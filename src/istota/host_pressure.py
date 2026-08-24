@@ -1098,11 +1098,12 @@ def read_container_shm(
     empty list. An empty list means "no container holds tmpfs", which is a
     finding; unreachable means the question was never asked, which is not.
 
-    ``docker_socket`` defaults to the real socket rather than to
-    ``docker_proxy``'s per-user allowlist socket, and that is deliberate in two
-    ways. The proxy is scoped to one user's own container, while this needs the
-    host-wide list; and the daemon only reaches the real socket at all if the
-    operator put its user in the ``docker`` group, so an unprivileged
+    ``docker_socket`` is the real socket. There used to be a per-user allowlist
+    proxy in front of it and this deliberately did not use one: the proxy was
+    scoped to a single user's own container, while this needs the host-wide
+    list. That proxy is now retired outright, so the note survives only to say
+    why nothing here changed. The daemon reaches the real socket at all only if
+    the operator put its user in the ``docker`` group, so an unprivileged
     deployment degrades to the "unreachable" row instead of gaining a
     capability it did not have. The handle is nonetheless root-equivalent, so
     the path stays a *parameter* — when Stage 3 wires ``snapshot`` it should

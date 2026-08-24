@@ -65,9 +65,50 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Non-root user with passwordless sudo (it's the user's box; sudo unlocks
 # `apt install` at runtime). Home is the persistent volume mount point.
-RUN useradd -m -s /bin/bash -d /home/dev -u 1000 dev \
-    && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
-    && chmod 0440 /etc/sudoers.d/dev
+#
+# The uid and gid are build args because the daemon and this container share a
+# filesystem — the per-user repos mount — and a shared mount with two different
+# uids on it fails in both directions. The daemon's `git worktree add` produces
+# 0755 daemon-owned directories that `dev` cannot create a `node_modules/`
+# inside, so every build fails EACCES on its first write; and once that is
+# worked around, a tree the container wrote is one the daemon's
+# `git worktree remove` cannot unlink, so every worktree that ever ran a build
+# becomes permanently unreapable. Neither has an error message anywhere that
+# says "uid".
+#
+# The deploy passes the daemon's own uid and gid, read with `getent`. They
+# default to 1000 so a build with no args reproduces the image this recipe
+# built before they existed, exactly. Nothing is lost in distribution by
+# building per host: the Ansible role has always built this image on the
+# machine it runs on, and hashes the directory's contents to trigger a rebuild.
+#
+# The uid is checked against the base image's own accounts first. Debian
+# allocates system uids from 100 upward and so does the istota role, so a
+# collision is reachable — and `useradd`'s own "UID 42 is not unique" arrives at
+# deploy time, in a build log, naming neither the arg nor the account it hit.
+#
+# One consequence is worth naming rather than discovering: the preflight also
+# refuses `DEV_UID=0`, which is the answer for a compose deployment, whose
+# istota service runs as root. Nothing here supports that yet — this ships bare
+# metal only — and reusing the existing root account rather than creating a
+# second one is a different recipe, not a different argument. The refusal is at
+# least loud, and it says which account it collided with.
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+RUN set -eux; \
+    if taken="$(getent passwd "${DEV_UID}")"; then \
+        echo "DEV_UID=${DEV_UID} is already used by: ${taken}" >&2; \
+        echo "pick a different uid for the istota daemon, or rebuild on a base without it" >&2; \
+        exit 1; \
+    fi; \
+    if taken="$(getent group "${DEV_GID}")"; then \
+        echo "DEV_GID=${DEV_GID} is already used by: ${taken}" >&2; \
+        exit 1; \
+    fi; \
+    groupadd -g "${DEV_GID}" dev; \
+    useradd -m -s /bin/bash -d /home/dev -u "${DEV_UID}" -g "${DEV_GID}" dev; \
+    echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev; \
+    chmod 0440 /etc/sudoers.d/dev
 
 USER dev
 WORKDIR /home/dev
@@ -196,6 +237,46 @@ RUN set -eux; \
     chmod 0555 /etc/istota-forge/data; \
     python3 /usr/local/lib/istota_forge/seed-forge-policy; \
     chmod 0644 /etc/istota-forge/policy.json
+
+# Layer 7: the exec transport.
+#
+# The devbox stops being a `docker exec` target and becomes a service host. A
+# server listens on a Unix socket in a per-user directory the istota side also
+# sees; a client on that side sends one request and gets the command's real
+# exit status back. That replaces `docker exec` through the Docker-API proxy,
+# which runs the command and loses its status — the CLI's flow is create,
+# start, *inspect*, and the proxy evicts the exec id before relaying the start,
+# so by inspect time there is nothing to inspect and every shimmed command
+# reports failure whatever it did.
+#
+# Three files, and the split is the same one `istota_forge_cli.py` already has:
+# the protocol module is vendored from `src/istota/devbox_exec_protocol.py`
+# because Docker cannot COPY from outside its build context, and
+# `scripts/sync-devbox-lib.sh` is what keeps the copy honest. It goes under
+# /usr/local/lib/istota_devbox_exec/ rather than beside the server, because the
+# server's own module search names that directory — deliberately, rather than
+# reading a path out of the environment, in a process whose whole job is
+# refusing paths.
+#
+# `istota-exec-run` is the container's CMD below, not the server: a server as
+# PID 1 makes a server crash take every concurrent build with it, and a `sleep`
+# as PID 1 neither restarts anything nor reaps what reparents to it. The
+# per-user service is to be declared with `init: true` so tini does the
+# reaping — that half lands with the deployment template, and until it does
+# this script is PID 1 and forwards the stop signal itself.
+#
+# The two checks at the end are a build-time smoke, and neither is decorative —
+# `--help` is what proves the vendored module is importable at the path the
+# server looks for it at, which a `COPY` cannot tell you.
+COPY lib/istota_devbox_exec_protocol.py /usr/local/lib/istota_devbox_exec/istota_devbox_exec_protocol.py
+COPY scripts/istota-exec-serve /usr/local/bin/istota-exec-serve
+COPY scripts/istota-exec-run /usr/local/bin/istota-exec-run
+RUN set -eux; \
+    chmod 0644 /usr/local/lib/istota_devbox_exec/istota_devbox_exec_protocol.py; \
+    chmod 0755 /usr/local/bin/istota-exec-serve /usr/local/bin/istota-exec-run; \
+    /usr/local/bin/istota-exec-serve --help > /dev/null; \
+    sh -n /usr/local/bin/istota-exec-run
+
 USER dev
 
 # ISTOTA_CRED_SOCK is the only thing the wrapper needs from the environment;
@@ -204,5 +285,14 @@ USER dev
 # location the wrapper computes rather than accepts. See policy_path().
 ENV ISTOTA_CRED_SOCK=/run/istota-cred/sock
 
-# The container is an exec target — keep it alive, no PID 1 service.
-CMD ["sleep", "infinity"]
+# The container runs the exec transport's supervisor. It used to run
+# `sleep infinity` and be an exec target; see Layer 7 for why neither half of
+# that survives, and `scripts/istota-exec-run` for what the supervisor does.
+#
+# The per-user service will override `command` with the same value and add
+# `init: true`; that change lands with the deployment template, which still
+# says `sleep infinity` today, so this image change is inert on a deployment
+# until it does. Setting `CMD` here rather than only there is what makes a
+# plain `docker run` of this image the thing the image tier can assert
+# against — and what makes the two definitions agree once both exist.
+CMD ["/usr/local/bin/istota-exec-run"]

@@ -1,6 +1,7 @@
 # Managed by Ansible — do not edit by hand.
-# One devbox service per istota_devbox_users entry. The agent shells in via
-# the host docker socket; nothing else talks to this stack.
+# One devbox service per istota_devbox_users entry. Nothing outside this stack
+# talks to these containers except the istota daemon, over two Unix sockets in
+# host directories mounted in below.
 #
 # Explicit project name — without this, ``docker compose`` defaults the
 # project to the parent directory name and pools containers across every
@@ -17,18 +18,39 @@ services:
     build:
       context: {{ istota_repo_dir }}/docker/devbox
       dockerfile: Dockerfile
+      args:
+        # The daemon's own uid and gid, read with `getent` at deploy time.
+        #
+        # This is the central invariant of the shared repos mount rather than a
+        # detail. The daemon's `git worktree add` produces 0755 daemon-owned
+        # directories, so a container at a different uid cannot create a
+        # `node_modules/` or a `.venv/` inside them and every build fails EACCES
+        # on its first write. And once that is worked around, a tree the
+        # container wrote is one the daemon's `git worktree remove` cannot
+        # unlink, so every worktree that ever ran a build becomes permanently
+        # unreapable — the expensive direction, and the one with no error
+        # message anywhere that says "uid".
+        #
+        # The image defaults both to 1000, so a build with no args reproduces
+        # what this recipe built before they existed. Nothing is lost by
+        # building per host: this image has always been built on the machine it
+        # runs on, and the role hashes the directory's contents to rebuild it.
+        DEV_UID: "{{ istota_devbox_uid }}"
+        DEV_GID: "{{ istota_devbox_gid }}"
     container_name: {{ istota_devbox_container_prefix }}{{ devbox_user }}
     hostname: {{ istota_devbox_container_prefix }}{{ devbox_user }}
     restart: unless-stopped
     labels:
       com.istota.user_id: "{{ devbox_user }}"
-    cap_add:
-      - NET_RAW
 {% if istota_devbox_proxy_enabled and istota_devbox_proxy_group_gid is defined %}
     # Grant the container's `dev` user the host's istota group as a
     # supplementary group. The proxy socket is mode 0o660 owned by
     # istota:istota — without this group membership the container's uid
-    # 1000 can't connect even though the socket is bind-mounted.
+    # can't connect even though the socket is bind-mounted.
+    #
+    # Still needed after DEV_UID matched the two uids: the *credential* socket
+    # is created by the host daemon at 0660 and shares only a group, which is a
+    # different mechanism from the exec socket the container creates itself.
     group_add:
       - "{{ istota_devbox_proxy_group_gid }}"
 {% endif %}
@@ -42,14 +64,81 @@ services:
       # tenant isolation — container alice sees only alice's socket.
       - {{ istota_devbox_proxy_socket_dir }}/{{ devbox_user }}:/run/istota-cred
 {% endif %}
-    tmpfs:
-      - /workspace:size={{ istota_devbox_workspace_tmpfs_size }},mode=1777
+{% if istota_developer_container_backend == 'devbox' %}
+      # --- The three paths visible on both sides, each at one spelling -------
+      #
+      # The exec transport's socket directory. Same "mount the directory, never
+      # the socket file" rule as the credential one above, and for the same
+      # reason: the server unlinks and recreates the inode on every restart.
+      # Only the per-user subdirectory — the parent holds every user's socket,
+      # and mounting it would be arbitrary command execution against another
+      # user's repositories. At the identical spelling on both sides, like the
+      # two below, so no path in this design needs translating.
+      - {{ istota_developer_container_exec_socket_dir }}/{{ devbox_user }}:{{ istota_developer_container_exec_socket_dir }}/{{ devbox_user }}
+      # This user's worktrees, at the identical absolute path on both sides, so
+      # a working directory needs no translation and the server's containment
+      # check is a plain `realpath` under one root.
+      - {{ istota_developer_repos_dir }}/{{ devbox_user }}:{{ istota_developer_repos_dir }}/{{ devbox_user }}
+{% endif %}
     networks:
       - devbox-net
     mem_limit: {{ istota_devbox_mem_limit }}
     cpus: {{ istota_devbox_cpus }}
     pids_limit: {{ istota_devbox_pids_limit }}
-    command: ["sleep", "infinity"]
+    # tini at PID 1, to reap what reparents to it. The supervisor below never
+    # calls `wait()` on a process it did not start, so anything that outlives
+    # the exec server's own reap would otherwise stay a zombie against
+    # `pids_limit` for the life of the container. `dockerd` used to reap
+    # `docker exec` children and nobody had to think about it.
+    init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ istota_devbox_log_max_size }}"
+        max-file: "{{ istota_devbox_log_max_file }}"
+    # The exec server's supervisor, replacing `sleep infinity`.
+    #
+    # `restart: unless-stopped` restarts the *container*; it says nothing about
+    # a process inside one. After a dockerd restart, a host reboot, or the
+    # server being picked off when the container reaches `mem_limit`, an
+    # unsupervised server is gone until an operator notices and every developer
+    # task on the deployment fails at its first shimmed command. The supervisor
+    # loops: run the server, log its exit, pause, run it again.
+    #
+    # Not the server itself as `command`: a server crash would take the
+    # container, and with it every concurrent build of that user's other tasks.
+    command: ["/usr/local/bin/istota-exec-run"]
+{% if istota_developer_container_backend == 'devbox' %}
+    # The supervisor's settings, in the *container's* own environment.
+    #
+    # That is a different thing from the model's environment, which the shims
+    # deliberately read nothing from: a shim is a child of the model's own
+    # shell, so an env-supplied path there is a path the model chooses. Nothing
+    # the model runs can reach this process's environment, which was fixed when
+    # the container was created — so the baked-path rule does not apply here.
+    #
+    # The two required settings are per user and have no defensible default;
+    # without both, the supervisor holds with the transport down and says so on
+    # a cadence rather than crash-looping the container.
+    environment:
+      ISTOTA_EXEC_SOCKET: {{ istota_developer_container_exec_socket_dir }}/{{ devbox_user }}/exec.sock
+      ISTOTA_EXEC_REPOS_ROOT: {{ istota_developer_repos_dir }}/{{ devbox_user }}
+      ISTOTA_EXEC_IDLE_TIMEOUT_SECONDS: "{{ istota_developer_container_idle_timeout_seconds }}"
+      # The package-manager caches, set on the container at start rather than
+      # carried by a request. One spelling per deployment, the model cannot
+      # reach it, and no request has to be trusted not to relocate a cache —
+      # which is what lets the protocol carry no `env` field at all.
+      npm_config_cache: /home/dev/.npm
+      CARGO_HOME: /home/dev/.cargo
+      GOMODCACHE: /home/dev/go/pkg/mod
+      UV_PYTHON_INSTALL_DIR: /home/dev/.uv-python
+      # The package cache is derived at `{repos_dir}/{user}/.package-caches`,
+      # which is inside the repos mount above — so it needs no mount of its own
+      # and no `security.sandbox_cache_dir`. One mount covers cache and venv,
+      # which is the only shape where uv hardlinks a wheel instead of copying
+      # it: `link(2)` compares mounts rather than devices.
+      UV_CACHE_DIR: {{ istota_developer_repos_dir }}/{{ devbox_user }}/.package-caches
+{% endif %}
 {% endfor %}
 
 volumes:

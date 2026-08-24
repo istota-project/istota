@@ -1,0 +1,36 @@
+# Negative control: the devbox image whose /home/dev belongs to nobody.
+#
+# `test_the_home_directory_belongs_to_the_dev_account` compares two things the
+# image reports about itself — `stat -c '%u %g' /home/dev` against
+# `id -u dev` / `id -g dev`. Two self-reports that agree is precisely the shape
+# of an assertion that can pass on any image, and it would keep passing if both
+# sides came back empty.
+#
+# It is a claim worth making, because the supervisor's runtime chown cannot
+# help with it. That repair is for a *volume* mounted over /home/dev. An image
+# whose own /home/dev belongs to somebody else ships a `dev` who cannot read
+# the uv and rustup installs baked into it, before any volume is involved.
+#
+# Note what this control does **not** break. `devbox-wrong-uid` builds the real
+# recipe with different args, and there the account and the directory move
+# together — so it turns the uid assertion red and leaves this one green, which
+# is correct and is why the two need separate controls.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-home-owned-by-a-stranger \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-home-owned-by-a-stranger:local docker/test
+ARG BASE
+FROM ${BASE}
+
+USER root
+
+# 4242 belongs to no account in the image, which is what a volume left behind
+# by a build with different args looks like from in here.
+RUN set -eux; \
+    chown -R 4242:4242 /home/dev; \
+    test "$(stat -c '%u %g' /home/dev)" = "4242 4242"; \
+    echo "control: /home/dev is owned by an account that does not exist"
+
+USER dev

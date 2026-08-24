@@ -1,12 +1,12 @@
-# Negative control 1 of 3: the devbox image with the forge binaries removed.
+# Negative control (the forge half): the devbox image with the forge binaries removed.
 #
 # The sibling of `Dockerfile.no-forge`, for the other half of the image tier.
-# `tests/image/test_devbox_image.py` runs thirteen assertions against a
+# `tests/image/test_devbox_image.py` runs its assertions against a
 # separately built image, and reading them tells you almost nothing about
 # whether they can fail — the lesson of ISSUE-263, where four Group A tests
 # passed against an image with no forge binaries in it at all.
 #
-# **Three controls, not one, and that was measured rather than assumed.** The
+# **Three forge controls, not one, and that was measured rather than assumed.** The
 # file asserts three separable things: that the two images ship the same forge
 # versions, that the vendored wrapper in the image is byte-identical to
 # `src/istota/forge_cli.py`, and that `gh` and `glab` resolve on PATH to the
@@ -14,7 +14,7 @@
 # second only in the weak sense that the file is gone rather than different.
 # It does not touch the third at all: `/usr/local/bin/gh` is a *copy* of the
 # wrapper (`docker/devbox/Dockerfile:156`), not a symlink into this directory,
-# so it survives the `rm` and four of the thirteen assertions stay green.
+# so it survives the `rm` and four of the forge assertions stay green.
 # Hence `Dockerfile.devbox-stale-wrapper` and
 # `Dockerfile.devbox-real-binary-on-path`.
 #

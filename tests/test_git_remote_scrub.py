@@ -783,6 +783,13 @@ class TestDeveloperSetupEnvSweep:
         )
         return setup_env(ctx)
 
+    @staticmethod
+    def _mine(repos_dir):
+        """This user's subdirectory of the repos root, created."""
+        mine = repos_dir / "alice"
+        mine.mkdir(parents=True, exist_ok=True)
+        return mine
+
     def test_the_hook_strips_a_credentialed_remote(self, tmp_path):
         repos = tmp_path / "repos"
         repos.mkdir()
@@ -808,6 +815,32 @@ class TestDeveloperSetupEnvSweep:
 
         assert "rotate" in caplog.text.lower()
         assert FAKE_TOKEN not in caplog.text
+
+    def test_the_sweep_leaves_another_users_tree_alone(self, tmp_path):
+        """The direction that matters, and not the obvious one.
+
+        Handed the global root, one user's task would walk and *rewrite git
+        configs in* every other user's tree, on every developer-enabled task.
+        Handed `{repos_dir}/{user_id}`, it reaches only its own — which is also
+        why `_MAX_DEPTH = 4` needs no change: that constant is measured from the
+        root it is given, and the documented layout sits at depth 2 below the
+        per-user root exactly as it used to sit at depth 2 below `repos_dir`.
+        """
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        mine = _bare(self._mine(repos))
+        theirs_dir = repos / "bob"
+        theirs_dir.mkdir()
+        theirs = _bare(theirs_dir)
+        for bare in (mine, theirs):
+            _git(bare, "config", "remote.origin.url", FAKE_URL)
+
+        self._run_hook(tmp_path, repos)
+
+        assert FAKE_TOKEN not in _text(mine / "config")
+        assert FAKE_TOKEN in _text(theirs / "config"), (
+            "the sweep rewrote another user's git config"
+        )
 
     def test_a_missing_repos_dir_does_not_break_setup(self, tmp_path):
         """`repos_dir` is configured but not yet created on a fresh install.

@@ -1385,7 +1385,6 @@
     - "restart istota-web"
     - "restart istota-webhooks"
     - "restart istota-devbox-proxy"
-    - "restart istota-docker-proxy"
 
 - name: Read back the repository remote URL
   command: "git -C {{ istota_repo_dir }} config --get remote.origin.url"
@@ -1451,7 +1450,6 @@
         - "restart istota-web"
         - "restart istota-webhooks"
         - "restart istota-devbox-proxy"
-        - "restart istota-docker-proxy"
 
     - name: Warn if no tags found
       debug:
@@ -2757,6 +2755,46 @@
     - istota_group_lookup.ansible_facts.getent_group is defined
     - istota_group_lookup.ansible_facts.getent_group[istota_group] is defined
 
+# The daemon's own numeric uid and gid, for the image's DEV_UID / DEV_GID build
+# args. Mirrors the group lookup above, and is *not* configurable: the value
+# that makes the shared repos mount work is whatever uid the daemon actually
+# runs as, and an operator-supplied second opinion about that is only ever a way
+# to be wrong. See the compose template for what a mismatch costs — every
+# worktree that ever ran a build becomes permanently unreapable, with no error
+# message anywhere naming a uid.
+- name: Look up the istota user's uid and gid for the devbox image build
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ istota_user }}"
+  register: istota_passwd_lookup
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Set devbox uid/gid facts for the compose template
+  ansible.builtin.set_fact:
+    istota_devbox_uid: "{{ istota_passwd_lookup.ansible_facts.getent_passwd[istota_user][1] }}"
+    istota_devbox_gid: "{{ istota_passwd_lookup.ansible_facts.getent_passwd[istota_user][2] }}"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_passwd_lookup is defined
+    - istota_passwd_lookup.ansible_facts is defined
+    - istota_passwd_lookup.ansible_facts.getent_passwd is defined
+    - istota_passwd_lookup.ansible_facts.getent_passwd[istota_user] is defined
+
+# The template uses both unconditionally and StrictUndefined would otherwise
+# stop the render with "'istota_devbox_uid' is undefined", which names the
+# variable and not the cause.
+- name: Fail clearly when the daemon user has no passwd entry
+  ansible.builtin.assert:
+    that:
+      - istota_devbox_uid is defined
+      - istota_devbox_gid is defined
+    fail_msg: >-
+      `getent passwd {{ istota_user }}` returned nothing, so the devbox image
+      cannot be built at the daemon's own uid. Create the account (an earlier
+      task in this role does) and re-run; a devbox built at a different uid
+      leaves every worktree that runs a build permanently unreapable.
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
 - name: Deploy devbox compose file
   template:
     src: docker-compose.devbox.yml.j2
@@ -2777,10 +2815,17 @@
 # Without this, a Dockerfile-only change ships to the host via git but
 # the running container keeps the old image until something else
 # changes the compose template.
+#
+# `__pycache__` is excluded because `docker/devbox/lib/` holds Python modules:
+# anything that imports one in place leaves bytecode whose filename carries the
+# interpreter version and whose content changes with the source's mtime, so the
+# hash would move on a run where nothing shipped and rebuild and recreate every
+# devbox on the host.
 - name: Hash devbox image content (Dockerfile + lib + scripts + etc)
   ansible.builtin.shell: |
     find {{ istota_repo_dir }}/docker/devbox \
         -type f \( -name Dockerfile -o -path '*/lib/*' -o -path '*/scripts/*' -o -path '*/etc/*' \) \
+        -not -path '*/__pycache__/*' \
         -print0 \
         | LC_ALL=C sort -z \
         | xargs -0 sha256sum \
@@ -2919,57 +2964,75 @@
     - istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only
     - istota_devbox_users | length > 0
 
-# --- Docker-API allowlist proxy. One systemd instance per devbox user; the
-# executor binds {dir}/<user>.sock into the sandbox at /var/run/docker.sock
-# instead of the root-equivalent raw socket.
-- name: Install docker-proxy socket-directory tmpfiles snippet
+# --- The exec transport ----------------------------------------------------
+#
+# Where project code builds and runs, when
+# `istota_developer_container_backend == 'devbox'`. A server inside each devbox
+# listens on a Unix socket in a host directory both sides see; the daemon writes
+# one shim per configured command into the task's own sandbox, each execing a
+# client that speaks to that socket and exits with the command's real status.
+#
+# Two directories have to exist before a container starts, both for the same
+# reason the credential proxy's do: Docker refuses to create a container whose
+# bind-mount source is missing, and where it does auto-create one it does so as
+# root:root, leaving the daemon unable to write its end.
+
+- name: Install exec-transport socket-directory tmpfiles snippet
   template:
-    src: istota-docker-proxy.tmpfiles.j2
-    dest: "/etc/tmpfiles.d/{{ istota_namespace }}-docker-proxy.conf"
+    src: istota-exec.tmpfiles.j2
+    dest: "/etc/tmpfiles.d/{{ istota_namespace }}-exec.conf"
     owner: root
     group: root
     mode: "0644"
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
   notify:
-    - "reload systemd-tmpfiles for docker proxy"
-    - "restart istota-docker-proxy"
+    - "reload systemd-tmpfiles for the exec transport"
 
-- name: Ensure docker-proxy socket directory exists right now
+- name: Ensure the exec-transport socket directory exists right now
   file:
-    path: "{{ istota_docker_proxy_socket_dir }}"
+    path: "{{ istota_developer_container_exec_socket_dir }}"
     state: directory
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
     mode: "0750"
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
 
-- name: Deploy docker-proxy systemd instance unit
-  template:
-    src: istota-docker-proxy@.service.j2
-    dest: "/etc/systemd/system/{{ istota_namespace }}-docker-proxy@.service"
-    owner: root
-    group: root
-    mode: "0644"
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-  notify:
-    - "reload systemd for docker proxy"
-    - "restart istota-docker-proxy"
-
-- name: Reload systemd before enabling docker-proxy instances
-  systemd:
-    daemon_reload: yes
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-  changed_when: false
-
-- name: Enable + start docker-proxy per devbox user
-  systemd:
-    name: "{{ istota_namespace }}-docker-proxy@{{ item }}.service"
-    enabled: yes
-    state: started
+# 0770 rather than 0750: the *container* creates the socket in here, as the
+# daemon's own uid, so it needs write on the directory. That is bounded rather
+# than denied — nothing on the host ever reads anything out of this tree, and
+# the tmpfiles snippet says so at length.
+- name: Ensure per-user exec-transport socket subdirectories exist
+  file:
+    path: "{{ istota_developer_container_exec_socket_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0770"
   loop: "{{ istota_devbox_users }}"
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
 
-- name: Stop + disable docker-proxy units no longer in istota_devbox_users
+# --- Retiring the Docker-API allowlist proxy.
+#
+# The proxy existed so a sandboxed task could reach `docker exec` without the
+# root-equivalent socket. Nothing in a task reaches Docker at all now: project
+# code goes to the container over the exec transport, and the devbox skill's one
+# remaining Docker verb, `reset`, runs host-side in the skill CLI's own process
+# against the real socket, which it always did.
+#
+# So the units are torn down rather than left listening. A per-user asyncio HTTP
+# intermediary bound to a socket nothing connects to is not inert — it is an
+# unattended listener on every deployment that ever enabled a devbox, kept alive
+# by systemd across every reboot, and the only thing that would ever have
+# removed it is this block. Unconditional on the devbox switches, because a
+# deployment that has since turned the devbox off is exactly the one whose
+# orphan nobody is looking at.
+- name: Retire the docker-proxy units
   block:
     - name: List existing docker-proxy instance units
       ansible.builtin.shell: |
@@ -2977,24 +3040,36 @@
           '{{ istota_namespace }}-docker-proxy@*.service' \
           | awk '{print $1}' \
           || true
-      register: existing_docker_proxy_units
+      register: retired_docker_proxy_units
       changed_when: false
 
-    - name: Stop and disable docker-proxy units no longer wanted
+    - name: Stop and disable every docker-proxy unit
       systemd:
         name: "{{ item }}"
         state: stopped
         enabled: no
-      loop: "{{ existing_docker_proxy_units.stdout_lines | default([]) }}"
-      when:
-        - item != ""
-        - >-
-            (item | regex_replace('^.*-docker-proxy@(.+)\\.service$', '\\1'))
-            not in istota_devbox_users
+      loop: "{{ retired_docker_proxy_units.stdout_lines | default([]) }}"
+      when: item != ""
       failed_when: false
-  when:
-    - istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only
-    - istota_devbox_users | length > 0
+
+    # The socket directory goes with them. The variable that named it is
+    # deleted, so the path is written out here rather than interpolated — this
+    # is the last thing in the role that knows where the old sockets were, and
+    # after this play nothing does. `/var/run` is a symlink to a tmpfs on a
+    # systemd host, so the directory would go at the next reboot anyway; this is
+    # so a host that is not rebooted does not keep a directory of dead sockets
+    # named after a subsystem that no longer exists.
+    - name: Remove the docker-proxy unit, tmpfiles snippet and socket directory
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/etc/systemd/system/{{ istota_namespace }}-docker-proxy@.service"
+        - "/etc/tmpfiles.d/{{ istota_namespace }}-docker-proxy.conf"
+        - "/var/run/{{ istota_namespace }}-docker"
+      notify:
+        - "reload systemd for docker proxy"
+  when: not istota_web_only
 
 - name: Check whether devbox compose currently has containers running
   shell: docker compose -f docker-compose.devbox.yml ps -q

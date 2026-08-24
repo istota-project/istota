@@ -684,9 +684,26 @@ class TestLoadBudget:
     forbids. Neither point is deducible from the line already there, and both
     were paid for by a task that installed Puppeteer, saw exit 0, and found the
     browser missing at run time.
+
+    763 -> 776 for the development container, same procedure again: the rules
+    file first, then this. Thirteen net lines, and the first raise that adds a
+    section rather than a rule. On a `[developer.container] backend = "devbox"`
+    deployment the package managers and language runtimes run inside the user's
+    container, and each of the four consequences is a failure the model cannot
+    read out of the error it gets. A file outside the repos root is "no such
+    file or directory" from a command that worked one directory over. An
+    absolute `.venv/bin/<tool>` is a missing interpreter. A backgrounded dev
+    server is gone with no message at all. And 120-123 are statuses no program
+    produces, one of which (123) means the command's fate is unknown and has to
+    be reported as neither success nor failure. Cutting the section means
+    picking which of those the model finds out by guessing.
+
+    The two raises above are independent and both landed: 761 -> 763 on main
+    for ISSUE-318, and this branch's +13 on top of it. The number is the sum
+    rather than either one, which is what the merge of the two bodies measures.
     """
 
-    BUDGET_LINES = 763
+    BUDGET_LINES = 776
 
     def test_three_bodies_fit_the_budget(self):
         total = 0

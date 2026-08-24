@@ -701,7 +701,8 @@ class TestDeveloperEnvVars:
         # The hook reads the task's user id to name the repos subtree it
         # creates and sweeps; without one it takes the fail-closed branch and
         # every assertion below would be made against a hook that did half its
-        # work.
+        # work. The exec socket path is derived from the same user id, so this
+        # one task is what both halves of the hook read.
         ctx.task = db.Task(
             id=1, prompt="test", user_id="alice",
             source_type="talk", status="running", conversation_token="",

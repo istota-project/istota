@@ -1,0 +1,330 @@
+#!/bin/sh
+# istota-exec-run — the devbox container's `command`, and the exec server's
+# supervisor.
+#
+# The container used to run `sleep infinity` and be an exec target. It is now a
+# service host, and that changes two things a `sleep` cannot do.
+#
+# **Something has to restart the server.** `restart: unless-stopped` restarts
+# the *container*; it says nothing about a process inside one. After a dockerd
+# restart, a host reboot, or the server being picked off when the container
+# reaches its `mem_limit`, an unsupervised server is gone until an operator
+# notices, and every developer task on the deployment fails at its first
+# shimmed command. So the loop below: run the server, log its exit, pause, run
+# it again.
+#
+# **Something has to reap.** `sleep infinity` as PID 1 never calls `wait()`, so
+# anything that outlives the server's own reap reparents to PID 1 and stays a
+# zombie against `pids_limit` for the life of the container. The per-user
+# service is to be declared with `init: true`, which puts tini at PID 1 to reap
+# with this script beneath it. That half lands with the deployment template,
+# which still says `command: ["sleep", "infinity"]` today; the stop handling
+# below is written to work either way, because the two shapes fail differently
+# and both fail. Do not "simplify" this into the container's PID 1 — see below.
+#
+# **This is not the server, and that is deliberate.** Running the server itself
+# as the container's command would make a server crash take the container, and
+# with it every concurrent build of that user's other tasks. A respawn keeps
+# the container's liveness independent of the server's and costs a second.
+#
+# The one other thing it does is the `/home/dev` chown, described where it
+# happens.
+#
+# POSIX `sh`, not bash: it pipes nothing, and the smaller interpreter is one
+# less thing to reason about in a supervisor.
+#
+# `set -e` is deliberately *off*. The whole point of the loop is to survive a
+# non-zero exit from the server; `-e` would make the first one fatal.
+set -u
+
+SERVER=/usr/local/bin/istota-exec-serve
+
+# Constants, not settings. Design 6 names `/home/dev` as the directory to
+# repair and the server compiles the same path in as its own `--home` default,
+# so there is nothing here to configure and a recursive chown has a target
+# nobody can move. `--home` is deliberately not passed at all: one copy of that
+# default, in the server, is what stops the two disagreeing.
+HOME_DIR=/home/dev
+
+# The devbox skill's ad-hoc file verbs stage here, and the server treats it as
+# one of its file roots. It is created rather than assumed because `/home/dev`
+# is a volume, so anything the image put there is masked at runtime — and the
+# server logs a warning on every start without it.
+STAGING_DIR="${HOME_DIR}/.istota-exec"
+
+# Every setting arrives in the container's own environment, from the per-user
+# service definition. That is a different thing from the model's environment,
+# which is where the shims deliberately read nothing from: a shim is a child of
+# the model's own shell, so an env-supplied path there is a path the model
+# chooses. Nothing the model runs can reach this process's environment, which
+# was fixed when the container was created.
+#
+# The two required settings are per user and have no defensible default —
+# `{exec_socket_dir}/{user_id}/exec.sock` and `{repos_dir}/{user_id}` are both
+# spelled identically on the host and in here, and guessing either would be
+# guessing which user's container this is.
+SOCKET="${ISTOTA_EXEC_SOCKET:-}"
+REPOS_ROOT="${ISTOTA_EXEC_REPOS_ROOT:-}"
+
+# The rest have defaults, and an unset one is left off the server's command
+# line entirely so the server's own default governs. Two copies of a default is
+# one copy too many when they can drift.
+IDLE_TIMEOUT="${ISTOTA_EXEC_IDLE_TIMEOUT_SECONDS:-}"
+LOG_LEVEL="${ISTOTA_EXEC_LOG_LEVEL:-}"
+
+# The respawn pause, and what bounds it. Design 11 asks for a second, which is
+# right for the case it describes — a server that had been serving and crashed.
+# It is wrong for a server that cannot start at all: an unmounted socket
+# directory or a non-absolute repos root makes the server exit immediately, and
+# a second's pause then means a Python interpreter start and a log line every
+# second for the life of the container, on the default unbounded json-file
+# driver. So the pause escalates only across runs that did not stay up, and any
+# run that did resets it. The crash case still costs a second.
+RESPAWN_PAUSE="${ISTOTA_EXEC_RESPAWN_PAUSE_SECONDS:-1}"
+MAX_RESPAWN_PAUSE="${ISTOTA_EXEC_MAX_RESPAWN_PAUSE_SECONDS:-300}"
+HEALTHY_RUN_SECONDS="${ISTOTA_EXEC_HEALTHY_RUN_SECONDS:-10}"
+UNCONFIGURED_PAUSE="${ISTOTA_EXEC_UNCONFIGURED_PAUSE_SECONDS:-300}"
+
+log() {
+    printf '%s istota-exec-run %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+}
+
+# An operator-supplied value reaches shell arithmetic below, and dash treats an
+# arithmetic syntax error in a non-interactive shell as fatal — which would take
+# the supervisor down over a typo in a compose file.
+positive_int_or() {
+    case "$2" in
+        "" | *[!0-9]*)
+            log "$1='$2' is not a positive integer; using $3"
+            printf '%s' "$3"
+            ;;
+        *) printf '%s' "$2" ;;
+    esac
+}
+
+RESPAWN_PAUSE="$(positive_int_or ISTOTA_EXEC_RESPAWN_PAUSE_SECONDS "$RESPAWN_PAUSE" 1)"
+MAX_RESPAWN_PAUSE="$(positive_int_or ISTOTA_EXEC_MAX_RESPAWN_PAUSE_SECONDS "$MAX_RESPAWN_PAUSE" 300)"
+HEALTHY_RUN_SECONDS="$(positive_int_or ISTOTA_EXEC_HEALTHY_RUN_SECONDS "$HEALTHY_RUN_SECONDS" 10)"
+UNCONFIGURED_PAUSE="$(positive_int_or ISTOTA_EXEC_UNCONFIGURED_PAUSE_SECONDS "$UNCONFIGURED_PAUSE" 300)"
+
+# The image gives `dev` passwordless sudo, so the chown below works whichever
+# uid this script runs as. Preferring a direct call when already root keeps the
+# common path free of sudo and keeps this working on a container started with
+# `--user root` for debugging.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
+# --- Stopping ---------------------------------------------------------------
+#
+# Without a trap the server's whole graceful shutdown is unreachable, and the
+# failure differs by deployment shape — both badly, and both measured.
+#
+# With `init: true`, tini forwards the stop signal to its direct child only,
+# which is this script. A non-interactive `sh` with no trap takes the default
+# action and dies; the server is a grandchild, is orphaned, and goes with the
+# pid namespace. Without `init: true` this script is PID 1, and the kernel does
+# not deliver a default-disposition signal to PID 1 at all — so `docker stop`
+# blocks for its full grace period and then SIGKILLs, on every stop, restart
+# and redeploy of every per-user devbox.
+#
+# Either way `serve()`'s `finally` never runs: no drain, no per-connection
+# reap, and the socket inode left behind. So the stop is forwarded, and the
+# flag is what keeps the loop from respawning into a teardown.
+SHUTTING_DOWN=0
+CHILD=""
+
+on_stop() {
+    SHUTTING_DOWN=1
+    if [ -n "$CHILD" ]; then
+        kill -TERM "$CHILD" 2>/dev/null || true
+    fi
+}
+
+trap on_stop TERM INT
+
+# --- The /home/dev chown ----------------------------------------------------
+#
+# The daemon and this container run as the same numeric uid, because they share
+# a filesystem. Where they do not, it fails in both directions: a worktree the
+# daemon created is one `dev` cannot write a `node_modules/` into, and — the
+# expensive one — a tree the container created is one the daemon's
+# `git worktree remove` cannot unlink, so every worktree that ever ran a build
+# becomes permanently unreapable.
+#
+# The image satisfies that by construction: `useradd -u ${DEV_UID}` and a
+# `/home/dev` created at build time. What does not is a *pre-existing volume*,
+# whose files were created at uid 1000 by an earlier image and which masks the
+# build-time directory when it is mounted.
+#
+# So: one self-healing step, here, rather than an Ansible-side check of a
+# volume's uid that an operator has to have read a release note to run.
+#
+# **Guarded by a stat of the directory itself**, which is what bounds it. A
+# recursive chown sets the top directory too, so the very walk that repairs the
+# volume is what stops the next boot from walking it again. The guard tests
+# both halves the chown sets — a guard narrower than its own remedy would leave
+# a volume it could see was wrong and never fix.
+#
+# **A partial failure is undone rather than left half-applied**, and that is
+# the subtle half. `chown -R` sets the top directory even when it errors on a
+# descendant, so without the revert the guard would read the repaired top
+# directory on the next boot, conclude the volume was fixed, and never try
+# again — turning one bad boot into a permanent half-broken home whose only
+# record is a log line in a container that has since been recreated. Putting
+# the top directory back is what makes the next start retry.
+repair_home_ownership() {
+    if [ ! -d "$HOME_DIR" ]; then
+        log "no ${HOME_DIR} to check ownership of; skipping the chown"
+        return
+    fi
+
+    # `id -u dev` rather than `id -u`: the passwd entry is where DEV_UID was
+    # written at build time, and it is the answer even when this script was
+    # started as somebody else.
+    want_uid="$(id -u dev 2>/dev/null || echo "")"
+    want_gid="$(id -g dev 2>/dev/null || echo "")"
+    if [ -z "$want_uid" ] || [ -z "$want_gid" ]; then
+        log "cannot resolve the 'dev' account; skipping the ${HOME_DIR} chown"
+        return
+    fi
+
+    have_uid="$(stat -c %u "$HOME_DIR" 2>/dev/null || echo "")"
+    have_gid="$(stat -c %g "$HOME_DIR" 2>/dev/null || echo "")"
+    if [ "$have_uid" = "$want_uid" ] && [ "$have_gid" = "$want_gid" ]; then
+        return
+    fi
+
+    log "chown ${HOME_DIR}: owned by ${have_uid}:${have_gid}, dev is ${want_uid}:${want_gid}"
+    if as_root chown -R "${want_uid}:${want_gid}" "$HOME_DIR"; then
+        log "chown ${HOME_DIR}: done"
+        return
+    fi
+
+    log "chown ${HOME_DIR}: FAILED; parts of the volume stay unwritable by dev"
+    if [ -n "$have_uid" ] && [ -n "$have_gid" ] \
+        && as_root chown "${have_uid}:${have_gid}" "$HOME_DIR"; then
+        log "chown ${HOME_DIR}: top directory put back, so the next start retries"
+    else
+        log "chown ${HOME_DIR}: could not put the top directory back;" \
+            "the next start will read it as repaired and not retry"
+    fi
+}
+
+ensure_staging_dir() {
+    if [ -d "$STAGING_DIR" ]; then
+        return
+    fi
+    if mkdir -p "$STAGING_DIR"; then
+        return
+    fi
+    log "could not create ${STAGING_DIR}; the devbox skill's file verbs will be refused"
+}
+
+# --- Refusing to guess ------------------------------------------------------
+#
+# A missing required setting holds here rather than exiting. Exiting would take
+# the container down under `restart: unless-stopped`, which turns a
+# configuration mistake into a crash loop that also removes the one way in to
+# diagnose it. Holding keeps the container up with the transport down, which is
+# the state `doctor`'s transport check is written to report — and it says so on
+# a cadence, because one line at boot is a line nobody scrolls back to.
+hold_unconfigured() {
+    while [ "$SHUTTING_DOWN" -eq 0 ]; do
+        log "ISTOTA_EXEC_SOCKET and ISTOTA_EXEC_REPOS_ROOT must both be set;" \
+            "the exec transport is not running (socket='${SOCKET}'," \
+            "repos root='${REPOS_ROOT}')"
+        sleep "$UNCONFIGURED_PAUSE"
+    done
+}
+
+# Backgrounded and waited on rather than run in the foreground, because a trap
+# does not interrupt a foreground child — the shell would not act on the stop
+# signal until the server it is waiting for had exited on its own.
+#
+# Two spellings rather than one built by word splitting: an unquoted variable
+# holding a whole flag is how a value with a space in it becomes two arguments.
+run_server_once() {
+    if [ -n "$IDLE_TIMEOUT" ] && [ -n "$LOG_LEVEL" ]; then
+        "$SERVER" --socket "$SOCKET" --repos-root "$REPOS_ROOT" \
+            --idle-timeout-seconds "$IDLE_TIMEOUT" --log-level "$LOG_LEVEL" &
+    elif [ -n "$IDLE_TIMEOUT" ]; then
+        "$SERVER" --socket "$SOCKET" --repos-root "$REPOS_ROOT" \
+            --idle-timeout-seconds "$IDLE_TIMEOUT" &
+    elif [ -n "$LOG_LEVEL" ]; then
+        "$SERVER" --socket "$SOCKET" --repos-root "$REPOS_ROOT" \
+            --log-level "$LOG_LEVEL" &
+    else
+        "$SERVER" --socket "$SOCKET" --repos-root "$REPOS_ROOT" &
+    fi
+    CHILD=$!
+
+    # A trapped signal makes `wait` return >128 with the child still running
+    # and draining, so the real status needs a second wait. Bounded, because a
+    # server that ignored the signal would otherwise hold the shutdown open
+    # until Docker's own SIGKILL — which is the orphan case the drain exists to
+    # avoid.
+    wait "$CHILD"
+    _status=$?
+    if [ "$_status" -gt 128 ]; then
+        _waited=0
+        while kill -0 "$CHILD" 2>/dev/null; do
+            _waited=$((_waited + 1))
+            if [ "$_waited" -gt 100 ]; then
+                log "the server did not stop within 10s; killing it"
+                kill -KILL "$CHILD" 2>/dev/null || true
+                break
+            fi
+            sleep 0.1
+        done
+        wait "$CHILD"
+        _status=$?
+    fi
+
+    CHILD=""
+    return "$_status"
+}
+
+main() {
+    repair_home_ownership
+    ensure_staging_dir
+
+    if [ -z "$SOCKET" ] || [ -z "$REPOS_ROOT" ]; then
+        hold_unconfigured
+        return 0
+    fi
+
+    log "supervising ${SERVER} on ${SOCKET}, repos root ${REPOS_ROOT}"
+    pause="$RESPAWN_PAUSE"
+    while [ "$SHUTTING_DOWN" -eq 0 ]; do
+        started_at="$(date +%s)"
+        run_server_once
+        status=$?
+        ran_for=$(($(date +%s) - started_at))
+
+        if [ "$SHUTTING_DOWN" -eq 1 ]; then
+            log "stopping: the server exited with status ${status}"
+            return 0
+        fi
+
+        if [ "$ran_for" -ge "$HEALTHY_RUN_SECONDS" ]; then
+            pause="$RESPAWN_PAUSE"
+        elif [ "$pause" -lt "$MAX_RESPAWN_PAUSE" ]; then
+            pause=$((pause * 5))
+            if [ "$pause" -gt "$MAX_RESPAWN_PAUSE" ]; then
+                pause="$MAX_RESPAWN_PAUSE"
+            fi
+        fi
+
+        log "istota-exec-serve exited with status ${status} after ${ran_for}s;" \
+            "restarting in ${pause}s"
+        sleep "$pause"
+    done
+    return 0
+}
+
+main "$@"

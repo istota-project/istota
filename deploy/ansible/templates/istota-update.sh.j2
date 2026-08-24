@@ -161,19 +161,15 @@ log "Restarting ${NAMESPACE}-webhooks"
 systemctl restart "${NAMESPACE}-webhooks"
 {% endif %}
 {% if istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0) %}
-# The two per-user proxies import from the checkout as well, and they are the
-# security boundary: docker-proxy is the allowlist in front of a
-# root-equivalent Docker socket, devbox-proxy holds the credentials. Left out
-# of this list they kept serving the pre-update module indefinitely, which is
-# how the ISSUE-294 keep-alive bypass stayed live after its fix merged.
+# The credential proxy imports from the checkout as well, and it is a security
+# boundary: it holds the tokens. Left out of this list it kept serving the
+# pre-update module indefinitely, which is how the ISSUE-294 keep-alive bypass
+# stayed live after its fix merged. (The Docker-API proxy used to be restarted
+# here too, and is retired — nothing in a task reaches Docker.)
 {% for devbox_user in istota_devbox_users %}
 {% if istota_devbox_proxy_enabled %}
 log "Restarting ${NAMESPACE}-devbox-proxy@{{ devbox_user }}"
 systemctl restart "${NAMESPACE}-devbox-proxy@{{ devbox_user }}"
-{% endif %}
-{% if istota_devbox_api_proxy_enabled %}
-log "Restarting ${NAMESPACE}-docker-proxy@{{ devbox_user }}"
-systemctl restart "${NAMESPACE}-docker-proxy@{{ devbox_user }}"
 {% endif %}
 {% endfor %}
 {% endif %}

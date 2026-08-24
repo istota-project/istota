@@ -1824,3 +1824,434 @@ class TestConfigSecrets:
         config = make_config()
         config.users = {"loop": config}
         doctor.config_secrets(config)
+
+
+# ---------------------------------------------------------------------------
+# The development container
+
+
+def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice",), **overrides):
+    """A Config with `[developer.container]` wired and one devbox user."""
+    from istota.config import ContainerConfig, DeveloperConfig, SecurityConfig, UserConfig
+
+    repos = tmp_path / "repos"
+    repos.mkdir(exist_ok=True)
+    exec_root = tmp_path / "run" / "exec"
+    exec_root.mkdir(parents=True, exist_ok=True)
+    # The per-user socket directory is what says "this user has a devbox": the
+    # role creates it only for `istota_devbox_users`, and the check treats its
+    # absence as "not configured for one" rather than as a broken container.
+    if not overrides.pop("no_socket_dirs", False):
+        for u in users:
+            (exec_root / u).mkdir(exist_ok=True)
+    container_fields = {
+        "backend": backend,
+        "exec_socket_dir": str(exec_root),
+        "connect_timeout_seconds": 0.5,
+    }
+    container_fields.update(overrides.pop("container", {}))
+    # Overridable so a caller can express "no repos_dir at all", which is the
+    # shape the derived package cache does not exist in.
+    repos_dir = overrides.pop("repos_dir", str(repos))
+    return make_config(
+        developer=DeveloperConfig(
+            enabled=True, repos_dir=repos_dir, container=ContainerConfig(**container_fields)
+        ),
+        security=SecurityConfig(**overrides.pop("security", {})),
+        users={u: UserConfig(display_name=u) for u in users},
+        **overrides,
+    )
+
+
+def _ping_reply(socket_path, payload, timeout):
+    return [{"pong": True, "protocol": 1}, {"exit_code": 0}], ""
+
+
+def _agreeing_container(repos_root, *, uid_offset=0, cache_exit=0):
+    """A fake server that answers ping, stat and `test -d` the way a healthy one does."""
+    import os as _os
+
+    def _reply(socket_path, payload, timeout):
+        body = payload.decode()
+        if '"ping"' in body:
+            return [{"pong": True, "protocol": 1}, {"exit_code": 0}], ""
+        if '"stat"' in body:
+            return (
+                [{"uid": _os.getuid() + uid_offset, "repos_root": repos_root},
+                 {"exit_code": 0}],
+                "",
+            )
+        return [{"exit_code": cache_exit}], ""
+
+    return _reply
+
+
+class TestTheReposLayoutCheck:
+    """The loud path for an upgrade that has not moved its clones.
+
+    `repos_dir` became a per-user root on *every* backend, and the bind is
+    skipped when its source does not exist — so a host whose clones still sit
+    flat has an unusable developer skill and no error anywhere naming a path.
+    This is what says so.
+    """
+
+    def _config(self, make_config, tmp_path, users=("alice",)):
+        from istota.config import DeveloperConfig, UserConfig
+
+        repos = tmp_path / "repos"
+        repos.mkdir(exist_ok=True)
+        return make_config(
+            developer=DeveloperConfig(enabled=True, repos_dir=str(repos)),
+            users={u: UserConfig(display_name=u) for u in users},
+        )
+
+    @staticmethod
+    def _bare(path):
+        path.mkdir(parents=True, exist_ok=True)
+        for marker in ("HEAD", "config"):
+            (path / marker).write_text("")
+        (path / "objects").mkdir(exist_ok=True)
+
+    def test_the_flat_layout_fails_and_names_what_it_found(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        self._bare(tmp_path / "repos" / "namespace" / "project.git")
+
+        result = doctor.check_repos_layout(config, probe=False)
+
+        assert result.status == FAIL
+        assert "namespace" in result.detail
+        assert result.remedy
+
+    def test_the_per_user_layout_is_ok(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        self._bare(tmp_path / "repos" / "alice" / "namespace" / "project.git")
+
+        result = doctor.check_repos_layout(config, probe=False)
+
+        assert result.status == OK
+
+    def test_a_half_migrated_host_still_fails(self, make_config, tmp_path):
+        """One user moved and another not is the shape a partial play leaves."""
+        config = self._config(make_config, tmp_path, users=("alice", "bob"))
+        self._bare(tmp_path / "repos" / "alice" / "ns" / "project.git")
+        self._bare(tmp_path / "repos" / "leftover" / "project.git")
+
+        result = doctor.check_repos_layout(config, probe=False)
+
+        assert result.status == FAIL
+        assert "leftover" in result.detail
+
+    def test_an_empty_root_is_ok(self, make_config, tmp_path):
+        result = doctor.check_repos_layout(self._config(make_config, tmp_path), probe=False)
+
+        assert result.status == OK
+
+    def test_a_directory_holding_no_repository_is_not_a_finding(
+        self, make_config, tmp_path
+    ):
+        """`repos_dir` is a directory an operator may put other things in."""
+        config = self._config(make_config, tmp_path)
+        (tmp_path / "repos" / "notes").mkdir()
+        (tmp_path / "repos" / "notes" / "README").write_text("hi")
+
+        assert doctor.check_repos_layout(config, probe=False).status == OK
+
+    def test_it_skips_when_the_skill_is_off(self, make_config, tmp_path):
+        from istota.config import DeveloperConfig
+
+        config = make_config(developer=DeveloperConfig(enabled=False))
+
+        assert doctor.check_repos_layout(config, probe=False).status == SKIP
+
+    def test_it_spawns_nothing_under_probe_false(self, make_config, tmp_path, monkeypatch):
+        """It is on the config-load path, where `probe=False` forbids spawning."""
+        monkeypatch.setattr(
+            doctor, "_run",
+            lambda *a, **k: pytest.fail("the repos layout check spawned a process"),
+        )
+        config = self._config(make_config, tmp_path)
+        self._bare(tmp_path / "repos" / "namespace" / "project.git")
+
+        doctor.check_repos_layout(config, probe=False)
+
+
+class TestTheDeveloperContainerChecks:
+    """Four properties, each of which fails silently on its own.
+
+    Registered as one entry so a single connection per user answers three of
+    them; the fourth reads the rendered config file and opens nothing.
+    """
+
+    GROUP = "developer.container"
+    NAMES = {
+        "developer.container.backend",
+        "developer.container.transport",
+        "developer.container.identity",
+        "developer.container.uv_cache",
+    }
+
+    def test_all_four_are_produced_whatever_happens(self, make_config, tmp_path):
+        """A caller asserts on a name, never on a count — a check that vanishes
+        under some configuration is a check nothing can require."""
+        for backend in ("none", "devbox"):
+            config = _container_config(make_config, tmp_path, backend=backend)
+            results = doctor.check_developer_container(config, probe=False)
+            assert {r.name for r in results} == self.NAMES
+
+    def test_the_group_is_in_the_registry(self):
+        assert self.GROUP in {name for name, _ in CHECKS}
+
+    def test_the_backend_being_off_skips_the_three_that_need_a_container(
+        self, make_config, tmp_path
+    ):
+        config = _container_config(make_config, tmp_path, backend="none")
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+
+        for name in self.NAMES - {"developer.container.backend"}:
+            assert by_name[name].status == SKIP
+
+    def test_the_skip_names_the_devbox_skill_when_that_pair_is_configured(
+        self, make_config, tmp_path
+    ):
+        """The pair the transport created, and the one this check is the only
+        witness to.
+
+        `devbox.enabled = true` with `backend = none` offers the devbox skill on
+        a deployment where the role provisions no exec server, so every verb but
+        `reset` refuses. The skill CLI says so at the point of use; an operator
+        should hear it before a task does. Design 16 has the mirror-image pair
+        (`backend = devbox` with `devbox.enabled = false`) and its own gate
+        correction; this is the other direction.
+        """
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.devbox.enabled = True
+
+        transport = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.transport"
+        ]
+
+        assert transport.status == SKIP
+        assert "devbox skill is offered" in transport.detail
+        assert "reset" in transport.detail
+
+    def test_the_skip_says_nothing_extra_when_the_skill_is_off(
+        self, make_config, tmp_path
+    ):
+        """Control: the sentence must not appear on the ordinary
+        `backend = none` deployment, which has no devbox and no problem."""
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.devbox.enabled = False
+
+        transport = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.transport"
+        ]
+
+        assert transport.status == SKIP
+        assert "devbox skill is offered" not in transport.detail
+
+    def test_probe_false_opens_no_socket(self, make_config, tmp_path, monkeypatch):
+        """Doctor runs on the daemon's start-up path; `probe=False` must connect
+        to nothing."""
+        called = []
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            lambda *a, **k: (called.append(a), ([], "unreachable"))[1],
+        )
+        config = _container_config(make_config, tmp_path)
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=False))
+
+        assert not called
+        assert by_name["developer.container.transport"].status == SKIP
+
+    def test_a_user_with_no_devbox_is_not_a_failure(self, make_config, tmp_path):
+        """Which users have a devbox is not in the daemon's config — the list
+        lives in Ansible. Counting every configured user as unreachable would
+        FAIL this check permanently on the reference shape (one admin with a
+        container, several other users without) and alert every admin hourly."""
+        config = _container_config(
+            make_config, tmp_path, users=("alice", "bob"), no_socket_dirs=True
+        )
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+
+        assert by_name["developer.container.transport"].status == SKIP
+        assert "no devbox socket directory" in by_name["developer.container.transport"].detail
+
+    def test_a_dead_container_is_a_fail_naming_the_socket(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            lambda socket_path, payload, timeout: ([], f"could not connect to {socket_path}"),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        transport = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.transport"
+        ]
+
+        assert transport.status == FAIL
+        assert "alice" in transport.detail
+        assert transport.remedy
+
+    def test_a_live_container_that_agrees_is_ok(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice")),
+        )
+        config = _container_config(
+            make_config, tmp_path,
+            security={"sandbox_cache_dir": str(tmp_path / "cache")},
+        )
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+
+        assert by_name["developer.container.transport"].status == OK
+        assert by_name["developer.container.identity"].status == OK
+        assert by_name["developer.container.uv_cache"].status == OK
+
+    def test_a_uid_mismatch_fails_and_says_what_it_costs(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """Untreated, uid drift ends in worktrees that can never be reaped, and
+        there is no error message anywhere that says so."""
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice"), uid_offset=1),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        identity = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.identity"
+        ]
+
+        assert identity.status == FAIL
+        assert "uid" in identity.detail
+        assert "reap" in identity.remedy
+
+    def test_a_repos_root_mismatch_fails(self, make_config, tmp_path, monkeypatch):
+        """The two sides must spell the tree identically: the shim sends
+        `os.getcwd()` and the server checks it with `realpath` against its own
+        root, so a disagreement refuses every real working directory."""
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request", _agreeing_container("/somewhere/else"),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        identity = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.identity"
+        ]
+
+        assert identity.status == FAIL
+        assert "/somewhere/else" in identity.detail
+
+    def test_an_unset_repos_dir_skips_rather_than_warning(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """The inverse of what this test used to assert, and the inversion is
+        the point.
+
+        It used to WARN when `security.sandbox_cache_dir` was unset. That key
+        stopped being the cache root: the cache is derived at
+        `{repos_dir}/{user_id}/.package-caches`, the key is read only where
+        `repos_dir` is unset, and its Ansible default is blank — so the old
+        assertion would fire on every correctly configured deployment, which is
+        worse than no check at all. With no `repos_dir` there is no subtree and
+        no derived cache, so there is nothing to look for and SKIP is honest.
+        """
+        monkeypatch.setattr(doctor, "_exec_transport_request", _ping_reply)
+        config = _container_config(make_config, tmp_path, repos_dir="")
+
+        cache = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.uv_cache"
+        ]
+
+        assert cache.status == SKIP
+
+    def test_a_missing_cache_mount_warns(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice"), cache_exit=1),
+        )
+        config = _container_config(
+            make_config, tmp_path,
+            security={"sandbox_cache_dir": str(tmp_path / "cache")},
+        )
+
+        cache = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.uv_cache"
+        ]
+
+        assert cache.status == WARN
+        assert "alice" in cache.detail
+
+
+class TestTheBackendAgreementCheck:
+    """Design 1 asks for this and an earlier draft put it in a unit test, which
+    is the wrong place for a property an operator needs to see on the host that
+    has the problem."""
+
+    def _write(self, tmp_path, backend):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n\n"
+            f'[developer.container]\nbackend = "{backend}"\n'
+        )
+        return path
+
+    def _backend_result(self, config):
+        return _by_name(doctor.check_developer_container(config, probe=False))[
+            "developer.container.backend"
+        ]
+
+    def test_agreement_is_ok(self, make_config, tmp_path):
+        config = _container_config(make_config, tmp_path, backend="devbox")
+        config.config_path = self._write(tmp_path, "devbox")
+
+        assert self._backend_result(config).status == OK
+
+    def test_a_daemon_running_the_old_value_fails(self, make_config, tmp_path):
+        """The file says one thing and the running process another, which is
+        what an operator sees after editing config.toml and not restarting: a
+        feature that was switched on and did not switch on."""
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.config_path = self._write(tmp_path, "devbox")
+
+        result = self._backend_result(config)
+
+        assert result.status == FAIL
+        assert "devbox" in result.detail and "none" in result.detail
+        assert result.remedy
+
+    def test_an_invalid_value_is_not_reported_as_stale(self, make_config, tmp_path):
+        """The loader corrects an unknown backend to "none" with a warning, so
+        the two differ permanently. Reporting that as drift would send an
+        operator to restart the daemon — the one thing that cannot help — every
+        hour, on the only FAIL in this group."""
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.config_path = self._write(tmp_path, "docker")
+
+        result = self._backend_result(config)
+
+        assert result.status == FAIL
+        assert "not a valid backend" in result.detail
+        assert "restart" not in result.remedy.lower()
+
+    def test_a_config_built_in_memory_skips(self, make_config, tmp_path):
+        config = _container_config(make_config, tmp_path)
+        config.config_path = None
+
+        assert self._backend_result(config).status == SKIP
+
+    def test_an_unreadable_file_warns_rather_than_claiming_agreement(
+        self, make_config, tmp_path
+    ):
+        config = _container_config(make_config, tmp_path)
+        config.config_path = tmp_path / "gone.toml"
+
+        result = self._backend_result(config)
+
+        assert result.status == WARN
+        assert result.remedy

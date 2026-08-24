@@ -14,7 +14,16 @@ class EnvSpec:
 
     var: str
     source: str  # "config" | "template_file" | "user_id" | "secret" | "setup_env"
-    # For source="config"
+    # For source="config".
+    #
+    # There is no per-user variant, and DEVELOPER_REPOS_DIR is why it was
+    # tried: an EnvSpec cannot interpolate a user id, and that variable has to
+    # be scoped because it is `code_review`'s containment root. The answer is
+    # `from: setup_env` instead — the developer skill's hook derives it from
+    # the same helper that creates and scrubs the subtree, so one place knows
+    # the layout. A manifest entry could not have been overridden by that hook
+    # in any case: `execute_task` merges `build_skill_env` first and the hooks
+    # second, both under `if k not in env`, so the manifest wins silently.
     config_path: str = ""
     # Guard: dotted config path(s) that must all be truthy. Accepts a
     # single string ("developer.gitlab_token") or a list of strings

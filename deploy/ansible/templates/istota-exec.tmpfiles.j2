@@ -1,0 +1,32 @@
+# {{ ansible_managed }}
+# {{ istota_developer_container_exec_socket_dir }} holds one directory per devbox
+# user, each carrying that user's exec-transport socket. On tmpfs, recreated at
+# boot, which is right for a socket directory and is also what bounds what a
+# container can put there.
+#
+# The container's `dev` has passwordless sudo, so it can create files in its own
+# subdirectory and change their mode. What stops that being a lever is that
+# nothing on the host ever *reads* anything out of this tree: the daemon
+# connects to one socket by an absolute path it composed itself, and never
+# opens, lists or executes anything here. So a container writing into it can
+# consume a bounded amount of tmpfs and cannot place a file anywhere a host
+# process will look at.
+#
+# 0750 on the parent so no other host user can see what is here.
+#
+# **The per-user subdirectories are declared here too, and that is not
+# duplication of the play's own task.** This tree is on tmpfs, so it is empty
+# again after a reboot — and the devbox carries `restart: unless-stopped`, so
+# Docker starts the container at boot, finds the bind source missing and
+# auto-creates it `root:root`. `istota-exec-serve` runs as the daemon's uid and
+# binds its socket directly, so it gets EACCES and the supervisor loops with an
+# escalating pause: the transport stays down until somebody runs the play again.
+# systemd-tmpfiles runs at boot; the play does not.
+#
+# 0770 rather than 0750: the *container* creates the socket in here, as the
+# daemon's own uid. That is bounded rather than denied — nothing on the host
+# ever reads anything out of this tree.
+d {{ istota_developer_container_exec_socket_dir }} 0750 {{ istota_user }} {{ istota_group }} -
+{% for devbox_user in istota_devbox_users %}
+d {{ istota_developer_container_exec_socket_dir }}/{{ devbox_user }} 0770 {{ istota_user }} {{ istota_group }} -
+{% endfor %}

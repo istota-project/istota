@@ -1,17 +1,142 @@
-"""Tests for the devbox skill CLI."""
+"""The devbox skill CLI, driven against a real exec server.
+
+**Rewritten against the protocol, not against mocked `docker` argv, and that is
+the point of the file.** The tests this replaced monkeypatched `_run_docker`
+wholesale, so the boundary where every bug in this subsystem actually lived —
+what a container path resolves to on the other side — never executed. A canned
+`(0, b"", b"")` for a copy is exactly the answer a real broken run cannot
+produce, which is how a `/workspace` destination that resolved to a directory
+nothing in the container could see stayed green through every release
+(ISSUE-306), and how a `cp-out` returning phantom bytes did the same
+(ISSUE-312). So: assert on what comes back, not on what was spelled.
+
+The server is the shipped `docker/devbox/scripts/istota-exec-serve`, started on
+a socket in a tmpdir with its roots pointed there. No Docker: the server is a
+stdlib-only asyncio script, and the container is what the `integration` tier
+proves. `reset` is the one verb still spoken in Docker, and it is the one place
+`_run_docker` is still stubbed — because it recreates a container, which is a
+thing no test here can do and no server can do for it.
+
+The socket is reached the way the deployment reaches it: a real `config.toml`
+with an `exec_socket_dir`, resolved by `_transport_settings()` through
+`load_config()`.
+Monkeypatching that resolution would leave the "the CLI reads its socket from
+its own configuration, never from the environment" rule untested, and that rule
+is what stops `ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine` buying a fabricated exit 0.
+"""
 
 import argparse
 import json
+import os
 import re
 import shlex
-import shutil
+import socket
 import subprocess
+import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from istota import shell_exec
+from istota import devbox_exec_protocol as proto
 from istota.skills import devbox
+
+_REPO = Path(__file__).resolve().parents[1]
+_SKILL_DIR = _REPO / "src" / "istota" / "skills" / "devbox"
+_EXECUTOR = _REPO / "src" / "istota" / "executor.py"
+_SERVER = _REPO / "docker/devbox/scripts/istota-exec-serve"
+
+
+# --------------------------------------------------------------------------- #
+# Harness
+# --------------------------------------------------------------------------- #
+
+
+class _Devbox:
+    """A running exec server plus the config that points the CLI at it."""
+
+    def __init__(self, base: Path, proc: subprocess.Popen, log: Path) -> None:
+        self.base = base
+        self.proc = proc
+        self.log = log
+        self.repos = base / "repos"
+        self.home = base / "home"
+        self.staging = self.home / ".istota-exec"
+        self.outside = base / "outside"
+        self.socket_path = str(base / "sock" / "bob" / "exec.sock")
+
+    def log_text(self) -> str:
+        return self.log.read_text(errors="replace")
+
+
+def _start_devbox(monkeypatch) -> _Devbox:
+    # A Unix socket path is capped at ~104 bytes on darwin, and pytest's
+    # tmp_path is long enough to blow through that once a class and test name
+    # are in it.
+    base = Path(tempfile.mkdtemp(dir="/tmp", prefix="istota-dbx-")).resolve()
+    repos = base / "repos"
+    home = base / "home"
+    staging = home / ".istota-exec"
+    outside = base / "outside"
+    sock_dir = base / "sock" / "bob"
+    for d in (repos, home, staging, outside, sock_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    socket_path = str(sock_dir / "exec.sock")
+
+    # The real resolution path: a config file naming the socket's *parent*,
+    # with the per-user component derived. `[developer.container]` is the
+    # authoritative key, and the CLI reads it in this host-side process.
+    config_path = base / "config.toml"
+    config_path.write_text(
+        "[developer]\n"
+        "enabled = true\n"
+        f'repos_dir = "{repos}"\n'
+        "\n"
+        "[developer.container]\n"
+        'backend = "devbox"\n'
+        f'exec_socket_dir = "{base / "sock"}"\n'
+    )
+    monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config_path))
+
+    log = base / "server.log"
+    with open(log, "wb") as handle:
+        proc = subprocess.Popen(
+            [
+                sys.executable, str(_SERVER),
+                "--socket", socket_path,
+                "--repos-root", str(repos),
+                "--home", str(home),
+                "--staging", str(staging),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError(
+                f"server exited {proc.returncode}: {log.read_text(errors='replace')}"
+            )
+        if os.path.exists(socket_path):
+            try:
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                probe.settimeout(2.0)
+                probe.connect(socket_path)
+                probe.close()
+                break
+            except OSError:
+                pass
+        time.sleep(0.02)
+    else:  # pragma: no cover
+        raise AssertionError(
+            f"server never listened: {log.read_text(errors='replace')}"
+        )
+
+    return _Devbox(base, proc, log)
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +144,6 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("ISTOTA_USER_ID", "bob")
     monkeypatch.setenv("ISTOTA_DEVBOX_CONTAINER", "devbox-bob")
     monkeypatch.setenv("ISTOTA_DEVBOX_DOCKER_CLI", "/usr/bin/docker")
-    monkeypatch.delenv("ISTOTA_DEVBOX_EXEC_TIMEOUT", raising=False)
     monkeypatch.delenv("ISTOTA_DEVBOX_MAX_OUTPUT_BYTES", raising=False)
     # cp-in / cp-out require an allowlist; point at tmp_path so tests
     # can build host paths inside it.
@@ -27,9 +151,31 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
 
 
-def _ownership_sequence(*, owner: str = "bob", running: bool = True) -> list[tuple[int, bytes, bytes]]:
-    """The _check_owned() helper makes two inspect calls. Return the standard
-    "container is running, owned by current user" response pair."""
+@pytest.fixture
+def dbx(monkeypatch):
+    box = _start_devbox(monkeypatch)
+    try:
+        yield box
+    finally:
+        if box.proc.poll() is None:
+            box.proc.terminate()
+            try:
+                box.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                box.proc.kill()
+                box.proc.wait(timeout=10)
+
+
+def _args(**kw):
+    return type("A", (), kw)()
+
+
+def _exec(command: str, timeout: int | None = None) -> dict:
+    return devbox.cmd_exec(_args(command=command, timeout=timeout))
+
+
+def _ownership_sequence(*, owner: str = "bob", running: bool = True):
+    """`_check_owned` makes two inspect calls; this is "running, ours"."""
     return [
         (0, b"true" if running else b"false", b""),
         (0, owner.encode(), b""),
@@ -42,114 +188,1225 @@ def _drain(returns):
     return lambda argv, timeout: next(it)
 
 
-class TestContainerName:
-    def test_uses_env_var(self):
-        assert devbox._container_name() == "devbox-bob"
+# --------------------------------------------------------------------------- #
+# The harness has to be able to fail
+# --------------------------------------------------------------------------- #
 
-    def test_falls_back_to_user_id(self, monkeypatch):
-        monkeypatch.delenv("ISTOTA_DEVBOX_CONTAINER")
-        assert devbox._container_name() == "devbox-bob"
 
-    def test_returns_none_when_unset(self, monkeypatch):
-        monkeypatch.delenv("ISTOTA_DEVBOX_CONTAINER")
-        monkeypatch.delenv("ISTOTA_USER_ID")
-        assert devbox._container_name() is None
+class TestTheHarnessIsNotAStub:
+    """A rewrite whose new tests could pass against the old code would have
+    bought nothing, so start by proving the server is really in the loop."""
 
-    @pytest.mark.parametrize("bad", [
-        "devbox bob",          # space
-        "devbox-bob;rm -rf /", # shell metachars
-        "../escape",              # path traversal
-        "$(whoami)",              # command substitution
+    def test_the_command_runs_in_the_servers_process_tree(self, dbx):
+        """`$PPID` chain reaching the server, not this pytest process."""
+        result = _exec("echo $$ && ps -o ppid= -p $$")
+        assert result["exit_code"] == 0, result
+        assert result["stdout"].strip(), result
+        assert str(os.getpid()) not in result["stdout"].split(), (
+            "the command's parent is this test process, so no server ran"
+        )
+
+    def test_with_no_server_every_verb_refuses(self, monkeypatch, tmp_path):
+        """The negative control: point the config at an empty directory and
+        require a refusal rather than a fabricated success.
+
+        `backend` is set, so this is the *connect* failure rather than the
+        configuration refusal `TestTheBackendMustBeDevbox` covers — the two have
+        different messages and a control that hit the wrong one would prove
+        nothing about the socket.
+        """
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+        result = _exec("true")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert str(tmp_path) in result["error"], result
+
+
+# --------------------------------------------------------------------------- #
+# A scripted server, for the answers a real one will not give cheaply
+# --------------------------------------------------------------------------- #
+
+
+class _ScriptedServer:
+    """A socket that acknowledges and then does whatever the test says.
+
+    The `dbx` fixture drives the shipped server, which is the right default —
+    it is the thing that has to be spoken to. But every failure this class
+    exists for happens **after** the acknowledgement, and the server sends that
+    ack before it streams precisely so an `ok` means the work started. A real
+    server produces those only under conditions a test cannot arrange cheaply:
+    a container restarting mid-command, a file growing past the read cap while
+    it is being sent, ENOSPC on a staging write.
+
+    So they are scripted. What is under test is this client's reading of the
+    protocol, and the protocol is the contract both sides are written against.
+    """
+
+    def __init__(self, socket_path: str, handler) -> None:
+        self.path = socket_path
+        self._handler = handler
+        self.requests: list[dict] = []
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(socket_path)
+        self._sock.listen(8)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        with conn:
+            buf = b""
+            try:
+                while b"\n" not in buf:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    buf += chunk
+                line, _, rest = buf.partition(b"\n")
+                request = json.loads(line)
+                self.requests.append(request)
+                self._handler(self, conn, request, rest)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:  # pragma: no cover
+            pass
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Point the CLI's config at a socket a test scripts by hand."""
+    servers: list[_ScriptedServer] = []
+    base = Path(tempfile.mkdtemp(dir="/tmp", prefix="istota-dbx-s-")).resolve()
+    sock_dir = base / "sock" / "bob"
+    sock_dir.mkdir(parents=True)
+    config = base / "config.toml"
+    config.write_text(
+        "[developer]\nenabled = true\n"
+        f'repos_dir = "{base / "repos"}"\n'
+        "\n[developer.container]\n"
+        'backend = "devbox"\n'
+        f'exec_socket_dir = "{base / "sock"}"\n'
+    )
+    monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+    def make(handler) -> _ScriptedServer:
+        server = _ScriptedServer(str(sock_dir / "exec.sock"), handler)
+        servers.append(server)
+        return server
+
+    try:
+        yield make
+    finally:
+        for server in servers:
+            server.close()
+
+
+def _ack_ok() -> bytes:
+    return proto.encode_ack_ok()
+
+
+
+def _drain_body(conn, size: int, rest: bytes = b"") -> None:
+    """Read exactly the declared body so the client's `sendall` cannot block.
+
+    Bounded by the declared size rather than by end-of-stream, because the
+    client does not close after sending: it sends the body and then waits for
+    the terminal frame, so a `while conn.recv(...)` drain blocks forever and
+    deadlocks both sides. The declared size is the terminator — the same fact
+    that makes the client's trailing `stdin_eof` unnecessary.
+    """
+    decoder = proto.FrameDecoder()
+    received = 0
+    pending = rest
+    while received < size:
+        for stream, payload in decoder.feed(pending):
+            if stream == proto.STREAM_STDIN:
+                received += len(payload)
+        if received >= size:
+            return
+        pending = conn.recv(65536)
+        if not pending:
+            return
+
+
+class TestAFateItCannotReportIsNeverASuccess:
+    """The one contract this whole transport exists for.
+
+    Design 4: "The client **must never report 0 there**." A connection that
+    closes after the acknowledgement and before the terminal frame is the only
+    case in the design with no exit status at all, and it is not hypothetical —
+    it is what a container restart looks like. The naive implementation reports
+    it as success, which is why it gets a class of its own.
+    """
+
+    def test_a_connection_that_closes_after_the_ack_is_an_error(self, scripted):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"partial output\n"))
+            conn.close()
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert "fate is unknown" in result["error"], result
+
+    @pytest.mark.parametrize(
+        "failure",
+        [ConnectionResetError(104, "Connection reset by peer"),
+         BrokenPipeError(32, "Broken pipe")],
+    )
+    def test_a_socket_error_mid_command_is_an_envelope(self, monkeypatch, failure):
+        """The other half of a peer going away, and a different code path.
+
+        A *clean* close makes `recv` return `b''`, which `_pump` turns into a
+        refusal — the test above. A peer that resets, or one that goes away
+        while a body is still being written, makes the call *raise* an
+        `OSError`, which is neither `_Refused` nor `ProtocolError`. That gap
+        handed an importing caller a traceback where the CLI printed an
+        envelope. A container restart mid-build produces both shapes.
+
+        Raised at the seam rather than provoked over a real socket, and that is
+        deliberate: whether a given RST surfaces as `ECONNRESET` or as a clean
+        EOF depends on whether the data was already buffered, so a socket-level
+        version of this test passes or fails on timing. What is under test is
+        the handling, and the raising is a property of Python's sockets.
+        """
+        def boom(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(devbox, "_converse", boom)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert "fate is unknown" in result["error"], result
+
+    def test_status_keeps_its_container_half_through_a_socket_error(
+        self, monkeypatch
+    ):
+        """Same gap, at the one verb that must survive it with half an answer."""
+        monkeypatch.setattr(
+            devbox,
+            "_run_docker",
+            _drain(
+                [
+                    (
+                        0,
+                        b"true|2026-05-13T10:00:00Z|istota-devbox:latest"
+                        b"|deadbeef1234abcd|0|bob",
+                        b"",
+                    ),
+                ]
+            ),
+        )
+
+        def boom(*args, **kwargs):
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+        monkeypatch.setattr(devbox, "_converse", boom)
+
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["running"] is True, info
+        assert info["transport"]["reachable"] is False, info
+
+    def test_a_terminal_frame_with_no_status_is_an_error(self, scripted):
+        """The server says so explicitly rather than by hanging up. Same rule:
+        no status is not a zero."""
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(
+                proto.encode_control(
+                    {"exit_code": None, "signal": None, "reason": "timeout"}
+                )
+            )
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+
+    def test_a_fault_beside_a_real_status_is_still_an_error(self, scripted):
+        """`istota-exec-serve` folds an input error into the body *after*
+        `terminal_frame` has already put waitpid's answer in it, so the protocol
+        admits a frame reporting both. Reading `exit_code` alone reports the
+        fault as a clean run."""
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(
+                proto.encode_control(
+                    {
+                        "exit_code": 0,
+                        "signal": None,
+                        "error": "internal",
+                        "message": "the input pump died",
+                    }
+                )
+            )
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "internal" in result["error"], result
+
+    def test_a_server_that_never_acknowledges_is_an_envelope(
+        self, scripted, monkeypatch
+    ):
+        """`settimeout` makes `recv` *raise* rather than return, so the crafted
+        message was unreachable and the verb raised a bare TimeoutError past the
+        decorator — a dict on one path and an exception on the other."""
+        monkeypatch.setattr(devbox, "ACK_TIMEOUT_SECONDS", 0.4)
+        monkeypatch.setattr(
+            devbox, "_ACK_TIMEOUT_MESSAGE", "{path}: no acknowledgement"
+        )
+
+        def handler(server, conn, request, rest):
+            time.sleep(5)
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "no acknowledgement" in result["error"], result
+
+    def test_status_keeps_its_container_half_when_the_transport_hangs(
+        self, scripted, monkeypatch
+    ):
+        """Two halves, and neither substitutes for the other — so a dead
+        transport must not take the container facts with it."""
+        monkeypatch.setattr(devbox, "ACK_TIMEOUT_SECONDS", 0.4)
+        monkeypatch.setattr(
+            devbox,
+            "_run_docker",
+            _drain(
+                [
+                    (
+                        0,
+                        b"true|2026-05-13T10:00:00Z|istota-devbox:latest"
+                        b"|deadbeef1234abcd|0|bob",
+                        b"",
+                    ),
+                ]
+            ),
+        )
+
+        def handler(server, conn, request, rest):
+            time.sleep(5)
+
+        scripted(handler)
+
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["running"] is True, info
+        assert info["transport"]["reachable"] is False, info
+
+
+class TestAPostAcknowledgementFailureNeverReadsAsSuccess:
+    """The ack is sent before the bytes move, so this is where they land.
+
+    ``read_file`` and ``write_file`` are both acknowledged *before* the server
+    streams — it has to be that way, since the ack is what tells the other side
+    to start. Every failure after that point arrives in the terminal frame and
+    nowhere else, and a caller that stops at the ack has been told a file exists
+    that does not. Which is ISSUE-306 and ISSUE-312 in a new envelope.
+    """
+
+    def test_cp_out_writes_nothing_when_the_read_failed_mid_stream(
+        self, scripted, tmp_path
+    ):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"HALF-A-FILE"))
+            conn.sendall(
+                proto.encode_control(
+                    {
+                        "exit_code": None,
+                        "error": "too_large",
+                        "message": "grew past the read cap while streaming",
+                    }
+                )
+            )
+
+        scripted(handler)
+        dest = tmp_path / "landed.bin"
+
+        result = devbox.cmd_cp_out(_args(src="/home/dev/out.bin", dest=str(dest)))
+
+        assert result["status"] == "error", result
+        assert not dest.exists(), (
+            "a fragment of unknown length was written to the host and reported "
+            "as a success — the ISSUE-312 shape exactly"
+        )
+
+    def test_cp_out_refuses_a_short_stream(self, scripted, tmp_path):
+        """The server reports what it sent; a mismatch is a truncation."""
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"1234"))
+            conn.sendall(proto.encode_control({"exit_code": 0, "size": 9999}))
+
+        scripted(handler)
+        dest = tmp_path / "landed.bin"
+
+        result = devbox.cmd_cp_out(_args(src="/home/dev/out.bin", dest=str(dest)))
+
+        assert result["status"] == "error", result
+        assert not dest.exists()
+
+    def test_cp_in_refuses_a_short_write(self, scripted, tmp_path):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            _drain_body(conn, request["size"], rest)
+            conn.sendall(proto.encode_control({"exit_code": 0, "size": 1}))
+
+        scripted(handler)
+        src = tmp_path / "probe.txt"
+        src.write_text("a much longer body than one byte\n")
+
+        result = devbox.cmd_cp_in(_args(src=str(src), dest="/home/dev/probe.txt"))
+
+        assert result["status"] == "error", result
+        assert "incomplete" in result["error"], result
+
+    def test_exec_file_does_not_run_a_script_whose_staging_write_failed(
+        self, scripted, tmp_path
+    ):
+        """Unchecked, the exec ran a path that was never created and the model
+        read "can't open file" and concluded its own script was wrong."""
+
+        def handler(server, conn, request, rest):
+            action = request.get("action")
+            conn.sendall(_ack_ok())
+            if action == "stat":
+                conn.sendall(
+                    proto.encode_control({"staging": "/home/dev/.istota-exec"})
+                )
+                conn.sendall(proto.encode_control({"exit_code": 0}))
+                return
+            if action == "write_file":
+                _drain_body(conn, request["size"], rest)
+                conn.sendall(
+                    proto.encode_control(
+                        {
+                            "exit_code": None,
+                            "error": "internal",
+                            "message": "No space left on device",
+                        }
+                    )
+                )
+                return
+            conn.sendall(proto.encode_control({"exit_code": 0}))
+
+        server = scripted(handler)
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\necho ok\n")
+
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+
+        assert result["status"] == "error", result
+        assert "No space left" in result["error"], result
+        assert [r["action"] for r in server.requests] == ["stat", "write_file"], (
+            "the exec ran anyway, against a file the write never created"
+        )
+
+
+class TestOutputIsBoundedInThisProcess:
+    """The envelope's cap is a rendering decision; this one bounds the process.
+
+    The skill proxy runs inside the scheduler daemon, so these bytes are charged
+    to the daemon's own memory and to no task cgroup — and
+    `exec 'cat /dev/urandom'` is one command away.
+    """
+
+    def test_a_command_past_the_buffer_cap_is_an_error_not_a_status(
+        self, scripted, monkeypatch
+    ):
+        monkeypatch.setattr(devbox, "MAX_BUFFERED_OUTPUT_BYTES", 4096)
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            try:
+                for _ in range(64):
+                    conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"x" * 1024))
+                conn.sendall(proto.encode_control({"exit_code": 0}))
+            except OSError:
+                return
+
+        scripted(handler)
+
+        result = _exec("cat /dev/urandom")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert "fate is unknown" in result["error"], result
+
+
+class TestTheBackendMustBeDevbox:
+    """The pair the transport created, and the message it used to produce.
+
+    `exec_socket_dir` carries a non-empty default, so a path always resolves —
+    but the role provisions the socket only under `backend = devbox`. On the
+    shipped pair `devbox.enabled = true` with `backend = none`, every verb but
+    `reset` failed with "the container may be down", on a deployment where
+    nothing was down and where this skill worked before the transport existed.
+    """
+
+    def test_it_names_the_key_rather_than_blaming_the_container(
+        self, monkeypatch, tmp_path
+    ):
+        config = tmp_path / "config.toml"
+        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+        result = _exec("true")
+
+        assert result["status"] == "error", result
+        assert "backend" in result["error"], result
+        assert "may be down" not in result["error"], result
+
+    def test_reset_still_works_with_the_backend_off(self, monkeypatch, tmp_path):
+        """`reset` is host-side Docker and does not touch the transport, so the
+        one verb that never needed a server keeps working."""
+        config = tmp_path / "config.toml"
+        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+        monkeypatch.setattr(
+            devbox,
+            "_run_docker",
+            _drain(
+                [
+                    *_ownership_sequence(),
+                    (0, b"", b""),
+                    (0, b"", b""),
+                    (0, b"", b""),
+                ]
+            ),
+        )
+
+        assert devbox.cmd_reset(_args(yes=True))["status"] == "ok"
+
+
+class TestTheConnectBudgetComesFromConfig:
+    def test_it_reads_the_configured_value(self, monkeypatch, tmp_path):
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+            "connect_timeout_seconds = 1.5\n"
+        )
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+        settings, err = devbox._transport_settings()
+
+        assert err is None, err
+        assert settings.connect_timeout == 1.5
+
+    @pytest.mark.parametrize("value", [0, -1, True])
+    def test_a_budget_that_would_disable_blocking_falls_back(
+        self, monkeypatch, tmp_path, value
+    ):
+        """Zero or negative puts the socket in non-blocking mode, where connect
+        raises at once and every verb reports an outage."""
+        from istota.config import Config
+
+        config = Config()
+        config.developer.container.exec_socket_dir = str(tmp_path)
+        config.developer.container.backend = "devbox"
+        config.developer.container.connect_timeout_seconds = value
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
+
+        settings, err = devbox._transport_settings()
+
+        assert err is None, err
+        assert settings.connect_timeout == devbox.DEFAULT_CONNECT_TIMEOUT_SECONDS
+
+    def test_the_two_clients_agree_on_the_ack_budget(self):
+        """Two clients of one server disagreeing about how long a slow spawn may
+        take shows up as one reporting an outage the other does not see."""
+        from istota import devbox_exec_client
+
+        assert devbox.ACK_TIMEOUT_SECONDS == devbox_exec_client.ACK_TIMEOUT_SECONDS
+
+
+# --------------------------------------------------------------------------- #
+# The five deletions
+# --------------------------------------------------------------------------- #
+
+
+class TestTheGuardsThatWentWithDockerCp:
+    """Design 3's deletion list, held as a deletion.
+
+    Each of these was a daemon-side guess about the container's mount table,
+    which is what ISSUE-306 and ISSUE-312 both were. Naming them keeps one from
+    creeping back beside the server-side check that replaced them.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "_CONTAINER_TMPFS_MOUNTS",
+        "_COMPOSE_TMPFS_MOUNTS",
+        "_RUNTIME_TMPFS_MOUNTS",
+        "_LEGACY_TMPFS_MOUNTS",
+        "_CONTAINER_OFFLIMITS_PATHS",
+        "_check_arrived",
+        "_check_source_visible",
+        "_normalize_container_path",
+        "_ask_container",
+        "_kill_stragglers",
     ])
-    def test_rejects_dangerous_names(self, monkeypatch, bad):
-        monkeypatch.setenv("ISTOTA_DEVBOX_CONTAINER", bad)
-        assert devbox._container_name() is None
+    def test_the_name_is_gone(self, name):
+        assert not hasattr(devbox, name), (
+            f"{name} is back. The containment decision belongs to the server, "
+            f"inside the container, where the mount table is not a guess."
+        )
 
+    def test_workspace_is_not_mentioned_anywhere_in_the_module(self):
+        source = (_SKILL_DIR / "__init__.py").read_text()
+        assert "/workspace" not in source, (
+            "the /workspace tmpfs is deleted from the image and the template; "
+            "a refusal list naming it is a list nothing needs"
+        )
 
-class TestTimeoutAndCap:
-    def test_default_timeout(self):
-        assert devbox._exec_timeout() == 300
+    def test_skill_host_paths_is_still_the_host_side_rule(self, tmp_path):
+        """Explicitly *not* on the deletion list. It scopes the host side of a
+        verb whose host path the model still picks, which is a different
+        question from what the container may touch."""
+        from istota import skill_host_paths
 
-    def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("ISTOTA_DEVBOX_EXEC_TIMEOUT", "60")
-        assert devbox._exec_timeout() == 60
-
-    def test_invalid_falls_back(self, monkeypatch):
-        monkeypatch.setenv("ISTOTA_DEVBOX_EXEC_TIMEOUT", "not-a-number")
-        assert devbox._exec_timeout() == 300
-
-    def test_max_output_floor(self, monkeypatch):
-        monkeypatch.setenv("ISTOTA_DEVBOX_MAX_OUTPUT_BYTES", "10")
-        assert devbox._max_output_bytes() == 1024
-
-
-class TestTruncate:
-    def test_short_passes_through(self):
-        assert devbox._truncate(b"hello", 100) == "hello"
-
-    def test_long_signals_truncation(self):
-        out = devbox._truncate(b"x" * 200, 50)
-        assert out.startswith("x" * 50)
-        assert "[truncated: 150 more bytes]" in out
-
-
-class TestValidateCommand:
-    def test_accepts_normal(self):
-        assert devbox._validate_command("dig MX example.com") is None
-
-    def test_rejects_nul_byte(self):
-        err = devbox._validate_command("echo hi\x00; rm -rf /")
-        assert err is not None
-        assert "NUL byte" in err
-
-    def test_rejects_oversized(self):
-        big = "x" * (devbox.MAX_COMMAND_BYTES + 1)
-        err = devbox._validate_command(big)
-        assert err is not None
-        assert "exceeds" in err
-
-
-class TestValidateHostPath:
-    def test_rejects_path_outside_allowlist(self, monkeypatch, tmp_path):
-        # /etc/passwd is outside ISTOTA_DEFERRED_DIR.
-        err = devbox._validate_host_path(Path("/etc/passwd"), must_exist=True)
-        assert err is not None
+        resolved, err = devbox._resolve_host_path(
+            Path("/etc/passwd"), must_exist=True
+        )
+        assert resolved is None
         assert "outside allowed roots" in err
+        # And it is the shared rule, not a copy: `kv set --value-file` and the
+        # deferred health ops go through the same function.
+        assert devbox._resolve_host_path.__module__ != skill_host_paths.__name__
+        assert skill_host_paths.resolve_host_path is not None
 
-    def test_accepts_path_inside_deferred_dir(self, tmp_path):
-        p = tmp_path / "ok.txt"
-        p.write_text("hi")
-        assert devbox._validate_host_path(p, must_exist=True) is None
 
-    def test_rejects_symlink_source(self, tmp_path):
+# --------------------------------------------------------------------------- #
+# exec
+# --------------------------------------------------------------------------- #
+
+
+class TestExec:
+    def test_a_command_that_succeeds_reports_zero(self, dbx):
+        result = _exec("echo hi")
+        assert result["status"] == "ok", result
+        assert result["exit_code"] == 0
+        assert result["stdout"] == "hi\n"
+
+    def test_a_command_that_fails_reports_its_own_status(self, dbx):
+        assert _exec("exit 7")["exit_code"] == 7
+
+    def test_stderr_comes_back_on_its_own_stream(self, dbx):
+        result = _exec("echo out; echo err >&2")
+        assert result["stdout"] == "out\n"
+        assert result["stderr"] == "err\n"
+
+    def test_it_runs_in_the_servers_own_home(self, dbx):
+        """`cwd: null`, so the *server* names the directory — the container's
+        `/home/dev`, or whatever this server was started with. The verb sends
+        no path at all, which is why a named `/home/dev` staying refused is not
+        a problem for it."""
+        result = _exec("pwd")
+        assert result["exit_code"] == 0, result
+        assert Path(result["stdout"].strip()).resolve() == dbx.home.resolve()
+
+    def test_it_sends_null_rather_than_naming_a_directory(self, dbx, monkeypatch):
+        """The wire, not the outcome: a verb that named `/home/dev` as a string
+        would be refused by `check_cwd`, which is the failure Design 13's
+        amendment exists to prevent."""
+        seen = {}
+        real = proto.encode_exec_request
+
+        def spy(**kw):
+            seen.update(kw)
+            return real(**kw)
+
+        monkeypatch.setattr(devbox.proto, "encode_exec_request", spy)
+        _exec("true")
+
+        assert "cwd" in seen, seen
+        assert seen["cwd"] is None, seen
+
+    def test_no_default_timeout_reaches_the_wire(self, dbx, monkeypatch):
+        """The 300-second default went with `docker exec`. The task's own
+        budget governs, and a caller that wants a kill passes `--timeout`."""
+        seen = {}
+        real = proto.encode_exec_request
+
+        def spy(**kw):
+            seen.update(kw)
+            return real(**kw)
+
+        monkeypatch.setattr(devbox.proto, "encode_exec_request", spy)
+        _exec("true")
+        assert seen["timeout"] == 0, seen
+
+        _exec("true", timeout=12)
+        assert seen["timeout"] == 12, seen
+
+    def test_a_timeout_kills_the_command_and_says_why(self, dbx):
+        result = _exec("sleep 30", timeout=1)
+        assert result["status"] == "ok", result
+        assert result["exit_code"] != 0, result
+        assert result.get("reason") == "timeout", result
+
+    def test_binary_output_survives(self, dbx):
+        result = _exec("printf 'a\\000b'")
+        assert result["exit_code"] == 0, result
+        assert "a" in result["stdout"]
+
+    def test_it_refuses_a_nul_byte(self, dbx):
+        result = devbox.cmd_exec(_args(command="echo hi\x00; rm -rf /", timeout=None))
+        assert result["status"] == "error"
+        assert "NUL byte" in result["error"]
+
+    def test_it_refuses_an_oversized_command(self, dbx):
+        big = "x" * (devbox.MAX_COMMAND_BYTES + 1)
+        result = devbox.cmd_exec(_args(command=big, timeout=None))
+        assert result["status"] == "error"
+        assert "exceeds" in result["error"]
+
+
+class TestExecKeepsThePipelineStatus:
+    """ISSUE-307, now decided by the server rather than by this file's argv.
+
+    The old version asserted that `bash -o pipefail -c` appeared in a mocked
+    `docker exec` argv and then ran the same argv locally to prove bash honours
+    the option — which proves something about *this* machine's bash, not about
+    the shell the command actually reaches. Here the command reaches a real
+    shell through the real transport and the status is what comes back.
+    """
+
+    def test_a_failing_pipeline_is_not_reported_as_success(self, dbx):
+        result = _exec("false | tail -1")
+        assert result["status"] == "ok", result
+        assert result["exit_code"] != 0, (
+            "a pipeline whose first stage failed came back green — this is the "
+            "exact shape of ISSUE-307"
+        )
+
+    def test_a_succeeding_pipeline_is_still_success(self, dbx):
+        """Control: the option must not turn every pipeline red."""
+        result = _exec("echo hi | tail -1")
+        assert result["exit_code"] == 0, result
+        assert result["stdout"] == "hi\n"
+
+    def test_sigpipe_carries_a_note_and_no_signal(self, dbx):
+        """`yes | head -1` makes bash *exit* 141; it is not a signalled child.
+
+        The note is the honest half: the server reports what `waitpid` said and
+        never infers a signal from 128+N, so the hint travels as prose.
+        """
+        result = _exec("yes | head -1")
+        assert result["exit_code"] == proto.SIGPIPE_EXIT, result
+        assert "signal" not in result, result
+        assert result.get("note"), result
+        assert "SIGPIPE" in result["note"]
+
+    def test_a_genuinely_signalled_child_reports_its_signal(self, dbx):
+        result = _exec("kill -TERM $$")
+        assert result.get("signal") == "SIGTERM", result
+        assert result["exit_code"] == 143, result
+
+
+class TestTheEnvelopeCap:
+    """The transport caps nothing; the envelope does, because its reader is a
+    language model rather than a terminal (Design 4)."""
+
+    def test_large_output_is_truncated_with_a_marker(self, dbx, monkeypatch):
+        monkeypatch.setenv("ISTOTA_DEVBOX_MAX_OUTPUT_BYTES", "1024")
+        result = _exec("head -c 20000 /dev/zero | tr '\\0' 'x'")
+        assert result["exit_code"] == 0, result
+        assert result["stdout"].startswith("x" * 1024)
+        assert "truncated" in result["stdout"]
+
+    def test_the_whole_output_crossed_the_wire(self, dbx, monkeypatch):
+        """The cap is a rendering decision, not a transport one: the bytes all
+        arrived, and the marker names how many were dropped on the way out."""
+        monkeypatch.setenv("ISTOTA_DEVBOX_MAX_OUTPUT_BYTES", "1024")
+        result = _exec("head -c 20000 /dev/zero | tr '\\0' 'x'")
+        assert f"truncated: {20000 - 1024} more bytes" in result["stdout"], (
+            result["stdout"][-120:]
+        )
+
+    def test_output_under_the_cap_is_untouched(self, dbx):
+        result = _exec("echo short")
+        assert result["stdout"] == "short\n"
+        assert "truncated" not in result["stdout"]
+
+
+# --------------------------------------------------------------------------- #
+# exec-file
+# --------------------------------------------------------------------------- #
+
+
+class TestExecFile:
+    @pytest.mark.parametrize("name,body,expected", [
+        ("probe.sh", "#!/bin/sh\necho shell-ok\n", "shell-ok\n"),
+        ("probe.py", "print('python-ok')\n", "python-ok\n"),
+    ])
+    def test_it_runs_a_script_through_its_interpreter(
+        self, dbx, tmp_path, name, body, expected,
+    ):
+        script = tmp_path / name
+        script.write_text(body)
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+        assert result["status"] == "ok", result
+        assert result["exit_code"] == 0, result
+        assert result["stdout"] == expected
+
+    def test_it_runs_a_script_with_no_extension_via_its_shebang(self, dbx, tmp_path):
+        """Needs the staged copy to be executable, which is what the 0755 mode
+        on the `write_file` request buys. The staging directory used to be a
+        `noexec` tmpfs, so this path could not work at all."""
+        script = tmp_path / "probe"
+        script.write_text("#!/bin/sh\necho shebang-ok\n")
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+        assert result["status"] == "ok", result
+        assert result["stdout"] == "shebang-ok\n"
+
+    def test_the_staged_copy_lands_in_the_staging_root(self, dbx, tmp_path):
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\necho ok\n")
+        devbox.cmd_exec_file(_args(path=str(script), interpreter=None, timeout=None))
+        # Gone afterwards, but the *directory* is the one the server was told
+        # to treat as a file root — asserted from the host, which can see it.
+        assert dbx.staging.is_dir()
+
+    def test_it_leaves_no_staged_copy_behind(self, dbx, tmp_path):
+        """The cleanup used to run against a path the file was never written
+        to, so it removed nothing and exited 0. Scoped to this process's own
+        staged name: the directory is shared and keyed on pid."""
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\necho ok\n")
+        assert devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )["exit_code"] == 0
+
+        staged = dbx.staging / f"exec_{os.getpid()}_probe.sh"
+        assert not staged.exists(), staged
+
+    def test_it_cleans_up_after_a_failing_script(self, dbx, tmp_path):
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\nexit 3\n")
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+        assert result["exit_code"] == 3, result
+        assert not (dbx.staging / f"exec_{os.getpid()}_probe.sh").exists()
+
+    def test_it_refuses_an_unusual_basename(self, dbx, tmp_path):
+        script = tmp_path / "pro be.sh"
+        script.write_text("#!/bin/sh\necho ok\n")
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+        assert result["status"] == "error"
+        assert "basename" in result["error"]
+
+    def test_it_refuses_a_host_path_outside_the_allowlist(self, dbx):
+        result = devbox.cmd_exec_file(
+            _args(path="/etc/hosts", interpreter=None, timeout=None)
+        )
+        assert result["status"] == "error"
+        assert "outside allowed roots" in result["error"]
+
+    def test_it_imposes_no_pipefail_on_the_script(self, dbx, tmp_path):
+        """A script owns its own shell options: it has a shebang line where
+        `set -euo pipefail` is the idiom, and the no-interpreter branch runs
+        whatever interpreter the file names."""
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\nfalse | true\n")
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+        assert result["exit_code"] == 0, result
+
+
+# --------------------------------------------------------------------------- #
+# cp-in / cp-out
+# --------------------------------------------------------------------------- #
+
+
+class TestCopyIn:
+    def test_a_file_arrives_where_the_server_can_read_it(self, dbx, tmp_path):
+        src = tmp_path / "probe.txt"
+        src.write_text("round-trip marker\n")
+        dest = dbx.home / "probe.txt"
+
+        result = devbox.cmd_cp_in(_args(src=str(src), dest=str(dest)))
+
+        assert result["status"] == "ok", result
+        # The whole point: read it back through the *server*, not off the host.
+        assert _exec(f"cat {dest}")["stdout"] == "round-trip marker\n"
+
+    def test_a_destination_outside_the_roots_is_refused_by_the_server(
+        self, dbx, tmp_path,
+    ):
+        """The refusal that replaced the hand-kept container-path lists."""
+        src = tmp_path / "probe.txt"
+        src.write_text("hello\n")
+        dest = dbx.outside / "probe.txt"
+
+        result = devbox.cmd_cp_in(_args(src=str(src), dest=str(dest)))
+
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+        assert not dest.exists(), "the refusal still wrote the file"
+
+    def test_a_relative_destination_is_refused(self, dbx, tmp_path):
+        """A relative path means something different in each namespace, so the
+        server refuses it rather than anchoring it somewhere."""
+        src = tmp_path / "probe.txt"
+        src.write_text("hello\n")
+
+        result = devbox.cmd_cp_in(_args(src=str(src), dest="probe.txt"))
+
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+
+    def test_a_symlink_out_of_the_roots_is_refused(self, dbx, tmp_path):
+        """Resolved before the test, never after."""
+        (dbx.home / "escape").symlink_to(dbx.outside)
+        src = tmp_path / "probe.txt"
+        src.write_text("hello\n")
+
+        result = devbox.cmd_cp_in(
+            _args(src=str(src), dest=str(dbx.home / "escape" / "probe.txt"))
+        )
+
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+        assert not (dbx.outside / "probe.txt").exists()
+
+    def test_a_host_source_outside_the_allowlist_is_refused(self, dbx):
+        result = devbox.cmd_cp_in(
+            _args(src="/etc/hosts", dest=str(dbx.home / "hosts"))
+        )
+        assert result["status"] == "error"
+        assert "outside allowed roots" in result["error"]
+        assert not (dbx.home / "hosts").exists()
+
+    def test_a_host_symlink_source_is_refused(self, dbx, tmp_path):
         real = tmp_path / "real.txt"
         real.write_text("x")
         link = tmp_path / "link.txt"
         link.symlink_to(real)
-        err = devbox._validate_host_path(link, must_exist=True)
-        assert err is not None
-        assert "symlink" in err
 
-    def test_dest_creates_parent(self, tmp_path):
-        dest = tmp_path / "nested" / "out.txt"
-        assert not dest.parent.exists()
-        assert devbox._validate_host_path(dest, must_exist=False) is None
-        assert dest.parent.exists()
+        result = devbox.cmd_cp_in(
+            _args(src=str(link), dest=str(dbx.home / "out.txt"))
+        )
 
-    def test_refuses_when_allowlist_empty(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("ISTOTA_DEFERRED_DIR")
-        err = devbox._validate_host_path(tmp_path / "x", must_exist=False)
-        assert err is not None
-        assert "allowed host roots" in err
+        assert result["status"] == "error"
+        assert "symlink" in result["error"]
 
-    def test_nextcloud_mount_path_is_also_allowed(self, monkeypatch, tmp_path):
-        nc = tmp_path / "nc"
-        nc.mkdir()
-        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(nc))
-        candidate = nc / "Users" / "bob" / "f.txt"
-        candidate.parent.mkdir(parents=True)
-        candidate.write_text("hi")
-        assert devbox._validate_host_path(candidate, must_exist=True) is None
+    def test_a_directory_source_is_refused_rather_than_half_copied(
+        self, dbx, tmp_path,
+    ):
+        (tmp_path / "tree").mkdir()
+        (tmp_path / "tree" / "a.txt").write_text("a")
+
+        result = devbox.cmd_cp_in(
+            _args(src=str(tmp_path / "tree"), dest=str(dbx.home / "tree"))
+        )
+
+        assert result["status"] == "error"
+        assert "directory" in result["error"]
+
+    def test_the_reported_byte_count_is_the_servers(self, dbx, tmp_path):
+        src = tmp_path / "probe.bin"
+        src.write_bytes(b"\x00\x01\x02" * 5000)
+
+        result = devbox.cmd_cp_in(
+            _args(src=str(src), dest=str(dbx.home / "probe.bin"))
+        )
+
+        assert result["size"] == 15000, result
+        assert (dbx.home / "probe.bin").read_bytes() == src.read_bytes()
+
+
+class TestCopyOut:
+    def test_a_file_written_inside_comes_back(self, dbx, tmp_path):
+        remote = dbx.home / "out.txt"
+        assert _exec(f"printf 'from inside\\n' > {remote}")["exit_code"] == 0
+        dest = tmp_path / "out.txt"
+
+        result = devbox.cmd_cp_out(_args(src=str(remote), dest=str(dest)))
+
+        assert result["status"] == "ok", result
+        assert dest.read_text() == "from inside\n"
+
+    def test_a_source_outside_the_roots_is_refused(self, dbx, tmp_path):
+        secret = dbx.outside / "secret.txt"
+        secret.write_text("not yours\n")
+        dest = tmp_path / "secret.txt"
+
+        result = devbox.cmd_cp_out(_args(src=str(secret), dest=str(dest)))
+
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+        assert not dest.exists()
+
+    def test_the_credential_directory_is_refused_by_name(self, dbx, tmp_path):
+        result = devbox.cmd_cp_out(
+            _args(src="/run/istota-cred/sock", dest=str(tmp_path / "sock"))
+        )
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+        assert "istota-cred" in result["error"]
+
+    def test_the_transports_own_socket_directory_is_refused_by_name(
+        self, dbx, tmp_path,
+    ):
+        result = devbox.cmd_cp_out(
+            _args(src="/run/istota-exec/bob/exec.sock", dest=str(tmp_path / "s"))
+        )
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+
+    def test_a_missing_source_is_an_error_not_an_empty_file(self, dbx, tmp_path):
+        dest = tmp_path / "nope.txt"
+
+        result = devbox.cmd_cp_out(
+            _args(src=str(dbx.home / "nope.txt"), dest=str(dest))
+        )
+
+        assert result["status"] == "error", result
+        assert not dest.exists(), (
+            "a refused copy left a file on the host — which is the ISSUE-312 "
+            "shape: bytes of unknown provenance the caller goes on to read"
+        )
+
+    def test_a_refusal_creates_no_host_directories(self, dbx, tmp_path):
+        """Container side first, then the host path. `_resolve_host_path`
+        creates the destination's parents, so the other order left an empty
+        tree in the user's workspace behind every refusal."""
+        dest = tmp_path / "deep" / "nested" / "out.txt"
+
+        result = devbox.cmd_cp_out(_args(src=str(dbx.outside / "x"), dest=str(dest)))
+
+        assert result["status"] == "error"
+        assert not dest.parent.exists(), dest.parent
+
+    def test_a_host_destination_outside_the_allowlist_is_refused(self, dbx):
+        remote = dbx.home / "out.txt"
+        assert _exec(f"echo hi > {remote}")["exit_code"] == 0
+
+        result = devbox.cmd_cp_out(_args(src=str(remote), dest="/etc/istota-probe"))
+
+        assert result["status"] == "error"
+        assert not Path("/etc/istota-probe").exists()
+
+    def test_binary_round_trips(self, dbx, tmp_path):
+        payload = bytes(range(256)) * 40
+        src = tmp_path / "in.bin"
+        src.write_bytes(payload)
+        remote = dbx.home / "in.bin"
+        assert devbox.cmd_cp_in(
+            _args(src=str(src), dest=str(remote))
+        )["status"] == "ok"
+
+        dest = tmp_path / "back.bin"
+        assert devbox.cmd_cp_out(
+            _args(src=str(remote), dest=str(dest))
+        )["status"] == "ok"
+        assert dest.read_bytes() == payload
+
+
+# --------------------------------------------------------------------------- #
+# status
+# --------------------------------------------------------------------------- #
+
+
+class TestStatus:
+    def test_it_reports_the_transport(self, dbx, monkeypatch):
+        monkeypatch.setattr(
+            devbox, "_run_docker", lambda argv, timeout: (1, b"", b"No such container")
+        )
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["transport"]["reachable"] is True, info
+        assert info["transport"]["protocol"] == proto.PROTOCOL_VERSION
+        assert Path(info["transport"]["home"]).resolve() == dbx.home.resolve()
+
+    def test_an_unreachable_container_is_reported_and_is_not_fatal(
+        self, dbx, monkeypatch,
+    ):
+        """Two halves that fail separately: Docker says whether the container
+        is up, the transport says whether the server inside it answers. A
+        deployment where the CLI cannot reach Docker at all still gets the
+        answer that matters."""
+        monkeypatch.setattr(
+            devbox, "_run_docker", lambda argv, timeout: (1, b"", b"No such container")
+        )
+        info = devbox.cmd_status(_args())
+
+        assert info["running"] is None, info
+        assert "container_error" in info, info
+        assert info["transport"]["reachable"] is True, info
+
+    def test_it_parses_the_inspect_line(self, dbx, monkeypatch):
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            (0, b"true|2026-05-13T10:00:00Z|istota-devbox:latest|deadbeef1234abcd|0|bob", b""),
+        ]))
+        info = devbox.cmd_status(_args())
+
+        assert info["running"] is True
+        assert info["image"] == "istota-devbox:latest"
+        assert info["id"] == "deadbeef1234"
+        assert info["restart_count"] == 0
+        assert info["owner"] == "bob"
+
+    def test_a_dead_transport_is_reported_rather_than_raised(
+        self, monkeypatch, tmp_path,
+    ):
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+        monkeypatch.setattr(
+            devbox, "_run_docker", lambda argv, timeout: (1, b"", b"nope")
+        )
+
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["transport"]["reachable"] is False, info
+        assert info["transport"]["error"], info
+
+
+# --------------------------------------------------------------------------- #
+# reset — the one verb still spoken in Docker
+# --------------------------------------------------------------------------- #
+
+
+class TestReset:
+    """`_run_docker` and `_check_owned` survive for this verb alone.
+
+    The transport cannot recreate a container and should not learn how: a
+    server inside a container cannot restart the container it is inside. And
+    `reset` never used the retired allowlist proxy — `_run_docker` shells
+    `docker` with the daemon's own environment and sets no `DOCKER_HOST`, so it
+    has always talked to the real socket. That is the evidence the proxy could
+    be retired whole rather than kept for this one verb.
+    """
+
+    def test_it_refuses_without_yes(self):
+        result = devbox.cmd_reset(_args(yes=False))
+        assert result["status"] == "error"
+        assert "Refusing" in result["error"]
+
+    def test_it_refuses_when_home_is_not_a_mountpoint(self, monkeypatch):
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (1, b"", b""),  # mountpoint -q /home/dev — not a mountpoint
+        ]))
+        result = devbox.cmd_reset(_args(yes=True))
+        assert result["status"] == "error"
+        assert "not a mountpoint" in result["error"]
+
+    def test_it_refuses_a_container_owned_by_someone_else(self, monkeypatch):
+        monkeypatch.setattr(
+            devbox, "_run_docker", _drain(_ownership_sequence(owner="alice"))
+        )
+        result = devbox.cmd_reset(_args(yes=True))
+        assert result["status"] == "error"
+        assert "owned by 'alice'" in result["error"]
+
+    def test_it_refuses_a_container_that_is_not_running(self, monkeypatch):
+        monkeypatch.setattr(devbox, "_run_docker", _drain([(0, b"false", b"")]))
+        result = devbox.cmd_reset(_args(yes=True))
+        assert result["status"] == "error"
+        assert "not running" in result["error"]
+
+    def test_it_wipes_and_restarts(self, monkeypatch):
+        calls = []
+        seq = iter([
+            *_ownership_sequence(),
+            (0, b"", b""),  # mountpoint -q → ok
+            (0, b"", b""),  # find …rm -rf wipe
+            (0, b"", b""),  # restart
+        ])
+
+        def fake_run(argv, timeout):
+            calls.append(argv)
+            return next(seq)
+
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        result = devbox.cmd_reset(_args(yes=True))
+
+        assert result["status"] == "ok"
+        wipe = [c for c in calls if c[0] == "exec" and "find" in " ".join(c)]
+        assert wipe and "-u" in wipe[0] and "root" in wipe[0]
+        assert calls[-1] == ["restart", "devbox-bob"]
+
+    def test_it_sets_no_docker_host(self):
+        """The evidence Design 14's deletion rests on, held as a test.
+
+        `_run_docker` passes no environment of its own, so the child inherits
+        the daemon's — which has no `DOCKER_HOST`, so `docker` resolves the
+        real socket. If this file ever started setting one, retiring the proxy
+        would have been the wrong call and this says so.
+        """
+        source = (_SKILL_DIR / "__init__.py").read_text()
+        # An assignment, not a mention: the docstrings here explain at length
+        # why no `DOCKER_HOST` is set, and a bare substring search would be
+        # satisfied by that prose.
+        assert not re.search(r"""DOCKER_HOST["']?\s*[\]:]?\s*=""", source), source
+        assert "env=" not in source.split("def _run_docker", 1)[1].split("\ndef ", 1)[0]
+
+
+# --------------------------------------------------------------------------- #
+# The parser, the envelope, and the shipped body
+# --------------------------------------------------------------------------- #
 
 
 class TestParser:
@@ -161,6 +1418,9 @@ class TestParser:
     def test_exec_with_timeout(self):
         args = devbox.build_parser().parse_args(["exec", "sleep 1", "--timeout", "10"])
         assert args.timeout == 10
+
+    def test_exec_has_no_default_timeout(self):
+        assert devbox.build_parser().parse_args(["exec", "x"]).timeout is None
 
     def test_exec_file(self):
         args = devbox.build_parser().parse_args(
@@ -177,833 +1437,158 @@ class TestParser:
         assert args.dest == "/b"
 
     def test_status(self):
-        args = devbox.build_parser().parse_args(["status"])
-        assert args.subcommand == "status"
+        assert devbox.build_parser().parse_args(["status"]).subcommand == "status"
 
     def test_reset_requires_yes(self):
         args = devbox.build_parser().parse_args(["reset"])
         assert args.subcommand == "reset"
         assert args.yes is False
 
-
-class TestExec:
-    def test_returns_error_when_no_container(self, monkeypatch):
-        monkeypatch.delenv("ISTOTA_DEVBOX_CONTAINER")
-        monkeypatch.delenv("ISTOTA_USER_ID")
-        args = type("A", (), {"command": "echo hi", "timeout": None})()
-        result = devbox.cmd_exec(args)
-        assert result["status"] == "error"
-        assert "No devbox" in result["error"]
-
-    def test_errors_when_not_running(self, monkeypatch):
-        # _check_owned probes inspect Running first; "false" short-circuits.
-        monkeypatch.setattr(devbox, "_run_docker", _drain([(0, b"false", b"")]))
-        args = type("A", (), {"command": "echo hi", "timeout": None})()
-        result = devbox.cmd_exec(args)
-        assert result["status"] == "error"
-        assert "not running" in result["error"]
-
-    def test_refuses_when_owner_label_mismatches(self, monkeypatch):
-        # State=running, but label points at the wrong user.
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            (0, b"true", b""),
-            (0, b"alice", b""),
-        ]))
-        args = type("A", (), {"command": "echo hi", "timeout": None})()
-        result = devbox.cmd_exec(args)
-        assert result["status"] == "error"
-        assert "owned by 'alice'" in result["error"]
-
-    def test_refuses_nul_byte_in_command(self):
-        args = type("A", (), {"command": "echo hi\x00bad", "timeout": None})()
-        result = devbox.cmd_exec(args)
-        assert result["status"] == "error"
-        assert "NUL" in result["error"]
-
-    def test_happy_path(self, monkeypatch):
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),       # _check_owned
-            (0, b"hi\n", b""),            # the actual exec
-        ])
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"command": "echo hi", "timeout": None})()
-        result = devbox.cmd_exec(args)
-        assert result["status"] == "ok"
-        assert result["exit_code"] == 0
-        assert result["stdout"] == "hi\n"
-        exec_argv = invocations[-1]
-        assert exec_argv[0] == "exec"
-        assert "devbox-bob" in exec_argv
-        assert exec_argv[exec_argv.index("devbox-bob") + 1] == "bash"
-        assert exec_argv[-2] == "-c"
-        assert exec_argv[-1] == "echo hi"
-        # The working directory must be somewhere `docker cp` can reach, or a
-        # relative path written by the command cannot be copied back out
-        # (ISSUE-306).
-        cwd = exec_argv[exec_argv.index("-w") + 1]
-        assert cwd == devbox._DEFAULT_WORKDIR
-        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
-            assert cwd != mount and not cwd.startswith(mount + "/")
-
-    def test_timeout_returns_error(self, monkeypatch):
-        # Ownership pair, then the exec times out, then the straggler-kill
-        # helper makes a probe + (zero) kill calls; we return empty.
-        seq = iter([
-            *_ownership_sequence(),
-            None,  # sentinel — actual exec raises TimeoutExpired below
-            (0, b"", b""),  # _kill_stragglers ps probe (empty)
-        ])
-        def fake_run(argv, timeout):
-            val = next(seq)
-            if val is None:
-                raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
-            return val
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"command": "sleep 999", "timeout": 1})()
-        result = devbox.cmd_exec(args)
-        assert result["status"] == "error"
-        assert "timed out" in result["error"]
-
-
-class TestExecKeepsThePipelineStatus:
-    """ISSUE-307: `bash -c` starts with `pipefail` off, so a pipeline reported
-    its *last* command's status and `<runner> … | tail` came back
-    `exit_code: 0` on a run that failed.
-
-    The envelope tells its reader that `exit_code` is the result, so the shell
-    has to make that claim true. Asserting the flag is merely present in the
-    argv would be satisfied by `-o pipefail` sitting somewhere the shell
-    ignores it, so the second test runs the argv the skill actually built.
-    """
-
-    def _exec_argv(self, monkeypatch, command: str) -> list[str]:
-        invocations = []
-        seq = iter([*_ownership_sequence(), (0, b"", b"")])
-
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        devbox.cmd_exec(type("A", (), {"command": command, "timeout": None})())
-        return invocations[-1]
-
-    def _shell_argv(self, argv: list[str]) -> list[str]:
-        """Everything after the container name — the argv docker hands to exec.
-
-        Anchored on `-w <workdir>`, which the code chooses, rather than on the
-        container name, which the fixture chooses: a command string containing
-        the container name would slice at the wrong `index` and the failure
-        would read as a pipefail regression.
-        """
-        return argv[argv.index(devbox._DEFAULT_WORKDIR) + 2:]
-
-    def test_the_argv_comes_from_the_shared_builder(self, monkeypatch):
-        """Not a second hardcoded spelling of the same rule.
-
-        `shell_exec` says in its own docstring that it exists so the next
-        caller inherits the rule rather than repeating it, and this is the
-        caller that paid for the rule — a hardcoded copy here would make that
-        claim false on the first file anyone checks.
-        """
-        argv = self._exec_argv(monkeypatch, "echo hi")
-        assert self._shell_argv(argv) == shell_exec.shell_argv("echo hi", bash="bash")
-
-    def test_the_sigpipe_constants_are_the_shared_ones(self):
-        """Both are user-facing text; two copies is two things to keep in step."""
-        assert devbox._SIGPIPE_EXIT is shell_exec.SIGPIPE_EXIT
-        assert devbox._SIGPIPE_NOTE is shell_exec.SIGPIPE_NOTE
-
-    def test_the_shell_argv_turns_pipefail_on(self, monkeypatch):
-        shell = self._shell_argv(self._exec_argv(monkeypatch, "echo hi"))
-        assert shell == ["bash", "-o", "pipefail", "-c", "echo hi"], shell
-
-    def test_the_argv_the_skill_builds_really_fails_a_failing_pipeline(self, monkeypatch):
-        """Run the shell argv `cmd_exec` produced, on this machine.
-
-        No container is needed to answer the question — the option belongs to
-        bash, not to the image — and this is the assertion a flag check cannot
-        make: that the status handed back is the failing command's. The passing
-        case is the control; without it a shell that failed everything would
-        satisfy the first half.
-        """
-        if not shutil.which("bash"):
-            pytest.skip("no bash on this host")
-
-        shell = self._shell_argv(self._exec_argv(monkeypatch, "false | tail -1"))
-        assert subprocess.run(shell, capture_output=True, timeout=30).returncode != 0, (
-            f"{shell} reported success for a pipeline whose first command failed"
-        )
-
-        shell_ok = self._shell_argv(self._exec_argv(monkeypatch, "true | tail -1"))
-        assert subprocess.run(shell_ok, capture_output=True, timeout=30).returncode == 0, (
-            f"{shell_ok} reported failure for a pipeline that succeeded"
-        )
-
-    def test_a_reporting_stage_now_colours_the_pipeline(self, monkeypatch):
-        """The cost `skill.md` promises, measured rather than asserted.
-
-        `pipefail` changes two things, not one. SIGPIPE is the recognisable
-        half; this is the other — a non-final stage that exits non-zero to
-        *report* something (`grep` with no match, `diff`, `cmp`) rather than to
-        fail. Nothing distinguishes it from a real failure, which is why it is
-        documented instead of annotated, and why it is pinned here: the docs
-        now make a claim about it that a future argv change could falsify.
-        """
-        if not shutil.which("bash"):
-            pytest.skip("no bash on this host")
-
-        shell = self._shell_argv(
-            self._exec_argv(monkeypatch, "grep -c nonexistent-needle /etc/hosts | wc -l"),
-        )
-        assert subprocess.run(shell, capture_output=True, timeout=30).returncode == 1, (
-            "a no-match grep mid-pipeline no longer colours the pipeline — "
-            "skill.md tells the reader it does"
-        )
-
-    def test_a_sigpipe_status_is_named_in_the_envelope(self, monkeypatch):
-        """The one cost of the option, answered where the reader is.
-
-        `pipefail` surfaces SIGPIPE, so `yes | head -5` now reports 141 where it
-        used to report 0. That is a true status rather than a bug, but nothing
-        else on the page would tell a reader so.
-        """
-        seq = iter([*_ownership_sequence(), (141, b"y\n", b"")])
-        monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: next(seq))
-        result = devbox.cmd_exec(type("A", (), {"command": "yes | head -1", "timeout": None})())
-        assert result["exit_code"] == 141
-        assert "SIGPIPE" in result["note"]
-        assert "pipefail" in result["note"]
-
-    def test_an_ordinary_status_carries_no_note(self, monkeypatch):
-        seq = iter([*_ownership_sequence(), (1, b"", b"nope\n")])
-        monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: next(seq))
-        result = devbox.cmd_exec(type("A", (), {"command": "false", "timeout": None})())
-        assert result["exit_code"] == 1
-        assert "note" not in result
-
-    def test_exec_file_does_not_impose_pipefail_on_the_script(self, monkeypatch, tmp_path):
-        """Deliberate, and pinned so a change of mind arrives as a reviewed diff.
-
-        `exec` takes a command string with nowhere to put shell options; a
-        script has a shebang line, where `set -euo pipefail` is the idiom, and
-        the no-interpreter branch runs whatever interpreter the file names — so
-        imposing the option here would cover one of the two branches and change
-        the meaning of a file the caller wrote.
-        """
-        script = tmp_path / "probe.sh"
-        script.write_text("#!/bin/bash\necho hi\n")
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),   # mkdir staging dir
-            (0, b"", b""),   # docker cp
-            (0, b"", b""),   # chmod
-            (0, b"", b""),   # the run
-            (0, b"", b""),   # cleanup rm
-        ])
-
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
-        devbox.cmd_exec_file(
-            type("A", (), {"path": str(script), "interpreter": None, "timeout": None})(),
-        )
-        run_argv = [a for a in invocations if "-w" in a and "bash" in a][-1]
-        # Substring, not element membership: `["bash", "-c", "set -o pipefail;
-        # exec " + remote]` is how someone would most likely impose the option
-        # on the interpreter branch, and `"pipefail" not in run_argv` accepts it.
-        assert not any("pipefail" in a for a in run_argv), run_argv
-
-
-class TestExecFile:
-    def test_happy_path(self, monkeypatch, tmp_path):
-        script = tmp_path / "x.py"
-        script.write_text("print('hi')\n")
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),                # mkdir -p staging dir
-            (0, b"", b""),                # cp into container
-            (0, b"", b""),                # chmod 0755
-            (0, b"hi\n", b""),            # the actual run
-            (0, b"", b""),                # rm cleanup
-        ])
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "ok"
-        assert result["exit_code"] == 0
-        assert result["stdout"] == "hi\n"
-        # Last call must be a cleanup rm -f on the staged path.
-        last = invocations[-1]
-        assert last[0] == "exec"
-        assert "rm" in last and "-f" in last
-
-    def test_refuses_unusual_basename(self, monkeypatch, tmp_path):
-        # A space in the basename trips the regex.
-        sneaky = tmp_path / "sneaky name.sh"
-        sneaky.write_text("#!/bin/sh\n")
-        monkeypatch.setattr(devbox, "_run_docker", _drain(_ownership_sequence()))
-        args = type("A", (), {"path": str(sneaky), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "error"
-        assert "basename" in result["error"]
-
-    def test_cleanup_runs_on_timeout(self, monkeypatch, tmp_path):
-        script = tmp_path / "y.py"
-        script.write_text("import time; time.sleep(999)\n")
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),                # mkdir -p staging dir
-            (0, b"", b""),                # cp into container
-            (0, b"", b""),                # chmod 0755
-            None,                          # exec → TimeoutExpired
-            (0, b"", b""),                # _kill_stragglers probe
-            (0, b"", b""),                # rm cleanup
-        ])
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            val = next(seq)
-            if val is None:
-                raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
-            return val
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"path": str(script), "interpreter": "python3", "timeout": 1})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "error"
-        assert "timed out" in result["error"]
-        # Cleanup rm must have run despite the timeout.
-        rm_calls = [c for c in invocations if c[0] == "exec" and "rm" in c]
-        assert rm_calls, "cleanup rm did not run after timeout"
-
-    def test_rejects_host_path_outside_allowlist(self, monkeypatch):
-        args = type("A", (), {"path": "/etc/passwd", "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "error"
-        assert "outside allowed roots" in result["error"]
-
-
-    def test_stages_onto_the_persistent_volume_not_the_tmpfs(self, monkeypatch, tmp_path):
-        """ISSUE-306: `docker cp` cannot traverse a tmpfs mount, so a script
-        staged into /workspace lands in the shadowed rootfs directory and the
-        interpreter reports "No such file or directory"."""
-        script = tmp_path / "probe.py"
-        script.write_text("print('hi')\n")
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),                # mkdir -p staging dir
-            (0, b"", b""),                # cp into container
-            (0, b"", b""),                # chmod 0755
-            (0, b"hi\n", b""),            # the actual run
-            (0, b"", b""),                # rm cleanup
-        ])
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "ok"
-
-        cp_idx = next(i for i, c in enumerate(invocations) if c[0] == "cp")
-        remote = invocations[cp_idx][2].split(":", 1)[1]
-        assert remote.startswith(devbox._EXEC_STAGING_DIR + "/"), remote
-        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
-            assert not remote.startswith(mount + "/"), f"staged into tmpfs {mount}"
-
-        # `docker cp` creates no parent directory, so the mkdir has to precede it.
-        mkdir_idx = next(i for i, c in enumerate(invocations) if "mkdir" in c)
-        assert mkdir_idx < cp_idx
-        assert devbox._EXEC_STAGING_DIR in invocations[mkdir_idx]
-
-        # The interpreter and the cleanup must name the same staged path.
-        run_idx = next(i for i, c in enumerate(invocations) if "python3" in c)
-        assert invocations[run_idx][-1] == remote
-        assert invocations[-1][-1] == remote
-
-    @pytest.mark.parametrize("name", ["probe", "probe.py"])
-    def test_fixes_the_staged_mode_on_both_branches(self, monkeypatch, tmp_path, name):
-        """`docker cp` preserves the host file's uid/gid and mode, and the
-        daemon user is not the container's `dev` — so a 0600 script arrives
-        unreadable by the user about to run it. That bites the interpreter
-        branch as hard as the fallback, and `chmod +x` would grant execute
-        without read."""
-        script = tmp_path / name
-        script.write_text("#!/bin/sh\necho hi\n")
-        script.chmod(0o600)
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),                # mkdir -p
-            (0, b"", b""),                # cp
-            (0, b"", b""),                # chmod
-            (0, b"hi\n", b""),            # the run
-            (0, b"", b""),                # rm cleanup
-        ])
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "ok"
-        chmod_call = [c for c in invocations if "chmod" in c][0]
-        assert chmod_call[:3] == ["exec", "-u", "root"]
-        assert "0755" in chmod_call
-
-    def test_reports_a_failed_chmod_instead_of_an_opaque_eacces(self, monkeypatch, tmp_path):
-        script = tmp_path / "probe"
-        script.write_text("#!/bin/sh\n")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),                          # mkdir -p
-            (0, b"", b""),                          # cp
-            (1, b"", b"chmod: Operation not permitted"),
-            (0, b"", b""),                          # rm cleanup
-        ]))
-        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "error"
-        assert "chmod" in result["error"]
-
-    def test_removes_the_partial_copy_when_the_copy_fails(self, monkeypatch, tmp_path):
-        """`docker cp` extracts a tar, so a failure part-way leaves a truncated
-        file behind on the persistent volume."""
-        script = tmp_path / "probe.py"
-        script.write_text("print(1)\n")
-        invocations = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),                        # mkdir -p
-            (1, b"", b"no space left on device"), # cp
-            (0, b"", b""),                        # rm cleanup
-        ])
-        def fake_run(argv, timeout):
-            invocations.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "error"
-        assert "cp into devbox failed" in result["error"]
-        assert "rm" in invocations[-1] and "-f" in invocations[-1]
-
-    def test_reports_a_failed_mkdir(self, monkeypatch, tmp_path):
-        script = tmp_path / "probe.py"
-        script.write_text("print(1)\n")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (1, b"", b"mkdir: cannot create directory"),
-        ]))
-        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
-        result = devbox.cmd_exec_file(args)
-        assert result["status"] == "error"
-        assert "staging" in result["error"]
-
-
-class TestCp:
-    def test_cp_in_missing_source(self, tmp_path):
-        args = type("A", (), {"src": str(tmp_path / "no-such"), "dest": "/home/dev/x"})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "error"
-        assert "not found" in result["error"]
-
-    def test_cp_in_success(self, monkeypatch, tmp_path):
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        calls = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (0, b"", b""),  # arrival check
-        ])
-        def fake_run(argv, timeout):
-            calls.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "ok"
-        cp_call = [c for c in calls if c[0] == "cp"][0]
-        assert cp_call[2] == "devbox-bob:/home/dev/a.txt"
-
-    def test_cp_in_says_the_arrival_check_failed_rather_than_that_the_file_is_gone(
-        self, monkeypatch, tmp_path,
-    ):
-        """ISSUE-313. The arrival check reads a *docker* exit status, and only
-        one of the two things it can mean is "the file is absent". When the
-        exec itself could not answer — the allowlist proxy refusing an
-        untracked exec is the case that happens — the old message claimed the
-        ISSUE-306 symptom outright, which is a confident false statement about
-        a copy that in fact landed."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp — the tar relay is allowed
-            (1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec"),
-        ]))
-        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "error"
-        assert "untracked_exec" in result["error"]
-        assert "is unknown" in result["error"]
-        assert "does not exist inside" not in result["error"]
-
-    def test_cp_in_still_names_a_genuinely_absent_destination(
-        self, monkeypatch, tmp_path,
-    ):
-        """Control: `test -e` answering "no" writes nothing to stderr, and that
-        case must keep the ISSUE-306 wording."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (1, b"", b""),  # arrival check: absent, and it said so cleanly
-        ]))
-        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "error"
-        assert "does not exist inside" in result["error"]
-
-    def test_cp_in_rejects_path_outside_allowlist(self):
-        args = type("A", (), {"src": "/etc/passwd", "dest": "/home/dev/p"})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "error"
-        assert "outside allowed roots" in result["error"]
-
-    def test_cp_out_creates_parent(self, monkeypatch, tmp_path):
-        dest = tmp_path / "nested" / "out.json"
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # source visible from inside the container
-            (0, b"", b""),  # docker cp
-        ]))
-        args = type("A", (), {"src": "/home/dev/out.json", "dest": str(dest)})()
-        result = devbox.cmd_cp_out(args)
-        assert result["status"] == "ok"
-        assert dest.parent.exists()
-
-    def test_cp_out_rejects_path_outside_allowlist(self, monkeypatch, tmp_path_factory):
-        # Build a *separate* tmp dir outside ISTOTA_DEFERRED_DIR. Writable by
-        # the test user, but not on the allowlist — the right rejection path.
-        #
-        # The host path is resolved last, after the container-side checks, so
-        # that a refusal never creates the destination's parents; the docker
-        # calls below are what that costs.
-        outside = tmp_path_factory.mktemp("outside")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # source visible
-        ]))
-        args = type("A", (), {"src": "/home/dev/x", "dest": str(outside / "payload")})()
-        result = devbox.cmd_cp_out(args)
-        assert result["status"] == "error"
-        assert "outside allowed roots" in result["error"]
-
-    def test_cp_out_propagates_docker_failure(self, monkeypatch, tmp_path):
-        dest = tmp_path / "out.txt"
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # source visible; the copy itself is what fails
-            (1, b"", b"Error: no such file"),
-        ]))
-        args = type("A", (), {"src": "/home/dev/missing", "dest": str(dest)})()
-        result = devbox.cmd_cp_out(args)
-        assert result["status"] == "error"
-        assert "no such file" in result["error"]
-
-
-    @pytest.mark.parametrize("dest", [
-        "/workspace",
-        "/workspace/a.txt",
-        "/workspace/nested/a.txt",
-        "/workspace/",
-        "//workspace/a.txt",
-        "/workspace/./a.txt",
-        "/home/dev/../../workspace/a.txt",
-        # `docker cp` reads a container path as relative to `/`, not to the
-        # image's WORKDIR, so these name the tmpfs just as squarely.
-        "workspace/a.txt",
-        "./workspace/a.txt",
-        "home/dev/../../workspace/a.txt",
-    ])
-    def test_cp_in_refuses_a_tmpfs_destination(self, monkeypatch, tmp_path, dest):
-        """ISSUE-306: `docker cp` writes into the rootfs directory shadowed by
-        the tmpfs mount, so the file exists nowhere the container can see it —
-        and the copy reports success."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called for a tmpfs dest: {argv}")
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        args = type("A", (), {"src": str(src), "dest": dest})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "error"
-        assert "tmpfs" in result["error"]
-        assert "/home/dev" in result["error"]
-
-    @pytest.mark.parametrize("src", [
-        "/workspace/out.json", "/workspace", "workspace/out.json",
-    ])
-    def test_cp_out_refuses_a_tmpfs_source(self, monkeypatch, tmp_path, src):
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called for a tmpfs src: {argv}")
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        args = type("A", (), {"src": src, "dest": str(tmp_path / "out.json")})()
-        result = devbox.cmd_cp_out(args)
-        assert result["status"] == "error"
-        assert "tmpfs" in result["error"]
-
-    @pytest.mark.parametrize("dest", [
-        "/workspaces/a.txt",
-        "/workspace-old/a.txt",
-        "/home/dev/workspaces/a.txt",
-    ])
-    def test_cp_in_allows_a_path_that_merely_starts_with_the_mount_name(
-        self, monkeypatch, tmp_path, dest,
-    ):
-        """The prefix match is anchored on a separator: `/workspaces` is a
-        different directory from `/workspace`, and dropping the anchor would
-        swallow it."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (0, b"", b""),  # arrival check
-        ]))
-        args = type("A", (), {"src": str(src), "dest": dest})()
-        assert devbox.cmd_cp_in(args)["status"] == "ok"
-
-    def test_cp_in_checks_arrival_at_the_path_docker_cp_actually_wrote(
-        self, monkeypatch, tmp_path,
-    ):
-        """The check runs through `docker exec`, whose cwd is the image WORKDIR,
-        while `docker cp` resolves against `/`. A relative destination has to be
-        anchored before it is read back or a copy that landed is called a
-        failure."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        calls = []
-        inner = _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (0, b"", b""),  # arrival check
-        ])
-        def fake_run(argv, timeout):
-            calls.append(argv)
-            return inner(argv, timeout)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"src": str(src), "dest": "sub/a.txt"})()
-        assert devbox.cmd_cp_in(args)["status"] == "ok"
-        # docker cp is handed the path as given; the readback is anchored.
-        assert [c for c in calls if c[0] == "cp"][0][2] == "devbox-bob:sub/a.txt"
-        assert "/sub/a.txt" in calls[-1]
-
-    def test_cp_in_of_a_directory_checks_the_destination_itself(
-        self, monkeypatch, tmp_path,
-    ):
-        """A directory copied onto a path that does not exist *becomes* that
-        path, rather than a child of it, so the basename form would look for a
-        file that was never going to be there."""
-        src = tmp_path / "payload"
-        src.mkdir()
-        (src / "inner.txt").write_text("hello")
-        calls = []
-        inner = _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (0, b"", b""),  # arrival check
-        ])
-        def fake_run(argv, timeout):
-            calls.append(argv)
-            return inner(argv, timeout)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"src": str(src), "dest": "/home/dev/target"})()
-        assert devbox.cmd_cp_in(args)["status"] == "ok"
-        script = calls[-1][calls[-1].index("-c") + 1]
-        assert script == 'test -e "$1"'
-
-    def test_cp_in_errors_when_the_file_did_not_arrive(self, monkeypatch, tmp_path):
-        """`docker cp` exiting 0 is not evidence the container can see the file.
-        Silent loss on a copy that reported success is the worse half of
-        ISSUE-306."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp — exits 0
-            (1, b"", b""),  # arrival check — the file is not there
-        ]))
-        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
-        result = devbox.cmd_cp_in(args)
-        assert result["status"] == "error"
-        assert "/home/dev/a.txt" in result["error"]
-
-    def test_cp_in_arrival_check_passes_the_dest_as_argv_not_as_script_text(
-        self, monkeypatch, tmp_path,
-    ):
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        calls = []
-        inner = _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (0, b"", b""),  # arrival check
-        ])
-        def fake_run(argv, timeout):
-            calls.append(argv)
-            return inner(argv, timeout)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        dest = "/home/dev/$(touch /tmp/pwned).txt"
-        args = type("A", (), {"src": str(src), "dest": dest})()
-        assert devbox.cmd_cp_in(args)["status"] == "ok"
-        check = calls[-1]
-        assert check[0] == "exec"
-        # The destination arrives as a positional argument, never spliced into
-        # the shell script the check runs.
-        assert dest in check
-        script = check[check.index("-c") + 1]
-        assert dest not in script
-
-
-class TestStatus:
-    def test_status_parses_inspect_output(self, monkeypatch):
-        # status now also surfaces the owner label as the 6th field.
-        seq = iter([
-            (0, b"true|2026-05-13T10:00:00Z|istota-devbox:latest|deadbeef1234abcd|0|bob", b""),
-            (0, b"42M\n", b""),
-        ])
-        monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: next(seq))
-        result = devbox.cmd_status(type("A", (), {})())
-        assert result["status"] == "ok"
-        assert result["running"] is True
-        assert result["image"] == "istota-devbox:latest"
-        assert result["id"] == "deadbeef1234"
-        assert result["restart_count"] == 0
-        assert result["home_size"] == "42M"
-        assert result["owner"] == "bob"
-
-    def test_status_propagates_inspect_error(self, monkeypatch):
-        monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: (1, b"", b"No such container"))
-        result = devbox.cmd_status(type("A", (), {})())
-        assert result["status"] == "error"
-        assert "No such container" in result["error"]
-
-
-class TestReset:
-    def test_refuses_without_yes(self):
-        args = type("A", (), {"yes": False})()
-        result = devbox.cmd_reset(args)
-        assert result["status"] == "error"
-        assert "Refusing" in result["error"]
-
-    def test_refuses_when_home_not_mountpoint(self, monkeypatch):
-        # Ownership ok, but mountpoint -q returns 1 → refuse.
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (1, b"", b""),  # mountpoint -q /home/dev — not a mountpoint
-        ]))
-        args = type("A", (), {"yes": True})()
-        result = devbox.cmd_reset(args)
-        assert result["status"] == "error"
-        assert "not a mountpoint" in result["error"]
-
-    def test_runs_wipe_and_restart(self, monkeypatch):
-        calls = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),  # mountpoint -q → ok
-            (0, b"", b""),  # find …rm -rf wipe
-            (0, b"", b""),  # restart
-        ])
-        def fake_run(argv, timeout):
-            calls.append(argv)
-            return next(seq)
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"yes": True})()
-        result = devbox.cmd_reset(args)
-        assert result["status"] == "ok"
-        # find / wipe runs as root
-        wipe = [c for c in calls if c[0] == "exec" and "find" in " ".join(c)]
-        assert wipe and "-u" in wipe[0] and "root" in wipe[0]
-        # restart fires
-        assert calls[-1] == ["restart", "devbox-bob"]
+    def test_there_is_no_workdir_flag(self):
+        """Naming a third location is not a capability this verb has: one `cd`
+        in the shell string it already sends covers the case, which is also why
+        refusing a path here was never a boundary."""
+        with pytest.raises(SystemExit):
+            devbox.build_parser().parse_args(["exec", "x", "--workdir", "/tmp"])
+
+
+class TestTruncate:
+    def test_short_passes_through(self):
+        assert devbox._truncate(b"abc", 100) == "abc"
+
+    def test_long_is_marked(self):
+        out = devbox._truncate(b"x" * 200, 100)
+        assert out.startswith("x" * 100)
+        assert "truncated: 100 more bytes" in out
+
+    def test_invalid_utf8_is_replaced_not_raised(self):
+        assert devbox._truncate(b"\xff\xfe", 100)
 
 
 class TestMain:
-    def test_main_prints_json_envelope(self, monkeypatch, capsys):
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"hi", b""),
-        ]))
+    def test_it_prints_the_json_envelope(self, dbx, capsys):
         devbox.main(["exec", "echo hi"])
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "ok"
-        assert out["stdout"] == "hi"
+        assert out["stdout"] == "hi\n"
 
-    def test_main_error_envelope_exits_nonzero(self, monkeypatch, capsys):
-        monkeypatch.delenv("ISTOTA_DEVBOX_CONTAINER")
-        monkeypatch.delenv("ISTOTA_USER_ID")
+    def test_an_error_envelope_exits_nonzero(self, monkeypatch, capsys, tmp_path):
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
         with pytest.raises(SystemExit) as exc:
             devbox.main(["exec", "echo hi"])
+
         assert exc.value.code == 1
+        assert json.loads(capsys.readouterr().out)["status"] == "error"
+
+    def test_a_missing_user_id_is_an_envelope_not_a_traceback(
+        self, monkeypatch, capsys,
+    ):
+        monkeypatch.delenv("ISTOTA_USER_ID")
+        with pytest.raises(SystemExit):
+            devbox.main(["exec", "echo hi"])
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "error"
+        assert "ISTOTA_USER_ID" in out["error"]
+
+
+class TestTheSocketPathComesFromConfig:
+    """Design 5's rule, at the one place it is decided for this CLI.
+
+    A shim bakes both paths in because it is a child of the model's own shell.
+    This CLI is a host-side process the model cannot reach, so it reads config —
+    and it must read *config*, because an environment variable here would be
+    the same hole by another route: the skill proxy spawns this CLI with a
+    per-task environment, and a name reaching the model is a name the model can
+    set.
+    """
+
+    def test_it_derives_the_per_user_socket(self, monkeypatch, tmp_path):
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+        settings, err = devbox._transport_settings()
+
+        assert err is None, err
+        assert settings.path == str(tmp_path / "bob" / "exec.sock")
+
+    def test_a_config_naming_no_directory_is_a_named_refusal(
+        self, monkeypatch, tmp_path,
+    ):
+        """`ContainerConfig` carries a default, so this needs the field blanked
+        on the object rather than in the file — which is the point: there is no
+        TOML that leaves it unset, and therefore no second `[devbox]` spelling
+        that could ever win. One spelling, and this is what its absence looks
+        like."""
+        from istota.config import Config
+
+        config = Config()
+        config.developer.container.backend = "devbox"
+        config.developer.container.exec_socket_dir = ""
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
+
+        settings, err = devbox._transport_settings()
+
+        assert settings is None
+        assert "exec_socket_dir" in err
+
+    def test_the_devbox_block_carries_no_second_spelling(self):
+        """`[devbox]` deliberately has no `exec_socket_dir`. A mirror of it
+        could only be dead — `ContainerConfig`'s default always wins — or a
+        second knob for a value the design says has one spelling."""
+        from istota.config import DevboxConfig
+
+        assert not hasattr(DevboxConfig(), "exec_socket_dir")
+
+    def test_no_environment_variable_names_the_socket(self):
+        source = (_SKILL_DIR / "__init__.py").read_text()
+        for form in ("ISTOTA_DEVBOX_EXEC_SOCKET", "ISTOTA_EXEC_SOCKET"):
+            assert f'"{form}"' not in source and f"'{form}'" not in source, (
+                f"{form} would let the model point this CLI at a socket it "
+                f"wrote, which buys an `ok` ack and a fabricated exit 0"
+            )
 
 
 class TestExcludeSkills:
     """devbox is a plain menu skill — no selection-time exclusion.
 
-    The old `exclude_skills: [devbox]` gate on the seven ingest skills (which
-    kept the raw docker socket away from untrusted-content tasks) was removed
-    once the Docker-API allowlist proxy made the socket safe to bind
-    unconditionally. The boundary is now the proxy (exec/cp/inspect/restart on
-    the user's own container only), not co-selection avoidance."""
+    The old `exclude_skills: [devbox]` gate on the seven ingest skills kept the
+    raw docker socket away from untrusted-content tasks. It was removed when
+    the allowlist proxy made the socket safe to bind unconditionally, and the
+    reasoning is stronger now that neither the proxy nor any docker socket
+    reaches a sandbox at all.
+    """
 
-    def test_devbox_not_always_include(self):
-        from pathlib import Path
+    def test_devbox_is_not_always_include(self):
         from istota.skills._loader import load_skill_index
-        idx = load_skill_index(Path("config/skills"))
-        devbox_meta = idx.get("devbox")
-        assert devbox_meta is not None
-        assert devbox_meta.always_include is False
-
-    @pytest.mark.parametrize("skill", ["email", "browse", "calendar", "transcribe", "whisper", "feeds", "bookmarks"])
-    def test_ingest_skill_no_longer_excludes_devbox(self, skill):
-        from pathlib import Path
-        from istota.skills._loader import load_skill_index
-        idx = load_skill_index(Path("config/skills"))
-        meta = idx.get(skill)
+        meta = load_skill_index(Path("config/skills")).get("devbox")
         assert meta is not None
-        assert "devbox" not in meta.exclude_skills, (
-            f"{skill} must NOT exclude devbox — the proxy is the boundary now"
-        )
+        assert meta.always_include is False
 
+    @pytest.mark.parametrize("skill", [
+        "email", "browse", "calendar", "transcribe", "whisper", "feeds", "bookmarks",
+    ])
+    def test_an_ingest_skill_does_not_exclude_devbox(self, skill):
+        from istota.skills._loader import load_skill_index
+        meta = load_skill_index(Path("config/skills")).get(skill)
+        assert meta is not None
+        assert "devbox" not in meta.exclude_skills
 
 
 # ---------------------------------------------------------------------------
 # ISSUE-284: the shipped body and the CLI have to agree, and the executor must
 # not export a name nothing reads.
-
-_REPO = Path(__file__).resolve().parents[1]
-_SKILL_DIR = _REPO / "src" / "istota" / "skills" / "devbox"
-_EXECUTOR = _REPO / "src" / "istota" / "executor.py"
 
 # Both forms a name can be read back in. A plain substring search over the CLI
 # source would be satisfied by a mention in a docstring, and the module
@@ -1058,9 +1643,6 @@ class TestDocumentedCommandsMatchTheCLI:
         assert len(_documented_argv()) == expected
 
     def test_every_documented_verb_parses(self):
-        """Catches a documented verb the CLI does not have, and wrong
-        positional arity. It does *not* catch ISSUE-284 itself — see
-        `test_documented_forms_carry_their_confirmation_flags`."""
         parser = devbox.build_parser()
         for lineno, argv in _documented_argv():
             assert argv, f"skill.md:{lineno} names no verb"
@@ -1081,8 +1663,7 @@ class TestDocumentedCommandsMatchTheCLI:
 
         A confirmation flag is `store_true` and so optional as far as argparse
         is concerned: the documented form parses cleanly and is then refused at
-        runtime. Parsing alone would not have caught ISSUE-284, and would not
-        catch the same drift if `cp-out` grew a gate tomorrow.
+        runtime. Parsing alone would not have caught ISSUE-284.
         """
         checked = 0
         for lineno, argv in _documented_argv():
@@ -1132,13 +1713,35 @@ class TestDocumentedCommandsMatchTheCLI:
             )
 
 
+class TestTheBodyDoesNotDescribeARetiredMechanism:
+    """The body is what the model acts on, so a rule about a mechanism that no
+    longer exists is worse than a missing rule: it sends the model looking for
+    a boundary that is not there."""
+
+    @pytest.mark.parametrize("phrase", [
+        "/workspace",
+        "docker cp",
+        "docker run",
+        "filtering proxy",
+        "Docker-API",
+    ])
+    def test_the_phrase_is_gone(self, phrase):
+        body = (_SKILL_DIR / "skill.md").read_text()
+        assert phrase not in body, (
+            f"skill.md still describes {phrase!r}, which this stage retired"
+        )
+
+    def test_it_says_what_a_shimmed_command_cannot_see(self):
+        body = (_SKILL_DIR / "skill.md").read_text()
+        assert "/home/dev" in body
+
+
 class TestExecutorExportsNothingTheCLIIgnores:
     """ISSUE-284: `ISTOTA_DEVBOX_DOCKER_SOCKET` was written into the model's
-    own environment and read by nothing. The name is the path of the *real*
-    root-equivalent socket, and `build_bwrap_cmd` uses the same config field as
-    the in-sandbox mount point for the allowlist proxy — one field, two
-    meanings. A name in the model's environment invites a later reader to treat
-    it as "the socket you may use"."""
+    own environment and read by nothing. A name in the model's environment
+    invites a later reader to treat it as "the socket you may use" — which is
+    exactly the hole `TestTheSocketPathComesFromConfig` closes for the exec
+    socket."""
 
     def _exported(self) -> set[str]:
         """Both routes a var can take into the task env: the imperative block
@@ -1176,660 +1779,43 @@ class TestExecutorExportsNothingTheCLIIgnores:
         )
 
 
-class TestCpOutAsksTheContainerBeforeItCopies:
-    """ISSUE-312. `cp-in` had `_check_arrived` and `cp-out` had nothing, so a
-    path the container cannot see produced `{"status": "ok"}` and real bytes on
-    the host — read out of the rootfs directory the mount shadows, which is
-    where a *failed* `cp-in` had left them. Reproduced on the deployment
-    against `/dev/shm`, an unlisted runtime tmpfs: the copy out returned 26
-    bytes of a file `ls` inside the container could not see."""
+class TestTheDockerApiProxyIsRetired:
+    """Design 14, held as a deletion rather than left to a grep somebody runs.
 
-    @staticmethod
-    def _args(src, dest):
-        return type("A", (), {"src": src, "dest": str(dest)})()
-
-    def test_a_source_the_container_cannot_see_is_refused(self, monkeypatch, tmp_path):
-        dest = tmp_path / "back.txt"
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (1, b"", b""),  # test -e says no, cleanly
-        ]))
-        result = devbox.cmd_cp_out(self._args("/home/dev/phantom.txt", dest))
-        assert result["status"] == "error"
-        assert "does not exist inside" in result["error"]
-        assert not dest.exists()
-
-    def test_the_check_runs_before_the_copy_not_after(self, monkeypatch, tmp_path):
-        """Order is the whole point. A read-back after the copy would leave the
-        phantom bytes on the host and only then report the problem, and the
-        host file is what a caller goes on to read."""
-        calls = []
-
-        def record(argv, timeout):
-            calls.append(argv)
-            if argv[0] == "inspect":
-                return _ownership_sequence()[0 if len(calls) == 1 else 1]
-            if argv[0] == "cp":
-                raise AssertionError(f"copied before asking the container: {calls}")
-            return (1, b"", b"")
-
-        monkeypatch.setattr(devbox, "_run_docker", record)
-        result = devbox.cmd_cp_out(self._args("/home/dev/phantom.txt", tmp_path / "b.txt"))
-        assert result["status"] == "error"
-        assert [c[0] for c in calls] == ["inspect", "inspect", "exec"]
-
-    def test_a_visible_source_is_copied(self, monkeypatch, tmp_path):
-        dest = tmp_path / "out.txt"
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # visible
-            (0, b"", b""),  # docker cp
-        ]))
-        assert devbox.cmd_cp_out(self._args("/home/dev/out.txt", dest))["status"] == "ok"
-
-    def test_a_check_that_could_not_answer_is_not_reported_as_absence(
-        self, monkeypatch, tmp_path,
-    ):
-        """Same split as `_check_arrived` (ISSUE-313): `docker exec`'s status is
-        not `test -e`'s alone, and `test -e` answering no writes nothing to
-        stderr."""
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec"),
-        ]))
-        result = devbox.cmd_cp_out(self._args("/home/dev/out.txt", tmp_path / "o.txt"))
-        assert result["status"] == "error"
-        assert "untracked_exec" in result["error"]
-        assert "is unknown" in result["error"]
-        assert "does not exist inside" not in result["error"]
-
-    def test_the_source_is_anchored_at_root_the_way_docker_cp_reads_it(
-        self, monkeypatch, tmp_path,
-    ):
-        """`docker cp` resolves a container path against `/`, never the image's
-        WORKDIR, while the `docker exec` doing the check has no `-w`. The same
-        anchoring `_check_arrived` needs applies here."""
-        seen = []
-
-        def record(argv, timeout):
-            seen.append(argv)
-            if argv[0] == "inspect":
-                return _ownership_sequence()[0 if len(seen) == 1 else 1]
-            return (0, b"", b"")
-
-        monkeypatch.setattr(devbox, "_run_docker", record)
-        result = devbox.cmd_cp_out(self._args("home/dev/./out.txt", tmp_path / "o.txt"))
-        assert result["status"] == "ok"
-        probe = [c for c in seen if c[0] == "exec"][0]
-        assert "/home/dev/out.txt" in probe, probe
-
-
-class TestRuntimeTmpfsMounts:
-    """ISSUE-312. `_CONTAINER_TMPFS_MOUNTS` mirrored the compose files' `tmpfs:`
-    keys, and the container has mounts that appear in no compose file: the OCI
-    default spec gives every Docker container a tmpfs at `/dev`, `/dev/shm`
-    included. So the pin was complete and the list was still short, and the
-    reported phantom was reproduced against `/dev/shm`."""
-
-    @pytest.mark.parametrize("path", [
-        "/dev/shm/phantom.txt",
-        "/dev/shm",
-        "dev/shm/phantom.txt",
-        "/dev/null",
-        "/home/dev/../../dev/shm/x",
-        "//dev/shm/x",
-    ])
-    def test_cp_in_refuses_a_runtime_tmpfs_destination(self, monkeypatch, tmp_path, path):
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        result = devbox.cmd_cp_in(type("A", (), {"src": str(src), "dest": path})())
-        assert result["status"] == "error"
-        assert "tmpfs" in result["error"]
-
-    @pytest.mark.parametrize("path", [
-        "/dev/shm/phantom.txt", "/dev/shm", "dev/shm/phantom.txt",
-    ])
-    def test_cp_out_refuses_a_runtime_tmpfs_source(self, monkeypatch, tmp_path, path):
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        result = devbox.cmd_cp_out(
-            type("A", (), {"src": path, "dest": str(tmp_path / "out.txt")})(),
-        )
-        assert result["status"] == "error"
-        assert "tmpfs" in result["error"]
-
-    @pytest.mark.parametrize("path", ["/devices/a.txt", "/dev-tools/a.txt"])
-    def test_the_anchor_still_holds_for_the_runtime_mounts(
-        self, monkeypatch, tmp_path, path,
-    ):
-        """`/devices` is not inside `/dev`, and dropping the separator anchor
-        would swallow it."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),  # docker cp
-            (0, b"", b""),  # arrival check
-        ]))
-        result = devbox.cmd_cp_in(type("A", (), {"src": str(src), "dest": path})())
-        assert result["status"] == "ok"
-
-    def test_the_credential_socket_directory_is_refused_in_both_directions(
-        self, monkeypatch, tmp_path,
-    ):
-        """`/run/istota-cred` is a *bind* of a host directory, not a compose
-        tmpfs, so it is in the container's MountPoints and `docker cp` may well
-        traverse it — which makes a copy in a write into a directory the daemon
-        owns. Refused by name so the outcome does not depend on which way
-        `docker cp` resolves it."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        into = devbox.cmd_cp_in(
-            type("A", (), {"src": str(src), "dest": "/run/istota-cred/sock"})(),
-        )
-        out = devbox.cmd_cp_out(
-            type("A", (), {"src": "/run/istota-cred/sock", "dest": str(tmp_path / "s")})(),
-        )
-        for result in (into, out):
-            assert result["status"] == "error"
-            # Not the tmpfs explanation: that one would be a guess about a
-            # mount whose reachability we deliberately do not depend on.
-            assert "credential" in result["error"]
-            assert "tmpfs" not in result["error"]
-
-    @pytest.mark.parametrize("path", [
-        "/home/dev/w/../../run/istota-cred/sock",
-        "/home/dev/w/../../dev/shm/x",
-        "/home/dev/../dev/out.txt",
-        "home/dev/w/../x",
-    ])
-    def test_a_dot_dot_segment_is_refused_outright(self, monkeypatch, tmp_path, path):
-        """The one way the two resolvers provably disagree. `_normalize_container_path`
-        collapses `..` lexically, before anything is followed; moby's
-        `FollowSymlinkInScope` follows a symlink *first* and applies `..` to
-        where it landed. So with `w -> /workspace` in the container,
-        `/home/dev/w/../../run/istota-cred/sock` is `/home/run/…` to the check
-        and `/run/istota-cred/sock` to `docker cp`, and the list decides
-        nothing. Removing `..` removes the divergence rather than trying to
-        model it."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        into = devbox.cmd_cp_in(type("A", (), {"src": str(src), "dest": path})())
-        out = devbox.cmd_cp_out(
-            type("A", (), {"src": path, "dest": str(tmp_path / "o.txt")})(),
-        )
-        for result in (into, out):
-            assert result["status"] == "error"
-            assert ".." in result["error"]
-
-    @pytest.mark.parametrize("path", [
-        "/workspace/../../workspace/a.txt", "/dev/shm/../shm/x",
-    ])
-    def test_a_refused_mount_still_gets_its_own_message(self, monkeypatch, tmp_path, path):
-        """Order matters for the wording: a `..` path that lands in a listed
-        mount should say tmpfs, not "no `..` please"."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        result = devbox.cmd_cp_in(type("A", (), {"src": str(src), "dest": path})())
-        assert result["status"] == "error"
-        assert "tmpfs" in result["error"]
-
-    @pytest.mark.parametrize("path", ["", "   ", ".", "/", "//", "/./"])
-    def test_the_container_root_is_refused(self, monkeypatch, tmp_path, path):
-        """Every one of these normalizes to `/`, which no mount in either list
-        contains and which `test -e` answers yes for — so the pre-check would
-        have admitted `docker cp devbox-bob:. dest`, a tar of the whole
-        rootfs including every bind the off-limits list exists to keep out."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        into = devbox.cmd_cp_in(type("A", (), {"src": str(src), "dest": path})())
-        out = devbox.cmd_cp_out(
-            type("A", (), {"src": path, "dest": str(tmp_path / "o.txt")})(),
-        )
-        for result in (into, out):
-            assert result["status"] == "error"
-            assert "root" in result["error"]
-
-    @pytest.mark.parametrize("path", ["/home/dev/x ", " /home/dev/x", "/home/dev/x\t"])
-    def test_surrounding_whitespace_is_refused(self, monkeypatch, tmp_path, path):
-        """`_normalize_container_path` strips; `docker cp` does not. So the
-        check asks about `/home/dev/x` and the copy writes `/home/dev/x `,
-        and a name that happens to exist makes the read-back pass for a copy
-        that landed somewhere else."""
-        src = tmp_path / "a.txt"
-        src.write_text("hello")
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        into = devbox.cmd_cp_in(type("A", (), {"src": str(src), "dest": path})())
-        out = devbox.cmd_cp_out(
-            type("A", (), {"src": path, "dest": str(tmp_path / "o.txt")})(),
-        )
-        for result in (into, out):
-            assert result["status"] == "error"
-            assert "whitespace" in result["error"]
-
-    def test_a_dangling_symlink_is_still_copyable(self, monkeypatch, tmp_path):
-        """`docker cp` without `-L` copies the link itself, so `test -e` alone
-        would refuse a copy that used to work."""
-        calls = []
-
-        def record(argv, timeout):
-            calls.append(argv)
-            if argv[0] == "inspect":
-                return _ownership_sequence()[0 if len(calls) == 1 else 1]
-            if argv[0] == "exec":
-                # `test -e` is false for a dangling link, `test -L` is true;
-                # the script has to ask both or the copy is refused.
-                assert "-L" in " ".join(argv), argv
-                return (0, b"", b"")
-            return (0, b"", b"")
-
-        monkeypatch.setattr(devbox, "_run_docker", record)
-        result = devbox.cmd_cp_out(
-            type("A", (), {"src": "/home/dev/link", "dest": str(tmp_path / "l")})(),
-        )
-        assert result["status"] == "ok", result
-
-    def test_a_refused_copy_out_leaves_no_directories_behind(self, monkeypatch, tmp_path):
-        """The host destination's parents are created by `_resolve_host_path`,
-        so it has to run after the container-side checks or every refusal
-        litters the user's workspace with empty trees."""
-        dest = tmp_path / "deep" / "nested" / "out.txt"
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (1, b"", b""),  # not visible inside the container
-        ]))
-        result = devbox.cmd_cp_out(type("A", (), {"src": "/home/dev/x", "dest": str(dest)})())
-        assert result["status"] == "error"
-        assert not dest.parent.exists()
-
-    def test_the_reported_sequence_is_refused_at_both_ends(self, monkeypatch, tmp_path):
-        """The repro in the entry, end to end: a `cp-in` to `/dev/shm` that
-        reported failure while leaving bytes in the shadowed directory, then a
-        `cp-out` of the same path that returned them and reported success."""
-        src = tmp_path / "phantom.txt"
-        src.write_text("phantom-marker\n")
-        back = tmp_path / "back.txt"
-
-        def refuse(argv, timeout):
-            raise AssertionError(f"docker must not be called: {argv}")
-
-        monkeypatch.setattr(devbox, "_run_docker", refuse)
-        assert devbox.cmd_cp_in(
-            type("A", (), {"src": str(src), "dest": "/dev/shm/phantom.txt"})(),
-        )["status"] == "error"
-        assert devbox.cmd_cp_out(
-            type("A", (), {"src": "/dev/shm/phantom.txt", "dest": str(back)})(),
-        )["status"] == "error"
-        assert not back.exists()
-
-
-class TestTmpfsMountList:
-    """`_COMPOSE_TMPFS_MOUNTS` is a hand-maintained mirror of the `tmpfs:` keys
-    in the devbox compose file. A mount added there and not here is a path
-    `docker cp` will silently swallow again, so pin the two together. There is
-    one such file now — the Ansible template — since `docker/docker-compose.yml`
-    ships no devbox; the compose half of this pin went with that service.
-
-    The pin is against the *compose* half alone. ISSUE-312 is what separated
-    the two: the runtime's own tmpfs appear in no compose file, so a complete
-    pin over the whole list was still a short list, and an equality assertion
-    over it would now fail on mounts no compose file will ever declare."""
-
-    REPO_ROOT = Path(__file__).resolve().parents[1]
-
-    @staticmethod
-    def _tmpfs_destinations(lines: list[str]) -> set[str]:
-        found: set[str] = set()
-        in_block = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped == "tmpfs:":
-                in_block = True
-                continue
-            if in_block:
-                # A comment or a blank line inside the list must not be read as
-                # the end of it, or the scan truncates and pins nothing.
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if not stripped.startswith("- "):
-                    in_block = False
-                    continue
-                found.add(stripped[2:].split(":", 1)[0].strip())
-        return found
-
-    def test_ansible_template_declares_nothing_unlisted(self):
-        path = self.REPO_ROOT / "deploy/ansible/templates/docker-compose.devbox.yml.j2"
-        declared = self._tmpfs_destinations(path.read_text().splitlines())
-        assert declared == set(devbox._COMPOSE_TMPFS_MOUNTS)
-
-    def test_the_compose_pin_is_a_subset_of_what_is_refused(self):
-        """The pin above is an equality against the compose half, so it would
-        pass if someone moved `/workspace` out of the refusal list entirely."""
-        assert set(devbox._COMPOSE_TMPFS_MOUNTS) <= set(devbox._CONTAINER_TMPFS_MOUNTS)
-        assert set(devbox._RUNTIME_TMPFS_MOUNTS) <= set(devbox._CONTAINER_TMPFS_MOUNTS)
-
-    def test_the_credential_socket_bind_is_pinned_to_the_compose_template(self):
-        """Same rule as the tmpfs pin: a destination renamed in the template
-        and not here leaves the refusal silently inert, with every test in
-        this file still green."""
-        template = (
-            self.REPO_ROOT / "deploy/ansible/templates/docker-compose.devbox.yml.j2"
-        ).read_text()
-        bound = {
-            line.strip().removeprefix("- ").rsplit(":", 1)[-1]
-            for line in template.splitlines()
-            if "istota-cred" in line
-        }
-        assert bound, "the template no longer binds a credential socket directory"
-        assert bound <= set(devbox._CONTAINER_OFFLIMITS_PATHS), bound
-
-    def test_the_runtime_mounts_are_not_declared_by_any_compose_file(self):
-        """If one ever is, it belongs in the compose half and the pin should be
-        what says so — carrying it in both lists means neither pin means much.
-
-        `docker/docker-compose.yml` declares no tmpfs at all now that it ships
-        no devbox, so that half is vacuous by construction. It stays as a
-        standing guard: a devbox coming back there with a tmpfs of its own is
-        exactly the case this would need to catch."""
-        for name in ("deploy/ansible/templates/docker-compose.devbox.yml.j2",
-                     "docker/docker-compose.yml"):
-            declared = self._tmpfs_destinations(
-                (self.REPO_ROOT / name).read_text().splitlines(),
-            )
-            assert declared.isdisjoint(devbox._RUNTIME_TMPFS_MOUNTS), name
-
-    def test_every_listed_mount_is_absolute_and_unslashed(self):
-        listed = (
-            *devbox._CONTAINER_TMPFS_MOUNTS,
-            *devbox._CONTAINER_OFFLIMITS_PATHS,
-        )
-        for mount in listed:
-            assert mount.startswith("/")
-            assert not mount.endswith("/")
-
-    def test_no_listed_path_is_inside_another(self):
-        """A path matched by two entries is a path whose refusal message
-        depends on list order, and `/dev/shm` under `/dev` is the tempting
-        redundancy — the prefix match already covers it."""
-        listed = (
-            *devbox._CONTAINER_TMPFS_MOUNTS,
-            *devbox._CONTAINER_OFFLIMITS_PATHS,
-        )
-        for mount in listed:
-            others = [m for m in listed if m != mount]
-            assert not any(mount.startswith(other + "/") for other in others), mount
-
-    def test_the_exchange_path_is_not_inside_anything_refused(self):
-        listed = (
-            *devbox._CONTAINER_TMPFS_MOUNTS,
-            *devbox._CONTAINER_OFFLIMITS_PATHS,
-        )
-        for mount in listed:
-            assert not devbox._DEFAULT_WORKDIR.startswith(mount + "/")
-            assert devbox._DEFAULT_WORKDIR != mount
-
-    def test_the_staging_dir_is_not_inside_a_tmpfs(self):
-        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
-            assert not devbox._EXEC_STAGING_DIR.startswith(mount + "/")
-            assert devbox._EXEC_STAGING_DIR != mount
-
-
-class TestTheIntegrationTierCannotReadARefusalAsAnAnswer:
-    """ISSUE-313, the half of it that runs without a devbox.
-
-    `tests/test_skills_devbox_integration.py` needs a container, so nothing in
-    it executes here. What is checkable here is the guard it grew: the
-    docker-API allowlist proxy refuses a raw `docker exec` at the exec-inspect
-    step, the CLI exits 1 with the command's own status never fetched, and read
-    as an answer that satisfied both of the file's negative assertions —
-    including the ISSUE-306 and ISSUE-307 regression tests, which were the two
-    that passed. These pin the pieces that turn that refusal into a skip.
+    The module, both Ansible templates and the `[devbox] api_proxy_*` keys all
+    went in the same change that removed the sandbox bind — its only consumer —
+    so the bind and its replacement never coexisted in a release.
     """
 
-    @staticmethod
-    def _integration_module():
-        from tests import test_skills_devbox_integration as devbox_it
+    def test_the_module_is_gone(self):
+        assert not (_REPO / "src" / "istota" / "docker_proxy.py").exists()
+        with pytest.raises(ImportError):
+            import istota.docker_proxy  # noqa: F401
 
-        return devbox_it
+    @pytest.mark.parametrize("template", [
+        "istota-docker-proxy@.service.j2",
+        "istota-docker-proxy.tmpfiles.j2",
+    ])
+    def test_the_template_is_gone(self, template):
+        assert not (_REPO / "deploy" / "ansible" / "templates" / template).exists()
 
-    @staticmethod
-    def _fixture_body(fixture):
-        """The plain function behind a `@pytest.fixture`.
-
-        Testing the gate helper on its own leaves the fixture free to stop
-        calling it — verified: dropping that one line turned nothing red. So
-        the fixture's own body is what gets exercised, and pytest keeps it
-        under a private name that has changed once already. Both spellings are
-        tried and a miss is an explicit failure, because the alternative is
-        this check quietly becoming a no-op on some future upgrade.
-        """
-        getter = getattr(fixture, "_get_wrapped_function", None)
-        if getter is not None:
-            return getter()
-        wrapped = getattr(fixture, "__wrapped__", None)
-        assert wrapped is not None, (
-            "pytest no longer exposes a fixture's underlying function under "
-            "either name — update this helper rather than dropping the check"
+    @pytest.mark.parametrize("key", [
+        "api_proxy_enabled",
+        "api_proxy_socket_dir",
+        "api_proxy_exec_ttl_seconds",
+        "api_proxy_audit_log",
+        "docker_socket",
+        "exec_timeout_seconds",
+    ])
+    def test_the_config_key_is_gone(self, key):
+        from istota.config import DevboxConfig
+        assert not hasattr(DevboxConfig(), key), (
+            f"DevboxConfig.{key} survived the thing that read it"
         )
-        return wrapped
 
-    def test_the_writer_interpolates_the_constant_the_reader_matches_on(self):
-        """Narrow on purpose: this proves only that `_http_response` still
-        builds its body from `PROXY_ERROR_PREFIX`, so re-inlining the literal
-        there goes red. It cannot catch a *rename* of the constant, since both
-        sides would move together — the assertions holding the value itself are
-        the one below and `tests/test_docker_proxy.py`'s `b"istota-docker-proxy"`
-        pin, both hardcoded."""
-        from istota import docker_proxy
-
-        body = docker_proxy._http_response(403, "Forbidden", "untracked_exec")
-        assert docker_proxy.PROXY_ERROR_PREFIX.encode() + b"untracked_exec" in body
-        assert self._integration_module()._proxy_refusal(
-            body.decode("utf-8"),
-        ) is not None
-
-    def test_a_refusal_in_any_stream_is_recognised(self):
-        devbox_it = self._integration_module()
-        refusal = (
-            "Error response from daemon: istota-docker-proxy: untracked_exec\n"
-        )
-        assert devbox_it._proxy_refusal("", refusal) == refusal.strip()
-        assert devbox_it._proxy_refusal("", "") is None
-        assert devbox_it._proxy_refusal("bash: no such file\n") is None
-        # The command's own output rides along on a refused exec, since the
-        # command ran; the refusal line is what gets named.
-        assert devbox_it._proxy_refusal(
-            f"warning: something\n{refusal}stack trace line\n",
-        ) == refusal.strip()
-
-    def test_exec_raises_on_a_refusal_rather_than_returning_it(self, monkeypatch):
-        """The whole defect in one assertion: `false | tail -1` came back with
-        `status: "ok"` and `exit_code: 1` because the *docker CLI* exited 1,
-        and the ISSUE-307 regression test asserts exactly that pair."""
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.devbox, "cmd_exec", lambda args: {
-            "status": "ok",
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": (
-                "Error response from daemon: istota-docker-proxy: "
-                "untracked_exec\n"
-            ),
-        })
-        with pytest.raises(AssertionError, match="refused"):
-            devbox_it._exec("false | tail -1")
-
-    def test_an_ordinary_failure_is_still_returned(self, monkeypatch):
-        """Control: the guard must not turn every non-zero exit into an error."""
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.devbox, "cmd_exec", lambda args: {
-            "status": "ok", "exit_code": 1, "stdout": "", "stderr": "",
-        })
-        assert devbox_it._exec("false | tail -1")["exit_code"] == 1
-
-    def test_exec_file_carries_the_same_guard(self, monkeypatch):
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.devbox, "cmd_exec_file", lambda args: {
-            "status": "ok",
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": "istota-docker-proxy: untracked_exec\n",
-        })
-        with pytest.raises(AssertionError, match="refused"):
-            devbox_it._exec_file("/tmp/probe.sh")
-
-    def test_a_refusal_folded_into_error_is_caught_too(self, monkeypatch):
-        """`exec-file`'s staging legs and both copy verbs put the CLI's stderr
-        in `error`, not `stderr` — see `cmd_exec_file`'s "could not create
-        staging dir" branch. Same refusal, different field."""
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.devbox, "cmd_exec_file", lambda args: {
-            "status": "error",
-            "error": (
-                "could not create staging dir /home/dev/.istota-exec in "
-                "devbox: Error response from daemon: istota-docker-proxy: "
-                "untracked_exec"
-            ),
-        })
-        with pytest.raises(AssertionError, match="refused"):
-            devbox_it._exec_file("/tmp/probe.sh")
-
-    def test_the_copy_verbs_carry_the_guard(self, monkeypatch):
-        """`cp-in`'s arrival check is a `docker exec`, so a refusal reaches it
-        as "the file is not there" — the ISSUE-306 symptom, manufactured."""
-        devbox_it = self._integration_module()
-        refused = {
-            "status": "error",
-            "error": (
-                "could not read /home/dev/a.txt back from inside devbox-bob "
-                "after the copy: Error response from daemon: "
-                "istota-docker-proxy: untracked_exec. Whether the file arrived "
-                "is unknown — the check did not run to an answer."
-            ),
-        }
-        monkeypatch.setattr(devbox_it.devbox, "cmd_cp_in", lambda args: refused)
-        monkeypatch.setattr(devbox_it.devbox, "cmd_cp_out", lambda args: refused)
-        with pytest.raises(AssertionError, match="refused"):
-            devbox_it._cp_in("/tmp/a.txt", "/home/dev/a.txt")
-        with pytest.raises(AssertionError, match="refused"):
-            devbox_it._cp_out("/home/dev/a.txt", "/tmp/a.txt")
-
-    def test_a_probe_that_never_finished_is_not_read_as_permission(self, monkeypatch):
-        """`TimeoutExpired` must escape rather than answer "not refused"."""
-        devbox_it = self._integration_module()
-
-        def _timeout(*a, **kw):
-            raise subprocess.TimeoutExpired(cmd="docker exec", timeout=30)
-
-        monkeypatch.setattr(devbox_it.subprocess, "run", _timeout)
-        with pytest.raises(subprocess.TimeoutExpired):
-            devbox_it._exec_refusal("devbox-bob")
-
-    def test_a_docker_cli_that_is_not_there_is_not_a_refusal(self, monkeypatch):
-        devbox_it = self._integration_module()
-
-        def _missing(*a, **kw):
-            raise FileNotFoundError("docker")
-
-        monkeypatch.setattr(devbox_it.subprocess, "run", _missing)
-        assert devbox_it._exec_refusal("devbox-bob") is None
-
-    def test_the_probe_reports_a_refused_exec(self, monkeypatch):
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
-            1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec\n",
-        ))
-        assert "untracked_exec" in devbox_it._exec_refusal("devbox-bob")
-
-    def test_the_probe_is_silent_when_exec_works(self, monkeypatch):
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
-            0, b"", b"",
-        ))
-        assert devbox_it._exec_refusal("devbox-bob") is None
-
-    def test_the_probe_does_not_invent_a_skip_for_an_unrelated_failure(self, monkeypatch):
-        """A container that is simply broken must still fail loudly."""
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
-            126, b"", b"exec: \"true\": permission denied\n",
-        ))
-        assert devbox_it._exec_refusal("devbox-bob") is None
-
-    def test_a_refusal_produces_a_skip_and_not_ten_results(self, monkeypatch):
-        """The control for the whole file: with the proxy refusing, the tier
-        has to come back skipped. It came back `6 failed, 2 passed`, and the
-        two passes were the ISSUE-306 and ISSUE-307 regressions.
-
-        Driven through the fixture's own body rather than the gate helper, so
-        a fixture that stops calling the gate fails here too.
-        """
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it, "_running_container", lambda: "devbox-bob")
-        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
-            1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec\n",
-        ))
-        with pytest.raises(pytest.skip.Exception, match="untracked_exec"):
-            self._fixture_body(devbox_it.container)()
-
-    def test_a_reachable_devbox_is_not_skipped(self, monkeypatch):
-        devbox_it = self._integration_module()
-        monkeypatch.setattr(devbox_it, "_running_container", lambda: "devbox-bob")
-        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
-            0, b"", b"",
-        ))
-        assert self._fixture_body(devbox_it.container)() == "devbox-bob"
-
-    def test_the_probe_is_autouse_so_no_test_can_bypass_it(self):
-        """A guard a new test can forget to request is the same hole again."""
-        devbox_it = self._integration_module()
-        fixture = devbox_it.container
-        marker = getattr(fixture, "_fixture_function_marker", None) or getattr(
-            fixture, "_pytestfixturefunction", None,
-        )
-        assert marker is not None, (
-            "pytest no longer records a fixture's marker under either name — "
-            "update this check rather than letting it pass vacuously"
-        )
-        assert marker.autouse is True
-        assert marker.scope == "module"
-
-
-class _CompletedStub:
-    """Enough of `subprocess.CompletedProcess` for the probe above."""
-
-    def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+    def test_the_executor_binds_nothing_at_the_docker_path(self):
+        source = _EXECUTOR.read_text()
+        assert "api_proxy" not in source
+        # The path may still be *named* in the comment explaining the removal;
+        # what must not survive is a bind argument built from it.
+        assert "docker.sock\"]" not in source

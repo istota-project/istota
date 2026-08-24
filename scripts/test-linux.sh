@@ -285,8 +285,8 @@ host_bwrap_failure() {
 #
 # **The units cannot be named in advance.** The Ansible role writes
 # `/etc/systemd/system/{{ istota_namespace }}-scheduler.service` and the same
-# for `-web`, `-webhooks`, `-devbox-proxy@`, `-docker-proxy@` and
-# `-devbox-iptables`, and `istota_namespace` is an inventory variable — so a
+# for `-web`, `-webhooks`, `-devbox-proxy@` and `-devbox-iptables`, and
+# `istota_namespace` is an inventory variable — so a
 # probe asking `is-active istota-scheduler.service` by name is blind on every
 # install that set it, which includes the production host. Enumerate what is
 # running and match on the suffix instead. Both managers, since a per-user
@@ -323,6 +323,10 @@ host_runs_deployment() {
         for manager in --system --user; do
             units="$(systemctl "$manager" list-units --type=service --state=active \
                 --no-legend --no-pager 2>/dev/null || true)"
+            # `-docker-proxy@` is a *retired* unit and is still matched on
+            # purpose: the role tears those down, but a host that has not run
+            # the play since is exactly one running the daemon, and a false
+            # negative here is what puts an unsandboxed suite beside it.
             case "$units" in
                 *-scheduler.service*|*-webhooks.service*|*-devbox-proxy@*|\
                 *-docker-proxy@*|*-devbox-iptables.service*)
@@ -625,7 +629,7 @@ run_container_tier() {
     # the machine, and the tests skip themselves there rather than taking the
     # whole tier down with them.
     run_in_container sh -c '. /src/scripts/dev/linux-tier-cgroup.sh
-ruff check --output-format concise src tests testbed && exec pytest "$@"' \
+ruff check --output-format concise src tests testbed docker/devbox && exec pytest "$@"' \
         -- -o cache_dir=/tmp/pytest_cache "${pytest_args[@]}"
 }
 
@@ -636,8 +640,8 @@ ruff check --output-format concise src tests testbed && exec pytest "$@"' \
 run_native_tier() {
     # Container mode is cwd-immune by construction — the bind, the `-f` path
     # and `-w /src` are all absolute. Native mode is not: `uv` walks up from
-    # the process's cwd to find a project, and `ruff check … src tests testbed`
-    # names three relative paths. Run from inside another checkout, the driver
+    # the process's cwd to find a project, and `ruff check … src tests testbed
+    # docker/devbox` names four relative paths. Run from inside another checkout, the driver
     # would lint and collect that one and report the answer as this
     # repository's.
     cd "$REPO_ROOT"
@@ -701,7 +705,7 @@ run_native_tier() {
     # `uv.lock`, which is a tracked file, so a test run would leave a diff
     # behind. It does not install anything the venv is missing either way —
     # `uv sync --extra test` is the prerequisite, stated in the header.
-    uv run --frozen ruff check --output-format concise src tests testbed
+    uv run --frozen ruff check --output-format concise src tests testbed docker/devbox
     exec uv run --frozen pytest "${pytest_args[@]}"
 }
 

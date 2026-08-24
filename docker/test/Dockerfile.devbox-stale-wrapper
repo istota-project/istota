@@ -1,4 +1,4 @@
-# Negative control 2 of 3: the devbox image whose vendored wrapper has drifted.
+# Negative control (the forge half): the devbox image whose vendored wrapper has drifted.
 #
 # `Dockerfile.devbox-no-forge` deletes the forge directory, which takes the
 # vendored wrapper with it — so the byte-identity assertion in

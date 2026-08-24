@@ -419,6 +419,64 @@ class TestOurRulesAreMissingEntirely:
 # When the check must decline to answer
 
 
+class TestTheGateIsADisjunction:
+    """There are two switches now, and this is the only witness over the devbox
+    network boundary.
+
+    `[devbox] enabled` gates the *skill's* capability. `[developer.container]
+    backend` gates the transport that routes every build into the container. So
+    `backend = devbox` with `devbox.enabled = false` is a deployment where every
+    build in the estate runs in a container whose egress filtering nothing
+    checks — a silent gap, of exactly the class this check exists to close.
+    """
+
+    def _container_config(self, make_config, tmp_path):
+        from istota.config import ContainerConfig, DeveloperConfig
+
+        repos = tmp_path / "repos"
+        repos.mkdir(exist_ok=True)
+        return make_config(
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir=str(repos),
+                container=ContainerConfig(backend="devbox"),
+            ),
+        )
+
+    def test_the_backend_alone_makes_the_check_run(
+        self, make_config, tmp_path, fake_iptables, boot_script
+    ):
+        """The control for the exact gap the disjunction exists to close: the
+        skill's capability is off and every build still runs in the container."""
+        boot_script(_our_destinations())
+        calls = fake_iptables(_chain(*_our_rules()))
+
+        result = _run_check(self._container_config(make_config, tmp_path))
+
+        assert calls, "the chain was not read for a deployment routing builds into it"
+        assert result.status == OK
+
+    def test_the_backend_alone_still_finds_a_shadowed_chain(
+        self, make_config, tmp_path, fake_iptables, boot_script
+    ):
+        """Running is not the property; *finding* is. A gate correction that let
+        the check run and answer OK on a broken chain would be no better."""
+        boot_script(_our_destinations())
+        fake_iptables(_chain("-A DOCKER-USER -j RETURN", *_our_rules()))
+
+        result = _run_check(self._container_config(make_config, tmp_path))
+
+        assert result.status == FAIL
+
+    def test_neither_switch_still_skips(self, make_config, fake_iptables):
+        calls = fake_iptables(_chain(*_our_rules()))
+
+        result = _run_check(make_config())
+
+        assert result.status == SKIP
+        assert not calls, "the chain was read for a deployment that has no devbox"
+
+
 class TestItSkipsRatherThanGuessing:
     def test_devbox_disabled_skips(self, make_config, fake_iptables):
         calls = fake_iptables(_chain(*_our_rules()))

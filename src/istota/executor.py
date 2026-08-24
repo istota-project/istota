@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from . import db
 from . import email_support
 from . import task_cgroup
+from . import config as istota_config
 from .config import Config
 from .context import (
     build_talk_context,
@@ -2024,6 +2025,12 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
         home / ".cache" / "huggingface",
     ]
     if config.developer.repos_dir:
+        # The *global* root, not `repos_root(config, user_id)`, and deliberately
+        # so — this function has no user and the global entry is the stricter
+        # test. Equal-or-ancestor is the rule, so naming the root refuses a
+        # cache at or above `{repos_dir}` while leaving one at
+        # `{repos_dir}/{user_id}` permitted; that one lands *inside* the repos
+        # bind for that user, at the same host directory, which covers nothing.
         targets.append(Path(config.developer.repos_dir))
     if config.nextcloud_mount_path:
         targets.append(Path(config.nextcloud_mount_path))
@@ -2381,13 +2388,22 @@ def build_bwrap_cmd(
     proxy_sock: Path | None = None,
     net_proxy_sock: Path | None = None,
     extra_ro_binds: list[Path] | None = None,
-    selected_skills: "frozenset[str] | set[str] | list[str] | None" = None,
+    authorized_skills: "frozenset[str] | set[str] | list[str] | None" = None,
     workspace_dir: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
     Returns the original cmd unchanged if sandbox is not available
     (non-Linux, bwrap not installed, or namespace creation denied).
+
+    ``authorized_skills`` is the union of selected skills and skills
+    auto-authorized by credential presence — the same set
+    ``_build_network_allowlist`` keys on. It used to be ``selected_skills``, was
+    read by nothing, and is now the predicate behind the exec-socket bind.
+    *Authorized*, not *selected*, deliberately: `developer` is a menu skill with
+    no `always_include` and no `source_types`, so it reaches `selected_skills`
+    only via sticky skills, which is to say on the second turn of a conversation
+    and not the first.
 
     ``workspace_dir`` (REPL ``--workspace cwd``) is bound RW and becomes the
     sandbox ``--chdir`` target instead of ``user_temp_dir``. It is bounds-checked
@@ -2544,29 +2560,31 @@ def build_bwrap_cmd(
         if path.exists():
             _ro_bind(path)
 
-    # --- Devbox: Docker CLI + Docker-API allowlist proxy ---
-    # The raw Docker socket is root-equivalent on the host: anything inside the
-    # sandbox that can write to it can launch a privileged container that mounts
-    # the host root. So we never bind the raw socket. Instead we bind the
-    # per-user Docker-API allowlist proxy (src/istota/docker_proxy.py) at the
-    # conventional in-sandbox path /var/run/docker.sock — the docker client
-    # connects there by default, so the devbox CLI is unchanged. The proxy
-    # forwards only exec/cp/inspect/restart on the user's own container and
-    # refuses create/run/build/privileged/host-mount, so it is safe to bind
-    # unconditionally (no selection-time gate): even an untrusted-content task
-    # that reaches the socket directly (curl --unix-socket) can't escalate.
-    if config.devbox.enabled and config.devbox.api_proxy_enabled:
-        docker_cli = Path(config.devbox.docker_cli)
-        if docker_cli.exists():
-            _ro_bind(docker_cli)
-        proxy_docker_sock = Path(config.devbox.api_proxy_socket_dir) / f"{task.user_id}.sock"
-        # Bind the proxy socket at the *literal* conventional dest path so the
-        # docker client finds it by default. dest is kept unresolved (mirrors
-        # the old raw-socket bind, where /var/run was never otherwise mapped);
-        # bwrap creates the intermediate mount point.
-        resolved_proxy = proxy_docker_sock.resolve()
-        if resolved_proxy.exists():
-            args.extend(["--bind", str(resolved_proxy), config.devbox.docker_socket])
+    # --- No Docker API reaches a task, and no `docker` binary either ---
+    # This used to bind the Docker CLI read-only and, at the conventional
+    # in-sandbox path /var/run/docker.sock, a per-user allowlist proxy in front
+    # of the root-equivalent socket. Both are gone, and the proxy with them.
+    #
+    # The bind was safe on its own terms — the proxy refused create, run, build,
+    # privileged and host-mount, so a task reaching it with `curl --unix-socket`
+    # could not escalate — but it was also *unconditional*, which is what makes
+    # its removal worth stating: `cp`, `restart`, `inspect` and the raw HTTP
+    # surface were reachable from every task of every user on a devbox
+    # deployment, including tasks built from email, feeds and fetched pages.
+    #
+    # Nothing in a build needs it now. Project code reaches the container over
+    # the exec transport, whose socket is bound above and gated on
+    # `"developer" in authorized_skills` — an arbitrary-command channel into a
+    # permissive-egress container is not an allowlist, so unlike the proxy's it
+    # cannot be ungated. The devbox skill's one remaining Docker verb, `reset`,
+    # runs host-side in the skill CLI process and never wanted a bind.
+    #
+    # **The socket is what makes this true, not the missing CLI bind.** `/usr`
+    # is `--ro-bind`ed unconditionally a little above, so `/usr/bin/docker` —
+    # which is exactly `devbox.docker_cli`'s default — is still in the namespace
+    # on any host that installs the client. The explicit bind was redundant
+    # there and is gone with the rest; what a task cannot do is reach a daemon,
+    # because no socket is bound at any path and no `DOCKER_HOST` is exported.
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
@@ -2654,6 +2672,35 @@ def build_bwrap_cmd(
         repos = get_user_repos_dir(config, task.user_id)
         if repos is not None and repos.exists():
             _bind(repos)
+
+    # --- The devbox exec socket (RW) ---
+    #
+    # Gated on `"developer" in authorized_skills`, byte for byte the predicate
+    # at `_build_network_allowlist` that already decides whether this task gets
+    # the package registries and the forge. The exec socket is bound exactly
+    # where the package registries are allowed.
+    #
+    # **The docker-proxy bind above is ungated and this one is not, and the
+    # difference is the mechanism rather than the caution.** That proxy is an
+    # allowlist: it refuses create, run, build, privileged and host-mount, so
+    # even an untrusted-content task reaching it with `curl --unix-socket`
+    # cannot escalate. This is an unauthenticated arbitrary-command channel into
+    # a container with permissive egress, so binding it into every task's
+    # sandbox would hand an email, feed or browse task a route straight around
+    # `_build_network_allowlist`, which is per task and skill-scoped.
+    #
+    # The *directory*, not the socket file: a server restart unlinks and
+    # recreates the inode, and a bind of the file itself strands this side
+    # against a dead target. Only the per-user subdirectory — the parent holds
+    # every user's socket, and that is arbitrary command execution against
+    # another user's repositories.
+    if (
+        istota_config.devbox_container_backend(config)
+        and "developer" in (authorized_skills or ())
+    ):
+        exec_dir = istota_config.exec_socket_dir(config, task.user_id)
+        if exec_dir is not None and exec_dir.is_dir():
+            _bind(exec_dir)
 
     # --- Per-resource mounts ---
     if mount:
@@ -4748,24 +4795,26 @@ def execute_task(
             env["BROWSER_API_URL"] = config.browser.api_url
             env["BROWSER_VNC_URL"] = config.browser.vnc_url
 
-        # Devbox: the agent's persistent dev container. Skill CLI shells
-        # into ``devbox-<user_id>`` via the host docker socket.
+        # Devbox: the agent's persistent dev container. The skill CLI speaks the
+        # exec transport to a server inside it; only `reset` still runs
+        # `docker`, host-side in the CLI's own process.
         #
-        # ``config.devbox.docker_socket`` is deliberately not exported here
-        # (ISSUE-284). Nothing read it — the CLI invokes ``docker`` and lets
-        # the client resolve its own socket — and the field carries two
-        # meanings: the real root-equivalent socket ``docker_proxy`` connects
-        # to upstream, and the in-sandbox mount point ``build_bwrap_cmd`` binds
-        # the allowlist proxy at. Putting that name in the model's own
-        # environment invites a later reader to treat it as a socket it may use.
+        # No socket path is exported, and that is load-bearing rather than
+        # tidiness (ISSUE-284, and Design 5 of the devbox transport). This
+        # environment is the *model's*, so a path named here is a path the model
+        # can replace: `ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine` would buy an `ok`
+        # acknowledgement and a fabricated exit 0 from a socket the model wrote.
+        # The CLI reads its socket from the config file instead, in a host-side
+        # process the model cannot reach.
+        #
+        # `ISTOTA_DEVBOX_EXEC_TIMEOUT` went with the 300-second default it
+        # carried: the transport imposes no timeout, the task's own budget
+        # governs, and a caller wanting a kill passes `--timeout`.
         if config.devbox.enabled:
             env["ISTOTA_DEVBOX_CONTAINER"] = (
                 f"{config.devbox.container_prefix}{task.user_id}"
             )
             env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
-            env["ISTOTA_DEVBOX_EXEC_TIMEOUT"] = str(
-                config.devbox.exec_timeout_seconds
-            )
             env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
                 config.devbox.max_output_bytes
             )
@@ -4996,7 +5045,11 @@ def execute_task(
                 Path(user_temp_dir), proxy_sock=_proxy_sock,
                 net_proxy_sock=_net_proxy_sock,
                 extra_ro_binds=_extra_ro_binds,
-                selected_skills=frozenset(selected_skills),
+                # The set computed ~190 lines above, not `selected_skills`. See
+                # `build_bwrap_cmd`'s own docstring for why the distinction
+                # decides whether the exec transport routes on the first turn of
+                # a conversation.
+                authorized_skills=frozenset(authorized_skills),
                 workspace_dir=workspace_dir,
             )
 

@@ -29,6 +29,12 @@
   command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-devbox-proxy.conf
   when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
+- name: "reload systemd-tmpfiles for the exec transport"
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-exec.conf
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
+
 - name: "reload systemd for devbox proxy"
   systemd:
     daemon_reload: yes
@@ -41,21 +47,13 @@
   loop: "{{ istota_devbox_users }}"
   when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
-- name: "reload systemd-tmpfiles for docker proxy"
-  command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-docker-proxy.conf
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-
+# The Docker-API allowlist proxy is retired: nothing in a task reaches Docker
+# any more. This handler survives its subject because the retirement task
+# removes the unit file and systemd has to be told.
 - name: "reload systemd for docker proxy"
   systemd:
     daemon_reload: yes
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-
-- name: "restart istota-docker-proxy"
-  systemd:
-    name: "{{ istota_namespace }}-docker-proxy@{{ item }}.service"
-    state: restarted
-  loop: "{{ istota_devbox_users }}"
-  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  when: not istota_web_only
 
 # `not istota_web_only` mirrors the scheduler/browser/devbox handlers. In
 # web-only mode the explicit "Restart web interface (web-only mode)" task is the

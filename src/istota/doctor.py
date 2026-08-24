@@ -1673,6 +1673,606 @@ def _covers(rule: dict, subnet: str) -> bool | None:
         return None
 
 
+def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
+    """Are this deployment's clones where the daemon now looks for them?
+
+    ``developer.repos_dir`` became a *per-user* root: every consumer that scopes
+    a task — the bwrap bind, the native brain's write root, the
+    ``DEVELOPER_REPOS_DIR`` manifest variable, the credential scrub — takes
+    ``{repos_dir}/{user_id}``. That applies whatever the container backend is,
+    because it is what closes cross-user worktree access rather than anything to
+    do with containers.
+
+    **Which makes the upgrade a silent failure without this check.** On a host
+    whose clones still sit flat under ``repos_dir``, the per-user directory is
+    empty, the bind is skipped because its source does not exist, and the
+    developer skill is unusable with no error anywhere naming a path. The
+    Ansible role performs the move and refuses to guess an owner where there is
+    more than one user; this is what says so on a host it did not reach — a
+    manual install, a half-finished play, an operator who moved one user's
+    clones and not another's.
+
+    Cheap and I/O-only: two ``iterdir`` passes and a marker test per entry, no
+    subprocess, so it is safe on the config-load path.
+    """
+    name = "developer.repos_layout"
+    dev, reason = _dev_gate(config)
+    if dev is None:
+        return CheckResult(name, SKIP, reason)
+
+    root = Path(dev.repos_dir)
+    if not root.is_dir():
+        return CheckResult(
+            name, SKIP, f"{root} does not exist yet, so there is nothing filed in it",
+        )
+
+    from .executor import get_user_repos_dir  # noqa: PLC0415 - executor pulls in most of the package
+
+    users = set(getattr(config, "users", {}) or {})
+    stray: list[str] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError as exc:
+        return CheckResult(
+            name, SKIP, f"{root} could not be listed: {exc}",
+        )
+    for entry in entries:
+        if not entry.is_dir() or entry.is_symlink() or entry.name in users:
+            continue
+        if _holds_a_repository(entry):
+            stray.append(entry.name)
+
+    if not stray:
+        expected = [u for u in sorted(users) if (root / u).is_dir()]
+        return CheckResult(
+            name, OK,
+            f"{root} holds only per-user roots"
+            + (f" ({', '.join(expected)})" if expected else " and is empty"),
+        )
+
+    example = get_user_repos_dir(config, sorted(users)[0]) if users else None
+    return CheckResult(
+        name, FAIL,
+        f"{root} still holds repositories outside any user's directory: "
+        f"{', '.join(stray[:5])}"
+        + (f" and {len(stray) - 5} more" if len(stray) > 5 else ""),
+        remedy=(
+            "The daemon now looks under {repos_dir}/{user_id}"
+            + (f" — for example {example} — " if example else " ")
+            + "and binds nothing when that directory does not exist, so the "
+            "developer skill cannot see these. Re-run the Ansible role with "
+            "`istota_developer_repos_migrate_to` set to the user they belong "
+            "to, or move them by hand."
+        ),
+    )
+
+
+def _holds_a_repository(entry: "Path", depth: int = 0) -> bool:
+    """Is there a git directory at or just below `entry`?
+
+    Two levels, matching the documented layout (`<namespace>/<project>.git`) and
+    the migration script's own scan. Bounded rather than a full walk, because
+    this runs on the start-up path and `repos_dir` holds working trees.
+    """
+    markers = ("HEAD", "config", "objects")
+    if all((entry / marker).exists() for marker in markers):
+        return True
+    if (entry / ".git").exists():
+        return True
+    if depth >= 2:
+        return False
+    try:
+        children = sorted(entry.iterdir())
+    except OSError:
+        return False
+    return any(
+        child.is_dir() and not child.is_symlink()
+        and _holds_a_repository(child, depth + 1)
+        for child in children
+    )
+
+
+# ---------------------------------------------------------------------------
+# The development container
+# ---------------------------------------------------------------------------
+
+#: The registry name. Four results hang off it, one per property.
+CONTAINER_GROUP = "developer.container"
+
+#: How long a transport probe waits on the socket. Shorter than `PROBE_TIMEOUT`
+#: because there is a per-user loop behind it and a dead container should be
+#: reported quickly rather than made to look like a hang.
+CONTAINER_PROBE_TIMEOUT = 5.0
+
+#: How long the *server* gives the one command this check runs (`test -d`).
+#: A constant rather than the connect budget: they answer different questions,
+#: and a command allowed exactly as long as the client will wait for a read is a
+#: race the client loses about half the time.
+CONTAINER_EXEC_TIMEOUT = 10.0
+
+
+def _container_results(names: Iterable[str], status: str, detail: str, remedy: str = "") -> list[CheckResult]:
+    """The same answer for several of the group's checks."""
+    return [
+        CheckResult(f"{CONTAINER_GROUP}.{name}", status, detail, remedy=remedy)
+        for name in names
+    ]
+
+
+def _exec_transport_request(
+    socket_path: "Path", payload: bytes, timeout: float
+) -> tuple[list[dict], str]:
+    """Send one request over the exec socket; return its control frames.
+
+    Speaks the wire directly rather than shelling the client: the client's job
+    is to be a shim's `exec` target and exit with a command's status, and doctor
+    wants the control frames the server sent. `devbox_exec_protocol` is a
+    stdlib-only leaf, so importing it here costs nothing.
+
+    Returns ``(frames, "")`` or ``([], reason)``. Never raises — this is a
+    start-up path.
+    """
+    import socket as socket_module  # noqa: PLC0415 - a leaf import on a probe path
+
+    from . import devbox_exec_protocol as proto  # noqa: PLC0415
+
+    sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        try:
+            sock.connect(str(socket_path))
+        except OSError as exc:
+            return [], f"could not connect to {socket_path}: {exc}"
+
+        try:
+            sock.sendall(payload)
+        except OSError as exc:
+            return [], f"could not send to {socket_path}: {exc}"
+
+        buffered = bytearray()
+
+        def _recv_exactly(count: int) -> bytes | None:
+            while len(buffered) < count:
+                try:
+                    chunk = sock.recv(65536)
+                except OSError:
+                    return None
+                if not chunk:
+                    return None
+                buffered.extend(chunk)
+            out = bytes(buffered[:count])
+            del buffered[:count]
+            return out
+
+        # The acknowledgement line comes first, and an error one closes the
+        # connection with nothing streamed behind it.
+        line = bytearray()
+        while b"\n" not in line:
+            if buffered:
+                line.extend(buffered)
+                buffered.clear()
+                continue
+            try:
+                chunk = sock.recv(65536)
+            except OSError as exc:
+                return [], f"no acknowledgement from {socket_path}: {exc}"
+            if not chunk:
+                return [], f"{socket_path} closed before acknowledging"
+            line.extend(chunk)
+        cut = line.index(b"\n")
+        buffered[:0] = bytes(line[cut + 1 :])
+        try:
+            ack = proto.decode_ack(bytes(line[:cut]))
+        except Exception as exc:  # noqa: BLE001 - a malformed ack is a finding
+            return [], f"{socket_path} sent an unreadable acknowledgement: {exc}"
+        if ack.get("status") != "ok":
+            return [], (
+                f"{socket_path} refused the request: "
+                f"{ack.get('code', '?')} {ack.get('message', '')}".strip()
+            )
+        if not proto.supported_protocol(ack.get("protocol")):
+            return [], (
+                f"{socket_path} speaks protocol {ack.get('protocol')!r}; this "
+                f"daemon speaks {proto.PROTOCOL_VERSION}"
+            )
+
+        frames: list[dict] = []
+        while True:
+            header = _recv_exactly(proto.FRAME_HEADER_BYTES)
+            if header is None:
+                return frames, f"{socket_path} closed before the terminal frame"
+            try:
+                stream, length = proto.unpack_header(header)
+            except Exception as exc:  # noqa: BLE001
+                return frames, f"{socket_path} sent an unreadable frame: {exc}"
+            body = _recv_exactly(length) if length else b""
+            if body is None:
+                return frames, f"{socket_path} closed mid-frame"
+            if stream != proto.STREAM_CONTROL:
+                continue
+            try:
+                obj = proto.decode_control(body)
+            except Exception as exc:  # noqa: BLE001
+                return frames, f"{socket_path} sent an unreadable control frame: {exc}"
+            frames.append(obj)
+            if proto.is_terminal(obj):
+                return frames, ""
+    except Exception as exc:  # noqa: BLE001 - never raise from a check
+        return [], f"{socket_path}: {type(exc).__name__}: {exc}"
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def check_developer_container(config: "Config", probe: bool) -> list[CheckResult]:
+    """The four properties of the development container that fail silently.
+
+    Every one of these is a thing an operator learns about from a task failing
+    hours later, or — worse — never learns about at all:
+
+    * **backend** — the rendered config and the running daemon disagree, so a
+      deployment that was switched on is still building on the host. A unit test
+      cannot tell an operator that the host in front of them is the one with the
+      problem.
+    * **transport** — nothing answers on the socket. This is what replaces the
+      per-task setup ping: the same question, asked once by an operator instead
+      of once per task by every task, including the tasks that will never run a
+      build.
+    * **identity** — the container's uid is not the daemon's, or the two sides
+      spell the repos root differently. Untreated, that ends in worktrees that
+      can never be reaped, and there is no error message anywhere that says so.
+    * **uv_cache** — the derived package cache, ``{repos_dir}/{user_id}/
+      .package-caches``, is not visible inside the container, so it is not
+      covered by the repos mount and every ``uv sync`` pays a full copy instead
+      of a hardlink. Merely slow is what nobody investigates.
+
+    Returns four results whatever happens, so a caller can assert on a name
+    rather than on a count.
+    """
+    from . import config as config_module  # noqa: PLC0415 - a cycle at module scope
+
+    names = ("backend", "transport", "identity", "uv_cache")
+    backend = config_module.container_backend(config)
+    results = [_container_backend_result(config, backend, config_module)]
+
+    dev = getattr(config, "developer", None)
+    if backend != config_module.CONTAINER_BACKEND_DEVBOX:
+        # Two switches, and one of the four pairs is a deployment where the
+        # devbox *skill* is offered and cannot work. The role provisions the
+        # socket directory and sets `ISTOTA_EXEC_SOCKET` on the container only
+        # under `backend = devbox`, and since the skill moved onto this
+        # transport every verb but `reset` needs a server behind that socket. So
+        # `devbox.enabled = true` with `backend = none` is a skill in the menu
+        # whose commands all fail — which the skill CLI now says at the point of
+        # use, and which an operator should hear before a task finds out.
+        detail = (
+            "[developer.container] backend is not 'devbox'; development commands "
+            "run on the host"
+        )
+        if getattr(getattr(config, "devbox", None), "enabled", False):
+            detail += (
+                ". [devbox] enabled is true, so the devbox skill is offered — "
+                "but its exec, cp-in, cp-out, exec-file and status verbs all "
+                "need this transport and will refuse. Set backend to 'devbox' "
+                "and re-deploy, or turn [devbox] enabled off; `reset` is the "
+                "only verb that works either way"
+            )
+        return results + _container_results(names[1:], SKIP, detail)
+    if not getattr(dev, "enabled", False) or not getattr(dev, "repos_dir", ""):
+        return results + _container_results(
+            names[1:], SKIP,
+            "the developer skill is off or has no repos_dir, so nothing routes "
+            "into a container whatever backend says",
+        )
+
+    users = sorted(getattr(config, "users", {}) or {})
+    if not users:
+        return results + _container_results(
+            names[1:], SKIP, "no users are configured, so there is no devbox to reach",
+        )
+    if not probe:
+        return results + _container_results(
+            names[1:], SKIP,
+            "reaching the container means opening its socket (probe disabled)",
+        )
+
+    return results + _container_probe_results(config, config_module, users)
+
+
+def _container_backend_result(config: "Config", backend: str, config_module) -> CheckResult:
+    """Does the file on disk say what the running process believes?
+
+    The daemon holds the config it loaded at start-up. An operator who edited
+    ``config.toml`` — or an Ansible run that rendered a new one — has changed
+    nothing until the daemon restarts, and the symptom is a feature that was
+    switched on and did not switch on.
+    """
+    name = f"{CONTAINER_GROUP}.backend"
+    path = getattr(config, "config_path", None)
+    if not path:
+        return CheckResult(
+            name, SKIP,
+            f"this process built its config in memory, so there is no rendered "
+            f"file to compare backend={backend!r} against",
+        )
+    try:
+        import tomllib  # noqa: PLC0415
+    except ModuleNotFoundError:  # pragma: no cover - 3.10 and older
+        import tomli as tomllib  # type: ignore[no-redef]  # noqa: PLC0415
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, ValueError) as exc:
+        return CheckResult(
+            name, WARN,
+            f"{path} could not be read, so backend={backend!r} could not be "
+            f"checked against it: {exc}",
+            remedy="Fix or re-render the config file the daemon was started with.",
+        )
+    block = (data.get("developer") or {}).get("container") or {}
+    on_disk = block.get("backend", config_module.CONTAINER_BACKEND_NONE)
+    if isinstance(on_disk, str):
+        on_disk = on_disk.strip().lower()
+    if on_disk == backend:
+        return CheckResult(
+            name, OK, f"{path} and this process agree: backend={backend!r}",
+        )
+    if on_disk not in config_module.CONTAINER_BACKENDS:
+        # Not drift. The loader corrected it to "none" with a warning, so the
+        # two differ permanently and a restart changes nothing — reporting this
+        # as a stale process would send an operator to do the one thing that
+        # cannot help, hourly.
+        return CheckResult(
+            name, FAIL,
+            f"{path} says backend={on_disk!r}, which is not a valid backend; "
+            f"this process corrected it to {backend!r}",
+            remedy=(
+                "Set [developer.container] backend to one of "
+                f"{', '.join(config_module.CONTAINER_BACKENDS)} and re-render "
+                "the config."
+            ),
+        )
+    return CheckResult(
+        name, FAIL,
+        f"{path} says backend={on_disk!r} and this process is running "
+        f"backend={backend!r}",
+        remedy=(
+            "Restart the daemon so it loads the rendered config. Until it does, "
+            "development commands run wherever the *running* value says."
+        ),
+    )
+
+
+def _container_probe_results(config: "Config", config_module, users: list[str]) -> list[CheckResult]:
+    """Transport, identity and uv_cache, from one connection per user."""
+    from . import devbox_exec_protocol as proto  # noqa: PLC0415
+
+    timeout = min(
+        float(
+            getattr(
+                getattr(getattr(config, "developer", None), "container", None),
+                "connect_timeout_seconds",
+                CONTAINER_PROBE_TIMEOUT,
+            )
+            or CONTAINER_PROBE_TIMEOUT
+        ),
+        PROBE_TIMEOUT,
+    )
+
+    # Not `security.sandbox_cache_dir`. That key stopped being the cache root:
+    # the cache is derived at `{repos_dir}/{user_id}/.package-caches`, and the
+    # key is read only where `repos_dir` is unset. Asking after it here would
+    # warn on exactly the deployments that are configured correctly, since the
+    # Ansible default for it is blank.
+    repos_root_cfg = getattr(getattr(config, "developer", None), "repos_dir", "")
+    from .executor import SANDBOX_CACHE_ROOT_NAME  # noqa: PLC0415 - executor pulls in most of the package
+
+    reachable: list[str] = []
+    transport_bad: list[str] = []
+    identity_bad: list[str] = []
+    identity_ok: list[str] = []
+    cache_bad: list[str] = []
+    cache_ok: list[str] = []
+    without_a_devbox: list[str] = []
+
+    for user_id in users:
+        socket_path = config_module.exec_socket_path(config, user_id)
+        if socket_path is None:
+            transport_bad.append(f"{user_id}: no socket path could be composed")
+            continue
+        # **Which users have a devbox is not in the daemon's config.** The list
+        # lives in Ansible (`istota_devbox_users`) and reaches neither
+        # `config.users` nor `DevboxConfig`, so iterating every configured user
+        # would FAIL this check permanently on the reference shape — one admin
+        # with a container, several other users without — and `check_doctor`'s
+        # hourly sweep would alert every admin on the transition. A check that
+        # cries wolf is one nobody reads.
+        #
+        # The per-user socket *directory* is the discriminator available here:
+        # the role creates it only for `istota_devbox_users`, both in the play
+        # and in the tmpfiles snippet that recreates it at boot. Its absence is
+        # "no devbox for this user", not "the devbox is broken".
+        if not socket_path.parent.is_dir():
+            without_a_devbox.append(user_id)
+            continue
+        frames, error = _exec_transport_request(
+            socket_path, proto.encode_ping_request(), timeout
+        )
+        if error:
+            transport_bad.append(f"{user_id}: {error}")
+            continue
+        if not any(frame.get("pong") is True for frame in frames):
+            transport_bad.append(f"{user_id}: {socket_path} answered without a pong")
+            continue
+        reachable.append(user_id)
+
+        frames, error = _exec_transport_request(
+            socket_path, proto.encode_stat_request(), timeout
+        )
+        stat = next((f for f in frames if "uid" in f), None)
+        if stat is None:
+            identity_bad.append(
+                f"{user_id}: {error or 'the server sent no stat reply'}"
+            )
+        else:
+            findings = _identity_findings(config, config_module, user_id, stat)
+            if findings:
+                identity_bad.extend(findings)
+            else:
+                identity_ok.append(user_id)
+
+        if not repos_root_cfg:
+            continue
+        cache_dir = Path(repos_root_cfg) / user_id / SANDBOX_CACHE_ROOT_NAME
+        frames, error = _exec_transport_request(
+            socket_path,
+            # A *server-side* budget, deliberately not `timeout`. That one is
+            # the connect budget, which `_parse_container_block` floors at 0.1 —
+            # an operator who sets it small for fast failure would otherwise get
+            # a 0.1s kill budget on `test -d` and be told their cache mount is
+            # missing. The two numbers answer different questions and one of
+            # them is not the operator's to set.
+            proto.encode_exec_request(
+                argv=["test", "-d", str(cache_dir)],
+                cwd=None,
+                stdin=False,
+                timeout=CONTAINER_EXEC_TIMEOUT,
+            ),
+            timeout,
+        )
+        terminal = next((f for f in frames if proto.is_terminal(f)), None)
+        if error and terminal is None:
+            cache_bad.append(f"{user_id}: {error}")
+        elif terminal is None or terminal.get("exit_code") != 0:
+            cache_bad.append(f"{user_id}: {cache_dir} is not a directory in the container")
+        else:
+            cache_ok.append(user_id)
+
+    results = [_transport_result(reachable, transport_bad, without_a_devbox)]
+    results.append(_identity_result(identity_ok, identity_bad, reachable))
+    results.append(_uv_cache_result(repos_root_cfg, cache_ok, cache_bad, reachable))
+    return results
+
+
+def _identity_findings(config: "Config", config_module, user_id: str, stat: dict) -> list[str]:
+    """What the container disagrees with the daemon about, if anything."""
+    findings: list[str] = []
+    daemon_uid = os.getuid() if hasattr(os, "getuid") else None
+    container_uid = stat.get("uid")
+    if daemon_uid is not None and container_uid != daemon_uid:
+        findings.append(
+            f"{user_id}: the container's server runs as uid {container_uid} and "
+            f"this daemon is uid {daemon_uid}"
+        )
+    from .executor import get_user_repos_dir  # noqa: PLC0415 - executor pulls in most of the package
+
+    expected = get_user_repos_dir(config, user_id)
+    reported = stat.get("repos_root")
+    if expected is not None and reported != str(expected):
+        findings.append(
+            f"{user_id}: the container's repos root is {reported!r} and this "
+            f"daemon's is {str(expected)!r}"
+        )
+    return findings
+
+
+def _transport_result(
+    reachable: list[str], bad: list[str], without_a_devbox: list[str]
+) -> CheckResult:
+    name = f"{CONTAINER_GROUP}.transport"
+    if not bad and not reachable:
+        return CheckResult(
+            name, SKIP,
+            f"{len(without_a_devbox)} configured user(s) have no devbox socket "
+            f"directory, so none of them routes development work into a container",
+        )
+    if bad:
+        return CheckResult(
+            name, FAIL,
+            "the exec transport did not answer for " + "; ".join(bad),
+            remedy=(
+                "Check the devbox container is up and its exec server is running "
+                "(`docker logs devbox-<user>`), that ISTOTA_EXEC_SOCKET and "
+                "ISTOTA_EXEC_REPOS_ROOT are set on the service, and that the "
+                "socket directory is mounted into it."
+            ),
+        )
+    detail = f"the exec transport answered a ping for {len(reachable)} devbox user(s)"
+    if without_a_devbox:
+        detail += f"; {len(without_a_devbox)} configured user(s) have no devbox"
+    return CheckResult(name, OK, detail)
+
+
+def _identity_result(ok: list[str], bad: list[str], reachable: list[str]) -> CheckResult:
+    name = f"{CONTAINER_GROUP}.identity"
+    if bad:
+        return CheckResult(
+            name, FAIL,
+            "the daemon and the container do not agree: " + "; ".join(bad),
+            remedy=(
+                "Rebuild the devbox image with DEV_UID/DEV_GID set to the "
+                "daemon's own uid and gid, and recreate the container. Until "
+                "they match, every worktree that runs a build becomes "
+                "unreapable and nothing else reports it."
+            ),
+        )
+    if not reachable:
+        return CheckResult(name, SKIP, "no container answered, so nothing was compared")
+    return CheckResult(
+        name, OK,
+        f"uid and repos root agree for {len(ok)} devbox user(s)",
+    )
+
+
+def _uv_cache_result(
+    repos_root_cfg: str, ok: list[str], bad: list[str], reachable: list[str]
+) -> CheckResult:
+    """Is the derived package cache visible inside the container?
+
+    The question this asks changed, and the old one would now be actively
+    misleading. It used to be "did the operator set `security.sandbox_cache_dir`
+    and is its bind present" — but the cache is derived at
+    `{repos_dir}/{user_id}/.package-caches` now, that key is read only where
+    `repos_dir` is unset, and its Ansible default is blank. Asking after the key
+    would WARN on every correctly configured deployment.
+
+    What is worth checking is the property, not the setting: the cache lives
+    inside the repos subtree the container already mounts, so one mount covers
+    cache and venv and `link(2)` hardlinks rather than copying. If that
+    directory is missing from the container, the mount is wrong in a way that is
+    slow rather than broken — which is exactly the failure nobody investigates
+    on their own.
+    """
+    name = f"{CONTAINER_GROUP}.uv_cache"
+    if not repos_root_cfg:
+        return CheckResult(
+            name, SKIP,
+            "developer.repos_dir is unset, so there is no per-user repos subtree "
+            "and no derived package cache to look for",
+        )
+    if bad:
+        return CheckResult(
+            name, WARN,
+            "the derived package cache is not visible in the container for "
+            + "; ".join(bad),
+            remedy=(
+                "The cache is {developer.repos_dir}/{user}/.package-caches and "
+                "sits inside the repos bind, so a missing directory means that "
+                "bind is wrong or the container predates it. Re-run the role and "
+                "recreate the container. Slow rather than broken — uv falls back "
+                "to copying every wheel — which is why nothing else will tell you."
+            ),
+        )
+    if not reachable:
+        return CheckResult(name, SKIP, "no container answered, so nothing was checked")
+    return CheckResult(
+        name, OK,
+        f"the derived package cache is visible for {len(ok)} devbox user(s)",
+    )
+
+
 def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
     """Read the live ``DOCKER-USER`` chain and report anything shadowing our rules.
 
@@ -1692,9 +2292,24 @@ def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
     silence the check exists to break.
     """
     name = "security.devbox_netfilter"
-    if not getattr(getattr(config, "devbox", None), "enabled", False):
+    # **The disjunction, not `devbox.enabled` alone.** There are two switches
+    # now: `[devbox] enabled` gates the skill's capability, and
+    # `[developer.container] backend` gates the transport that routes every
+    # build into the container. So `backend = devbox` with `devbox.enabled =
+    # false` is a deployment where every build in the estate runs in a container
+    # whose egress filtering nothing checks — and this is the only witness over
+    # that boundary.
+    from . import config as config_module  # noqa: PLC0415 - a cycle at module scope
+
+    devbox_on = getattr(getattr(config, "devbox", None), "enabled", False)
+    container_on = (
+        config_module.container_backend(config) == config_module.CONTAINER_BACKEND_DEVBOX
+    )
+    if not devbox_on and not container_on:
         return CheckResult(
-            name, SKIP, "devbox is disabled ([devbox] enabled); the role adds no rules"
+            name, SKIP,
+            "devbox is disabled ([devbox] enabled) and [developer.container] "
+            "backend is not 'devbox'; the role adds no rules",
         )
     if not probe:
         return CheckResult(
@@ -1939,6 +2554,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.forge_policy", check_forge_policy),
     ("developer.gitlab_reviewer", check_gitlab_reviewer),
     ("developer.forge_transport", check_forge_transport),
+    ("developer.repos_layout", check_repos_layout),
+    ("developer.container", check_developer_container),
     ("web.static", check_web_static),
     ("sandbox.masks", check_sandbox_masks),
 )
@@ -1973,6 +2590,11 @@ CHECK_SCOPES: dict[str, str] = {
     "developer.forge_policy": DEPLOYMENT,
     "developer.gitlab_reviewer": DEPLOYMENT,
     "developer.forge_transport": DEPLOYMENT,
+    # Deployment, not image: three of its four results need a running
+    # container to reach, and the fourth reads the rendered config file.
+    # Deployment: it is a fact about what is filed on this host.
+    "developer.repos_layout": DEPLOYMENT,
+    "developer.container": DEPLOYMENT,
     "web.static": IMAGE,
     "sandbox.masks": DEPLOYMENT,
 }

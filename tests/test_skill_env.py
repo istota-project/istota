@@ -36,10 +36,17 @@ class _MockBrowser:
 
 
 @dataclass
+class _MockDeveloper:
+    enabled: bool = False
+    repos_dir: str = ""
+
+
+@dataclass
 class _MockConfig:
     nextcloud_mount_path: Path | None = None
     bot_dir_name: str = "istota"
     browser: _MockBrowser = field(default_factory=_MockBrowser)
+    developer: _MockDeveloper = field(default_factory=_MockDeveloper)
 
 
 def _make_config(tmp_path: Path, mount: bool = True) -> _MockConfig:
@@ -493,6 +500,33 @@ class TestPhase2ManifestAcceptance:
         assert "developer.enabled" in gitlab_token.when
         assert "developer.repos_dir" in gitlab_token.when
         assert "developer.gitlab_token" in gitlab_token.when
+
+    def test_developer_repos_dir_is_scoped_to_the_task_user(self):
+        """`DEVELOPER_REPOS_DIR` is `code_review`'s containment root, and it is
+        the one consumer of the repos tree whose argument the *model* picks.
+
+        Left global, `code_review run --worktree {repos_dir}/other-user/…` is in
+        bounds — the exact cross-user reach the per-user layout closes,
+        surviving in the last place anyone would look.
+
+        Both manifests must therefore be `setup_env`, not `config`, and the
+        distinction is not stylistic: a `from: config` entry cannot be corrected
+        by the hook that knows the layout. `execute_task` merges
+        `build_skill_env` first and the hooks second, both under
+        `if k not in env`, so the manifest would win and the hook's scoped value
+        would be dropped without a word.
+        """
+        from istota.skills._loader import load_skill_index
+
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        for skill in ("developer", "code_review"):
+            meta = index.get(skill)
+            assert meta is not None, skill
+            spec = next(s for s in meta.env_specs if s.var == "DEVELOPER_REPOS_DIR")
+            assert spec.source == "setup_env", (
+                f"{skill} resolves DEVELOPER_REPOS_DIR from the manifest, which "
+                f"outranks the hook that scopes it"
+            )
 
     def test_google_workspace_token_marked_sensitive_via_setup_env(self):
         from istota.skills._loader import load_skill_index

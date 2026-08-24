@@ -1,133 +1,67 @@
-"""Devbox skill against a real container — the tier that would have caught
-ISSUE-306 on day one.
+"""Devbox skill against a real container, over the real exec transport.
 
-Every other devbox test monkeypatches ``_run_docker`` wholesale, so the boundary
-where the bug lived (``docker cp`` resolving a container path against the
-rootfs rather than through the container's mount namespace) never executes. A
-canned ``(0, b"", b"")`` for the copy is exactly the answer a real broken run
-cannot produce, which is why three months of green suites said nothing.
+Every other devbox test drives the protocol against a server in a tmpdir on the
+host. That proves the skill speaks the wire; it does not prove the wire reaches
+a *container*. This file is the tier that does, and the assertions that make it
+worth running are the ones only a container can satisfy: a hostname that is not
+the host's, and a path that exists in the image and nowhere else.
 
-Prerequisites: a `docker` CLI, a running devbox container owned by the current
-``ISTOTA_USER_ID``, **and a docker socket that will run a raw `docker exec`**.
-Every test skips without all three, so the file is inert on a laptop and
-meaningful on the deployment:
+Prerequisites: `ISTOTA_USER_ID`, a config naming an `exec_socket_dir`, and a
+running devbox whose exec server is answering. Every test skips without them, so
+the file is inert on a laptop and meaningful on the deployment:
 
     ISTOTA_USER_ID=<user> uv run pytest -m integration tests/test_skills_devbox_integration.py -n0
 
-**Run it from a shell on the host, outside the sandbox.** The socket a
-sandboxed task sees is `istota-docker-proxy`, which tracks the exec ids it
-issued and refuses any other — so a raw `docker exec` from a task is denied at
-the exec-inspect step, after the command has already run. The CLI then exits 1
-with the command's own status never fetched, and every assertion here that
-expects a non-zero exit is satisfied by the refusal rather than by the
-container (ISSUE-313). That is the proxy working as designed; the tracking is
-what makes the socket safe to expose at all. The `container` fixture probes for
-it and skips the file, and `_exec` / `_exec_file` raise rather than hand a
-refusal to an assertion.
+**What changed, and why the old gate is gone.** This file used to spend a third
+of its length probing for a Docker-API allowlist refusal and skipping on it: the
+socket a sandboxed task saw was `istota-docker-proxy`, which tracked the exec
+ids it issued and denied a raw `docker exec` at the exec-inspect step — *after*
+the command had run — so an envelope reading `ok` / `1` said nothing about the
+container (ISSUE-313). That proxy is retired and the skill no longer runs
+`docker` for anything but `reset`. The status is now in the protocol and comes
+from `waitpid`, so there is no refusal to mistake for an answer and nothing to
+probe for. The gate is simply whether the transport answers a `ping`.
 """
 
 import os
 import shutil
-import subprocess
 import uuid
 
 import pytest
 
-from istota.docker_proxy import PROXY_ERROR_PREFIX
+from istota import devbox_exec_protocol as proto
 from istota.skills import devbox
 
 pytestmark = pytest.mark.integration
 
 
-def _running_container() -> str | None:
-    """The devbox this process is allowed to talk to, or None."""
-    if not shutil.which(os.environ.get("ISTOTA_DEVBOX_DOCKER_CLI") or "docker"):
-        return None
-    container = devbox._container_name()
-    if not container:
-        return None
-    if devbox._check_owned(container) is not None:
-        return None
-    return container
+def _args(**kw):
+    return type("A", (), kw)()
 
 
-def _proxy_refusal(*streams: str) -> str | None:
-    """The docker-proxy refusal carried by any of ``streams``, else None.
-
-    Matched on the prefix the proxy itself writes (`docker_proxy`'s
-    ``PROXY_ERROR_PREFIX``) rather than on a copy of the string, so the two
-    cannot drift. The reason word is deliberately not part of the match: a
-    refusal is a refusal whatever the allowlist called it.
-
-    Returns the matching *line*, not the whole stream — a refused `docker
-    exec` has already run the command, so the stream can carry the command's
-    own output as well, and the point of the return value is to name what
-    happened rather than to reprint it.
-    """
-    for stream in streams:
-        if not stream or PROXY_ERROR_PREFIX not in stream:
-            continue
-        for line in stream.splitlines():
-            if PROXY_ERROR_PREFIX in line:
-                return line.strip()
+def _transport_error() -> str | None:
+    """Why the transport is unreachable, or None when it answers."""
+    try:
+        devbox._converse(proto.encode_ping_request())
+    except devbox._Refused as e:
+        return e.message
+    except Exception as e:  # noqa: BLE001 — any failure is a reason to skip
+        return f"{type(e).__name__}: {e}"
     return None
 
 
-def _exec_refusal(container: str) -> str | None:
-    """Refusal text if this process's `docker exec` is denied, else None.
-
-    Returns None for any *other* failure. An unreachable or broken container
-    is not a reason to invent a skip — those already fail loudly, and turning
-    them quiet is the shape of defect this probe exists to remove. Which is
-    also why `subprocess.TimeoutExpired` is deliberately **not** caught: a
-    probe that never finished is not evidence that exec is permitted, and
-    letting it out errors the module rather than reading silence as a yes.
-    """
-    try:
-        proc = subprocess.run(
-            [devbox._docker_cli(), "exec", "-u", "dev", container, "true"],
-            capture_output=True, timeout=30, check=False,
-        )
-    except OSError:
-        return None
-    if proc.returncode == 0:
-        return None
-    return _proxy_refusal(proc.stderr.decode("utf-8", "replace"))
-
-
-def _skip_if_exec_is_refused(name: str) -> None:
-    """Skip the file when the proxy will refuse its `docker exec` calls.
-
-    A separate function rather than four lines inside the fixture so the
-    branch can be exercised without a container: it is the one that decides
-    between a skip and ten results, and a gate nothing can call is a gate
-    nothing has checked. See
-    `tests/test_skills_devbox.py::TestTheIntegrationTierCannotReadARefusalAsAnAnswer`.
-    """
-    refusal = _exec_refusal(name)
-    if refusal:
-        pytest.skip(
-            f"docker exec is refused for this process: {refusal}. "
-            "istota-docker-proxy tracks only the exec ids it issued, so a raw "
-            "`docker exec` from a sandboxed task is denied at the exec-inspect "
-            "step and its exit status says nothing about the command. Run this "
-            "file from a shell on the host."
-        )
-
-
 @pytest.fixture(scope="module", autouse=True)
-def container() -> str:
-    """The devbox under test, and the reachability gate for the whole file.
+def transport() -> None:
+    """The reachability gate for the whole file.
 
-    Autouse on purpose: a guard a new test can forget to request is the same
-    hole ISSUE-313 was filed for. Every test here goes through the probe
-    whether or not it names the fixture.
+    Autouse on purpose: a guard a new test can forget to request is a guard
+    nothing has. Every test here goes through it whether or not it says so.
     """
-    name = _running_container()
-    if not name:
-        pytest.skip("no running devbox container for this user")
-    _skip_if_exec_is_refused(name)
-    return name
+    if not os.environ.get("ISTOTA_USER_ID", "").strip():
+        pytest.skip("ISTOTA_USER_ID is unset, so there is no per-user devbox")
+    reason = _transport_error()
+    if reason:
+        pytest.skip(f"the devbox exec transport did not answer a ping: {reason}")
 
 
 @pytest.fixture
@@ -138,94 +72,81 @@ def allowlisted_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def remote_scratch(container):
-    """A per-run directory on the persistent volume, removed afterwards."""
-    path = f"/home/dev/.istota-it-{uuid.uuid4().hex[:8]}"
-    made = subprocess.run(
-        [devbox._docker_cli(), "exec", "-u", "dev", container, "mkdir", "-p", path],
-        check=False, capture_output=True, timeout=30,
-    )
-    if made.returncode != 0:
-        # `check=True` would raise a CalledProcessError whose str() is the
-        # return code and the argv, with the daemon's own explanation only
-        # reachable from the exception object. Reporting, not a guard, and
-        # untested by construction — it needs a container, and factoring two
-        # lines out to unit-test a failure message would buy nothing.
-        pytest.fail(
-            f"could not create {path} in {container}: "
-            f"{made.stderr.decode('utf-8', 'replace').strip()}"
-        )
-    yield path
-    subprocess.run(
-        [devbox._docker_cli(), "exec", "-u", "dev", container, "rm", "-rf", path],
-        check=False, capture_output=True, timeout=30,
-    )
+def remote_scratch():
+    """A per-run directory on the persistent volume, removed afterwards.
 
-
-def _args(**kw):
-    return type("A", (), kw)()
-
-
-def _refuse_a_refusal(result: dict, what: str) -> None:
-    """Raise rather than let a proxy refusal be read as a command's result.
-
-    `cmd_exec` and `cmd_exec_file` report the *docker CLI's* exit status as
-    ``exit_code``, inside an envelope whose ``status: "ok"`` means only that
-    the CLI ran. A refused exec exits 1 having never fetched the command's own
-    status, so the envelope says `ok` / `1` for a container that may have done
-    anything at all — which is what every negative assertion in this file was
-    reading (ISSUE-313). The `container` fixture already skips the file when
-    exec is refused up front; this catches a refusal that starts mid-run, and
-    keeps the guarantee at the call site rather than in a fixture's memory.
-
-    Both fields, because a refusal reaches the envelope by two routes: `exec`
-    and `exec-file` put the CLI's stderr in ``stderr`` and report its status
-    as ``exit_code``, while the copy verbs and `exec-file`'s staging legs fold
-    it into ``error``.
-
-    One hole, stated rather than papered over: ``stderr`` is capped by
-    ``_max_output_bytes`` (100 KB by default) and `_truncate` keeps the head,
-    while the CLI writes its refusal *after* the command's own output. A
-    command emitting more than the cap on stderr therefore hands this function
-    a string with the refusal cut off. Nothing here produces that volume, and
-    the up-front probe reads the raw stream, so the primary gate is unaffected.
+    Made and removed over the transport, which is the only channel this file
+    has left — and the right one, because a directory the transport cannot
+    create is a directory the verbs under test could not have used either.
     """
-    refusal = _proxy_refusal(result.get("stderr") or "", result.get("error") or "")
-    if refusal:
-        raise AssertionError(
-            f"{what} was refused, not answered: {refusal}. `exit_code` here is "
-            "the docker CLI's, not the command's — this result says nothing "
-            "about the container."
-        )
+    path = f"/home/dev/.istota-it-{uuid.uuid4().hex[:8]}"
+    made = _exec(f"mkdir -p {path}")
+    if made["exit_code"] != 0:
+        pytest.fail(f"could not create {path} in the devbox: {made['stderr']}")
+    yield path
+    _exec(f"rm -rf {path}")
 
 
-def _exec(command: str) -> dict:
-    result = devbox.cmd_exec(_args(command=command, timeout=60))
-    _refuse_a_refusal(result, "`docker exec`")
-    return result
+def _exec(command: str, timeout: int = 60) -> dict:
+    return devbox.cmd_exec(_args(command=command, timeout=timeout))
 
 
 def _exec_file(path, interpreter: str | None = None, timeout: int = 60) -> dict:
-    result = devbox.cmd_exec_file(
+    return devbox.cmd_exec_file(
         _args(path=str(path), interpreter=interpreter, timeout=timeout),
     )
-    _refuse_a_refusal(result, "`exec-file`")
-    return result
 
 
 def _cp_in(src, dest: str) -> dict:
-    """`cp-in`, guarded. Its arrival check is a `docker exec`, so a refusal
-    reaches it as a failure to read the destination back — which without the
-    guard reads as the ISSUE-306 symptom the check exists to detect."""
-    result = devbox.cmd_cp_in(_args(src=str(src), dest=dest))
-    _refuse_a_refusal(result, "`cp-in`")
-    return result
+    return devbox.cmd_cp_in(_args(src=str(src), dest=dest))
 
 
 def _cp_out(src: str, dest) -> dict:
-    result = devbox.cmd_cp_out(_args(src=src, dest=str(dest)))
-    _refuse_a_refusal(result, "`cp-out`")
-    return result
+    return devbox.cmd_cp_out(_args(src=src, dest=str(dest)))
+
+
+class TestItIsActuallyTheContainer:
+    """The assertions a client that ran the command on the host cannot pass.
+
+    "A file written into the shared path appears on the other side" is path
+    identity, which is the design — so it passes byte for byte against a host
+    that never had a container. That is the shape of the three sandbox
+    scenarios which stayed green through the whole period every task ran
+    unconfined. These name something only the image can produce.
+    """
+
+    def test_the_hostname_differs_from_this_one(self):
+        result = _exec("cat /etc/hostname")
+        assert result["exit_code"] == 0, result
+        assert result["stdout"].strip(), result
+        assert result["stdout"].strip() != os.uname().nodename, (
+            "the command reported this machine's hostname, so it ran here "
+            "rather than in the container"
+        )
+
+    def test_stat_reports_the_container_side_view(self):
+        """`stat` is answered by the server, so its facts are the container's.
+
+        The hostname is the discriminating one — the roots would be identical
+        on a host that happened to be configured the same way, which is the
+        design (Design 15 wants one spelling on both sides).
+        """
+        info = devbox.cmd_status(_args())
+        assert info["status"] == "ok", info
+        transport = info["transport"]
+        assert transport["reachable"] is True, transport
+        assert transport["home"] == "/home/dev", transport
+        assert transport["hostname"] != os.uname().nodename, transport
+
+    def test_a_path_that_exists_only_in_the_image_resolves(self):
+        """The exec server itself: installed by the image, absent on a host
+        that merely has the repository checked out."""
+        result = _exec("test -x /usr/local/bin/istota-exec-serve")
+        assert result["exit_code"] == 0, result
+        assert not os.path.exists("/usr/local/bin/istota-exec-serve"), (
+            "this host has the server installed too, so the assertion above "
+            "cannot distinguish the container — pick another image-only path"
+        )
 
 
 class TestCopyRoundTrip:
@@ -256,27 +177,34 @@ class TestCopyRoundTrip:
         assert result["status"] == "ok", result
         assert dest.read_text() == "from inside\n"
 
-    def test_cp_in_reports_an_error_rather_than_losing_the_file(self, container, allowlisted_dir):
-        """The `/workspace` tmpfs used to take a copy, report ok, and drop it."""
+    def test_a_destination_outside_the_servers_roots_is_refused(
+        self, allowlisted_dir,
+    ):
+        """The refusal is the *server's*, decided inside the container.
+
+        This used to be a daemon-side list of container paths — a guess about
+        the container's mount table, which is what ISSUE-306 and ISSUE-312 both
+        were. `/etc` exists in both namespaces and means different things,
+        which is exactly the class the root test closes.
+        """
         src = allowlisted_dir / "probe.txt"
         src.write_text("hello\n")
-        result = _cp_in(src, "/workspace/probe.txt")
-        assert result["status"] == "error"
-        assert "tmpfs" in result["error"]
-        # And nothing arrived under that name either way.
-        assert _exec("test -e /workspace/probe.txt")["exit_code"] != 0
+
+        result = _cp_in(src, "/etc/probe.txt")
+
+        assert result["status"] == "error", result
+        assert result.get("code") == proto.ERR_PATH_REFUSED, result
+        assert _exec("test -e /etc/probe.txt")["exit_code"] != 0
 
 
 class TestExecPipelineStatus:
     """ISSUE-307, in the shell that actually runs the command.
 
-    The unit tier fakes `_run_docker`, so the shell whose options are the whole
-    question never exists there; it compensates by running the argv locally,
-    which proves bash honours the flag but not that this image's `bash` is the
-    one being reached. These two are the end of that chain.
+    The unit tier runs a server on the host, so it proves this build's `bash`
+    honours the flag; these prove the *image's* does.
     """
 
-    def test_a_failing_pipeline_is_not_reported_as_success(self, container):
+    def test_a_failing_pipeline_is_not_reported_as_success(self):
         result = _exec("false | tail -1")
         assert result["status"] == "ok", result
         assert result["exit_code"] != 0, (
@@ -284,13 +212,13 @@ class TestExecPipelineStatus:
             "`exit_code` in this envelope does not mean what it says"
         )
 
-    def test_a_succeeding_pipeline_is_still_success(self, container):
+    def test_a_succeeding_pipeline_is_still_success(self):
         """Control: the option must not turn every pipeline red."""
         result = _exec("echo hi | tail -1")
         assert result["exit_code"] == 0, result
         assert result["stdout"] == "hi\n"
 
-    def test_the_option_is_on_inside_the_container(self, container):
+    def test_the_option_is_on_inside_the_container(self):
         result = _exec("set -o | grep pipefail")
         assert result["exit_code"] == 0, result
         assert result["stdout"].split() == ["pipefail", "on"], result["stdout"]
@@ -302,7 +230,7 @@ class TestExecFile:
         ("probe.py", "print('python-ok')\n", "python-ok\n"),
     ])
     def test_runs_a_script_through_its_interpreter(
-        self, container, allowlisted_dir, name, body, expected,
+        self, allowlisted_dir, name, body, expected,
     ):
         script = allowlisted_dir / name
         script.write_text(body)
@@ -311,11 +239,9 @@ class TestExecFile:
         assert result["exit_code"] == 0, result
         assert result["stdout"] == expected
 
-    def test_runs_a_script_with_no_extension_via_its_shebang(
-        self, container, allowlisted_dir,
-    ):
-        """The staging dir used to be a `noexec` tmpfs, so this path could not
-        work even once the file was reachable."""
+    def test_runs_a_script_with_no_extension_via_its_shebang(self, allowlisted_dir):
+        """The staging directory used to be a `noexec` tmpfs, so this path
+        could not work even once the file was reachable."""
         script = allowlisted_dir / "probe"
         script.write_text("#!/bin/bash\necho shebang-ok\n")
         result = _exec_file(script)
@@ -323,9 +249,9 @@ class TestExecFile:
         assert result["exit_code"] == 0, result
         assert result["stdout"] == "shebang-ok\n"
 
-    def test_leaves_no_staged_copy_behind(self, container, allowlisted_dir):
-        """The cleanup `rm -f` used to run against a path the file was never
-        written to, so it removed nothing and exited 0.
+    def test_leaves_no_staged_copy_behind(self, allowlisted_dir):
+        """The cleanup used to run against a path the file was never written
+        to, so it removed nothing and exited 0.
 
         Scoped to this process's own staged name: the staging directory is
         shared by every caller and keyed on pid, so asserting it is globally
@@ -338,3 +264,19 @@ class TestExecFile:
 
         staged = f"{devbox._EXEC_STAGING_DIR}/exec_{os.getpid()}_probe.sh"
         assert _exec(f"test -e {staged}")["exit_code"] != 0, staged
+
+
+class TestStatus:
+    def test_it_reports_the_container_and_the_transport_separately(self):
+        """Two halves, and neither substitutes for the other: Docker says the
+        container is running, the transport says the server inside it answers.
+        """
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["transport"]["reachable"] is True, info
+        if shutil.which(devbox._docker_cli()) and devbox._container_name():
+            # Only where this process can reach Docker at all — on the
+            # deployment the CLI runs host-side and can, but the transport
+            # half must not depend on it.
+            assert "container" in info, info

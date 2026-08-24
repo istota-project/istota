@@ -83,6 +83,7 @@ from .skills.briefing import (
     parse_briefing_json,
     strip_briefing_preamble,
 )
+from . import config as istota_config
 from .config import BriefingConfig, Config, SchedulerConfig, load_config
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
@@ -4369,6 +4370,17 @@ def check_worktree_reap(config: Config) -> list:
     Nothing is protected by name here, and nothing needs to be: the retention
     window is the guard, and it is floored well above any task's lifetime.
 
+    **The global root, not a per-user one, and that is deliberate.** Everything
+    that scopes a *task* takes `{repos_dir}/{user_id}` — the bwrap bind, the
+    container mount, `DEVELOPER_REPOS_DIR`, the credential scrub — because those
+    decide what one user's model can reach. This sweep decides nothing of the
+    kind: it runs in the daemon, on a cadence, for the whole deployment, and it
+    has no user to scope to. Handed a per-user root it would need a list of
+    users, and a user missing from that list would keep every worktree they ever
+    made, silently — which is the ISSUE-288 state this exists to end. The
+    per-user directories sit one level below the root and `find_git_dirs`'
+    depth budget covers them.
+
     Returns the outcomes so a caller can assert on them; the sweep logs its own
     removals and a count of what it kept.
     """
@@ -6956,6 +6968,26 @@ def run_daemon(
             )
     logger.info("SECURITY Skill proxy: %s", "enabled" if config.security.skill_proxy_enabled else "disabled")
     logger.info("SECURITY Network proxy: %s", "enabled" if config.security.network.enabled else "disabled")
+    # Beside the sandbox lines rather than in a corner of its own: this is the
+    # other thing that decides where a task's commands actually run. A feature
+    # that silently no-ops is how the compose devbox reached the state
+    # `312f8fd5` found it in, so the backend is named at start-up and checked by
+    # `doctor` — a log line an operator can grep for, and a check that says
+    # whether the rendered config and this process agree.
+    _container_backend = istota_config.container_backend(config)
+    if istota_config.devbox_container_backend(config):
+        logger.info(
+            "SECURITY Development container: %s — %s command(s) route into the "
+            "user's devbox over the exec transport",
+            _container_backend,
+            len(config.developer.container.shim_commands),
+        )
+    else:
+        logger.info(
+            "SECURITY Development container: %s — project code builds and runs "
+            "on the host",
+            _container_backend,
+        )
 
     # The runtime self-check. Logs every non-OK result and alerts the admin
     # allowlist on any failure; never aborts, whatever it finds (see the

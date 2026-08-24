@@ -1,0 +1,41 @@
+# Negative control: the devbox image whose vendored exec protocol has drifted.
+#
+# `scripts/sync-devbox-lib.sh` copies two files into the build context now, and
+# the second one is the wire format. A stale copy means the server in the
+# container and the client on the istota side disagree about framing — which
+# surfaces as a `bad_request` or a hang, in a subsystem that has already
+# produced three wrong-exit-status bugs.
+#
+# The sibling of `Dockerfile.devbox-stale-wrapper`, and for the same reason it
+# exists separately from `Dockerfile.devbox-no-forge`: a comparison that raises
+# before reaching its `assert` goes red on a *missing* file and is still
+# incapable of noticing one that genuinely differs. So this perturbs the copy
+# rather than removing it. The module is present, readable, and still imports —
+# only its bytes differ from `src/istota/devbox_exec_protocol.py`.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-stale-exec-protocol \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-stale-exec-protocol:local docker/test
+ARG BASE
+FROM ${BASE}
+
+USER root
+
+# `printf '\n# …'` rather than `echo`, for the reason spelled out in
+# Dockerfile.devbox-stale-wrapper: the source happens to end in a newline, and
+# a control that stopped appending and started concatenating onto the last
+# statement would still parse and would be corrupting a line instead.
+#
+# The import check afterwards is what keeps this control honest. An image whose
+# protocol module no longer imports would fail the transport tests too, and
+# this file's whole job is to move exactly one assertion.
+RUN set -eux; \
+    printf '\n# drift introduced by Dockerfile.devbox-stale-exec-protocol\n' \
+        >> /usr/local/lib/istota_devbox_exec/istota_devbox_exec_protocol.py; \
+    python3 -c "import sys; sys.path.insert(0, '/usr/local/lib/istota_devbox_exec'); import istota_devbox_exec_protocol as p; assert p.PROTOCOL_VERSION == 1"; \
+    /usr/local/bin/istota-exec-serve --help > /dev/null; \
+    echo "control: the protocol module still imports, its hash now differs"
+
+USER dev

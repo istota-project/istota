@@ -153,6 +153,48 @@ This needs both `Delegate=memory pids cpu` and `DelegateSubgroup=supervisor` on 
 
 **A host that has not re-run this role keeps working.** Containment never engages, nothing raises, and the daemon logs the reason once at startup rather than looking protected — so check the startup log after an Ansible run, not just the config.
 
+## The dev container
+
+`istota_devbox_enabled` brings up one container per entry in `istota_devbox_users`, from `deploy/ansible/templates/docker-compose.devbox.yml.j2`. It is the only devbox definition in the tree; the Docker compose stack ships none.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `istota_devbox_enabled` | `false` | Bring up the containers and enable the `devbox` skill |
+| `istota_devbox_users` | `[]` | User ids to create a container for. Container name is `devbox-<user_id>` |
+| `istota_devbox_mem_limit` | `"4g"` | Per container, shared by all of that user's concurrent tasks |
+| `istota_devbox_cpus` / `istota_devbox_pids_limit` | `2` / `512` | Per container |
+| `istota_devbox_log_max_size` / `istota_devbox_log_max_file` | `"10m"` / `3` | The container's own log. The default json-file driver is unbounded, and the supervisor writes a line per server exit |
+| `istota_devbox_force_recreate` | `false` | Rebuild the image and recreate the containers on the next run even when nothing tracked changed. A command-line override, not an inventory setting |
+
+The container runs a supervisor as PID 1's child rather than `sleep infinity`, with `init: true` for reaping. `restart: unless-stopped` restarts the container and says nothing about a process inside one, so without the supervisor a server picked off by a dockerd restart or a memory limit stays gone until somebody notices.
+
+The raw-socket diagnostics — `traceroute`, `mtr`, `tcpdump` — do not work inside it. They need `CAP_NET_RAW`, which the definition no longer grants: a build needs none of them, and a container holding it can pick its own source address and walk past every address-scoped drop rule the role installs. `ping` is probably unaffected, since it tries an unprivileged ICMP datagram socket first and Docker's default sysctls permit that. Egress is otherwise permissive, bounded by those rules — link-local, Azure's host agent, RFC1918 and carrier-grade NAT.
+
+## Where project code builds and runs
+
+`istota_developer_container_backend` decides this, deployment-wide. `none` (the default) is what every deployment did before: `npm`, `uv`, `cargo` and the rest run on the host inside the task's sandbox, where they cannot reach a registry that is not on the CONNECT allowlist and cannot install a system package. `devbox` routes them into that user's container over a Unix-socket exec transport, with their real exit codes, their whole output and no timeout of their own.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `istota_developer_container_backend` | `"none"` | `none` or `devbox` |
+| `istota_developer_container_exec_socket_dir` | `/run/{{ istota_namespace }}-exec` | Parent of the per-user socket directories |
+| `istota_developer_container_connect_timeout_seconds` | `5.0` | The client's connect budget |
+| `istota_developer_container_idle_timeout_seconds` | `3600` | Server-side backstop reap for an idle connection |
+| `istota_developer_container_shim_commands` | fifteen | The commands routed into the container |
+| `istota_developer_repos_migrate_to` | `""` | The user id an existing flat `repos_dir` belongs to. For one run, then remove it |
+
+`istota_devbox_uid` and `istota_devbox_gid` are **derived**, not configured: the role reads them with `getent passwd {{ istota_user }}` and passes them to the image build, so the daemon and the container write into the shared worktree as one identity. Get that wrong and there is no error message anywhere that says so — the container cannot write into a worktree the daemon made, and once that is worked around the daemon cannot unlink a tree the container made, which leaves every worktree that ever ran a build permanently unreapable. The play asserts the lookup succeeded rather than failing later on an undefined variable.
+
+Leave `istota_security_sandbox_cache_dir` blank. With `istota_developer_enabled` and `istota_developer_repos_dir` set, each user's package cache is derived at `{repos_dir}/{user_id}/.package-caches`, which is inside the repos mount the container already gets — so cache and venv are on one mount and uv hardlinks rather than copying (`link(2)` compares mounts rather than devices). Setting the key on a deployment with the developer skill configured names a path nothing reads.
+
+### Two upgrade notes
+
+**The repos directory gains a level, whatever backend you run.** `istota_developer_repos_dir` is now a per-user root: the daemon derives `{repos_dir}/{user_id}` and hands that to the sandbox bind, `DEVELOPER_REPOS_DIR`, the credential scrub and the container mount. That is what closes cross-user reach into another person's worktrees, and it applies on `backend: none` as much as on `devbox`. The role moves an existing flat layout down a level on the first run, refusing any repository holding uncommitted work or written to in the last quarter of an hour. **With more than one configured user it cannot derive the owner** — the old layout recorded none — so it reports what it would move, changes nothing, and fails the play until `istota_developer_repos_migrate_to` names the user. That failure is deliberate: a green play there is followed by a daemon restart into a state where the repos bind names an empty directory and the developer skill is silently unusable.
+
+**Every dev container is rebuilt and recreated.** The image gains the exec server, the supervisor and the uid build args, and the container's PID 1 changes, so the first run after this lands interrupts whatever is in the box at the time. The `/home/dev` volume repairs its own ownership: the supervisor chowns it once when the owner does not match the new uid, guarded by a stat of the directory, so it happens on the first start and never again. Watch `docker logs devbox-<user>` for `supervising …` and no respawn loop.
+
+Then check it before a task does: `istota doctor --only developer.container` gives four results — does the rendered config agree with the running daemon, does the transport answer, do the two sides agree on uid and repos root, and is the uv cache mounted. `istota doctor --only developer.repos_layout` reports repositories still sitting outside a user's directory. A `skip` in either means the check did not run, not that the property holds.
+
 ## Disk growth
 
 Three things on the host grew without a bound until this was fixed, and between them they filled a root disk.

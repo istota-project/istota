@@ -1,0 +1,34 @@
+# Negative control: the devbox image with /workspace back.
+#
+# `/workspace` was a 1 GiB tmpfs charged against the container's memory limit,
+# and it produced ISSUE-306 and ISSUE-312 — `docker cp` cannot traverse a tmpfs
+# mount, so a file copied there arrived nowhere while every layer above
+# reported success. It is deleted: the work root is a bind mount of the repos
+# tree and scratch is /home/dev.
+#
+# `test_the_image_has_no_workspace_directory` asserts its absence, and an
+# absence assertion is the archetype of a test that can never fail. `test ! -e`
+# against a path nothing was ever going to create passes on any image at all,
+# including one with no devbox in it. This control is the only thing that says
+# otherwise.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-workspace-present \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-workspace-present:local docker/test
+ARG BASE
+FROM ${BASE}
+
+USER root
+
+# 1777, which is what the retired tmpfs mount used, so the control reproduces
+# the path as the deployment actually had it rather than an arbitrary directory
+# with the same name.
+RUN set -eux; \
+    mkdir -p /workspace; \
+    chmod 1777 /workspace; \
+    test -d /workspace; \
+    echo "control: /workspace is back"
+
+USER dev

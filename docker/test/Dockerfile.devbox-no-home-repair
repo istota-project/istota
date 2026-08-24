@@ -1,0 +1,44 @@
+# Negative control: the devbox image whose supervisor never repairs /home/dev.
+#
+# The daemon and this container run as the same numeric uid because they share
+# a filesystem. A pre-existing /home/dev volume was written by an image where
+# `dev` was 1000, so on a deployment whose daemon is not 1000 it is a home the
+# user cannot write — and the failure has no error message anywhere that says
+# "uid". `scripts/istota-exec-run` repairs it once, guarded by a stat of the
+# directory itself.
+#
+# `test_the_supervisor_repairs_a_home_directory_with_the_wrong_owner` is the
+# assertion, and it needs a control of its own rather than borrowing
+# `devbox-no-exec-server`'s. That image turns the same test red, but by way of
+# a transport that never comes up — the chown would have run correctly and the
+# assertion never reaches its own comparison. Same distinction
+# `Dockerfile.devbox-stale-wrapper` draws against `Dockerfile.devbox-no-forge`.
+#
+# So this leaves the transport entirely intact and removes only the call. The
+# function stays defined, which keeps the edit to one line and keeps the script
+# a script.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-no-home-repair \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-no-home-repair:local docker/test
+ARG BASE
+FROM ${BASE}
+
+USER root
+
+# The `sed` targets the single call site in `main()`, and everything after it
+# is what keeps a control from silently editing nothing: two occurrences before
+# (the definition and the call), one after (the definition alone), and the
+# script still parses. A control whose edit missed would otherwise report a
+# green tier as proof that the assertion works.
+RUN set -eux; \
+    target=/usr/local/bin/istota-exec-run; \
+    test "$(grep -c 'repair_home_ownership' "$target")" = "2"; \
+    sed -i 's|^    repair_home_ownership$|    : # control: the repair call is removed|' "$target"; \
+    test "$(grep -c 'repair_home_ownership' "$target")" = "1"; \
+    sh -n "$target"; \
+    echo "control: the supervisor still runs, and never chowns /home/dev"
+
+USER dev

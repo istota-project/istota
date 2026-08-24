@@ -16,6 +16,7 @@ dest_dir="${repo_root}/docker/devbox/lib"
 # source-relative-path  ->  destination basename
 sync_pairs=(
     "src/istota/forge_cli.py:istota_forge_cli.py"
+    "src/istota/devbox_exec_protocol.py:istota_devbox_exec_protocol.py"
 )
 
 mkdir -p "${dest_dir}"
