@@ -113,72 +113,6 @@ class TestBuildSkillEnvConfig:
         assert "NONEXISTENT" not in env
 
 
-class TestConfigPerUser:
-    """The `config_per_user` source: a configured root, plus the task's user id.
-
-    It exists because an `EnvSpec` cannot interpolate a user id and
-    `DEVELOPER_REPOS_DIR` has to be scoped — see
-    `TestSkillManifestEnvSpecs::test_developer_repos_dir_is_scoped_to_the_task_user`
-    for what a global one costs.
-    """
-
-    def _meta(self, when=""):
-        return SkillMeta(
-            name="developer",
-            description="Developer",
-            env_specs=[EnvSpec(
-                var="DEVELOPER_REPOS_DIR",
-                source="config_per_user",
-                config_path="developer.repos_dir",
-                when=when,
-            )],
-        )
-
-    def test_the_user_id_is_appended(self, tmp_path):
-        config = _make_config(tmp_path)
-        config.developer.enabled = True
-        config.developer.repos_dir = "/srv/repos"
-        ctx = _make_ctx(tmp_path, config=config)
-
-        env = build_skill_env(["developer"], {"developer": self._meta()}, ctx)
-
-        assert env["DEVELOPER_REPOS_DIR"] == "/srv/repos/alice"
-
-    def test_the_same_guards_apply_as_to_config(self, tmp_path):
-        config = _make_config(tmp_path)
-        config.developer.enabled = False
-        config.developer.repos_dir = "/srv/repos"
-        ctx = _make_ctx(tmp_path, config=config)
-
-        env = build_skill_env(
-            ["developer"], {"developer": self._meta(when="developer.enabled")}, ctx
-        )
-
-        assert "DEVELOPER_REPOS_DIR" not in env
-
-    def test_a_task_with_no_user_resolves_to_nothing(self, tmp_path):
-        """Never to the unscoped root. Resolving to `{repos_dir}` would hand a
-        caller the global tree wearing a per-user variable's name, which is the
-        containment hole this source exists to close."""
-        config = _make_config(tmp_path)
-        config.developer.repos_dir = "/srv/repos"
-        ctx = _make_ctx(tmp_path, config=config)
-        ctx.task.user_id = ""
-
-        env = build_skill_env(["developer"], {"developer": self._meta()}, ctx)
-
-        assert "DEVELOPER_REPOS_DIR" not in env
-
-    def test_an_unset_root_resolves_to_nothing(self, tmp_path):
-        config = _make_config(tmp_path)
-        config.developer.repos_dir = ""
-        ctx = _make_ctx(tmp_path, config=config)
-
-        env = build_skill_env(["developer"], {"developer": self._meta()}, ctx)
-
-        assert "DEVELOPER_REPOS_DIR" not in env
-
-
 class TestBuildSkillEnvUserId:
     """Tests for 'user_id' source type."""
 
@@ -573,9 +507,14 @@ class TestPhase2ManifestAcceptance:
 
         Left global, `code_review run --worktree {repos_dir}/other-user/…` is in
         bounds — the exact cross-user reach the per-user layout closes,
-        surviving in the last place anyone would look. An `EnvSpec` has no way
-        to interpolate a user id, which is why this is a source kind rather than
-        a template.
+        surviving in the last place anyone would look.
+
+        Both manifests must therefore be `setup_env`, not `config`, and the
+        distinction is not stylistic: a `from: config` entry cannot be corrected
+        by the hook that knows the layout. `execute_task` merges
+        `build_skill_env` first and the hooks second, both under
+        `if k not in env`, so the manifest would win and the hook's scoped value
+        would be dropped without a word.
         """
         from istota.skills._loader import load_skill_index
 
@@ -584,8 +523,9 @@ class TestPhase2ManifestAcceptance:
             meta = index.get(skill)
             assert meta is not None, skill
             spec = next(s for s in meta.env_specs if s.var == "DEVELOPER_REPOS_DIR")
-            assert spec.source == "config_per_user", (
-                f"{skill} still resolves DEVELOPER_REPOS_DIR globally"
+            assert spec.source == "setup_env", (
+                f"{skill} resolves DEVELOPER_REPOS_DIR from the manifest, which "
+                f"outranks the hook that scopes it"
             )
 
     def test_google_workspace_token_marked_sensitive_via_setup_env(self):

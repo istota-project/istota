@@ -68,7 +68,7 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
     if spec.gate_has_discovered_calendars and not ctx.discovered_calendars:
         return None
 
-    if spec.source in ("config", "config_per_user"):
+    if spec.source == "config":
         # Guard check (intentionally falsy-aware: empty string / 0 / False
         # all mean "feature disabled"). ``when`` is either a string or a
         # list of strings — all listed paths must be truthy.
@@ -82,24 +82,7 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
         # with empty strings or numeric zeros.
         if val is None:
             return None
-        if spec.source == "config":
-            return str(val)
-
-        # ``config_per_user``: the resolved value is a *root* and the task's
-        # user id is its last component. An ``EnvSpec`` has no way to
-        # interpolate one, which is why this is a source kind rather than a
-        # template — and DEVELOPER_REPOS_DIR is why it exists at all. Left
-        # global, that variable stays `code_review`'s containment root, so
-        # `code_review run --worktree {repos_dir}/other-user/…` is in bounds:
-        # the one consumer of the repos tree whose argument the model picks.
-        #
-        # No user id means no scoping, and a root of ``{value}/`` is the global
-        # root wearing a per-user spelling — so it resolves to nothing rather
-        # than to something wider than asked for.
-        user_id = getattr(ctx.task, "user_id", "") or ""
-        if not user_id or not str(val):
-            return None
-        return str(Path(str(val)) / user_id)
+        return str(val)
 
     elif spec.source == "user_id":
         return getattr(ctx.task, "user_id", None) or None
