@@ -211,7 +211,7 @@ istota_scheduler_shared_file_check_interval: 120  # Shared file organization che
 istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
 istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
 istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping sweep (ISSUE-288, 6h; 0 disables)
-istota_scheduler_sandbox_cache_sweep_interval: 21600 # package-cache sweep (ISSUE-317, 6h; 0 disables). Inert unless istota_security_sandbox_cache_dir is set
+istota_scheduler_sandbox_cache_sweep_interval: 21600 # package-cache sweep (ISSUE-317, 6h; 0 disables). Inert unless a cache root resolves: istota_developer_repos_dir (derived) or istota_security_sandbox_cache_dir (fallback)
 istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch loop's read scans; a lock past this skips the tick instead of blocking 30s (0 = 30s default)
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
