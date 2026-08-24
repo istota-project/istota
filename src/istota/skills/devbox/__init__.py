@@ -93,7 +93,15 @@ _SIGPIPE_NOTE = SIGPIPE_NOTE
 # (deploy/ansible/templates/docker-compose.devbox.yml.j2);
 # tests/test_skills_devbox.py pins the two together. There is one such file:
 # docker/docker-compose.yml ships no devbox, so it declares no tmpfs either.
-_COMPOSE_TMPFS_MOUNTS = ("/workspace",)
+#
+# **Empty, because that template now declares none.** ``/workspace`` was a 1 GiB
+# tmpfs charged against the container's memory limit, and it is what produced
+# ISSUE-306 and ISSUE-312. Nothing needs it once the work root is a bind mount
+# of the user's repos tree and scratch is ``/home/dev``, so it went with the
+# change that made the container a service host. The tuple stays as the mirror
+# mechanism: a tmpfs added back to the template and not to this list is a path
+# ``docker cp`` will silently swallow again.
+_COMPOSE_TMPFS_MOUNTS: tuple[str, ...] = ()
 
 # The mount that produced a report and appears in no compose file, so the pin
 # above was complete and the list was still short by it (ISSUE-312). The
@@ -121,7 +129,19 @@ _COMPOSE_TMPFS_MOUNTS = ("/workspace",)
 # matched by two entries is a path whose refusal message depends on list order.
 _RUNTIME_TMPFS_MOUNTS = ("/dev",)
 
-_CONTAINER_TMPFS_MOUNTS = _COMPOSE_TMPFS_MOUNTS + _RUNTIME_TMPFS_MOUNTS
+# A tmpfs the template used to declare and no longer does. Refused anyway,
+# because a container is not recreated at the instant the template changes: an
+# operator's play rewrites the compose file and the handler recreates each
+# devbox afterwards, and between those two moments a *running* container still
+# has the mount. `/workspace` was also never anything but scratch — the exec
+# staging directory moved to `/home/dev/.istota-exec` when the tmpfs's `noexec`
+# broke the no-interpreter branch — so refusing a path there costs nothing
+# whichever side of the recreate a caller is on.
+_LEGACY_TMPFS_MOUNTS = ("/workspace",)
+
+_CONTAINER_TMPFS_MOUNTS = (
+    _COMPOSE_TMPFS_MOUNTS + _RUNTIME_TMPFS_MOUNTS + _LEGACY_TMPFS_MOUNTS
+)
 
 # Reachable, and still not an exchange path. ``/run/istota-cred`` is the
 # credential proxy's per-user socket directory, bind-mounted from the host by

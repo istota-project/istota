@@ -73,8 +73,7 @@ def _resolve(variables: dict, env: Environment) -> dict:
     raise AssertionError("defaults/main.yml did not reach a fixed point in 10 passes")
 
 
-@pytest.fixture(scope="module")
-def ansible_service() -> dict:
+def _render_service(**overrides) -> dict:
     env = Environment(
         keep_trailing_newline=True,
         trim_blocks=True,
@@ -91,6 +90,13 @@ def ansible_service() -> dict:
             "ansible_facts": {"processor_vcpus": 4},
             "istota_devbox_users": [DEVBOX_USER],
             "istota_devbox_proxy_group_gid": 1001,
+            # Derived by the role with `getent`, never configured: the value
+            # that makes the shared repos mount work is whatever uid the daemon
+            # actually runs as. Supplied here for the same reason the gid above
+            # is — StrictUndefined would otherwise stop the render.
+            "istota_devbox_uid": 999,
+            "istota_devbox_gid": 999,
+            **overrides,
         },
         env,
     )
@@ -98,6 +104,29 @@ def ansible_service() -> dict:
     services = rendered["services"]
     assert len(services) == 1, f"expected one rendered service, got {list(services)}"
     return next(iter(services.values()))
+
+
+@pytest.fixture(scope="module")
+def ansible_service() -> dict:
+    """The service as the defaults render it: `backend = none`."""
+    return _render_service()
+
+
+#: What a deployment routing builds into the devbox sets. Values chosen so the
+#: three container mounts are distinguishable from each other and from anything
+#: the defaults already produce.
+CONTAINER_VARS = {
+    "istota_developer_enabled": True,
+    "istota_developer_container_backend": "devbox",
+    "istota_developer_repos_dir": "/srv/repos",
+    "istota_security_sandbox_cache_dir": "/srv/repos/.cache",
+}
+
+
+@pytest.fixture(scope="module")
+def container_service() -> dict:
+    """The service with `backend = devbox` — the shape this whole design is for."""
+    return _render_service(**CONTAINER_VARS)
 
 
 class TestTheAnsibleDevboxCarriesItsCredentialSocket:
@@ -253,6 +282,149 @@ class TestTheAnsibleVolumeMountsAreHeldInLine:
             )
 
 
+class TestTheThreeSharedPathsAndNoFourth:
+    """`backend = devbox` adds exactly three mounts, and each is load-bearing.
+
+    Every one of them is a directory the container can write, so a fourth
+    arriving unannounced is the thing to catch. The `PERMITTED` allowlist next
+    door covers the default shape; this covers the one this design is for.
+    """
+
+    #: Mount point -> why it is there. Keyed on the *destination*, like
+    #: `TestTheAnsibleVolumeMountsAreHeldInLine`.
+    PERMITTED = {
+        "/home/dev": "the per-user home volume, which is where its state lives",
+        "/run/istota-cred": "the credential proxy socket directory",
+        "/run/istota-exec/alice": (
+            "the exec transport's per-user socket directory — mounted as the "
+            "directory rather than the socket file, so a server restart can "
+            "recreate the inode without stranding the daemon, and only the "
+            "per-user subdirectory so no user's container holds another's"
+        ),
+        "/srv/repos/alice": (
+            "this user's worktrees, at the identical absolute path on both "
+            "sides so a working directory needs no translation"
+        ),
+        "/srv/repos/.cache/alice": (
+            "uv's cache, on the same mount as the venv it populates so link(2) "
+            "does not return EXDEV"
+        ),
+    }
+
+    @staticmethod
+    def _mounts(service: dict) -> dict[str, str]:
+        """`{destination: source}` for every volume entry."""
+        found: dict[str, str] = {}
+        for entry in service.get("volumes", []):
+            if isinstance(entry, dict):
+                found[entry["target"]] = str(entry.get("source", ""))
+            else:
+                parts = str(entry).split(":")
+                assert len(parts) >= 2, f"unparsable volume entry: {entry!r}"
+                found[parts[1]] = parts[0]
+        return found
+
+    def test_the_three_paths_are_mounted(self, container_service):
+        mounts = self._mounts(container_service)
+        assert "/srv/repos/alice" in mounts
+        assert "/srv/repos/.cache/alice" in mounts
+        assert "/run/istota-exec/alice" in mounts, (
+            "the exec socket directory is not mounted, so nothing routes"
+        )
+
+    def test_each_of_the_three_is_at_the_same_spelling_on_both_sides(
+        self, container_service
+    ):
+        """The whole reason a working directory needs no translation. A shim
+        sends `os.getcwd()` and the server checks it with `realpath` against its
+        own root; if the two sides spelled the tree differently that check would
+        refuse every real path."""
+        mounts = self._mounts(container_service)
+        for dest, source in mounts.items():
+            if dest in ("/home/dev", "/run/istota-cred"):
+                continue
+            assert source == dest, (
+                f"{dest} is mounted from {source}; the shared paths must carry "
+                f"one spelling"
+            )
+
+    def test_only_the_per_user_socket_subdirectory_is_mounted(self, container_service):
+        """Mounting the parent would put every user's socket in every user's
+        container, which is arbitrary command execution against another user's
+        repositories."""
+        mounts = self._mounts(container_service)
+        for source in mounts.values():
+            assert not source.rstrip("/").endswith("-exec"), (
+                f"{source} is the socket *parent*, not a per-user subdirectory"
+            )
+
+    def test_nothing_else_arrived(self, container_service):
+        extra = set(self._mounts(container_service)) - set(self.PERMITTED)
+        assert not extra, (
+            f"the container-backed devbox mounts {sorted(extra)} with nothing "
+            f"saying why. Add it to PERMITTED with a reason, or take it out"
+        )
+
+    def test_the_default_shape_mounts_none_of_them(self, ansible_service):
+        """The negative control. `backend = none` is every deployment that has
+        not opted in, and it must be byte-identical to what it was: no repos
+        tree in the container, no cache, no socket."""
+        mounts = TestTheThreeSharedPathsAndNoFourth._mounts(ansible_service)
+        assert set(mounts) == {"/home/dev", "/run/istota-cred"}
+
+    def test_the_supervisor_is_told_where_the_socket_and_the_repos_are(
+        self, container_service
+    ):
+        """Both are required by the supervisor and neither has a defensible
+        default — guessing either would be guessing which user's container this
+        is. Without them it holds with the transport down."""
+        env = container_service.get("environment") or {}
+        assert env.get("ISTOTA_EXEC_SOCKET", "").endswith("/alice/exec.sock")
+        assert env.get("ISTOTA_EXEC_REPOS_ROOT") == "/srv/repos/alice"
+
+    def test_the_caches_are_set_on_the_container_not_on_the_wire(
+        self, container_service
+    ):
+        """One spelling per deployment, in the container's own environment,
+        which the model cannot reach — which is what lets the protocol carry no
+        `env` field at all."""
+        env = container_service.get("environment") or {}
+        assert env["npm_config_cache"] == "/home/dev/.npm"
+        assert env["CARGO_HOME"] == "/home/dev/.cargo"
+        assert env["GOMODCACHE"] == "/home/dev/go/pkg/mod"
+        assert env["UV_PYTHON_INSTALL_DIR"] == "/home/dev/.uv-python"
+        assert env["UV_CACHE_DIR"] == "/srv/repos/.cache/alice"
+
+    def test_the_uv_cache_mount_and_variable_arrive_together(self):
+        """A `UV_CACHE_DIR` naming a directory the container does not have is
+        worse than no variable: uv would create it on the container's own
+        filesystem and every task would silently lose its cache at recreate."""
+        service = _render_service(
+            **{**CONTAINER_VARS, "istota_security_sandbox_cache_dir": ""}
+        )
+        env = service.get("environment") or {}
+        assert "UV_CACHE_DIR" not in env
+        mounts = TestTheThreeSharedPathsAndNoFourth._mounts(service)
+        assert not any("cache" in dest for dest in mounts)
+
+    def test_the_image_is_built_at_the_daemons_own_uid(self, container_service):
+        """The central invariant of the shared mount. A mismatch fails in both
+        directions — the container cannot write into a worktree the daemon
+        made, and once that is worked around the daemon cannot unlink a tree the
+        container made, so every worktree that ever ran a build becomes
+        permanently unreapable."""
+        args = container_service["build"]["args"]
+        assert str(args["DEV_UID"]) == "999"
+        assert str(args["DEV_GID"]) == "999"
+
+    def test_the_uid_args_are_passed_whatever_the_backend(self, ansible_service):
+        """Not gated on the backend: the volume is shared with the daemon's own
+        `docker cp` path too, and a build arg that appears only on one shape is
+        an image that differs between them."""
+        args = ansible_service["build"]["args"]
+        assert str(args["DEV_UID"]) == "999"
+
+
 class TestTheAnsibleServiceKeepsItsContainment:
     """The presence half of what the parity comparison used to check.
 
@@ -278,13 +450,53 @@ class TestTheAnsibleServiceKeepsItsContainment:
     REQUIRED = {
         "image": None,
         "restart": "unless-stopped",
-        "command": ["sleep", "infinity"],
-        "cap_add": ["NET_RAW"],
         "networks": ["devbox-net"],
         "mem_limit": None,
         "cpus": None,
         "pids_limit": None,
+        # tini at PID 1. `command` below is a supervisor that never calls
+        # `wait()` on a process it did not start, so without this anything that
+        # outlives the exec server's own reap stays a zombie against
+        # `pids_limit` for the life of the container. `dockerd` used to reap
+        # `docker exec` children and nobody had to think about it.
+        "init": True,
+        # The json-file driver is unbounded by default and the supervisor
+        # writes a line per server exit, so a server that cannot start at all
+        # fills the disk one line at a time.
+        "logging": None,
     }
+
+    #: Keys this class used to require and deliberately does not any more. Kept
+    #: as a written record rather than deleted, because the class's whole
+    #: purpose is that a key leaving it is a decision somebody made:
+    #:
+    #: `cap_add: [NET_RAW]` — it existed for `ping`, `traceroute`, `mtr` and
+    #: `tcpdump`. A build needs none of them, the diagnostics case the original
+    #: spec was written for is not what the box is used for, and holding the
+    #: capability puts the container in the ISSUE-299 class, where it picks its
+    #: own source address and walks past every `-s`-scoped DROP rule.
+    #:
+    #: `command: ["sleep", "infinity"]` — the container is a service host now,
+    #: not an exec target. Its command is the exec server's supervisor, which is
+    #: also the image's own `CMD`, so the compose value is belt-and-braces
+    #: rather than the property. What matters is that it is *not* `sleep`:
+    #: nothing would restart the server after a dockerd restart or a container
+    #: OOM, and `sleep` as PID 1 never reaps.
+    RETIRED = ("cap_add", "command")
+
+    @pytest.mark.parametrize("key", sorted(RETIRED))
+    def test_a_retired_key_is_not_quietly_back(self, key, ansible_service):
+        """Both were dropped for a reason, and re-adding one should be as
+        deliberate as removing it was."""
+        if key == "command":
+            # The supervisor is a legitimate value here; `sleep infinity` is the
+            # one this design cannot have.
+            assert ansible_service.get("command") != ["sleep", "infinity"]
+            return
+        assert key not in ansible_service, (
+            f"the Ansible devbox declares {key!r} again. It was dropped "
+            f"deliberately — see RETIRED for why"
+        )
 
     @pytest.mark.parametrize("key", sorted(REQUIRED))
     def test_the_key_is_present(self, key, ansible_service):

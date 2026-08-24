@@ -853,10 +853,20 @@ istota_devbox_docker_cli: "/usr/bin/docker"
 istota_devbox_docker_socket: "/var/run/docker.sock"
 istota_devbox_exec_timeout_seconds: 300
 istota_devbox_max_output_bytes: 102400
-istota_devbox_mem_limit: "2g"
+# Raised from 2g when the devbox became the place project code builds. It is now
+# shared by *all* of one user's concurrent tasks (per-user concurrency is about
+# four workers), and the task cgroup no longer bounds a build at all — container
+# processes are in the container's cgroup, not the task's — so this is the only
+# limit left. An OOM-killed build comes back as exit 137 with signal SIGKILL and
+# is reported by nothing else.
+istota_devbox_mem_limit: "4g"
 istota_devbox_cpus: 2
 istota_devbox_pids_limit: 512
-istota_devbox_workspace_tmpfs_size: "1g"
+# How much of the container's log the json-file driver keeps. The default driver
+# is unbounded, and the supervisor writes a line per server exit — a server that
+# cannot start at all would otherwise fill the disk one line at a time.
+istota_devbox_log_max_size: "10m"
+istota_devbox_log_max_file: 3
 istota_devbox_network_name: "{{ istota_namespace }}-devbox-net"
 istota_devbox_network_subnet: "172.30.0.0/24"
 # Metadata and link-local blocking. Covers the whole 169.254.0.0/16, not just
@@ -1097,8 +1107,73 @@ istota_nodejs_enabled: false
 # Developer skill settings (git + GitLab/GitHub workflows)
 # Recommended: dedicated bot accounts with minimal required permissions
 istota_developer_enabled: false
-istota_developer_repos_dir: ""                    # Base directory for repo clones/worktrees
+# Base directory for repo clones/worktrees. **A per-user root**: the daemon
+# derives {repos_dir}/{user_id} and everything that scopes a task — the bwrap
+# bind, the devbox mount, DEVELOPER_REPOS_DIR, the credential scrub — is handed
+# that rather than this. The role moves an existing flat layout down one level
+# on the first run after this lands, and refuses to move a directory holding
+# uncommitted work.
+istota_developer_repos_dir: ""
 istota_developer_author_credit: ""                # Appended to every commit (e.g., "Co-Authored-By: Name <email>")
+
+# --- Where project code builds and runs ([developer.container]) -------------
+#
+# A deploy-time choice, not a runtime one. "none" (the default) is what every
+# deployment did before this existed: npm, uv, cargo and the rest run on the
+# host, inside the task's bwrap sandbox, where they cannot reach a registry that
+# is not on the CONNECT allowlist and cannot install a system package.
+#
+# "devbox" routes them into the user's devbox over a Unix-socket exec transport.
+# It needs istota_devbox_enabled and istota_devbox_users to name the user, and
+# it needs the image rebuilt with the daemon's own uid — the role does that for
+# you (see the DEV_UID build args in the compose template). `istota doctor
+# --only developer.container` is the check; a deployment where the rendered
+# config and the running daemon disagree is reported there rather than found by
+# a task failing hours later.
+istota_developer_container_backend: "none"        # none | devbox
+# The one-time move of an existing flat `repos_dir` into `{repos_dir}/{user}`.
+# Set to the user id the existing clones belong to, run the play once, then take
+# it back out. Unset, the role reports what it *would* move and changes nothing
+# — the old layout recorded no owner, so nothing can derive one, and picking
+# wrong would file one person's work under another's name. The script refuses a
+# repository holding uncommitted work and never merges into an existing
+# destination.
+istota_developer_repos_migrate_to: ""
+# The parent directory holding one socket directory per user. Only the per-user
+# subdirectory is ever mounted into a container: mounting the parent would put
+# every user's socket in every user's container, which is arbitrary command
+# execution against another user's repositories.
+istota_developer_container_exec_socket_dir: "/run/{{ istota_namespace }}-exec"
+# The client's connect budget, and the only timeout on the connect path.
+istota_developer_container_connect_timeout_seconds: 5.0
+# Server-side backstop reap for a connection with no traffic in either
+# direction. Deliberately longer than most values of task_timeout_minutes, so in
+# practice it only fires on an orphan whose task is already gone. Do not lower it
+# to something that would kill a long link step.
+istota_developer_container_idle_timeout_seconds: 3600
+# The commands fronted by a shim. Two absences are deliberate. `python3` is not
+# here and cannot be added — the sandbox starts its own network bridge with it,
+# so a shim would route that into the container and break egress for every
+# developer-enabled task. `make` is not here because shimming a *driver*
+# inverts routing for everything beneath it: a Makefile calling git, gh or
+# python3 would get the container's copies. Add it only if you know your
+# Makefiles.
+istota_developer_container_shim_commands:
+  - npm
+  - npx
+  - pnpm
+  - yarn
+  - node
+  - uv
+  - uvx
+  - pip
+  - pip3
+  - cargo
+  - rustc
+  - rustup
+  - go
+  - bundle
+  - gem
 # The forge CLIs the developer skill drives, from the vendors' own releases
 # rather than the Debian archive: trixie ships gh 2.46 and glab 1.53, roughly
 # fifty releases behind what both images pin, and a bare-metal host is meant to

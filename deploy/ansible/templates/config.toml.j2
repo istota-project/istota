@@ -583,10 +583,22 @@ devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
 worktree_reap_enabled = {{ istota_developer_worktree_reap_enabled | ternary('true', 'false') }}
 worktree_retention_hours = {{ istota_developer_worktree_retention_hours }}
 
-# Subsection, so it has to stay last in the [developer] block: every key after
-# this header belongs to it.
+# Subsections, so they have to stay last in the [developer] block: every key
+# after these headers belongs to one of them.
 [developer.review]
 timeout_seconds = {{ istota_developer_review_timeout_seconds }}
+
+# Where project code builds and runs. "none" runs it on the host inside the
+# task's sandbox, as every deployment did before this key existed; "devbox"
+# routes the commands below into the user's devbox over the exec transport.
+# `istota doctor --only developer.container` is what says whether this file and
+# the running daemon agree.
+[developer.container]
+backend = "{{ istota_developer_container_backend }}"
+exec_socket_dir = "{{ istota_developer_container_exec_socket_dir }}"
+connect_timeout_seconds = {{ istota_developer_container_connect_timeout_seconds }}
+idle_timeout_seconds = {{ istota_developer_container_idle_timeout_seconds }}
+shim_commands = {{ istota_developer_container_shim_commands | to_json }}
 {% endif %}
 
 # User profiles, folder mounts, and briefing schedule/delivery live in the DB

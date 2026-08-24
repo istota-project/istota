@@ -29,6 +29,12 @@
   command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-devbox-proxy.conf
   when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
+- name: "reload systemd-tmpfiles for the exec transport"
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-exec.conf
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
+
 - name: "reload systemd for devbox proxy"
   systemd:
     daemon_reload: yes

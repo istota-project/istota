@@ -1504,7 +1504,13 @@ class TestTmpfsMountList:
     The pin is against the *compose* half alone. ISSUE-312 is what separated
     the two: the runtime's own tmpfs appear in no compose file, so a complete
     pin over the whole list was still a short list, and an equality assertion
-    over it would now fail on mounts no compose file will ever declare."""
+    over it would now fail on mounts no compose file will ever declare.
+
+    Both halves are currently empty of anything but the runtime's, because the
+    template no longer declares a tmpfs: `/workspace` went when the container
+    became a service host with a real bind mount for its work root. The
+    equality assertion is what keeps that honest — a tmpfs added back and not
+    listed here fails, rather than silently swallowing a `docker cp` again."""
 
     REPO_ROOT = Path(__file__).resolve().parents[1]
 

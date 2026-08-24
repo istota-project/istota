@@ -267,6 +267,15 @@ _DEVELOPER_KEYS = {
     "glab_bin_path": "istota_developer_glab_bin_path",
 }
 
+# [developer.container] — where project code builds and runs.
+_DEVELOPER_CONTAINER_KEYS = {
+    "backend": "istota_developer_container_backend",
+    "exec_socket_dir": "istota_developer_container_exec_socket_dir",
+    "connect_timeout_seconds": "istota_developer_container_connect_timeout_seconds",
+    "idle_timeout_seconds": "istota_developer_container_idle_timeout_seconds",
+    "shim_commands": "istota_developer_container_shim_commands",
+}
+
 
 def convert(settings: dict) -> dict:
     """Convert a settings dict to Ansible vars dict."""
@@ -327,6 +336,11 @@ def convert(settings: dict) -> dict:
         for key, ansible_key in _DEVELOPER_KEYS.items():
             if key in developer:
                 result[ansible_key] = developer[key]
+        container = developer.get("container", {})
+        if isinstance(container, dict):
+            for key, ansible_key in _DEVELOPER_CONTAINER_KEYS.items():
+                if key in container:
+                    result[ansible_key] = container[key]
 
     # Brain section — nested: [brain], [brain.native], [brain.source_type_overrides].
     # Ansible defaults + config.toml.j2 already render these; we just map the

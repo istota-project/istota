@@ -2559,6 +2559,31 @@
     - istota_group_lookup.ansible_facts.getent_group is defined
     - istota_group_lookup.ansible_facts.getent_group[istota_group] is defined
 
+# The daemon's own numeric uid and gid, for the image's DEV_UID / DEV_GID build
+# args. Mirrors the group lookup above, and is *not* configurable: the value
+# that makes the shared repos mount work is whatever uid the daemon actually
+# runs as, and an operator-supplied second opinion about that is only ever a way
+# to be wrong. See the compose template for what a mismatch costs — every
+# worktree that ever ran a build becomes permanently unreapable, with no error
+# message anywhere naming a uid.
+- name: Look up the istota user's uid and gid for the devbox image build
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ istota_user }}"
+  register: istota_passwd_lookup
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Set devbox uid/gid facts for the compose template
+  ansible.builtin.set_fact:
+    istota_devbox_uid: "{{ istota_passwd_lookup.ansible_facts.getent_passwd[istota_user][1] }}"
+    istota_devbox_gid: "{{ istota_passwd_lookup.ansible_facts.getent_passwd[istota_user][2] }}"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_passwd_lookup is defined
+    - istota_passwd_lookup.ansible_facts is defined
+    - istota_passwd_lookup.ansible_facts.getent_passwd is defined
+    - istota_passwd_lookup.ansible_facts.getent_passwd[istota_user] is defined
+
 - name: Deploy devbox compose file
   template:
     src: docker-compose.devbox.yml.j2
@@ -2579,10 +2604,17 @@
 # Without this, a Dockerfile-only change ships to the host via git but
 # the running container keeps the old image until something else
 # changes the compose template.
+#
+# `__pycache__` is excluded because `docker/devbox/lib/` holds Python modules:
+# anything that imports one in place leaves bytecode whose filename carries the
+# interpreter version and whose content changes with the source's mtime, so the
+# hash would move on a run where nothing shipped and rebuild and recreate every
+# devbox on the host.
 - name: Hash devbox image content (Dockerfile + lib + scripts + etc)
   ansible.builtin.shell: |
     find {{ istota_repo_dir }}/docker/devbox \
         -type f \( -name Dockerfile -o -path '*/lib/*' -o -path '*/scripts/*' -o -path '*/etc/*' \) \
+        -not -path '*/__pycache__/*' \
         -print0 \
         | LC_ALL=C sort -z \
         | xargs -0 sha256sum \
@@ -2720,6 +2752,121 @@
   when:
     - istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only
     - istota_devbox_users | length > 0
+
+# --- The exec transport ----------------------------------------------------
+#
+# Where project code builds and runs, when
+# `istota_developer_container_backend == 'devbox'`. A server inside each devbox
+# listens on a Unix socket in a host directory both sides see; the daemon writes
+# one shim per configured command into the task's own sandbox, each execing a
+# client that speaks to that socket and exits with the command's real status.
+#
+# Two directories have to exist before a container starts, both for the same
+# reason the credential proxy's do: Docker refuses to create a container whose
+# bind-mount source is missing, and where it does auto-create one it does so as
+# root:root, leaving the daemon unable to write its end.
+
+- name: Install exec-transport socket-directory tmpfiles snippet
+  template:
+    src: istota-exec.tmpfiles.j2
+    dest: "/etc/tmpfiles.d/{{ istota_namespace }}-exec.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
+  notify:
+    - "reload systemd-tmpfiles for the exec transport"
+
+- name: Ensure the exec-transport socket directory exists right now
+  file:
+    path: "{{ istota_developer_container_exec_socket_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
+
+# 0770 rather than 0750: the *container* creates the socket in here, as the
+# daemon's own uid, so it needs write on the directory. That is bounded rather
+# than denied — nothing on the host ever reads anything out of this tree, and
+# the tmpfiles snippet says so at length.
+- name: Ensure per-user exec-transport socket subdirectories exist
+  file:
+    path: "{{ istota_developer_container_exec_socket_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0770"
+  loop: "{{ istota_devbox_users }}"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - istota_developer_container_backend == 'devbox'
+
+# --- The per-user repos layout ---------------------------------------------
+#
+# `developer.repos_dir` became a per-user root: the daemon derives
+# `{repos_dir}/{user_id}` and every task-scoping consumer takes that. One rule
+# closing three holes — a devbox mounting the global root would hand user B
+# write access to user A's worktrees; a non-admin with a devbox would reach past
+# the admin-only bwrap bind through the transport; and one user's credential
+# scrub would walk and rewrite git configs in every other user's tree.
+#
+# The directory is created for every configured user, not only devbox ones: the
+# layout is the daemon's, and a devbox is one consumer of it.
+- name: Ensure the per-user repos directories exist
+  file:
+    path: "{{ istota_developer_repos_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  loop: "{{ (istota_users.keys() | list) | union(istota_devbox_users) | unique }}"
+  when:
+    - istota_developer_enabled and not istota_web_only
+    - istota_developer_repos_dir | length > 0
+
+# The one-time move. Existing clones sit directly under `repos_dir` and go down
+# a level.
+#
+# It refuses rather than moving anything holding uncommitted work — a repository
+# under here can be a bare clone with live worktrees beside it, and a move
+# performed while a task is mid-run would take the checkout out from under it.
+# The script is idempotent and prints what it did; a directory it declined to
+# move is named, left exactly where it is, and reported as changed=false so a
+# rerun after the operator has dealt with it picks it up.
+#
+# Which user a stray repository belongs to is not derivable — the old layout
+# recorded no owner, which is half the reason it is being replaced — so the
+# move needs a name. `istota_developer_repos_migrate_to` is that name, unset by
+# default, and with it unset the task reports what it *would* move and changes
+# nothing.
+- name: Migrate a flat repos layout to the per-user one
+  script: >
+    files/migrate_repos_layout.py
+    --root "{{ istota_developer_repos_dir }}"
+    {% if istota_developer_repos_migrate_to %}--user "{{ istota_developer_repos_migrate_to }}"{% endif %}
+    --known-user "{{ (istota_users.keys() | list) | union(istota_devbox_users) | unique | join(',') }}"
+  args:
+    executable: "{{ istota_home }}/.venv/bin/python"
+  become: true
+  become_user: "{{ istota_user }}"
+  register: istota_repos_migration
+  changed_when: "'MOVED ' in (istota_repos_migration.stdout | default(''))"
+  when:
+    - istota_developer_enabled and not istota_web_only
+    - istota_developer_repos_dir | length > 0
+
+- name: Report repositories the layout migration held back
+  ansible.builtin.debug:
+    msg: "{{ istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|WOULD-MOVE) ') | list }}"
+  when:
+    - istota_repos_migration is defined
+    - istota_repos_migration.stdout is defined
+    - istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|WOULD-MOVE) ') | list | length > 0
 
 # --- Docker-API allowlist proxy. One systemd instance per devbox user; the
 # executor binds {dir}/<user>.sock into the sandbox at /var/run/docker.sock

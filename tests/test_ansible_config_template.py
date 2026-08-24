@@ -276,6 +276,64 @@ class TestTheForgePathsMatchWhatTheRoleInstalls:
 
         assert getattr(config.developer, key) == f"/usr/local/bin/{binary}"
 
+    def test_the_developer_container_block_names_only_real_fields(self):
+        """`[developer]` renders only when the skill is on, so the default
+        walk in `TestEveryRenderedKeyIsARealField` never sees it — and the
+        loader ignores an unknown key, so a rename there is silent on every
+        host. Walk the enabled rendering too."""
+        rendered = render(istota_developer_enabled=True)
+        parsed = tomllib.loads(rendered)
+
+        assert "container" in parsed["developer"], (
+            "config.toml.j2 no longer emits [developer.container], so an "
+            "operator has no way to switch the backend on"
+        )
+        assert not sorted(_unknown_keys(parsed, Config, prefix=""))
+
+    def test_the_container_walk_would_notice_a_bad_key(self):
+        """The guard on the guard, same shape as the section walk above: prove
+        the descent reaches `[developer.container]` rather than stopping at
+        `[developer]` and reporting nothing."""
+        parsed = tomllib.loads(render(istota_developer_enabled=True))
+        poisoned = {
+            **parsed,
+            "developer": {
+                **parsed["developer"],
+                "container": {**parsed["developer"]["container"], "zzz_not_a_field": 1},
+            },
+        }
+
+        assert "developer.container.zzz_not_a_field" in _unknown_keys(
+            poisoned, Config, prefix=""
+        )
+
+    def test_the_rendered_container_block_loads_with_the_values_it_names(self):
+        config = load_config_from(
+            render(
+                istota_developer_enabled=True,
+                istota_developer_container_backend="devbox",
+            )
+        )
+
+        assert config.developer.container.backend == "devbox"
+        # A list, not a string. `shim_commands = "npm"` would iterate as
+        # characters and install a shim called `n`; the loader refuses that, and
+        # this is the assertion that the template does not produce it.
+        assert isinstance(config.developer.container.shim_commands, list)
+        assert "npm" in config.developer.container.shim_commands
+        # The two deliberate absences, which are the routing decision rather
+        # than a preference. See `config.DEFAULT_SHIM_COMMANDS`.
+        assert "python3" not in config.developer.container.shim_commands
+        assert "make" not in config.developer.container.shim_commands
+
+    def test_the_default_rendering_leaves_the_backend_off(self):
+        """A deploy-time choice an operator has to make: the key exists on every
+        host from now on, and on a host that has not opted in it must render the
+        behaviour that host already had."""
+        config = load_config_from(render(istota_developer_enabled=True))
+
+        assert config.developer.container.backend == "none"
+
     def test_the_developer_block_is_absent_when_the_skill_is_off(self, parsed):
         # The role default is off, and an off skill should render no paths at
         # all rather than paths to binaries the role was never asked to install.
