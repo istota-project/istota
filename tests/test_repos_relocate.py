@@ -35,6 +35,7 @@ from istota.repos_relocate import (
     EXIT_OK,
     EXIT_PARTIAL,
     EXIT_REFUSED,
+    REFUSE_NO_ADMINS,
     LAYOUT_VERSION,
     MARKER_NAME,
     RelocateRefusal,
@@ -474,6 +475,35 @@ class TestLiveTaskGuard:
         assert main([]) == EXIT_REFUSED
 
         assert _snapshot(tree["repos_dir"]) == before
+
+    def test_the_refusal_prints_its_reason_code(self, tree, deployment, capsys):
+        """The prose says which user; this says which *kind* of refusal, and it
+        is what the Ansible role reads.
+
+        A caller deciding whether to stop the deploy cannot match on the
+        sentence — it is free to be reworded — so the reason is emitted as a
+        stable token on a line of its own.
+        """
+        deployment.write()
+        deployment.with_live_task("alice")
+
+        assert main([]) == EXIT_REFUSED
+
+        assert "refusal: live_tasks" in capsys.readouterr().err
+
+    def test_each_refusal_reason_reaches_the_output_verbatim(
+        self, tree, deployment, capsys
+    ):
+        """One token per reason, and the live-task one is not special-cased in
+        the printer — the role tells them apart, so they must all be printed
+        the same way or the ones it stops on would be indistinguishable."""
+        deployment.write(admins=[])  # no admins: ownership cannot be inferred
+
+        assert main([]) == EXIT_REFUSED
+
+        err = capsys.readouterr().err
+        assert f"refusal: {REFUSE_NO_ADMINS}" in err
+        assert "refusal: live_tasks" not in err
 
     def test_the_refusal_names_the_user(self, tree, deployment, capsys):
         deployment.write()

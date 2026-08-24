@@ -562,6 +562,123 @@ class TestTheReposRelocationTask:
             "it has to fail the play rather than be reported and passed over"
         )
 
+    def test_a_migration_deferred_by_a_live_task_does_not_fail_the_play(
+        self, migrator
+    ):
+        """The refusal that carries on, and the reason failing was never a
+        safeguard.
+
+        A hard failure here does not stop the new code reaching the host: the
+        auto-update path resets the checkout to `main` and restarts the units
+        whatever this play reports. So failing left the same half-migrated host
+        *and* stopped the rest of the deploy. The refusal is transient — the
+        tasks finish and the next run migrates — so it is reported instead.
+        """
+        condition = migrator["failed_when"]
+
+        assert "rc == 1" in condition, (
+            "no arm of the pass condition admits a refusal, so a task in "
+            "flight fails the whole deploy"
+        )
+        # Bound to the constant rather than to a copy of its value: the play
+        # and the migrator are different languages, and a renamed reason would
+        # otherwise leave the play matching a token nothing prints — which
+        # fails open, back to a hard failure on every busy host.
+        from istota.repos_relocate import REFUSE_LIVE_TASKS
+
+        assert f"refusal: {REFUSE_LIVE_TASKS}" in condition, (
+            "the rule keys on something other than the migrator's own reason "
+            "code, so it cannot tell a transient refusal from a permanent one"
+        )
+
+    def test_only_the_live_task_refusal_is_tolerated(self, migrator):
+        """The other reasons stop the play, and the distinction is the whole
+        point: none of them resolves on its own.
+
+        An ambiguous set of admins, an unreadable root and a destination that
+        is not contained all need a person. Retrying cannot help, so a warning
+        would repeat on every deploy for ever and be read as noise.
+        """
+        condition = migrator["failed_when"]
+
+        for reason in ("no_admins", "many_admins", "unreadable_root"):
+            assert reason not in condition, (
+                f"the play passes over a {reason} refusal, which never "
+                "resolves on its own and so would go unfixed"
+            )
+
+    @pytest.mark.parametrize(
+        "rc,stderr,should_fail,why",
+        [
+            (0, "done: 1 moved, marker written\n", False, "a clean migration"),
+            (0, "", False, "already migrated: exits before it prints anything"),
+            (
+                1, "refusal: live_tasks\n", False,
+                "transient: the tasks finish and the next deploy migrates",
+            ),
+            (
+                1, "refusal: no_admins\n", True,
+                "ownership cannot be inferred and never will be on its own",
+            ),
+            (
+                1, "refusal: unreadable_root\n", True,
+                "needs a person; retrying reads the same unreadable root",
+            ),
+            (
+                2, "NOT repaired: /x\ndone: 1 moved, marker written\n", False,
+                "moved and marked: re-running has no rename left to perform",
+            ),
+            (
+                2, "FAILED: /x\ndone: 0 moved, marker not written\n", True,
+                "nothing moved and no marker, so a re-run retries it",
+            ),
+            (
+                2, "python: No module named istota\n", True,
+                "the command module's own exit 2, with no report behind it",
+            ),
+            (127, "", True, "no interpreter: not the migrator's code at all"),
+        ],
+    )
+    def test_the_pass_condition_evaluates_the_way_it_reads(
+        self, migrator, rc, stderr, should_fail, why
+    ):
+        """The only test that *runs* the expression rather than reading it.
+
+        Every other assertion here greps the condition for a substring, which
+        cannot tell a rule that works from one that is merely worded like it —
+        and this rule is now two arms joined by `or` inside a `not`, which is
+        the shape precedence mistakes hide in. Rendering it through Jinja with
+        the module's own result shape is what settles it.
+        """
+        # `Environment` is imported at module scope, like the rest of this
+        # file. Not `importorskip`: jinja2 is a declared dev dependency, and a
+        # guard would turn an install that lost it into a silently skipped
+        # test rather than a failing one.
+        rendered = Environment(undefined=StrictUndefined).from_string(
+            "{{ " + migrator["failed_when"] + " }}"
+        ).render(_repos_relocate={"rc": rc, "stderr": stderr})
+
+        assert (rendered == "True") is should_fail, (
+            f"rc={rc} ({why}): the play "
+            f"{'passes over' if should_fail else 'fails on'} it"
+        )
+
+    def test_a_deferred_migration_is_reported(self, tasks):
+        """Carrying on silently is how a host stays on the old layout with
+        nobody knowing. The deploy goes green, so this message is the only
+        place it is said."""
+        warnings = [
+            t for t in _flatten(tasks)
+            if "refusal: live_tasks" in str(t.get("when", ""))
+            and t.get("debug") is not None
+            and "NOT migrated" in str(t.get("debug", {}).get("msg", ""))
+        ]
+
+        assert warnings, (
+            "the play tolerates a deferred migration and never says so, so a "
+            "host on the old layout reports a clean deploy"
+        )
+
     def test_a_partial_that_only_needs_a_hand_does_not_fail_the_play(self, migrator):
         """The other half of the same rule, and the reason it is not just
         "fail on anything but zero".

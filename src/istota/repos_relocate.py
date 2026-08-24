@@ -160,7 +160,10 @@ PROGRESS_NAME = ".istota-layout.in-progress"
 #: (nothing was touched), 2 partial (something moved and something did not).
 #: Three rather than two because Ansible reads the code: a refusal is an
 #: operator decision, a partial is an operator repair, and they are not the
-#: same job.
+#: same job. The code alone does not say *which* refusal, and the role needs
+#: that — a `live_tasks` refusal is transient and the play carries on past it,
+#: every other reason needs a person and stops it — so `_print_refusal` also
+#: emits `refusal: <reason>` for a caller to match on.
 EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_PARTIAL = 2
@@ -1083,6 +1086,13 @@ def _print_refusal(refusal: RelocateRefusal) -> None:
     print(f"repos_relocate: refused — {refusal.message}", file=sys.stderr)
     for line in refusal.details:
         print(f"  {line}", file=sys.stderr)
+    # The machine-readable half of the same refusal, because one caller has to
+    # tell them apart and prose is not a contract. Ansible reads this line:
+    # `live_tasks` is the one refusal that resolves on its own — the tasks
+    # finish — so the play reports it and carries on, while every other reason
+    # names something only a person can change and stops the play. Printed last
+    # and on a line of its own so the wording above it stays free to change.
+    print(f"refusal: {refusal.reason}", file=sys.stderr)
 
 
 def _print_plan(plan: RelocatePlan) -> None:
