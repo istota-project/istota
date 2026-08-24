@@ -36,10 +36,17 @@ class _MockBrowser:
 
 
 @dataclass
+class _MockDeveloper:
+    enabled: bool = False
+    repos_dir: str = ""
+
+
+@dataclass
 class _MockConfig:
     nextcloud_mount_path: Path | None = None
     bot_dir_name: str = "istota"
     browser: _MockBrowser = field(default_factory=_MockBrowser)
+    developer: _MockDeveloper = field(default_factory=_MockDeveloper)
 
 
 def _make_config(tmp_path: Path, mount: bool = True) -> _MockConfig:
@@ -104,6 +111,72 @@ class TestBuildSkillEnvConfig:
         )
         env = build_skill_env(["test"], {"test": meta}, ctx)
         assert "NONEXISTENT" not in env
+
+
+class TestConfigPerUser:
+    """The `config_per_user` source: a configured root, plus the task's user id.
+
+    It exists because an `EnvSpec` cannot interpolate a user id and
+    `DEVELOPER_REPOS_DIR` has to be scoped — see
+    `TestSkillManifestEnvSpecs::test_developer_repos_dir_is_scoped_to_the_task_user`
+    for what a global one costs.
+    """
+
+    def _meta(self, when=""):
+        return SkillMeta(
+            name="developer",
+            description="Developer",
+            env_specs=[EnvSpec(
+                var="DEVELOPER_REPOS_DIR",
+                source="config_per_user",
+                config_path="developer.repos_dir",
+                when=when,
+            )],
+        )
+
+    def test_the_user_id_is_appended(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.developer.enabled = True
+        config.developer.repos_dir = "/srv/repos"
+        ctx = _make_ctx(tmp_path, config=config)
+
+        env = build_skill_env(["developer"], {"developer": self._meta()}, ctx)
+
+        assert env["DEVELOPER_REPOS_DIR"] == "/srv/repos/alice"
+
+    def test_the_same_guards_apply_as_to_config(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.developer.enabled = False
+        config.developer.repos_dir = "/srv/repos"
+        ctx = _make_ctx(tmp_path, config=config)
+
+        env = build_skill_env(
+            ["developer"], {"developer": self._meta(when="developer.enabled")}, ctx
+        )
+
+        assert "DEVELOPER_REPOS_DIR" not in env
+
+    def test_a_task_with_no_user_resolves_to_nothing(self, tmp_path):
+        """Never to the unscoped root. Resolving to `{repos_dir}` would hand a
+        caller the global tree wearing a per-user variable's name, which is the
+        containment hole this source exists to close."""
+        config = _make_config(tmp_path)
+        config.developer.repos_dir = "/srv/repos"
+        ctx = _make_ctx(tmp_path, config=config)
+        ctx.task.user_id = ""
+
+        env = build_skill_env(["developer"], {"developer": self._meta()}, ctx)
+
+        assert "DEVELOPER_REPOS_DIR" not in env
+
+    def test_an_unset_root_resolves_to_nothing(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.developer.repos_dir = ""
+        ctx = _make_ctx(tmp_path, config=config)
+
+        env = build_skill_env(["developer"], {"developer": self._meta()}, ctx)
+
+        assert "DEVELOPER_REPOS_DIR" not in env
 
 
 class TestBuildSkillEnvUserId:
@@ -493,6 +566,27 @@ class TestPhase2ManifestAcceptance:
         assert "developer.enabled" in gitlab_token.when
         assert "developer.repos_dir" in gitlab_token.when
         assert "developer.gitlab_token" in gitlab_token.when
+
+    def test_developer_repos_dir_is_scoped_to_the_task_user(self):
+        """`DEVELOPER_REPOS_DIR` is `code_review`'s containment root, and it is
+        the one consumer of the repos tree whose argument the *model* picks.
+
+        Left global, `code_review run --worktree {repos_dir}/other-user/…` is in
+        bounds — the exact cross-user reach the per-user layout closes,
+        surviving in the last place anyone would look. An `EnvSpec` has no way
+        to interpolate a user id, which is why this is a source kind rather than
+        a template.
+        """
+        from istota.skills._loader import load_skill_index
+
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        for skill in ("developer", "code_review"):
+            meta = index.get(skill)
+            assert meta is not None, skill
+            spec = next(s for s in meta.env_specs if s.var == "DEVELOPER_REPOS_DIR")
+            assert spec.source == "config_per_user", (
+                f"{skill} still resolves DEVELOPER_REPOS_DIR globally"
+            )
 
     def test_google_workspace_token_marked_sensitive_via_setup_env(self):
         from istota.skills._loader import load_skill_index
