@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -19,14 +19,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# Layer 2: Node 20 via NodeSource. Kept on its own layer so apt cache
+# Layer 2: Node 24 via NodeSource. Kept on its own layer so apt cache
 # changes here don't bust the heavier base layer above.
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+#
+# 24 is the active LTS line. Node 26 has been out since April and does not
+# become LTS until October, and this is a box people build releases on.
+#
+# Note that docker/istota/Dockerfile and the Ansible role still install Node 20
+# — that is the runtime the shipped web bundle is built and served with, and
+# moving it is a change to the deployed artifact rather than to this box.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get update && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Layer 3: Go (latest stable). Pinned to a versioned URL so rebuilds are
-# reproducible — bump deliberately, not opportunistically.
+# Layer 3: Go. Pinned to a versioned URL so rebuilds are reproducible — bump
+# deliberately, not opportunistically.
+#
+# 1.26.7 rather than 1.27.0: both were published on the same day and 1.27.0 is
+# the .0 of a line that is days old, while 1.26 is the mature supported line.
+# Lagging one minor costs nothing here — GOTOOLCHAIN defaults to `auto`, so a
+# go.mod requiring a newer toolchain fetches it rather than failing.
 #
 # The asset is chosen per architecture, the same way docker/istota/Dockerfile
 # picks its forge assets, and for the same reason: this image had a hardcoded
@@ -45,9 +57,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # checksum file alongside the tarball, so this layer had no verification at all
 # before; it does now. An architecture with no pinned checksum fails the build
 # rather than going unverified.
-ARG GO_VERSION=1.22.2
-ARG GO_SHA256_AMD64=5901c52b7a78002aeff14a21f93e0f064f74ce1360fce51c6ee68cd471216a17
-ARG GO_SHA256_ARM64=36e720b2d564980c162a48c7e97da2e407dfcc4239e1e58d98082dfa2486a0c1
+ARG GO_VERSION=1.26.7
+ARG GO_SHA256_AMD64=ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+ARG GO_SHA256_ARM64=5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "${arch}" in \
@@ -131,11 +143,12 @@ ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 #
 # Pinned to the exact versions the spec's reconnaissance stage measured against
 # (gh 2.98.0, glab 1.114.0), with the published sha256 verified before the
-# archive is opened. Bookworm's own gh is 2.23 — far behind the 2.98 measured
-# there — and ships no glab at all, so these come from the vendors' release
-# artifacts rather than apt. Same versions as docker/istota/Dockerfile and the
-# Ansible role; tests/test_ansible_forge_cli_install.py holds the three equal,
-# so bump them together.
+# archive is opened. Trixie packages both now, where bookworm packaged only gh,
+# but they are 2.46.0 and 1.53.0 — still far behind the versions measured there
+# — so these keep coming from the vendors' release artifacts rather than apt.
+# Same versions as docker/istota/Dockerfile and the Ansible role;
+# tests/test_ansible_forge_cli_install.py holds the three equal, so bump them
+# together.
 #
 # Extracted from the .deb rather than installed with it: dpkg would put a
 # second, real `gh` at /usr/bin/gh, and the whole point is that the only `gh`
