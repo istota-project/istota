@@ -16,13 +16,23 @@
 # It covers both halves of the tier:
 #
 #   * the istota image, via docker/test/Dockerfile.no-forge;
-#   * the devbox image, via four controls, because that file asserts four
+#   * the devbox image, via nine controls, because that file asserts nine
 #     separable things and no single broken image reaches all of them. The
-#     forge-less image alone left four of its thirteen assertions green, since
-#     /usr/local/bin/gh is a *copy* of the wrapper rather than a symlink into
-#     the directory being removed — the fourth control is what closes those.
-#     See the four docker/test/Dockerfile.devbox-* files for what each one
-#     breaks and why.
+#     forge-less image alone left four of the original thirteen assertions
+#     green, since /usr/local/bin/gh is a *copy* of the wrapper rather than a
+#     symlink into the directory being removed — the fourth control is what
+#     closed those. The last five arrived with the exec transport: the uid the
+#     container runs as, the ownership of /home/dev, the vendored protocol
+#     module, whether the transport comes *up*, and the /home/dev repair. See
+#     the nine docker/test/Dockerfile.devbox-* files for what each one breaks
+#     and why, and read each one's note about what it deliberately does not
+#     break — several of them turn a neighbour's assertion red for the wrong
+#     reason, which is exactly what a second control exists to separate.
+#
+# Three assertions in the devbox file have no control, deliberately, and they
+# are the ones that cannot pass vacuously: `test -x` against a named absolute
+# path, `python3 -c 'import …'` against a named directory, and a `Cmd` compared
+# to an exact list all fail closed. A mistake in any of them is red.
 #
 #   scripts/test-image-negative-control.sh [amd64]
 #
@@ -151,10 +161,28 @@ run_devbox_control() {
     # an array: macOS ships bash 3.2.
 
     tag="istota-test/${control_name}:${control_suffix}"
-    echo
-    echo "[control] devbox/${control_name}: ${control_expect}"
     docker build -q -f "docker/test/${control_dockerfile}" \
         --build-arg "BASE=$devbox_base_tag" -t "$tag" docker/test >/dev/null
+
+    require_devbox_failures "$control_name" "$tag" "$control_expect" "$@"
+}
+
+# Run the named node ids against a control image and require every one of them
+# to appear on a FAILED line.
+#
+# Split out from `run_devbox_control` because one control is not a perturbation
+# of the built image: `devbox-wrong-uid` builds the real recipe with different
+# build args, which is the only way to test that the args work at all. A
+# `FROM ${BASE}` image with `usermod -u` applied would turn the same assertion
+# red while proving nothing about `ARG DEV_UID`.
+require_devbox_failures() {
+    control_name="$1"
+    tag="$2"
+    control_expect="$3"
+    shift 3
+
+    echo
+    echo "[control] devbox/${control_name}: ${control_expect}"
 
     # The verdict comes from the captured output, not from `$?` — deliberately.
     # A pipeline reports its *last* command's status, so `| tee` would hand
@@ -231,6 +259,72 @@ run_devbox_control \
     "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_the_real_binary_is_off_path[gh]" \
     "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_the_real_binary_is_off_path[glab]"
 
+
+# --------------------------------------------------------------------------
+# The exec transport and the uid, added with the devbox-as-the-development-
+# container work.
+
+# The one control that is a real build rather than a perturbation. `DEV_UID`
+# and `DEV_GID` exist so the deploy can pass the daemon's own uid, and the only
+# way to know the args work is to use them; a `FROM ${BASE}` image with
+# `usermod -u` applied would turn the assertion red while telling you nothing
+# about `ARG DEV_UID`.
+#
+# It costs a build of the real recipe from the `useradd` layer down, which is
+# uv, rustup and the two forge CLIs — about half a minute on a warm cache, and
+# it needs the network on a cold one. The layers above it (apt, Node, Go) are
+# shared with the base build that already happened.
+echo
+echo "[control] devbox/devbox-wrong-uid: building the real recipe with DEV_UID=1234…"
+wrong_uid_tag="istota-test/devbox-wrong-uid:${control_suffix}"
+docker build -q -f docker/devbox/Dockerfile \
+    --build-arg DEV_UID=1234 --build-arg DEV_GID=1234 \
+    -t "$wrong_uid_tag" docker/devbox >/dev/null
+
+require_devbox_failures \
+    "devbox-wrong-uid" \
+    "$wrong_uid_tag" \
+    "dev is 1234, so a build with no args did not reproduce uid 1000" \
+    "${DEVBOX_TESTS}::TestTheDevUidBuildArgs::test_the_dev_account_has_the_default_uid_and_gid"
+
+run_devbox_control \
+    "devbox-home-owned-by-a-stranger" \
+    "Dockerfile.devbox-home-owned-by-a-stranger" \
+    "/home/dev belongs to an account that does not exist in the image" \
+    "${DEVBOX_TESTS}::TestTheDevUidBuildArgs::test_the_home_directory_belongs_to_the_dev_account"
+
+run_devbox_control \
+    "devbox-stale-exec-protocol" \
+    "Dockerfile.devbox-stale-exec-protocol" \
+    "the vendored protocol module is present and imports, but its bytes differ" \
+    "${DEVBOX_TESTS}::TestTheExecTransportIsInstalled::test_the_vendored_protocol_copy_is_byte_identical_to_the_source"
+
+# The transport tests are the ones where an assertion can pass without the
+# mechanism, so this is the control that matters most of the five. Note what it
+# is *not* asked to prove: the /home/dev repair test also probes the wire and
+# goes red here, for the wrong reason, which is why it is not named and has a
+# control of its own below.
+run_devbox_control \
+    "devbox-no-exec-server" \
+    "Dockerfile.devbox-no-exec-server" \
+    "the supervisor runs but the server is gone, so nothing ever binds" \
+    "${DEVBOX_TESTS}::TestTheExecTransportIsInstalled::test_the_exec_server_is_installed_and_executable" \
+    "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_the_supervisor_brings_the_transport_up" \
+    "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_the_supervisor_restarts_the_server_after_it_dies"
+
+run_devbox_control \
+    "devbox-no-home-repair" \
+    "Dockerfile.devbox-no-home-repair" \
+    "the transport comes up normally and never chowns /home/dev" \
+    "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_the_supervisor_repairs_a_home_directory_with_the_wrong_owner"
+
+run_devbox_control \
+    "devbox-workspace-present" \
+    "Dockerfile.devbox-workspace-present" \
+    "/workspace is back, which an absence assertion can only see if it works" \
+    "${DEVBOX_TESTS}::TestTheWorkspaceTmpfsIsGone::test_the_image_has_no_workspace_directory"
+
 echo
 echo "[control] OK: both halves of the image tier can see a broken artifact,"
-echo "[control] and every assertion in the devbox file has one that reaches it."
+echo "[control] and every assertion in the devbox file that could pass"
+echo "[control] vacuously has one that reaches it."

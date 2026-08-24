@@ -1,10 +1,10 @@
-# Negative control 3 of 3: the devbox image with the real `gh` on PATH.
+# Negative control (the forge half): the devbox image with the real `gh` on PATH.
 #
 # This is the bypass `TestTheWrapperIsWhatResolvesByName` exists to catch, and
 # neither of the other two controls produces it. `/usr/local/bin/gh` is a copy
 # of the wrapper rather than a symlink into `/usr/local/lib/istota_forge`
 # (`docker/devbox/Dockerfile:156`), so deleting that directory leaves the PATH
-# entry intact and four of the file's thirteen assertions green.
+# entry intact and four of the file's forge assertions green.
 #
 # What it reproduces: an image where `gh` resolves by name to the real CLI. The
 # deny policy is then never consulted and the token is never injected — a task

@@ -1,0 +1,43 @@
+# Negative control: the devbox image with the exec server removed.
+#
+# `tests/image/test_devbox_image.py` now claims the exec transport comes *up* —
+# that the supervisor starts, the server binds a socket, and something answers
+# the protocol on it. Reading those tests tells you nothing about whether they
+# can fail: a socket path that is never created and a `probe_wire` that quietly
+# returns are indistinguishable from a working transport unless you have seen
+# the failing case.
+#
+# This is that case. The supervisor is intact and still runs; the binary it
+# supervises is not there, so it loops on exit 127 and nothing ever binds.
+#
+# What it deliberately does **not** control for is the /home/dev repair. That
+# test also probes the wire, so it goes red here — for the wrong reason, since
+# the chown happens before the loop and would have run correctly. Its control
+# is `Dockerfile.devbox-no-home-repair`, which is the same distinction
+# `Dockerfile.devbox-stale-wrapper` exists to draw against
+# `Dockerfile.devbox-no-forge`.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-no-exec-server \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-no-exec-server:local docker/test
+ARG BASE
+FROM ${BASE}
+
+# The base ends on `USER dev` and /usr/local/bin is root-owned. Dropped back at
+# the end so the image the tier receives differs from the product in exactly
+# one way.
+USER root
+
+# The server alone, not the directory holding the vendored protocol module and
+# not the supervisor: each of those is a separate claim with a separate
+# failure, and a control that breaks three things at once cannot tell you which
+# assertion was reading which.
+RUN set -eux; \
+    rm -f /usr/local/bin/istota-exec-serve; \
+    test -x /usr/local/bin/istota-exec-run; \
+    test -f /usr/local/lib/istota_devbox_exec/istota_devbox_exec_protocol.py; \
+    echo "control: the supervisor and the protocol module survive; the server does not"
+
+USER dev

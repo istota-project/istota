@@ -1,11 +1,11 @@
-# Negative control 4 of 4: the devbox image with the forge directory on PATH.
+# Negative control (the forge half): the devbox image with the forge directory on PATH.
 #
 # Added after measuring which assertions the first three controls actually
 # reach. Two did not have a control at all —
 # `test_the_name_resolves_to_the_wrapper[gh]` and `[glab]` — and two more
 # (`test_the_real_binary_is_off_path`) only ever went red through the
 # `test -x` guard raising in the no-forge image, never through the comparison
-# they are written around. Four of thirteen, unfalsified, in the change whose
+# they are written around. Four forge assertions, unfalsified, in the change whose
 # entire purpose was to stop assertions being unfalsified.
 #
 # The defect it reproduces is real and small: someone puts
