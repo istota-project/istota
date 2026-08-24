@@ -18,7 +18,9 @@ about what the container's mount table looks like. Every containment decision is
 made here, at the moment of use, by the process whose view of the filesystem is
 the one the command will actually get:
 
-* a command's ``cwd`` is refused unless it resolves under the repos root
+* a command's ``cwd`` is refused unless it resolves under the repos root — and
+  a request that declines to name one (``cwd: null``) runs in ``--home``, which
+  is this process's own constant rather than a path that travelled
 * ``read_file`` / ``write_file`` are refused unless the ``realpath`` lands under
   the repos root, the home directory or the exec staging directory
 * ``/run/istota-cred`` and ``/run/istota-exec`` are refused by name as well,
@@ -217,13 +219,29 @@ class Roots:
             raise ValueError(f"{label} must be an absolute path, got {value!r}")
         return os.path.realpath(value)
 
+    def default_cwd(self) -> str:
+        """The directory a request that named none runs in: this server's home.
+
+        ``null`` on the wire means "you choose", and the choice is a constant
+        compiled into this process rather than a path that travelled. That is
+        the whole of the distinction: ``check_cwd`` polices paths a caller
+        supplied, and this is not one, so admitting it widens nothing — naming
+        this same directory as a string is still refused.
+        """
+        if not os.path.isdir(self.home):
+            raise ProtocolError(ERR_NO_SUCH_CWD, f"no such directory: {self.home}")
+        return self.home
+
     def check_cwd(self, raw: str) -> str:
-        """Resolve and authorize a working directory.
+        """Resolve and authorize a *caller-supplied* working directory.
 
         Scoped to the repos root alone, which turns the dangerous case into the
         loud one: ``/tmp``, ``/home/…`` and ``/usr/src`` all exist in both
         namespaces and mean different things, so a passed-through ``cwd`` would
-        silently run the command somewhere the model cannot see.
+        silently run the command somewhere the model cannot see. A shim's
+        ``cwd`` is *inherited* — ``os.getcwd()`` in the model's shell, in the
+        other namespace — rather than chosen, which is the class this exists
+        for.
         """
         resolved = self._resolve(raw)
         if not is_under(resolved, self.repos_root):
@@ -524,7 +542,11 @@ class ExecServer:
     async def _do_exec(
         self, request: dict, reader: asyncio.StreamReader, conn: Connection
     ) -> None:
-        cwd = self.roots.check_cwd(request["cwd"])
+        raw_cwd = request["cwd"]
+        if raw_cwd is None:
+            cwd = self.roots.default_cwd()
+        else:
+            cwd = self.roots.check_cwd(raw_cwd)
         shell = request.get("shell")
         if shell is not None:
             argv = [BASH, "-o", "pipefail", "-c", shell]

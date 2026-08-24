@@ -542,12 +542,42 @@ class TestTheWorkingDirectoryIsChecked:
         assert not marker.exists(), "the command ran despite the refusal"
 
     def test_the_home_root_is_not_a_working_directory(self, server):
-        """Design 3 scopes cwd to the repos root alone. /home/dev is a file root
-        so the staging path can be written; it is not somewhere a command runs,
-        because a passed-through cwd that exists in both namespaces is the case
-        that used to run silently in the container's own /tmp."""
+        """Design 3 scopes a *named* cwd to the repos root alone. /home/dev is a
+        file root so the staging path can be written; it is not somewhere a
+        caller may point a command, because a passed-through cwd that exists in
+        both namespaces is the case that used to run silently in the container's
+        own /tmp.
+
+        This is also the assertion that keeps the `cwd: null` amendment from
+        being read as a widening of the roots: the server may choose this
+        directory, and a request may not name it."""
         ack = server.refusal(encode_exec_request(argv=["pwd"], cwd=str(server.home)))
         assert ack["code"] == ERR_PATH_REFUSED
+
+    def test_a_null_cwd_runs_in_the_servers_own_home(self, server):
+        """`null` means "you choose", and the choice is this process's `--home`
+        constant rather than a path that travelled over the wire. It is what the
+        devbox skill's ad-hoc verbs send, which have no repository to stand in."""
+        out = server.run(argv=["pwd"], cwd=None)
+        assert out.stdout.strip() == str(server.home).encode()
+        assert out.terminal["exit_code"] == 0
+
+    def test_a_missing_cwd_key_is_a_bad_request_and_not_the_default(self, server):
+        """Forgetting a field and declining to name one are different
+        statements. A client whose `getcwd` broke must not land in /home/dev."""
+        marker = server.home / "should-not-exist"
+        ack = server.refusal(
+            encode_line(
+                {
+                    "action": "exec",
+                    "argv": ["sh", "-c", f"touch {marker}"],
+                    "stdin": False,
+                    "timeout": 0,
+                }
+            )
+        )
+        assert ack["code"] == ERR_BAD_REQUEST
+        assert not marker.exists(), "the command ran despite the refusal"
 
     def test_a_symlink_out_of_the_root_is_resolved_before_the_test(self, server):
         link = server.repos / "escape"

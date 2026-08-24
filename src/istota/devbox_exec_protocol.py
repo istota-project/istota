@@ -43,6 +43,22 @@ know. The server ships in a separately built image and the client is copied out
 of the daemon's tree at task setup, so the two are independently upgradable by
 construction; bump ``PROTOCOL_VERSION`` whenever a frame or an action changes.
 
+The working directory
+---------------------
+
+``cwd`` is ``string | null`` and **the key is always present**. A string is the
+caller's own directory and the server refuses it unless it resolves under the
+repos root, which turns the dangerous case into the loud one: ``/tmp``,
+``/home/…`` and ``/usr/src`` all exist in both namespaces and mean different
+things. ``null`` selects the server's own default, ``/home/dev`` — a constant
+compiled into the server, decided in the container, never a path off the wire —
+and is what the devbox skill's ad-hoc verbs send, since "install something, no
+repository involved" has no repository to stand in. A **missing** key is
+``bad_request`` rather than the default: forgetting a field and declining to
+name one are different statements, and a client whose ``getcwd`` broke must not
+silently land in ``/home/dev``. Naming ``/home/dev`` as a string is still
+refused, which is what keeps this from being a widening of the roots.
+
 Termination
 -----------
 
@@ -292,7 +308,7 @@ def encode_exec_request(
     *,
     argv: list[str] | None = None,
     shell: str | None = None,
-    cwd: str,
+    cwd: str | None,
     stdin: bool = False,
     timeout: float = 0,
 ) -> bytes:
@@ -302,6 +318,9 @@ def encode_exec_request(
     ``argv`` — no shell, so no quoting bug can be introduced between the model's
     shell and the container; ``shell`` exists for the devbox skill's own ``exec``
     verb, which the server runs under ``bash -o pipefail -c``.
+
+    ``cwd`` has no default and is keyword-only, so a caller has to say which of
+    the two it means. See the module docstring.
 
     There is deliberately **no** ``env`` parameter. See the module docstring.
     """
@@ -377,9 +396,20 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
                 )
         if shell is not None and (not isinstance(shell, str) or not shell.strip()):
             raise ProtocolError(ERR_BAD_REQUEST, "'shell' must be a non-empty string")
-        cwd = payload.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            raise ProtocolError(ERR_BAD_REQUEST, "exec requires a 'cwd'")
+        # Present-and-null and absent are different statements and the server
+        # keeps them apart: declining to name a directory selects the server's
+        # own, while a client whose `getcwd` broke and dropped the field must
+        # not quietly land in it.
+        if "cwd" not in payload:
+            raise ProtocolError(
+                ERR_BAD_REQUEST,
+                "exec requires a 'cwd'; send null to accept the server's default",
+            )
+        cwd = payload["cwd"]
+        if cwd is not None and (not isinstance(cwd, str) or not cwd):
+            raise ProtocolError(
+                ERR_BAD_REQUEST, "'cwd' must be a non-empty string or null"
+            )
         stdin = payload.get("stdin", False)
         if not isinstance(stdin, bool):
             raise ProtocolError(ERR_BAD_REQUEST, "'stdin' must be a boolean")

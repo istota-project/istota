@@ -54,6 +54,21 @@ instead of sending a dead string for the server to have a rule about. ``--cwd``
 overrides it for the devbox skill, which passes a directory it was told about
 rather than one it is standing in.
 
+**This client always sends a string, and has no spelling for ``cwd: null``.**
+The wire carries ``string | null`` — ``null`` meaning "the server chooses",
+which resolves to its own ``/home/dev`` — and the caller that needs it is the
+devbox skill's ad-hoc verbs, which have no repository to stand in. They do not
+get it from here. That skill's CLI runs host-side in a Python process and has
+to import ``devbox_exec_protocol`` regardless, because four of its five verbs
+(``cp-in``, ``cp-out``, ``exec-file``'s write half and ``status``) are actions
+this client does not implement at all and never should — it runs one command
+and exits with its status. Giving it a ``--cwd=-`` or a ``--server-cwd`` would
+be a second mechanism for one verb of a caller that is already speaking the
+wire for the other four, and it would put a flag on the surface a shim bakes
+in, where every added spelling is one more thing a shim can get wrong. So the
+flag surface stays: ``--socket``, ``--cwd``, ``--stdin``, ``--timeout``,
+``--connect-timeout``, ``--``.
+
 No signal handlers
 ------------------
 

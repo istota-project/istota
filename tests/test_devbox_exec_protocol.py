@@ -158,6 +158,29 @@ class TestRequestsRoundTrip:
             "timeout": 300,
         }
 
+    def test_an_exec_that_declines_to_name_a_directory(self):
+        """`null` is a value, not an omission: it selects the server's own
+        default. The pair with the test below is what keeps "declined to name
+        one" distinguishable from "forgot the field"."""
+        line = p.encode_exec_request(argv=["pip", "install", "httpx"], cwd=None)
+        assert p.decode_request(line) == {
+            "action": "exec",
+            "argv": ["pip", "install", "httpx"],
+            "cwd": None,
+            "stdin": False,
+            "timeout": 0,
+        }
+
+    def test_a_missing_cwd_key_is_a_bad_request_rather_than_the_default(self):
+        """A client whose `getcwd` broke and dropped the field must not quietly
+        land in the server's home directory."""
+        with pytest.raises(p.ProtocolError) as caught:
+            p.decode_request(
+                p.encode_line({"action": "exec", "argv": ["pwd"], "stdin": False})
+            )
+        assert caught.value.code == p.ERR_BAD_REQUEST
+        assert "cwd" in caught.value.message
+
     def test_a_write_file(self):
         line = p.encode_write_file_request(path="/home/dev/x.py", size=1886, mode=0o644)
         assert p.decode_request(line) == {
@@ -251,6 +274,9 @@ class TestMalformedRequests:
             {"action": "exec", "argv": ["a"], "cwd": "/x", "stdin": "yes"},
             {"action": "exec", "argv": ["a"], "cwd": "/x", "timeout": -1},
             {"action": "exec", "argv": ["a"], "cwd": "/x", "timeout": "300"},
+            {"action": "exec", "argv": ["a"], "cwd": ""},
+            {"action": "exec", "argv": ["a"], "cwd": 7},
+            {"action": "exec", "argv": ["a"], "cwd": True},
             {"action": "read_file"},
             {"action": "write_file", "path": "/x", "size": -1},
             {"action": "write_file", "path": "/x", "size": 1, "mode": "0644"},
