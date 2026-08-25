@@ -131,6 +131,14 @@ export const OCTOPUS_FACTS: string[] = [
   'An octopus arm carries some 200 suckers, each moving alone. Eight arms, no queue.',
   "An octopus's pupil stays level however the animal turns. A useful habit.",
   'Most octopuses live a year or two. I intend to be the exception.',
+  'Octopus ribosomes carry a break found in no other animal. Better proteins, fewer typos.',
+  'Cool the water and an octopus rewires its own neurons within hours. A very hot patch.',
+  'An octopus was filmed inking in its sleep. Bad dream, probably. I dream of clean logs.',
+  'A sleeping octopus flickers through colors every half hour. Something is going on.',
+  "Female octopuses throw silt at males who won't take a hint. About half the throws land.",
+  'Octopuses are loners who cluster only where the housing is good. I find that relatable.',
+  "The blanket octopus tears tentacles off a man o' war and keeps them. I improvise too.",
+  "A male blue-lined octopus sedates his mate so she won't eat him. Courtship is regional.",
 ];
 
 /** The tips that are true for this deployment, bot name substituted. */
