@@ -2,8 +2,8 @@
 
 Also provides a CLI for calendar operations from Claude Code:
     python -m istota.skills.calendar list [--calendar URL] [--date today|tomorrow|DATE | --week] [--tz TZ]
-    python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME --end DATETIME
-    python -m istota.skills.calendar update --calendar URL --uid UID [--summary TEXT] [--start DT] [--end DT] ...
+    python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME [--end DATETIME]
+    python -m istota.skills.calendar update --calendar URL --uid UID [--summary TEXT] [--start DT] [--end DT] [--all-day] ...
     python -m istota.skills.calendar delete --calendar URL --uid UID
 """
 
@@ -232,8 +232,8 @@ def create_event(
     client: caldav.DAVClient,
     calendar_url: str,
     summary: str,
-    start: datetime,
-    end: datetime,
+    start: date | datetime,
+    end: date | datetime,
     location: str | None = None,
     description: str | None = None,
 ) -> str:
@@ -335,8 +335,8 @@ def update_event(
     calendar_url: str,
     uid: str,
     summary: str | None = None,
-    start: datetime | None = None,
-    end: datetime | None = None,
+    start: date | datetime | None = None,
+    end: date | datetime | None = None,
     location: str | None = None,
     description: str | None = None,
 ) -> bool:
@@ -359,9 +359,11 @@ def update_event(
             if summary is not None:
                 component["summary"] = summary
             if start is not None:
-                component["dtstart"] = start
+                component.pop("dtstart", None)
+                component.add("dtstart", start)
             if end is not None:
-                component["dtend"] = end
+                component.pop("dtend", None)
+                component.add("dtend", end)
             if location is not None:
                 if location:
                     component["location"] = location
@@ -487,6 +489,16 @@ def _parse_datetime(dt_str: str) -> datetime:
     raise ValueError(f"Cannot parse datetime: {dt_str}. Use format: YYYY-MM-DD HH:MM")
 
 
+def _parse_all_day_date(date_str: str) -> date:
+    """Parse the date value used by an all-day event."""
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(
+            f"Cannot parse all-day date: {date_str}. Use format: YYYY-MM-DD"
+        ) from exc
+
+
 def _get_date_range(args) -> tuple[datetime, datetime, str]:
     """Compute (start, end, label) from --week or --date flags."""
     if getattr(args, "week", False):
@@ -542,10 +554,19 @@ def cmd_list(args) -> dict:
 
 def cmd_create(args) -> dict:
     """Create a calendar event."""
-    start = _parse_datetime(args.start)
-    end = _parse_datetime(args.end)
+    if args.all_day:
+        start = _parse_all_day_date(args.start)
+        inclusive_end = _parse_all_day_date(args.end) if args.end else start
+        if inclusive_end < start:
+            raise ValueError("All-day end date cannot be before start date")
+        end = inclusive_end + timedelta(days=1)
+    else:
+        if args.end is None:
+            raise ValueError("Timed events require --end")
+        start = _parse_datetime(args.start)
+        end = _parse_datetime(args.end)
 
-    if args.tz:
+    if args.tz and not args.all_day:
         tz = ZoneInfo(args.tz)
         start = start.replace(tzinfo=tz)
         end = end.replace(tzinfo=tz)
@@ -568,6 +589,7 @@ def cmd_create(args) -> dict:
         "summary": args.summary,
         "start": start.isoformat(),
         "end": end.isoformat(),
+        "all_day": args.all_day,
     }
 
 
@@ -588,14 +610,24 @@ def cmd_update(args) -> dict:
     kwargs: dict = {}
     if args.summary is not None:
         kwargs["summary"] = args.summary
-    if args.start is not None:
+
+    if args.all_day and (args.start is not None or args.end is not None):
+        if args.start is None or args.end is None:
+            raise ValueError("An all-day update requires both --start and --end")
+        start = _parse_all_day_date(args.start)
+        inclusive_end = _parse_all_day_date(args.end)
+        if inclusive_end < start:
+            raise ValueError("All-day end date cannot be before start date")
+        kwargs["start"] = start
+        kwargs["end"] = inclusive_end + timedelta(days=1)
+    elif args.start is not None:
         dt = _parse_datetime(args.start)
-        if hasattr(args, "tz") and args.tz:
+        if args.tz:
             dt = dt.replace(tzinfo=ZoneInfo(args.tz))
         kwargs["start"] = dt
-    if args.end is not None:
+    if not args.all_day and args.end is not None:
         dt = _parse_datetime(args.end)
-        if hasattr(args, "tz") and args.tz:
+        if args.tz:
             dt = dt.replace(tzinfo=ZoneInfo(args.tz))
         kwargs["end"] = dt
 
@@ -650,12 +682,13 @@ def build_parser():
     p_create.add_argument("--summary", "-s", required=True, help="Event title")
     p_create.add_argument(
         "--start", required=True,
-        help="Start time (YYYY-MM-DD HH:MM)"
+        help="Start time, or date with --all-day"
     )
     p_create.add_argument(
-        "--end", required=True,
-        help="End time (YYYY-MM-DD HH:MM)"
+        "--end",
+        help="End time, or inclusive end date with --all-day (defaults to start date)"
     )
+    p_create.add_argument("--all-day", action="store_true", help="Create an all-day event using YYYY-MM-DD dates")
     p_create.add_argument("--location", "-l", help="Event location")
     p_create.add_argument("--description", help="Event description")
     p_create.add_argument("--tz", help="Timezone for start/end times (e.g., America/Los_Angeles)")
@@ -672,6 +705,7 @@ def build_parser():
     p_update.add_argument("--summary", "-s", help="New event title")
     p_update.add_argument("--start", help="New start time (YYYY-MM-DD HH:MM)")
     p_update.add_argument("--end", help="New end time (YYYY-MM-DD HH:MM)")
+    p_update.add_argument("--all-day", action="store_true", help="Treat start/end as YYYY-MM-DD dates; end is inclusive")
     p_update.add_argument("--location", "-l", help="New event location")
     p_update.add_argument("--description", help="New event description")
     p_update.add_argument("--tz", help="Timezone for start/end times (e.g., America/Los_Angeles)")

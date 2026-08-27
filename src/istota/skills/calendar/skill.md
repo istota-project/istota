@@ -52,6 +52,13 @@ istota-skill calendar create \
   --tz "America/Los_Angeles" \
   --description "SAS SK932"
 
+# Create a one-day all-day event
+istota-skill calendar create \
+  --calendar "https://..." \
+  --summary "Holiday" \
+  --start "2026-08-29" \
+  --all-day
+
 # Update an event
 istota-skill calendar update \
   --calendar "https://..." \
@@ -59,6 +66,14 @@ istota-skill calendar update \
   --summary "Updated Title" \
   --start "2026-02-15 15:00" \
   --end "2026-02-15 16:00"
+
+# Move an all-day event. The end date is inclusive.
+istota-skill calendar update \
+  --calendar "https://..." \
+  --uid "event-uid-here" \
+  --start "2026-08-29" \
+  --end "2026-08-30" \
+  --all-day
 
 # Update: clear optional fields
 istota-skill calendar update \
@@ -72,7 +87,7 @@ istota-skill calendar delete --calendar "https://..." --uid "event-uid-here"
 
 **Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries.
 
-**Always pass `--tz` when creating events with specific timezone semantics** (flights, meetings across timezones). Omit `--tz` for local events where the wall-clock time is what matters.
+**Always pass `--tz` when creating timed events with specific timezone semantics** (flights, meetings across timezones). Omit `--tz` for local timed events where the wall-clock time is what matters. All-day events are DATE values and never carry a timezone. Their end date is inclusive; create may omit it for a one-day event, while update requires both dates to keep the event boundaries the same type.
 
 Output is JSON:
 ```json
@@ -125,8 +140,8 @@ The `istota.skills.calendar` module also provides functions for programmatic acc
 class CalendarEvent:
     uid: str           # Unique identifier
     summary: str       # Event title
-    start: datetime    # Start time
-    end: datetime      # End time
+    start: datetime    # Start time; midnight when an all-day event is read
+    end: datetime      # End time; exclusive midnight for an all-day event
     location: str | None
     description: str | None
     all_day: bool
