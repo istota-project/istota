@@ -8,7 +8,8 @@ import pytest
 
 from istota.skills.calendar import (
     Calendar,
-    get_events, cmd_update, cmd_list, build_parser, main, _parse_datetime, _get_date_range,
+    get_events, create_event, update_event, cmd_create, cmd_update, cmd_list, build_parser, main,
+    _parse_datetime, _get_date_range,
 )
 
 _has_icalendar = Calendar is not None
@@ -240,6 +241,23 @@ class TestBuildParserUpdateSubcommand:
         assert args.clear_location is True
         assert args.clear_description is True
 
+    def test_create_all_day_end_is_optional(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "create", "--calendar", "https://cal/url", "--summary", "Holiday",
+            "--start", "2026-08-29", "--all-day",
+        ])
+        assert args.all_day is True
+        assert args.end is None
+
+    def test_update_accepts_all_day(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "update", "--calendar", "https://cal/url", "--uid", "abc123",
+            "--start", "2026-08-29", "--end", "2026-08-30", "--all-day",
+        ])
+        assert args.all_day is True
+
     def test_list_week_flag(self):
         parser = build_parser()
         args = parser.parse_args(["list", "--week", "--tz", "UTC"])
@@ -332,6 +350,111 @@ class TestCmdUpdate:
         call_kwargs = mock_update.call_args[1]
         assert call_kwargs["start"] == datetime(2026, 3, 15, 14, 0)
         assert call_kwargs["end"] == datetime(2026, 3, 15, 15, 0)
+
+    @patch("istota.skills.calendar.update_event")
+    @patch("istota.skills.calendar._get_client_from_env")
+    def test_update_all_day_uses_dates_and_exclusive_end(self, mock_client_fn, mock_update):
+        mock_update.return_value = True
+        parser = build_parser()
+        args = parser.parse_args([
+            "update", "--calendar", "https://cal", "--uid", "u1",
+            "--start", "2026-08-29", "--end", "2026-08-30",
+            "--all-day", "--tz", "America/Los_Angeles",
+        ])
+        result = cmd_update(args)
+        assert result["status"] == "ok"
+        call_kwargs = mock_update.call_args[1]
+        assert call_kwargs["start"] == date(2026, 8, 29)
+        assert call_kwargs["end"] == date(2026, 8, 31)
+
+    @patch("istota.skills.calendar._get_client_from_env")
+    def test_update_all_day_requires_both_dates(self, mock_client_fn):
+        parser = build_parser()
+        args = parser.parse_args([
+            "update", "--calendar", "https://cal", "--uid", "u1",
+            "--start", "2026-08-29", "--all-day",
+        ])
+        with pytest.raises(ValueError, match="requires both --start and --end"):
+            cmd_update(args)
+
+    @patch("istota.skills.calendar._get_client_from_env")
+    def test_update_all_day_rejects_end_before_start(self, mock_client_fn):
+        parser = build_parser()
+        args = parser.parse_args([
+            "update", "--calendar", "https://cal", "--uid", "u1",
+            "--start", "2026-08-30", "--end", "2026-08-29", "--all-day",
+        ])
+        with pytest.raises(ValueError, match="cannot be before start date"):
+            cmd_update(args)
+
+
+class TestCmdCreate:
+    @patch("istota.skills.calendar.create_event")
+    @patch("istota.skills.calendar._get_client_from_env")
+    def test_create_single_all_day_event(self, mock_client_fn, mock_create):
+        mock_create.return_value = "u1"
+        parser = build_parser()
+        args = parser.parse_args([
+            "create", "--calendar", "https://cal", "--summary", "Holiday",
+            "--start", "2026-08-29", "--all-day", "--tz", "America/Los_Angeles",
+        ])
+        result = cmd_create(args)
+        assert result == {
+            "status": "ok",
+            "uid": "u1",
+            "summary": "Holiday",
+            "start": "2026-08-29",
+            "end": "2026-08-30",
+            "all_day": True,
+        }
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["start"] == date(2026, 8, 29)
+        assert call_kwargs["end"] == date(2026, 8, 30)
+
+
+@pytest.mark.skipif(not _has_icalendar, reason="icalendar not installed")
+class TestAllDayEventWrites:
+    def test_create_serializes_date_values(self):
+        client = MagicMock()
+        saved = client.calendar.return_value.save_event
+
+        create_event(
+            client,
+            "https://cal",
+            "Holiday",
+            date(2026, 8, 29),
+            date(2026, 8, 30),
+        )
+
+        payload = saved.call_args.args[0]
+        ical = Calendar.from_ical(payload)
+        component = next(c for c in ical.walk() if c.name == "VEVENT")
+        assert component["dtstart"].dt == date(2026, 8, 29)
+        assert component["dtend"].dt == date(2026, 8, 30)
+        assert not isinstance(component["dtstart"].dt, datetime)
+
+    def test_update_serializes_date_values(self):
+        client = MagicMock()
+        event = client.calendar.return_value.event_by_uid.return_value
+        event.data = _make_ical_timed(
+            "u1",
+            "Meeting",
+            datetime(2026, 8, 29, 12),
+            datetime(2026, 8, 29, 13),
+        )
+
+        assert update_event(
+            client,
+            "https://cal",
+            "u1",
+            start=date(2026, 8, 30),
+            end=date(2026, 8, 31),
+        )
+
+        ical = Calendar.from_ical(event.data)
+        component = next(c for c in ical.walk() if c.name == "VEVENT")
+        assert component["dtstart"].dt == date(2026, 8, 30)
+        assert component["dtend"].dt == date(2026, 8, 31)
 
 
 class TestCmdListWeek:
