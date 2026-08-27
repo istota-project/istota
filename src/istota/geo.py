@@ -2,8 +2,16 @@
 
 import math
 import sqlite3
+from datetime import timedelta
 
 _EARTH_RADIUS_M = 6_371_000  # meters
+
+# A closing ping can arrive long after a tracker stopped reporting at a place.
+# Six hours covers an ordinary long stop without assigning an overnight outage
+# to it. When the closing ping has no usable speed, 30 mph gives a conservative
+# road-travel estimate instead of treating a distant observation as departure.
+MAX_STOP_EXTENSION_SECONDS = 6 * 60 * 60
+DEFAULT_TRAVEL_SPEED_MPS = 13.4
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -143,6 +151,7 @@ def cluster_pings(
     pings: list[dict],
     radius_m: float = 200,
     max_gap_seconds: float = 300,
+    closing_ping: dict | None = None,
 ) -> list[dict]:
     """Cluster pings into stops based on spatial proximity.
 
@@ -183,7 +192,7 @@ def cluster_pings(
             current["lat_sum"] += ping["lat"]
             current["lon_sum"] += ping["lon"]
         else:
-            clusters.append(_finalize_cluster(current))
+            clusters.append(_finalize_cluster(current, next_ping=ping))
             current = {
                 "pings": [ping],
                 "lat_sum": ping["lat"],
@@ -192,7 +201,7 @@ def cluster_pings(
             origin_lat = ping["lat"]
             origin_lon = ping["lon"]
 
-    clusters.append(_finalize_cluster(current))
+    clusters.append(_finalize_cluster(current, next_ping=closing_ping))
     return clusters
 
 
@@ -205,7 +214,39 @@ def cluster_pings(
 MIN_PLACE_PINGS = 3
 
 
-def _finalize_cluster(cluster: dict) -> dict:
+def _format_timestamp_like(dt, source: str) -> str:
+    rendered = dt.isoformat()
+    if source.endswith("Z") and rendered.endswith("+00:00"):
+        return rendered[:-6] + "Z"
+    return rendered
+
+
+def _estimated_departure_timestamp(last_inside: dict, closing_ping: dict) -> str:
+    last_inside_dt = _parse_ts(last_inside["timestamp"])
+    closing_dt = _parse_ts(closing_ping["timestamp"])
+    gap_seconds = (closing_dt - last_inside_dt).total_seconds()
+    if gap_seconds <= 0:
+        return last_inside["timestamp"]
+
+    distance_m = haversine(
+        last_inside["lat"], last_inside["lon"],
+        closing_ping["lat"], closing_ping["lon"],
+    )
+    speed = closing_ping.get("speed")
+    if not isinstance(speed, (int, float)) or not math.isfinite(speed) or speed <= 0:
+        speed = DEFAULT_TRAVEL_SPEED_MPS
+
+    travel_seconds = distance_m / speed
+    extension_seconds = max(0.0, gap_seconds - travel_seconds)
+    extension_seconds = min(extension_seconds, MAX_STOP_EXTENSION_SECONDS)
+    departure_dt = last_inside_dt + timedelta(seconds=extension_seconds)
+
+    if departure_dt == closing_dt:
+        return closing_ping["timestamp"]
+    return _format_timestamp_like(departure_dt, closing_ping["timestamp"])
+
+
+def _finalize_cluster(cluster: dict, next_ping: dict | None = None) -> dict:
     n = len(cluster["pings"])
     lat = cluster["lat_sum"] / n
     lon = cluster["lon_sum"] / n
@@ -234,12 +275,32 @@ def _finalize_cluster(cluster: dict) -> dict:
             place_id = best_pid
             place_name = names.get(best_pid)
 
+    last_ts = cluster["pings"][-1]["timestamp"]
+    if place_id is not None:
+        last_inside_index = max(
+            i for i, ping in enumerate(cluster["pings"])
+            if ping.get("place_id") == place_id
+        )
+        closing_ping = next(
+            (
+                ping for ping in cluster["pings"][last_inside_index + 1:]
+                if ping.get("place_id") != place_id
+            ),
+            None,
+        )
+        if closing_ping is None and next_ping is not None:
+            if next_ping.get("place_id") != place_id:
+                closing_ping = next_ping
+        if closing_ping is not None:
+            last_inside = cluster["pings"][last_inside_index]
+            last_ts = _estimated_departure_timestamp(last_inside, closing_ping)
+
     return {
         "lat": lat,
         "lon": lon,
         "ping_count": n,
         "first_ts": cluster["pings"][0]["timestamp"],
-        "last_ts": cluster["pings"][-1]["timestamp"],
+        "last_ts": last_ts,
         "place_id": place_id,
         "place_name": place_name,
     }

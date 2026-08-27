@@ -2756,6 +2756,94 @@ class TestClusterPlaceAttribution:
         assert result[0]["place_id"] is None
         assert result[0]["place_name"] is None
 
+    def test_stop_ends_when_reporting_resumes_outside_place(self):
+        """A quiet tracker does not turn its last stationary ping into departure."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:24:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:29:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:34:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:38:33Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T15:45:17Z",
+             "activity_type": "driving"},
+        ]
+
+        result = cluster_pings(pings)
+
+        assert result[0]["place_name"] == "Gym"
+        assert result[0]["last_ts"] == "2026-08-26T15:45:17Z"
+
+    def test_stop_end_subtracts_travel_time_to_distant_closing_ping(self):
+        """A distant resume ping bounds departure before the observation time."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:00:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:05:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:10:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1720, "lon": -118.3000, "timestamp": "2026-08-26T15:10:00Z",
+             "speed": 20.0, "activity_type": "driving"},
+        ]
+
+        result = cluster_pings(pings)
+
+        departure = datetime.fromisoformat(result[0]["last_ts"].replace("Z", "+00:00"))
+        closing_ping = datetime.fromisoformat("2026-08-26T15:10:00+00:00")
+        travel_seconds = (closing_ping - departure).total_seconds()
+        assert 6 * 60 < travel_seconds < 7 * 60
+
+    def test_stop_end_extension_is_capped(self):
+        """A dead tracker cannot turn the next day's first ping into a day-long stop."""
+        from istota.geo import MAX_STOP_EXTENSION_SECONDS, cluster_pings
+
+        pings = [
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:00:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:05:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:10:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-27T08:00:00Z"},
+        ]
+
+        result = cluster_pings(pings)
+
+        last_inside = datetime.fromisoformat("2026-08-26T14:10:00+00:00")
+        departure = datetime.fromisoformat(result[0]["last_ts"].replace("Z", "+00:00"))
+        assert (departure - last_inside).total_seconds() == MAX_STOP_EXTENSION_SECONDS
+
+    def test_first_outside_ping_inside_cluster_closes_stop(self):
+        """Nearby exit pings close a placed stop even when they do not split it."""
+        from istota.geo import cluster_pings
+
+        pings = [
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:00:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:01:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1000, "lon": -118.3000, "timestamp": "2026-08-26T14:02:00Z",
+             "place_id": 7, "place_name": "Gym"},
+            {"lat": 34.1009, "lon": -118.3000, "timestamp": "2026-08-26T14:03:00Z",
+             "speed": 10.0, "activity_type": "driving"},
+            {"lat": 34.1012, "lon": -118.3000, "timestamp": "2026-08-26T14:04:00Z",
+             "speed": 10.0, "activity_type": "driving"},
+        ]
+
+        result = cluster_pings(pings)
+
+        assert len(result) == 1
+        departure = datetime.fromisoformat(result[0]["last_ts"].replace("Z", "+00:00"))
+        first_outside = datetime.fromisoformat("2026-08-26T14:03:00+00:00")
+        assert 9 < (first_outside - departure).total_seconds() < 11
+
 
 # ===========================================================================
 # reverse-geocode CLI command tests
@@ -2860,6 +2948,8 @@ class TestCmdDaySummary:
                 location_db.insert_ping(
                     conn, ping["timestamp"], ping["lat"], ping["lon"],
                     accuracy=ping.get("accuracy", 5.0),
+                    speed=ping.get("speed"),
+                    activity_type=ping.get("activity_type"),
                     place_id=place_id,
                 )
             conn.commit()
@@ -3110,6 +3200,56 @@ class TestCmdDaySummary:
         stop = result["stops"][0]
         assert "duration_minutes" in stop
         assert stop["duration_minutes"] == 120
+
+    def test_duration_uses_first_ping_after_stationary_reporting_gap(self, tmp_path):
+        """Day summary counts the quiet part of a saved-place visit."""
+        places = [{"name": "Gym", "lat": 34.10, "lon": -118.30, "radius_meters": 150}]
+        pings = [
+            {"timestamp": "2026-03-08T14:24:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T14:29:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T14:34:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T14:38:33Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T15:45:17Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "driving"},
+        ]
+
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+
+        assert len(result["stops"]) == 1
+        assert result["stops"][0]["location"] == "Gym"
+        assert result["stops"][0]["duration_minutes"] == 81
+        assert result["stops"][0]["departed"] == "08:45"
+
+    def test_duration_uses_recorded_speed_for_distant_closing_ping(self, tmp_path):
+        places = [{"name": "Gym", "lat": 34.10, "lon": -118.30, "radius_meters": 150}]
+        pings = [
+            {"timestamp": "2026-03-08T14:00:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T14:05:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T14:10:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-08T15:10:00Z", "lat": 34.172, "lon": -118.30,
+             "speed": 20.0, "activity_type": "driving"},
+        ]
+
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+
+        assert result["stops"][0]["duration_minutes"] == 63
+
+    def test_closing_ping_after_local_midnight_ends_stop(self, tmp_path):
+        places = [{"name": "Home", "lat": 34.10, "lon": -118.30, "radius_meters": 150}]
+        pings = [
+            {"timestamp": "2026-03-09T06:40:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-09T06:45:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-09T06:50:00Z", "lat": 34.10, "lon": -118.30, "place_id": 1},
+            {"timestamp": "2026-03-09T07:10:00Z", "lat": 34.10, "lon": -118.30,
+             "activity_type": "driving"},
+        ]
+
+        result = self._run_day_summary(tmp_path, pings=pings, places=places)
+
+        assert result["ping_count"] == 3
+        assert result["stops"][0]["ping_count"] == 3
+        assert result["stops"][0]["duration_minutes"] == 30
+        assert result["stops"][0]["departed"] == "00:10"
 
     def test_duration_minutes_for_nominatim_stop(self, tmp_path):
         """duration_minutes should work for reverse-geocoded stops too."""
