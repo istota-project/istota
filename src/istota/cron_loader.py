@@ -1,5 +1,6 @@
 """Load scheduled job definitions from CRON.md files and sync to DB."""
 
+import hashlib
 import json
 import logging
 import re
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 import tomli
 
 from . import db
-from .storage import get_user_cron_path
+from .storage import get_user_cron_path, get_user_scripts_path
 
 logger = logging.getLogger("istota.cron_loader")
 
@@ -335,6 +336,71 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
     return "\n".join(lines)
 
 
+def _prompt_file_name(name: str) -> str:
+    """Return a readable filename for a generated cron prompt."""
+    filename = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
+    filename = filename or "job"
+    if len(filename.encode()) <= 200:
+        return filename
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    return f"{filename[:191]}-{digest}"
+
+
+def _disambiguate_prompt_file_name(filename: str, name: str) -> str:
+    """Add a stable job-name digest while keeping the filename bounded."""
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    return f"{filename[:191]}-{digest}"
+
+
+def _write_generated_prompt(path, prompt: str) -> None:
+    """Create a generated prompt file without replacing unrelated content."""
+    try:
+        with path.open("x") as f:
+            f.write(prompt)
+    except FileExistsError:
+        if path.read_text() != prompt:
+            raise
+
+
+def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) -> None:
+    """Move inline multiline prompts into files before CRON.md is rewritten."""
+    prompts_dir_ref = f"{get_user_scripts_path(user_id, config.bot_dir_name)}/prompts"
+    prompts_dir = config.nextcloud_mount_path / prompts_dir_ref.lstrip("/")
+    assigned_names: dict[str, str] = {}
+
+    for job in jobs:
+        if (
+            job.command
+            or job.prompt_file
+            or ("\r" not in job.prompt and "\n" not in job.prompt)
+        ):
+            continue
+
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        stem = _prompt_file_name(job.name)
+        if stem in assigned_names and assigned_names[stem] != job.name:
+            stem = _disambiguate_prompt_file_name(stem, job.name)
+        assigned_names[stem] = job.name
+        prompt_path = prompts_dir / f"{stem}.txt"
+        try:
+            _write_generated_prompt(prompt_path, job.prompt)
+        except FileExistsError:
+            digest = hashlib.sha256(job.prompt.encode()).hexdigest()[:8]
+            prompt_path = prompts_dir / f"{stem}-{digest}.txt"
+            _write_generated_prompt(prompt_path, job.prompt)
+        job.prompt_file = f"{prompts_dir_ref}/{prompt_path.name}"
+
+
+def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> None:
+    """Write CRON.md, externalizing inline multiline prompts first."""
+    _externalize_multiline_prompts(config, user_id, jobs)
+    cron_path = config.nextcloud_mount_path / get_user_cron_path(
+        user_id, config.bot_dir_name
+    ).lstrip("/")
+    cron_path.parent.mkdir(parents=True, exist_ok=True)
+    cron_path.write_text(generate_cron_md(jobs))
+
+
 def sync_cron_jobs_to_db(
     conn,
     user_id: str,
@@ -525,8 +591,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))
 
-    cron_path.parent.mkdir(parents=True, exist_ok=True)
-    cron_path.write_text(generate_cron_md(file_jobs))
+    _write_cron_md(config, user_id, file_jobs)
     logger.info(
         "Migrated %d DB scheduled job(s) to CRON.md for user %s",
         len(file_jobs), user_id,
@@ -558,8 +623,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     if not found:
         return False
 
-    cron_path = config.nextcloud_mount_path / get_user_cron_path(user_id, config.bot_dir_name).lstrip("/")
-    cron_path.write_text(generate_cron_md(jobs))
+    _write_cron_md(config, user_id, jobs)
     logger.info(
         "%s job '%s' in CRON.md for user %s",
         "Enabled" if enabled else "Disabled", job_name, user_id,
@@ -586,7 +650,6 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     if len(jobs) == original_count:
         return False  # Job not found
 
-    cron_path = config.nextcloud_mount_path / get_user_cron_path(user_id, config.bot_dir_name).lstrip("/")
-    cron_path.write_text(generate_cron_md(jobs))
+    _write_cron_md(config, user_id, jobs)
     logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
     return True

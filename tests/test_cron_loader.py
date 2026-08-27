@@ -522,6 +522,85 @@ class TestMigrateDbJobsToFile:
         assert 'name = "daily"' in content
         assert 'cron = "0 9 * * *"' in content
 
+    def test_multiline_prompt_is_written_to_prompt_file(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "daily summary", "0 9 * * *", "First line\nSecond \\ line"),
+            )
+            result = migrate_db_jobs_to_file(conn, config, "alice")
+
+        assert result is True
+        prompt_path = mount_path / "Users/alice/istota/scripts/prompts/daily-summary.txt"
+        assert prompt_path.read_text() == "First line\nSecond \\ line"
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        content = cron_path.read_text()
+        assert 'prompt_file = "/Users/alice/istota/scripts/prompts/daily-summary.txt"' in content
+        assert "prompt = \"\"\"" not in content
+
+    def test_carriage_return_prompt_is_written_to_prompt_file(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "old-mac", "0 9 * * *", "First line\rSecond line"),
+            )
+            migrate_db_jobs_to_file(conn, config, "alice")
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].prompt == "First line\nSecond line"
+        assert jobs[0].prompt_file.endswith("/old-mac.txt")
+
+    def test_colliding_job_names_get_distinct_prompt_files(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.executemany(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                [
+                    ("alice", "daily report", "0 9 * * *", "Same\nprompt"),
+                    ("alice", "daily-report", "0 10 * * *", "Same\nprompt"),
+                ],
+            )
+            migrate_db_jobs_to_file(conn, config, "alice")
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 2
+        assert jobs[0].prompt_file != jobs[1].prompt_file
+
+    @pytest.mark.parametrize("name", ["a" * 300, "é" * 300])
+    def test_long_job_name_uses_bounded_prompt_filename(
+        self, db_path, mount_path, make_config_with_mount, name
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", name, "0 9 * * *", "First\nSecond"),
+            )
+            migrate_db_jobs_to_file(conn, config, "alice")
+
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        filename = jobs[0].prompt_file.rsplit("/", 1)[-1]
+        assert len(filename.encode()) <= 255
+        assert jobs[0].prompt == "First\nSecond"
+
     def test_does_not_overwrite_existing_file(self, db_path, mount_path, make_config_with_mount):
         config = make_config_with_mount(db_path=db_path)
         _write_cron_md(mount_path, "alice", "# Existing file\n")
@@ -1138,6 +1217,30 @@ enabled = false
         jobs = load_cron_jobs(config, "alice")
         assert len(jobs) == 1
         assert jobs[0].enabled is True
+
+    def test_rewrite_externalizes_inline_multiline_prompt(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", '''\
+```toml
+[[jobs]]
+name = "multiline"
+cron = "0 9 * * *"
+prompt = """First line
+Second line"""
+```
+''')
+
+        result = update_job_enabled_in_cron_md(config, "alice", "multiline", False)
+
+        assert result is True
+        prompt_path = mount_path / "Users/alice/istota/scripts/prompts/multiline.txt"
+        assert prompt_path.read_text() == "First line\nSecond line"
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        content = cron_path.read_text()
+        assert 'prompt_file = "/Users/alice/istota/scripts/prompts/multiline.txt"' in content
+        assert "prompt = \"\"\"" not in content
 
     def test_leaves_other_jobs_intact(self, mount_path, make_config_with_mount):
         config = make_config_with_mount()
