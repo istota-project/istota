@@ -649,7 +649,7 @@ def cmd_day_summary(args):
 
     rows = conn.execute(
         """
-        SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy,
+        SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy, lp.speed,
                lp.place_id, p.name as place_name
         FROM location_pings lp
         LEFT JOIN places p ON lp.place_id = p.id
@@ -665,9 +665,27 @@ def cmd_day_summary(args):
         framework_conn.close()
         return
 
+    closing_ping = None
+    last_place_id = rows[-1]["place_id"]
+    if last_place_id is not None:
+        closing_row = conn.execute(
+            """
+            SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy, lp.speed,
+                   lp.place_id, p.name as place_name
+            FROM location_pings lp
+            LEFT JOIN places p ON lp.place_id = p.id
+            WHERE lp.timestamp >= ? AND (lp.place_id IS NULL OR lp.place_id != ?)
+            ORDER BY lp.timestamp ASC
+            LIMIT 1
+            """,
+            (until_utc, last_place_id),
+        ).fetchone()
+        if closing_row is not None:
+            closing_ping = dict(closing_row)
+
     pings = [dict(r) for r in rows]
     pings = dedupe_near_duplicate_pings(pings)
-    clusters = cluster_pings(pings, radius_m=250)
+    clusters = cluster_pings(pings, radius_m=250, closing_ping=closing_ping)
 
     saved_places = conn.execute(
         "SELECT id, name, lat, lon, radius_meters FROM places"
