@@ -150,7 +150,9 @@ class TestWebToTalkPush:
             assert resp.status_code == 200
             await _drain_bg()
 
-        instance.mark_conversation_read.assert_awaited_once_with("talkref9")
+        instance.mark_conversation_read.assert_awaited_once_with(
+            "talkref9", raise_on_error=True,
+        )
         assert constructed[0]["bearer_token"] == "live-at"
 
     async def test_unchanged_cursor_no_push(self, tmp_path, keyed, monkeypatch):
@@ -239,7 +241,9 @@ class TestWebToTalkPush:
             assert resp.json()["updated"] == 1
             await _drain_bg()
 
-        instance.mark_conversation_read.assert_awaited_once_with("talkref9")
+        instance.mark_conversation_read.assert_awaited_once_with(
+            "talkref9", raise_on_error=True,
+        )
 
 
 @_needs_web_deps

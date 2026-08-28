@@ -151,6 +151,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A lost Nextcloud connection now says so and can be repaired from Settings. The connection is established once, at login, and two things could quietly delete it afterwards — revoking the app in Nextcloud, or the server's token key being changed. When that happened, messages you sent from web chat were reposted by the bot under its own name instead of appearing under yours, and read state stopped syncing with Talk, with nothing anywhere saying why. Both now raise a notification naming what broke, and the settings card offers a Connect button that signs you back in to Nextcloud and returns you to the page. It replaces the card's old advice to log out and back in, which was the only remedy and which nobody had a reason to discover.
+
+- Read markers pushed from web chat to Talk now recover from an expired access token, the way sending a message already did. Without that the two behaved differently on the same dead token: your messages still reached Talk under your own name while every read marker failed silently, which is the split that made the underlying problem hard to recognise. Failures also name the HTTP status now, so a rejected token can be told apart from an endpoint that moved.
+
 - Recovering a chat stream while a message send is still waiting for its server response no longer creates a second progress row for the same task or renders the completed answer twice.
 
 - The maps on the location pages stopped drawing a background and stamped every tile with "API KEY REQUIRED" instead, after the tile service started demanding a key. The address of that service was written into the app, so no setting could change it. Which map service to use is now a setting, and the default needs no key, no account and no signup — the maps draw correctly again with nothing to configure.
