@@ -51,7 +51,7 @@ from istota.config import Config, UserConfig
 
 
 @pytest.fixture(autouse=True)
-def _scrub_ambient_env(monkeypatch):
+def _scrub_ambient_env(monkeypatch, request):
     """Take the ambient shell's istota config out of every test (ISSUE-301).
 
     The suite reset every process global it knew about and no part of the
@@ -101,6 +101,9 @@ def _scrub_ambient_env(monkeypatch):
     # meant to. The suite's own value beats the shell's.
     for name, value in SUITE_ENV_DEFAULTS.items():
         monkeypatch.setenv(name, value)
+    devbox_user = request.config.getoption("--devbox-user")
+    if devbox_user:
+        monkeypatch.setenv("ISTOTA_USER_ID", devbox_user)
     # Forced, not scrubbed — see `env_isolation.NO_PROXY_VALUE` for why the
     # proxy variables themselves are left alone.
     for name in NO_PROXY_NAMES:
@@ -331,7 +334,7 @@ def _reset_expunge_warning_latch():
 
 
 def pytest_addoption(parser):
-    """`--platform` for the image tier.
+    """Options for the image and real-devbox tiers.
 
     Lives here rather than in ``tests/image/conftest.py`` because pytest only
     honours ``pytest_addoption`` in an *initial* conftest — the rootdir's and
@@ -352,6 +355,13 @@ def pytest_addoption(parser):
             "Docker platform for the image tier, e.g. amd64 or linux/amd64. "
             "Defaults to native, or to $ISTOTA_TEST_PLATFORM."
         ),
+    )
+    parser.addoption(
+        "--devbox-user",
+        action="store",
+        default=None,
+        metavar="USER",
+        help="require the real-devbox integration tier for this user",
     )
 
 
