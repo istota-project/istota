@@ -6,7 +6,7 @@ import pytest
 
 from istota.briefings import UserNotFoundError, resolve_for_user, list_users
 from istota.briefings.workspace import synthesize_briefings_context
-from istota.config import Config, UserConfig
+from istota.config import BriefingConfig, Config, UserConfig
 
 
 class TestWorkspaceSynth:
@@ -16,6 +16,7 @@ class TestWorkspaceSynth:
         assert ctx.data_dir == (tmp_path / "briefings").resolve()
         assert ctx.db_path == ctx.data_dir / "data" / "briefings.db"
         assert ctx.workspace_root == tmp_path.resolve()
+        assert ctx.configured_briefing_names == ()
 
     def test_explicit_db_path(self, tmp_path):
         explicit = tmp_path / "custom.db"
@@ -46,9 +47,20 @@ class TestResolveForUser:
         cfg = _config(tmp_path, users=["alice"])
         ctx = resolve_for_user("alice", cfg)
         assert ctx.user_id == "alice"
+        assert ctx.configured_briefing_names == ()
         # DB relocated to local disk via module_db_path (not under the mount).
         assert "briefings.db" in str(ctx.db_path)
         assert not str(ctx.db_path).startswith(str(tmp_path / "mount"))
+
+    def test_carries_effective_configured_names(self, tmp_path):
+        cfg = _config(tmp_path, users=["alice"])
+        cfg.users["alice"].briefings = [
+            BriefingConfig(name="weekly", cron="0 8 * * 1", output="email"),
+        ]
+
+        ctx = resolve_for_user("alice", cfg)
+
+        assert ctx.configured_briefing_names == ("weekly",)
 
     def test_disabled_module_raises(self, tmp_path):
         cfg = _config(tmp_path, users=["alice"], disabled={"alice": ["briefings"]})

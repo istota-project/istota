@@ -15,11 +15,14 @@ Manage the content model of the user's briefings through the in-tree briefings m
 Run `istota-skill briefings --help` for the live list. Output is JSON.
 
 ```bash
+# Briefing names, block counts, and latest generation timestamps
+istota-skill briefings list
+
 # Blocks
-istota-skill briefings blocks list --briefing Morning
-istota-skill briefings blocks add --briefing Morning --title "World News" [--directive "3-5 stories, neutral"] [--render-mode synthesis|structured]
+istota-skill briefings blocks list --briefing morning
+istota-skill briefings blocks add --briefing morning --title "World News" [--directive "3-5 stories, neutral"] [--render-mode synthesis|structured]
 istota-skill briefings blocks set --id 3 [--title …] [--directive …] [--render-mode …] [--options '{"tone":"brief"}']
-istota-skill briefings blocks reorder --briefing Morning --ids 3,1,2
+istota-skill briefings blocks reorder --briefing morning --ids 3,1,2
 istota-skill briefings blocks remove --id 3
 
 # Sources (kind: rss|email|browse|markets|calendar|todos|reminders|notes|shared_block)
@@ -30,9 +33,11 @@ istota-skill briefings sources add --block 3 --kind rss --config '{"feed_ref":{"
 istota-skill briefings sources remove --id 7
 
 # Archive (past rendered briefings)
-istota-skill briefings archive list [--briefing Morning] [--limit 20]
+istota-skill briefings archive list [--briefing morning] [--limit 20]
 istota-skill briefings archive show --id 42
 ```
+
+`blocks list` returns `status: "not_found"` with an `available` name list when the requested briefing does not exist. Briefing names are case-sensitive; run `briefings list` instead of guessing them.
 
 ## Source kinds
 

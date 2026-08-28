@@ -54,6 +54,27 @@ class TestSchedule:
 
 
 class TestBlocksSources:
+    def test_list_briefings(self, config, capsys):
+        from istota.config import BriefingConfig
+
+        config.users["alice"].briefings = [
+            BriefingConfig(name="weekly", cron="0 8 * * 1", output="email"),
+        ]
+
+        rc = cli_briefings.dispatch(["list", "-u", "alice"], config)
+
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "status": "ok",
+            "briefings": [
+                {
+                    "name": "weekly",
+                    "block_count": 0,
+                    "last_generated_at": None,
+                },
+            ],
+        }
+
     def test_add_list_block(self, config, capsys):
         rc = cli_briefings.dispatch(
             ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "News"],

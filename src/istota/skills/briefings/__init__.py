@@ -8,8 +8,9 @@ so new CLI subcommands need no facade change. No subprocess, no HTTP. Mirrors
 
 Lets the model manage briefing blocks/sources conversationally, e.g.::
 
-    istota-skill briefings blocks list --briefing Morning
-    istota-skill briefings blocks add --briefing Morning --title "World News"
+    istota-skill briefings list
+    istota-skill briefings blocks list --briefing morning
+    istota-skill briefings blocks add --briefing morning --title "World News"
     istota-skill briefings sources add --block 3 --kind rss --config '{"feed_ref": {...}}'
     istota-skill briefings archive list
 """
@@ -73,7 +74,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         print(
-            "Usage: istota-skill briefings <blocks|sources|archive> ...",
+            "Usage: istota-skill briefings <list|blocks|sources|archive> ...",
             file=sys.stderr,
         )
         sys.exit(1)

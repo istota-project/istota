@@ -302,6 +302,35 @@ def list_briefing_names(conn: sqlite3.Connection) -> list[str]:
     return [r["briefing_name"] for r in rows]
 
 
+def list_briefing_summaries(conn: sqlite3.Connection) -> list[dict]:
+    """Briefing names with block counts and their latest archive timestamp."""
+    rows = conn.execute(
+        """
+        SELECT
+            blocks.briefing_name AS name,
+            blocks.block_count,
+            MAX(briefing_archive.generated_at) AS last_generated_at
+        FROM (
+            SELECT briefing_name, COUNT(*) AS block_count
+            FROM briefing_blocks
+            GROUP BY briefing_name
+        ) AS blocks
+        LEFT JOIN briefing_archive
+            ON briefing_archive.briefing_name = blocks.briefing_name
+        GROUP BY blocks.briefing_name, blocks.block_count
+        ORDER BY blocks.briefing_name COLLATE NOCASE
+        """
+    ).fetchall()
+    return [
+        {
+            "name": row["name"],
+            "block_count": row["block_count"],
+            "last_generated_at": row["last_generated_at"],
+        }
+        for row in rows
+    ]
+
+
 def reorder_blocks(
     conn: sqlite3.Connection, briefing_name: str, ordered_ids: list[int],
 ) -> None:
