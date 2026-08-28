@@ -1246,14 +1246,24 @@ class TestForgeConfigDrift:
         from istota.skills import developer as developer_skill
 
         shipped = _fake_bin(tmp_path / "image" / "gh")
-        monkeypatch.setitem(developer_skill._IMAGE_BIN, "gh", str(shipped))
-        config = _dev_config(
-            make_config, tmp_path, gh_bin_path="/usr/local/bin/gh"
+        stale = "/usr/local/bin/gh"
+        original_exists = doctor.Path.exists
+        monkeypatch.setattr(
+            doctor.Path,
+            "exists",
+            lambda path: False if str(path) == stale else original_exists(path),
         )
+        monkeypatch.setattr(
+            developer_skill.os.path,
+            "exists",
+            lambda path: False if str(path) == stale else original_exists(doctor.Path(path)),
+        )
+        monkeypatch.setitem(developer_skill._IMAGE_BIN, "gh", str(shipped))
+        config = _dev_config(make_config, tmp_path, gh_bin_path=str(stale))
         results = _by_name(run_checks(config, only=("developer.forge_config_drift",)))
         drift = results["developer.forge_config_drift.gh"]
         assert drift.status == WARN
-        assert "/usr/local/bin/gh" in drift.detail
+        assert stale in drift.detail
         assert str(shipped) in drift.detail
         assert drift.remedy
 
