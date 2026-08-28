@@ -192,6 +192,17 @@
     profile.routing = next;
   }
 
+  // A full page navigation, not `goto`: `/reconnect` is a server auth route that
+  // answers with a redirect to Nextcloud, so the client router has nothing to
+  // resolve. Same shape as GoogleWorkspaceCard's connect.
+  //
+  // This replaces the card's old instruction to log out and back in, which was
+  // the only documented remedy for a credential that had died silently
+  // (ISSUE-333).
+  function reconnectNextcloud() {
+    window.location.href = `${base}/reconnect`;
+  }
+
   async function disconnectNextcloud() {
     ncTokenBusy = true;
     try {
@@ -550,6 +561,7 @@
         {/snippet}
         {#if nc.connected}
           <div class="oauth-actions">
+            <Button variant="secondary" size="sm" onclick={reconnectNextcloud}>Reconnect</Button>
             <Button
               variant="secondary"
               size="sm"
@@ -560,8 +572,12 @@
             </Button>
           </div>
         {:else}
+          <div class="oauth-actions">
+            <Button variant="primary" size="sm" onclick={reconnectNextcloud}>Connect</Button>
+          </div>
           <p class="empty">
-            Log out and back in to connect — the connection is established at login.
+            Connecting signs you in to Nextcloud again and brings you back here. Your session stays
+            as it is.
           </p>
         {/if}
       </SettingsCard>

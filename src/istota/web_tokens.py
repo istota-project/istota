@@ -52,6 +52,21 @@ _SCRYPT_P = 1
 _REFRESH_MARGIN_SECONDS = 60
 _REFRESH_TIMEOUT_SECONDS = 10.0
 
+# The `connected_service` notification source's name for this credential. Losing
+# the pair is the one event in this module the *user* has to act on, and until
+# ISSUE-333 both deletion sites recorded it only as a WARNING in the web
+# process's log. Nothing else will ever notice: the login callback is the only
+# writer, and an active user never revisits it, so the credential can be dead for
+# weeks behind a perfectly healthy session.
+_SERVICE = "nextcloud"
+
+# Why the pair went away, in the user's terms. Which of the two fired was not
+# recoverable after the fact during the reported incident — neither site left a
+# durable trace — so the reason travels on the notification row.
+_REASON_REVOKED = "the Nextcloud sign-in was revoked or expired"
+_REASON_UNDECRYPTABLE = "the server's token key changed"
+_REASON_NOT_PERSISTED = "a renewed sign-in could not be saved"
+
 # Per-user refresh serialization. Process-local by design — the web app is a
 # single process and the scheduler never refreshes. Guarded by _locks_guard so
 # two requests can't race the dict itself.
@@ -154,6 +169,65 @@ def _user_lock(user_id: str) -> threading.Lock:
         return lock
 
 
+def note_credential_lost(config: "Config", user_id: str, reason: str) -> None:
+    """Record the loss where the user will see it, and push once.
+
+    Called from the two sites that delete the row, and only from those: a
+    transient refusal (network, 5xx) keeps the pair and is not a loss, and
+    "no row stored" is the state of every user who has not logged in since the
+    operator enabled the feature. Raising on either would push a warning nobody
+    can act on, once per rooms poll.
+
+    Delivery, not just a row. `connected_service`'s own rule is that a producer
+    delivers when nothing else will notice again, and that is exactly this
+    credential's shape. The dedup key bounds it: the store's upsert delivers on
+    an insert or a reopen and not on a bump, and the row is deleted here anyway,
+    so the "once" is structural rather than a counter.
+
+    Never raises. Every caller is on a path whose contract is to return None,
+    and an inbox failure must not become a failed web request.
+    """
+    try:
+        from .notification_resolvers import connected_service  # noqa: PLC0415
+
+        connected_service.raise_for_service(config, user_id, _SERVICE, reason)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning(
+            "could not raise the Nextcloud reconnect notice for %r",
+            user_id, exc_info=True,
+        )
+
+
+def close_credential_notice(db_path: Path, user_id: str, *, by: str) -> None:
+    """Close the open "needs reconnecting" notice.
+
+    `by` records what ended the condition — a credential stored again
+    (`"reconnect"`), or the user deliberately disconnecting
+    (`"disconnect"`). Both close the same row; neither is a failure.
+
+    Lives inside `store_tokens` rather than at its call sites because
+    "a pair is now stored" is precisely the condition, and there are two writers
+    (the login callback and a successful refresh).
+
+    A deliberate Disconnect never reaches here — it goes through
+    `delete_tokens`, which is also the *self-heal* deletion path, so closing
+    from in there would undo the raise it was just given. The settings
+    `DELETE /settings/nextcloud-token` handler closes its own row instead, which
+    is the same split `garmin.clear_tokens` takes.
+
+    The resolver is the backstop behind both, not the other way round.
+    """
+    try:
+        from .notification_resolvers import connected_service  # noqa: PLC0415
+
+        connected_service.close_for_service(db_path, user_id, _SERVICE, by=by)
+    except Exception:  # noqa: BLE001 — must not be able to fail a login
+        logger.warning(
+            "could not close the Nextcloud reconnect notice for %r",
+            user_id, exc_info=True,
+        )
+
+
 def _expires_at(expires_in: int | float) -> str:
     return (
         datetime.now(timezone.utc) + timedelta(seconds=float(expires_in))
@@ -188,6 +262,10 @@ def store_tokens(
             """,
             (user_id, access_ct, refresh_ct, _expires_at(expires_in)),
         )
+    # After the write transaction has closed, never inside it: the close opens a
+    # connection of its own on a short lock budget, and holding this one while it
+    # waits would stall a login behind an unrelated writer.
+    close_credential_notice(db_path, user_id, by="reconnect")
 
 
 def delete_tokens(db_path: Path, user_id: str) -> bool:
@@ -246,6 +324,33 @@ def get_access_token(
     """
     if not token_key_available():
         return None
+
+    access, lost_reason = _get_under_lock(
+        db_path, config, user_id, force_refresh=force_refresh,
+    )
+    # Outside the lock, deliberately. The raise opens a DB connection of its own
+    # at the store's 30-second busy timeout and then *delivers* — Talk, email,
+    # ntfy — and doing that under the per-user lock would serialize every other
+    # token read for this user behind an outbound HTTP call, on a thread serving
+    # a web request. Same discipline `store_tokens` uses for the close.
+    if lost_reason:
+        note_credential_lost(config, user_id, lost_reason)
+    return access
+
+
+def _get_under_lock(
+    db_path: Path,
+    config: "Config",
+    user_id: str,
+    *,
+    force_refresh: bool,
+) -> tuple[str | None, str | None]:
+    """`get_access_token`'s body, under the per-user refresh lock.
+
+    Returns `(access_token, lost_reason)`. A non-None reason means the stored
+    pair was deleted and the user has to reconnect; the caller raises the notice
+    after releasing the lock.
+    """
     fernet = _get_fernet()
 
     with _user_lock(user_id):
@@ -259,9 +364,9 @@ def get_access_token(
                     (user_id,),
                 ).fetchone()
         except sqlite3.OperationalError:
-            return None  # table absent (pre-migration DB)
+            return None, None  # table absent (pre-migration DB)
         if row is None:
-            return None
+            return None, None  # never connected — not a loss, see the caller
 
         try:
             access_token = fernet.decrypt(row["access_token"].encode("ascii")).decode("utf-8")
@@ -273,7 +378,7 @@ def get_access_token(
                 user_id,
             )
             delete_tokens(db_path, user_id)
-            return None
+            return None, _REASON_UNDECRYPTABLE
 
         needs_refresh = force_refresh
         if not needs_refresh:
@@ -287,16 +392,21 @@ def get_access_token(
                 needs_refresh = True  # unparseable expiry — treat as expired
 
         if not needs_refresh:
-            return access_token
+            return access_token, None
 
         return _refresh(db_path, config, user_id, refresh_token)
 
 
 def _refresh(
     db_path: Path, config: "Config", user_id: str, refresh_token: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """One refresh attempt against the NC token endpoint. Caller holds the
-    per-user lock. Persists the rotated pair on success."""
+    per-user lock. Persists the rotated pair on success.
+
+    Returns `(access_token, lost_reason)` on the same contract as
+    `_get_under_lock`: the notice is raised by `get_access_token` once the lock
+    is released, never from in here.
+    """
     endpoint = _token_endpoint(config)
     try:
         resp = httpx.post(
@@ -311,7 +421,7 @@ def _refresh(
         )
     except httpx.HTTPError as e:
         logger.warning("web token refresh failed (transient) user=%s: %s", user_id, e)
-        return None
+        return None, None  # transient — the pair is kept for a later retry
 
     if resp.status_code in (400, 401):
         # Definitive: revoked/expired refresh token (invalid_grant). Delete so
@@ -321,13 +431,13 @@ def _refresh(
             resp.status_code, user_id,
         )
         delete_tokens(db_path, user_id)
-        return None
+        return None, _REASON_REVOKED
     if resp.status_code != 200:
         logger.warning(
             "web token refresh failed (transient %d) user=%s",
             resp.status_code, user_id,
         )
-        return None
+        return None, None
 
     try:
         body = resp.json()
@@ -336,8 +446,31 @@ def _refresh(
         expires_in = body.get("expires_in", 3600)
     except (ValueError, KeyError, TypeError) as e:
         logger.warning("web token refresh: malformed response user=%s: %s", user_id, e)
-        return None
+        return None, None
 
-    store_tokens(db_path, user_id, new_access, new_refresh, expires_in)
+    # Nextcloud rotated the refresh token and invalidated the one we sent, so by
+    # this line the stored pair is already dead whatever happens next. If the
+    # persist fails we hold nothing usable and the server holds a pair we cannot
+    # name — unrecoverable except by re-login. It used to fail silently *and*
+    # escape: nothing caught it, so it also broke this function's never-raises
+    # contract at the one call site that matters least (a background poll) and
+    # most (a send). Delete, say so loudly, and put the reconnect where the user
+    # is (ISSUE-333, item 5).
+    try:
+        store_tokens(db_path, user_id, new_access, new_refresh, expires_in)
+    except Exception:
+        logger.error(
+            "web token refresh: rotated pair could not be persisted user=%s — "
+            "the old refresh token is already invalid, so the connection is "
+            "lost until the user signs in again",
+            user_id, exc_info=True,
+        )
+        delete_tokens(db_path, user_id)
+        # `new_access` is handed back rather than discarded: it is valid for
+        # `expires_in` seconds and the caller has work to do now. Only the
+        # *next* read degrades, which is what the notice is for. Returning None
+        # here would fail the in-flight request as well, on a token that works.
+        return new_access, _REASON_NOT_PERSISTED
+
     logger.debug("web token refreshed user=%s", user_id)
-    return new_access
+    return new_access, None

@@ -422,14 +422,26 @@ class TalkClient:
             data = {**data, "entries": entries[:wanted]}
         return data
 
-    async def mark_conversation_read(self, conversation_token: str) -> bool:
+    async def mark_conversation_read(
+        self, conversation_token: str, *, raise_on_error: bool = False,
+    ) -> bool:
         """Mark a whole conversation read for the authenticated identity.
 
         ``POST /chat/{token}/read`` with no ``lastReadMessage`` marks everything
         read (Talk capability ``chat-read-last``). Used with a user bearer token
-        to sync the web UI's mark-read into Nextcloud Talk. Returns a success
-        bool and never raises to callers — a Talk failure must not fail the web
-        request that triggered it.
+        to sync the web UI's mark-read into Nextcloud Talk.
+
+        `raise_on_error` decides who handles a failure. The default swallows
+        everything and returns a bool, which is what a fire-and-forget caller
+        wants. But swallowing here means the caller never sees a *status*, and a
+        401 on a stale-but-present access token is then indistinguishable from a
+        moved endpoint or a Talk outage — so the one place that can actually act
+        on the difference could not (ISSUE-333). Pass True to get the
+        `httpx.HTTPStatusError` and decide for yourself.
+
+        The failure log carries the status either way. Without it the warning
+        named the exception and not the code, which is what made the reported
+        incident unreadable from the log.
         """
         url = (
             f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat"
@@ -446,9 +458,13 @@ class TalkClient:
             response.raise_for_status()
             return True
         except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
             logger.warning(
-                "mark_conversation_read failed for %s: %s", conversation_token, e,
+                "mark_conversation_read failed for %s: status=%s %s: %s",
+                conversation_token, status, type(e).__name__, e,
             )
+            if raise_on_error:
+                raise
             return False
 
     async def list_conversations(self) -> list[dict]:

@@ -800,11 +800,65 @@ def _render_login_error_page(
 async def login(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("Auth not configured", status_code=500)
+    # An abandoned reconnect (the user closed the provider's consent page) leaves
+    # its landing marker in the session, and only a *completed* callback consumes
+    # one — so an ordinary login some time later would land on settings. Starting
+    # a plain login is the statement that this is not that reconnect.
+    request.session.pop(_POST_LOGIN_KEY, None)
     if not request.query_params.get("go"):
         from . import __version__
 
         bot_name = _config.bot_name if _config else "Istota"
         return HTMLResponse(_render_login_page(bot_name, __version__))
+    return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
+
+
+# Where a completed OAuth round trip may land, keyed rather than stored as a
+# URL. The key rides in the signed session cookie, so a user can only ever set it
+# for themselves — but it still becomes a `Location` header, and "only the victim
+# can poison their own redirect" is the argument that ends in a phishing hop off
+# somebody's login flow. A fixed table cannot be talked into an absolute URL, a
+# protocol-relative one, or a traversal.
+_POST_LOGIN_TARGETS = {
+    "settings": "/istota/settings",
+}
+_DEFAULT_POST_LOGIN_TARGET = "/istota/"
+
+# The session key carrying that choice across the provider hop.
+_POST_LOGIN_KEY = "post_login_redirect"
+
+
+def _post_login_target(key: object) -> str:
+    """Resolve a post-login landing page from an allowlisted key."""
+    if isinstance(key, str):
+        return _POST_LOGIN_TARGETS.get(key, _DEFAULT_POST_LOGIN_TARGET)
+    return _DEFAULT_POST_LOGIN_TARGET
+
+
+@auth_router.get("/reconnect")
+async def reconnect(request: Request):
+    """Re-run the OAuth authorize flow for an already signed-in user.
+
+    The stored Nextcloud pair and the web session have independent lifetimes and
+    nothing connects them: the session is a signed cookie Starlette re-issues on
+    every response, while the pair is a row two paths can delete at any moment.
+    So the credential can be dead for weeks behind a healthy session, and until
+    this route the only remedy was a full logout/login cycle the user had to work
+    out for themselves — the settings card said so in words (ISSUE-333, item 1).
+
+    Nothing here mints, stores or deletes anything: the callback already does all
+    of that for whoever authenticates, and it stores under the identity the
+    provider returns rather than the one in the session, so a user who signs in
+    as somebody else gets that account rather than a pair filed under the wrong
+    name. The only thing this adds is the landing page at the far end.
+    """
+    if _oauth is None or not hasattr(_oauth, "nextcloud"):
+        return Response("Auth not configured", status_code=500)
+    # An action on an existing account. An anonymous caller has no connection to
+    # re-establish and belongs on the login page.
+    if not request.session.get("user"):
+        return RedirectResponse(url="/istota/login", status_code=302)
+    request.session[_POST_LOGIN_KEY] = "settings"
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
 
@@ -929,12 +983,17 @@ async def callback(request: Request):
         except Exception as e:  # noqa: BLE001
             logger.warning("web token persistence failed user=%s: %s", username, e)
 
+    # Read before the clear, resolve through the allowlist, and consume it: a
+    # marker left in place would send every later login of this session to
+    # settings.
+    landing = _post_login_target(request.session.get(_POST_LOGIN_KEY))
+
     request.session.clear()
     request.session["user"] = {
         "username": username,
         "display_name": display_name,
     }
-    return RedirectResponse(url="/istota/", status_code=302)
+    return RedirectResponse(url=landing, status_code=302)
 
 
 @auth_router.get("/logout")
@@ -5224,41 +5283,130 @@ def _room_talk_ref(room_token: str) -> str | None:
     return next((b.surface_ref for b in bindings if b.surface == "talk"), None)
 
 
-async def _push_read_to_talk(username: str, room_token: str) -> None:
+async def _push_read_to_talk(username: str, room_token: str) -> bool:
     """Web→Talk read sync: mark the bound Talk conversation read as the user.
-    Called only when the web cursor actually advanced. Best-effort — the one
-    user-visible artifact of failure is a badge that doesn't auto-clear."""
+
+    Called when the web cursor actually advanced, and again from the rooms
+    poll's reconciliation leg for a room that got out of step. Returns whether
+    Talk accepted it, which the reconciler reads and the cursor-advance caller
+    ignores.
+
+    Two of the four bails are ordinary and silent: the feature being off, and a
+    room with no Talk binding (every web-only room, on every read). The third —
+    no live token — is the degraded state this whole issue is about, and it now
+    says so once per occurrence rather than returning as if nothing happened
+    (ISSUE-333, item 4). The bot-attributed repost that follows is a legitimate
+    fallback; being indistinguishable from normal operation in the log is not.
+    """
     try:
         from . import web_tokens
 
         if not _config or not web_tokens.feature_enabled(_config):
-            return
+            return False
         talk_ref = await asyncio.to_thread(_room_talk_ref, room_token)
         if not talk_ref:
-            return
+            return False
         access = await asyncio.to_thread(
             web_tokens.get_access_token, _config.db_path, _config, username,
         )
         if not access:
-            return
-        from .talk import TalkClient
+            _note_token_degraded(username, room_token, "read push to Talk")
+            return False
 
-        client = TalkClient(_config, bearer_token=access, timeout=5)
-        try:
-            # mark_conversation_read logs + returns False on failure.
-            await client.mark_conversation_read(talk_ref)
-        finally:
-            await client.aclose()
+        _note_token_healthy(username)
+        return await _mark_read_as_user(username, talk_ref, access)
     except Exception as e:  # noqa: BLE001 — never propagate into the request
         logger.warning(
-            "read push to Talk failed user=%s room=%s: %s",
-            username, room_token, e,
+            "read push to Talk failed user=%s room=%s: %s: %s",
+            username, room_token, type(e).__name__, e,
         )
+        return False
+
+
+async def _mark_read_as_user(username: str, talk_ref: str, access: str) -> bool:
+    """One mark-read attempt, with a single forced-refresh retry on 401.
+
+    Byte for byte the recovery `_post_as_user` has had since it shipped, and its
+    absence here is what produced the reported asymmetry: a stale-but-present
+    access token let the message mirror keep working (it force-refreshes on the
+    401) while every read push failed. The two call sites should not disagree
+    about how a stale token is handled.
+
+    Only 401. A 403 is an answer about the room and a 404 about the endpoint;
+    neither changes when the token does, and retrying them would double every
+    failing request.
+    """
+    from . import web_tokens
+    from .talk import TalkClient
+
+    for attempt in (0, 1):
+        client = TalkClient(_config, bearer_token=access, timeout=5)
+        try:
+            await client.mark_conversation_read(talk_ref, raise_on_error=True)
+            return True
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if attempt == 0 and status == 401:
+                access = await asyncio.to_thread(
+                    lambda: web_tokens.get_access_token(
+                        _config.db_path, _config, username, force_refresh=True,
+                    ),
+                )
+                if access:
+                    continue
+            logger.warning(
+                "read push to Talk failed user=%s room=%s status=%s",
+                username, talk_ref, status,
+            )
+            return False
+        except Exception as e:
+            logger.warning(
+                "read push to Talk failed user=%s room=%s: %s: %s",
+                username, talk_ref, type(e).__name__, e,
+            )
+            return False
+        finally:
+            await client.aclose()
+    return False
 
 
 # Talk→web read-state pull throttle: user -> monotonic timestamp of the last
 # pull. Process-local by design (a web restart just pulls once immediately).
 _talk_read_pull_state: dict[str, float] = {}
+
+# Users already warned that their Nextcloud connection is not usable, so the
+# degraded-consumer warnings below are one per user per healthy period rather
+# than one per send. Cleared the moment a live token is obtained, which is what
+# makes the next loss loud again. Process-local, like the pull throttle above.
+_token_degraded_logged: set[str] = set()
+
+
+def _note_token_healthy(username: str) -> None:
+    _token_degraded_logged.discard(username)
+
+
+def _note_token_degraded(username: str, room_token: str, what: str) -> None:
+    """Warn once that a consumer is running degraded for want of a token.
+
+    Once, not per occurrence. `get_access_token` returns None identically for a
+    credential that just died and for a user who has never connected, and the
+    row is deleted on loss so nothing downstream can tell the two apart — so an
+    unconditional warning here is a line per web send, forever, for every user
+    on a deployment that enabled the feature after they last logged in. The
+    issue asks for the first bail after a healthy period, which is what the
+    paired `_note_token_healthy` makes this (ISSUE-333, item 4).
+
+    The notification is the surface that actually reaches the user; this is for
+    whoever is reading the log.
+    """
+    if username in _token_degraded_logged:
+        return
+    _token_degraded_logged.add(username)
+    logger.warning(
+        "%s degraded user=%s room=%s: no live Nextcloud token — either the "
+        "connection was lost or it was never established",
+        what, username, room_token,
+    )
 
 
 async def _pull_talk_read_state(username: str) -> None:
@@ -5477,12 +5625,16 @@ async def _mirror_web_turn_as_user(
             web_tokens.get_access_token, _config.db_path, _config, username,
         )
         if not access:
-            logger.debug(
-                "post-as-user skipped user=%s room=%s (no live token)",
-                username, room_token,
-            )
+            # WARNING, not the DEBUG this used to be. This is the degraded
+            # state: the turn will be reposted by the bot under the bot's name
+            # instead of appearing as the user, which misrepresents authorship
+            # in the shared Talk history. It reached the log at a level nobody
+            # runs at, which is half of why the credential could be dead for
+            # weeks unnoticed (ISSUE-333, item 4).
+            _note_token_degraded(username, room_token, "post-as-user mirror")
             return
 
+        _note_token_healthy(username)
         posted_id = await _post_as_user(
             access, talk_ref, text, message_id, username,
             reply_to_talk_id=parent_talk_id,
@@ -7324,6 +7476,17 @@ async def nextcloud_token_disconnect(
     )
     if deleted:
         logger.info("Nextcloud token disconnected for user %s", user["username"])
+    # Close any open "needs reconnecting" notice. Here rather than in
+    # `delete_tokens`, which is also the self-heal deletion path that *raises*
+    # that notice — closing from in there would cancel the warning it had just
+    # written. Same split `garmin.clear_tokens` takes. Unconditional: a user
+    # disconnecting a credential the self-heal already removed still means
+    # "I know, and I am not reconnecting", and `was_connected` is False there.
+    await asyncio.to_thread(
+        lambda: _wt.close_credential_notice(
+            _config.db_path, user["username"], by="disconnect",
+        ),
+    )
     return {"ok": True, "was_connected": deleted}
 
 
