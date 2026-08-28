@@ -146,6 +146,34 @@ MODULE_SERVICE_SCHEMA: dict[str, dict[str, dict]] = {
                 {"key": "ingest_token", "label": "Ingest token", "type": "password"},
             ],
         },
+        "carto": {
+            "label": "CARTO basemap",
+            "used_by": ("location",),
+            # Its own service rather than another field on `overland`: it is a
+            # different credential with a different lifecycle, and a second
+            # field there would flip that card to "Partial" for every user who
+            # has an ingest token and no basemap key.
+            #
+            # The only credential in the schema that is *meant* to reach the
+            # browser. MapLibre puts it in the tile URL, so it ships to every
+            # client that loads a map and appears in every request they make —
+            # CARTO issues these keys free, for exactly that use. It is stored
+            # here for the encryption at rest, the per-user scoping and the
+            # input UI, not because it is confidential. Nothing reads it back
+            # as a value: `/api/map/basemap` returns it only already embedded
+            # in the tile URL the browser is about to fetch, so the store's
+            # write-only-to-the-browser property is kept where it means
+            # something (ISSUE-334).
+            "hint": (
+                "Free from carto.com/basemaps/apikey. Setting a key selects "
+                "CARTO as your basemap; leave it empty to use the deployment "
+                "default. The key travels in the map tile URL, so treat it as "
+                "public."
+            ),
+            "fields": [
+                {"key": "api_key", "label": "API key", "type": "password"},
+            ],
+        },
     },
 }
 

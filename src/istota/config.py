@@ -969,6 +969,34 @@ class WebChatConfig:
 
 
 @dataclass
+class WebMapConfig:
+    """Where the map surfaces get their background tiles.
+
+    A seam rather than a literal (ISSUE-334): the location maps used to name
+    CARTO's tile host in the frontend bundle, and when CARTO started
+    watermarking keyless requests there was no way to change it without a code
+    edit. Resolution lives in `istota.map_basemap`, which the web endpoint and
+    the `web.basemap` doctor check both read, so the checker cannot pass while
+    the map is blank.
+
+    `api_key` is disclosed by construction — MapLibre puts it in the tile URL,
+    so it ships to every browser that loads a map. Treat it as public. It is
+    accepted here for an operator who prefers one deployment-wide value in
+    config; the per-user key set from the location settings page is stored in
+    the encrypted `secrets` table and wins over this one.
+    """
+    # openfreemap (default, keyless) | carto | osm | custom.
+    provider: str = "openfreemap"
+    # carto only. Public — it travels in the tile URL to every browser.
+    api_key: str = ""
+    # custom only: MapLibre style URLs the operator serves themselves. One is
+    # enough; it then covers both themes.
+    dark_style: str = ""
+    light_style: str = ""
+    attribution: str = ""
+
+
+@dataclass
 class WebConfig:
     """Authenticated web interface configuration.
 
@@ -1000,6 +1028,7 @@ class WebConfig:
     token_storage: str = "ephemeral"
     session_secret_key: str = ""
     chat: WebChatConfig = field(default_factory=WebChatConfig)
+    map: WebMapConfig = field(default_factory=WebMapConfig)
 
 
 @dataclass
@@ -3286,6 +3315,15 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "web" in data:
         w = data["web"]
+        map_data = w.get("map", {})
+        _map_defaults = WebMapConfig()
+        web_map = WebMapConfig(
+            provider=map_data.get("provider", _map_defaults.provider),
+            api_key=map_data.get("api_key", _map_defaults.api_key),
+            dark_style=map_data.get("dark_style", _map_defaults.dark_style),
+            light_style=map_data.get("light_style", _map_defaults.light_style),
+            attribution=map_data.get("attribution", _map_defaults.attribution),
+        )
         chat_data = w.get("chat", {})
         _chat_defaults = WebChatConfig()
         web_chat = WebChatConfig(
@@ -3353,6 +3391,7 @@ def load_config(config_path: Path | None = None) -> Config:
             token_storage=_token_storage,
             session_secret_key=w.get("session_secret_key", ""),
             chat=web_chat,
+            map=web_map,
         )
 
     if "developer" in data:

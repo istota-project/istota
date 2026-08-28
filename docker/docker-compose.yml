@@ -396,6 +396,15 @@ services:
       # "ephemeral" to opt out.
       ISTOTA_WEB_TOKEN_STORAGE: ${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}
       ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL: ${ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL:-60}
+      # Map background tiles. The default needs no key. "carto" needs a free
+      # one from https://carto.com/basemaps/apikey/ — without it every tile is
+      # returned watermarked with a 200 status, so nothing but a human notices.
+      # The key travels in the tile URL to every browser: it is public.
+      ISTOTA_WEB_MAP_PROVIDER: ${ISTOTA_WEB_MAP_PROVIDER:-openfreemap}
+      ISTOTA_WEB_MAP_API_KEY: ${ISTOTA_WEB_MAP_API_KEY:-}
+      ISTOTA_WEB_MAP_DARK_STYLE: ${ISTOTA_WEB_MAP_DARK_STYLE:-}
+      ISTOTA_WEB_MAP_LIGHT_STYLE: ${ISTOTA_WEB_MAP_LIGHT_STYLE:-}
+      ISTOTA_WEB_MAP_ATTRIBUTION: ${ISTOTA_WEB_MAP_ATTRIBUTION:-}
     restart: unless-stopped
 
   # Web UI service. Shares the istota image (built once) and reads the same

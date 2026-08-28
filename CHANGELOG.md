@@ -159,6 +159,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Recovering a chat stream while a message send is still waiting for its server response no longer creates a second progress row for the same task or renders the completed answer twice.
 
+- The maps on the location pages stopped drawing a background and stamped every tile with "API KEY REQUIRED" instead, after the tile service started demanding a key. The address of that service was written into the app, so no setting could change it. Which map service to use is now a setting, and the default needs no key, no account and no signup — the maps draw correctly again with nothing to configure.
+
+- **If you want the old look back:** the previous service is still on the list and looks the way it always did; it just needs a free key now, by email from carto.com/basemaps/apikey. Paste it into the box on the location settings page, or set one for everybody in the configuration file. Treat that key as public — it is part of the address your browser asks for tiles at — and as a stopgap, since that service is winding down the tile format we use.
+
+- `istota doctor` now reports what it can about the map. The defaced tiles came back as a normal, successful image, the same bytes whether the key was right, wrong or missing, so nothing automated could tell a working map from a broken one. It now says plainly when the map needs a key and has none, fetches a tile where a fetch settles the question, and says it cannot tell rather than reporting everything is fine.
+
+- **Not fixed:** none of this stops the map service learning which part of the world you are looking at, and when — every tile your browser fetches tells them that, from your address. Swapping one company for another does not change it; serving the map from your own install would, and that needs a map file built and hosted, which is separate work.
+
 - Briefing content commands now report an unknown briefing name instead of presenting it as a configured briefing with no blocks. The error includes the valid names, and a new list command shows each briefing's block count and latest generation time so callers no longer have to guess case-sensitive names.
 
 - Location visits now stay open across reporting gaps when pings resume at the same place. The nightly reconciler no longer rewrites one continuous stop as several short visits merely because a phone stopped reporting for longer than its grace period.

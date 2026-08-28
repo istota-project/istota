@@ -972,6 +972,18 @@ istota_web_token_storage: "ephemeral"
 istota_web_token_key: ""
 # Talk→web read-state pull cadence in seconds (0 disables the pull;
 # web→Talk push is unaffected). Only active with token storage "encrypted".
+# Map background tiles. The default needs no key and no account.
+# "carto" needs a free key from https://carto.com/basemaps/apikey/ — without
+# one every tile comes back watermarked "API KEY REQUIRED" with a 200 status,
+# so no automated check sees it. The key travels in the tile URL to every
+# browser that loads a map, so it is public: it is not a secret to protect,
+# and each user can override it from the location settings page.
+istota_web_map_provider: openfreemap   # openfreemap | carto | osm | custom
+istota_web_map_api_key: ""             # carto only
+istota_web_map_dark_style: ""          # custom only: MapLibre style URL
+istota_web_map_light_style: ""         # custom only
+istota_web_map_attribution: ""         # custom only
+
 istota_web_chat_talk_read_sync_interval: 60
 # Live room-event stream (GET /chat/stream): one user-scoped SSE connection per
 # open tab carrying every room the user is a member of. Server-side poll cadence

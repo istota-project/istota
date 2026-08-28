@@ -177,6 +177,59 @@ Docker `/data/.web_token_key`). `"encrypted"` without the key logs one ERROR
 at web startup and behaves as ephemeral. Docker-path override:
 `ISTOTA_WEB_TOKEN_STORAGE` env var (validated the same way).
 
+### `WebMapConfig` (`[web.map]`) — where map tiles come from
+```
+provider: str = "openfreemap"   # openfreemap | carto | osm | custom; unknown → warning + openfreemap
+api_key: str = ""               # carto only; public by construction
+dark_style: str = ""            # custom only: a MapLibre style URL
+light_style: str = ""           # custom only
+attribution: str = ""           # custom only
+```
+The seam that replaced two hardcoded CARTO URLs in `LocationMap.svelte`
+(ISSUE-334). Resolution is `istota/map_basemap.py`, a stdlib-only leaf read by
+both consumers — `GET /istota/api/map/basemap` and the `web.basemap` doctor
+check — so the checker cannot pass while the map is blank. Never raises and
+never returns an unusable spec: an unknown provider, a `custom` with no URL or
+a non-http(s) one, **and a keyed provider with no key** all fall back to
+`openfreemap` and set `fell_back`.
+
+That last one is the case worth being explicit about. Returning the keyless
+CARTO templates with a `needs_key` flag set was the original bug wearing a
+label — nothing in a browser can act on a flag, so the user still got the
+watermark. The flag survives on the fallback spec as the *reason*, which is
+what lets doctor say "carto, with no key" instead of the much vaguer "did not
+resolve as written".
+
+`api_key` **is not a secret**. MapLibre puts it in the tile URL, so it ships to
+every browser that loads a map and appears in every request they make; CARTO
+issues these free for exactly that. It is redacted in the admin config view
+because it matches `is_secret_name`, which is harmless but not a guarantee
+about the value.
+
+A user can also store their own CARTO key from the location settings page
+(`MODULE_SERVICE_SCHEMA["location"]["carto"]`). **A stored key selects CARTO
+for that user**, overriding `provider` — `map_basemap.select_provider` — because
+otherwise pasting a key would do nothing visible and the reason would live in a
+file the user cannot reach. The endpoint returns that key only already embedded
+in the tile URL, never as a field, so the secrets store stays write-only to the
+browser everywhere it means something.
+
+**`web.basemap` opens no socket, deliberately.** Two measured facts remove the
+value a probe would have. The watermark is invisible to a fetch: CARTO returns
+200, `content-type: image/png`, and a byte-identical body and ETag for a
+keyless request and one with a bogus key (measured 2026-08-28), so a probe
+reports a working basemap for a defaced one. And the daemon is the wrong host —
+tiles are fetched by the browser, over a different route, so a proxied
+deployment would fail a probe for a basemap every browser renders. Running it
+anyway also put a third-party request on the boot path and the hourly sweep,
+where a CDN blip becomes a FAIL and pages the operator. A keyed CARTO is
+therefore reported as *configured*, never as verified.
+`tests/test_doctor_basemap.py::TestItOpensNoSocket` holds this.
+
+Docker: `ISTOTA_WEB_MAP_PROVIDER`, `_API_KEY`, `_DARK_STYLE`, `_LIGHT_STYLE`,
+`_ATTRIBUTION`, read by `render-config.sh` and passed through
+`docker-compose.yml`. Ansible: `istota_web_map_*` in `defaults/main.yml`.
+
 ### `WebChatConfig` (`[web.chat]`) — read-sync knob
 ```
 talk_read_sync_interval: int = 60   # Talk→web read pull cadence (s); 0 disables the pull

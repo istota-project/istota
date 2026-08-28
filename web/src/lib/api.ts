@@ -1,5 +1,6 @@
 import { base } from '$app/paths';
 import { uploadFromPath, type Picked } from '$lib/platform/nativePicker';
+import type { BasemapSpec } from '$lib/basemap';
 
 class AuthError extends Error {
   constructor() {
@@ -850,6 +851,9 @@ export interface ServiceCard {
   configured_keys: string[];
   last_updated: string | null;
   used_by?: string[];
+  // Optional prose from the service schema: where to get the credential, or
+  // what setting it changes. Absent for most services.
+  hint?: string;
   oauth?: boolean; // auth is an OAuth redirect rather than writable fields
   // Render a bespoke card (garmin, google_workspace) instead of fields.
   custom_ui?: boolean;
@@ -1008,25 +1012,43 @@ export async function generateIngestToken(): Promise<GeneratedIngestToken> {
   return resp.json();
 }
 
+// The basemap spec embeds the calling user's stored CARTO key in the tile URL,
+// so writing that key invalidates the cached spec. Without this, pasting a key
+// on /location/settings and navigating to /location is a client-side
+// navigation: the module stays loaded, the stale spec is served, and the map
+// does not change until a full reload — which is not what the settings card
+// says will happen, and gives the user no reason to suspect a reload.
+function invalidateSecretDerivedCaches(service: string): void {
+  if (service === 'carto') resetBasemapCache();
+}
+
 export async function setSecret(
   service: string,
   key: string,
   value: string,
 ): Promise<{ ok: boolean; configured: boolean }> {
-  return apiFetch(`/settings/secrets/${service}/${key}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ value }),
-  });
+  const result = await apiFetch<{ ok: boolean; configured: boolean }>(
+    `/settings/secrets/${service}/${key}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    },
+  );
+  invalidateSecretDerivedCaches(service);
+  return result;
 }
 
 export async function deleteSecret(
   service: string,
   key: string,
 ): Promise<{ ok: boolean; deleted: boolean }> {
-  return apiFetch(`/settings/secrets/${service}/${key}`, {
-    method: 'DELETE',
-  });
+  const result = await apiFetch<{ ok: boolean; deleted: boolean }>(
+    `/settings/secrets/${service}/${key}`,
+    { method: 'DELETE' },
+  );
+  invalidateSecretDerivedCaches(service);
+  return result;
 }
 
 /**
@@ -2369,6 +2391,36 @@ export function chatConfigOnce(): Promise<ChatConfig> {
 /** Test seam: drop the cached config so the next call fetches again. */
 export function resetChatConfigCache(): void {
   chatConfigInFlight = null;
+}
+
+export function getBasemap(): Promise<BasemapSpec> {
+  return apiFetch<BasemapSpec>('/map/basemap');
+}
+
+/**
+ * `getBasemap`, shared across callers and across maps.
+ *
+ * Every map surface asks the same question and none of them can change the
+ * answer, so one request per page load covers the location page, the history
+ * page and anything that mounts a second map beside them.
+ *
+ * A failure is not cached, for the same reason `chatConfigOnce` does not cache
+ * one: the caller falls back to the keyless default and a later navigation
+ * should get another chance at the real answer.
+ */
+let basemapInFlight: Promise<BasemapSpec> | null = null;
+
+export function basemapOnce(): Promise<BasemapSpec> {
+  basemapInFlight ??= getBasemap().catch((e) => {
+    basemapInFlight = null;
+    throw e;
+  });
+  return basemapInFlight;
+}
+
+/** Test seam: drop the cached basemap so the next call fetches again. */
+export function resetBasemapCache(): void {
+  basemapInFlight = null;
 }
 
 export interface ChatCommand {

@@ -489,6 +489,13 @@ oauth2_redirect_uri = "${WEB_REDIRECT_URI}"
 session_secret_key = "${WEB_SESSION_SECRET}"
 token_storage = "${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}"
 
+[web.map]
+provider = "${ISTOTA_WEB_MAP_PROVIDER:-openfreemap}"
+api_key = "${ISTOTA_WEB_MAP_API_KEY:-}"
+dark_style = "${ISTOTA_WEB_MAP_DARK_STYLE:-}"
+light_style = "${ISTOTA_WEB_MAP_LIGHT_STYLE:-}"
+attribution = "${ISTOTA_WEB_MAP_ATTRIBUTION:-}"
+
 [web.chat]
 talk_read_sync_interval = ${ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL:-60}
 
