@@ -29,10 +29,11 @@
 #     assertion red for the wrong reason, which is exactly what a second
 #     control exists to separate.
 #
-# Five assertions in the devbox file have no control, deliberately, and each
-# fails closed: three positive existence checks (`test -x` against a named
+# Six assertions in the devbox file have no control, deliberately, and each
+# fails closed: four positive existence checks (`test -x` against a named
 # absolute path, `python3 -c 'import …'` against a named directory, a `Cmd`
-# compared to an exact list), the graceful-stop assertion (a log line only a
+# compared to an exact list, and `command -v uv` compared to the directory the
+# home volume mounts over), the graceful-stop assertion (a log line only a
 # graceful shutdown writes, plus an unlinked socket), and the unconfigured hold
 # (a process still alive and a message naming two literal variables).
 #

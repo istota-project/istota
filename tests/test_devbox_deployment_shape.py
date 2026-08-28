@@ -43,6 +43,33 @@ DEFAULTS_FILE = ANSIBLE / "defaults" / "main.yml"
 DEVBOX_USER = "alice"
 
 
+DEVBOX_DOCKERFILE = REPO / "docker" / "devbox" / "Dockerfile"
+
+
+def _copy_lines() -> list[list[str]]:
+    """Every `COPY` in the devbox Dockerfile, tokenized."""
+    return [
+        line.split()
+        for line in DEVBOX_DOCKERFILE.read_text().splitlines()
+        if line.startswith("COPY ")
+    ]
+
+
+def _context_copy_sources() -> list[str]:
+    """The COPY sources that come from the *build context*.
+
+    A `COPY --from=<image>` reads a path inside another image, so its sources
+    exist nowhere under `docker/devbox` and asserting they do would fail the
+    build recipe for being correct.
+    """
+    sources = []
+    for tokens in _copy_lines():
+        if any(t.startswith("--from=") for t in tokens):
+            continue
+        sources.append(tokens[1])
+    return sources
+
+
 def _defaults() -> dict:
     return yaml.safe_load(DEFAULTS_FILE.read_text())
 
@@ -627,11 +654,7 @@ class TestTheBuildRecipeIsRootedWhereTheCopiesExpect:
         """And the reason the above matters, checked directly: each COPY source
         is a real path inside docker/devbox. This is what a build would fail
         on."""
-        sources = [
-            line.split()[1]
-            for line in (self.DEVBOX_DIR / "Dockerfile").read_text().splitlines()
-            if line.startswith("COPY ")
-        ]
+        sources = _context_copy_sources()
         assert sources, "no COPY lines found in the devbox Dockerfile"
         missing = [s for s in sources if not (self.DEVBOX_DIR / s).exists()]
         assert not missing, (
@@ -643,15 +666,90 @@ class TestTheBuildRecipeIsRootedWhereTheCopiesExpect:
         """The negative control for the two above: these paths must *not* exist
         at the repo root, or rooting the context there would have worked and
         the bug this class pins would not have been a bug."""
-        sources = [
-            line.split()[1]
-            for line in (self.DEVBOX_DIR / "Dockerfile").read_text().splitlines()
-            if line.startswith("COPY ")
-        ]
+        sources = _context_copy_sources()
         resolvable_from_root = [s for s in sources if (REPO / s).exists()]
         assert not resolvable_from_root, (
             f"{resolvable_from_root} resolve from the repo root as well as from "
             f"docker/devbox, so this class no longer distinguishes the two"
+        )
+
+
+class TestTheImageToolchainOutlivesTheHomeVolume:
+    """ISSUE-336 — what the image installs must not land in the mount.
+
+    Docker seeds a named volume from the image only when the volume is empty at
+    container-*create* time. `/home/dev` is that volume, and `devbox reset`
+    empties it and then `docker restart`s the container, which copies nothing —
+    so anything the recipe installed under it is gone for good, from a verb
+    whose name promises a clean box rather than a smaller one.
+
+    That is what happened: uv and rustup were installed as `dev` into
+    `~/.local/bin` and `~/.cargo`, survived a first boot, and disappeared on the
+    first reset. uv is the one that matters, because it is in
+    `config.DEFAULT_SHIM_COMMANDS` — a missing uv on a devbox-backed deployment
+    is `uv sync` failing inside a shim rather than a scratch box missing a tool.
+
+    The mount points come from the rendered service rather than from a literal,
+    so a template that moved the volume moves this assertion with it.
+    """
+
+    @staticmethod
+    def _copy_destination(needle: str) -> tuple[str, list[str]]:
+        for tokens in _copy_lines():
+            if needle in tokens[1:-1]:
+                return tokens[-1], tokens
+        raise AssertionError(
+            f"the devbox Dockerfile copies no {needle}; if uv now arrives some "
+            f"other way, this class has to learn how"
+        )
+
+    def test_uv_is_installed_outside_every_mount_point(self, container_service):
+        destination, _ = self._copy_destination("/uv")
+        mounts = TestTheAnsibleVolumeMountsAreHeldInLine._mount_points(
+            container_service
+        )
+        assert mounts, "the service rendered no mounts, so this proves nothing"
+        under = [m for m in mounts if destination.startswith(m.rstrip("/") + "/")]
+        assert not under, (
+            f"the devbox Dockerfile installs uv at {destination}, which is "
+            f"inside {under} — a runtime mount masks it and `devbox reset` "
+            f"deletes it (ISSUE-336)"
+        )
+
+    def test_uvx_arrives_with_it(self, container_service):
+        """Both are shimmed, so both have to be in the image."""
+        _, tokens = self._copy_destination("/uv")
+        assert "/uvx" in tokens, (
+            "the image ships uv without uvx, which is shimmed too and would "
+            "fail with a missing-command refusal"
+        )
+
+    def test_the_uv_image_is_pinned(self):
+        _, tokens = self._copy_destination("/uv")
+        source = next(t for t in tokens if t.startswith("--from="))
+        assert re.fullmatch(r"--from=\S+/uv:\d+\.\d+\.\d+", source), (
+            f"{source} is not a pinned uv release, so a rebuild is not "
+            f"reproducible"
+        )
+
+    def test_the_recipe_installs_no_rust_toolchain(self):
+        """The other half of the decision, and a real cost: rustup with a
+        minimal profile is ~600 MB of image for a toolchain nothing in istota
+        uses. `cargo`, `rustc` and `rustup` stay shimmed — the container is
+        still where they belong — and a task that wants them installs them at
+        the time, into /home/dev, where the next reset correctly takes them.
+        """
+        body = DEVBOX_DOCKERFILE.read_text()
+        offenders = [
+            line
+            for line in body.splitlines()
+            if not line.lstrip().startswith("#")
+            and ("rustup.rs" in line or "rustup-init" in line)
+        ]
+        assert not offenders, (
+            f"the devbox image installs a Rust toolchain again: {offenders}. "
+            f"It would live in /home/dev and die with the next reset, and it is "
+            f"~600 MB nothing in this project needs (ISSUE-336)"
         )
 
 

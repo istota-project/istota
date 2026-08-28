@@ -372,8 +372,8 @@ class TestTheDevUidBuildArgs:
         # The half the supervisor's chown cannot help with: what the *image*
         # ships. A volume masks this at runtime and the chown repairs that; an
         # image whose own /home/dev belongs to somebody else is broken before
-        # any volume is involved, and the uv and rustup installs baked into it
-        # are unreadable.
+        # any volume is involved — `dev` cannot write the directory every
+        # `exec` starts in.
         #
         # Both sides are the image's own self-report, which is the shape of an
         # assertion that agrees with itself on any image at all — on one with no
@@ -396,6 +396,43 @@ class TestTheDevUidBuildArgs:
             f"/home/dev is owned by {_field(out, 'OWNER')} and dev is "
             f"{_field(out, 'ACCOUNT')}; dev cannot write its own home"
         )
+
+
+class TestTheToolchainSurvivesTheHomeVolume:
+    """ISSUE-336 — uv is in the image, and not in the directory a volume masks.
+
+    It used to be installed as `dev` into `/home/dev/.local/bin`. Docker seeds
+    a named volume from the image only when the volume is empty at
+    container-create time, so that survived a first boot and nothing after it:
+    `devbox reset` empties the volume and restarts the container, a restart
+    copies nothing, and uv was gone for good. `uv` is shimmed, so what that
+    actually broke was `uv sync` on a repository task, inside a container the
+    reader did not know they were in.
+
+    `tests/test_devbox_deployment_shape.py` asserts the recipe's shape; this
+    asserts the built artifact, which is the claim. No negative control: both
+    halves fail closed — an image with no uv fails `command -v`, and the path
+    it prints is compared against a literal it must not be under.
+    """
+
+    def test_uv_and_uvx_run_from_outside_the_home_directory(
+        self, devbox_image_under_test
+    ):
+        result = sh(
+            devbox_image_under_test,
+            'echo "UV $(command -v uv)"; echo "UVX $(command -v uvx)"; '
+            'uv --version > /dev/null; uvx --version > /dev/null',
+        )
+        out = assert_ok(result, "uv/uvx are not installed and runnable")
+
+        for key in ("UV", "UVX"):
+            where = _field(out, key)
+            assert where, f"{key} resolved to nothing"
+            assert not where.startswith("/home/dev"), (
+                f"{key.lower()} is at {where}, inside the directory the "
+                f"per-user volume mounts over — a `devbox reset` deletes it "
+                f"and nothing puts it back (ISSUE-336)"
+            )
 
 
 class TestTheExecTransportIsInstalled:

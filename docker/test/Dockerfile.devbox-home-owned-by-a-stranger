@@ -8,8 +8,9 @@
 #
 # It is a claim worth making, because the supervisor's runtime chown cannot
 # help with it. That repair is for a *volume* mounted over /home/dev. An image
-# whose own /home/dev belongs to somebody else ships a `dev` who cannot read
-# the uv and rustup installs baked into it, before any volume is involved.
+# whose own /home/dev belongs to somebody else ships a `dev` who cannot write
+# its own working directory — where every `exec` starts and every scratch build
+# lands — before any volume is involved.
 #
 # Note what this control does **not** break. `devbox-wrong-uid` builds the real
 # recipe with different args, and there the account and the directory move

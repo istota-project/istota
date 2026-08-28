@@ -120,7 +120,7 @@ The costs above were measured on one arm64 developer machine with warm caches; t
 
 Two of these carry a negative control, and the controls are not a formality — on a tier that asserts against an artifact, reading the test tells you almost nothing about whether it can fail. `scripts/test-image-negative-control.sh` covers both halves of the image tier and requires each to go red against a deliberately broken image.
 
-The istota half is one control: the image with `/usr/local/lib/istota_forge` removed. The devbox half needs **ten**, because that file asserts several separable things and no single broken image reaches all twenty-six of its assertions:
+The istota half is one control: the image with `/usr/local/lib/istota_forge` removed. The devbox half needs **ten**, because that file asserts several separable things and no single broken image reaches all twenty-seven of its assertions:
 
 | Control | Turns red | Why it is separate |
 |---|---|---|
@@ -135,7 +135,7 @@ The istota half is one control: the image with `/usr/local/lib/istota_forge` rem
 | `Dockerfile.devbox-no-home-repair` | `test_the_supervisor_repairs_a_home_directory_with_the_wrong_owner` | the transport comes up normally and only the repair call is removed, so the assertion reaches its own comparison. The `sed` verifies its own edit took, because a control that quietly changed nothing reports a green tier as proof |
 | `Dockerfile.devbox-workspace-present` | `test_the_image_has_no_workspace_directory` | an absence assertion is the archetype of a test that can never fail: `test ! -e` against a path nothing creates passes on any image at all |
 
-Five assertions in that file have no control, deliberately, and each fails closed rather than passing vacuously: `test -x` against a named absolute path, `python3 -c 'import …'` against a named directory, a `Cmd` compared to an exact list, the graceful-stop assertion (a log line only a graceful shutdown writes, plus an unlinked socket), and the unconfigured hold (a process still alive and a message naming two literal variables).
+Six assertions in that file have no control, deliberately, and each fails closed rather than passing vacuously: `test -x` against a named absolute path, `python3 -c 'import …'` against a named directory, a `Cmd` compared to an exact list, `command -v uv` compared to the directory the home volume mounts over, the graceful-stop assertion (a log line only a graceful shutdown writes, plus an unlinked socket), and the unconfigured hold (a process still alive and a message naming two literal variables).
 
 **Each control names the exact parametrized node ids it must turn red**, and the script requires those to appear in pytest's own `FAILED` summary. Checking only the exit status is not enough, and that is not hypothetical: the first cut did that, and one control passed on a `UnicodeDecodeError` raised inside `subprocess` before its assertion ever ran — red for the right image, for the wrong reason, which is indistinguishable from a working assertion and is exactly what a control exists to tell apart. The underlying harness bug is fixed too (`errors="replace"` in `tests/image/conftest.py`).
 

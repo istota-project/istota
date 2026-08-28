@@ -122,17 +122,38 @@ RUN set -eux; \
     echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev; \
     chmod 0440 /etc/sudoers.d/dev
 
+# Layer 4: uv, at a system path.
+#
+# It used to be `curl https://astral.sh/uv/install.sh | sh` as `dev`, which put
+# it in /home/dev/.local/bin, and rustup beside it in /home/dev/.cargo. That is
+# the *volume* mount point: Docker seeds a named volume from the image only
+# when the volume is empty at container-create time, so both survived a first
+# boot and nothing else. `devbox reset` empties the volume and restarts the
+# container — a restart, which copies nothing — so uv and the whole Rust
+# toolchain went away permanently, from an operation whose own name promises a
+# clean box rather than a smaller one (ISSUE-336).
+#
+# So uv comes from the same pinned image `docker/istota/Dockerfile` copies it
+# from, and lands outside the mount where nothing at runtime can mask or delete
+# it. istota is a uv project and `uv`/`uvx`/`pip` are in
+# `config.DEFAULT_SHIM_COMMANDS`, so on a devbox-backed deployment a missing uv
+# is not a missing tool in a scratch box — it is `uv sync` failing inside a
+# shim, at a remove from anywhere the reader would look.
+#
+# Rust is deliberately *not* here. Nothing in istota is Rust, and rustup with a
+# minimal profile is ~600 MB of image for a toolchain the box may never use.
+# `cargo`, `rustc` and `rustup` stay shimmed — routing is still correct, the
+# container is exactly where they belong — and a task that wants them installs
+# them with rustup at the time. That install lands in /home/dev and dies with
+# the next reset, which is now the documented boundary rather than a surprise.
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /usr/local/bin/
+
 USER dev
 WORKDIR /home/dev
 
-# Layer 4: uv (per-user) and rustup (per-user). Both install to /home/dev,
-# which is masked at runtime by the persistent volume — but baking them
-# into the image gives a working environment on first boot, before the
-# user has done anything in their volume. Anything the user installs
-# afterwards persists on top.
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --no-modify-path --profile minimal
+# Where a *user*-installed toolchain lands, kept on PATH on purpose: rustup
+# writes to ~/.cargo, `uv tool install` to ~/.local/bin, and both are inside
+# the volume. Empty on a fresh box, which is correct — see Layer 4.
 ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 
 # Layer 5: forge CLIs. The real `gh` and `glab` live under
