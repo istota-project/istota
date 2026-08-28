@@ -33,6 +33,11 @@ class TestSections:
         keys = {s["key"] for s in payload["sections"]}
         assert {"general", "nextcloud", "scheduler", "logging", "web", "security"} <= keys
 
+    def test_retired_moneyman_section_is_absent(self):
+        payload = view.build_config_view(Config())
+        keys = {s["key"] for s in payload["sections"]}
+        assert "moneyman" not in keys
+
     def test_nested_dataclasses_get_their_own_dotted_section(self):
         payload = view.build_config_view(Config())
         keys = {s["key"] for s in payload["sections"]}

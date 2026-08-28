@@ -319,6 +319,18 @@ class TestConfigLoading:
         assert not hasattr(cfg, "briefing_defaults")
         assert not hasattr(config_mod, "BriefingDefaultsConfig")
 
+    def test_moneyman_section_ignored(self, tmp_path):
+        from istota import config as config_mod
+
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[moneyman]\n'
+            'api_url = "http://localhost:8090"\n'
+        )
+        cfg = load_config(p)
+        assert not hasattr(cfg, "moneyman")
+        assert not hasattr(config_mod, "MoneymanConfig")
+
     def test_parse_default_briefings_section(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text(

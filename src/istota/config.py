@@ -1111,15 +1111,6 @@ class GoogleWorkspaceConfig:
 
 
 @dataclass
-class MoneymanConfig:
-    """Instance-level Moneyman service configuration."""
-    cli_path: str = ""  # e.g. "/srv/app/moneyman/app/.venv/bin/moneyman"
-    config_path: str = ""  # e.g. "/srv/app/moneyman/app/config.toml"
-    api_url: str = ""  # e.g. "http://localhost:8090"
-    api_key: str = ""
-
-
-@dataclass
 class WebFetchConfig:
     """Native-brain daemon-side WebFetch tool ([brain.native.web_fetch]).
 
@@ -1497,7 +1488,6 @@ class Config:
     site: SiteConfig = field(default_factory=SiteConfig)
     caldav: CaldavConfig = field(default_factory=CaldavConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
-    moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
@@ -3283,15 +3273,6 @@ def load_config(config_path: Path | None = None) -> Config:
             reconcile_grace_minutes=loc.get("reconcile_grace_minutes", 10.0),
             reconcile_min_pings=loc.get("reconcile_min_pings", 3),
             reconcile_min_dwell_sec=loc.get("reconcile_min_dwell_sec", 60),
-        )
-
-    if "moneyman" in data:
-        mm = data["moneyman"]
-        config.moneyman = MoneymanConfig(
-            cli_path=mm.get("cli_path", ""),
-            config_path=mm.get("config_path", ""),
-            api_url=mm.get("api_url", ""),
-            api_key=mm.get("api_key", ""),
         )
 
     if "google_workspace" in data:

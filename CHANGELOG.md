@@ -151,6 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The admin Configuration pane no longer shows an empty `moneyman` section. The retired integration's unused config type and loader branch are gone; a stale `[moneyman]` block in `config.toml` is ignored like any other unknown top-level block.
+
 - Rewriting `CRON.md` now moves inline multi-line prompts into per-job files under the user's `scripts/prompts` directory and writes `prompt_file` references instead. This also covers the one-time database migration, so a backslash in a long prompt can no longer make every scheduled job fail to load.
 
 - Calendar create and update commands can now write real all-day events with `--all-day`. They accept bare dates, omit timezones, and translate an inclusive end date into CalDAV's exclusive `DTEND`; a create with no end date lasts one day.
