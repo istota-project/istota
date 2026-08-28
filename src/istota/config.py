@@ -3725,6 +3725,34 @@ def load_config(config_path: Path | None = None) -> Config:
     return config
 
 
+CONFIG_LOAD_CHECKS = (
+    "developer.forge_binaries",
+    "developer.forge_policy",
+    "security.skill_proxy",
+)
+"""The doctor checks that run inside every ``load_config``.
+
+Named here rather than written inline in :func:`_validate_forge_clis` because
+this tuple *is* the config-load hot path, and the property that it stays cheap
+needs something to point at. ``load_config`` runs in the daemon, the web app,
+the webhook receiver, every CLI invocation, and every host-side skill CLI
+subprocess the skill proxy spawns *per call*, so a heavy import reached from
+one of these checks is paid on all of them.
+``tests/test_doctor.py::TestConfigLoadPathStaysCheap`` asserts against this
+tuple in a fresh interpreter.
+
+Deliberately not ``("developer.", "security.")`` or any other prefix, and the
+six ``developer.*`` checks it leaves out are left out for two different reasons.
+``repos_layout`` reaches ``istota.executor`` — and through it the whole skill
+package — for a path derivation, and ``container`` opens a socket per user;
+both are correct as they stand, because they run from the ``doctor`` CLI, the
+daemon's boot run and the hourly sweep, none of which is a hot path and all of
+which have ``executor`` loaded anyway. The remaining four are excluded for the
+repetition reason :func:`_validate_forge_clis` gives below: this path runs per
+skill-CLI call, so a warning from it repeats for as long as the condition holds.
+"""
+
+
 def _validate_forge_clis(config: "Config") -> None:
     """Warn about a forge CLI setup that will only fail later, and worse.
 
@@ -3764,15 +3792,7 @@ def _validate_forge_clis(config: "Config") -> None:
 
     _logger = logging.getLogger("istota.config")
     try:
-        results = run_checks(
-            config,
-            only=(
-                "developer.forge_binaries",
-                "developer.forge_policy",
-                "security.skill_proxy",
-            ),
-            probe=False,
-        )
+        results = run_checks(config, only=CONFIG_LOAD_CHECKS, probe=False)
     except Exception:  # pragma: no cover - never fail config load over a warning
         _logger.warning("forge CLI validation failed", exc_info=True)
         return

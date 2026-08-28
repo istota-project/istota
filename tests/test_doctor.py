@@ -331,14 +331,129 @@ class TestConfigLoadPathStaysCheap:
         assert "istota.web_app" not in loaded
         assert "istota.config" not in loaded
 
-    def test_the_forge_checks_do_not_import_the_skill_package(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        config = _dev_config(make_config, tmp_path)
-        monkeypatch.delitem(sys.modules, "istota.skills", raising=False)
-        monkeypatch.delitem(sys.modules, "istota.skills.developer", raising=False)
-        run_checks(config, only=("developer.",), probe=False)
-        assert "istota.skills" not in sys.modules
+    def _run_in_fresh_interpreter(
+        self, tmp_path, body: str
+    ) -> tuple[set[str], list[tuple[str, str]]]:
+        """Run `body` against a wired-up dev Config in a fresh interpreter.
+
+        Returns the modules loaded afterwards and the `(name, status)` pairs of
+        whatever `run_checks` the body called put in `results`. Statuses and not
+        just names, because a check that returned early is still a result under
+        the same name — see the caller.
+
+        `tmp_path` is handed to the subprocess rather than letting it call
+        `mkdtemp`, so pytest owns the cleanup like it does for every other test
+        in this file.
+
+        A subprocess rather than `monkeypatch.delitem` on `sys.modules`, for the
+        reason the two sibling tests above already spawn one: deleting
+        `istota.skills` while its importer stays cached makes the deletion
+        inert, so the import chain resolves from cache, nothing re-adds the
+        module, and the assertion passes while the property is untested. That is
+        ordering-dependent, so under `-n auto` it is a flake rather than only a
+        run-it-alone curiosity (ISSUE-335). No arrangement of in-process cache
+        surgery fixes this; a clean interpreter is the only honest substrate.
+        """
+        code = (
+            "import json, pathlib, sys\n"
+            "from istota.config import CONFIG_LOAD_CHECKS, Config, DeveloperConfig\n"
+            "from istota.doctor import run_checks\n"
+            "tmp = pathlib.Path(sys.argv[1])\n"
+            "skills = tmp / 'skills'; skills.mkdir(exist_ok=True)\n"
+            "(skills / '_index.toml').write_text('')\n"
+            "mount = tmp / 'mount'; mount.mkdir(exist_ok=True)\n"
+            "repos = tmp / 'repos'; repos.mkdir(exist_ok=True)\n"
+            "config = Config(\n"
+            "    db_path=tmp / 'test.db', temp_dir=tmp / 'temp',\n"
+            "    skills_dir=skills, nextcloud_mount_path=mount,\n"
+            "    developer=DeveloperConfig(\n"
+            "        enabled=True, repos_dir=str(repos), gitlab_token='t' * 20,\n"
+            "        gh_bin_path=str(tmp / 'bin' / 'gh'),\n"
+            "        glab_bin_path=str(tmp / 'bin' / 'glab'),\n"
+            "    ),\n"
+            ")\n"
+            "results = []\n"
+            f"{body}\n"
+            "print(json.dumps({\n"
+            "    'modules': sorted(sys.modules),\n"
+            "    'results': [[r.name, r.status] for r in results],\n"
+            "}))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True
+        )
+        # Not `check=True`: `CalledProcessError` does not render `stderr`, so a
+        # traceback from the constructed `Config` — a renamed field, say —
+        # would surface only as a non-zero exit status with the cause discarded.
+        assert out.returncode == 0, out.stderr
+        # The last line, not the whole of stdout: anything the body prints ahead
+        # of the payload should fail an assertion rather than a JSON parse.
+        payload = json.loads(out.stdout.strip().splitlines()[-1])
+        return set(payload["modules"]), [tuple(r) for r in payload["results"]]
+
+    def test_the_config_load_checks_do_not_import_the_skill_package(self, tmp_path):
+        """The checks `load_config` runs stay off the skill package's import graph.
+
+        Scoped to `config.CONFIG_LOAD_CHECKS` — the exact tuple
+        `_validate_forge_clis` passes — rather than to a `developer.` prefix.
+        The prefix was wrong at both ends: it overshot onto `repos_layout` and
+        `container`, which reach `executor` deliberately and are on no hot path,
+        and it undershot by omitting `security.skill_proxy`, which really does
+        run inside every `load_config`.
+
+        `istota.executor` is asserted alongside `istota.skills` because it is
+        the importer that pulls the package in (`executor` imports
+        `.skills.calendar` at module scope, and `istota.skills.__init__`
+        star-imports every skill). Naming both means the guard still bites if
+        the star-import is ever removed but the chain onto `executor` is not.
+        """
+        loaded, ran = self._run_in_fresh_interpreter(
+            tmp_path,
+            "results = run_checks(config, only=CONFIG_LOAD_CHECKS, probe=False)",
+        )
+        from istota.config import CONFIG_LOAD_CHECKS
+
+        # Every requested check produced a result. `only=` filters on registry
+        # names, so a rename would otherwise leave the module assertions below
+        # passing over an empty run.
+        for name in CONFIG_LOAD_CHECKS:
+            assert any(
+                n == name or n.startswith(f"{name}.") for n, _ in ran
+            ), f"{name} produced no result; the guard would be vacuous"
+
+        # And the two that reach for something did the reaching. Returning a
+        # result is not evidence of work: both of these emit one under their own
+        # name from an early `SKIP` — `check_forge_binaries` before it calls
+        # `_resolved_forge_bin`, `check_forge_policy` before it imports
+        # `forge_cli` — so a tightened gate would leave nothing heavy running and
+        # every assertion below satisfied. `security.skill_proxy` is deliberately
+        # not held to this: it SKIPs legitimately when `istota-skill` is off the
+        # PATH, which is a property of the machine, not of the checks.
+        did_work = {"developer.forge_binaries", "developer.forge_policy"}
+        for name, status in ran:
+            if name in did_work or name.rsplit(".", 1)[0] in did_work:
+                assert status != SKIP, f"{name} skipped; nothing heavy was reached"
+
+        assert "istota.skills" not in loaded
+        assert "istota.executor" not in loaded
+
+    def test_the_import_probe_can_see_an_import(self, tmp_path):
+        """The control for the test above, which otherwise cannot be seen to fail.
+
+        A fresh-interpreter probe that reported an empty or truncated module set
+        would satisfy every `not in` assertion above while testing nothing. This
+        asserts the other direction on the same helper, against a synthetic body
+        rather than against a real check, so no product change can make it churn.
+
+        Only the module named by the body is asserted, and deliberately not
+        `istota.skills` alongside it: that one is present because
+        `executor` imports `.skills.calendar`, which is a product fact the test
+        above says may legitimately change. Asserting it here would make the
+        control red for a reason having nothing to do with whether the probe can
+        see an import.
+        """
+        loaded, _ = self._run_in_fresh_interpreter(tmp_path, "import istota.executor")
+        assert "istota.executor" in loaded
 
     def test_web_static_does_not_import_web_app(self, make_config, tmp_path, monkeypatch):
         from istota.config import WebConfig
