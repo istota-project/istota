@@ -1789,7 +1789,10 @@ def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
     clones and not another's.
 
     Cheap and I/O-only: two ``iterdir`` passes and a marker test per entry, no
-    subprocess, so it is safe on the config-load path.
+    subprocess. That is a statement about the work, not about the import graph,
+    and it is not the same thing as being safe on the config-load path — the
+    ``from .executor import`` below pulls in most of the package. This check is
+    deliberately outside ``config.CONFIG_LOAD_CHECKS`` for that reason.
     """
     name = "developer.repos_layout"
     dev, reason = _dev_gate(config)
