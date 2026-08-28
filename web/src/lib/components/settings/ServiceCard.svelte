@@ -115,6 +115,10 @@
     </div>
   </header>
 
+  {#if service.hint}
+    <p class="hint">{service.hint}</p>
+  {/if}
+
   {#if service.used_by && service.used_by.length > 0}
     <p class="used-by">
       Used by:

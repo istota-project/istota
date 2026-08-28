@@ -1308,6 +1308,102 @@ def _redact_userinfo(url: str) -> str:
 # web.*
 # ---------------------------------------------------------------------------
 
+def check_basemap(config: "Config", probe: bool) -> CheckResult:
+    """Whether the map surfaces have a background that will actually render.
+
+    **This check deliberately opens no socket, and that is the finding rather
+    than a shortcut.** Two facts, both established by measurement, remove the
+    value a fetch would have had:
+
+    The watermark is not observable from the response. Measured against the
+    live service on 2026-08-28, CARTO returns 200, ``content-type: image/png``
+    and a byte-identical body and ETag for a keyless request, a request with a
+    bogus key and (by construction) a good one. There is no status, header or
+    length to key on, so a probe there reports a working basemap for a defaced
+    one — worse than not probing, because it manufactures confidence.
+
+    And the daemon is the wrong host. Tiles are fetched by the *browser*, over
+    a different route. A deployment whose egress is a proxy would fail a probe
+    for a basemap every browser on the network renders correctly, and one with
+    open egress would pass for a browser network that blocks the CDN. Running
+    it anyway also put a third-party request on the daemon's boot path and on
+    the hourly doctor sweep — up to two per run, at ``PROBE_TIMEOUT`` each,
+    where a CDN blip becomes a FAIL and pages the operator about a deployment
+    with nothing wrong with it.
+
+    What is left is the half that *is* decidable from here, and it happens to
+    be the half that matters: a keyed provider with no key is exactly the
+    reported bug (ISSUE-334), and configuration says so for free and with
+    certainty. ``probe`` is accepted to satisfy the ``Check`` protocol and is
+    unused.
+    """
+    from .map_basemap import resolve_basemap
+
+    web = getattr(config, "web", None)
+    if not web or not web.enabled:
+        return CheckResult(
+            "web.basemap", SKIP, "web interface disabled", scope=DEPLOYMENT
+        )
+
+    m = getattr(web, "map", None)
+    if m is None:
+        return CheckResult(
+            "web.basemap", SKIP, "no [web.map] configuration", scope=DEPLOYMENT
+        )
+
+    spec = resolve_basemap(
+        provider=m.provider,
+        api_key=m.api_key,
+        dark_style=m.dark_style,
+        light_style=m.light_style,
+        attribution=m.attribution,
+    )
+
+    if spec.needs_key:
+        return CheckResult(
+            "web.basemap",
+            WARN,
+            f"provider is {m.provider!r} with no API key, so its tiles come "
+            "back watermarked 'API KEY REQUIRED' with a 200 status; the maps "
+            f"are rendering on {spec.provider!r} instead",
+            remedy=(
+                "Request a free key at https://carto.com/basemaps/apikey/ and "
+                "set it in [web.map] api_key, or per user on the location "
+                "settings page. Or set [web.map] provider = \"openfreemap\", "
+                "which needs no key. Note that CARTO is retiring its raster "
+                "service, so a key buys time rather than a fix."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    if spec.fell_back:
+        return CheckResult(
+            "web.basemap",
+            WARN,
+            f"basemap config did not resolve as written: {spec.warning}",
+            remedy=(
+                "Fix [web.map] provider, or the custom style URLs beside it. "
+                f"The maps are rendering on {spec.provider!r} meanwhile."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    detail = f"provider {spec.provider!r}"
+    if spec.provider in _UNVERIFIABLE_KEY_PROVIDERS:
+        detail += (
+            " with an API key configured — configured, not verified: the "
+            "service answers 200 with the same watermarked tile for a good "
+            "key, a bad key and no key at all"
+        )
+    if spec.warning:
+        detail += f"; {spec.warning}"
+    return CheckResult("web.basemap", OK, detail, scope=DEPLOYMENT)
+
+
+# Providers whose key cannot be validated from a response. Named here rather
+# than imported so the reason travels with the sentence that depends on it.
+_UNVERIFIABLE_KEY_PROVIDERS = frozenset({"carto"})
+
 
 def check_web_static(config: "Config", probe: bool) -> CheckResult:
     """The SvelteKit build the web surface serves actually exists.
@@ -2572,6 +2668,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.repos_layout", check_repos_layout),
     ("developer.container", check_developer_container),
     ("web.static", check_web_static),
+    ("web.basemap", check_basemap),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -2611,6 +2708,9 @@ CHECK_SCOPES: dict[str, str] = {
     "developer.repos_layout": DEPLOYMENT,
     "developer.container": DEPLOYMENT,
     "web.static": IMAGE,
+    # Deployment, not image: it reads the rendered config and reaches the
+    # network. A bare `docker run` can answer neither.
+    "web.basemap": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 

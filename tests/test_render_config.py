@@ -653,7 +653,16 @@ class TestTheEntrypointStillOwnsWhatItKept:
         )
 
     @pytest.mark.parametrize(
-        "prefix", ["ISTOTA_DEVELOPER_", "ISTOTA_EMAIL_", "ISTOTA_NEXTCLOUD_"]
+        "prefix",
+        [
+            "ISTOTA_DEVELOPER_",
+            "ISTOTA_EMAIL_",
+            "ISTOTA_NEXTCLOUD_",
+            # The basemap family (ISSUE-334). Added because the rule in
+            # AGENTS.md says to widen this list when a service needs another
+            # prefix — a render-read variable outside it is checked by nothing.
+            "ISTOTA_WEB_MAP_",
+        ],
     )
     def test_every_var_the_render_reads_is_passed_by_compose(self, prefix):
         """The other half of the hand-off, which nothing checked.

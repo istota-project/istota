@@ -1115,6 +1115,37 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # NC OAuth2 tokens grant full account access, so this is a deliberate opt-in.
 # token_storage = "ephemeral"                      # "ephemeral" | "encrypted"
 
+# Background tiles for the map surfaces (location today; anything geospatial
+# later). The default needs no key and no setup, so this block is only for an
+# operator who wants a different provider.
+#
+#   openfreemap  free OSM vector tiles, no key, no account, dark + light.
+#                Still a third-party request, so it does not make map viewing
+#                private — it just needs no credential.
+#   carto        the previous default. Requires a free API key since 2026;
+#                without one every tile comes back stamped "API KEY REQUIRED"
+#                with a 200 status, so nothing but a human notices. Get one at
+#                https://carto.com/basemaps/apikey/ — and note CARTO is
+#                retiring its raster service, so this buys time, not a fix.
+#                Set without a key, this falls back to openfreemap rather than
+#                serving watermarked tiles, and `istota doctor` says so.
+#   osm          keyless raster last resort. Light tiles only, so the dark
+#                theme looks wrong, and the OSMF tile usage policy discourages
+#                application use.
+#   custom       your own MapLibre style URLs, e.g. a self-hosted tile server.
+#                One URL is enough; it then covers both themes.
+#
+# api_key travels inside the tile URL to every browser that loads a map, so it
+# is public by construction — treat it as disclosed, whatever it is called.
+# Each user can also set their own CARTO key on the location settings page,
+# which selects CARTO for them and overrides whatever is set here.
+# [web.map]
+# provider = "openfreemap"                         # openfreemap | carto | osm | custom
+# api_key = ""                                     # carto only; public
+# dark_style = ""                                  # custom only: MapLibre style URL
+# light_style = ""                                 # custom only
+# attribution = ""                                 # custom only
+
 # In-app web chat surface (always-on companion to Talk; reachable from the
 # "Chat" tab). All knobs have sensible defaults — this block is only for tuning.
 # [web.chat]

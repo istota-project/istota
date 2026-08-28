@@ -19,8 +19,18 @@
   import maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
   import type { LocationPing, Place, DiscoveredCluster, DismissedCluster } from '$lib/api';
+  import { basemapOnce } from '$lib/api';
   import { ACTIVITY_COLORS, speedGradientStops } from '$lib/location-constants';
   import { buildEdges, filterAccuratePings, greatCircleArc } from '$lib/location-path';
+  import {
+    BASEMAP_DARK_LAYER,
+    BASEMAP_LIGHT_LAYER,
+    DEFAULT_BASEMAP,
+    buildRasterStyle,
+    isRaster,
+    styleUrlFor,
+    type BasemapSpec,
+  } from '$lib/basemap';
   import { theme } from '$lib/stores/theme';
 
   interface Props {
@@ -69,8 +79,32 @@
   }: Props = $props();
 
   let container: HTMLDivElement;
+  // Where the background tiles come from. Starts on the keyless default so a
+  // failed or slow config fetch still renders a map rather than a blank box.
+  let basemap: BasemapSpec = DEFAULT_BASEMAP;
+  // The style URL currently loaded, for vector providers only. Guards against
+  // a redundant setStyle, which would drop and re-add every data layer.
+  let currentStyleUrl = '';
+  // Layer-scoped listeners live on the Map, not the Style, so they survive
+  // setStyle. Re-running addLayers must not bind them a second time.
+  let layerHandlersBound = false;
+  // Recovery timer for a vector style swap that never completes. See
+  // applyBasemapTheme.
+  let styleFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // How long a vector style gets to load before the swap is treated as failed.
+  // Generous: this is a recovery path, and cutting a slow-but-working style
+  // short would swap a rendering basemap out from under the user.
+  const STYLE_LOAD_TIMEOUT_MS = 15000;
+
   let map: maplibregl.Map | undefined;
-  let mapLoaded = false;
+  // `$state`, not a plain `let`. The map is now built after a config fetch
+  // rather than synchronously in onMount, so the `$effect` blocks below run
+  // once before `map` exists. A non-reactive flag means none of them re-runs
+  // when it does — the theme, the drag marker and the picking cursor were all
+  // silently dropped on that path, and a theme toggle during a vector style
+  // swap was dropped the same way.
+  let mapLoaded = $state(false);
   let hasFittedBounds = false;
   let currentMarker: maplibregl.Marker | undefined;
   let dragMarker: maplibregl.Marker | undefined;
@@ -208,49 +242,16 @@
   }
 
   function initMap() {
-    // Both CARTO basemaps are added; visibility is toggled by theme so a
-    // light/dark switch is an instant layer swap (no setStyle rebuild that
-    // would drop our data layers). Initial visibility follows the saved theme.
-    const startLight = get(theme) === 'light';
+    // The basemap comes from deployment config (ISSUE-334). A raster provider
+    // gets both themes in one style so a light/dark switch stays an instant
+    // visibility toggle; a vector provider is a style URL per theme, and
+    // switching means setStyle, which is why applyBasemapTheme re-adds the
+    // data layers afterwards.
+    const startTheme = get(theme) === 'light' ? 'light' : 'dark';
+    currentStyleUrl = isRaster(basemap) ? '' : styleUrlFor(basemap, startTheme);
     map = new maplibregl.Map({
       container,
-      style: {
-        version: 8,
-        sources: {
-          'carto-dark': {
-            type: 'raster',
-            tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png'],
-            tileSize: 256,
-            attribution:
-              '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
-          },
-          'carto-light': {
-            type: 'raster',
-            tiles: ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png'],
-            tileSize: 256,
-            attribution:
-              '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
-          },
-        },
-        layers: [
-          {
-            id: 'carto-dark-layer',
-            type: 'raster',
-            source: 'carto-dark',
-            minzoom: 0,
-            maxzoom: 20,
-            layout: { visibility: startLight ? 'none' : 'visible' },
-          },
-          {
-            id: 'carto-light-layer',
-            type: 'raster',
-            source: 'carto-light',
-            minzoom: 0,
-            maxzoom: 20,
-            layout: { visibility: startLight ? 'visible' : 'none' },
-          },
-        ],
-      },
+      style: isRaster(basemap) ? buildRasterStyle(basemap, startTheme) : currentStyleUrl,
       center: center as [number, number],
       zoom,
       attributionControl: false,
@@ -265,22 +266,37 @@
       addLayers();
       updateSources();
       updateCurrentMarker();
+      updateDragMarker();
       applyMapTheme(get(theme));
       fitBounds();
     });
   }
 
+  // Idempotent, because this now runs twice: once on the map's own `load`, and
+  // again after a vector theme swap replaces the style. MapLibre's
+  // `addSource` *throws* on a duplicate id (unlike `addLayer`, which only
+  // fires an error event), and a throw here escapes into MapLibre's event
+  // dispatch and skips everything after it — leaving the flag saying the map
+  // is healthy and no data layers on it.
+  function addSource(id: string, data: GeoJSON.FeatureCollection) {
+    if (!map || map.getSource(id)) return;
+    map.addSource(id, { type: 'geojson', data });
+  }
+
   function addSources() {
     if (!map) return;
-    map.addSource('path', { type: 'geojson', data: buildPathGeoJSON([]) });
-    map.addSource('ping-points', { type: 'geojson', data: buildPingPointsGeoJSON([]) });
-    map.addSource('places', { type: 'geojson', data: buildPlacesGeoJSON([]) });
-    map.addSource('clusters', { type: 'geojson', data: buildClustersGeoJSON([]) });
-    map.addSource('dismissed', { type: 'geojson', data: buildDismissedGeoJSON([]) });
+    addSource('path', buildPathGeoJSON([]));
+    addSource('ping-points', buildPingPointsGeoJSON([]));
+    addSource('places', buildPlacesGeoJSON([]));
+    addSource('clusters', buildClustersGeoJSON([]));
+    addSource('dismissed', buildDismissedGeoJSON([]));
   }
 
   function addLayers() {
     if (!map) return;
+    // Same reason as addSources: a re-run must not double-add. Bailing on the
+    // first layer is right because they are added as one batch.
+    if (map.getLayer('place-radius')) return;
 
     // Place radius circles — meters to pixels via exponential zoom interpolation.
     // At zoom z, ground resolution at lat ~34°: meters/px = 78271.484 * cos(34°) / 2^z
@@ -489,21 +505,23 @@
         });
       }
     };
-    map.on('click', 'cluster-markers', handleClusterClick);
-    map.on('click', 'cluster-labels', handleClusterClick);
+    if (!layerHandlersBound) {
+      map.on('click', 'cluster-markers', handleClusterClick);
+      map.on('click', 'cluster-labels', handleClusterClick);
 
-    map.on('mouseenter', 'cluster-markers', () => {
-      if (map) map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'cluster-markers', () => {
-      if (map) map.getCanvas().style.cursor = '';
-    });
-    map.on('mouseenter', 'cluster-labels', () => {
-      if (map) map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'cluster-labels', () => {
-      if (map) map.getCanvas().style.cursor = '';
-    });
+      map.on('mouseenter', 'cluster-markers', () => {
+        if (map) map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'cluster-markers', () => {
+        if (map) map.getCanvas().style.cursor = '';
+      });
+      map.on('mouseenter', 'cluster-labels', () => {
+        if (map) map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'cluster-labels', () => {
+        if (map) map.getCanvas().style.cursor = '';
+      });
+    }
 
     // Dismissed cluster zones — gray, sized by radius, restorable on click
     map.addLayer({
@@ -557,14 +575,17 @@
         });
       }
     };
-    map.on('click', 'dismissed-center', handleDismissedClick);
-    map.on('click', 'dismissed-zones', handleDismissedClick);
-    map.on('mouseenter', 'dismissed-center', () => {
-      if (map) map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'dismissed-center', () => {
-      if (map) map.getCanvas().style.cursor = '';
-    });
+    if (!layerHandlersBound) {
+      map.on('click', 'dismissed-center', handleDismissedClick);
+      map.on('click', 'dismissed-zones', handleDismissedClick);
+      map.on('mouseenter', 'dismissed-center', () => {
+        if (map) map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'dismissed-center', () => {
+        if (map) map.getCanvas().style.cursor = '';
+      });
+    }
+    layerHandlersBound = true;
   }
 
   function updateSources() {
@@ -589,10 +610,101 @@
   // are tuned for the dark basemap; light tiles need a white halo, lighter
   // strokes, and a darker green→orange band on the track.
   function applyMapTheme(t: 'light' | 'dark') {
+    applyBasemapTheme(t);
+    applyThemeColors(t);
+  }
+
+  // Swap the background tiles. Cheap for a raster provider (two visibility
+  // toggles on layers that are both already present); for a vector one it is a
+  // whole-style replacement, because a MapLibre style URL carries its own
+  // sources, glyphs and sprites and there is no way to hold two at once. That
+  // drops every data layer, so they are re-added when the new style settles.
+  function applyBasemapTheme(t: 'light' | 'dark') {
+    if (!map || !mapLoaded) return;
+
+    if (isRaster(basemap)) {
+      const light = t === 'light';
+      map.setLayoutProperty(BASEMAP_LIGHT_LAYER, 'visibility', light ? 'visible' : 'none');
+      map.setLayoutProperty(BASEMAP_DARK_LAYER, 'visibility', light ? 'none' : 'visible');
+      return;
+    }
+
+    const url = styleUrlFor(basemap, t);
+    if (!url || url === currentStyleUrl) return;
+    const previousUrl = currentStyleUrl;
+    currentStyleUrl = url;
+    mapLoaded = false;
+
+    // `style.load`, not `styledata`. Measured against MapLibre 5 with a real
+    // vector style: after setStyle, `styledata` fires exactly once and
+    // `isStyleLoaded()` is still false at that point, then never fires again —
+    // so waiting for `styledata` with `isStyleLoaded()` true re-arms forever
+    // and the data layers are never re-added. The map keeps its new
+    // background and silently loses every ping, path and place.
+    // `style.load` fires once, after the style is parsed and before its tiles
+    // finish, which is exactly when addSource/addLayer become legal again.
+    let settled = false;
+    const reattach = () => {
+      if (!map || settled) return;
+      settled = true;
+      if (styleFallbackTimer) {
+        clearTimeout(styleFallbackTimer);
+        styleFallbackTimer = undefined;
+      }
+      mapLoaded = true;
+      addSources();
+      addLayers();
+      updateSources();
+      updateLayerVisibility();
+      // The live theme, not the `t` this swap started with. A toggle during
+      // the style fetch is applied by the effect re-running on `mapLoaded`,
+      // but the colours below would otherwise be painted from the stale value
+      // first and briefly disagree with the basemap that just landed.
+      applyThemeColors(get(theme) === 'light' ? 'light' : 'dark');
+      updateCurrentMarker();
+      updateDragMarker();
+      if (!hasFittedBounds) {
+        fitBounds();
+        hasFittedBounds = true;
+      }
+    };
+
+    // A style that never loads — a 404 on a custom URL, egress blocked —
+    // fires `error` and never `style.load`, which would leave `mapLoaded`
+    // false forever. setStyle has already discarded the data layers by then,
+    // so every later update returns early against a map showing nothing: the
+    // same silent failure this change exists to remove.
+    //
+    // Recovery is on a timer rather than on the `error` event, and that is the
+    // point rather than laziness. MapLibre fires `error` for a missing glyph
+    // or a single 404 tile too, and one of those can arrive before
+    // `style.load` on a style that is loading perfectly well — so acting on
+    // the event means classifying it, and getting that wrong tears down a
+    // working basemap. A timer needs no classification: if the style did load,
+    // `settled` is already true and this does nothing.
+    if (styleFallbackTimer) clearTimeout(styleFallbackTimer);
+    styleFallbackTimer = setTimeout(() => {
+      if (!map || settled) return;
+      if (previousUrl && previousUrl !== url) {
+        // Go back to the style we know rendered, and re-add there.
+        currentStyleUrl = previousUrl;
+        map.once('style.load', reattach);
+        map.setStyle(previousUrl);
+        return;
+      }
+      // Nothing to fall back to. Release the guard so the rest of the
+      // component is not wedged; the basemap stays broken and visibly so.
+      settled = true;
+      mapLoaded = true;
+    }, STYLE_LOAD_TIMEOUT_MS);
+
+    map.once('style.load', reattach);
+    map.setStyle(url);
+  }
+
+  function applyThemeColors(t: 'light' | 'dark') {
     if (!map || !mapLoaded) return;
     const light = t === 'light';
-    map.setLayoutProperty('carto-light-layer', 'visibility', light ? 'visible' : 'none');
-    map.setLayoutProperty('carto-dark-layer', 'visibility', light ? 'none' : 'visible');
     const halo = light ? '#ffffff' : '#111111';
     map.setPaintProperty('place-labels', 'text-color', light ? '#444444' : '#888888');
     map.setPaintProperty('place-labels', 'text-halo-color', halo);
@@ -712,9 +824,23 @@
   }
 
   onMount(() => {
-    initMap();
+    // The basemap source is deployment config, so it has to be fetched before
+    // the map is built. `basemapOnce` shares one request across every map on
+    // the page; a failure leaves `basemap` on the keyless default rather than
+    // leaving the user with no map at all.
+    let cancelled = false;
+    basemapOnce()
+      .catch(() => DEFAULT_BASEMAP)
+      .then((spec) => {
+        if (cancelled) return;
+        basemap = spec;
+        initMap();
+      });
     resizeObserver = new ResizeObserver(() => map?.resize());
     resizeObserver.observe(container);
+    return () => {
+      cancelled = true;
+    };
   });
 
   onDestroy(() => {
@@ -760,6 +886,12 @@
   });
 
   $effect(() => {
+    // Read the reactive flag so this re-runs once the map exists. `map` is a
+    // plain `let`, and initMap is now deferred behind a fetch — without this,
+    // arriving at /location with picking already active (the store survives
+    // navigation) bound no click handler and showed no crosshair, for the life
+    // of the page.
+    mapLoaded;
     if (!map) return;
     const canvas = map.getCanvas();
     canvas.style.cursor = pickingLocation ? 'crosshair' : '';

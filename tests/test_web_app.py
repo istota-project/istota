@@ -3678,3 +3678,193 @@ class TestChatUnreadRoomIndicators:
         resp = await client.get("/istota/api/chat/rooms", cookies=cookies)
         rooms = {r["token"]: r for r in resp.json()["rooms"]}
         assert rooms[room.token]["unread_count"] == 1
+
+
+class TestBasemapEndpoint:
+    """`GET /api/map/basemap` — the seam that replaced two hardcoded CARTO URLs.
+
+    What these cover and the unit tests cannot: deployment config and a stored
+    per-user key reaching the resolver, and the resolved key coming back
+    embedded in a tile URL rather than as a readable field.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _secret_key(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "basemap.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _cfg(self, tmp_path, **map_kwargs):
+        from dataclasses import replace
+        from istota.config import WebMapConfig
+
+        cfg = _make_config(tmp_path, users={"alice": UserConfig(display_name="Alice")})
+        cfg.db_path = self._db_path
+        cfg.web = replace(cfg.web, map=WebMapConfig(**map_kwargs))
+        return cfg
+
+    async def _login_alice(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(
+            return_value={"user_id": "alice"}
+        )
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_it_requires_a_session(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        resp = await client.get("/istota/api/map/basemap")
+        assert resp.status_code in (401, 403)
+
+    async def test_the_default_deployment_answers_with_a_keyless_provider(
+        self, tmp_path, client, app,
+    ):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/map/basemap", cookies=cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["provider"] == "openfreemap"
+        assert body["needs_key"] is False
+        assert "cartocdn" not in body["dark"]
+
+    async def test_deployment_config_reaches_the_browser(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path, provider="osm"))
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert body["provider"] == "osm"
+        assert body["kind"] == "raster"
+
+    async def test_a_stored_user_key_selects_carto_and_lands_in_the_tile_url(
+        self, tmp_path, client, app,
+    ):
+        """The whole point of the settings input: paste a key, get a map."""
+        from istota import secrets_store
+
+        _patch_app(self._cfg(tmp_path))
+        secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "alicekey")
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert body["provider"] == "carto"
+        assert body["needs_key"] is False
+        assert "api_key=alicekey" in body["dark"]
+
+    async def test_the_key_is_never_returned_as_a_field_of_its_own(
+        self, tmp_path, client, app,
+    ):
+        """The secrets store stays write-only to the browser as a *value*."""
+        from istota import secrets_store
+
+        _patch_app(self._cfg(tmp_path))
+        secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "alicekey")
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert "api_key" not in body
+
+    async def test_one_users_key_does_not_reach_another_user(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+
+        _patch_app(self._cfg(tmp_path))
+        secrets_store.set_secret(self._db_path, "bob", "carto", "api_key", "bobkey")
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert "bobkey" not in body["dark"]
+        assert body["provider"] == "openfreemap"
+
+    async def test_a_deployment_key_applies_when_the_user_has_none(
+        self, tmp_path, client, app,
+    ):
+        _patch_app(self._cfg(tmp_path, provider="carto", api_key="deploykey"))
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert "api_key=deploykey" in body["dark"]
+
+    async def test_carto_with_no_key_anywhere_serves_the_fallback_not_watermarks(
+        self, tmp_path, client, app,
+    ):
+        """The reported bug, end to end: the browser must never get those URLs."""
+        _patch_app(self._cfg(tmp_path, provider="carto"))
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert "cartocdn" not in body["dark"]
+        assert "cartocdn" not in body["light"]
+        assert body["needs_key"] is True
+
+    async def test_a_whitespace_key_does_not_override_a_working_deployment_key(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+
+        _patch_app(self._cfg(tmp_path, provider="carto", api_key="deploykey"))
+        secrets_store.set_secret(self._db_path, "alice", "carto", "api_key", "   ")
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert "api_key=deploykey" in body["dark"]
+        assert "%20" not in body["dark"]
+
+    async def test_a_broken_secrets_store_still_returns_a_usable_map(
+        self, tmp_path, client, app, monkeypatch,
+    ):
+        """A basemap that 500s is a blank rectangle, which is the failure again."""
+        import istota.secrets_store as store
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("db is gone")
+
+        _patch_app(self._cfg(tmp_path))
+        monkeypatch.setattr(store, "get_secret", _boom)
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/map/basemap", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["provider"] == "openfreemap"
+
+    async def test_the_carto_service_card_is_offered_on_the_location_module(
+        self, tmp_path, client, app,
+    ):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login_alice(client, app)
+        resp = await client.get(
+            "/istota/api/settings/module-services/location", cookies=cookies
+        )
+        assert resp.status_code == 200
+        cards = {s["service"]: s for s in resp.json()["services"]}
+        assert "carto" in cards
+        assert [f["key"] for f in cards["carto"]["fields"]] == ["api_key"]
+        assert cards["carto"]["status"] == "missing"
+        assert "carto.com" in cards["carto"]["hint"]
+
+    async def test_adding_the_carto_card_did_not_disturb_the_overland_one(
+        self, tmp_path, client, app,
+    ):
+        """A second field on `overland` would have flipped it to partial."""
+        from istota import secrets_store
+
+        _patch_app(self._cfg(tmp_path))
+        secrets_store.set_secret(
+            self._db_path, "alice", "overland", "ingest_token", "tok"
+        )
+        cookies = await self._login_alice(client, app)
+        resp = await client.get(
+            "/istota/api/settings/module-services/location", cookies=cookies
+        )
+        cards = {s["service"]: s for s in resp.json()["services"]}
+        assert cards["overland"]["status"] == "configured"
+
+    async def test_the_key_can_be_saved_through_the_ordinary_secrets_route(
+        self, tmp_path, client, app,
+    ):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login_alice(client, app)
+        resp = await client.put(
+            "/istota/api/settings/secrets/carto/api_key",
+            json={"value": "typed-in-the-ui"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert "api_key=typed-in-the-ui" in body["dark"]

@@ -524,6 +524,21 @@ oauth2_client_secret = "{{ istota_web_oauth2_client_secret }}"
 session_secret_key = "{{ istota_web_secret_key }}"
 {% endif %}
 
+[web.map]
+provider = "{{ istota_web_map_provider }}"
+{% if istota_web_map_api_key %}
+api_key = "{{ istota_web_map_api_key }}"
+{% endif %}
+{% if istota_web_map_dark_style %}
+dark_style = "{{ istota_web_map_dark_style }}"
+{% endif %}
+{% if istota_web_map_light_style %}
+light_style = "{{ istota_web_map_light_style }}"
+{% endif %}
+{% if istota_web_map_attribution %}
+attribution = "{{ istota_web_map_attribution }}"
+{% endif %}
+
 [web.chat]
 talk_read_sync_interval = {{ istota_web_chat_talk_read_sync_interval }}
 room_stream_poll_interval_ms = {{ istota_web_chat_room_stream_poll_interval_ms }}

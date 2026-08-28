@@ -7400,6 +7400,10 @@ def _build_service_card(
         "configured_keys": sorted(configured),
         "last_updated": last_updated,
         "used_by": list(schema.get("used_by", ())),
+        # Optional prose for a service whose behaviour needs a sentence the
+        # field labels cannot carry — where to get the credential, or what
+        # setting it changes. Empty for every service that does not declare one.
+        "hint": schema.get("hint", ""),
         "oauth": bool(schema.get("oauth", False)),
         "custom_ui": bool(schema.get("custom_ui", False)),
     }
@@ -8787,6 +8791,66 @@ def _location_delete_place(db_path: str, place_id: int) -> bool:
         return True
     finally:
         conn.close()
+
+
+@api_router.get("/map/basemap")
+async def api_map_basemap(user: dict = Depends(_require_api_auth)):
+    """Where this user's maps should fetch their background tiles.
+
+    Not under ``/location`` because the basemap is a property of the web UI
+    rather than of the location module — the geospatial surfaces that come
+    later read the same seam — and because the resolution lives in
+    ``map_basemap``, which the ``web.basemap`` doctor check reads too.
+
+    The CARTO key is returned, but only already embedded in the tile URL the
+    browser is about to fetch, never as a field of its own. That is what keeps
+    the secrets store's write-only-to-the-browser property intact: this is not
+    a generic read path for stored credentials, and adding one would be a much
+    larger decision than restoring a map (ISSUE-334).
+
+    Never fails. A basemap that 500s is a blank rectangle where the map was,
+    which is the same silent failure the watermark was; on any error the
+    deployment default is returned instead.
+    """
+    from . import map_basemap
+
+    # `getattr` rather than attribute access, matching `check_basemap`: a Config
+    # with `web` unset would otherwise raise here and 500, which is the blank
+    # rectangle this endpoint promises never to produce.
+    web_cfg = getattr(_config, "web", None) if _config else None
+    cfg = getattr(web_cfg, "map", None)
+    user_key = ""
+    if _config is not None:
+        try:
+            from . import secrets_store
+
+            # Stripped once, at the read, so `select_provider` and the
+            # `api_key=` below cannot disagree about whether this user has a
+            # key. They used to: one tested `.strip()` and the other bare
+            # truthiness, so a stored "  " selected the configured provider
+            # while overriding its working key with whitespace.
+            user_key = (
+                secrets_store.get_secret(
+                    _config.db_path, user["username"], "carto", "api_key"
+                )
+                or ""
+            ).strip()
+        except Exception:  # noqa: BLE001 - a map must render without the store
+            logger.warning("basemap: could not read the stored carto key", exc_info=True)
+            user_key = ""
+
+    if cfg is None:
+        return map_basemap.resolve_basemap().as_dict()
+
+    provider = map_basemap.select_provider(cfg.provider, user_api_key=user_key)
+    spec = map_basemap.resolve_basemap(
+        provider=provider,
+        api_key=user_key or cfg.api_key,
+        dark_style=cfg.dark_style,
+        light_style=cfg.light_style,
+        attribution=cfg.attribution,
+    )
+    return spec.as_dict()
 
 
 @api_router.get("/location/settings-info")
