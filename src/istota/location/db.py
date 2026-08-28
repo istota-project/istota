@@ -804,17 +804,11 @@ def reconcile_visits(
         gap_sec = (_parse(ts) - _parse(current["last_ts"])).total_seconds()
 
         if pid == current["place_id"]:
-            if gap_sec > grace_sec:
-                segments.append(current)
-                current = {
-                    "place_id": pid,
-                    "first_ts": ts,
-                    "last_ts": ts,
-                    "ping_count": 1,
-                }
-            else:
-                current["last_ts"] = ts
-                current["ping_count"] += 1
+            # A quiet tracker supplies no evidence that the user left. When
+            # reporting resumes at the same place, keep extending the visit
+            # regardless of the time between pings.
+            current["last_ts"] = ts
+            current["ping_count"] += 1
             continue
 
         if pid is None:
@@ -848,44 +842,56 @@ def reconcile_visits(
         for r in conn.execute("SELECT id, name FROM places").fetchall()
     }
 
+    delete_predicate = "exited_at >= ? AND entered_at < ?"
+    delete_params: tuple = (since, until)
+    crossing = next((seg for seg in kept if seg["first_ts"] < since), None)
+    if crossing is not None:
+        # A same-place segment can now cross the rolling window boundary.
+        # Replace older rows covered by that full segment as well, or the
+        # reconstructed visit would overlap the preserved pre-window row.
+        delete_predicate = (
+            f"({delete_predicate}) OR "
+            "(place_id = ? AND exited_at >= ? AND entered_at <= ?)"
+        )
+        delete_params += (
+            crossing["place_id"], crossing["first_ts"], crossing["last_ts"],
+        )
+
     # `location_pings.visit_id` and `location_state.current_visit_id`
     # both REFERENCE visits(id). With `PRAGMA foreign_keys = ON` (set by
     # `connect()`), deleting visits while pings still point at them
     # raises FOREIGN KEY constraint failed. Null the back-references
     # first; pings keep their `place_id`, which is what reconcile reads.
     conn.execute(
-        """
+        f"""
         UPDATE location_pings SET visit_id = NULL
         WHERE visit_id IN (
             SELECT id FROM visits
             WHERE exited_at IS NOT NULL
-              AND exited_at >= ?
-              AND entered_at < ?
+              AND ({delete_predicate})
         )
         """,
-        (since, until),
+        delete_params,
     )
     conn.execute(
-        """
+        f"""
         UPDATE location_state SET current_visit_id = NULL
         WHERE current_visit_id IN (
             SELECT id FROM visits
             WHERE exited_at IS NOT NULL
-              AND exited_at >= ?
-              AND entered_at < ?
+              AND ({delete_predicate})
         )
         """,
-        (since, until),
+        delete_params,
     )
 
     conn.execute(
-        """
+        f"""
         DELETE FROM visits
         WHERE exited_at IS NOT NULL
-          AND exited_at >= ?
-          AND entered_at < ?
+          AND ({delete_predicate})
         """,
-        (since, until),
+        delete_params,
     )
 
     written = 0
