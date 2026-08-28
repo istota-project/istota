@@ -51,10 +51,41 @@ def _source_dict(s) -> dict:
     }
 
 
+def _available_briefing_names(
+    bctx: BriefingsContext, conn,
+) -> list[str]:
+    names = set(bdb.list_briefing_names(conn))
+    names.update(bctx.configured_briefing_names)
+    return sorted(names, key=lambda name: (name.casefold(), name))
+
+
 @click.group()
 @click.pass_context
 def cli(ctx):
     """Briefings content management."""
+
+
+@cli.command("list")
+@click.pass_context
+def briefings_list(ctx):
+    """List briefing names and their content status."""
+    bctx = _ctx(ctx)
+    with bdb.connect(bctx.db_path) as conn:
+        summaries_by_name = {
+            row["name"]: row for row in bdb.list_briefing_summaries(conn)
+        }
+        available = _available_briefing_names(bctx, conn)
+        for name in available:
+            if name in summaries_by_name:
+                continue
+            latest = bdb.latest_archived(conn, briefing_name=name)
+            summaries_by_name[name] = {
+                "name": name,
+                "block_count": 0,
+                "last_generated_at": latest.generated_at if latest else None,
+            }
+    summaries = [summaries_by_name[name] for name in available]
+    _emit({"status": "ok", "briefings": summaries})
 
 
 # -- blocks -------------------------------------------------------------------
@@ -72,6 +103,14 @@ def blocks_list(ctx, briefing):
     bctx = _ctx(ctx)
     with bdb.connect(bctx.db_path) as conn:
         rows = bdb.list_blocks(conn, briefing)
+        available = _available_briefing_names(bctx, conn)
+    if briefing not in available:
+        _emit({
+            "status": "not_found",
+            "error": f"no briefing named '{briefing}'",
+            "available": available,
+        })
+        return
     _emit({"status": "ok", "blocks": [_block_dict(b) for b in rows]})
 
 

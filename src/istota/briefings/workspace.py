@@ -24,6 +24,7 @@ def synthesize_briefings_context(
     *,
     data_dir: Path | None = None,
     db_path: Path | None = None,
+    configured_briefing_names: tuple[str, ...] = (),
 ) -> BriefingsContext:
     """Build a :class:`BriefingsContext` rooted at a workspace dir.
 
@@ -45,4 +46,5 @@ def synthesize_briefings_context(
         data_dir=data_dir,
         db_path=db_path,
         workspace_root=workspace_root,
+        configured_briefing_names=tuple(configured_briefing_names),
     )

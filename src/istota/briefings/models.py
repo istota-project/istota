@@ -69,6 +69,7 @@ class BriefingsContext:
     data_dir: Path
     db_path: Path
     workspace_root: Path | None = None
+    configured_briefing_names: tuple[str, ...] = ()
 
     def ensure_dirs(self) -> None:
         """Create the data dir and the SQLite parent dir."""

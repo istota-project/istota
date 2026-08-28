@@ -67,6 +67,9 @@ def resolve_for_user(
         user_id,
         workspace,
         db_path=db_override,
+        configured_briefing_names=tuple(
+            briefing.name for briefing in uc.briefings if briefing.name
+        ),
     )
 
 

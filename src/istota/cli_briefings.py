@@ -6,7 +6,7 @@ One tree over the briefings module:
   ``briefing_configs`` (schedule + delivery). Absorbs the deprecated
   ``istota briefing ensure|list|delete``; delegates to
   ``cli.run_briefing_schedule``.
-* ``istota briefings blocks|sources|archive …`` — the per-user module DB
+* ``istota briefings list|blocks|sources|archive …`` — the per-user module DB
   content model, routed through the module Click CLI (``briefings.cli``) via
   ``CliRunner`` with a resolved :class:`BriefingsContext`.
 
@@ -24,6 +24,9 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="istota briefings")
     sub = parser.add_subparsers(dest="group", required=True)
+
+    listing = sub.add_parser("list", help="List briefing names and content status")
+    listing.add_argument("-u", "--user", required=True)
 
     # schedule ------------------------------------------------------------
     sched = sub.add_parser("schedule", help="Manage briefing schedule + delivery")
@@ -310,6 +313,7 @@ def dispatch(argv: list[str], config) -> int:
         return _run_shared(args, config)
 
     builders = {
+        "list": lambda args: ["list"],
         "blocks": _blocks_argv,
         "sources": _sources_argv,
         "archive": _archive_argv,
