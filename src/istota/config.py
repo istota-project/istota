@@ -899,7 +899,7 @@ class LocationReceiverConfig:
     reconcile_enabled: bool = True         # re-derive closed visits from pings periodically
     reconcile_lookback_hours: float = 6.0  # reconcile pings within this window
     reconcile_buffer_minutes: float = 10.0  # don't reconcile pings newer than this (safety margin)
-    reconcile_grace_minutes: float = 10.0  # gap between at-place pings before splitting a visit
+    reconcile_grace_minutes: float = 10.0  # time away before an unassigned ping closes a visit
     reconcile_min_pings: int = 3            # minimum at-place pings to count as a visit
     reconcile_min_dwell_sec: int = 60       # minimum duration (sec) to count as a visit
 

@@ -151,6 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Location visits now stay open across reporting gaps when pings resume at the same place. The nightly reconciler no longer rewrites one continuous stop as several short visits merely because a phone stopped reporting for longer than its grace period.
+
 - The real-devbox integration tier can no longer report a clean run after executing none of its tests. Its documented command now passes the user as a pytest option, which survives the container command shim, and that option turns a missing config or unreachable transport into a failure. Running the wider integration suite without requesting a devbox still skips this tier.
 
 - The admin Configuration pane no longer shows an empty `moneyman` section. The retired integration's unused config type and loader branch are gone; a stale `[moneyman]` block in `config.toml` is ignored like any other unknown top-level block.

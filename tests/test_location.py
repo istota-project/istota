@@ -3562,28 +3562,81 @@ class TestReconcileVisits:
             assert visits[0].exited_at == "2026-04-21T10:28:00Z"
             assert visits[0].ping_count == 15
 
-    def test_splits_when_gap_exceeds_grace(self, tmp_path):
+    def test_same_place_reporting_gaps_do_not_split_visit(self, tmp_path):
+        """ISSUE-329: silence is not evidence that the user left a place."""
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(conn, "home", 35.629, 139.741)
-            # Morning visit
-            for m in range(0, 10, 2):
-                self._ping(conn, f"2026-04-21T08:{m:02d}:00Z", pid)
-            # 45-min gap (away), no pings at place
-            # Evening visit
-            for m in range(0, 10, 2):
-                self._ping(conn, f"2026-04-21T09:{m:02d}:00Z", pid)
+            pid = location_db.add_place(conn, "gym", 34.0, -118.0)
+            timestamps = [
+                "2026-01-10T09:00:00Z", "2026-01-10T09:01:00Z",
+                "2026-01-10T09:02:00Z", "2026-01-10T09:04:00Z",
+                "2026-01-10T09:06:00Z", "2026-01-10T09:07:00Z",
+                "2026-01-10T09:08:00Z", "2026-01-10T09:09:00Z",
+                "2026-01-10T09:33:00Z", "2026-01-10T09:34:00Z",
+                "2026-01-10T09:36:00Z", "2026-01-10T09:39:00Z",
+                "2026-01-10T09:41:00Z", "2026-01-10T09:44:00Z",
+                "2026-01-10T09:47:00Z", "2026-01-10T09:51:00Z",
+                "2026-01-10T10:20:00Z", "2026-01-10T10:21:00Z",
+                "2026-01-10T10:22:00Z", "2026-01-10T10:23:00Z",
+                "2026-01-10T10:24:00Z", "2026-01-10T10:25:00Z",
+                "2026-01-10T10:26:00Z", "2026-01-10T10:27:00Z",
+                "2026-01-10T10:29:00Z",
+            ]
+            for ts in timestamps:
+                self._ping(conn, ts, pid)
             conn.commit()
 
-            n = location_db.reconcile_visits(conn, since="2026-04-21T00:00:00Z", until="2026-04-22T00:00:00Z",
+            n = location_db.reconcile_visits(conn, since="2026-01-10T00:00:00Z", until="2026-01-11T00:00:00Z",
                 grace_minutes=10.0, min_pings=3, min_dwell_sec=60,
             )
             conn.commit()
 
-            assert n == 2
-            visits = sorted(location_db.get_visits(conn), key=lambda v: v.entered_at)
-            assert visits[0].entered_at == "2026-04-21T08:00:00Z"
-            assert visits[1].entered_at == "2026-04-21T09:00:00Z"
+            assert n == 1
+            visits = location_db.get_visits(conn)
+            assert len(visits) == 1
+            assert visits[0].entered_at == "2026-01-10T09:00:00Z"
+            assert visits[0].exited_at == "2026-01-10T10:29:00Z"
+            assert visits[0].ping_count == 25
+
+    def test_same_place_merge_replaces_visit_before_window(self, tmp_path):
+        """A merged segment must not overlap a preserved pre-fix visit."""
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            pid = location_db.add_place(conn, "gym", 34.0, -118.0)
+            first_id = location_db.open_visit(
+                conn, pid, "gym", "2026-01-10T08:00:00Z",
+            )
+            location_db.close_visit(conn, first_id, "2026-01-10T08:08:00Z")
+            second_id = location_db.open_visit(
+                conn, pid, "gym", "2026-01-10T10:00:00Z",
+            )
+            location_db.close_visit(conn, second_id, "2026-01-10T10:08:00Z")
+            for minute in (0, 4, 8):
+                location_db.insert_ping(
+                    conn, f"2026-01-10T08:{minute:02d}:00Z", 0.0, 0.0,
+                    accuracy=10.0, place_id=pid, visit_id=first_id,
+                )
+                location_db.insert_ping(
+                    conn, f"2026-01-10T10:{minute:02d}:00Z", 0.0, 0.0,
+                    accuracy=10.0, place_id=pid, visit_id=second_id,
+                )
+            conn.commit()
+
+            location_db.reconcile_visits(
+                conn,
+                since="2026-01-10T09:00:00Z",
+                until="2026-01-10T11:00:00Z",
+                grace_minutes=10.0,
+                min_pings=3,
+                min_dwell_sec=60,
+            )
+            conn.commit()
+
+            visits = location_db.get_visits(conn)
+            assert len(visits) == 1
+            assert visits[0].entered_at == "2026-01-10T08:00:00Z"
+            assert visits[0].exited_at == "2026-01-10T10:08:00Z"
+            assert visits[0].ping_count == 6
 
     def test_filters_walkby(self, tmp_path):
         db_path = _init_loc_db(tmp_path)
