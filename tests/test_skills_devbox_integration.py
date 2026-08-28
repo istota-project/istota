@@ -6,11 +6,12 @@ a *container*. This file is the tier that does, and the assertions that make it
 worth running are the ones only a container can satisfy: a hostname that is not
 the host's, and a path that exists in the image and nowhere else.
 
-Prerequisites: `ISTOTA_USER_ID`, a config naming an `exec_socket_dir`, and a
-running devbox whose exec server is answering. Every test skips without them, so
-the file is inert on a laptop and meaningful on the deployment:
+Prerequisites: `--devbox-user`, a config naming an `exec_socket_dir`, and a
+running devbox whose exec server is answering. Without `--devbox-user` the file
+skips, so it stays inert in a general integration run. Passing the option is a
+promise that the tier can run; missing prerequisites then fail the run:
 
-    ISTOTA_USER_ID=<user> uv run pytest -m integration tests/test_skills_devbox_integration.py -n0
+    uv run pytest -m integration tests/test_skills_devbox_integration.py -n0 --devbox-user=<user>
 
 **What changed, and why the old gate is gone.** This file used to spend a third
 of its length probing for a Docker-API allowlist refusal and skipping on it: the
@@ -51,17 +52,35 @@ def _transport_error() -> str | None:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def transport() -> None:
+def transport(pytestconfig) -> None:
     """The reachability gate for the whole file.
 
     Autouse on purpose: a guard a new test can forget to request is a guard
     nothing has. Every test here goes through it whether or not it says so.
     """
-    if not os.environ.get("ISTOTA_USER_ID", "").strip():
-        pytest.skip("ISTOTA_USER_ID is unset, so there is no per-user devbox")
-    reason = _transport_error()
-    if reason:
-        pytest.skip(f"the devbox exec transport did not answer a ping: {reason}")
+    requested_user = pytestconfig.getoption("--devbox-user")
+    if requested_user is None:
+        pytest.skip("--devbox-user is unset, so no real devbox run was requested")
+    user_id = requested_user.strip()
+    if not user_id:
+        pytest.fail("--devbox-user requires a non-empty user id", pytrace=False)
+
+    previous_user_id = os.environ.get("ISTOTA_USER_ID")
+    os.environ["ISTOTA_USER_ID"] = user_id
+    try:
+        reason = _transport_error()
+        if reason:
+            pytest.fail(
+                "--devbox-user requested a real devbox, but the exec transport "
+                f"did not answer a ping: {reason}",
+                pytrace=False,
+            )
+        yield
+    finally:
+        if previous_user_id is None:
+            os.environ.pop("ISTOTA_USER_ID", None)
+        else:
+            os.environ["ISTOTA_USER_ID"] = previous_user_id
 
 
 @pytest.fixture
