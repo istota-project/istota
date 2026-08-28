@@ -471,6 +471,46 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('does not duplicate a turn when recovery beats the send response', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+
+    let release: (v: any) => void = () => {};
+    api.sendChatMessage.mockReturnValue(
+      new Promise((res) => {
+        release = res;
+      }),
+    );
+    const sending = s.send('hello');
+
+    api.getRoomMessages.mockResolvedValue({
+      messages: [row(10, 't1', { role: 'user', text: 'hello', task_id: 7, status: 'running' })],
+      active_task: { id: 7, status: 'running' },
+      active_tasks: [{ id: 7, status: 'running' }],
+    });
+    api.getRoomEvents.mockResolvedValueOnce({ events: [], cursor: 900, gap: true });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 900, gap: false });
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    release({ ok: true, task_id: 7 });
+    await sending;
+    expect(get(s.messages).filter((m) => m.role === 'assistant' && m.taskId === 7)).toHaveLength(1);
+
+    api.getTaskEvents.mockResolvedValue({
+      events: [
+        { seq: 1, kind: 'result', payload: { text: 'the answer' } },
+        { seq: 2, kind: 'done', payload: {} },
+      ],
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.messages).filter((m) => m.text === 'the answer')).toHaveLength(1);
+    s.teardown();
+  });
+
   it('adopts the echo of a send the client gave up on but the server accepted', async () => {
     // ISSUE-200: the POST is not idempotent and carries no client id, so a
     // timeout (or a socket dropped after the request was processed) leaves the

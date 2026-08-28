@@ -657,6 +657,8 @@ function createSession(): ChatSession {
   // Stream now, or queue behind the active stream. Queued placeholders show a
   // "Queued…" line until their turn (task_started then stamps the real verb).
   function enqueueStream(taskId: number, cid: number) {
+    if (get(activeTaskId) === taskId) return;
+    if (streamQueue.some((q) => q.taskId === taskId)) return;
     if (activeStream) {
       // Insert in taskId order: ids are monotonic with backend execution
       // order, and concurrent send() POSTs can resolve out of order, so a
@@ -1020,8 +1022,6 @@ function createSession(): ChatSession {
   // is picked up too — its persisted `confirmation` event replays and the card
   // renders, which the old poller skipped outright.
   function pickUpStreamedTask(taskId: number, status?: string) {
-    if (get(activeTaskId) === taskId) return;
-    if (streamQueue.some((q) => q.taskId === taskId)) return;
     if (get(messages).some((m) => m.role === 'assistant' && m.taskId === taskId)) return;
     const ph: ChatMessage = {
       cid: nextCid(),
@@ -2548,19 +2548,33 @@ function createSession(): ChatSession {
     // streams into nothing) — the same already-tolerated state a room switch
     // produced before, when the switch wiped the placeholder out from under a
     // send in flight.
+    let assistantCid = phCid;
+    let streamAlreadyBound = false;
     if (get(activeRoomId) === roomId) {
-      messages.update((a) => [
-        ...a,
-        {
-          cid: phCid,
-          role: 'assistant',
-          text: '',
-          segments: [],
-          streaming: true,
-          progress: randomAckVerb(),
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      const recovered =
+        res.task_id == null
+          ? undefined
+          : get(messages).find((m) => m.role === 'assistant' && m.taskId === res.task_id);
+      if (recovered) {
+        assistantCid = recovered.cid;
+        streamAlreadyBound = true;
+        updateMsg(recovered.cid, (m) => {
+          if (!m.progress) m.progress = randomAckVerb();
+        });
+      } else {
+        messages.update((a) => [
+          ...a,
+          {
+            cid: phCid,
+            role: 'assistant',
+            text: '',
+            segments: [],
+            streaming: true,
+            progress: randomAckVerb(),
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
     }
     if (res.task_id == null) {
       applyInlineResult(userCid, phCid, res);
@@ -2579,9 +2593,9 @@ function createSession(): ChatSession {
     updateMsg(userCid, (m) => {
       m.taskId = res.task_id!;
     });
-    updateMsg(phCid, (m) => {
+    updateMsg(assistantCid, (m) => {
       m.taskId = res.task_id!;
-      m.status = 'pending';
+      if (!streamAlreadyBound) m.status = 'pending';
     });
     // A Stop tapped while this POST was in flight (see `cancel`) has an id to
     // act on now. Cancel first, then stream anyway: the stream is what renders
@@ -2596,7 +2610,7 @@ function createSession(): ChatSession {
     }
     // Stream now if the room is free, otherwise queue behind the in-flight
     // task. The backend gate keeps this task pending until its turn either way.
-    enqueueStream(res.task_id, phCid);
+    if (!streamAlreadyBound) enqueueStream(res.task_id, assistantCid);
   }
 
   /**

@@ -151,6 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recovering a chat stream while a message send is still waiting for its server response no longer creates a second progress row for the same task or renders the completed answer twice.
+
 - Briefing content commands now report an unknown briefing name instead of presenting it as a configured briefing with no blocks. The error includes the valid names, and a new list command shows each briefing's block count and latest generation time so callers no longer have to guess case-sensitive names.
 
 - Location visits now stay open across reporting gaps when pings resume at the same place. The nightly reconciler no longer rewrites one continuous stop as several short visits merely because a phone stopped reporting for longer than its grace period.
