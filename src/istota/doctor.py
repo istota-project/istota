@@ -1907,7 +1907,7 @@ def _exec_transport_request(
 
 
 def check_developer_container(config: "Config", probe: bool) -> list[CheckResult]:
-    """The four properties of the development container that fail silently.
+    """The five properties of the development container that fail silently.
 
     Every one of these is a thing an operator learns about from a task failing
     hours later, or — worse — never learns about at all:
@@ -1927,13 +1927,18 @@ def check_developer_container(config: "Config", probe: bool) -> list[CheckResult
       .package-caches``, is not visible inside the container, so it is not
       covered by the repos mount and every ``uv sync`` pays a full copy instead
       of a hardlink. Merely slow is what nobody investigates.
+    * **command_reaper** — the server is running without the child that kills
+      its commands when it is killed rather than stopped. Every command is
+      still reaped on its own exit path, so nothing fails; what accumulates is
+      builds that outlived a server the container's OOM killer picked off, and
+      the only place that was ever visible is here.
 
-    Returns four results whatever happens, so a caller can assert on a name
+    Returns five results whatever happens, so a caller can assert on a name
     rather than on a count.
     """
     from . import config as config_module  # noqa: PLC0415 - a cycle at module scope
 
-    names = ("backend", "transport", "identity", "uv_cache")
+    names = ("backend", "transport", "identity", "uv_cache", "command_reaper")
     backend = config_module.container_backend(config)
     results = [_container_backend_result(config, backend, config_module)]
 
@@ -2097,6 +2102,8 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
     identity_ok: list[str] = []
     cache_bad: list[str] = []
     cache_ok: list[str] = []
+    reaper_bad: list[str] = []
+    reaper_ok: list[str] = []
     without_a_devbox: list[str] = []
 
     for user_id in users:
@@ -2144,6 +2151,12 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
                 identity_bad.extend(findings)
             else:
                 identity_ok.append(user_id)
+            # A server too old to answer says nothing, which is not the same as
+            # answering `false`. Only an explicit `false` is a finding here.
+            if stat.get("reaper") is False:
+                reaper_bad.append(user_id)
+            elif stat.get("reaper") is True:
+                reaper_ok.append(user_id)
 
         if not repos_root_cfg:
             continue
@@ -2175,6 +2188,7 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
     results = [_transport_result(reachable, transport_bad, without_a_devbox)]
     results.append(_identity_result(identity_ok, identity_bad, reachable))
     results.append(_uv_cache_result(repos_root_cfg, cache_ok, cache_bad, reachable))
+    results.append(_reaper_result(reaper_ok, reaper_bad, reachable))
     return results
 
 
@@ -2245,6 +2259,47 @@ def _identity_result(ok: list[str], bad: list[str], reachable: list[str]) -> Che
     return CheckResult(
         name, OK,
         f"uid and repos root agree for {len(ok)} devbox user(s)",
+    )
+
+
+def _reaper_result(
+    ok: list[str], bad: list[str], reachable: list[str]
+) -> CheckResult:
+    """Is anything behind the exec server if it is killed rather than stopped?
+
+    WARN rather than FAIL: the transport works, commands run, and every one of
+    them is still killed on its own exit path. What is missing is the backstop
+    for the one death that skips those paths — so the cost is builds that
+    outlive a server the container's OOM killer picked off, which is a leak
+    rather than an outage.
+
+    A server too old to report the field is not a finding. It reports SKIP by
+    landing in neither list, the same way an unreachable one does.
+    """
+    name = f"{CONTAINER_GROUP}.command_reaper"
+    if bad:
+        return CheckResult(
+            name, WARN,
+            "the exec server has no command reaper for " + ", ".join(bad),
+            remedy=(
+                "Grep the container's log for 'reaper' (`docker logs "
+                "devbox-<user>`) and restart the container. It either never "
+                "started ('cannot start the reaper', 'cannot create the reaper "
+                "pipe') or died later ('the reaper is gone', 'the reaper "
+                "exited'), and the second is the common one. Until it is back, "
+                "a server killed rather than stopped leaves every command it "
+                "was running alive in the container."
+            ),
+        )
+    if not ok:
+        return CheckResult(
+            name, SKIP,
+            "no container reported whether it has a command reaper"
+            if reachable
+            else "no container answered, so nothing was asked",
+        )
+    return CheckResult(
+        name, OK, f"the command reaper is running for {len(ok)} devbox user(s)",
     )
 
 
@@ -2605,8 +2660,8 @@ CHECK_SCOPES: dict[str, str] = {
     "developer.forge_policy": DEPLOYMENT,
     "developer.gitlab_reviewer": DEPLOYMENT,
     "developer.forge_transport": DEPLOYMENT,
-    # Deployment, not image: three of its four results need a running
-    # container to reach, and the fourth reads the rendered config file.
+    # Deployment, not image: four of its five results need a running
+    # container to reach, and the fifth reads the rendered config file.
     # Deployment: it is a fact about what is filed on this host.
     "developer.repos_layout": DEPLOYMENT,
     "developer.container": DEPLOYMENT,

@@ -1887,8 +1887,12 @@ def _ping_reply(socket_path, payload, timeout):
     return [{"pong": True, "protocol": 1}, {"exit_code": 0}], ""
 
 
-def _agreeing_container(repos_root, *, uid_offset=0, cache_exit=0):
-    """A fake server that answers ping, stat and `test -d` the way a healthy one does."""
+def _agreeing_container(repos_root, *, uid_offset=0, cache_exit=0, reaper=True):
+    """A fake server that answers ping, stat and `test -d` the way a healthy one does.
+
+    `reaper=None` is a server too old to know the field, which is a third answer
+    and not a quieter spelling of `False`.
+    """
     import os as _os
 
     def _reply(socket_path, payload, timeout):
@@ -1896,11 +1900,10 @@ def _agreeing_container(repos_root, *, uid_offset=0, cache_exit=0):
         if '"ping"' in body:
             return [{"pong": True, "protocol": 1}, {"exit_code": 0}], ""
         if '"stat"' in body:
-            return (
-                [{"uid": _os.getuid() + uid_offset, "repos_root": repos_root},
-                 {"exit_code": 0}],
-                "",
-            )
+            stat = {"uid": _os.getuid() + uid_offset, "repos_root": repos_root}
+            if reaper is not None:
+                stat["reaper"] = reaper
+            return [stat, {"exit_code": 0}], ""
         return [{"exit_code": cache_exit}], ""
 
     return _reply
@@ -1996,10 +1999,10 @@ class TestTheReposLayoutCheck:
 
 
 class TestTheDeveloperContainerChecks:
-    """Four properties, each of which fails silently on its own.
+    """Five properties, each of which fails silently on its own.
 
-    Registered as one entry so a single connection per user answers three of
-    them; the fourth reads the rendered config file and opens nothing.
+    Registered as one entry so a single connection per user answers four of
+    them; the fifth reads the rendered config file and opens nothing.
     """
 
     GROUP = "developer.container"
@@ -2008,9 +2011,10 @@ class TestTheDeveloperContainerChecks:
         "developer.container.transport",
         "developer.container.identity",
         "developer.container.uv_cache",
+        "developer.container.command_reaper",
     }
 
-    def test_all_four_are_produced_whatever_happens(self, make_config, tmp_path):
+    def test_all_five_are_produced_whatever_happens(self, make_config, tmp_path):
         """A caller asserts on a name, never on a count — a check that vanishes
         under some configuration is a check nothing can require."""
         for devbox in (False, True):
@@ -2125,6 +2129,7 @@ class TestTheDeveloperContainerChecks:
         assert by_name["developer.container.transport"].status == OK
         assert by_name["developer.container.identity"].status == OK
         assert by_name["developer.container.uv_cache"].status == OK
+        assert by_name["developer.container.command_reaper"].status == OK
 
     def test_a_uid_mismatch_fails_and_says_what_it_costs(
         self, make_config, tmp_path, monkeypatch
@@ -2200,6 +2205,46 @@ class TestTheDeveloperContainerChecks:
 
         assert cache.status == WARN
         assert "alice" in cache.detail
+
+    def test_a_server_with_no_reaper_warns_rather_than_failing(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """The transport works and every command is still killed on its own exit
+        path. What is gone is the backstop for the death that skips those paths,
+        so the cost is a leak rather than an outage — and the whole reason this
+        check exists is that a ping and a stat both answered happily while a
+        24-hour-old build ran against the repos mount."""
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=False),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        result = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.command_reaper"
+        ]
+
+        assert result.status == WARN
+        assert "alice" in result.detail
+        assert "docker logs" in result.remedy
+
+    def test_a_server_too_old_to_answer_is_not_reported_as_broken(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """A missing field and a `false` are different facts. Reading the first
+        as the second warns on every container that has not been rebuilt yet,
+        which is a check an operator learns to scroll past."""
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice"), reaper=None),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        result = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.command_reaper"
+        ]
+
+        assert result.status == SKIP
 
 
 class TestTheBackendAgreementCheck:

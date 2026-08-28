@@ -151,6 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A dev container no longer keeps builds and test processes running after its command server is killed rather than stopped. The server spawns a small reaper child holding one end of a pipe; the kernel closes the other end however the server dies, and the reaper kills whatever is still running, checking each process group is alive first so one already cleaned up is left alone. `devbox status` now reports how many commands are running and whether the reaper is there, and `istota doctor` warns when a container has none.
+
 - Recovering a chat stream while a message send is still waiting for its server response no longer creates a second progress row for the same task or renders the completed answer twice.
 
 - Briefing content commands now report an unknown briefing name instead of presenting it as a configured briefing with no blocks. The error includes the valid names, and a new list command shows each briefing's block count and latest generation time so callers no longer have to guess case-sensitive names.

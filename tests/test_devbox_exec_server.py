@@ -17,6 +17,7 @@ one is a named test here, and the two lists are meant to stay in step.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import struct
@@ -939,6 +940,92 @@ class TestShutdown:
             time.sleep(0.05)
         assert not _alive(pid), f"{pid} survived the server that started it"
 
+    def test_a_sigkilled_server_does_not_orphan_the_commands_it_started(
+        self, server_factory
+    ):
+        """The graceful path above runs from a `finally`, and a `finally` does
+        not run on SIGKILL — which is the death the supervisor exists for, since
+        the reason it was written is the server being picked off when the
+        container reaches its `mem_limit`. Measured before the reaper: the
+        command survived indefinitely, invisible to the replacement server, to
+        `stat` and to every log."""
+        srv = server_factory()
+        conn = srv.connect()
+        pid = None
+        try:
+            conn.send(
+                encode_exec_request(
+                    argv=["sh", "-c", "echo $$; sleep 300"], cwd=str(srv.repos)
+                )
+            )
+            assert conn.read_ack()["status"] == "ok"
+            decoder = FrameDecoder()
+            deadline = time.monotonic() + READ_TIMEOUT
+            while pid is None and time.monotonic() < deadline:
+                for stream, payload in decoder.feed(conn.sock.recv(65536)):
+                    if stream == STREAM_STDOUT and payload.strip():
+                        pid = int(payload.split()[0])
+            assert pid and _alive(pid), "the fixture never started"
+
+            srv.proc.kill()
+            srv.proc.wait(timeout=10)
+
+            gone_by = time.monotonic() + 10.0
+            while time.monotonic() < gone_by and _alive(pid):
+                time.sleep(0.05)
+            assert not _alive(pid), f"{pid} outlived the SIGKILLed server"
+        finally:
+            conn.close()
+            if pid and _alive(pid):
+                os.killpg(pid, signal.SIGKILL)
+
+    def test_the_reaper_kills_a_group_whose_leader_has_already_exited(
+        self, server_factory
+    ):
+        """The group, not the leader. A `sh -c 'daemon & exit'` leaves the group
+        alive with its leader gone, so nothing keyed on the leader's own
+        liveness — a `/proc/<pgid>/stat` read, a start-time comparison — can see
+        it. That shape is the ordinary one for a backgrounded dev server."""
+        srv = server_factory()
+        marker = srv.repos / "child.pid"
+        conn = srv.connect()
+        pid = None
+        try:
+            conn.send(
+                encode_exec_request(
+                    shell=f"( sleep 300 & echo $! > {marker} ) ; exit 0",
+                    cwd=str(srv.repos),
+                )
+            )
+            assert conn.read_ack()["status"] == "ok"
+            deadline = time.monotonic() + READ_TIMEOUT
+            while time.monotonic() < deadline and not marker.exists():
+                time.sleep(0.02)
+            pid = int(marker.read_text().strip())
+            assert _alive(pid), "the backgrounded child never started"
+            # Without this the test could pass with the reaper removed: the
+            # command exits at once, so `_do_exec`'s own `finally` is racing to
+            # kill the same group. Asking the server proves it still holds the
+            # group at the moment of the SIGKILL, so whatever killed the child
+            # afterwards was not that path.
+            with srv.connect() as probe:
+                probe.send(encode_stat_request())
+                assert probe.read_ack()["status"] == "ok"
+                assert probe.collect().controls[0]["process_groups"] == 1
+
+            srv.proc.kill()
+            srv.proc.wait(timeout=10)
+
+            gone_by = time.monotonic() + 10.0
+            while time.monotonic() < gone_by and _alive(pid):
+                time.sleep(0.05)
+            assert not _alive(pid), f"{pid} outlived the SIGKILLed server"
+        finally:
+            conn.close()
+            if pid and _alive(pid):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+
 
 class TestOutputIsNeverSilentlyLost:
     """The drain grace exists for a pipe nobody will close, not for a client
@@ -1189,6 +1276,271 @@ class TestPingAndStat:
         assert reply["uid"] == os.getuid()
         assert reply["protocol"] == PROTOCOL_VERSION
         assert out.terminal["exit_code"] == 0
+
+    def test_stat_reports_running_work_and_whether_the_backstop_is_there(
+        self, server_factory
+    ):
+        """doctor's transport check is a ping and a stat. Both answered happily
+        from a server that had lost track of a live build and from one running
+        with no reaper behind it, which is what made the orphans invisible from
+        every side."""
+        srv = server_factory()
+        with srv.connect() as conn:
+            conn.send(encode_stat_request())
+            assert conn.read_ack()["status"] == "ok"
+            idle = conn.collect().controls[0]
+        assert idle["process_groups"] == 0
+        assert idle["reaper"] is True
+
+        busy = srv.connect()
+        try:
+            busy.send(
+                encode_exec_request(shell="echo up; sleep 300", cwd=str(srv.repos))
+            )
+            assert busy.read_ack()["status"] == "ok"
+            decoder = FrameDecoder()
+            deadline = time.monotonic() + READ_TIMEOUT
+            started = False
+            while not started and time.monotonic() < deadline:
+                for stream, payload in decoder.feed(busy.sock.recv(65536)):
+                    if stream == STREAM_STDOUT and payload.strip():
+                        started = True
+            assert started, "the fixture never started"
+            with srv.connect() as conn:
+                conn.send(encode_stat_request())
+                assert conn.read_ack()["status"] == "ok"
+                assert conn.collect().controls[0]["process_groups"] == 1
+        finally:
+            busy.close()
+
+
+class TestTheReaperRecordStream:
+    """The reaper's own logic, without a server around it.
+
+    Every one of these is about a record whose group is *not* the one the
+    record names any more — which is the only way a `killpg` from here can
+    reach something it should not.
+    """
+
+    def test_a_record_is_added_and_removed_by_the_stream(self):
+        module = _load_server_module()
+        live: set[int] = set()
+        for record in (b"+41", b"+42", b"-41"):
+            module._apply_reaper_record(live, record)
+        assert live == {42}
+
+    def test_an_unreadable_record_is_dropped_rather_than_guessed_at(self):
+        module = _load_server_module()
+        live: set[int] = set()
+        for record in (b"", b"41", b"+", b"+0", b"-0", b"+-1", b"+4 1", b"?41", b"+x"):
+            module._apply_reaper_record(live, record)
+        assert live == set()
+
+    def test_a_group_that_is_already_gone_is_never_signalled(self, monkeypatch):
+        """The whole anti-reuse story. The server sends `-<pgid>` just after it
+        kills a group, so a record can outlive its group by a few instructions —
+        and by then the pid is free for anything else to claim."""
+        module = _load_server_module()
+        killed = []
+        monkeypatch.setattr(module, "group_alive", lambda pgid: pgid == 42)
+        monkeypatch.setattr(
+            module, "kill_group", lambda pgid, sig: killed.append((pgid, sig))
+        )
+        assert module._reap_abandoned_groups({41, 42}) == 0
+        assert killed == [(42, signal.SIGKILL)]
+
+    def test_a_survivor_of_sigkill_is_reported_rather_than_retried(
+        self, monkeypatch, caplog
+    ):
+        module = _load_server_module()
+        monkeypatch.setattr(module, "REAPER_VERIFY_SECONDS", 0.1)
+        monkeypatch.setattr(module, "group_alive", lambda pgid: True)
+        monkeypatch.setattr(module, "kill_group", lambda pgid, sig: None)
+        with caplog.at_level("ERROR", logger=module.logger.name):
+            module._reap_abandoned_groups({41})
+        assert "still present after SIGKILL" in caplog.text
+
+    def test_a_read_failure_exits_without_killing_anything(self, monkeypatch):
+        """EOF is the server's death; a read *failure* is the reaper's own.
+
+        Both used to `break` into the same reap, so a failing read SIGKILLed
+        every live build under a perfectly healthy server — the thing this file
+        exists to prevent, done by the thing meant to prevent it.
+        """
+        module = _load_server_module()
+        killed = []
+        monkeypatch.setattr(module, "group_alive", lambda pgid: True)
+        monkeypatch.setattr(
+            module, "kill_group", lambda pgid, sig: killed.append(pgid)
+        )
+
+        reads = iter([b"+41\n", OSError(5, "Input/output error")])
+
+        def failing_read(fd, size):
+            value = next(reads)
+            if isinstance(value, OSError):
+                raise value
+            return value
+
+        monkeypatch.setattr(module.os, "read", failing_read)
+        assert module.run_reaper() == 0
+        assert killed == [], "a read failure killed the groups it was tracking"
+
+    def test_a_backlog_larger_than_one_read_loses_no_record(self, monkeypatch):
+        """The cap used to be applied before the split, so it truncated the
+        *head* of the buffer — where the partial record from the previous read
+        lives. Measured, a legitimate backlog of 2000 records lost two of them,
+        which is two builds the reaper would never kill."""
+        module = _load_server_module()
+        expected = list(range(9000, 11000))
+        stream = b"".join(b"+%d\n" % pgid for pgid in expected)
+        assert len(stream) > module.REAPER_MAX_BUFFER_BYTES, "not a real backlog"
+
+        killed = []
+        monkeypatch.setattr(module, "group_alive", lambda pgid: True)
+        monkeypatch.setattr(
+            module, "kill_group", lambda pgid, sig: killed.append(pgid)
+        )
+        chunks = iter(
+            [stream[i : i + 4096] for i in range(0, len(stream), 4096)] + [b""]
+        )
+        monkeypatch.setattr(module.os, "read", lambda fd, size: next(chunks))
+
+        module.run_reaper()
+
+        assert sorted(killed) == expected
+
+    def test_the_stream_ends_at_eof_and_reaps_what_it_was_told(
+        self, monkeypatch, tmp_path
+    ):
+        """End to end through `run_reaper`'s own read loop, on a real pipe,
+        with the write end closed the way the kernel closes it on a SIGKILL."""
+        module = _load_server_module()
+        killed = []
+        monkeypatch.setattr(module, "group_alive", lambda pgid: pgid in (42, 43))
+        monkeypatch.setattr(
+            module, "kill_group", lambda pgid, sig: killed.append(pgid)
+        )
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"+41\n+42\n-41\n+4")
+        os.write(write_fd, b"3\n")
+        saved = os.dup(0)
+        try:
+            os.dup2(read_fd, 0)
+            os.close(read_fd)
+            os.close(write_fd)
+            assert module.run_reaper() == 0
+        finally:
+            os.dup2(saved, 0)
+            os.close(saved)
+        assert sorted(killed) == [42, 43]
+
+
+class TestARecordIsReleasedWhenItsGroupGoes:
+    def test_a_stalled_client_does_not_hold_a_record_past_its_group(
+        self, server_factory
+    ):
+        """The record has to be released when the *group* empties, not when the
+        connection ends.
+
+        `_do_exec`'s `finally` runs after `_drain` — whose grace restarts while
+        any pump is writing — and after the terminal frame's `writer.drain()`,
+        which has no timeout. So a client that stops reading held the record for
+        as long as it liked while the pgid was already free to be reused, and a
+        SIGKILL in that state aimed the reaper's `killpg` at whatever now held
+        the number. Measured at 15 seconds and still counting.
+        """
+        # A drain grace far longer than the assertion window, so the two cases
+        # separate cleanly: with the record released on the group's exit this
+        # reads 0 within a second, and without it the server holds the record
+        # for the whole grace — which restarts while any pump is writing, so it
+        # was measured still holding at 15s against the 5s default.
+        srv = server_factory(drain_grace=30.0)
+        stalled = srv.connect()
+        try:
+            # Sized so the command itself finishes — small enough to fit in the
+            # pipe and socket buffers — while the server stays blocked writing
+            # to a client that has stopped reading. Too much more and the child
+            # blocks instead, which is a live group and a different test.
+            stalled.send(
+                encode_exec_request(
+                    shell="head -c 100000 /dev/zero | tr '\\0' x", cwd=str(srv.repos)
+                )
+            )
+            assert stalled.read_ack()["status"] == "ok"
+            stalled.sock.recv(4096)
+
+            deadline = time.monotonic() + 8.0
+            groups = None
+            while time.monotonic() < deadline:
+                with srv.connect() as probe:
+                    probe.send(encode_stat_request())
+                    assert probe.read_ack()["status"] == "ok"
+                    groups = probe.collect().controls[0]["process_groups"]
+                if groups == 0:
+                    break
+                time.sleep(0.1)
+
+            assert groups == 0, (
+                "the server still holds a record for a group that has exited, "
+                "so its pgid is free for reuse while the reaper would still "
+                "signal it"
+            )
+        finally:
+            stalled.close()
+
+
+class TestTheReaperIsReportedLive:
+    """`stat` answers whether the reaper is there now, not whether one started.
+
+    It used to be a boolean set when the pipe was created and falsified only
+    when the *next* command spawned. A reaper killed on its own therefore read
+    as healthy for the whole idle window — which is the window doctor probes in,
+    and this is not a hypothetical death: the reaper shares the server's cgroup,
+    so the OOM killer the feature exists for can take it instead.
+    """
+
+    def _reaper_pid(self, srv) -> int:
+        match = re.search(r"reaper started, pid (\d+)", srv.log_text())
+        assert match, f"the server never logged a reaper pid: {srv.log_text()}"
+        return int(match.group(1))
+
+    def test_a_reaper_killed_on_its_own_is_reported_before_the_next_command(
+        self, server_factory
+    ):
+        srv = server_factory()
+        reaper = self._reaper_pid(srv)
+        with srv.connect() as conn:
+            conn.send(encode_stat_request())
+            assert conn.read_ack()["status"] == "ok"
+            assert conn.collect().controls[0]["reaper"] is True
+
+        os.kill(reaper, signal.SIGKILL)
+        gone_by = time.monotonic() + 10.0
+        while time.monotonic() < gone_by and _alive(reaper):
+            time.sleep(0.05)
+
+        # No command in between: that is the whole point. The old field only
+        # moved when `_send` failed, so this same sequence answered True.
+        with srv.connect() as conn:
+            conn.send(encode_stat_request())
+            assert conn.read_ack()["status"] == "ok"
+            assert conn.collect().controls[0]["reaper"] is False
+
+    def test_the_server_still_runs_commands_with_no_reaper(self, server_factory):
+        """Losing the backstop must not become an outage. A server that refused
+        work without a reaper would turn a leak into a dead transport, which is
+        strictly worse than the thing it protects against."""
+        srv = server_factory()
+        os.kill(self._reaper_pid(srv), signal.SIGKILL)
+        gone_by = time.monotonic() + 10.0
+        while time.monotonic() < gone_by and _alive(self._reaper_pid(srv)):
+            time.sleep(0.05)
+
+        out = srv.run(shell="echo still-serving", cwd=str(srv.repos))
+
+        assert out.terminal["exit_code"] == 0
+        assert b"still-serving" in out.stdout
 
 
 class TestTheSocket:

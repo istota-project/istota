@@ -166,7 +166,9 @@ This needs both `Delegate=memory pids cpu` and `DelegateSubgroup=supervisor` on 
 | `istota_devbox_log_max_size` / `istota_devbox_log_max_file` | `"10m"` / `3` | The container's own log. The default json-file driver is unbounded, and the supervisor writes a line per server exit |
 | `istota_devbox_force_recreate` | `false` | Rebuild the image and recreate the containers on the next run even when nothing tracked changed. A command-line override, not an inventory setting |
 
-The container runs a supervisor as PID 1's child rather than `sleep infinity`, with `init: true` for reaping. `restart: unless-stopped` restarts the container and says nothing about a process inside one, so without the supervisor a server picked off by a dockerd restart or a memory limit stays gone until somebody notices.
+The container runs a supervisor as PID 1's child rather than `sleep infinity`, with `init: true` to reap zombies. `restart: unless-stopped` restarts the container and says nothing about a process inside one, so without the supervisor a server picked off by a dockerd restart or a memory limit stays gone until somebody notices.
+
+Restarting the server is all the supervisor does. Commands the dead server was running are handled by the server itself, which keeps a reaper child holding one end of a pipe: the kernel closes the other end however the server dies, and the reaper kills whatever is still running. `istota-skill devbox status` reports how many commands are running and whether that child is there, and `istota doctor` warns when a container has none.
 
 The raw-socket diagnostics — `traceroute`, `mtr`, `tcpdump` — do not work inside it. They need `CAP_NET_RAW`, which the definition no longer grants: a build needs none of them, and a container holding it can pick its own source address and walk past every address-scoped drop rule the role installs. `ping` is probably unaffected, since it tries an unprivileged ICMP datagram socket first and Docker's default sysctls permit that. Egress is otherwise permissive, bounded by those rules — link-local, Azure's host agent, RFC1918 and carrier-grade NAT.
 
@@ -194,7 +196,7 @@ Leave `istota_security_sandbox_cache_dir` blank. With `istota_developer_enabled`
 
 **Every dev container is rebuilt and recreated.** The image gains the exec server, the supervisor and the uid build args, and the container's PID 1 changes, so the first run after this lands interrupts whatever is in the box at the time. The `/home/dev` volume repairs its own ownership: the supervisor chowns it once when the owner does not match the new uid, guarded by a stat of the directory, so it happens on the first start and never again. Watch `docker logs devbox-<user>` for `supervising …` and no respawn loop.
 
-Then check it before a task does: `istota doctor --only developer.container` gives four results — does the rendered config derive what the running daemon is running (re-derived from the three variables above, since there is no key left to read), does the transport answer, do the two sides agree on uid and repos root, and is the uv cache mounted. `istota doctor --only developer.repos_layout` reports repositories still sitting outside a user's directory. A `skip` in either means the check did not run, not that the property holds.
+Then check it before a task does: `istota doctor --only developer.container` gives five results — does the rendered config derive what the running daemon is running (re-derived from the three variables above, since there is no key left to read), does the transport answer, do the two sides agree on uid and repos root, is the uv cache mounted, and is the command reaper there. `istota doctor --only developer.repos_layout` reports repositories still sitting outside a user's directory. A `skip` in either means the check did not run, not that the property holds.
 
 ## Disk growth
 

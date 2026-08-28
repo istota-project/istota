@@ -85,11 +85,16 @@ services:
     mem_limit: {{ istota_devbox_mem_limit }}
     cpus: {{ istota_devbox_cpus }}
     pids_limit: {{ istota_devbox_pids_limit }}
-    # tini at PID 1, to reap what reparents to it. The supervisor below never
-    # calls `wait()` on a process it did not start, so anything that outlives
-    # the exec server's own reap would otherwise stay a zombie against
-    # `pids_limit` for the life of the container. `dockerd` used to reap
-    # `docker exec` children and nobody had to think about it.
+    # tini at PID 1, to reap *zombies* that reparent to it. The supervisor
+    # below never calls `wait()` on a process it did not start, so anything
+    # that outlives the exec server's own reap would otherwise stay a zombie
+    # against `pids_limit` for the life of the container. `dockerd` used to
+    # reap `docker exec` children and nobody had to think about it.
+    #
+    # It is not a backstop for a *live* orphan. A backgrounded build reparented
+    # here is running, not a zombie, and tini calls `wait()` on it exactly
+    # never. What covers that is the exec server's own reaper child, which the
+    # kernel wakes by closing a pipe however the server dies.
     init: true
     logging:
       driver: json-file
