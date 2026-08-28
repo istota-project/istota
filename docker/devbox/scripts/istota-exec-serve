@@ -55,6 +55,25 @@ either side writes into the shared mount is writable by the other. Supervised by
 ``istota-exec-run``, which restarts it after a crash — nothing here tries to
 survive its own bugs.
 
+**A SIGKILL is not a bug this survives, and its commands must not survive it
+either.** The kill above runs from a ``finally``, and a ``finally`` does not run
+on SIGKILL — which is the death the supervisor was written for, since the reason
+it exists is the server being picked off when the container reaches its
+``mem_limit``. So a small child process holds the read end of a pipe this
+process never writes to except to name a process group; see ``run_reaper``. The
+kernel closes the write end when this process dies, the child reads EOF, and it
+kills what was still running. It is a backstop behind ``shutdown``, not a
+replacement for it: on the ordinary path the groups are already gone by then and
+it says nothing.
+
+No command inherits that write end — ``os.pipe`` returns non-inheritable
+descriptors and only pipes are passed to a spawn — so nothing a task runs can
+suppress the EOF by accident. It can be suppressed on purpose, by a process in
+the container opening ``/proc/<pid>/fd/<n>`` on this one and holding a write end
+of its own. That is not a boundary this defends: ``dev`` has passwordless sudo
+in the devbox and is already root there. It is named because the sentence above
+would otherwise read as a guarantee against the container, which it is not.
+
 stdlib only, and it imports nothing from ``istota``: this runs in a container
 with no such package. The one module it needs travels as a vendored, byte-
 identical copy of ``src/istota/devbox_exec_protocol.py``, kept in step by
@@ -76,6 +95,7 @@ import logging
 import os
 import signal
 import stat as stat_module
+import subprocess
 import sys
 import time
 
@@ -92,7 +112,8 @@ import time
 # nothing's path today, and would go to the front of `sys.path` ahead of the
 # stdlib, so a `pip install --prefix=/usr/local` dropping a top-level module
 # there would shadow one this server imports.
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_THIS_SCRIPT = os.path.abspath(__file__)
+_HERE = os.path.dirname(_THIS_SCRIPT)
 for _candidate in (
     "/usr/local/lib/istota_devbox_exec",
     os.path.join(os.path.dirname(_HERE), "lib"),
@@ -361,6 +382,266 @@ def group_alive(pgid: int) -> bool:
     return True
 
 
+# ---- The reaper ------------------------------------------------------------
+#
+# A process group is named by its leader's pid, and that number is only
+# trustworthy while the group is non-empty: Linux keeps a pid allocated for as
+# long as anything holds a reference to it, and every member of a group holds
+# one through its pgid. So `killpg` either reaches the group that was recorded
+# or reaches nothing at all — until the group empties, after which the number
+# means whatever the next process to claim it means. Everything below is built
+# around keeping the recorded set as short-lived as that fact requires.
+
+# argv[0] of the reaper child. Not an argparse flag: the child takes no
+# configuration at all, and a mode that appeared in `--help` would invite one.
+REAPER_MODE = "--internal-reaper"
+
+# One record is `+` or `-`, a pid, and a newline. Anything longer than a few of
+# those buffered at once is not something the server wrote, so the buffer is
+# bounded rather than grown for a writer that cannot exist.
+REAPER_MAX_BUFFER_BYTES = 4096
+
+# How long the reaper waits for a killed group to actually go. SIGKILL is not
+# refusable, but a process in an uninterruptible wait does not leave it until
+# the wait ends, and a survivor is worth a log line rather than silence.
+REAPER_VERIFY_SECONDS = 2.0
+
+
+def run_reaper() -> int:
+    """The reaper child: kill what the server was supervising if it dies badly.
+
+    Reads `+<pgid>` and `-<pgid>` records from its stdin, which is the read end
+    of a pipe whose only write end belongs to the server. It never writes to
+    that pipe and never signals anything while the server is alive; its whole
+    behaviour is what it does when the read returns EOF, which the kernel
+    guarantees on the server's death by any means, SIGKILL included.
+
+    The liveness re-check immediately before each kill is what makes a stale
+    record safe, and it is the only thing standing between a recycled pid and a
+    `killpg` aimed at whatever now holds it. A non-empty group pins its own
+    pgid — every member holds a reference to the leader's pid — so the number
+    cannot be reissued while the group has anything in it. The exposure is
+    therefore a record that outlives an *emptied* group, which is why the server
+    releases one the moment the group goes rather than when the connection ends:
+    measured, a stalled client held a record open for 15 seconds past the point
+    its pgid became free. What remains is the gap between this check and the
+    signal on the next line, and that is stated rather than claimed away.
+
+    Nothing here raises: this process is the last thing between a dead server
+    and a build that runs until the container does.
+    """
+    live: set[int] = set()
+    buffer = b""
+    while True:
+        try:
+            chunk = os.read(0, 4096)
+        except OSError as e:
+            # Not a reap. EOF is the server's death; a read *failure* is this
+            # process's own, and killing every live build on it would be the
+            # thing this file exists to prevent, done by the thing meant to
+            # prevent it. Exiting is the honest move: the server's next write
+            # gets EPIPE, flips `healthy` and says so, and doctor reports it.
+            logger.error("reaper: cannot read from the server, exiting: %s", e)
+            return 0
+        if not chunk:
+            break
+        buffer += chunk
+        # Split first, then bound only the incomplete remainder. Capping the
+        # whole buffer ahead of the split truncated the *head*, which is where
+        # the partial record from the previous read lives — measured, a backlog
+        # of 2000 legitimate records lost two of them, silently. A remainder
+        # this long cannot be a record, so dropping it costs nothing real.
+        *lines, buffer = buffer.split(b"\n")
+        if len(buffer) > REAPER_MAX_BUFFER_BYTES:
+            logger.warning("reaper: oversized partial record; dropping it")
+            buffer = b""
+        for line in lines:
+            _apply_reaper_record(live, line)
+    return _reap_abandoned_groups(live)
+
+
+def _apply_reaper_record(live: set[int], line: bytes) -> None:
+    record = line.strip()
+    if not record:
+        return
+    verb, digits = record[:1], record[1:]
+    # `isdigit` rather than leaving it to `int`, which also accepts a sign,
+    # underscores and surrounding whitespace. The only writer is the server and
+    # none of those can come from it, so this is about the grammar meaning what
+    # the comments say it means.
+    if verb not in (b"+", b"-") or not digits.isdigit():
+        logger.warning("reaper: ignoring an unreadable record")
+        return
+    pgid = int(digits)
+    if pgid <= 0:
+        logger.warning("reaper: ignoring an unreadable record")
+        return
+    if verb == b"+":
+        live.add(pgid)
+    else:
+        live.discard(pgid)
+
+
+def _reap_abandoned_groups(live: set[int]) -> int:
+    """Kill every group still running; silent when there is nothing to kill."""
+    killed = []
+    for pgid in sorted(live):
+        # Checked immediately before its own signal rather than in a pass of
+        # its own. This check is the whole anti-reuse story, and a formatted
+        # log line and a blocking write between the check and the `killpg`
+        # would widen the window it is there to keep narrow.
+        if not group_alive(pgid):
+            continue
+        kill_group(pgid, signal.SIGKILL)
+        killed.append(pgid)
+    if not killed:
+        # The ordinary path: `shutdown` already killed them, or there was
+        # nothing to kill. Silence here is what keeps a log line meaningful.
+        return 0
+    logger.warning(
+        "reaper: the server is gone; killed %d process group(s): %s",
+        len(killed),
+        ", ".join(str(pgid) for pgid in killed),
+    )
+    deadline = time.monotonic() + REAPER_VERIFY_SECONDS
+    present = [pgid for pgid in killed if group_alive(pgid)]
+    while present and time.monotonic() < deadline:
+        time.sleep(0.05)
+        present = [pgid for pgid in present if group_alive(pgid)]
+    if present:
+        # "present", not "still running", and the count above is deliberately
+        # not adjusted down by this. `group_alive` is a `killpg(0)`, which
+        # succeeds against a group of zombies — so a group killed correctly
+        # reads as alive until whatever is left gets reaped, and reporting
+        # that as a failed kill made the reaper claim it had done nothing on
+        # the exact runs where it had worked. The other two causes are a task
+        # in an uninterruptible wait and a group this uid may not signal.
+        logger.error(
+            "reaper: %s still present after SIGKILL (unreaped, uninterruptible, "
+            "or not ours to signal)",
+            ", ".join(str(pgid) for pgid in present),
+        )
+    return 0
+
+
+class ReaperLink:
+    """The server's end of the deadman pipe. A link with no pipe is a no-op.
+
+    Writes are blocking and deliberately so. The pipe holds 64 KiB, a record is
+    about a dozen bytes, and the only reader does nothing but read — so the
+    alternative, a non-blocking write that drops a record on EAGAIN, trades a
+    stall for an orphan. The stall is reachable, and by exactly one thing: a
+    process inside the container stopping the reaper and letting the pipe fill,
+    which blocks the event loop and takes every connection with it. That is not
+    a boundary this defends — `dev` has passwordless sudo in the devbox and is
+    already root there — but it is the reason this says "reachable" rather than
+    "cannot happen".
+    """
+
+    def __init__(
+        self, proc: subprocess.Popen | None = None, write_fd: int | None = None
+    ) -> None:
+        self.proc = proc
+        self._fd = write_fd
+        self._failed = write_fd is None
+
+    @property
+    def healthy(self) -> bool:
+        """Whether the reaper is there *now*, asked rather than remembered.
+
+        This used to be a boolean set at construction and falsified only from
+        inside `_send` — so it answered "was a pipe created at start-up", and a
+        reaper killed on its own stayed `True` until the next command spawned.
+        On an idle container that is indefinite, and it is not a hypothetical
+        death: the reaper is a process in the same cgroup as the server, so the
+        OOM killer this whole feature exists for can take it instead. `stat`
+        and doctor's check both read this, and both state the stronger claim.
+
+        `poll()` also reaps the child, which keeps a dead reaper from holding a
+        slot against the container's `pids_limit` for the life of the server.
+        """
+        if self._failed or self._fd is None:
+            return False
+        if self.proc is not None and self.proc.poll() is not None:
+            logger.error(
+                "the reaper exited with %s; commands will not survive a SIGKILL",
+                self.proc.returncode,
+            )
+            self._failed = True
+            return False
+        return True
+
+    def track(self, pgid: int) -> None:
+        self._send(b"+%d\n" % pgid)
+
+    def forget(self, pgid: int) -> None:
+        self._send(b"-%d\n" % pgid)
+
+    def _send(self, record: bytes) -> None:
+        if self._fd is None:
+            return
+        try:
+            written = 0
+            while written < len(record):
+                written += os.write(self._fd, record[written:])
+        except OSError as e:
+            if not self._failed:
+                # Once, loudly. The server carries on: a dead reaper costs the
+                # backstop, and refusing commands over it would turn that into
+                # an outage, which is strictly worse than what it protects.
+                logger.error(
+                    "the reaper is gone; commands will not survive a SIGKILL: %s", e
+                )
+            self._failed = True
+
+    def close(self) -> None:
+        """Release the pipe and wait for the reaper to finish its last word."""
+        if self._fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = None
+        if self.proc is not None:
+            # A second, not the verify window. The write end is closed above, so
+            # the reaper already has its EOF and does its work whether or not
+            # this waits; all the wait buys is its log line landing before
+            # "stopped". Meanwhile `istota-exec-run` SIGKILLs the server ten
+            # seconds after SIGTERM and `docker stop` allows the same, and
+            # `wait_closed` has already spent five of them.
+            with contextlib.suppress(Exception):
+                self.proc.wait(timeout=1.0)
+            self.proc = None
+
+
+def start_reaper() -> ReaperLink:
+    """Spawn the reaper, or report why there is none and carry on without it."""
+    try:
+        read_fd, write_fd = os.pipe()
+    except OSError as e:
+        logger.error("cannot create the reaper pipe: %s", e)
+        return ReaperLink()
+    try:
+        proc = subprocess.Popen(
+            # Resolved at import rather than here: this is the path the reaper
+            # is spawned from, and a relative `__file__` would mean whatever
+            # the working directory happened to be at the time.
+            [sys.executable, _THIS_SCRIPT, REAPER_MODE],
+            stdin=read_fd,
+            # Its own session, so a signal aimed at this server's process group
+            # cannot take the one process whose job is to outlive this server by
+            # a moment. Its stdout and stderr are this process's, which is where
+            # the container's log already goes.
+            start_new_session=True,
+        )
+    except OSError as e:
+        logger.error("cannot start the reaper: %s", e)
+        os.close(write_fd)
+        return ReaperLink()
+    finally:
+        os.close(read_fd)
+    logger.info("reaper started, pid %s", proc.pid)
+    return ReaperLink(proc, write_fd)
+
+
 def signal_name(number: int) -> str:
     try:
         return signal.Signals(number).name
@@ -390,6 +671,23 @@ def terminal_frame(returncode: int | None, started: float, reason: str | None) -
         body["reason"] = reason
     body["duration_ms"] = int((time.monotonic() - started) * 1000)
     return body
+
+
+class _GroupHandle:
+    """One exec's claim on a process group, so two paths can release it once.
+
+    The pgid is not an identity: it is a pid, and the moment the group empties
+    the number is free for the next command to claim. Two places release a
+    group — as soon as it exits, and a `finally` covering every other way out —
+    and without this flag the second would aim `kill_group` and `forget` at
+    whatever holds the number by then. For `forget` that means dropping the
+    record of a live command, which is the exact failure this file exists to
+    prevent, introduced by the code meant to prevent it.
+    """
+
+    def __init__(self, pgid: int) -> None:
+        self.pgid = pgid
+        self.released = False
 
 
 class Connection:
@@ -443,11 +741,16 @@ class ExecServer:
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
         kill_grace: float = KILL_GRACE_SECONDS,
         drain_grace: float = DRAIN_GRACE_SECONDS,
+        reaper: ReaperLink | None = None,
     ) -> None:
         self.roots = roots
         self.idle_timeout = idle_timeout
         self.kill_grace = kill_grace
         self.drain_grace = drain_grace
+        # A link with no pipe behind it: constructing a server without a reaper
+        # is a server whose commands do not survive it, not a special case every
+        # call site has to remember to guard.
+        self.reaper = reaper if reaper is not None else ReaperLink()
         self.started_at = time.time()
         self.served = 0
         # Every process group with a live command in it. The container outlives
@@ -456,6 +759,23 @@ class ExecServer:
         self.live_groups: set[int] = set()
         self._temp_ids = itertools.count(1)
 
+    def _release_group(self, handle: _GroupHandle, *, final: bool = False) -> None:
+        """Stop tracking a group once, and only once it is actually empty.
+
+        Called from two places: as soon as the command's group has gone, and
+        from the `finally` that covers every other way out of a connection.
+        `final` is the second, where the connection is over and a group still
+        running is one nothing will ever report on — holding its record would
+        hand the reaper a pgid no live server is tracking.
+        """
+        if handle.released:
+            return
+        if not final and group_alive(handle.pgid):
+            return
+        handle.released = True
+        self.live_groups.discard(handle.pgid)
+        self.reaper.forget(handle.pgid)
+
     def shutdown(self) -> None:
         """Kill every command still running. Called before the socket closes."""
         groups = sorted(self.live_groups)
@@ -463,6 +783,10 @@ class ExecServer:
             logger.info("shutting down: killing %d process group(s)", len(groups))
         for pgid in groups:
             kill_group(pgid, signal.SIGKILL)
+        # The reaper is deliberately not told to forget them. It re-checks
+        # liveness before it signals anything, so a group killed here costs it
+        # one `kill(0)` and no log line — and a group that somehow survived this
+        # loop is exactly what it is there to catch.
 
     # -- dispatch ------------------------------------------------------------
 
@@ -528,6 +852,11 @@ class ExecServer:
             "idle_timeout_seconds": self.idle_timeout,
             "started_at": int(self.started_at),
             "connections": self.served,
+            # Both of these exist because doctor's transport check is a ping and
+            # a stat, and a server that had lost track of running work — or lost
+            # the backstop that outlives it — answered both without a hint.
+            "process_groups": len(self.live_groups),
+            "reaper": self.reaper.healthy,
         }
 
     async def _read_request_line(self, reader: asyncio.StreamReader) -> bytes | None:
@@ -592,9 +921,16 @@ class ExecServer:
             raise ProtocolError(ERR_SPAWN_FAILED, f"{argv[0]}: {e.strerror or e}") from e
 
         pgid = proc.pid
+        # Before anything else, and with no `await` between the spawn and this:
+        # the gap here is the one death that still orphans a command, so it is
+        # kept to the instructions it takes to name the group.
+        self.reaper.track(pgid)
         self.live_groups.add(pgid)
+        handle = _GroupHandle(pgid)
         try:
-            await self._run_exec(request, reader, conn, proc, pgid, argv, cwd, started)
+            await self._run_exec(
+                request, reader, conn, proc, handle, argv, cwd, started
+            )
         finally:
             # Every exit path, including the acknowledgement failing against a
             # client that has already gone, an internal error, and cancellation.
@@ -607,12 +943,20 @@ class ExecServer:
             # logged; a line here means something was still running that this
             # connection had no way to report on, which is the case worth
             # knowing about and the only witness it leaves.
-            if group_alive(pgid):
-                logger.info(
-                    "connection %s: reaping process group %s at exit", conn.id, pgid
-                )
-            kill_group(pgid, signal.SIGKILL)
-            self.live_groups.discard(pgid)
+            # Only while this exec still owns the group. Once it has been
+            # released the number is somebody else's to claim, and signalling
+            # it here would reach whatever claimed it.
+            if not handle.released:
+                if group_alive(pgid):
+                    logger.info(
+                        "connection %s: reaping process group %s at exit",
+                        conn.id,
+                        pgid,
+                    )
+                kill_group(pgid, signal.SIGKILL)
+            # After the kill, never before: a group that outlives its record is
+            # not reaped at all.
+            self._release_group(handle, final=True)
 
     async def _run_exec(
         self,
@@ -620,11 +964,12 @@ class ExecServer:
         reader: asyncio.StreamReader,
         conn: Connection,
         proc: asyncio.subprocess.Process,
-        pgid: int,
+        handle: _GroupHandle,
         argv: list[str],
         cwd: str,
         started: float,
     ) -> None:
+        pgid = handle.pgid
         # Only now, after the path checks and a successful spawn. An `ok` means
         # the command is running; that ordering is what the guarantee rests on.
         await conn.ack()
@@ -710,6 +1055,16 @@ class ExecServer:
         # Both the Design 11 reap and what releases the output pipes: asyncio's
         # own wait() stays pending for as long as a forked process holds them.
         kill_group(pgid, signal.SIGKILL)
+        # Here rather than only in `_do_exec`'s `finally`, and the difference is
+        # not a tidy-up. That `finally` runs after `_drain` — whose grace
+        # *restarts* while any pump is still writing — and after the terminal
+        # frame's `writer.drain()`, which carries no timeout at all. So a client
+        # that stalls holds the record open for as long as it likes, while the
+        # group itself emptied a moment ago and its pgid is free to be reused.
+        # Measured at 15s and still counting on a stalled client. Releasing it
+        # the instant the group is empty is what keeps the reaper's own liveness
+        # re-check a narrow window rather than a client-controlled one.
+        self._release_group(handle)
         drained = await self._drain((out_task, err_task), (out_state, err_state))
         await self._cancel(*tasks)
 
@@ -1105,11 +1460,15 @@ async def serve(args: argparse.Namespace) -> int:
                 "%s %s does not exist; requests for it will be refused", label, root
             )
 
+    # Before the socket, so there is no moment in which a command can be
+    # accepted with nothing behind it.
+    reaper = start_reaper()
     server_obj = ExecServer(
         roots,
         idle_timeout=args.idle_timeout_seconds,
         kill_grace=args.kill_grace_seconds,
         drain_grace=args.drain_grace_seconds,
+        reaper=reaper,
     )
     prepare_socket_path(args.socket)
 
@@ -1152,11 +1511,24 @@ async def serve(args: argparse.Namespace) -> int:
             await asyncio.wait_for(server.wait_closed(), 5)
         with contextlib.suppress(OSError):
             os.unlink(args.socket)
+        # Last, so its verdict is in the log before "stopped" and so a group
+        # that survived `shutdown` is still caught on the way out.
+        reaper.close()
     logger.info("stopped")
     return 0
 
 
 def main(argv: list[str]) -> int:
+    # Handled before argparse rather than as a flag on it. The reaper takes no
+    # configuration — every root, timeout and path belongs to the server — and a
+    # mode that showed up in `--help` beside them would read as one more knob.
+    if argv == [REAPER_MODE]:
+        logging.basicConfig(
+            level=logging.INFO,
+            stream=sys.stderr,
+            format="%(asctime)s istota-exec-reaper %(levelname)s %(message)s",
+        )
+        return run_reaper()
     args = parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),

@@ -13,14 +13,22 @@
 # shimmed command. So the loop below: run the server, log its exit, pause, run
 # it again.
 #
-# **Something has to reap.** `sleep infinity` as PID 1 never calls `wait()`, so
-# anything that outlives the server's own reap reparents to PID 1 and stays a
-# zombie against `pids_limit` for the life of the container. The per-user
-# service is to be declared with `init: true`, which puts tini at PID 1 to reap
-# with this script beneath it. That half lands with the deployment template,
-# which still says `command: ["sleep", "infinity"]` today; the stop handling
-# below is written to work either way, because the two shapes fail differently
-# and both fail. Do not "simplify" this into the container's PID 1 — see below.
+# **Something has to reap zombies.** `sleep infinity` as PID 1 never calls
+# `wait()`, so anything that outlives the server's own reap reparents to PID 1
+# and stays a zombie against `pids_limit` for the life of the container. The
+# per-user service is declared with `init: true`, which puts tini at PID 1 to
+# reap with this script beneath it. Both halves are in the deployment template:
+# `init: true`, and this script as the container's `command`. Do not "simplify"
+# this into the container's PID 1 — see below.
+#
+# **That covers zombies and nothing else, which is worth being exact about.**
+# A backgrounded `sleep 4001` reparented to PID 1 is alive, not a zombie, and
+# tini calls `wait()` on it exactly never — so the restart above used to leave
+# whatever the dead server was running still running, with the replacement
+# knowing nothing about it. Nothing here fixes that: the server carries its own
+# backstop, a child holding the read end of a pipe that the kernel closes
+# however the server dies. See `run_reaper` in `istota-exec-serve`. This
+# supervisor's job stays the one it was written for, restarting the server.
 #
 # **This is not the server, and that is deliberate.** Running the server itself
 # as the container's command would make a server crash take the container, and
