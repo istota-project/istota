@@ -1,6 +1,8 @@
 """A connected third-party service whose stored credential stopped working.
 
-Today that is Garmin and only Garmin. A six-hourly sync hits an auth error,
+Two services: Garmin, and the user-scoped Nextcloud OAuth pair (ISSUE-333).
+
+Garmin. A six-hourly sync hits an auth error,
 `garmin.mark_token_error` wipes the OAuth blob so the settings card stops
 claiming "Connected", and nothing at all is pushed — the "row, no push" half of
 the inventory. Worse than merely silent: `health/jobs.py` renders the sync job
@@ -9,17 +11,26 @@ deletes the job row on its next tick and the failure stops recurring. The row
 has to be written at the moment of the error, because there will not be a second
 one.
 
+Nextcloud. The web login's OAuth pair is deleted by a refresh rejection or by a
+key rotation, and the login callback is the only thing that ever writes it — so,
+exactly like Garmin, the moment of the error is the only moment anything knows.
+`web_tokens.note_credential_lost` writes and delivers; `web_tokens.store_tokens`
+closes on the next successful login, and the settings Disconnect handler closes
+on a deliberate teardown.
+
 **`object_id` is a service name, not an integer**, so it gets the explicit
 segment check the spec asks for in place of the `int()` coercion the other
-sources use: only a name in `SERVICES` below is ever rendered. Nothing here
-interpolates it into a path — the action is a fixed link to the settings page —
-but a source whose ids are free text is one wrong f-string away from being the
-thing the runtime allowlist has to catch, and the allowlist is meant to be the
-backstop rather than the check.
+sources use: only a name in `SERVICES` below is ever rendered. The reconnect
+link is now per-service rather than the one fixed path it began as, but it is
+still **code-owned** — `RECONNECT_HREFS` is a literal table keyed by the same
+allowlist, so `object_id` selects a path and never supplies one, and an
+unknown name is refused before the lookup. `SAFE_PATH_RE` remains the runtime
+backstop behind that rather than the check.
 
-The close path is the credential coming back: `garmin.store_tokens` on a
-successful (re)connect, and `garmin.clear_tokens` when the user disconnects
-deliberately. The resolver is the backstop for both.
+The consequence sentence and the remedy sentence are per service too, because
+the two services fail differently: Garmin stops collecting data, while Nextcloud
+loses nothing and silently changes how two features behave. A warning that
+describes the wrong failure is worse than a generic one.
 """
 
 from __future__ import annotations
@@ -43,21 +54,67 @@ SOURCE = "connected_service"
 # credential, not the remote account.
 OBJECT_TYPE = "secret"
 
-# A service that has stopped syncing is losing data every hour it stays that
-# way, and only the user can fix it.
+# Only the user can fix either of these, and both get worse the longer they
+# stand — Garmin loses data, Nextcloud misattributes messages the user wrote.
 SEVERITY = "warning"
 
-# The settings page mounts the Garmin card (`web/src/routes/settings/+page.svelte`
-# → `GarminCard`), so one link covers every service this source can name. It is
-# a frontend route, not an API path; `NotificationItem` renders it as
-# `{base}{href}`.
+# Where "Reconnect" goes, per service. A frontend-relative path, not an API one;
+# `NotificationItem` renders it as `{base}{href}`, and `SAFE_PATH_RE` is enforced
+# on it at runtime on every view.
+#
+# Garmin's is the settings page, which mounts its card
+# (`web/src/routes/settings/+page.svelte` → `GarminCard`) and holds the whole
+# reconnect flow inline. Nextcloud's is not: its reconnect *is* an OAuth
+# authorize round trip, and the settings card is where the user was already told
+# to log out and back in — linking there returns them to the mystery rather than
+# to the remedy. `/reconnect` is the auth route that runs the flow and comes back
+# with the session intact (ISSUE-333).
+RECONNECT_HREFS: dict[str, str] = {
+    "garmin": "/settings",
+    "nextcloud": "/reconnect",
+}
+
+# Retained as the fallback for a service with no entry above, and because it is
+# the spelling the original single-service version of this module exported.
 RECONNECT_HREF = "/settings"
 
 # The allowlist that stands in for `int()` here. Keys are the `object_id` values
 # this source may carry; the value is what the user calls the service.
 SERVICES: dict[str, str] = {
     "garmin": "Garmin Connect",
+    "nextcloud": "Nextcloud",
 }
+
+# What stops working, per service, in the user's own terms. Garmin's is a sync
+# that stops and data that stops arriving; Nextcloud's is neither — nothing is
+# lost and nothing stops, two features silently change behaviour. Saying "no new
+# data is coming in" there would be false, and a warning that describes the wrong
+# failure is worse than a generic one.
+_CONSEQUENCE: dict[str, str] = {
+    "garmin": (
+        "The stored {label} credentials were rejected, so syncing has stopped "
+        "and no new data is coming in."
+    ),
+    "nextcloud": (
+        "The stored {label} connection was lost, so messages you send from web "
+        "chat are being reposted by the bot instead of appearing under your own "
+        "name, and read state is no longer syncing with Talk."
+    ),
+}
+
+_DEFAULT_CONSEQUENCE = (
+    "The stored {label} credentials were rejected, so syncing has stopped "
+    "and no new data is coming in."
+)
+
+# The closing sentence, per service — the remedy differs, so the instruction has
+# to as well.
+_REMEDY: dict[str, str] = {
+    "garmin": "Reconnect under Settings → Connected services.",
+    "nextcloud": "Reconnect to restore both — it takes one round trip and keeps you signed in.",
+}
+
+_DEFAULT_REMEDY = "Reconnect under Settings → Connected services."
 
 # `notification_store._STALE_SWEEP_BUSY_TIMEOUT_MS`, for the same reason: see
 # :func:`close_for_service`.
@@ -77,19 +134,20 @@ def title_for(service: str) -> str:
     return f"{label_for(service)} needs to be reconnected"
 
 
+def reconnect_href(service: str) -> str:
+    return RECONNECT_HREFS.get(service, RECONNECT_HREF)
+
+
 def body_for(service: str, reason: str = "") -> str:
     """The stored body, which is also what the push says."""
     from ..confirmations import flatten
 
     label = label_for(service)
     detail = flatten(reason or "")[:200]
-    lead = (
-        f"The stored {label} credentials were rejected, so syncing has stopped "
-        f"and no new data is coming in."
-    )
+    lead = _CONSEQUENCE.get(service, _DEFAULT_CONSEQUENCE).format(label=label)
     if detail:
         lead += f" ({detail})"
-    return f"{lead} Reconnect under Settings → Connected services."
+    return f"{lead} {_REMEDY.get(service, _DEFAULT_REMEDY)}"
 
 
 def _row_kwargs(service: str, reason: str) -> dict:
@@ -127,11 +185,16 @@ def raise_for_service(
     """Write **and** deliver, on a connection of the store's own.
 
     `raise_notification` rather than the buffered pair, and the reason is the
-    one its docstring demands be named: the caller is `sync_garmin`, which holds
+    one its docstring demands be named. `sync_garmin` holds
     no framework-DB transaction at any of its three call sites. It reaches the
     framework DB only through `secrets_store`, and every one of those helpers
     opens and closes a connection of its own around a single statement — there
-    is no open write lock for a second connection to wait thirty seconds on.
+    is no open write lock for a second connection to wait thirty seconds on. The
+    second caller, `web_tokens.note_credential_lost`, reaches the framework DB
+    only through that module's own short-lived `_connect`, and calls this
+    *outside* the per-user refresh lock for the neighbouring reason: this
+    delivers, and holding a lock across an outbound HTTP call would serialize
+    every other token read for that user behind it.
 
     Never raises: the whole point of this source is a sync that failed, and the
     failure must not turn into a traceback out of the sync engine. The guard is
@@ -245,7 +308,7 @@ class ConnectedServiceResolver:
             actions=(
                 NotificationAction(
                     id="reconnect", label="Reconnect", kind="primary",
-                    method="LINK", href=RECONNECT_HREF,
+                    method="LINK", href=reconnect_href(service),
                 ),
             ),
         )
@@ -268,6 +331,16 @@ def _is_connected(config: "Config", user_id: str, service: str) -> bool:
         from ..health import garmin
 
         return bool(garmin.get_status(db_path, user_id).get("connected"))
+    if service == "nextcloud":
+        # `token_status` reads the row without decrypting, so this answers
+        # correctly in a process that has no `ISTOTA_WEB_TOKEN_KEY` — the panel
+        # is served by the web unit, which does, but the resolver is also reached
+        # by the store's liveness sweep and must not depend on that. A row that
+        # is present but undecryptable reads as connected here and is deleted by
+        # the next `get_access_token`, which raises the row again.
+        from .. import web_tokens
+
+        return web_tokens.token_status(db_path, user_id) is not None
     return False
 
 
