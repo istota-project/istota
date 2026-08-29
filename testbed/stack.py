@@ -1172,6 +1172,23 @@ class Stack:
         #: `oauth2_clients` row is the one compose was given. Passwords read
         #: `<redacted>`; nothing in the tier asserts on one.
         self.env = redacted(env or {})
+        #: The unredacted credentials, kept **only** to substitute them back out
+        #: of a failure report (`_scrub`). Nothing reads this to assert with, and
+        #: `self.env` above stays the public view — a scenario that wants a
+        #: credential should be given one by its service, which is what the
+        #: stub-credential rule already requires.
+        #:
+        #: Longest first so a value containing another is replaced whole rather
+        #: than left with the shorter one already substituted inside it.
+        self._secrets: list[tuple[str, str]] = sorted(
+            (
+                (key, value)
+                for key, value in (env or {}).items()
+                if is_credential_key(key) and value
+            ),
+            key=lambda pair: len(pair[1]),
+            reverse=True,
+        )
         self.probe = Probe(compose_args=args, service=ISTOTA_SERVICE)
         #: The watermark the most recent `reset` returned, for the negative
         #: assertions in `Probe.rows_above`. Set by the fixture that drives the
@@ -1701,6 +1718,14 @@ class Stack:
         Each service renders *itself*, through `describe()`. The forge version
         of this reached into `stub.calls` and `stub.git_calls` directly, which
         is why it could only ever diagnose a forge.
+
+        **The tool output is in here because leaving it out cost ISSUE-338 an
+        hour.** A scripted model ignores what a command printed and answers
+        anyway, so a task whose Bash call failed still reaches `completed` — and
+        the only surviving assertion is then a service-side one reporting an
+        empty list with no cause attached. The sentence naming the cause was
+        written to stderr inside the sandbox and reached the conversation, which
+        is the one place `diagnostics` did not look.
         """
         seen = "\n".join(
             f"[{name}]\n{service.describe()}"
@@ -1711,9 +1736,87 @@ class Stack:
             f"task {task.get('id')} ended {task.get('status')!r}: "
             f"{task.get('error')!r}\n"
             f"--- result ---\n{task.get('result')}\n"
+            f"--- tool output ---\n{self.tool_output()}\n"
             f"--- services ---\n{seen}\n"
             f"--- daemon logs ---\n{self.logs(150)}"
         )
+
+    def tool_output(self, *, per_call: int = 2000) -> str:
+        """What the model's commands printed, one block per call, size-bounded.
+
+        Bounded per call because a build log is not a diagnosis, and
+        `transcript()` — the only other view of this — is dominated by the 60KB
+        system prompt repeated once per turn.
+
+        **Head and tail, not just the tail**, because the Bash tool has already
+        truncated once and it truncates at the *head*: over `max_output_bytes`
+        it keeps the first N bytes, drops the rest, and appends an
+        `[output truncated…]` notice plus the status suffix. A tail-only window
+        on such a result shows the notice and the exit code and nothing that
+        produced them. Under the cap the two halves overlap and the whole block
+        is shown, which is the common case.
+
+        **Credential-shaped values are scrubbed.** This renders into
+        `Stack.diagnostics`, which every failing scenario prints — including
+        `test_the_token_is_injected_without_the_model_ever_holding_it`, whose
+        assertion fires precisely when a token reached the conversation. Without
+        this, the report publishing the leak *is* the leak, on a public repo,
+        into a terminal scrollback that gets pasted into an issue. Same reason
+        `ServiceCall.__repr__` and `FullCredentials.__repr__` redact, and the
+        values come from the same `is_credential_key` shape rule `Stack.env`
+        uses rather than from a list somebody has to remember to extend.
+
+        Never raises. This is a failure path, and a report that dies rendering
+        replaces the diagnosis with a harness traceback.
+        """
+        try:
+            results = self.endpoint.tool_results()
+        except Exception as exc:  # pragma: no cover - diagnostics must not fail
+            return f"(unavailable: {exc!r})"
+        if not results:
+            return "(the model made no tool calls)"
+        blocks = []
+        for index, text in enumerate(results):
+            text = self._scrub(text)
+            if len(text) > per_call:
+                half = per_call // 2
+                elided = len(text) - 2 * half
+                text = (
+                    text[:half]
+                    + f"\n...[{elided} chars elided]...\n"
+                    + text[-half:]
+                )
+            blocks.append(f"[call {index}]\n{text}")
+        return "\n".join(blocks)
+
+    def _scrub(self, text: str) -> str:
+        """Every credential this stack knows, replaced by its name.
+
+        The name rather than a bare `<redacted>`: "the value of
+        ISTOTA_DEVELOPER_GITLAB_TOKEN appeared here" is the diagnosis, and
+        blanking it uniformly throws that away.
+
+        **Two sources, because neither covers both shapes.** The compose
+        environment carries the credentials on the `full` shape and is empty on
+        the lean one, which renders its config on the host — so a lean-shape
+        scrub drawing only on it would miss the forge token, which is the exact
+        value the scenario this protects asserts about. The other source is each
+        service's own `credential`, which every stub bound off loopback is
+        required to have (`HttpStub.start`), read by `getattr` like the rest of
+        the optional service members.
+
+        Longest first, so a value containing another is replaced whole rather
+        than left with the shorter one already substituted inside it.
+        """
+        secrets = list(self._secrets)
+        for name, service in self.services.items():
+            credential = getattr(service, "credential", None)
+            if isinstance(credential, str) and credential:
+                secrets.append((f"{name} credential", credential))
+        for key, value in sorted(secrets, key=lambda p: len(p[1]), reverse=True):
+            if value in text:
+                text = text.replace(value, f"<{key}>")
+        return text
 
 
 def _bind_services(stack: "Stack") -> None:

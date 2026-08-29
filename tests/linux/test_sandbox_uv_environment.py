@@ -76,8 +76,27 @@ def _q(path):
 
 @pytest.fixture
 def repos_dir(tmp_path):
-    """The developer repos directory, bound RW into the sandbox for admins."""
+    """`developer.repos_dir` — the *root* of the per-user subtrees.
+
+    Nothing binds this. It is the configured value only; the bind is the
+    per-user subtree below.
+    """
     d = tmp_path / "repos"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def user_repos(repos_dir):
+    """`{repos_dir}/alice` — the directory actually bound RW for an admin task.
+
+    Since the per-user split, `build_bwrap_cmd` binds `get_user_repos_dir`'s
+    answer and never `developer.repos_dir` itself, so anything a test wants to
+    see from inside the sandbox has to live here. Three tests in this file were
+    still writing into the root and asserting they could read it back, which
+    the split turned from a real assertion into a permanent failure.
+    """
+    d = repos_dir / "alice"
     d.mkdir()
     return d
 
@@ -200,20 +219,42 @@ class TestTheCacheIsRamBacked:
         assert out.get("written") == str(4 * 1024 * 1024), f"{result.stdout}{result.stderr}"
         assert out["blob_dev"] == out["root_dev"], out
 
-    def test_a_bound_directory_is_not_on_the_root_tmpfs(self, layout, task, repos_dir, user_temp):
+    def test_a_bound_directory_is_not_on_the_root_tmpfs(
+        self, layout, task, repos_dir, user_repos, user_temp,
+    ):
         """The control: a fix has somewhere to land.
 
         Without this the first two tests could pass in a sandbox where
         *everything* is the root tmpfs, and "point `UV_CACHE_DIR` at a bound
         directory" would be no fix at all. The comparison is device against
-        `/` rather than filesystem type, because under the test runner
+        device rather than filesystem type, because under the test runner
         `tmp_path` is itself on a tmpfs — a different mount, which is the
         property that matters, and asserting `!= tmpfs` would fail there for a
         reason that says nothing about the deployment.
+
+        **The comparison is against the bind's own parent, not against `/`, and
+        that is the whole assertion.** `build_bwrap_cmd` emits `--tmpfs /tmp`,
+        and `tmp_path` is under `/tmp`, so every unbound directory in this
+        layout sits on a tmpfs that is already not the root one — against `/`
+        the check passed for a directory nothing had bound, which is what it
+        was doing here until the per-user split made the difference visible.
+        The parent is the discriminating comparison: a bind is its own mount
+        and differs from the directory it was mounted inside, while an unbound
+        child shares its parent's device.
+
+        Inside the sandbox that parent is on bwrap's `--tmpfs /tmp`, not on the
+        host filesystem — bwrap creates the intermediate mountpoint directories
+        there. So the three devices are distinct (bind source, sandbox `/tmp`,
+        sandbox root), and the assertion holds for the right reason only while
+        pytest's basetemp is under `/tmp`. Move basetemp elsewhere and
+        `parent_dev` becomes `root_dev`, at which point this collapses back into
+        the vacuous check it replaced — hence both comparisons, not just the
+        new one.
         """
         result = run_probe(
-            f'test -d {_q(repos_dir)} && echo bound=PRESENT || echo bound=ABSENT; '
-            f'echo "repos_dev=$(stat -c %d {_q(repos_dir)} 2>/dev/null)"; '
+            f'test -d {_q(user_repos)} && echo bound=PRESENT || echo bound=ABSENT; '
+            f'echo "repos_dev=$(stat -c %d {_q(user_repos)} 2>/dev/null)"; '
+            f'echo "parent_dev=$(stat -c %d {_q(repos_dir)} 2>/dev/null)"; '
             'echo "root_dev=$(stat -c %d /)"',
             layout, task, user_temp,
         )
@@ -221,7 +262,7 @@ class TestTheCacheIsRamBacked:
             line.split("=", 1) for line in result.stdout.split() if "=" in line
         )
         # `stat` on a path that is not there prints nothing and the empty
-        # string differs from every device number, so the comparison below
+        # string differs from every device number, so the comparisons below
         # would pass on an unbound directory. Both guards exist because the
         # test did exactly that when it was first run against `is_admin=False`.
         assert out.get("bound") == "PRESENT", (
@@ -229,6 +270,13 @@ class TestTheCacheIsRamBacked:
         )
         assert out.get("repos_dev", "").isdigit(), (
             f"no device number for the repos bind: {result.stdout}{result.stderr}"
+        )
+        assert out.get("parent_dev", "").isdigit(), (
+            f"no device number for the repos root: {result.stdout}{result.stderr}"
+        )
+        assert out["repos_dev"] != out["parent_dev"], (
+            f"the developer repos bind shares a device with the unbound root "
+            f"above it, so it was not bound at all: {out}"
         )
         assert out["repos_dev"] != out["root_dev"], (
             f"the developer repos bind is on the root tmpfs: {out}"
@@ -239,15 +287,15 @@ class TestAnEnvironmentIsPinnedToItsPath:
     """Why a second namespace must bind the repos directory at the same path."""
 
     @pytest.fixture
-    def venv(self, repos_dir):
-        """A virtualenv built on the host, inside the bound repos directory.
+    def venv(self, user_repos):
+        """A virtualenv built on the host, inside the bound repos subtree.
 
         Built with the stdlib rather than uv so the test needs no network and
         no populated cache. What it shares with a uv-built environment is the
         thing under test: an absolute interpreter path baked into every
         console script's shebang.
         """
-        target = repos_dir / "proj" / ".venv"
+        target = user_repos / "proj" / ".venv"
         subprocess.run(
             [str(_base_interpreter()), "-m", "venv", str(target)],
             check=True, capture_output=True, timeout=180,
@@ -257,18 +305,18 @@ class TestAnEnvironmentIsPinnedToItsPath:
         return target
 
     def test_the_repos_directory_is_bound_at_its_host_path(
-        self, layout, task, repos_dir, user_temp,
+        self, layout, task, user_repos, user_temp,
     ):
         """The invariant the container has to match.
 
         The sandbox already satisfies it, because `build_bwrap_cmd` binds the
-        repos directory at its own path. A devbox that mounted the same tree
-        at `/home/dev/repos` would not, and every environment built on one
+        task's repos subtree at its own path. A devbox that mounted the same
+        tree at `/home/dev/repos` would not, and every environment built on one
         side would be unusable from the other.
         """
-        (repos_dir / "marker").write_text("written-on-the-host")
+        (user_repos / "marker").write_text("written-on-the-host")
         result = run_probe(
-            f'cat {_q(repos_dir / "marker")} 2>/dev/null || echo MISSING',
+            f'cat {_q(user_repos / "marker")} 2>/dev/null || echo MISSING',
             layout, task, user_temp,
         )
         assert "written-on-the-host" in result.stdout, f"{result.stdout}{result.stderr}"
@@ -304,7 +352,7 @@ class TestAnEnvironmentIsPinnedToItsPath:
         )
 
     def test_the_same_venv_at_another_path_is_a_broken_environment(
-        self, layout, task, repos_dir, user_temp, venv,
+        self, layout, task, user_repos, user_temp, venv,
     ):
         """The negative control for path equality.
 
@@ -315,7 +363,7 @@ class TestAnEnvironmentIsPinnedToItsPath:
         filesystem, two namespaces, nothing diverges" is true of the bytes and
         false of the environment, and this is the difference.
         """
-        moved = repos_dir / "moved" / ".venv"
+        moved = user_repos / "moved" / ".venv"
         moved.parent.mkdir()
         venv.rename(moved)
         result = run_probe(
