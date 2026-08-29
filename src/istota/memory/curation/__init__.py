@@ -5,7 +5,7 @@ Public surface:
 - `parse_sectioned_doc(text) -> SectionedDoc`
 - `serialize_sectioned_doc(doc) -> str`
 - `apply_ops(doc, ops) -> (new_doc, applied, rejected)`
-- `build_op_curation_prompt(user_id, doc, dated_memories, kg_facts_text)`
+- `build_op_curation_prompt(user_id, doc, dated_memories, kg_facts_text, skill_overlays=None)`
 - `strip_json_fences(text) -> str`
 - `write_audit_log(config, user_id, applied, rejected)`
 - `get_curation_audit_path(config, user_id)`

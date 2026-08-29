@@ -956,6 +956,47 @@ class TestCurateUserMemory:
         mock_index.assert_not_called()
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_the_prompt_carries_the_users_skill_overlay_inventory(
+        self, mock_run, mount_config
+    ):
+        """The wiring, not the renderer: this is the assertion that dies if
+        `curate_user_memory` stops reading the overlay directory. Without it
+        the whole sleep-cycle half of the feature can be deleted and the suite
+        stays green, since every other test calls the two pieces directly.
+
+        The curator is shown that a topic is handled elsewhere — otherwise it
+        re-adds to USER.md, a week later, exactly the rules that moved out of
+        it into a skill overlay.
+        """
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## A\n- a\n"
+        )
+        overlays = config_dir / "skills"
+        overlays.mkdir()
+        (overlays / "developer.md").write_text("- Rebase, never merge.\n")
+        mock_run.return_value = (True, '{"ops": []}')
+
+        curate_user_memory(mount_config, "alice")
+
+        prompt = mock_run.call_args.args[1]
+        assert "## Skill overlays" in prompt
+        assert "- developer: 1 line" in prompt
+        # Names and counts only: the body never reaches the curator.
+        assert "Rebase" not in prompt
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_the_overlay_section_is_absent_with_no_overlay_directory(
+        self, mock_run, mount_config
+    ):
+        mount_config.sleep_cycle.curate_user_memory = True
+        _setup_curation_fixture(mount_config, existing_user_md="## A\n- a\n")
+        mock_run.return_value = (True, '{"ops": []}')
+
+        curate_user_memory(mount_config, "alice")
+        assert "Skill overlays" not in mock_run.call_args.args[1]
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_invalid_json_returns_false(self, mock_run, mount_config):
         mount_config.sleep_cycle.curate_user_memory = True
         config_dir, _ = _setup_curation_fixture(

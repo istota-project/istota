@@ -7,6 +7,12 @@ from collections.abc import Sequence
 from .parser import serialize_sectioned_doc
 from .types import SectionedDoc
 
+#: Bounds on one inventory row. A skill name is a directory name in the
+#: operator's own tree and a count is a `len()`, so both are already small;
+#: these stop a future caller's unbounded value from filling the prompt.
+_MAX_NAME_CHARS = 60
+_MAX_LINES = 100_000
+
 
 def render_skill_overlay_inventory(
     overlays: Sequence[tuple[str, int]] | None,
@@ -19,23 +25,31 @@ def render_skill_overlay_inventory(
     write overlays, so no op names one.
 
     A malformed row is dropped rather than raising: this runs on the nightly
-    path where the alternative to a missing bullet is a curation pass that does
-    not happen at all. The names arrive from a caller that has already required
-    each one to be a *known* skill, so newline collapsing here is belt-and-
-    braces against a future caller that has not — a name carrying a newline
-    would otherwise forge a bullet, or a section, in the prompt.
+    path, where the alternative to a missing bullet is a curation pass that
+    does not happen at all. Today's caller has already required each name to be
+    a *known* skill and takes each count from a `len()`, so the checks here are
+    for the caller that has not: a name carrying a newline would forge a bullet
+    or a section, and `int()` alone accepts a float that raises `OverflowError`
+    on the way in (not caught by `ValueError`) and an integer of any width on
+    the way out. A row must be a pair, the count a plain non-negative `int`,
+    and the name one line of printable text.
     """
     rows: list[str] = []
     for entry in overlays or ():
-        try:
-            name, lines = entry
-            count = int(lines)
-        except (TypeError, ValueError):
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
             continue
-        clean = " ".join(str(name).split())
+        name, count = entry
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            continue
+        clean = " ".join(
+            "".join(c for c in str(name) if c.isprintable() or c.isspace()).split()
+        )
         if not clean:
             continue
-        rows.append(f"- {clean}: {count} line{'' if count == 1 else 's'}")
+        shown = min(count, _MAX_LINES)
+        rows.append(
+            f"- {clean[:_MAX_NAME_CHARS]}: {shown} line{'' if shown == 1 else 's'}"
+        )
     return "\n".join(rows)
 
 
@@ -71,8 +85,13 @@ def build_op_curation_prompt(
         parts.append(
             "## Skill overlays (already stored — do not duplicate to USER.md)\n"
             "\n"
-            "The user keeps these rules in a file per skill, loaded whenever that skill\n"
-            "is. The ops below cannot edit them."
+            "The user keeps some rules in a file of their own per skill, loaded with\n"
+            "that skill. Below are the file names and their sizes. Their contents are\n"
+            "deliberately not shown, and the ops below cannot edit them.\n"
+            "\n"
+            "This list is a reason not to ADD a rule the user has clearly filed under a\n"
+            "skill. It is never grounds to REMOVE anything from USER.md: you cannot see\n"
+            "what these files say, so you cannot know a bullet is covered by one."
         )
         parts.append(overlay_rows)
 

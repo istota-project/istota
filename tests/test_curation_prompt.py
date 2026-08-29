@@ -1,11 +1,16 @@
 """Tests for curation prompt construction and JSON-fence stripping."""
 
 import os
+from unittest.mock import patch
 
 import pytest
 
 from istota.memory.curation.parser import parse_sectioned_doc
-from istota.memory.curation.prompt import build_op_curation_prompt, strip_json_fences
+from istota.memory.curation.prompt import (
+    build_op_curation_prompt,
+    render_skill_overlay_inventory,
+    strip_json_fences,
+)
 from istota.memory.curation.types import SectionedDoc
 
 
@@ -128,11 +133,27 @@ class TestSkillOverlaySection:
 
     def test_a_malformed_row_is_dropped_rather_than_raising(self):
         """The nightly pass is the caller: a bad row costs a bullet, never the
-        whole curation run."""
-        prompt = self._prompt([("notes", 6), ("broken", None), "nonsense"])
+        whole curation run. `float("inf")` is the one that bites — `int()`
+        raises `OverflowError` on it, which is neither `TypeError` nor
+        `ValueError` and would escape all the way out of the prompt build."""
+        prompt = self._prompt([
+            ("notes", 6),
+            ("broken", None),
+            ("floaty", float("inf")),
+            ("boolish", True),
+            ("negative", -3),
+            "12",
+            ("triple", 1, 2),
+        ])
         assert "- notes: 6 lines" in prompt
-        assert "broken" not in prompt
-        assert "nonsense" not in prompt
+        for dropped in ("broken", "floaty", "boolish", "negative", "triple"):
+            assert dropped not in prompt
+        # A two-character string unpacks as a pair without the shape check.
+        assert "- 1: 2 lines" not in prompt
+
+    def test_an_unbounded_row_cannot_fill_the_prompt(self):
+        row = render_skill_overlay_inventory([("x" * 500, 10**400)])
+        assert row == "- " + "x" * 60 + ": 100000 lines"
 
     def test_a_name_cannot_forge_a_line(self):
         """Belt and braces: the caller passes known skill names only, but a
@@ -140,6 +161,17 @@ class TestSkillOverlaySection:
         prompt = self._prompt([("notes\n## Knowledge graph", 6)])
         assert "- notes ## Knowledge graph: 6 lines" in prompt
         assert "\n## Knowledge graph" not in prompt
+        assert "\x00" not in self._prompt([("no\x00tes", 6)])
+
+    def test_says_the_bodies_are_not_shown_and_are_not_grounds_to_remove(self):
+        """The heading is the knowledge graph's, and that section is grounds
+        both to skip a fact and to drop one. Here the model is shown no
+        content, so a bullet it thinks a listed skill covers is a bullet it
+        cannot check itself against — and `remove` is destructive."""
+        prompt = self._prompt([("notes", 6)])
+        section = prompt.split("## Skill overlays")[1]
+        assert "not shown" in section
+        assert "never grounds to REMOVE" in section
 
 
 class TestOverlayInventoryFromDisk:
@@ -257,15 +289,48 @@ class TestOverlayInventoryFromDisk:
         d = self._overlays(config)
         (d / "notes.md").write_text("- switched off instance-wide\n")
         (d / "developer.md").write_text("- switched off for alice\n")
+        (d / "sensitive_actions.md").write_text("- and this one is denylisted\n")
         assert self._load(config) == []
+        # The same three files with nothing switched off, so the empty list
+        # above is the disabled set firing rather than the directory going
+        # unread — and `sensitive_actions` stays out either way.
+        assert self._load(self._config(tmp_path)) == [("developer", 1), ("notes", 1)]
 
     def test_a_planted_symlink_file_is_not_read(self, tmp_path):
+        """A live overlay sits beside the planted one, so "the guard fired" is
+        distinguishable from "nothing was read at all"."""
         config = self._config(tmp_path)
         secret = tmp_path / "credentials.json"
         secret.write_text("- TOP SECRET TOKEN value\n")
-        (self._overlays(config) / "developer.md").symlink_to(secret)
-        assert self._load(config) == []
+        d = self._overlays(config)
+        (d / "developer.md").symlink_to(secret)
+        (d / "notes.md").write_text("- a real rule\n")
+        assert self._load(config) == [("notes", 1)]
         assert "TOP SECRET" not in self._prompt_for(config)
+
+    def test_only_files_named_for_a_known_skill_are_opened(self, tmp_path):
+        """The candidate names come from the skill index, not from the tree.
+        Listing the directory would open and read every file a task planted —
+        to the 32 KiB cap each, on the unsandboxed nightly path — before
+        discarding it for its name."""
+        from istota.skills import _loader
+
+        config = self._config(tmp_path)
+        d = self._overlays(config)
+        (d / "developer.md").write_text("- a real rule\n")
+        for i in range(50):
+            (d / f"planted{i}.md").write_text("- planted\n")
+
+        opened: list[str] = []
+        real = _loader.inspect_overlay
+
+        def counting(path, **kwargs):
+            opened.append(path.name)
+            return real(path, **kwargs)
+
+        with patch.object(_loader, "inspect_overlay", counting):
+            assert self._load(config) == [("developer", 1)]
+        assert opened == sorted(f"{s}.md" for s in self.SKILLS)
 
     def test_a_redirected_overlay_directory_is_not_walked(self, tmp_path):
         """`O_NOFOLLOW` covers the last component only — the files behind a
@@ -289,5 +354,7 @@ class TestOverlayInventoryFromDisk:
         """A FIFO with no writer blocks `open(2)`, and nothing times out this
         read: the prompt is assembled before any brain request exists."""
         config = self._config(tmp_path)
-        os.mkfifo(self._overlays(config) / "developer.md")
-        assert self._load(config) == []
+        d = self._overlays(config)
+        os.mkfifo(d / "developer.md")
+        (d / "notes.md").write_text("- a real rule\n")
+        assert self._load(config) == [("notes", 1)]

@@ -1125,25 +1125,40 @@ def _load_skill_overlay_inventory(
     elsewhere, not to re-read the rules — and it is a read: the curator does
     not write overlays in v1, so nothing here is fed back into an op.
 
-    Only overlays that *bind* are listed, and the disabled set is the
-    executor's own. A file for a misspelled, denylisted or switched-off skill
-    reaches no prompt, so naming it here would tell the curator a rule is
-    stored live somewhere when it is not — and the curator's one use for this
-    list is deciding what USER.md no longer needs.
+    A file the loader would refuse is left out: a name that is not a skill, a
+    denylisted one, an empty one, one past the cap. Naming it would tell the
+    curator a rule is stored live somewhere when it is not, and deciding what
+    USER.md no longer needs is this list's one use. The disabled set is
+    `effective_disabled_skills`, so an overlay switched off instance-wide, for
+    this user, or by the capability gate is left out too — but that function is
+    not the whole of `select_skills`' pre-filter, so an overlay for a skill
+    held back by a missing dependency or by `admin_only` is still listed. The
+    claim this makes is "the loader would load this file", not "this task will
+    see it", which no nightly-time answer could make anyway.
 
-    Every part of walking that directory is `_loader`'s and `storage`'s rather
-    than this module's, because `{mount}/Users/{user_id}` is bound read-write
-    into that user's own sandbox and so every component under it is
-    model-plantable. `resolve_user_skill_overlays_dir` carries the containment
-    rule (`config` and `skills` are both entries a task can replace with a
-    symlink to anywhere the daemon can read), and `inspect_overlay` opens each
-    file `O_NOFOLLOW` and `O_NONBLOCK` and refuses anything that is not a
-    regular file — a FIFO left at `notes.md` would otherwise block this read
-    forever, and the nightly pass runs unsandboxed with no timeout over it.
+    **The candidate names come from the skill index, never from the tree.**
+    `{mount}/Users/{user_id}` is bound read-write into that user's own sandbox,
+    so a task can put any number of files in this directory, and only a file
+    named for a known skill can ever bind. Listing the directory would have
+    this nightly pass open and read every planted file to the cap before
+    discarding it; deriving one path per known skill bounds the work by the
+    operator's own tree, which is `sandbox_cache_sweeper`'s rule for the same
+    hazard. What that leaves unreported — a file named for no skill at all — is
+    `doctor`'s `config.skill_overlays` to report, and it is not something the
+    curator could act on.
 
-    Returns [] on any failure, like `_load_kg_facts_text`: an inventory that
-    cannot be built is a missing prompt section, never a curation pass that
-    does not run.
+    Everything else about reaching those files is `_loader`'s and `storage`'s
+    rather than this module's. `resolve_user_skill_overlays_dir` carries the
+    containment rule (`config` and `skills` are both entries a task can replace
+    with a symlink to anywhere the daemon can read), and `inspect_overlay`
+    opens each file `O_NOFOLLOW` and `O_NONBLOCK` and refuses anything that is
+    not a regular file — a FIFO left at `notes.md` would otherwise block this
+    read forever, and the nightly pass runs unsandboxed with no timeout over it.
+
+    Returns [] on any failure, like `_load_kg_facts_text`, but logs first: the
+    section vanishing from every nightly prompt for every user is the exact
+    duplication this exists to stop, and silence would make a permanently
+    broken index indistinguishable from a user with no overlays.
     """
     try:
         overlay_dir = resolve_user_skill_overlays_dir(config, user_id)
@@ -1159,13 +1174,15 @@ def _load_skill_overlay_inventory(
         )
 
         known = load_skill_index(
-            config.skills_dir, bundled_dir=getattr(config, "bundled_skills_dir", None)
+            config.skills_dir, bundled_dir=config.bundled_skills_dir
         )
         disabled = effective_disabled_skills(config, user_id, known)
         rows: list[tuple[str, int]] = []
-        for path in sorted(overlay_dir.glob("*.md")):
+        for skill in sorted(known):
+            if skill in disabled:
+                continue
             found = inspect_overlay(
-                path,
+                overlay_dir / f"{skill}.md",
                 known_skills=known,
                 disabled_skills=disabled,
                 max_read_bytes=OVERLAY_MAX_BYTES,
@@ -1173,7 +1190,10 @@ def _load_skill_overlay_inventory(
             if found.binds and found.lines is not None:
                 rows.append((found.skill, found.lines))
         return rows
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - a prompt section is best-effort
+        logger.warning(
+            "skill overlay inventory unavailable for %s: %s", user_id, e
+        )
         return []
 
 
