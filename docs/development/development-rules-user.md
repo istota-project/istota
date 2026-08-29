@@ -10,9 +10,17 @@ Deployment mechanics did not move. The forge boundary and its refused verbs, the
 
 ## Restoring the pre-337 routine
 
-Paste the block below into your `USER.md` — the file at `config/USER.md` inside your bot folder — to get the old routine back on every coding task. Paste it into a project room's `CHANNEL.md` instead to scope it to that project. Where both files carry a workflow and they disagree, `CHANNEL.md` wins for a task from that room.
+The usual home is the `developer` skill's per-user overlay, `config/skills/developer.md`, which is read only when that skill loads — exactly when a workflow decision applies, and at no cost on the tasks that will never write code. Write it a line at a time:
 
-Nothing else is needed. `USER.md` is in the system prompt of every task, and a room's `CHANNEL.md` is in the system prompt of every task from that room; neither is ever truncated. That difference in reach is the thing to weigh when choosing between them — a workflow written only in a room's `CHANNEL.md` reaches nothing from the 1:1, from a cron job, or from another room.
+```bash
+istota-skill memory append --skill developer --line "Worktree per task, always, however small the change."
+```
+
+Or paste the block into `config/USER.md` to have it on every task, or into a project room's `CHANNEL.md` to scope it to that project. Where `USER.md` and a room's `CHANNEL.md` disagree, `CHANNEL.md` wins for a task from that room. The overlay's own label says it outranks the skill's defaults and claims nothing about the other two files, so write each decision in one place rather than in two expecting a defined winner.
+
+Nothing else is needed. `USER.md` is in the system prompt of every task, and a room's `CHANNEL.md` is in the system prompt of every task from that room; neither is ever truncated. That difference in reach is the thing to weigh — a workflow written only in a room's `CHANNEL.md` reaches nothing from the 1:1, from a cron job, or from another room, and one written only in the overlay reaches nothing on a task where the `developer` skill did not load.
+
+**That last point decides where the machine-specific rules go.** An admin task is handed the repositories tree whenever the developer feature is on, whether or not the `developer` skill was selected — so a task can reach a checkout and start a test run with no overlay loaded. A rule about what this host can afford ("the suite takes over an hour here, never run it in a foreground task") belongs in `USER.md` for that reason. The workflow decisions below are inert on such a task and belong in the overlay.
 
 One warning before you paste it. The full-suite line is the rule ISSUE-337 was filed about: a suite that cannot finish inside a single command is killed partway and produces no coverage at all, which is worse than a narrow pass that completed. Keep it only if the suite finishes on the host the task runs on, and expect it to be run detached rather than under a timeout.
 
@@ -37,4 +45,4 @@ Length here is not free, and the cost lands where you will not see it. `USER.md`
 
 So treat the block as a menu rather than a set: drop the lines you do not care about, and each decision you leave out keeps the skill's default. A user who only wants the full suite back writes one line.
 
-The seeded `examples/WORKFLOW.md` in a user's bot folder is the same vocabulary written for the user rather than for this repository. It is the file to point someone at who wants to write their own workflow instead of restoring this one.
+The seeded `examples/WORKFLOW.md` in a user's bot folder is the same vocabulary written for the user rather than for this repository, and it names the same three homes. It is the file to point someone at who wants to write their own workflow instead of restoring this one.

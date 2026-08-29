@@ -50,8 +50,10 @@ read/write access. Everything you interact with lives here.
 Configuration files live in the `config/` subfolder:
 
 - **config/USER.md** — Persistent memory. Istota reads this at the start of every \
-task and appends to it when you ask it to remember something. A development \
-workflow for coding tasks is written here too — see `examples/WORKFLOW.md`.
+task and appends to it when you ask it to remember something.
+- **config/skills/<skill>.md** — (Optional) Per-skill additions to a skill's \
+instructions, read only when that skill loads. A development workflow for coding \
+tasks usually goes in `config/skills/developer.md` — see `examples/WORKFLOW.md`.
 - **config/TASKS.md** — Task queue. Write `- [ ] do something` and Istota picks \
 it up automatically. Status updates are written back to the file.
 - **config/BRIEFINGS.md** — (Optional) Briefing schedule configuration. \
@@ -553,8 +555,9 @@ WORKFLOW_EXAMPLE = """\
 # Development workflow
 
 There is no `config/WORKFLOW.md`. A development workflow is written in
-`config/USER.md`, or in a project room's `CHANNEL.md`, under a heading of your
-own. This file is the vocabulary — what you can set, not what you should set.
+`config/skills/developer.md`, in `config/USER.md`, or in a project room's
+`CHANNEL.md`. This file is the vocabulary — what you can set, not what you
+should set.
 
 The developer skill ships a default for each decision below and yields to
 whatever you write. Say nothing about a decision and its default applies, so a
@@ -562,10 +565,24 @@ workflow of three lines is a perfectly good one.
 
 ## Where to write it
 
-- **config/USER.md** — applies to every coding task, whichever room it came from.
+- **config/skills/developer.md** — the usual home. It is read only when the
+  `developer` skill loads, which is exactly when a workflow decision applies,
+  and it costs nothing on the tasks that will never write code. Write it with
+  `istota-skill memory append --skill developer --line "..."`.
+- **config/USER.md** — applies to every task, coding or not. The right home for
+  a rule that would still be wrong to ignore on a task where the `developer`
+  skill did not load. Anything about what this machine can afford belongs here:
+  an admin task can reach a checkout whenever the developer feature is on,
+  whether or not the skill was selected, so "don't run the whole suite in the
+  foreground on this box" has to be somewhere it will actually be read.
 - **CHANNEL.md** in a project's room — applies to tasks from that room only.
-- Where both carry a workflow and they disagree, `CHANNEL.md` wins for a task \
-from that room. It is the more specific statement, and the room is the project.
+- Where `USER.md` and a room's `CHANNEL.md` disagree, `CHANNEL.md` wins for a
+  task from that room. It is the more specific statement, and the room is the
+  project.
+- The overlay says it outranks the `developer` skill's own defaults, and claims
+  nothing about the other two files. So do not write the same decision into an
+  overlay and into `USER.md` expecting a defined winner — there isn't one.
+  Write each decision in one place.
 
 ## What you can set
 

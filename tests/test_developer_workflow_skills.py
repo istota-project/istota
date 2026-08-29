@@ -1174,17 +1174,31 @@ class TestTheVocabularyIsWrittenDownForUsers:
             f"it leaves the post-337 default in place: {line!r}"
         )
 
-    def test_the_seeded_example_names_both_files_and_the_tie_break(self):
+    def test_the_seeded_example_names_every_file_and_the_tie_break(self):
         """Naming one file leaves half the workflows nowhere to go — `USER.md`
         alone has no per-project scope, `CHANNEL.md` alone reaches no task from
-        the 1:1 — and naming both without the tie-break leaves a user who wrote
-        both unable to predict which one a task will follow."""
+        the 1:1, and the per-skill overlay is now the usual home — and naming
+        them without the tie-break leaves a user who wrote two unable to
+        predict which one a task will follow."""
         assert "USER.md" in WORKFLOW_EXAMPLE
         assert "CHANNEL.md" in WORKFLOW_EXAMPLE
+        assert "config/skills/developer.md" in WORKFLOW_EXAMPLE
         assert "`CHANNEL.md` wins" in WORKFLOW_EXAMPLE, (
-            "the example names both files and never says which wins when they "
-            "disagree"
+            "the example names both memory files and never says which wins "
+            "when they disagree"
         )
+
+    def test_the_seeded_example_claims_no_precedence_the_overlay_does_not_have(self):
+        """The overlay's own label scopes its precedence to the skill's body and
+        says nothing about `USER.md` — it sits later in the prompt, but position
+        is not a stated rule. A vocabulary page that invents an ordering there
+        teaches a precedence the system does not implement."""
+        assert "Write each decision in one place." in WORKFLOW_EXAMPLE
+        for invented in ("overlay over `USER.md`", "`USER.md` over the overlay",
+                         "`CHANNEL.md` over the overlay"):
+            assert invented not in WORKFLOW_EXAMPLE, (
+                f"the example asserts {invented!r}, which nothing implements"
+            )
 
     def test_the_seeded_example_says_the_mechanics_do_not_yield(self):
         """The one thing a vocabulary page can get dangerously wrong is
