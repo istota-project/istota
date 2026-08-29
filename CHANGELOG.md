@@ -197,6 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Log rotation is now something you can set on the Docker install. The three settings that control it were read when the config was written but never handed to the container, so rotation stayed on and the retention numbers were fixed at 10 MB and five files however you set them — with no error to say the setting had been dropped. All three now reach the container and are documented in the example environment file.
+
 - Resetting a dev container no longer takes `uv` away with it. The container's Python package manager was installed into the same home directory the reset wipes, so it survived the container's first boot and nothing after that — and because repository work routes those commands into the container, the next build failed with a message that named neither the container nor the reason. It is now part of the image, outside the directory a reset clears. A Rust toolchain is deliberately not in the image: it is several hundred megabytes nothing here uses, so it stays an install-when-you-need-it, and the documentation now says which tools come with the box and which do not.
 
 - A command that runs in the dev container and is not installed there now says so. It reported "no such file or directory", which reads as an answer about your own machine — the command was routed into a container the reader did not know they were in. The line now names the routing and says nothing ran, on either side.

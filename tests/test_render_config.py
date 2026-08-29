@@ -652,19 +652,14 @@ class TestTheEntrypointStillOwnsWhatItKept:
             "boot while every test in this file still passes."
         )
 
-    @pytest.mark.parametrize(
-        "prefix",
-        [
-            "ISTOTA_DEVELOPER_",
-            "ISTOTA_EMAIL_",
-            "ISTOTA_NEXTCLOUD_",
-            # The basemap family (ISSUE-334). Added because the rule in
-            # AGENTS.md says to widen this list when a service needs another
-            # prefix — a render-read variable outside it is checked by nothing.
-            "ISTOTA_WEB_MAP_",
-        ],
-    )
-    def test_every_var_the_render_reads_is_passed_by_compose(self, prefix):
+    # Every ``ISTOTA_*`` name the render reads has to arrive through compose,
+    # so the scan needs no allowlist. This set is here for the name that one
+    # day legitimately does not — a value compose is right to withhold, with
+    # the reason written down. It is empty today, and the emptiness is the
+    # point: nothing was excluded to make the blanket scan pass.
+    COMPOSE_WITHHOLDS: dict[str, str] = {}
+
+    def test_every_var_the_render_reads_is_passed_by_compose(self):
         """The other half of the hand-off, which nothing checked.
 
         The test above excludes ``ISTOTA_*`` on the grounds that compose puts
@@ -673,14 +668,8 @@ class TestTheEntrypointStillOwnsWhatItKept:
         setting is simply absent from the config, in production, with the suite
         green.
 
-        Scoped by prefix rather than run over every ``ISTOTA_*`` name, because
-        both of these families are wholly operator-set — no other layer assigns
-        one, so any name the render reads has to arrive through compose. Names
-        the entrypoint itself computes (``LOCATION_INGEST_TOKEN`` and friends)
-        would fail a blanket scan for the wrong reason.
-
-        Two of the three prefixes are here because both have been out of step,
-        months apart.
+        This ran over four prefixes before it ran over all of them, and each of
+        the four was added *after* the family it names had already broken.
         ISSUE-289 was the reviewer setting, present in the Ansible role and the
         render and absent from compose, which cost nothing until an MR opened
         with nobody on it. The email pair was ``ISTOTA_EMAIL_AUTHSERV_ID`` and
@@ -688,33 +677,91 @@ class TestTheEntrypointStillOwnsWhatItKept:
         ``docker/.env.example`` and read by the render — so an operator asking
         for ``confirm_sender_match = "gate"`` on a Docker deploy silently got
         ``off``, which is the gate switched off rather than a setting ignored.
-
         ``ISTOTA_NEXTCLOUD_`` joined them with ``dav_prefix`` and
-        ``auto_share_bot_dir``. Both are wholly operator-set in the same sense —
-        the render is the only thing that reads them — and both fail the same
-        silent way: the daemon addresses a Nextcloud path that does not exist on
-        the Docker shape, and every share and every ``files`` verb 404s while
-        the suite stays green.
+        ``auto_share_bot_dir``, and ``ISTOTA_WEB_MAP_`` with the basemap family
+        (ISSUE-334). A list that only ever grows after an incident is a list
+        that is wrong until the next incident.
+
+        The docstring for the scoped version gave a real reason for it: names
+        the entrypoint computes itself, like ``LOCATION_INGEST_TOKEN``, would
+        fail a blanket scan for the wrong reason. But those carry no ``ISTOTA_``
+        prefix, and the neighbouring test already checks the entrypoint half
+        separately — so the blanket scan over that prefix has no such name in
+        it to trip on. Measured when the scoping came off: 170 names read, and
+        the only three the four prefixes were hiding.
+
+        The three were ``ISTOTA_LOGGING_ROTATE``, ``_MAX_SIZE_MB`` and
+        ``_BACKUP_COUNT``. Log rotation was not switchable on the Docker shape
+        and the retention numbers were pinned at 10 MB and 5 files, because
+        ``ISTOTA_LOGGING_`` was not one of the four.
         """
         code = "\n".join(
             line
             for line in RENDER_CONFIG.read_text().splitlines()
             if not line.lstrip().startswith("#")
         )
-        read = {
-            name
-            for name in re.findall(r"\$\{?(" + prefix + r"[A-Z0-9_]*)", code)
-        }
-        assert read, f"the scan found no {prefix}* reads; the regex has rotted"
+        read = set(re.findall(r"\$\{?(ISTOTA_[A-Z0-9_]*)", code))
+        assert len(read) > 100, "the scan found almost no reads; the regex has rotted"
 
         compose = (REPO / "docker" / "docker-compose.yml").read_text()
-        passed = set(re.findall(r"^\s*(" + prefix + r"[A-Z0-9_]*):", compose, re.M))
+        passed = set(re.findall(r"^\s*(ISTOTA_[A-Z0-9_]*):", compose, re.M))
 
-        missing = sorted(read - passed)
+        stale = sorted(set(self.COMPOSE_WITHHOLDS) - read)
+        assert not stale, (
+            f"COMPOSE_WITHHOLDS names {stale}, which render-config.sh no longer "
+            "reads. Drop the entry rather than leaving a hole open."
+        )
+
+        missing = sorted(read - passed - set(self.COMPOSE_WITHHOLDS))
         assert not missing, (
             f"render-config.sh reads {missing}, which docker-compose.yml does "
             "not pass into the container. Each renders as its default or empty "
-            "on a real boot, unsettable by the operator."
+            "on a real boot, unsettable by the operator. If compose is right to "
+            "withhold one, say so in COMPOSE_WITHHOLDS with the reason."
+        )
+
+    def test_every_settable_compose_var_is_documented_in_env_example(self):
+        """The third leg of the same hand-off, which nothing checked either.
+
+        render -> compose is the test above. compose -> the operator is this
+        one: a variable compose interpolates from the environment is one the
+        operator is meant to set, and the only place they can learn it exists
+        is ``docker/.env.example``. ``ISTOTA_NEXTCLOUD_DAV_PREFIX`` was found
+        working and undocumented; it turned out to be pinned rather than
+        settable, which is what this test's split makes checkable instead of a
+        judgement someone re-makes by reading.
+
+        Settable means compose passes the name through an interpolation *of
+        that same name* — ``FOO: ${FOO:-x}``. That is what an operator can
+        reach from ``.env``. A literal (``ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR:
+        "false"``), an anchor (``*shared_mount_name``) or a container-internal
+        path (``ISTOTA_WEB_STATIC_DIR``) is pinned by the stack on purpose,
+        each with its reason inline, and documenting it in ``.env.example``
+        would invite an operator to set something that does nothing.
+
+        Six are pinned today and the split is derived, not listed, so pinning
+        a variable or opening one up moves it between the halves without
+        anybody editing this test.
+        """
+        compose = "\n".join(
+            line
+            for line in (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        settable = set(
+            re.findall(r"^\s*(ISTOTA_[A-Z0-9_]*):\s*\$\{\1[:\-?}]", compose, re.M)
+        )
+        assert len(settable) > 100, "the scan found almost no reads; the regex has rotted"
+
+        env_example = (REPO / "docker" / ".env.example").read_text()
+        documented = set(re.findall(r"^#?\s*(ISTOTA_[A-Z0-9_]*)=", env_example, re.M))
+
+        missing = sorted(settable - documented)
+        assert not missing, (
+            f"docker-compose.yml lets the operator set {missing}, which "
+            "docker/.env.example never mentions. It works and there is no way "
+            "to learn it exists. Document it, or pin it in compose if it is "
+            "not meant to be set."
         )
 
     def test_the_backfill_passes_stayed_in_the_entrypoint(self):
