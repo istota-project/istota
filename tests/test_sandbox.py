@@ -16,6 +16,7 @@ from istota.executor import (
     native_fs_confinement_active,
     native_fs_roots,
     resolve_sandbox_cache_dir,
+    sandbox_cache_is_derived,
 )
 
 
@@ -1742,6 +1743,13 @@ class TestDerivedSandboxCacheDir:
         than devices, so the alternative is a full byte copy of every wheel into
         every venv. This is what the sibling masks used to be layered on top of,
         and it must stay asserted now that they are gone.
+
+        **It is also a boundary, which is the less obvious half (ISSUE-320).**
+        The covering bind is what buries a symlink swapped in at the cache path
+        between `resolve_sandbox_cache_dir`'s check and bwrap's `mount` —
+        measured following that link into another user's subtree on the linux
+        tier. So relaxing this order costs the hardlink *and* reopens that,
+        and anyone revisiting it for performance reasons needs to know both.
         """
         repos = self._setup(sandbox_config, tmp_path)
         result = _run_bwrap(sandbox_config, make_sandbox_task(), True)
@@ -1900,8 +1908,19 @@ class TestDerivedSandboxCacheDir:
             )
 
         assert not any("bob" in str(p) for p in denied), denied
+        # Writable, which is the property — not listed, which is the mechanism.
+        # Since ISSUE-320 the derived cache is deliberately *not* a write root
+        # of its own: `ToolEnv` realpaths each root at construction, so a
+        # symlink planted at `.package-caches` after the resolver validated it
+        # would make the link's target writable, and the native brain has no
+        # covering mount to bury it the way bwrap does. It stays writable
+        # through the repos root that contains it.
         cache = (repos / "alice" / ".package-caches").resolve()
-        assert cache in [p.resolve() for p in write]
+        roots = [p.resolve() for p in write]
+        assert cache not in roots
+        assert any(cache.is_relative_to(r) for r in roots), (
+            f"the task's own cache is not writable under any root: {roots}"
+        )
 
     def test_the_issue_319_machinery_is_gone(self):
         """Deleted, not bypassed. Each of these existed only because one cache
@@ -2038,3 +2057,176 @@ class TestDerivedSandboxCacheDir:
         assert resolve_sandbox_cache_dir(sandbox_config, "alice") is None
         assert stat.S_IMODE(victim.stat().st_mode) == 0o755, \
             "another user's subtree was chmodded through a planted symlink"
+
+
+class TestTheDerivationIsGatedOnAdmin:
+    """ISSUE-320: the derived cache and the bind that covers it share one gate.
+
+    The derivation puts the cache inside `{repos_dir}/{user_id}`, and it is only
+    safe there because the repos bind is emitted afterwards, is an ancestor, and
+    lands on top of it — so a symlink swap in the window between
+    `resolve_sandbox_cache_dir`'s check and bwrap's `mount` binds the link's
+    target somewhere nothing can reach. `tests/linux/test_sandbox_cache_dir.py`
+    measures both halves of that on a real kernel.
+
+    The bind is `is_admin and developer.enabled`; the derivation used to be
+    `developer.enabled` alone. A **non-admin** therefore derived a cache inside
+    a directory their own devbox container mounts read-write — the devbox's
+    repos mount has no admin gate, and neither does the exec-socket bind that
+    reaches it — and took the cache bind with nothing above it. That is the
+    shape the linux tier measures binding an arbitrary directory read-write into
+    the sandbox.
+
+    So the gate is the fix, and these hold it. A test that only asserted the
+    admin path would pass on the pre-fix code.
+    """
+
+    def _setup(self, sandbox_config, tmp_path, admins):
+        repos = tmp_path / "repos"
+        for user in ("alice", "bob"):
+            (repos / user).mkdir(parents=True)
+        sandbox_config.developer.enabled = True
+        sandbox_config.developer.repos_dir = str(repos)
+        sandbox_config.admin_users = set(admins)
+        return repos
+
+    def test_a_non_admin_gets_no_cache_inside_the_repos_tree(
+        self, sandbox_config, tmp_path,
+    ):
+        """The defect, as a predicate. `bob` is not in the admin set."""
+        self._setup(sandbox_config, tmp_path, admins={"alice"})
+
+        assert sandbox_cache_is_derived(sandbox_config, "bob") is False
+        assert resolve_sandbox_cache_dir(sandbox_config, "bob") is None
+
+    def test_a_non_admin_falls_back_to_the_configured_root(
+        self, sandbox_config, tmp_path,
+    ):
+        """Not "no cache" as such — the fallback branch, which is what an
+        operator who sets the key gets. That root is outside `repos_dir`, is
+        bound into no sandbox and is not model-writable, so there is no writer
+        to race there. The key is blank on a deployed developer install, which
+        is why the test above sees None."""
+        self._setup(sandbox_config, tmp_path, admins={"alice"})
+        cache_root = tmp_path / "caches"
+        cache_root.mkdir()
+        sandbox_config.security.sandbox_cache_dir = str(cache_root)
+
+        assert resolve_sandbox_cache_dir(sandbox_config, "bob") == cache_root / "bob"
+
+    def test_an_admin_still_derives(self, sandbox_config, tmp_path):
+        """The other half. Without this the gate could be `False` always and
+        every assertion above would still pass, taking the hardlink property
+        with it."""
+        repos = self._setup(sandbox_config, tmp_path, admins={"alice"})
+
+        assert sandbox_cache_is_derived(sandbox_config, "alice") is True
+        assert resolve_sandbox_cache_dir(sandbox_config, "alice") == \
+            repos / "alice" / ".package-caches"
+
+    def test_an_empty_admin_set_derives_for_everyone(self, sandbox_config, tmp_path):
+        """`Config.is_admin` reads an empty `admin_users` as everyone-is-admin.
+        That fails in the safe direction here: everyone derives, and everyone
+        gets the covering repos bind too, so the two still agree."""
+        repos = self._setup(sandbox_config, tmp_path, admins=set())
+
+        assert sandbox_cache_is_derived(sandbox_config, "bob") is True
+        assert resolve_sandbox_cache_dir(sandbox_config, "bob") == \
+            repos / "bob" / ".package-caches"
+
+    def test_the_gate_matches_the_repos_bind_exactly(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """The invariant, asserted against the argv rather than restated.
+
+        For every combination of admin-ness, a cache bind whose destination is
+        inside `repos_dir` must be accompanied by a repos bind above it. This is
+        the assertion that goes red if either gate moves without the other.
+        """
+        repos = self._setup(sandbox_config, tmp_path, admins={"alice"})
+
+        for user, is_admin in (("alice", True), ("bob", False)):
+            task = make_sandbox_task()
+            task.user_id = user
+            result = _run_bwrap(sandbox_config, task, is_admin)
+            dests = [d for _, d in _get_bind_pairs(result, "--bind")]
+            cache = str(repos / user / ".package-caches")
+            subtree = str(repos / user)
+
+            if cache in dests:
+                assert subtree in dests, (
+                    f"{user}: the cache is bound inside the repos tree with no "
+                    f"repos bind above it — ISSUE-320"
+                )
+                assert dests.index(subtree) > dests.index(cache), (
+                    f"{user}: the repos bind no longer covers the cache bind"
+                )
+
+        # And the non-admin really did take neither, rather than the loop above
+        # being vacuous for `bob`.
+        task = make_sandbox_task()
+        task.user_id = "bob"
+        dests = [d for _, d in _get_bind_pairs(_run_bwrap(sandbox_config, task, False), "--bind")]
+        assert str(repos / "bob" / ".package-caches") not in dests
+        assert str(repos / "bob") not in dests
+
+
+class TestTheNativeBrainDoesNotAddTheDerivedCache:
+    """ISSUE-320's other half: no mounts means no covering bind.
+
+    `native_fs_roots` is the native brain's stand-in for the bwrap binds, and it
+    has no ordering to lean on — nothing lands on top of anything. `ToolEnv`
+    realpaths every write root at construction, which is later than
+    `resolve_sandbox_cache_dir`'s `O_NOFOLLOW` check, so a symlink planted at
+    `.package-caches` in between would make the link's *target* a write root and
+    the file tools would write wherever it pointed.
+
+    On the derived branch the cache is inside the repos write root already, so
+    adding it separately buys nothing and costs that. On the fallback branch it
+    is the only way the cache is writable, and its root is operator-owned
+    outside `repos_dir`, so it stays.
+    """
+
+    def _setup(self, sandbox_config, tmp_path, admins):
+        repos = tmp_path / "repos"
+        (repos / "alice").mkdir(parents=True)
+        sandbox_config.developer.enabled = True
+        sandbox_config.developer.repos_dir = str(repos)
+        sandbox_config.admin_users = set(admins)
+        return repos
+
+    def _write_roots(self, sandbox_config, make_sandbox_task, user, is_admin):
+        task = make_sandbox_task()
+        task.user_id = user
+        user_temp = sandbox_config.temp_dir / user
+        user_temp.mkdir(parents=True, exist_ok=True)
+        _, write, _ = native_fs_roots(
+            sandbox_config, task, is_admin, [], user_temp, None,
+        )
+        return [str(p) for p in write]
+
+    def test_the_derived_cache_is_not_a_separate_write_root(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        repos = self._setup(sandbox_config, tmp_path, admins={"alice"})
+        roots = self._write_roots(sandbox_config, make_sandbox_task, "alice", True)
+
+        assert str(repos / "alice" / ".package-caches") not in roots
+        # Still writable, via the root that covers it — otherwise this would be
+        # a fix that quietly broke every package install.
+        assert str(repos / "alice") in roots
+
+    def test_the_fallback_cache_is_still_a_write_root(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """The control. Without it the assertion above passes on a build that
+        dropped the cache write root altogether."""
+        sandbox_config.developer.enabled = False
+        sandbox_config.developer.repos_dir = ""
+        sandbox_config.admin_users = set()
+        cache_root = tmp_path / "caches"
+        cache_root.mkdir()
+        sandbox_config.security.sandbox_cache_dir = str(cache_root)
+
+        roots = self._write_roots(sandbox_config, make_sandbox_task, "alice", True)
+        assert str(cache_root / "alice") in roots
