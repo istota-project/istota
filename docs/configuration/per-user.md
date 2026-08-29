@@ -197,7 +197,7 @@ Rules:
 
 - Plain markdown, bullets preferred. YAML frontmatter is stripped if present.
 - No `# ` or `## ` headings. The overlay is rendered under a `#### ` label of its own, and a heading that shallow ends that block and floats the rules up as a new section peer to the whole skills reference, detached from the skill they configure. One written anyway is demoted to `#### ` at load time rather than dropped, so a hand-edited file misbehaves visibly; `istota doctor` warns about it. `### ` and deeper are fine.
-- Over 8 KB warns. Over 32 KB is not loaded at all — the write still lands, so the file is still readable and shrinkable through the CLI, but it reaches no prompt. Only a write that would take the file past 1 MB is refused outright, since past that the CLI could no longer read it back to shrink it.
+- Over 24 KB warns that the cap is close. Over 32 KB is not loaded at all — the write still lands, so the file is still readable and shrinkable through the CLI, but it reaches no prompt. Only a write that would take the file past 1 MB is refused outright, since past that the CLI could no longer read it back to shrink it.
 - `sensitive_actions` and `untrusted_input` accept no overlay. Not a security boundary — the operator override can still replace either document — but a guard against a casual preference line landing in the safety layer.
 - A file named for a skill that does not exist is silently never read. Two things report it: `istota-skill memory skills` for one user, and `istota doctor`'s `config.skill_overlays` check across every user's tree.
 - Overlays are read from the workspace mount, so a deployment without one has no overlays. Every failure above degrades to exactly the prompt the skill would have had with no overlay at all.

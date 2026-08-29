@@ -2892,9 +2892,10 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
             name, WARN,
             f"{len(warned)} of {total} overlay file(s) need a look: {_overlay_list(warned)}",
             remedy=(
-                "over_warn_bytes: an overlay is appended to the bundled skill body, "
-                "not a replacement for it, so this size usually means a forked skill "
-                "doc. shallow_heading: a `# ` or `## ` heading is demoted to `#### ` "
+                "over_warn_bytes: the file is within a few KB of the loading cap, "
+                "past which it stops reaching any prompt at all — shrink it, or move "
+                "the rules that belong to another skill into that skill's own "
+                "overlay. shallow_heading: a `# ` or `## ` heading is demoted to `#### ` "
                 "at load time, because at its written level it would end the skill's "
                 "own section. empty / overlay_not_utf8 / overlay_is_a_symlink / "
                 "overlay_not_a_regular_file / overlay_unreadable: the file is there "
