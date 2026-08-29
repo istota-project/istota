@@ -103,9 +103,15 @@ Skill discovery uses layered priority:
 
 Operator overrides can replace or extend bundled skills.
 
+## Per-skill user overlays
+
+A user can append their own instructions to one skill without forking it, by putting a markdown file at `/Users/{user_id}/{bot_dir}/config/skills/<skill-name>.md`. The text is added to the end of that skill's section in the prompt, under a heading that says it takes precedence over the skill's own instructions, on both the eager path and the on-demand pull.
+
+This is additive, and that is the difference from an operator override — an override replaces the whole document, an overlay adds to whatever the layers above resolved. Bundled skill edits keep flowing under an overlay. Layout, the size caps, the two skills that accept no overlay, and the test for whether a rule belongs in an overlay or in `USER.md` are in [per-user configuration](../configuration/per-user.md#per-skill-overlays).
+
 ## Fingerprinting
 
-Skills have a SHA-256 fingerprint (of all `skill.md` + `skill.toml` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks.
+Skills have a SHA-256 fingerprint (of all `skill.md` + `skill.toml` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks. Per-user overlays are deliberately not hashed: editing one must not fire a changelog notice that then says nothing about the edit that fired it.
 
 ## Placeholder substitution
 

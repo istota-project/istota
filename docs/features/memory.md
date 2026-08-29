@@ -36,6 +36,12 @@ Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded i
 
 CHANNEL.md is indexed under `source_type = "channel_memory_durable"` — a separate type from the dated `channel_memory` files, so it survives retention pruning the way USER.md does.
 
+### Per-skill overlays
+
+Not a prompt section of its own, but a durable user-written store the memory CLI writes and the search index carries. A behavioral rule scoped to one skill goes in `/Users/{user_id}/{bot_dir}/config/skills/<skill-name>.md`, appended to that skill's instructions whenever the skill loads. Written through the same `memory` skill with `--skill NAME` on `append`/`remove`/`replace`/`show`, under the same lock and audit log; `istota-skill memory skills` prints the inventory. Overlays are flat, so `--heading` names a `### ` subsection rather than a `## ` section, and the heading verbs are refused.
+
+The rule for choosing between here and USER.md: an overlay only reaches the prompt when its skill is selected, so a rule it would be *wrong* to ignore on a task where the skill did not load belongs in USER.md. Indexed under `source_type = "skill_overlay"`, durable like USER.md, and only for a file that actually loads. Layout, caps and the operator-override contrast are in [per-user configuration](../configuration/per-user.md#per-skill-overlays).
+
 ### Layer 3 — Dated memories
 
 Nightly extracts produced by the user sleep cycle, written to `/Users/{user_id}/memories/YYYY-MM-DD.md`. Each entry is a self-contained bullet with task provenance:

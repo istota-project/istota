@@ -10,7 +10,7 @@ For module-specific internals, see `.claude/rules/`:
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — every dataclass field + TOML mapping
-- `skills.md` — skill metadata, single-axis selection (eager vs menu), CLI modules
+- `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for)
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split (the design language itself lives in `web/AGENTS.md`)
@@ -19,7 +19,7 @@ For module-specific internals, see `.claude/rules/`:
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest
 - `feeds.md` — native RSS/Atom/Tumblr/Are.na poller, per-user SQLite, image dedupe
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
-- `memory.md` — USER.md/CHANNEL.md, knowledge graph, playbooks, sleep cycle
+- `memory.md` — USER.md/CHANNEL.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
 - `deployment.md` — Ansible role, Docker stack, the Nextcloud rclone mount
 - `testbed.md` — `testbed/`: the two compose shapes, profiles, the `Service` protocol and the four rules binding one, session-scoped reset and the watermark, what each shape concedes, the prompt goldens
 

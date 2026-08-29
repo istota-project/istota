@@ -58,8 +58,18 @@ expand_companions(names, skill_index, *, is_admin=True, disabled_skills=None,
     # companion expansion) so the gate filter can't drift between the two paths.
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
-load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
-    # Concatenate skill docs (strips frontmatter)
+load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None,
+            user_overlay_dir=None) -> str
+    # Concatenate skill docs (strips frontmatter), appending each skill's
+    # per-user overlay from user_overlay_dir/<name>.md. See "Per-skill user
+    # overlays" below.
+contained_overlay_dir(overlay_dir: Path, user_root: Path) -> Path | None
+read_overlay_bytes(path: Path, *, max_bytes=OVERLAY_READ_CAP_BYTES) -> tuple[bytes|None, str|None, int|None]
+inspect_overlay(path, *, known_skills, disabled_skills=(), max_read_bytes=...) -> OverlayInspection
+overlay_effective_body(text: str) -> str
+    # The four shared overlay primitives. `inspect_overlay(...).binds` is the
+    # single bind predicate behind `memory skills` and `doctor`; the two must
+    # not re-derive it, or one says a file is live while the prompt lacks it.
 build_disclosure_index(menu_names, skill_index) -> str            # "" when menu empty
 ```
 
@@ -184,6 +194,24 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 1. Bundled skill directories in `src/istota/skills/*/skill.md`
 2. Operator override directories in `config/skills/*/` (skill.md or skill.toml)
 3. Legacy `_index.toml` (lowest priority, deprecated)
+
+### Per-skill user overlays
+
+A fourth source of skill text, and the only **additive** one: `{mount}/Users/{uid}/{bot_dir}/config/skills/<skill-name>.md`, appended to that skill's rendered body every time the skill loads. The layers above resolve *which document* to read; an overlay is glued onto whichever one won. Confusing the two is the failure the size cap exists to catch — a forked 47 KB skill doc filed here is two contradictory bodies in one prompt, with no error.
+
+Injection happens inside `load_skills`, not at the call sites, and that is the point: `executor.py` (eager) and `skills/skills/__init__.py` `cmd_show` (menu pull) are the two paths, and this codebase keeps getting bitten by the two drifting. Both call `storage.resolve_user_skill_overlays_dir(config, user_id)` rather than joining the mount themselves, for the same reason one level down — that helper is also where `use_mount` and containment under `{mount}/Users/{uid}` are decided, so a redirected directory returns None on both paths at once.
+
+The rendered shape is the bundled body, then `#### {user_id}'s configuration for this skill`, then a preamble scoped to *this skill* (`OVERLAY_PREAMBLE`), then the overlay. The preamble does **not** say "supersedes anything above": `load_skills` renders the eager set sorted, `sensitive_actions` sorts before `skills`/`todos`/every `t`-`z` name, and `skills` is `always_include` — so an unscoped claim would have the daemon asserting user precedence over the safety body, which is exactly what `OVERLAY_DENYLIST` exists to prevent and which the denylist cannot reach, since it filters by filename.
+
+Gates, all in `_loader.py`: `OVERLAY_DENYLIST` (`sensitive_actions`, `untrusted_input`, matched on the `-`/`_`-normalized name); `OVERLAY_WARN_BYTES` 8 KB and `OVERLAY_MAX_BYTES` 32 KB; the skill name must be in the index and not disabled; level-1 and level-2 headings — ATX in every CommonMark spelling, plus setext — demoted to `#### ` rather than dropped, so a hand-edited file misbehaves visibly. Reads go through `read_overlay_bytes`: `O_NOFOLLOW | O_NONBLOCK` plus an `S_ISREG` check and an `fstat` size check *before* the read, because the overlay directory is under `{mount}/Users/{uid}`, which `build_bwrap_cmd` binds **read-write** into that user's sandbox — every entry is model-plantable and the fixed filename is not containment. A FIFO there would otherwise block prompt assembly forever, before any task timeout exists.
+
+`compute_skills_fingerprint` deliberately does not hash the user tree. An overlay edit must not fire the "skills changed, here's the changelog" notice, which would then say nothing about the edit that fired it. Pinned by `tests/test_skills_loader.py::TestSkillOverlays::test_fingerprint_is_unchanged_across_an_overlay_write` and its control.
+
+**The eager path and `skills show` treat a companion's overlay differently, deliberately.** On the eager path `select_skills` folds companions into one flat name list and `load_skills` loads every name in it as a first-class skill, so a companion's overlay applies. On the `skills show` path there is a designated primary and companions ride under a delimiter beneath it as guardrails; `_render_companion_body` applies no overlay at all. The asymmetry is inherent — the eager path has no primary/companion distinction to act on — and it is harmless where it matters, because both safety companions are denylisted, so the cases that would be dangerous coincide. What actually differs is an ordinary companion such as `commit` under `developer`. Recorded rather than fixed, and pinned by `tests/test_skills_loader.py::TestSkillOverlays::test_a_companion_in_the_eager_set_does_get_its_overlay` so it stays a decision.
+
+For the same ordering reason, the overlay is appended inside `load_skills` and therefore lands *before* the companion bodies on the show path. A user overlay must never sit downstream of a safety companion, where recency would let it soften one. `tests/test_skills_loader_cli.py::test_the_overlay_never_follows_a_safety_companion` asserts the index ordering.
+
+Written and inspected through `istota-skill memory --skill` (see `.claude/rules/memory.md`), indexed for search as `source_type="skill_overlay"`, and swept by `doctor`'s `config.skill_overlays`. User-facing documentation is `docs/configuration/per-user.md`.
 
 ## Skill Index (from skill.md frontmatter)
 
