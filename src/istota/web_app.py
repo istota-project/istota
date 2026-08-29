@@ -2988,6 +2988,11 @@ def _room_snapshot(username: str) -> dict[str, dict]:
             h.token: h
             for h in db.list_web_chat_rooms(conn, username, include_archived=True)
         }
+        # Same reason the listing carries it: a room appearing in this frame for
+        # the first time is adopted wholesale by the client, so a missing
+        # `talk_token` would render a promoted room as web-only until the next
+        # poll settles it (ISSUE-342).
+        talk_refs = db.talk_refs_for_member(conn, username)
         out: dict[str, dict] = {}
         for r in db.list_member_rooms(conn, username, include_archived=False):
             handle = handles.get(r.token)
@@ -2998,6 +3003,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "token": r.token,
                 "name": r.name or handle.name,
                 "origin": r.origin,
+                "talk_token": talk_refs.get(r.token),
                 "model": r.model,
                 "effort": r.effort,
             }
@@ -3784,8 +3790,21 @@ def _chat_list_rooms(username: str) -> list[dict]:
     renders it as given, so this is where the sidebar's order is decided."""
     from . import db
     with db.get_db(_config.db_path) as conn:
-        db.ensure_default_web_chat_room(conn, username)
+        # Only invent a room for a user who has none at all. The loop below
+        # mints a handle for every registry room anyway, so asking for a
+        # default first is what produced a second `general` beside the Talk one
+        # on a user's first web visit (ISSUE-342): the helper counted handles,
+        # and a Talk room's handle does not exist until this runs.
         registry = db.list_member_rooms(conn, username, include_archived=False)
+        if not registry:
+            db.ensure_default_web_chat_room(conn, username)
+            registry = db.list_member_rooms(conn, username, include_archived=False)
+        # One query for the whole listing rather than a binding lookup per
+        # room. `talk_token` is what tells the client a *promoted* room is on
+        # Talk — `origin` stays `web` for one by design, so without this key the
+        # room reads as istota-only and the UI re-offers "Also open in Talk"
+        # (ISSUE-342).
+        talk_refs = db.talk_refs_for_member(conn, username)
         out: list[dict] = []
         for r in registry:
             handle = db.ensure_web_chat_handle(
@@ -3801,6 +3820,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d = _room_to_dict(handle)
             d["name"] = r.name or handle.name
             d["origin"] = r.origin
+            d["talk_token"] = talk_refs.get(r.token)
             # Standing per-room model/effort default lives on the shared registry
             # room (canonical), not the per-user web handle.
             d["model"] = r.model
@@ -3998,6 +4018,16 @@ def _chat_update_room(
         reg = db.get_room(conn, updated.token)
         d["model"] = reg.model if reg else None
         d["effort"] = reg.effort if reg else None
+        # The client merges this response into its room record, so it has to
+        # carry the same identity keys the listing does — a key the listing
+        # sends and this omits reads as absent to any consumer that replaces
+        # rather than spreads (ISSUE-342). `origin` is omitted rather than
+        # guessed when there is no registry row: everywhere else it comes from
+        # that row, and a handle without one means unknown, not `web`.
+        if reg is not None:
+            d["origin"] = reg.origin
+        binding = db.get_room_binding(conn, updated.token, "talk")
+        d["talk_token"] = binding.surface_ref if binding else None
     return d
 
 

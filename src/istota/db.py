@@ -3232,12 +3232,75 @@ def ensure_web_chat_handle(
 def ensure_default_web_chat_room(
     conn: sqlite3.Connection, user_id: str,
 ) -> WebChatRoom:
-    """Guarantee the user has at least one active room. Returns the first
-    active room, creating a ``general`` room when none exist."""
+    """The user's default room, creating a ``general`` one when they have none.
+
+    This is a **delivery** question, not a listing one, and the difference is
+    what ISSUE-342 turned on. `transport.web.default_web_room_token` is the only
+    caller that needs a room invented — a bare `web` route (an alert, the
+    execution log, a routed notification) has to land somewhere. The web listing
+    calls this only when the registry has nothing at all, because it mints Talk
+    handles in its own loop a few lines later and never needed one invented for
+    it; counting `web_chat_rooms` handles here is what produced a second
+    `general` beside the Talk one on a user's first web visit, since a Talk
+    room's handle does not exist until that loop runs.
+
+    Two rules on the fallback, both about it being a delivery target:
+
+    - **A room the user is alone in.** A shared Talk room is one other people
+      read, and a personal alert delivered into it is delivered in front of
+      them.
+    - **Not a channel room.** `log_channel` and `alerts_channel` are
+      machine-owned; the entrypoint even posts into `alerts` at boot, so
+      activity order alone would hand a user's default to whichever the daemon
+      last wrote to. Worse, the pick sticks: the handle minted here becomes the
+      user's oldest, and the first branch returns it from then on.
+
+    A user whose only rooms are shared or machine-owned gets a private
+    `general`, which is the old behaviour and the right answer for delivery.
+    """
     rooms = list_web_chat_rooms(conn, user_id, include_archived=False)
     if rooms:
         return rooms[0]
+    for room in _default_room_candidates(conn, user_id):
+        handle = ensure_web_chat_handle(
+            conn, user_id, room.token, room.name or "Talk room",
+        )
+        # `list_member_rooms` filters `rooms.archived` while the branch above
+        # filters the per-user handle flag, so a room the user hid and was then
+        # re-added to (ISSUE-134) arrives here with an archived handle. Clear
+        # it, the same way the web listing does, or this returns a row the
+        # payload would report as hidden.
+        if handle.archived:
+            handle = update_web_chat_room(conn, handle.id, archived=False) or handle
+        return handle
     return create_web_chat_room(conn, user_id, "general")
+
+
+def _default_room_candidates(
+    conn: sqlite3.Connection, user_id: str,
+) -> "list[Room]":
+    """Registry rooms usable as ``user_id``'s default delivery target.
+
+    Activity-ordered, like `list_member_rooms`, minus the two classes that must
+    never become a delivery default: rooms with another member in them, and the
+    user's own log / alerts channels. See `ensure_default_web_chat_room`.
+    """
+    row = conn.execute(
+        "SELECT log_channel, alerts_channel FROM user_profiles WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    channels = {
+        (row["log_channel"] or ""), (row["alerts_channel"] or "")
+    } if row else set()
+    channels.discard("")
+    out: "list[Room]" = []
+    for room in list_member_rooms(conn, user_id, include_archived=False):
+        if room.token in channels:
+            continue
+        if len(list_room_members(conn, room.token)) > 1:
+            continue
+        out.append(room)
+    return out
 
 
 # The legacy `web_chat_messages` accessors (`add_web_chat_message` /
@@ -3775,6 +3838,28 @@ def list_room_bindings(
         (room_token,),
     ).fetchall()
     return [_row_to_room_binding(r) for r in rows]
+
+
+def talk_refs_for_member(
+    conn: sqlite3.Connection, user_id: str,
+) -> dict[str, str]:
+    """Canonical room token -> its Talk conversation ref, for one user's rooms.
+
+    One query rather than a binding lookup per room: the web room listing needs
+    this for every entry it renders and is polled. Scoped by membership rather
+    than by a token list, so it takes one host parameter however many rooms the
+    user is in — an `IN (...)` built from `list_member_rooms` is unbounded, and
+    that query has no `LIMIT`. A room with no Talk binding is absent from the
+    result rather than present with None, so the caller decides what "not on
+    Talk" renders as; a room the caller has already filtered out is harmless.
+    """
+    rows = conn.execute(
+        "SELECT b.room_token, b.surface_ref FROM room_bindings b "
+        "JOIN room_members m ON m.room_token = b.room_token "
+        "WHERE b.surface = 'talk' AND m.user_id = ?",
+        (user_id,),
+    ).fetchall()
+    return {row["room_token"]: row["surface_ref"] for row in rows}
 
 
 def resolve_room_token(
