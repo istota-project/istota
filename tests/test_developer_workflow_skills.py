@@ -755,19 +755,16 @@ _SUITE_LINES_ALLOWED = [
         "e5bf1007bad9",
         "the review's place in the order, naming the same pass",
     ),
-    (
-        _POINTER,
-        "Tests: <the final verification pass",
-        "d77f4bf79bd5",
-        "the report template's field, which stage 3 rewrites",
-    ),
 ]
 
-# The seven decisions the spec moves from mandate to default, and the lifecycle
-# section each one lives in.
+# The eight decisions the spec moves from mandate to default, and the lifecycle
+# section each one lives in. Test authoring is the eighth, added during
+# implementation: the spec's Context names it in the routine being deferred and
+# its split table did not, which stages 1 and 2 each flagged in passing.
 _DEFERRED_DECISIONS = {
     "worktree per task": "### 2. Create the worktree, then read back what was made",
     "change tiers": "### 5. Pick a change tier, and say which",
+    "when a test gets written": "### 6. Implement, and verify as you go",
     "when tests run, and which": "### 7. The verification budget",
     "commit granularity": "### 8. Commit",
     "whether a review runs": "### 9. Review before landing",
@@ -992,6 +989,69 @@ class TestWorkflowDeference:
                 f"killed command reads as sanctioned: {line[:140]!r}"
             )
 
+    REPORT_HEADING = "### 12. Report"
+
+    def _report_field(self, name):
+        """The template lines starting `<name>: `, inside section 12's fence.
+
+        A list rather than the line, so a duplicated field is a failure here
+        instead of whichever copy the scan reached first. Scoped to the fenced
+        block rather than to the section, because the fence is the part the
+        model copies: a field moved out of it into the surrounding prose has
+        left the template, and a scan of the whole section would not notice."""
+        section = self._step_body(self._body(), self.REPORT_HEADING)
+        blocks = section.split("```")
+        assert len(blocks) >= 3, (
+            f"section {self.REPORT_HEADING!r} has no fenced template block, so "
+            "there is nothing for the model to copy"
+        )
+        return [ln for ln in blocks[1].splitlines() if ln.startswith(f"{name}: ")]
+
+    def test_the_report_tests_field_admits_a_partial_pass(self):
+        """A5. The field asked for "the final full pass, the exit status it
+        was read from, which stacks it covered", and a template field is what
+        the model fills in when the work is done — so a task that ran
+        something narrower either widened it to produce that sentence or wrote
+        a sentence its run did not support. Both were observed. It now asks
+        for what was run and for what it left out, which is answerable
+        honestly whatever the scope was.
+
+        The `_SUITE_MENTION` scan is reused rather than a hand-written list of
+        forbidden words: it is the same pattern the line-level audit uses, so
+        a demand for a wider run reintroduced here fails on the phrasing that
+        audit already knows about rather than on one guessed at here."""
+        fields = self._report_field("Tests")
+        assert len(fields) == 1, f"section 12 has {len(fields)} `Tests:` fields, not one"
+        line = fields[0]
+        assert not _SUITE_MENTION.search(line), (
+            "the report template asks for a run wider than the change again, "
+            f"which is where the demand was hardest to see: {line!r}"
+        )
+        for required in ("paths", "exit status", "did not cover"):
+            assert required in line, (
+                f"the `Tests:` field no longer asks for {required!r}, so a narrow "
+                f"pass can be reported without saying what it was: {line!r}"
+            )
+
+    def test_the_report_records_which_workflow_was_in_force(self):
+        """A6. The defaults now yield, so two tasks on one deployment can run
+        under different rules and produce reports of the same shape. Without
+        this field a reader cannot tell a narrow pass the user asked for from
+        one nobody sanctioned, and the deference rule becomes unauditable from
+        the only artifact anybody reads."""
+        fields = self._report_field("Workflow")
+        assert len(fields) == 1, f"section 12 has {len(fields)} `Workflow:` fields, not one"
+        line = fields[0]
+        for name in ("USER.md", "CHANNEL.md"):
+            assert name in line, (
+                f"the `Workflow:` field does not offer {name} as an answer, so a "
+                f"task working under it has nowhere to say so: {line!r}"
+            )
+        assert "default" in line.lower(), (
+            "the field offers no answer for the deployment that wrote neither "
+            f"file, which is every new one: {line!r}"
+        )
+
     @pytest.mark.parametrize(
         "decision,heading", sorted(_DEFERRED_DECISIONS.items())
     )
@@ -1101,6 +1161,13 @@ class TestLoadBudget:
     The two raises above are independent and both landed: 761 -> 763 on main
     for ISSUE-318, and this branch's +13 on top of it. The number is the sum
     rather than either one, which is what the merge of the two bodies measures.
+
+    ISSUE-337 is the first change to come through without a raise. It removed
+    the mandates and added the deference rule, the selection ladder and the
+    report's `Workflow:` field for no net lines, which is the trade a change
+    that deletes orders should be able to make. What it leaves behind is worth
+    knowing before the next edit: the bundle is at 776 of 776, so the next line
+    added anywhere in the three bodies raises the budget, rules file first.
     """
 
     BUDGET_LINES = 776
@@ -1116,6 +1183,22 @@ class TestLoadBudget:
         assert total <= self.BUDGET_LINES, (
             f"three-body bundle is {total} lines, over the {self.BUDGET_LINES} "
             f"budget: {per_skill}"
+        )
+
+    def test_the_rules_file_states_the_same_number(self):
+        """A7. The procedure every raise above followed — the rules file
+        first, then this — was a convention nothing checked, and a number
+        raised only here is a budget that has stopped meaning anything. The
+        reason for a raise lives in prose that cannot be asserted on; that the
+        prose was written at all can be."""
+        rules = Path(__file__).resolve().parents[1] / ".claude" / "rules" / "skills.md"
+        stated = re.findall(r"(\d+)-line budget", rules.read_text())
+        assert stated == [str(self.BUDGET_LINES)], (
+            f"`.claude/rules/skills.md` states {stated or 'no'} budget(s), not "
+            f"exactly [{self.BUDGET_LINES!r}]. Raise it there first, with the reason "
+            "beside the other raises, and only then here. A second figure left "
+            "behind by an earlier raise is the same defect as a missing one: the "
+            "file then contradicts itself about what the contract is"
         )
 
 

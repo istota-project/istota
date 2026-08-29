@@ -250,8 +250,8 @@ The tier decides how much process the rest of the change gets. Pick it before wr
 ### 6. Implement, and verify as you go
 
 - **Edit files in the worktree**, never in the bare clone.
-- **Write the test first in exactly three cases**: reproducing a reported bug, where the failing test is what proves the fix; pure logic whose semantics are tricky enough that the assertion is the real spec; and any Full-tier change. In all three, run it and confirm it fails for the reason you expect.
-- **Everywhere else, write the test and the implementation together and run once.** Do not spend a separate run confirming red. Check by reading instead: an assertion that could have passed against the pre-change code is vacuous, so rewrite it.
+- **When a test gets written is a default, like the tier above it**, and the user's own instructions in `USER.md` or `CHANNEL.md` may set it otherwise. The default writes the test first in exactly three cases: reproducing a reported bug, where the failing test is what proves the fix; pure logic whose semantics are tricky enough that the assertion is the real spec; and any Full-tier change. In all three, run it and confirm it fails for the reason you expect.
+- **Everywhere else the test and the implementation are written together and run once.** A separate run to confirm red buys nothing; check by reading instead, since an assertion that could have passed against the pre-change code is vacuous and wants rewriting rather than running.
 - **Breadth**: the happy path, the specific edge case that motivated the change, and one integration test through the real seam. Not an exhaustive edge-case sweep. Integration tests are the highest-value layer — high enough to prove the system works, low enough to debug when they break. Avoid mocks; where unavoidable, mock at a system boundary, never per collaborator.
 - **Verify integration points.** If the change adds env vars, config fields, CLI commands or dependencies, check that every consumer and producer is updated together. A new env var is useless if the code reading it uses a different name than the code setting it. Adding a package to `pyproject.toml` or `package.json` is not enough — run the install and commit the lockfile.
 - **Keep metadata in step.** If you change a module's purpose, update its descriptions, docstrings and config manifests to match.
@@ -329,9 +329,10 @@ Report in this shape unless the user's own instructions ask for a different one,
 ```
 <repo>/<branch> — <task>
 
+Workflow: <USER.md | CHANNEL.md | this document's defaults — and what they left to it>
 Tier: <Fast | Standard | Full>, <why — boundary surface, size, or default>
 Worked: <what changed, one or two sentences>
-Tests: <the final verification pass, the exit status it was read from, which stacks it covered; N added>
+Tests: <command, paths and stacks covered, exit status it was read from, what it did not cover; N added>
 Review: <counts by severity and what you did about them> | <skipped, why> | <not run, Fast tier>
 Landed: <MR/PR URL> | <why not>
 Worktree: <path, left in place>
@@ -339,7 +340,7 @@ Worktree: <path, left in place>
 Deferred: <anything you did not take on, and why it is separate — one line each>
 ```
 
-Omit `Deferred` when there is nothing in it. `Tests:` names an exit status rather than an impression of one — the last twenty lines of a run say nothing about the twelve failures above them.
+Omit `Deferred` when there is nothing in it. `Workflow:` names the file whose instructions were in force — `USER.md`, a room's `CHANNEL.md`, or neither — because a reader who does not know which rules the work ran under cannot tell a narrow pass that was chosen from one that was careless. `Tests:` names an exit status rather than an impression of one — the last twenty lines of a run say nothing about the twelve failures above them — and states what the pass left out, which by default is any test the selection did not reach.
 
 ## GitLab: Pushing and Creating a Merge Request
 
