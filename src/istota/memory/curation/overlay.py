@@ -119,11 +119,17 @@ def apply_overlay_op(section: Section, op: dict[str, Any]) -> tuple[Section, str
 
 
 def _region(section: Section, op: dict) -> tuple[int, int] | None:
-    """The ``(start, end)`` line range an op targets, or None when it is missing.
+    """The ``(start, end)`` range an *append* targets, or None when it is missing.
 
     ``subheading`` omitted means the top region — everything before the first
     ``### `` line. Given, it means that subsection. This is the whole of an
     overlay's addressing scheme; there is no ``## `` level above it.
+
+    Not shared with ``_match_region``, which answers for ``remove`` and
+    ``replace``: an unnamed subsection means "the top region" when placing a
+    new bullet and "the whole document" when hunting an existing one, and
+    collapsing the two would either put appends at the end of the file or stop
+    a bare ``remove`` reaching a bullet inside a subsection.
     """
     sub = op.get("subheading")
     if sub is not None and str(sub).strip():
@@ -146,12 +152,36 @@ def _apply_append(section: Section, op: dict) -> str:
     return insert_bullet_in_region(section, region, new_bullet, new_text_lower)
 
 
+def _match_region(section: Section, op: dict) -> tuple[int, int] | None | str:
+    """The search range for `remove` / `replace`, or a reject reason.
+
+    Named subsection: that subsection only, `subheading_missing` when it is
+    not there. Unnamed: None, which `find_unique_bullet` reads as the whole
+    document, matching what `remove` does on USER.md.
+
+    The scoping is the point. Without it `--heading` was accepted, validated
+    against nothing and discarded — so `remove --heading Other --match x` took
+    a bullet out of `### Rules` and reported `applied`, and a misspelled
+    subsection still mutated the file. A flag that silently does nothing is
+    worse than one that is refused, because nothing downstream can tell.
+    """
+    sub = op.get("subheading")
+    if sub is None or not str(sub).strip():
+        return None
+    region = subsection_region_indices(section, str(sub))
+    return "subheading_missing" if region is None else region
+
+
 def _apply_remove(section: Section, op: dict) -> str:
     match = op["match"]
     if not match or not match.strip():
         return "empty_match"
 
-    found = find_unique_bullet(section, match.strip().lower())
+    region = _match_region(section, op)
+    if isinstance(region, str):
+        return region  # subheading_missing
+
+    found = find_unique_bullet(section, match.strip().lower(), region)
     if isinstance(found, str):
         return found  # noop_no_match | multiple_matches
 
@@ -168,7 +198,11 @@ def _apply_replace(section: Section, op: dict) -> str:
     if reason:
         return reason
 
-    found = find_unique_bullet(section, match.strip().lower())
+    region = _match_region(section, op)
+    if isinstance(region, str):
+        return region  # subheading_missing
+
+    found = find_unique_bullet(section, match.strip().lower(), region)
     if isinstance(found, str):
         return found  # noop_no_match | multiple_matches
 

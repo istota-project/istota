@@ -838,6 +838,28 @@ def _looks_like_frontmatter(text: str) -> bool:
     )
 
 
+def overlay_effective_body(text: str) -> str:
+    """What the loader will actually use from an overlay file, or ``""``.
+
+    Frontmatter stripped and whitespace trimmed — everything between decoding
+    the bytes and demoting the headings. An empty return means the loader
+    treats the file as though it were not there.
+
+    Module API because two other places have to agree with it and cannot
+    re-derive it: ``memory skills`` reports whether an overlay *binds*, and
+    the memory CLI deletes an overlay whose last bullet has gone so the
+    directory stays an honest inventory. Both used to test the raw text for
+    emptiness, which parts company with the loader on exactly one input — a
+    file holding nothing but frontmatter. That file has bytes, has lines, and
+    loads as nothing, so `ls` said configured, `binds` said true, and the
+    prompt had none of it. Deriving the answer twice is what made that
+    possible; there is one derivation now.
+    """
+    if _looks_like_frontmatter(text):
+        text = _strip_frontmatter(text)
+    return text.strip()
+
+
 def _read_overlay_bytes(path: Path) -> bytes | None:
     """Read an overlay file, refusing anything that is not a plain file.
 
@@ -929,9 +951,7 @@ def _load_user_overlay(
         logger.warning("skill overlay %s is not valid UTF-8 — not loaded", path)
         return None
 
-    if _looks_like_frontmatter(text):
-        text = _strip_frontmatter(text)
-    body = text.strip()
+    body = overlay_effective_body(text)
     if not body:
         return None
     body = _demote_overlay_headings(body)

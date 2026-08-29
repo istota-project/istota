@@ -92,6 +92,23 @@ class TestAppend:
         assert reason == "line_starts_with_hash"
         assert serialize_overlay_doc(new) == "- one\n"
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "note\n### Injected\n- hidden rule",
+            "note\n## Escaped",
+            "note\rcarriage",
+        ],
+    )
+    def test_an_embedded_newline_is_rejected(self, line):
+        # `_HEADING_SHAPED_RE` is not MULTILINE, so it only ever saw the first
+        # line: one op inserted three, and the `remove` that undid the append
+        # popped one of them and orphaned the rest for good.
+        section = parse_overlay_doc("- safe rule\n")
+        new, reason = apply_overlay_op(section, {"op": "append", "line": line})
+        assert reason == "line_contains_newline"
+        assert serialize_overlay_doc(new) == "- safe rule\n"
+
     def test_append_of_a_blank_line_is_rejected(self):
         section = parse_overlay_doc("- one\n")
         _, reason = apply_overlay_op(section, {"op": "append", "line": "   "})
@@ -171,6 +188,40 @@ class TestRemove:
         _, reason = apply_overlay_op(section, {"op": "remove", "match": "  "})
         assert reason == "empty_match"
 
+    def test_a_named_subsection_scopes_the_search(self):
+        # `--heading` used to be accepted, validated against nothing and
+        # dropped, so this removed the top-region bullet and said `applied`.
+        section = parse_overlay_doc(
+            "- top rule\n\n### Rules\n\n- nested rule\n"
+        )
+        new, outcome = apply_overlay_op(
+            section, {"op": "remove", "match": "top", "subheading": "Rules"}
+        )
+        assert outcome == "noop_no_match"
+        assert serialize_overlay_doc(new) == (
+            "- top rule\n\n### Rules\n\n- nested rule\n"
+        )
+
+    def test_a_missing_subsection_is_rejected_rather_than_ignored(self):
+        section = parse_overlay_doc("- top rule\n\n### Rules\n\n- nested\n")
+        new, reason = apply_overlay_op(
+            section, {"op": "remove", "match": "top", "subheading": "NoSuch"}
+        )
+        assert reason == "subheading_missing"
+        assert serialize_overlay_doc(new) == (
+            "- top rule\n\n### Rules\n\n- nested\n"
+        )
+
+    def test_a_named_subsection_disambiguates_a_multiple_match(self):
+        section = parse_overlay_doc(
+            "- alpha top\n\n### Rules\n\n- alpha nested\n"
+        )
+        new, outcome = apply_overlay_op(
+            section, {"op": "remove", "match": "alpha", "subheading": "Rules"}
+        )
+        assert outcome == "applied"
+        assert serialize_overlay_doc(new) == "- alpha top\n\n### Rules\n\n"
+
 
 class TestReplace:
     def test_replaces_the_unique_match(self):
@@ -210,6 +261,23 @@ class TestReplace:
             section, {"op": "replace", "match": "alpha", "line": "### Rules"}
         )
         assert reason == "line_starts_with_hash"
+
+    def test_a_named_subsection_scopes_the_search(self):
+        section = parse_overlay_doc("- top rule\n\n### Rules\n\n- nested rule\n")
+        new, outcome = apply_overlay_op(
+            section,
+            {"op": "replace", "match": "top", "line": "x", "subheading": "Rules"},
+        )
+        assert outcome == "noop_no_match"
+        assert "- top rule" in serialize_overlay_doc(new)
+
+    def test_a_missing_subsection_is_rejected_rather_than_ignored(self):
+        section = parse_overlay_doc("- top rule\n")
+        _, reason = apply_overlay_op(
+            section,
+            {"op": "replace", "match": "top", "line": "x", "subheading": "NoSuch"},
+        )
+        assert reason == "subheading_missing"
 
     def test_indentation_of_the_matched_bullet_survives(self):
         section = parse_overlay_doc("- top\n  - nested one\n")

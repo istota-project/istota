@@ -196,9 +196,22 @@ def validate_appendable_line(line: str) -> str | None:
     because it would alter the section structure on the next parse. A bullet
     whose body merely contains `#` (hashtags, footnote markers, code-comment
     notes) is allowed — only `# `, `## `, ... shapes are blocked.
+
+    An embedded newline is rejected for the same reason one op is one bullet
+    everywhere else here. `_HEADING_SHAPED_RE` is not `MULTILINE`, so it only
+    ever examined the first line, and `--line "note\\n### Injected"` therefore
+    inserted a real subheading past a check whose whole job is to stop one.
+    Worse than the heading itself is what follows: the injected lines are
+    separate elements on the next parse, so the `remove` that undoes the
+    append pops one of them and orphans the rest permanently, and every later
+    append lands in a region the user did not choose. Both dedup paths and
+    both `pop`/`replace` paths assume one line per bullet, so the contract is
+    enforced rather than the symptom patched.
     """
     if not line or not line.strip():
         return "empty_line"
+    if "\n" in line or "\r" in line:
+        return "line_contains_newline"
     stripped = line.lstrip()
     body = normalize_bullet_text(line)
     if _HEADING_SHAPED_RE.match(body) or _HEADING_SHAPED_RE.match(stripped):
@@ -330,17 +343,27 @@ def insert_bullet_in_region(
     return "applied"
 
 
-def find_unique_bullet(section: Section, needle: str) -> int | str:
+def find_unique_bullet(
+    section: Section, needle: str, region: tuple[int, int] | None = None
+) -> int | str:
     """Return the index of the single bullet whose text contains `needle`.
 
-    Searches every bullet line in the section — top region AND subsections —
-    so stale bullets anywhere are reachable. `### subheading` lines are never
-    candidates (they classify as 'subheading', not 'bullet'). Returns the
-    reason string `"noop_no_match"` (zero) or `"multiple_matches"` (>1) when
-    there isn't exactly one hit.
+    By default searches every bullet line in the section — top region AND
+    subsections — so stale bullets anywhere are reachable. `### subheading`
+    lines are never candidates (they classify as 'subheading', not 'bullet').
+    Returns the reason string `"noop_no_match"` (zero) or `"multiple_matches"`
+    (>1) when there isn't exactly one hit.
+
+    `region` bounds the search to a `(start, end)` line range. USER.md never
+    passes one and keeps whole-section reach; an overlay passes one when the
+    caller named a `### ` subsection, because there an explicit target that
+    silently matched somewhere else would be worse than no target at all.
+    It is also the only way to disambiguate a `multiple_matches` in a document
+    whose sole addressing dimension is the subsection.
     """
+    start, end = region if region is not None else (0, len(section.lines))
     matches: list[int] = []
-    for i in range(len(section.lines)):
+    for i in range(start, min(end, len(section.lines))):
         if classify_line(section.lines[i]) != "bullet":
             continue
         if needle in normalize_bullet_text(section.lines[i]).lower():

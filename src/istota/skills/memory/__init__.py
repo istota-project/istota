@@ -13,7 +13,8 @@ Subcommands:
                 into subsections.
   replace       Rewrite the single matching bullet in place.
   remove-heading Drop a whole `## ` section.
-  show          Print the current contents of USER.md (or one section).
+  show          Print USER.md, a CHANNEL.md or a skill overlay (or one
+                section / `### ` subsection of it).
   headings      List the `## ` heading names in order.
   skills        Inventory of the per-skill overlay files: what is customized,
                 and whether each one actually binds.
@@ -186,12 +187,24 @@ def _skill_index():
     and the rest of it deliberately reads env vars rather than a Config — see
     `_config_for_audit`. Only the `--skill` paths need to know which skill
     names exist, so only they pay for the TOML parse and the frontmatter scan.
+
+    Guarded because it is the only thing in this CLI that can raise. Every
+    other refusal here returns one JSON line on stdout, and `main` has no
+    exception handling — so a malformed `config.toml` or an unreadable skills
+    directory would hand the model a traceback on stderr and nothing on
+    stdout, which reads as "the command did nothing" rather than as a failure.
     """
     from istota.config import load_config
     from istota.skills._loader import load_skill_index
 
-    config = load_config()
-    index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    try:
+        config = load_config()
+        index = load_skill_index(
+            config.skills_dir, bundled_dir=config.bundled_skills_dir
+        )
+    except Exception as e:  # noqa: BLE001 — the envelope contract is the point
+        _err("skill_index_unavailable", detail=f"{type(e).__name__}: {e}")
+        sys.exit(1)
     return index, config
 
 
@@ -209,8 +222,19 @@ def _skill_overlay_path(skill: str, *, verb: str) -> Path:
     document through the operator override, but a guard against a casual
     preference line landing in the safety layer. Only the verbs that *put text
     in* are refused — `append` and `replace`. `remove` and `show` cannot add a
-    line, and refusing them would leave a hand-planted file in that directory
-    with no way to read it or take it out.
+    line, so a file hand-planted in one of those two slots is still readable
+    and removable through the sanctioned path.
+
+    The two refusals are deliberately not symmetric, and the asymmetry is
+    about where the name comes from rather than about convenience. A
+    denylisted name is one of two known strings, so `show --skill
+    sensitive_actions` involves no unbounded input and the only question is
+    whether the verb adds text. An unknown name is a caller-supplied path
+    component, and the skill index is the whole of what bounds it — there is
+    nothing else to check `develper` or `../../USER` against. So it is refused
+    on every verb, including the ones that only read. The cost is that a
+    misspelled file is visible in `memory skills` and removable only with the
+    file tools, which is what the error says.
     """
     from istota.skills._loader import OVERLAY_DENYLIST, _denylist_key
 
@@ -220,6 +244,10 @@ def _skill_overlay_path(skill: str, *, verb: str) -> Path:
             "unknown_skill",
             skill=skill,
             available_skills=sorted(index),
+            hint=(
+                "no overlay binds to this name. `memory skills` lists any file "
+                "already filed under it; remove one with the file tools"
+            ),
         )
         sys.exit(1)
     if verb in ("append", "replace") and _denylist_key(skill) in OVERLAY_DENYLIST:
@@ -341,36 +369,57 @@ def _read_overlay_text(path: Path) -> str:
     """`_read_overlay_bytes` with every refusal turned into an error envelope."""
     raw, reason = _read_overlay_bytes(path)
     if reason is not None:
-        _err(reason, path=str(path))
+        _err(reason, path=_mount_relative(path))
         sys.exit(1)
     assert raw is not None
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        _err("overlay_not_utf8", path=str(path))
+        _err("overlay_not_utf8", path=_mount_relative(path))
         sys.exit(1)
 
 
 def _check_overlay_dir() -> Path:
-    """Refuse a stand-in planted at `config/skills/`. Creates nothing.
+    """Refuse a redirected `config/skills/`. Creates nothing.
 
-    `O_NOFOLLOW` on the overlay file covers the *last* path component only, so
-    a `ln -s ~/.claude config/skills` inside the sandbox slips past it: every
-    read and write then resolves through the link to a directory of the
-    model's choosing. `mkdir(exist_ok=True)` and `os.replace` follow it too.
-    The filename is bounded to a known skill's `<name>.md`, so nothing can be
-    *aimed* at a chosen file — but the directory can, and this `lstat` is what
-    stops it. Every `--skill` path runs it, reads included: a read through a
-    redirected directory is the same hole in the cheaper direction.
+    `O_NOFOLLOW` on the overlay file covers the *last* path component, and an
+    `lstat` on `skills` covers one more. Neither covers an ancestor, and every
+    ancestor is model-writable: `{mount}/Users/{user_id}` is bound read-write
+    into that user's sandbox, so `mv config config.real && ln -s /anywhere
+    config` is two commands from inside it. The link's target is a string
+    resolved *host-side* by this unsandboxed CLI, so it need not exist in the
+    namespace — which turned `append --skill developer` into a write of
+    model-chosen content to a model-chosen directory, and `show --skill
+    developer` into a read back out of one. `mkdir(parents=True)` obligingly
+    created the missing `skills/` at the far end.
+
+    So containment is checked, not just the leaf's shape: the resolved
+    directory must sit under the resolved `{mount}/Users/{user_id}`, the same
+    equality-under-a-known-root pattern `sandbox_cache_sweeper` and
+    `repos_relocate` use. Both sides are resolved because the mount itself is
+    reached through symlinks on some hosts, and comparing a resolved path to
+    an unresolved root reads every path as outside.
+
+    The leaf is held to the stricter of the two rules — it may not be a
+    symlink at all — because it is the component this CLI creates and owns.
+    An *ancestor* link that stays inside the user's own tree passes: that
+    leads nowhere the user could not already reach, and refusing it would
+    break someone who had reorganised their own config directory.
 
     Not atomic with the write that follows — the check and the `os.replace`
     are separated by the op, so a directory swapped in between is not covered.
     This closes the planted-link case, which is the one a model reaches with a
-    single command; a genuine race against the daemon is not addressed here.
+    couple of commands; a genuine race against the daemon is not addressed.
     """
     d = _overlay_dir()
     if d.is_symlink() or (d.exists() and not d.is_dir()):
-        _err("overlay_dir_not_a_directory", path=str(d))
+        _err("overlay_dir_not_a_directory", path=_mount_relative(d))
+        sys.exit(1)
+    user_root = _mount_path() / "Users" / _user_id()
+    resolved = Path(os.path.realpath(d))
+    resolved_root = Path(os.path.realpath(user_root))
+    if resolved != resolved_root and resolved_root not in resolved.parents:
+        _err("overlay_dir_outside_user_tree", path=_mount_relative(d))
         sys.exit(1)
     return d
 
@@ -404,8 +453,16 @@ def _atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        # mkstemp is 0600; this becomes a file the user reads over Nextcloud.
-        os.chmod(tmp, 0o644)
+            # mkstemp is 0600; this becomes a file the user reads over
+            # Nextcloud. `fchmod` on the open descriptor rather than `chmod`
+            # on the name: the staging file is created inside a directory
+            # every entry of which is model-plantable, and the model is the
+            # party that invoked this CLI, so it knows when the window between
+            # the close and the mode change opens. A symlink swapped in there
+            # would take the 0644 to whatever it names. The descriptor cannot
+            # be redirected. `os.replace` needs no such care — rename does not
+            # follow the final component.
+            os.fchmod(fh.fileno(), 0o644)
         os.replace(tmp, path)
     except OSError:
         tmp.unlink(missing_ok=True)
@@ -542,7 +599,11 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
     there reads as "this skill is configured" and would need `memory skills` to
     contradict it.
     """
-    from istota.skills._loader import OVERLAY_MAX_BYTES, OVERLAY_WARN_BYTES
+    from istota.skills._loader import (
+        OVERLAY_MAX_BYTES,
+        OVERLAY_WARN_BYTES,
+        overlay_effective_body,
+    )
 
     path = target.path
     try:
@@ -564,10 +625,28 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
             }
             if outcome == "applied":
                 new_text = serialize_overlay_doc(new_section)
-                if new_text.strip():
+                size = len(new_text.encode("utf-8"))
+                # Refused *before* the write, because past this bound the file
+                # can no longer be read by `_read_overlay_bytes` — and `remove`
+                # is the only way to shrink one. Letting the write through left
+                # a file the loader ignores and this CLI can neither show nor
+                # edit, recoverable only from a host shell. Reachable by one
+                # oversized `--line` or by enough ordinary appends.
+                if size > _MAX_OVERLAY_READ_BYTES:
+                    _audit_for(args, op_dict, "overlay_would_exceed_read_cap",
+                               target=target, applied=False)
+                    return _err(
+                        "overlay_would_exceed_read_cap",
+                        skill=target.skill,
+                        bytes=size,
+                        cap=_MAX_OVERLAY_READ_BYTES,
+                    )
+                # Emptiness is the loader's own reduction, not `.strip()`: a
+                # file left holding nothing but frontmatter has bytes and
+                # loads as nothing, so `ls` would call it configured forever.
+                if overlay_effective_body(new_text):
                     _ensure_overlay_dir()
                     _atomic_write(path, new_text)
-                    size = len(new_text.encode("utf-8"))
                     payload["bytes"] = size
                     # An overlay past the loader's hard cap is not loaded at
                     # all, so a write that crosses it produces a file that is
@@ -771,6 +850,7 @@ def cmd_skills(args) -> int:
         OVERLAY_MAX_BYTES,
         _denylist_key,
         effective_disabled_skills,
+        overlay_effective_body,
     )
 
     index, config = _skill_index()
@@ -806,7 +886,12 @@ def cmd_skills(args) -> int:
             except UnicodeDecodeError:
                 reason = reason or "overlay_not_utf8"
             else:
-                body = [ln for ln in text.split("\n") if ln.strip()]
+                # The loader's own reduction, so `binds` is its answer rather
+                # than a re-derivation that agrees on five gates and not the
+                # sixth. A frontmatter-only file has bytes and lines and loads
+                # as nothing.
+                effective = overlay_effective_body(text)
+                body = [ln for ln in effective.split("\n") if ln.strip()]
                 row["lines"] = len(body)
                 row["first_line"] = body[0].strip()[:_FIRST_LINE_CHARS] if body else ""
                 if not body:
@@ -826,7 +911,7 @@ def cmd_skills(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.memory",
-        description="Runtime memory writes (USER.md / CHANNEL.md)",
+        description="Runtime memory writes (USER.md / CHANNEL.md / skill overlays)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -885,7 +970,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_channel_flag(p_rmh)
     _add_skill_flag(p_rmh)
 
-    p_show = sub.add_parser("show", help="Print USER.md (optionally filtered to one heading).")
+    p_show = sub.add_parser("show", help="Print USER.md, a CHANNEL.md, or a skill overlay (--skill), optionally filtered to one heading.")
     p_show.add_argument("--heading")
     _add_channel_flag(p_show)
     _add_skill_flag(p_show)

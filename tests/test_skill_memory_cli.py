@@ -740,6 +740,202 @@ class TestOverlayPlantedPaths:
         assert "TOP SECRET" not in captured
         assert json.loads(captured)["error"] == "overlay_dir_not_a_directory"
 
+    def test_a_symlinked_ancestor_cannot_redirect_the_write(
+        self, tmp_path, overlay_env, capsys
+    ):
+        # `config/` is an ordinary entry in the read-write-bound user tree, so
+        # `mv config config.real && ln -s /anywhere config` is two commands
+        # from inside the sandbox — and the leaf `lstat` never sees it. This
+        # wrote model-chosen content to a model-chosen directory, and
+        # `mkdir(parents=True)` obligingly created `skills/` at the far end.
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        config_dir = overlay_env.overlays.parent
+        config_dir.rename(tmp_path / "config.real")
+        config_dir.symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", "developer", "--line", "pwned"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "overlay_dir_outside_user_tree"
+        assert list(victim.iterdir()) == []
+
+    def test_a_symlinked_ancestor_cannot_redirect_the_read(
+        self, tmp_path, overlay_env, capsys
+    ):
+        victim = tmp_path / "victim"
+        (victim / "skills").mkdir(parents=True)
+        (victim / "skills" / "developer.md").write_text("- TOP SECRET TOKEN\n")
+        config_dir = overlay_env.overlays.parent
+        config_dir.rename(tmp_path / "config.real")
+        config_dir.symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--skill", "developer"])
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        assert json.loads(captured)["error"] == "overlay_dir_outside_user_tree"
+
+    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(
+        self, overlay_env, capsys
+    ):
+        # Containment is the user's own root, not the literal path. A link
+        # that stays inside the tree the sandbox binds read-write leads
+        # nowhere the user could not already reach, so refusing it would be a
+        # stricter rule than the threat calls for — and would break a user who
+        # had reorganised their own config directory.
+        config_dir = overlay_env.overlays.parent
+        real = config_dir.parent / "config.real"
+        config_dir.rename(real)
+        config_dir.symlink_to(real, target_is_directory=True)
+
+        memory_main(["append", "--skill", "developer", "--line", "a rule"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert (real / "skills" / "developer.md").read_text() == "- a rule\n"
+
+
+class TestOverlayUnreadableFiles:
+    """The three refusals `_read_overlay_bytes` can return that no planted
+    inode produces. Each must reach the caller as an error — reporting one as
+    "file absent" is what would let `append` clobber it."""
+
+    def test_a_file_over_the_read_cap_is_refused_on_both_paths(
+        self, overlay_env, capsys
+    ):
+        from istota.skills.memory import _MAX_OVERLAY_READ_BYTES
+
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- padding\n" * (_MAX_OVERLAY_READ_BYTES // 10 + 10))
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--skill", "developer"])
+        assert json.loads(capsys.readouterr().out)["error"] == (
+            "overlay_unreadably_large"
+        )
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "overlay_unreadably_large"
+
+    def test_a_non_utf8_file_is_refused_on_both_paths(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_bytes(b"- caf\xff\xfe\n")
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--skill", "developer"])
+        assert json.loads(capsys.readouterr().out)["error"] == "overlay_not_utf8"
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "overlay_not_utf8"
+
+    @pytest.mark.requires_dac
+    def test_an_unreadable_file_is_refused_not_treated_as_absent(
+        self, overlay_env, capsys
+    ):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- a rule\n")
+        f.chmod(0o000)
+        try:
+            with pytest.raises(SystemExit):
+                memory_main(["append", "--skill", "developer", "--line", "new"])
+            assert json.loads(capsys.readouterr().out)["error"] == (
+                "overlay_unreadable"
+            )
+        finally:
+            f.chmod(0o644)
+        # Not clobbered by an append that read it as absent.
+        assert f.read_text() == "- a rule\n"
+
+    def test_a_write_past_the_read_cap_is_refused_before_it_lands(
+        self, overlay_env, capsys
+    ):
+        # Otherwise one oversized append produces a file the loader ignores
+        # and this CLI can no longer show, edit or shrink — recoverable only
+        # from a host shell.
+        from istota.skills.memory import _MAX_OVERLAY_READ_BYTES
+
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- seed\n")
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--skill", "developer",
+                "--line", "x" * (_MAX_OVERLAY_READ_BYTES + 10),
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "overlay_would_exceed_read_cap"
+        assert f.read_text() == "- seed\n"
+        # Still editable, which is the whole point of refusing.
+        memory_main(["show", "--skill", "developer"])
+        assert capsys.readouterr().out == "- seed\n"
+
+
+class TestOverlayFrontmatterOnly:
+    """A file holding nothing but frontmatter has bytes and lines and loads as
+    nothing. `binds` and delete-on-empty both have to be the loader's answer,
+    not a second derivation of it."""
+
+    FM = "---\ncreated: 2026-08-28\nauthor: someone\n---\n\n"
+
+    def test_the_inventory_reports_it_as_not_binding(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_text(self.FM)
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "empty"
+
+    def test_removing_the_last_bullet_deletes_it_despite_the_frontmatter(
+        self, overlay_env, capsys
+    ):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text(self.FM + "- only rule\n")
+        memory_main(["remove", "--skill", "developer", "--match", "only"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        assert out["removed_file"] is True
+        assert not f.exists()
+
+    def test_the_loader_agrees_with_the_inventory(self, overlay_env):
+        # The property both of the above rest on, asserted directly against
+        # the loader's own reduction rather than inferred from the CLI.
+        from istota.skills._loader import overlay_effective_body
+
+        assert overlay_effective_body(self.FM) == ""
+        assert overlay_effective_body(self.FM + "- a rule") == "- a rule"
+
+
+class TestOverlayScopedEdits:
+    def test_heading_scopes_a_remove_to_its_subsection(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- top rule\n\n### Testing\n\n- nested rule\n")
+        memory_main([
+            "remove", "--skill", "developer", "--heading", "Testing",
+            "--match", "top",
+        ])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "noop_no_match"
+        assert "- top rule" in f.read_text()
+
+    def test_a_misspelled_heading_does_not_mutate_the_file(
+        self, overlay_env, capsys
+    ):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- top rule\n\n### Testing\n\n- nested rule\n")
+        before = f.read_text()
+        with pytest.raises(SystemExit):
+            memory_main([
+                "replace", "--skill", "developer", "--heading", "Nope",
+                "--match", "top", "--line", "rewritten",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "subheading_missing"
+        assert out["available_subheadings"] == ["Testing"]
+        assert f.read_text() == before
+
 
 class TestOverlayShow:
     def test_show_prints_the_whole_overlay(self, overlay_env, capsys):
