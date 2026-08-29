@@ -491,8 +491,8 @@ workflow of three lines is a perfectly good one.
 
 - **config/skills/developer.md** — the usual home. It is read only when the
   `developer` skill loads, which is exactly when a workflow decision applies,
-  and it costs nothing on the tasks that will never write code. Write it with
-  `istota-skill memory append --skill developer --line "..."`.
+  and it costs nothing on the tasks that will never write code. Edit it as a
+  file, then run `istota-skill skills overlays` and check it says `binds: true`.
 - **config/USER.md** — applies to every task, coding or not. The right home for
   a rule that would still be wrong to ignore on a task where the `developer`
   skill did not load. Anything about what this machine can afford belongs here:

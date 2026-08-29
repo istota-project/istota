@@ -68,7 +68,7 @@ read_overlay_bytes(path: Path, *, max_bytes=OVERLAY_READ_CAP_BYTES) -> tuple[byt
 inspect_overlay(path, *, known_skills, disabled_skills=(), max_read_bytes=...) -> OverlayInspection
 overlay_effective_body(text: str) -> str
     # The four shared overlay primitives. `inspect_overlay(...).binds` is the
-    # single bind predicate behind `memory skills` and `doctor`; the two must
+    # single bind predicate behind `skills overlays` and `doctor`; the two must
     # not re-derive it, or one says a file is live while the prompt lacks it.
 build_disclosure_index(menu_names, skill_index) -> str            # "" when menu empty
 ```
@@ -211,7 +211,7 @@ Gates, all in `_loader.py`. On the load path `_load_user_overlay` applies `OVERL
 
 For the same ordering reason, the overlay is appended inside `load_skills` and therefore lands *before* the companion bodies on the show path. A user overlay must never sit downstream of a safety companion, where recency would let it soften one. `tests/test_skills_loader_cli.py::TestShowOverlays::test_the_overlay_never_follows_a_safety_companion` asserts the index ordering.
 
-Written and inspected through `istota-skill memory --skill` (see `.claude/rules/memory.md`), indexed for search as `source_type="skill_overlay"`, and swept by `doctor`'s `config.skill_overlays`. User-facing documentation is `docs/configuration/per-user.md`.
+**Written by the user as an ordinary file — there is no CLI write path** (ISSUE-343; the reasoning is in `.claude/rules/memory.md`). Read through `istota-skill skills overlay <name>` and inventoried by `istota-skill skills overlays`, both of which resolve the directory through `storage.resolve_user_skill_overlays_dir` so the containment rule is `contained_overlay_dir` rather than a second copy. Indexed for search as `source_type="skill_overlay"` by `memory/search.py::reindex_skill_overlays`, called from `reindex_all` and from `scheduler.check_skill_overlay_reindex` on `scheduler.skill_overlay_reindex_interval` (6h) — a scheduler tick rather than the sleep cycle, because `check_sleep_cycles` is gated on `sleep_cycle.enabled` and on the primary brain's breaker and this pass makes no model call. See `.claude/rules/memory.md`. Swept by `doctor`'s `config.skill_overlays`. User-facing documentation is `docs/configuration/per-user.md`.
 
 ## Skill Index (from skill.md frontmatter)
 

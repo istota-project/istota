@@ -133,6 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Your own additions to a skill's instructions are now edited as files, not through a command.** Those files are yours to write, and one of them is a twelve-step coding workflow with paragraphs and code blocks in it — which the old commands could not write at all, since they only added, removed or reworded a single bullet. Ask the bot to change one, or open it in Nextcloud.
+
+- Two read-only commands remain and have moved: `istota-skill skills overlay <name>` prints one, and `istota-skill skills overlays` lists what you have customized and whether each file actually loads. Run the second after an edit — a file that does not load is otherwise completely silent, and it says which of the four reasons applies.
+
+- Searching your memory finds these files on a schedule now rather than the instant they change. The old update ran from the write command, which never covered editing the file yourself — the way it was always meant to be done.
+
 - **Briefing schedules are now the settings page and the operator's config, and nothing else.** `BRIEFINGS.md` in your config folder is no longer read. It used to win over everything: a time or a room you set on the settings page was overridden by whatever that file said, while the page went on showing you the value you had picked. Content had already moved to the block editor, so all the file still controlled was the schedule and where it went — and it controlled those in a way nobody could see.
 
 - **Upgrade note:** on first start after the update, whatever your file held is copied into the settings, once, and the file's time, room and delivery choice win over what is stored — so no briefing you were actually receiving changes when or where it arrives. From then on the settings page is the only authority and your edits stick. Your own `BRIEFINGS.md` is left where it is; it does nothing now and can be deleted, and new setups get no such file. The `[briefings.components]` toggles some files still carry are not copied over: nothing has read them since content moved to blocks, and importing them would add content you have not been getting.

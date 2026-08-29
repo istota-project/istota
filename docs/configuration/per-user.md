@@ -194,11 +194,11 @@ The text lands at the end of the skill's section under a `#### alice's configura
 
 Rules:
 
-- Plain markdown, bullets preferred. YAML frontmatter is stripped if present.
+- Plain markdown. Bullets, prose, fenced code blocks — whatever the instruction needs. YAML frontmatter is stripped if present.
 - No `# ` or `## ` headings. The overlay is rendered under a `#### ` label of its own, and a heading that shallow ends that block and floats the rules up as a new section peer to the whole skills reference, detached from the skill they configure. One written anyway is demoted to `#### ` at load time rather than dropped, so a hand-edited file misbehaves visibly; `istota doctor` warns about it. `### ` and deeper are fine.
-- Over 24 KB warns that the cap is close. Over 32 KB is not loaded at all — the write still lands, so the file is still readable and shrinkable through the CLI, but it reaches no prompt. Only a write that would take the file past 1 MB is refused outright, since past that the CLI could no longer read it back to shrink it.
+- Over 24 KB warns that the cap is close. Over 32 KB is not loaded at all — the file stays on disk and stays editable, but it reaches no prompt. `istota-skill skills overlays` reports both, as a warning and as `binds: false` with `reason: over_cap`.
 - `sensitive_actions` and `untrusted_input` accept no overlay. Not a security boundary — the operator override can still replace either document — but a guard against a casual preference line landing in the safety layer.
-- A file named for a skill that does not exist is silently never read. Two things report it: `istota-skill memory skills` for one user, and `istota doctor`'s `config.skill_overlays` check across every user's tree.
+- A file named for a skill that does not exist is silently never read. Two things report it: `istota-skill skills overlays` for one user, and `istota doctor`'s `config.skill_overlays` check across every user's tree.
 - Overlays are read from the workspace mount, so a deployment without one has no overlays. Every failure above degrades to exactly the prompt the skill would have had with no overlay at all.
 - Editing an overlay does not move the skills fingerprint, so it does not fire the "skills changed" notice. That notice would otherwise appear and then say nothing about the edit that triggered it.
 
@@ -210,19 +210,18 @@ A note-naming convention is irrelevant on a task that writes no note, and belong
 
 Apply the test to the **action** rather than the topic. If what the rule governs can be done with the skill unloaded, the rule is not skill-specific however much it sounds like it, and an overlay is the wrong home because it will not be loaded on the task that gets it wrong. Editing `CRON.md` is the case that looks most like an exception and is not: only the `reminders` and `schedules` skills write that file, but it is an ordinary file in the config directory that any task can edit, and a malformed edit unschedules every job silently — so its rules belong in `USER.md`.
 
-**Editing them.** Through the memory skill CLI, under the same file lock, atomic write and audit log as `USER.md`:
+**Editing them.** As files. Open one in the Nextcloud editor, or ask the bot to change it and it will use its file tools. There is no CLI that writes an overlay, deliberately: an overlay is a document you author, and it was tried the other way — the memory CLI carried the same one-bullet-at-a-time ops it uses on `USER.md`, and they could address roughly a fifth of a real overlay. They could not write a paragraph or a code block at all, and removing a bullet orphaned the code block underneath it.
+
+Two read-only commands, on the skills CLI:
 
 ```bash
-istota-skill memory skills                      # inventory: what is customized, and does it load
-istota-skill memory show --skill developer
-istota-skill memory append --skill developer --line "A full test run takes about an hour here — ask first."
-istota-skill memory replace --skill developer --match "about an hour" --line "A full test run takes about two hours here — ask first."
-istota-skill memory remove --skill developer --match "about two hours"
+istota-skill skills overlays            # inventory: what is customized, and does each one load
+istota-skill skills overlay developer   # print one
 ```
 
-`append` creates the file. A `remove` that leaves the file *empty* deletes it, so the directory stays an honest inventory — note that emptiness is judged on the whole file, so an overlay whose last bullet goes but whose `### ` subheading remains is kept, and the skill's prompt then carries that heading with nothing under it. `--skill` and `--channel` are mutually exclusive, an unknown skill name is refused with the list of known ones, and `add-heading` / `remove-heading` / `headings` are refused because an overlay has no `## ` sections. Under `--skill`, `--heading` names a `### ` subsection of the overlay rather than a section of `USER.md`.
+**Check `binds` after an edit.** That is the whole verification story, and it is a better one than a write-time gate: binding is a property of the file, so one command catches a misspelled skill name, a file over the cap, a denylisted slot and a file holding nothing but frontmatter, and says which in its `reason` field. Nothing warns you at the moment of the edit, because nothing is watching the edit — a hand edit produces no audit entry and no notification anywhere. It cannot corrupt a prompt either; the worst it can do is not load.
 
-Overlay text is indexed for memory search under the `skill_overlay` source type, so a search finds a rule without the user knowing which file holds it. The nightly curator is shown the inventory — skill names and line counts, never the bodies — so it does not copy a rule back into `USER.md` a week after it moved out.
+Overlay text is indexed for memory search under the `skill_overlay` source type, so a search finds a rule without the user knowing which file holds it. That index is refreshed on a schedule (`scheduler.skill_overlay_reindex_interval`, six hours by default, and once on start-up), by a pass that walks the whole directory — so a rule you added by hand becomes searchable within a few hours rather than immediately, and one you deleted stops being searchable on the same schedule. The nightly curator is shown the inventory — skill names and line counts, never the bodies — so it does not copy a rule back into `USER.md` a week after it moved out.
 
 ## Admin vs non-admin
 

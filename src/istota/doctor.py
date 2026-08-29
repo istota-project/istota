@@ -2883,7 +2883,7 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
             remedy=(
                 "A file here is only read when its name is a known skill that takes "
                 "an overlay and its body is under the loading cap. Run `istota-skill "
-                "memory skills` as that user for the per-file verdict, then rename, "
+                "skills overlays` as that user for the per-file verdict, then rename, "
                 "shrink or remove it."
             ),
         )

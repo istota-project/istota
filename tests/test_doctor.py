@@ -2634,7 +2634,7 @@ class TestSkillOverlays:
     def test_a_disabled_skill_is_deliberately_not_reported(self, make_config, tmp_path):
         """Its overlay binds again the moment the skill is switched back on, so
         it is a fact about the configuration and not a defect in the file.
-        `memory skills` still says so for the user asking about their own."""
+        `skills overlays` still says so for the user asking about their own."""
         config = self._config(make_config, tmp_path, disabled_skills=["browse"])
         (self._overlays(config) / "browse.md").write_text("- a rule\n")
         r = self._run(config)
