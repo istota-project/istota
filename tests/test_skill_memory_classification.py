@@ -27,6 +27,35 @@ class TestClassificationGate:
         for label in ["Temporal event", "Stable factual claim", "Behavioral instruction"]:
             assert label in body, f"missing classification branch: {label!r}"
 
+    def test_the_skill_overlay_branch_is_present(self):
+        body = _body()
+        assert "Skill-specific instruction" in body
+        assert "memory append --skill" in body
+
+    def test_the_overlay_branch_carries_the_prohibition_test(self):
+        """The gate that decides USER.md vs overlay, not just a mention of the
+        target. An overlay only reaches the prompt when its skill is selected,
+        and selection is heuristic — so a rule that must hold on a task where
+        the skill did not load has to be routed to USER.md by name, or the
+        branch above quietly turns every prohibition into a conditional one.
+        """
+        body = _body()
+        assert "would it be *wrong* to ignore this rule" in body.lower()
+        assert "not loaded" in body
+        assert "merely irrelevant" in body
+
+    def test_the_overlay_section_states_the_flat_document_rules(self):
+        """`--heading` means something different under `--skill`, and three
+        verbs are refused outright. A model that guesses either wastes a turn
+        on a JSON refusal it could have read here.
+        """
+        body = _body()
+        assert "### Per-skill overlays" in body
+        assert "memory skills" in body
+        for verb in ["add-heading", "remove-heading", "headings"]:
+            assert verb in body
+        assert "sensitive_actions" in body and "untrusted_input" in body
+
     def test_routes_to_both_cli_targets(self):
         body = _body()
         assert "add-fact" in body
