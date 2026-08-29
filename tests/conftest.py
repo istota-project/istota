@@ -421,6 +421,22 @@ LEAN_READY_TIMEOUT = 120
 #: The tiers that must run `-n0`, and therefore the ones the guard below covers.
 SERIAL_TIER_MARKERS = ("smoke", "full", "testbed")
 
+#: The markers `addopts` deselects on an ordinary `uv run pytest`.
+#:
+#: Restated here because pytest's `-m` and testmon's selection are mutually
+#: exclusive: testmon switches its selection off entirely the moment it sees a
+#: marker expression ("selection automatically deactivated because -m was
+#: used"), so an incremental run cannot express the default deselection the way
+#: the default run does. `ISTOTA_DESELECT_TIERS=1` applies the same set through
+#: the collection hook instead, which leaves `-m` free for testmon.
+#:
+#: `tests/test_tier_deselection.py` fails if this falls out of step with
+#: addopts — the direction that matters is a marker deselected there and
+#: missing here, which would have an incremental run building Docker images.
+DISCRETIONARY_MARKERS = (
+    "integration", "live", "linux", "image", "smoke", "full", "testbed", "ml",
+)
+
 #: Every compose project these tiers create starts with it, which is what makes
 #: the session-start sweep able to find leftovers without touching anything else
 #: — a developer's own demo or red-team stack is never named this.
@@ -480,6 +496,19 @@ def pytest_collection_modifyitems(config, items):
     `numprocesses` in the workers so they do not re-fan-out. `_require_no_xdist`
     is the check that binds.
     """
+    if os.environ.get("ISTOTA_DESELECT_TIERS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        keep, drop = [], []
+        for item in items:
+            target = drop if any(
+                item.get_closest_marker(m) for m in DISCRETIONARY_MARKERS
+            ) else keep
+            target.append(item)
+        if drop:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = keep
+
     if not any(
         item.get_closest_marker(marker)
         for item in items

@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+#
+# qt -- run the tests your change actually affects, and nothing else.
+#
+# The full suite is ~16,700 tests and ~110s, and it is throughput-bound across
+# every core, so there is no way to make it meaningfully faster. The only lever
+# that shortens the edit/test loop is running fewer tests. pytest-testmon knows
+# which tests executed which source lines, so a Python change reruns only the
+# tests that touched it -- typically a fraction of a second.
+#
+# Two things about this are not obvious and are the whole reason this wrapper
+# exists rather than a documented flag:
+#
+#   * **testmon and `-m` are mutually exclusive.** testmon switches selection
+#     off entirely the moment it sees a marker expression, and this repo's
+#     `addopts` carries one (the discretionary-tier deselection). So the
+#     incremental run clears `addopts` and applies the same deselection through
+#     `ISTOTA_DESELECT_TIERS`, which `tests/conftest.py` reads.
+#     `tests/test_tier_deselection.py` keeps the two sets in step.
+#
+#   * **testmon cannot see into a subprocess.** Roughly 60 of this repo's test
+#     files drive a shell script, a git binary, a Dockerfile or a rendered
+#     template rather than the product's own Python. Changing
+#     `scripts/check-private-data.sh` selects *zero* tests, measured -- while
+#     the 39 tests that exercise it sit right there. So any non-Python change
+#     falls back to the full suite rather than being trusted to testmon.
+#
+#   * **One file crashes testmon outright.** `tests/test_devbox_exec_server.py`
+#     imports `docker/devbox/scripts/istota-exec-serve` in-process, and that
+#     program deliberately carries no `.py` suffix (it is on the container's
+#     PATH and invoked by name). testmon's `get_file` does
+#     `filename.rsplit(".", 1)[1]` on everything coverage traced, so an
+#     extensionless file raises IndexError and takes down the *whole* run --
+#     INTERNALERROR, exit 3, after every test has already passed. There is no
+#     config for it: testmon builds its Coverage with `config_file=False` and
+#     the line that would honour a coverage `omit` is commented out in its
+#     source. So the file is excluded here and covered by the full run instead.
+#     If another test starts importing an extensionless program, the
+#     INTERNALERROR check below catches it and falls back rather than reporting
+#     a green run that never finished.
+#
+# Usage:
+#   scripts/qt                 # the affected tests
+#   scripts/qt --full          # the whole suite, refreshing testmon's data
+#   scripts/qt --par           # affected tests, in parallel (for a central change)
+#   scripts/qt tests/test_x.py # scope it, still incrementally
+#
+# The data file is `.testmondata` (gitignored). Delete it to force a rebuild.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+DATA=".testmondata"
+FULL=0
+PAR=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    --full) FULL=1 ;;
+    --par) PAR=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+
+run_full() {
+  echo "qt: running the full suite (and refreshing testmon's data)" >&2
+  exec scripts/qtest uv run pytest --testmon -q "${args[@]+"${args[@]}"}"
+}
+
+[ "$FULL" = 1 ] && run_full
+
+if [ ! -f "$DATA" ]; then
+  echo "qt: no $DATA yet -- building it from a full run, once" >&2
+  run_full
+fi
+
+# --- The blind spot -------------------------------------------------------
+#
+# Anything that is not Python is invisible to testmon's tracing, so it forces a
+# full run. Prose is the only exception: a README cannot change a test's
+# outcome, and treating it as one would mean a 110s suite for a typo fix.
+changed() {
+  { git diff --name-only HEAD 2>/dev/null || true
+    git ls-files --others --exclude-standard 2>/dev/null || true
+  } | sort -u
+}
+
+non_python="$(changed | grep -vE '\.py$' | grep -vE '\.(md|rst|txt)$|^\.gitignore$|^LICENSE$' || true)"
+
+if [ -n "$non_python" ]; then
+  echo "qt: non-Python changes testmon cannot trace:" >&2
+  printf '  %s\n' $non_python >&2
+  run_full
+fi
+
+# --- Incremental ----------------------------------------------------------
+#
+# `-o addopts=` clears both the `-m` expression (which would disable testmon's
+# selection) and `-n auto`. Workers are chosen below from how much was actually
+# selected: xdist costs ~6s to start, which dwarfs a handful of tests, so the
+# common case is deliberately serial.
+export ISTOTA_DESELECT_TIERS=1
+
+# See the note above: this one file kills the run rather than failing a test.
+excludes=(--ignore=tests/test_devbox_exec_server.py)
+
+# Workers: serial by default. testmon's selection is applied at *run* time and
+# is invisible to `--collect-only` (which reports the whole collected set, not
+# the selected one), so there is no cheap way to size the pool from how much was
+# actually chosen -- the version of this that tried read "0 selected" for a run
+# that went on to execute 4,544 tests, and would have reported a green
+# "nothing affected" for a change touching the whole suite.
+#
+# Serial is right for the edit loop, where a handful of tests beat xdist's ~6s
+# startup. A change to something central is the exception: `db.py` selects ~4,500
+# tests, which is most of the suite and belongs in `--par` or `--full`.
+workers=(-n0)
+[ "$PAR" = 1 ] && workers=(-n auto)
+
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+set +e
+uv run pytest --testmon -o addopts= -p no:randomly -q \
+  "${workers[@]}" "${excludes[@]}" "${args[@]+"${args[@]}"}" 2>&1 | tee "$out"
+status=${PIPESTATUS[0]}
+set -e
+
+# An INTERNALERROR means testmon aborted the session -- every test may have
+# passed and the run still means nothing. Never let that read as success.
+if grep -q "INTERNALERROR" "$out"; then
+  echo "qt: testmon aborted the session (INTERNALERROR) -- falling back" >&2
+  run_full
+fi
+
+# 5 is pytest's "no tests ran", which here means nothing your change touched.
+if [ "$status" = 5 ]; then
+  echo "qt: nothing affected by your changes" >&2
+  exit 0
+fi
+exit "$status"

@@ -33,7 +33,27 @@ uv run pytest tests/test_doctor.py                           # one file, no sema
 uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 ```
 
-`addopts` in `pyproject.toml` pins `-n auto`, so the suite runs under pytest-xdist by default. New tests must be order-independent. For a local edit loop, `--testmon -n0` reruns only what your change touched; `-v` is only readable with `-n0`, since xdist interleaves worker output.
+`addopts` in `pyproject.toml` pins `-n auto`, so the suite runs under pytest-xdist by default. New tests must be order-independent. `-v` is only readable with `-n0`, since xdist interleaves worker output. For a local edit loop use `scripts/qt`, below — **not** a bare `--testmon`, which this repo's `addopts` silently disables.
+
+### The edit loop: `scripts/qt`
+
+```bash
+scripts/qt                     # only the tests your change affects
+scripts/qt --full              # the whole suite, refreshing testmon's data
+scripts/qt tests/test_db.py    # scoped, still incrementally
+```
+
+The full suite is ~16,700 tests in ~110s, and it is **throughput-bound across every core** — roughly 740s of CPU over 110s of wall, with no long pole (the slowest single test is 5s). Measured consequences: xdist's `worksteal`, `loadfile` and `loadscope` are all *slower* than the default `load`; gating the twenty slowest infrastructure files removes 1,179 tests and 4% of the wall time; and making individual tests cheaper backfires if it trades CPU for I/O. There is no version of "make the suite faster" that pays. The only lever is running fewer tests.
+
+`scripts/qt` is that lever. pytest-testmon records which tests executed which source lines, so an ordinary Python change reruns a handful of tests in under a second, and a change that affects nothing exits immediately.
+
+Two properties of the wrapper are worth knowing, because both are traps if you invoke testmon by hand:
+
+**testmon and `-m` are mutually exclusive.** testmon turns its selection off entirely the moment it sees a marker expression — it says so on a line most people scroll past: `testmon: selection automatically deactivated because -m was used`. This repo's `addopts` always carries one, for the discretionary-tier deselection, so a hand-run `uv run pytest --testmon` quietly runs *everything* while looking like it worked. `qt` clears `addopts` and applies the same deselection through `ISTOTA_DESELECT_TIERS=1`, which `tests/conftest.py` reads. `tests/test_tier_deselection.py` keeps the two sets in step, and fails loudly in the direction that matters — a marker deselected by `addopts` and missing from `DISCRETIONARY_MARKERS` would have an incremental run building Docker images.
+
+**testmon cannot see into a subprocess.** About sixty of this repo's test files drive a shell script, a git binary, a Dockerfile or a rendered template rather than the product's own Python. Measured: changing `scripts/check-private-data.sh` selects **zero** tests, while the 39 tests that exercise that script sit right there. So `qt` does not trust testmon with non-Python changes at all — any changed file that is not `.py` (prose aside) falls back to the full suite. That is the conservative direction, and it is why the fallback is automatic rather than a flag you have to remember.
+
+`.testmondata` is gitignored and local. Delete it to force a rebuild; `qt` rebuilds on its own if it is missing.
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Every run ends with one verdict line on stderr — `qtest: PASS exit=0 time=3m41s cmd: uv run pytest`, or `FAIL`, or `KILLED-SIGKILL`, or `NO-SLOT` — so a run read through `| tail`, which reports the pipe's exit code rather than the suite's, still says plainly how it went; stdout is left untouched. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
