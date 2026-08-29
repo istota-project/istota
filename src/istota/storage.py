@@ -31,7 +31,6 @@ Configuration files live in the `config/` subfolder:
 
 - **config/USER.md** — Persistent memory
 - **config/TASKS.md** — Task queue (`- [ ] do something`)
-- **config/BRIEFINGS.md** — Briefing schedule configuration
 - **config/HEARTBEAT.md** — Health monitoring configuration
 - **config/CRON.md** — Scheduled recurring jobs
 - **config/PERSONA.md** — Bot personality (editable copy of global persona)
@@ -56,8 +55,6 @@ instructions, read only when that skill loads. A development workflow for coding
 tasks usually goes in `config/skills/developer.md` — see `examples/WORKFLOW.md`.
 - **config/TASKS.md** — Task queue. Write `- [ ] do something` and Istota picks \
 it up automatically. Status updates are written back to the file.
-- **config/BRIEFINGS.md** — (Optional) Briefing schedule configuration. \
-Control your own briefing times, delivery channel, and components.
 - **config/HEARTBEAT.md** — (Optional) Health monitoring configuration. \
 Set up periodic checks that alert you when something needs attention.
 - **config/CRON.md** — (Optional) Scheduled recurring jobs. \
@@ -75,105 +72,27 @@ Additionally, you can share any of your own Nextcloud folders with Istota \
 for direct access to your files.
 """
 
-BRIEFINGS_TEMPLATE = """\
-# Briefing Schedule
-
-See `examples/BRIEFINGS.md` for all available options.
-
-```toml
-# [[briefings]]
-# name = "morning"
-# cron = "0 7 * * 1-5"         # 7am weekdays (in your timezone)
-# conversation_token = "{conversation_token}"
-# output = "talk"               # talk / email / ntfy (or a comma list, e.g. "talk,email")
-#
-# [briefings.components]
-# markets = true
-# news = true
-# calendar = true
-# todos = true
-# reminders = true
-# notes = true
-```
-"""
-
 BRIEFINGS_EXAMPLE = """\
 # Briefing Schedule
 
-Control your briefing times, delivery channel, and components.
-The scheduler reads this file automatically — changes take effect within ~60 seconds.
+This file is no longer read.
 
-## Example
+Briefing schedules used to live here. They are now the operator's TOML config
+plus your own entries in the database, which is what the settings page and the
+`istota briefing` command write. Anything this file held was carried over
+automatically the first time the new version started.
 
-```toml
-[[briefings]]
-name = "morning"
-cron = "0 7 * * 1-5"         # 7am weekdays (in your timezone)
-conversation_token = "abc123"
-output = "talk"               # talk / email / ntfy (or a comma list, e.g. "talk,email")
+The file was retired because it silently won: a schedule set in the settings
+page was overridden by whatever this file said, and the page went on showing
+the value you had chosen.
 
-[briefings.components]
-markets = true
-news = true
-calendar = true
-todos = true
-reminders = true
-notes = true
+## Changing a briefing
 
-[[briefings]]
-name = "evening"
-cron = "0 18 * * 1-5"        # 6pm weekdays
-conversation_token = "abc123"
-output = "talk"
+- In the web UI: Briefings, then Settings.
+- Just ask, in any room: "move my morning briefing to 8am".
 
-[briefings.components]
-markets = true
-news = true
-calendar = true
-```
-
-## Component Reference
-
-- **calendar** — Today's calendar events
-- **todos** — Pending items from your configured TODO file resource
-- **markets** — Market data from configured symbols
-- **news** — Headlines from configured news sources
-- **reminders** — Random reminder from your configured reminders file resource
-- **notes** — Summary of recent notes
-
-Components set to `true` expand using admin-configured defaults.
-Use a dict to override, e.g.: `markets = { enabled = true, futures = ["ES=F"] }`
-
-## Output Options
-
-- `output = "talk"` — Send to Nextcloud Talk room (requires `conversation_token`)
-- `output = "email"` — Send via email
-- `output = "ntfy"` — Send as an ntfy push notification
-- `output = "talk,email"` — Comma-separate surfaces to deliver to several at once
-
-## Cron Format
-
-Standard 5-field cron: `minute hour day-of-month month day-of-week`
-
-- `0 7 * * 1-5` — 7am weekdays
-- `0 18 * * *` — 6pm every day
-- `30 8 * * 1` — 8:30am Mondays only
-- `0 */6 * * *` — Every 6 hours
-
-Evaluated in the user's configured timezone.
+Your own `config/BRIEFINGS.md` (if you have one) is inert and can be deleted.
 """
-
-
-def _build_briefings_seed(config: "Config", user_id: str) -> str:
-    """Build seed BRIEFINGS.md content, filling conversation_token from admin config."""
-    token = ""
-    user_config = config.users.get(user_id)
-    if user_config:
-        for b in user_config.briefings:
-            if b.conversation_token:
-                token = b.conversation_token
-                break
-    return BRIEFINGS_TEMPLATE.format(conversation_token=token)
 
 
 # Template for initial HEARTBEAT.md file
@@ -398,7 +317,12 @@ def get_user_playbooks_path(user_id: str, bot_dir: str) -> str:
 
 
 def get_user_briefings_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's BRIEFINGS.md file."""
+    """Get the path to a user's retired ``BRIEFINGS.md``.
+
+    Nothing reads the file as config any more. The one caller left is
+    ``user_briefings.import_from_workspace_files``, which carries what it
+    holds into ``briefing_configs`` once.
+    """
     return f"{get_user_config_path(user_id, bot_dir)}/BRIEFINGS.md"
 
 
@@ -983,10 +907,10 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             tasks_file.write_text(TASKS_FILE_TEMPLATE)
             logger.debug("Created %s/config/TASKS.md for %s", bot_dir, user_id)
 
-        briefings_file = config_dir / "BRIEFINGS.md"
-        if not briefings_file.exists():
-            briefings_file.write_text(_build_briefings_seed(config, user_id))
-            logger.debug("Created %s/config/BRIEFINGS.md for %s", bot_dir, user_id)
+        # No BRIEFINGS.md is seeded. The file is retired as an input — briefings
+        # are the TOML config plus the `briefing_configs` table the web UI and
+        # `istota briefing` write. An existing one is left alone rather than
+        # deleted (it is the user's file), and `examples/BRIEFINGS.md` says so.
 
         heartbeat_file = config_dir / "HEARTBEAT.md"
         if not heartbeat_file.exists():

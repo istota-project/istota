@@ -48,7 +48,6 @@ from istota.storage import (
     _migrate_notes_to_workspace,
     _migrate_workspace_files,
     _migrate_workspace_to_bot_dir,
-    _build_briefings_seed,
     WORKSPACE_README,
     WORKSPACE_README_EXAMPLE,
     TASKS_FILE_TEMPLATE,
@@ -229,37 +228,20 @@ class TestMountOperations:
         ensure_user_directories_v2(mount_config, "alice")
         assert readme.read_text() == "custom content"
 
-    def test_briefings_file_created(self, mount_config):
+    def test_no_briefings_file_is_seeded(self, mount_config):
+        """The file is retired as an input, so nothing writes a new one."""
         ensure_user_directories_v2(mount_config, "alice")
         bf = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
-        assert bf.exists()
-        content = bf.read_text()
-        assert "Briefing Schedule" in content
-        assert "# markets = true" in content
+        assert not bf.exists()
 
-    def test_briefings_file_not_overwritten(self, mount_config):
+    def test_an_existing_briefings_file_is_left_alone(self, mount_config):
+        """It is the user's own file; the retirement does not delete it."""
         ensure_user_directories_v2(mount_config, "alice")
         bf = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
         bf.write_text("# my custom config")
 
         ensure_user_directories_v2(mount_config, "alice")
         assert bf.read_text() == "# my custom config"
-
-    def test_briefings_seed_includes_conversation_token(self, tmp_path):
-        from istota.config import BriefingConfig, UserConfig
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        user = UserConfig(briefings=[
-            BriefingConfig(name="morning", cron="0 6 * * *", conversation_token="abc123"),
-        ])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
-        ensure_user_directories_v2(config, "alice")
-        bf = mount / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
-        assert 'conversation_token = "abc123"' in bf.read_text()
-
-    def test_briefings_seed_empty_token_when_no_briefings(self, mount_config):
-        content = _build_briefings_seed(mount_config, "alice")
-        assert 'conversation_token = ""' in content
 
     def test_examples_directory_created(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")

@@ -1,16 +1,19 @@
-"""Configuration loading for istota.briefing_loader module."""
+"""Configuration loading for istota.briefing_loader module.
 
+``get_briefings_for_user`` used to apply a workspace ``BRIEFINGS.md`` over the
+config's own briefings. That file is retired as an input — see
+``tests/test_briefings_md_retirement.py`` for the read path ignoring it and for
+the one-shot import that carries its contents into ``briefing_configs``. What
+is left here is the config read itself, plus the parser the import inherited.
+"""
 
-
-from istota.skills.briefing import (
-    _load_workspace_briefings,
-    get_briefings_for_user,
-)
+from istota.skills.briefing import get_briefings_for_user
 from istota.config import (
     BriefingConfig,
     Config,
     UserConfig,
 )
+from istota.user_briefings import parse_briefings_md
 
 
 def _wrap_toml(toml_content: str) -> str:
@@ -31,117 +34,66 @@ Additional notes.
 """
 
 
-class TestLoadWorkspaceBriefings:
-    def test_no_mount_returns_none(self):
-        config = Config(nextcloud_mount_path=None)
-        assert _load_workspace_briefings(config, "alice") is None
+class TestParseBriefingsMd:
+    """The file parser, now owned by the one-shot import.
 
-    def test_file_not_found(self, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        config = Config(nextcloud_mount_path=mount)
-        assert _load_workspace_briefings(config, "alice") is None
+    ``None`` and ``[]`` mean different things to the caller: ``None`` is "could
+    not read this", which leaves the user's sentinel unset for another try,
+    and ``[]`` is "read fine, named nothing".
+    """
 
-    def test_valid_toml(self, tmp_path):
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(_wrap_toml(
+    def test_valid_toml(self):
+        entries = parse_briefings_md(_wrap_toml(
             '[[briefings]]\n'
             'name = "morning"\n'
             'cron = "0 7 * * *"\n'
             'conversation_token = "room1"\n'
             'output = "talk"\n'
+        ))
+        assert entries == [{
+            "name": "morning",
+            "cron": "0 7 * * *",
+            "conversation_token": "room1",
+            "output": "talk",
+        }]
+
+    def test_components_are_returned_but_the_caller_drops_them(self):
+        entries = parse_briefings_md(_wrap_toml(
+            '[[briefings]]\n'
+            'name = "morning"\n'
+            'cron = "0 7 * * *"\n'
             '\n'
             '[briefings.components]\n'
             'calendar = true\n'
         ))
-        config = Config(nextcloud_mount_path=mount)
-        result = _load_workspace_briefings(config, "alice")
-        assert result is not None
-        assert len(result) == 1
-        assert result[0].name == "morning"
-        assert result[0].cron == "0 7 * * *"
-        assert result[0].conversation_token == "room1"
-        # Workspace BRIEFINGS.md no longer reads component keys (blocks-only).
-        assert result[0].components == {}
+        assert entries is not None
+        assert entries[0]["components"] == {"calendar": True}
 
-    def test_malformed_toml_returns_none(self, tmp_path):
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "bob" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(_wrap_toml("this is not valid [[[ toml"))
-        config = Config(nextcloud_mount_path=mount)
-        result = _load_workspace_briefings(config, "bob")
-        assert result is None
+    def test_invalid_toml_is_unreadable(self):
+        assert parse_briefings_md(_wrap_toml("this is not valid [[[ toml")) is None
 
-    def test_empty_file(self, tmp_path):
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text("")
-        config = Config(nextcloud_mount_path=mount)
-        result = _load_workspace_briefings(config, "alice")
-        # No TOML block found → empty list
-        assert result == []
+    def test_a_non_list_briefings_key_is_unreadable(self):
+        assert parse_briefings_md(_wrap_toml('briefings = "morning"\n')) is None
 
-    def test_no_toml_block(self, tmp_path):
-        """File with markdown but no toml code block returns empty list."""
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(
-            "# Briefings\n\nJust some notes, no TOML block.\n"
-        )
-        config = Config(nextcloud_mount_path=mount)
-        result = _load_workspace_briefings(config, "alice")
-        assert result == []
+    def test_empty_file_reads_as_no_briefings(self):
+        assert parse_briefings_md("") == []
 
-    def test_markdown_with_valid_toml_block(self, tmp_path):
-        """File with markdown content and valid TOML block works."""
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        content = """# My Briefing Config
+    def test_markdown_without_a_toml_block_reads_as_no_briefings(self):
+        assert parse_briefings_md(
+            "# Briefings\n\nJust some notes about briefings.\n"
+        ) == []
 
-Here's my custom schedule configuration.
-
-## Current Settings
-
-```toml
-[[briefings]]
-name = "custom"
-cron = "0 9 * * *"
-conversation_token = "custom_room"
-```
-
-## Notes
-
-This is just for testing.
-"""
-        (workspace / "BRIEFINGS.md").write_text(content)
-        config = Config(nextcloud_mount_path=mount)
-        result = _load_workspace_briefings(config, "alice")
-        assert result is not None
-        assert len(result) == 1
-        assert result[0].name == "custom"
-        assert result[0].cron == "0 9 * * *"
-
-    def test_defaults_for_missing_fields(self, tmp_path):
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(_wrap_toml(
-            '[[briefings]]\n'
-            'name = "quick"\n'
-            'cron = "0 8 * * *"\n'
+    def test_multiple_briefings(self):
+        entries = parse_briefings_md(_wrap_toml(
+            '[[briefings]]\nname = "morning"\ncron = "0 7 * * *"\n'
+            '\n'
+            '[[briefings]]\nname = "evening"\ncron = "0 18 * * *"\n'
         ))
-        config = Config(nextcloud_mount_path=mount)
-        result = _load_workspace_briefings(config, "alice")
-        assert len(result) == 1
-        assert result[0].conversation_token == ""
-        assert result[0].output == "talk"
-        assert result[0].components == {}
+        assert [e["name"] for e in entries] == ["morning", "evening"]
+
+    def test_a_non_table_entry_is_dropped(self):
+        entries = parse_briefings_md(_wrap_toml('briefings = ["morning"]\n'))
+        assert entries == []
 
 
 class TestGetBriefingsForUser:
@@ -163,50 +115,6 @@ class TestGetBriefingsForUser:
         assert len(result) == 1
         assert result[0].name == "morning"
 
-    def test_workspace_overrides_admin(self, tmp_path):
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(_wrap_toml(
-            '[[briefings]]\n'
-            'name = "morning"\n'
-            'cron = "0 7 * * *"\n'
-            'conversation_token = "room2"\n'
-        ))
-        admin_briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1", components={"calendar": True},
-        )
-        user = UserConfig(briefings=[admin_briefing])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
-
-        result = get_briefings_for_user(config, "alice")
-        assert len(result) == 1
-        assert result[0].cron == "0 7 * * *"
-        assert result[0].conversation_token == "room2"
-
-    def test_workspace_adds_new_briefing(self, tmp_path):
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(_wrap_toml(
-            '[[briefings]]\n'
-            'name = "afternoon"\n'
-            'cron = "0 14 * * *"\n'
-            'conversation_token = "room1"\n'
-        ))
-        admin_briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-        )
-        user = UserConfig(briefings=[admin_briefing])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
-
-        result = get_briefings_for_user(config, "alice")
-        names = [b.name for b in result]
-        assert "morning" in names
-        assert "afternoon" in names
-
     def test_components_not_expanded(self, tmp_path):
         # The legacy boolean-component expansion is retired: get_briefings_for_user
         # returns admin briefings verbatim, no defaults merged in.
@@ -224,56 +132,14 @@ class TestGetBriefingsForUser:
         # Verbatim — no {"enabled": True, ...} expansion.
         assert result[0].components == {"markets": True}
 
-    def test_no_workspace_file_uses_admin(self, tmp_path):
+    def test_the_returned_list_is_a_copy(self, tmp_path):
+        """A caller mutating the result must not edit the loaded config."""
         mount = tmp_path / "mount"
         mount.mkdir()
-        # No BRIEFINGS.md on disk
-        admin_briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1", components={"calendar": True},
-        )
-        user = UserConfig(briefings=[admin_briefing])
+        user = UserConfig(briefings=[
+            BriefingConfig(name="morning", cron="0 6 * * *"),
+        ])
         config = Config(nextcloud_mount_path=mount, users={"alice": user})
 
-        result = get_briefings_for_user(config, "alice")
-        assert len(result) == 1
-        assert result[0].name == "morning"
-
-    def test_empty_workspace_falls_back_to_admin(self, tmp_path):
-        """Empty BRIEFINGS.md with no [[briefings]] should fall back to admin."""
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text("")
-
-        admin_briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-        )
-        user = UserConfig(briefings=[admin_briefing])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
-
-        result = get_briefings_for_user(config, "alice")
-        # Workspace exists but has no briefings → admin preserved
-        assert len(result) == 1
-        assert result[0].name == "morning"
-
-    def test_markdown_without_toml_falls_back_to_admin(self, tmp_path):
-        """BRIEFINGS.md with only markdown (no toml block) falls back to admin."""
-        mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(
-            "# Briefings\n\nJust some notes about briefings.\n"
-        )
-
-        admin_briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-        )
-        user = UserConfig(briefings=[admin_briefing])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
-
-        result = get_briefings_for_user(config, "alice")
-        assert len(result) == 1
-        assert result[0].name == "morning"
+        get_briefings_for_user(config, "alice").clear()
+        assert len(config.users["alice"].briefings) == 1
