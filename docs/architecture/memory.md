@@ -14,7 +14,7 @@ src/istota/memory/
     ├── ops.py            # apply_ops with validation
     ├── overlay.py        # per-skill overlay docs: flat, one synthetic Section
     ├── prompt.py         # curation prompt + JSON-fence stripper
-    ├── audit.py          # USER.md.audit.jsonl writer
+    ├── audit.py          # audit trail + USER.md fingerprints, in the KV store
     ├── file_lock.py      # per-file flock for runtime memory writes
     └── lint.py           # Phase-A lint pass over USER.md bullets
 ```
@@ -104,7 +104,7 @@ curate_user_memory(config, user_id, conn)
   ├── (skip-write check on outcomes)
   ├── serialize_sectioned_doc() + write
   ├── index_file(source_type="user_memory")  # re-index for search
-  ├── write_audit_log()                  # USER.md.audit.jsonl
+  ├── write_audit_log()                  # a row in the `_memory_audit` KV namespace
   └── _post_curation_summary()           # one-line message to log_channel
 ```
 
@@ -134,7 +134,6 @@ Files written to the user's Nextcloud workspace:
 
 ```
 /Users/{user_id}/{bot_dir}/config/USER.md           # durable, hand- or curation-edited
-/Users/{user_id}/{bot_dir}/config/USER.md.audit.jsonl  # curation audit log (sidecar)
 /Users/{user_id}/memories/YYYY-MM-DD.md              # dated memory files
 /Users/{user_id}/{bot_dir}/playbooks/                 # distilled procedures (source_type="playbook")
 
@@ -152,6 +151,7 @@ SQLite tables (`schema.sql`):
 | `memory_chunks_fts` | FTS5 virtual table, trigger-synced from `memory_chunks` |
 | `memory_chunks_vec` | sqlite-vec table, lazy-created via `ensure_vec_table()` |
 | `knowledge_facts` | Temporal triples; `valid_from` / `valid_until` columns; unique-current index on `(user_id, subject, predicate, object) WHERE valid_until IS NULL` |
+| `istota_kv` | Two reserved namespaces here: `_memory_audit` (one row per curation write event, keyed `<ts>-<NNN>`) and `_memory_curation` (`last_seen`, `lint_seen`). Both refused by the `kv` skill and by the deferred-op applier — see `kv_namespaces.py` |
 
 `source_type` values used in `memory_chunks`:
 

@@ -308,14 +308,23 @@ def _resolve_target(args, *, verb: str) -> Target:
 def _config_for_audit():
     """Build a minimal Config-like shim for `write_audit_log`/`write_last_seen`.
 
-    The audit module uses `_get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))`
-    to resolve the audit sidecar. We only need `nextcloud_mount_path` and
-    `bot_dir_name`. Importing the full Config is heavy and pulls in TOML
-    parsing for a CLI that runs hundreds of milliseconds end-to-end.
+    Those write to the framework KV store, so the only field they read is
+    `db_path`. `ISTOTA_DB_PATH` is set for every skill CLI by the proxy
+    (`executor.py`, unconditionally, admin or not), and the file it names is in
+    no sandbox at any path.
+
+    Importing the real Config is heavy and pulls in TOML parsing for a CLI that
+    runs hundreds of milliseconds end to end, which is why this is a shim
+    rather than a load. `use_mount` is False so the shim can never be handed to
+    `migrate_user_md_sidecars` and have it try to resolve mount paths that are
+    not on it; the migration is the nightly daemon's job, with a real Config.
     """
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+
     class _Shim:
-        nextcloud_mount_path = _mount_path()
-        bot_dir_name = _bot_dir()
+        use_mount = False
+
+    _Shim.db_path = Path(db_path) if db_path else None
     return _Shim()
 
 

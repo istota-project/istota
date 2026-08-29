@@ -4,11 +4,13 @@ Detects bullets in USER.md that look like temporal facts (events with a
 date directly attached to a temporal verb) and surfaces them as lint
 candidates so a future PR can decide whether to migrate them to the KG.
 
-This module DOES NOT mutate anything. The nightly curator calls
-`find_temporal_bullets()` and writes the result to the audit log with
-`entry_kind="lint_candidate"`. Phase B will gate the actual migration on
-a config flag and emit `remove`/`add_fact` op pairs into the curator's op
-list.
+This module DOES NOT mutate anything and does no I/O. The nightly curator
+calls `find_temporal_bullets()`, filters the result through
+`filter_unseen_candidates()`, and writes what survives to the audit log with
+`entry_kind="lint_candidate"`; the dedup set it filters against is loaded and
+stored by the caller, via `curation.audit`. Phase B will gate the actual
+migration on a config flag and emit `remove`/`add_fact` op pairs into the
+curator's op list.
 
 It also exposes `prepend_agents_header_if_missing()`, a one-shot
 idempotent migration that prepends an `<!-- agents: ... -->` comment to
@@ -19,12 +21,10 @@ both are nightly self-heals over USER.md content.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
 
 from .types import SectionedDoc, classify_line, normalize_bullet_text, top_region_indices
 
@@ -207,30 +207,25 @@ def _candidate_hash(heading: str, bullet_text: str) -> str:
 
 def filter_unseen_candidates(
     candidates: list[TemporalBulletCandidate],
-    seen_path: Path,
+    seen: dict[str, str],
     *,
     today: date | None = None,
     ttl_days: int = LINT_SEEN_TTL_DAYS,
-) -> list[TemporalBulletCandidate]:
-    """Drop candidates already logged within `ttl_days`. Persists the seen set.
+) -> tuple[list[TemporalBulletCandidate], dict[str, str]]:
+    """Drop candidates already logged within `ttl_days`.
 
-    The sidecar at `seen_path` stores `{"hashes": {hash: "YYYY-MM-DD"}}`,
-    keyed by sha256(heading + NUL + bullet_text)[:16]. Entries older than
-    `ttl_days` are pruned on each call so a long-untouched bullet
-    eventually re-surfaces. Best-effort I/O — read errors fall back to an
-    empty seen set; write errors are logged and dropped (the lint pass
-    re-emits next night, which is the existing behavior).
+    `seen` is `{hash: "YYYY-MM-DD"}`, keyed by
+    sha256(heading + NUL + bullet_text)[:16]. Entries older than `ttl_days`
+    are pruned so a long-untouched bullet eventually re-surfaces.
+
+    Pure: returns `(unseen_candidates, updated_seen)` and persists nothing.
+    The set used to live in a `USER.md.lint_seen.json` sidecar that this
+    function read and wrote itself, which put I/O inside a module whose whole
+    contract is that it mutates nothing. Storage is the caller's business now —
+    `curation.audit.read_lint_seen` / `write_lint_seen`, against the KV store.
     """
     today = today or datetime.utcnow().date()
-    seen: dict[str, str] = {}
-    try:
-        if seen_path.exists():
-            data = json.loads(seen_path.read_text(encoding="utf-8") or "{}")
-            seen = data.get("hashes") or {}
-            if not isinstance(seen, dict):
-                seen = {}
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("lint_seen_read_failed path=%s err=%s", seen_path, e)
+    if not isinstance(seen, dict):
         seen = {}
 
     fresh: dict[str, str] = {}
@@ -251,16 +246,7 @@ def filter_unseen_candidates(
         out.append(cand)
         fresh[h] = today_iso
 
-    try:
-        seen_path.parent.mkdir(parents=True, exist_ok=True)
-        seen_path.write_text(
-            json.dumps({"hashes": fresh}, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
-        )
-    except OSError as e:
-        logger.warning("lint_seen_write_failed path=%s err=%s", seen_path, e)
-
-    return out
+    return out, fresh
 
 
 _AGENTS_HEADER_MARKER = "<!-- agents:"

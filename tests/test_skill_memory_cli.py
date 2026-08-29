@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from istota import db
+from istota.memory.curation.audit import (
+    AUDIT_NAMESPACE,
+    CURATION_NAMESPACE,
+    LAST_SEEN_KEY,
+)
 from istota.skills.memory import main as memory_main
 
 
@@ -42,9 +48,27 @@ def _setup_user(tmp_path, monkeypatch, user_id="alice", bot_dir="istota"):
     monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
     monkeypatch.setenv("ISTOTA_USER_ID", user_id)
     monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", bot_dir)
+    # The audit trail and the USER.md fingerprint are rows in the framework
+    # KV store, so the CLI needs the DB the skill proxy hands every skill CLI.
+    db_path = tmp_path / "istota.db"
+    if not db_path.exists():
+        db.init_db(db_path)
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
     monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
     monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
     return user_md
+
+
+def _audit_entries(tmp_path, user_id="alice"):
+    """The audit rows the CLI wrote, oldest first."""
+    with db.get_db(tmp_path / "istota.db") as conn:
+        rows = db.kv_list(conn, user_id, AUDIT_NAMESPACE)
+    return [json.loads(r["value"]) for r in rows]
+
+
+def _last_seen(tmp_path, user_id="alice"):
+    with db.get_db(tmp_path / "istota.db") as conn:
+        return db.kv_get(conn, user_id, CURATION_NAMESPACE, LAST_SEEN_KEY)
 
 
 class TestAppend:
@@ -87,15 +111,22 @@ class TestAppend:
         assert user_md.read_text() == before
 
     def test_append_writes_audit_log(self, tmp_path, monkeypatch, capsys):
+        _setup_user(tmp_path, monkeypatch)
+        memory_main(["append", "--heading", "Notes", "--line", "Audit me"])
+        capsys.readouterr()
+        entries = _audit_entries(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["source"] == "runtime"
+        assert entries[0]["entry_kind"] == "batch"
+        assert entries[0]["applied"][0]["outcome"] == "applied"
+
+    def test_append_writes_no_sidecar_files(self, tmp_path, monkeypatch, capsys):
+        """The whole point of the move: the user's config folder holds the
+        documents they wrote and nothing the machine keeps for itself."""
         user_md = _setup_user(tmp_path, monkeypatch)
         memory_main(["append", "--heading", "Notes", "--line", "Audit me"])
         capsys.readouterr()
-        audit = user_md.parent / "USER.md.audit.jsonl"
-        assert audit.exists()
-        entry = json.loads(audit.read_text().strip().splitlines()[-1])
-        assert entry["source"] == "runtime"
-        assert entry["entry_kind"] == "batch"
-        assert entry["applied"][0]["outcome"] == "applied"
+        assert sorted(p.name for p in user_md.parent.iterdir()) == ["USER.md"]
 
 
 class TestAddHeading:
@@ -264,6 +295,13 @@ class TestChannel:
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
         monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "istota")
+        # A reachable store that stays empty is the assertion; an absent one
+        # would make "channel writes are not audited" true for the wrong
+        # reason.
+        db_path = tmp_path / "istota.db"
+        if not db_path.exists():
+            db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         return ch_md
 
     def test_channel_append(self, tmp_path, monkeypatch, capsys):
@@ -337,9 +375,12 @@ class TestChannel:
         assert out["outcome"] == "applied"
         assert "Use Redis for queues" in ch_md.read_text()
 
-        # No audit JSONL, no last_seen sidecar.
-        assert not (user_md_dir / "USER.md.audit.jsonl").exists()
-        assert not (user_md_dir / "USER.md.last_seen.json").exists()
+        # Channel writes are not audited and do not move the USER.md
+        # fingerprint. Asserted against the store rather than against absent
+        # sidecar files, which nothing writes any more and which would
+        # therefore be a check that cannot fail.
+        assert _audit_entries(tmp_path) == []
+        assert _last_seen(tmp_path) is None
 
 
 class TestAtomicWrite:
@@ -520,12 +561,11 @@ class TestOverlayAppend:
         assert out["error"] == "subheading_not_valid_with_skill"
 
     def test_append_writes_an_audit_entry_naming_the_target(
-        self, overlay_env, capsys
+        self, overlay_env, capsys, tmp_path
     ):
         memory_main(["append", "--skill", "developer", "--line", "Audit me"])
         capsys.readouterr()
-        audit = overlay_env.user_md.parent / "USER.md.audit.jsonl"
-        entry = json.loads(audit.read_text().strip().splitlines()[-1])
+        entry = _audit_entries(tmp_path)[-1]
         assert entry["source"] == "runtime"
         assert entry["skill"] == "developer"
         assert entry["target_path"] == "Users/alice/istota/config/skills/developer.md"
@@ -534,13 +574,22 @@ class TestOverlayAppend:
         assert "user_md_size_bytes" not in entry
 
     def test_overlay_write_does_not_move_the_user_md_fingerprint(
-        self, overlay_env, capsys
+        self, overlay_env, capsys, tmp_path
     ):
-        # The last_seen sidecar is what the nightly bypass detector compares
-        # against. Stamping it here would mask an out-of-band USER.md edit.
+        # last_seen is what the nightly bypass detector compares against.
+        # Stamping it here would mask an out-of-band USER.md edit.
         memory_main(["append", "--skill", "developer", "--line", "x"])
         capsys.readouterr()
-        assert not (overlay_env.user_md.parent / "USER.md.last_seen.json").exists()
+        assert _last_seen(tmp_path) is None
+
+    def test_a_user_md_write_does_move_the_fingerprint(
+        self, overlay_env, capsys, tmp_path
+    ):
+        """The control for the assertion above: it has to be the overlay
+        target that withholds the stamp, not the store being unreachable."""
+        memory_main(["append", "--heading", "Notes", "--line", "x"])
+        capsys.readouterr()
+        assert _last_seen(tmp_path) is not None
 
 
 class TestOverlayRemoveAndReplace:
