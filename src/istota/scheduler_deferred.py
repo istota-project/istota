@@ -26,6 +26,7 @@ from typing import Any
 
 from . import db
 from .config import Config
+from .kv_namespaces import is_reserved_namespace
 from .notification_store import deliver_pending
 
 # Use the parent scheduler's logger name so log lines remain identical to
@@ -342,6 +343,17 @@ def _process_deferred_kv_ops(
             namespace = entry.get("namespace", "")
             key = entry.get("key", "")
             if not namespace or not key:
+                continue
+            # The sandbox has no database, so a task's `kv set` lands here as
+            # JSON rather than as a CLI call — which means the skill's own
+            # refusal never ran for it. This is the enforcement point that
+            # covers a sandboxed task, and the op file is model-written, so
+            # the namespace is checked against the value in the JSON.
+            if is_reserved_namespace(namespace):
+                logger.warning(
+                    "Deferred KV op for task %d names reserved namespace %r; refused",
+                    task.id, namespace,
+                )
                 continue
             # Shared-scope writes are gated on the task's *trusted* identity
             # (task.user_id, never the JSON), fail-closed via is_shared_kv_writer.

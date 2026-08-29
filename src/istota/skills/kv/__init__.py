@@ -24,6 +24,7 @@ import os
 import sys
 from pathlib import Path
 
+from istota.kv_namespaces import is_reserved_namespace
 from istota.skill_host_paths import resolve_host_path
 
 # `list` decodes and prints every value in a namespace. The natural command for
@@ -362,6 +363,10 @@ def cmd_namespaces(args):
             namespaces = db.shared_kv_namespaces(conn)
         else:
             namespaces = db.kv_namespaces(conn, _user_id())
+    # Reserved namespaces are refused by every other verb, so listing them
+    # would only offer the caller a name that answers "reserved" — and it puts
+    # framework internals in the model's context for no reader.
+    namespaces = [n for n in namespaces if not is_reserved_namespace(n)]
     print(json.dumps({"status": "ok", "namespaces": namespaces}))
 
 
@@ -693,6 +698,15 @@ _SET_OPS = frozenset({
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    namespace = getattr(args, "namespace", None)
+    if is_reserved_namespace(namespace):
+        print(json.dumps({
+            "status": "error",
+            "error": f"namespace {namespace!r} is reserved for framework state "
+                     f"and cannot be read or written through this CLI",
+            "namespace": namespace,
+        }))
+        sys.exit(1)
     if args.command in _SET_OPS and getattr(args, "shared", False):
         print(json.dumps({
             "status": "error",
