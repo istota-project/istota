@@ -179,6 +179,8 @@ All work happens inside `$WORK_DIR`.
 
 A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
 
+**These steps are this document's default, and the user's own instructions outrank them.** A development workflow written in `USER.md`, or in a project's `CHANNEL.md`, is already in front of you before this skill loads, and it wins wherever it speaks: which of these steps run, how much process a change gets, what counts as enough testing, how the work lands. Where both files carry one and they disagree, `CHANNEL.md` wins for a task from that room — it is the more specific statement, and the room is the project. Where neither says anything, everything below applies as written. What does not yield is the deployment's mechanics: the forge boundary and its refused verbs, the CONNECT allowlist, the 600-second ceiling, the credential rules, where builds and tests run, the pre-submission checks, and every delete path. Those are properties of the host rather than preferences, so an instruction that collides with one is something to report rather than to follow.
+
 ### 1. Preflight, before a worktree exists
 
 Batch these reads and act on them together. Do not start work that cannot land.
@@ -199,7 +201,7 @@ git config --list --includes | awk -F= '{ k = $1 }
 
 ### 2. Create the worktree, then read back what was made
 
-Create it as described under "Creating a Worktree for Development". Then read back what actually exists and use those values for the rest of the run:
+A worktree per task is the default; a user who works another way says so in `USER.md` or `CHANNEL.md`, and the rule against editing live source holds wherever you work. Create it as described under "Creating a Worktree for Development". Then read back what actually exists and use those values for the rest of the run:
 
 ```bash
 cd "$WORK_DIR"
@@ -235,13 +237,13 @@ Reading existing patterns is the cheapest step here and skipping it is the most 
 
 ### 5. Pick a change tier, and say which
 
-The tier decides how much process the rest of the change gets. Pick it before writing code and state it in your report.
+The tier decides how much process the rest of the change gets. Pick it before writing code and state it in your report. The three tiers are the default shape of that decision, and a user's own instructions may set a different one.
 
 **Boundary surfaces.** Any change touching one of these is Full tier regardless of size: authn/authz, secrets and credentials, money or billing, schema migrations, deletion and other destructive paths, external API contracts and payload shapes, concurrency and locking, anything crossing a network, anything running as root or over ssh on a remote host.
 
-- **Fast** — under about 30 changed lines, one or two files, no boundary surface. Implement, add or extend one test, run the affected tests, run the suite once, commit. No pre-written failing test, and no review.
-- **Standard** — the default. Tests written alongside the implementation, full suite green before the commit, review before the MR.
-- **Full** — any boundary surface, a diff over about 150 lines, or anything you would not want to be wrong about. Failing test first, full suite before and after, review with both agents.
+- **Fast** — under about 30 changed lines, one or two files, no boundary surface. Implement, add or extend one test, run the affected tests, commit. No pre-written failing test, and no review.
+- **Standard** — the default. Tests written alongside the implementation, the verification pass below green before the commit, review before the MR.
+- **Full** — any boundary surface, a diff over about 150 lines, or anything you would not want to be wrong about. Failing test first, the verification pass below before and after, review with both agents.
 
 **Escalate, never downgrade.** Move up a tier the moment any of these happens: the suite goes red in a way you did not predict, you need to read a third file to understand the change, or you find a boundary surface you had not counted. Say that you escalated and why. Never move down mid-change, and never pick Fast to avoid work you already suspect is needed.
 
@@ -292,22 +294,20 @@ Test and lint output is the largest single source of wasted context. Spend it de
 
 - **Bail on the first failure while iterating** (`-x`, `--bail=1`). One real failure beats forty cascading ones. Drop the flag for the final full run.
 - **One command, one output.** Chain lint, typecheck and tests into a single invocation rather than three.
-- **Affected tests during the loop, the full suite once at the end of the work.** Not after every fix and not before every commit.
-- **For the full pass, use the project's own entry point** — `npm run check`, `make check`, `just check`, `tox`, whatever the repository already has. Read the `package.json` scripts or the Makefile once and use what is there. If there is no single command, chain the linters, the type checker and the tests yourself. Do not write a wrapper script to avoid doing that; a second entry point drifts from the real one and hides which step failed.
+- **Affected tests during the loop, the full suite once at the end of the work** — the default, and one a user's own instructions may replace with a different scope. Not after every fix and not before every commit. For that pass, use the project's own entry point — `npm run check`, `make check`, `just check`, `tox`, whatever the repository already has. Read the `package.json` scripts or the Makefile once and use what is there. If there is no single command, chain the linters, the type checker and the tests yourself. Do not write a wrapper script to avoid doing that; a second entry point drifts from the real one and hides which step failed.
 - **In a multi-stack repository, cover the stacks the branch touched.** Untouched code cannot break, with one exception: anything crossing between the stacks — an API payload shape, a serialized schema, a shared fixture — is a boundary surface and pulls the other stack's tests into scope whether or not you edited its files. Say which stacks the pass covered, so a partial run never reads as a whole one.
 - **Never re-run a full suite that a timeout killed.** Not with a longer timeout, not with the same command again — one job spent forty minutes on four identical attempts and produced no coverage at all while holding the host down. The next run is a *different, smaller* command: narrow to the paths the branch touched (`uv run pytest tests/foo tests/bar`), and narrow again if that is still too slow. Then say so — the report names the paths actually covered and states plainly that the full suite did not complete. Partial coverage honestly labelled is usable; "tests pass" on the strength of a suite that never ran is not. If every attempt dies at the same point and unrelated tests fail on time, the machine is the finding: stop and report that rather than narrowing further.
-
 - **Never re-read a file you just wrote.** The edit would have failed loudly if it had not applied.
 
 ### 8. Commit
 
-Commit in coherent steps rather than one lump. The `commit` companion carries the message format, what lands alongside a commit, and the scrub rules — follow it rather than improvising.
+Commit in coherent steps rather than one lump, unless the user's own instructions ask for a different granularity. The `commit` companion carries the message format, what lands alongside a commit, and the scrub rules — follow it rather than improvising.
 
 **Commit before you review.** The review resolves a commit range and reads it with `git diff`, `git log` and `git show`; uncommitted work appears in none of those, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed first.
 
 ### 9. Review before landing
 
-Unless the change is Fast tier, run a review after the work's full pass and after the commits exist, but before the branch is pushed. See the `code_review` companion for the command and for how to read what comes back.
+Unless the change is Fast tier, or the user's own instructions say otherwise, run a review after the work's verification pass and after the commits exist, but before the branch is pushed. See the `code_review` companion for the command and for how to read what comes back.
 
 The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
 
@@ -315,7 +315,7 @@ If the review is unavailable — the CLI is not configured, the brain is degrade
 
 ### 10. Land
 
-Push the branch and open a merge request or pull request, following the platform sections below. **Landing is an MR or a PR, not a merge.** Merge to the default branch only when the task text explicitly asks for it.
+Push the branch and open a merge request or pull request, following the platform sections below. **Landing is an MR or a PR, not a merge** — the default, and the decision `CHANNEL.md` speaks to above all, since how work lands is usually a property of the project rather than of the person. Merge to the default branch when the task text explicitly asks for it, or when the user's own instructions for this repository say that is how work lands here.
 
 ### 11. The abort path
 
@@ -325,14 +325,14 @@ Never delete a worktree whose work did not land.
 
 ### 12. Report
 
-Report in this shape every time, so the room gets a consistent block:
+Report in this shape unless the user's own instructions ask for a different one, so the room gets a consistent block:
 
 ```
 <repo>/<branch> — <task>
 
 Tier: <Fast | Standard | Full>, <why — boundary surface, size, or default>
 Worked: <what changed, one or two sentences>
-Tests: <the final full pass, the exit status it was read from, which stacks it covered; N added>
+Tests: <the final verification pass, the exit status it was read from, which stacks it covered; N added>
 Review: <counts by severity and what you did about them> | <skipped, why> | <not run, Fast tier>
 Landed: <MR/PR URL> | <why not>
 Worktree: <path, left in place>

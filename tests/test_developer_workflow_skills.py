@@ -611,6 +611,170 @@ class TestBodiesDoNotContradict:
         assert "<!-- companion code_review: unavailable -->" in out
 
 
+# ---------------------------------------------------------------------------
+# ISSUE-337: the workflow defers, the deployment's mechanics do not.
+
+# Anything that mentions a test suite at all, so a new line has to be classified
+# rather than slipping past a pattern aimed at today's phrasings.
+_SUITE_MENTION = re.compile(r"\bsuites?\b|\bfull pass\b", re.IGNORECASE)
+
+# What a line has to carry to count as yielding to the user on the spot.
+_DEFERENCE_MARKERS = ("user's own instructions", "USER.md", "CHANNEL.md")
+
+_DEFERRED = "deferred default"  # states the default and yields on the same line
+_NOT_A_MANDATE = "not a mandate"  # a negation, or a fact about the host
+
+# Every line of the `developer` body allowed to mention a suite, keyed by a
+# fragment that identifies it, with the reason it is allowed. An allowlist and
+# not a pattern: a regex looking for "must" or "always" passes the next mandate
+# that happens to be phrased differently, which is the failure ISSUE-337 was —
+# one bullet stating the rule and six others restating it as an order.
+_SUITE_LINES_ALLOWED = [
+    (
+        _NOT_A_MANDATE,
+        "dozens of unrelated red suites",
+        "the shape a shared node_modules fails in; names no suite to run",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "not a full suite. The base branch was green",
+        "step 3 forbids the baseline pass outright",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "the suite goes red in a way you did not predict",
+        "a trigger for escalating a tier, conditioned on a run that happened",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "each suite claims the whole box",
+        "the worker cap: a property of the host, and one of the mechanics",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "no longer exits 0 on a suite that failed",
+        "how pipefail is read; correctness of the answer, not scope",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "a long suite might have finished",
+        "why a near-ceiling timeout is the wrong fix for a long run",
+    ),
+    (
+        _DEFERRED,
+        "Affected tests during the loop, the full suite once at the end of the work",
+        "the single statement of the shipped default",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "Never re-run a full suite that a timeout killed",
+        "a prohibition on re-running one",
+    ),
+]
+
+# The seven decisions the spec moves from mandate to default, and the lifecycle
+# section each one lives in.
+_DEFERRED_DECISIONS = {
+    "worktree per task": "### 2. Create the worktree, then read back what was made",
+    "change tiers": "### 5. Pick a change tier, and say which",
+    "when tests run, and which": "### 7. The verification budget",
+    "commit granularity": "### 8. Commit",
+    "whether a review runs": "### 9. Review before landing",
+    "an MR or PR rather than a merge": "### 10. Land",
+    "report shape": "### 12. Report",
+}
+
+
+class TestWorkflowDeference:
+    """ISSUE-337. The body carries deployment mechanics and a development
+    routine under one voice, and the routine shipped as an order to every
+    deployment — a task followed it into a full suite on a host that takes 70
+    minutes to run one, was killed at 47, and committed nothing. The routine is
+    now a default that yields to `USER.md` and `CHANNEL.md`; the mechanics are
+    not."""
+
+    def _body(self):
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def _section(self, body, heading):
+        """The text of one `###` step, up to the next heading."""
+        start = body.index(heading)
+        rest = body[start + len(heading) :]
+        following = re.search(r"^#{2,3} ", rest, re.MULTILINE)
+        end = start + len(heading) + (following.start() if following else len(rest))
+        return body[start:end]
+
+    def test_the_lifecycle_states_the_deference_rule(self):
+        """A1. The skill body arrives mid-task, after user and channel memory
+        are already in the system prompt, so it is the later and more specific
+        document — which is why an override written in `CHANNEL.md` lost to it
+        on 2026-08-28. Deference is the skill spending that lateness on
+        pointing back at the earlier document. It has to name both files: a
+        rule naming only `USER.md` leaves per-project workflow nowhere to go,
+        and one naming only `CHANNEL.md` reaches no task from the 1:1."""
+        lifecycle = self._section(self._body(), "## The Job Lifecycle")
+        paragraphs = [p for p in lifecycle.split("\n\n") if "USER.md" in p]
+        assert len(paragraphs) == 1, (
+            "the deference rule is one paragraph near the top of the lifecycle; "
+            f"found {len(paragraphs)} mentioning USER.md"
+        )
+        rule = paragraphs[0]
+        assert "CHANNEL.md" in rule, "the rule names USER.md but not CHANNEL.md"
+        # The tie-break: the model has no other way to resolve two workflows.
+        assert "`CHANNEL.md` wins" in rule, rule
+        # And which set of instructions does not yield, since a user asking for
+        # work in place under /srv/app collides with a pre-submission check.
+        assert "does not yield" in rule and "mechanics" in rule, rule
+
+    def test_no_surviving_full_suite_mandate(self):
+        """A2. The failure this catches is the document contradicting itself —
+        the deference rule stated once and the old orders left standing
+        elsewhere, where they win on repetition. Every line that mentions a
+        suite is classified here by hand, so a mandate added later fails
+        instead of passing on a pattern that did not anticipate its wording."""
+        lines = [ln.strip() for ln in self._body().splitlines() if _SUITE_MENTION.search(ln)]
+        assert lines, "the pattern matches nothing; it no longer detects anything"
+
+        for line in lines:
+            hits = [e for e in _SUITE_LINES_ALLOWED if e[1] in line]
+            assert len(hits) == 1, (
+                "a line mentioning a test suite is not on the allowlist, or "
+                f"matches more than one entry ({len(hits)}): {line[:160]!r}"
+            )
+
+        for kind, fragment, reason in _SUITE_LINES_ALLOWED:
+            matching = [ln for ln in lines if fragment in ln]
+            assert len(matching) == 1, (
+                f"allowlist entry ({reason}) matches {len(matching)} lines, not one: {fragment!r}"
+            )
+            if kind is _DEFERRED:
+                assert any(m in matching[0] for m in _DEFERENCE_MARKERS), (
+                    "a line stating the test-scope default has to yield to the "
+                    f"user on the same line: {matching[0][:160]!r}"
+                )
+
+        defaults = [e for e in _SUITE_LINES_ALLOWED if e[0] is _DEFERRED]
+        assert len(defaults) == 1, (
+            "the default is stated once. Six restatements of it are what "
+            f"ISSUE-337 cost; this allowlist carries {len(defaults)}"
+        )
+
+    @pytest.mark.parametrize(
+        "decision,heading", sorted(_DEFERRED_DECISIONS.items())
+    )
+    def test_every_deferred_decision_says_so_where_it_is_stated(self, decision, heading):
+        """A2, the other half. The rule at the top is not enough on its own:
+        each decision it governs has to say it yields where the decision is
+        made, because that is the line the model is reading when it acts. The
+        marker is what matters, not the wording — a rewrite that keeps the
+        deference and changes the sentence should pass."""
+        section = self._section(self._body(), heading)
+        assert any(m in section for m in _DEFERENCE_MARKERS), (
+            f"section {heading!r} decides {decision} and never says the user's "
+            "own instructions may set it otherwise"
+        )
+
+
 class TestLoadBudget:
     """Goal 5: the split grows what a coding task loads, so the ceiling is
     stated rather than assumed. Parity with the pre-split single file is not
