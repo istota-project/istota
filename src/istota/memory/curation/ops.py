@@ -30,6 +30,10 @@ Op shapes
                 (rewrites the single matching bullet in place)
 - remove_heading: {"op": "remove_heading", "heading": str}
                 (drops the whole `## ` section)
+- remove_subheading: {"op": "remove_subheading", "heading": str,
+                "subheading": str}
+                (drops a whole `### ` subsection and everything under it,
+                 including prose and numbered items that `remove` cannot reach)
 - add_fact:    {"op": "add_fact", "subject": str, "predicate": str,
                 "object": str, "valid_from": str | None}
                 (apply_ops_with_db only)
@@ -62,6 +66,8 @@ from .types import (
     SectionedDoc,
     classify_line,
     normalize_bullet_text,
+    subsection_bounds,
+    subsection_is_empty,
     subsection_region_indices,
     top_region_indices,
 )
@@ -86,6 +92,7 @@ _REQUIRED_FIELDS = {
     "remove": ("heading", "match"),
     "replace": ("heading", "match", "line"),
     "remove_heading": ("heading",),
+    "remove_subheading": ("heading", "subheading"),
     "add_fact": ("subject", "predicate", "object"),
 }
 
@@ -162,6 +169,8 @@ def _apply_ops_inner(
             result = _apply_replace(new_doc, op)
         elif kind == "remove_heading":
             result = _apply_remove_heading(new_doc, op)
+        elif kind == "remove_subheading":
+            result = _apply_remove_subheading(new_doc, op)
         else:  # "add_fact"
             result = _apply_add_fact(op, db_ctx)
 
@@ -388,6 +397,50 @@ def _apply_remove(doc: SectionedDoc, op: dict) -> str:
         return found  # noop_no_match | multiple_matches
 
     section.lines.pop(found)
+    _drop_emptied_subsection(section, found)
+    return "applied"
+
+
+def _drop_emptied_subsection(section: Section, removed_at: int) -> None:
+    """Take the `### ` heading with the last bullet that was under it.
+
+    The same rule the CLI already applies one level up, where a `remove` that
+    empties an overlay *file* deletes the file rather than leaving an empty one.
+    A heading with nothing under it is the same defect at subsection scale: it
+    survives, and rides into every prompt that loads the document, announcing a
+    section that says nothing. Prose counts as content, so a subsection still
+    holding a paragraph keeps its heading.
+
+    `removed_at` is where the bullet was, which is inside the region if it had
+    a heading at all — a bullet in the top region has none above it, and there
+    is nothing to drop.
+    """
+    heading_idx = None
+    for i in range(min(removed_at, len(section.lines)) - 1, -1, -1):
+        if classify_line(section.lines[i]) == "subheading":
+            heading_idx = i
+            break
+    if heading_idx is None:
+        return  # top-region bullet: no subsection owns it
+
+    end = len(section.lines)
+    for j in range(heading_idx + 1, len(section.lines)):
+        if classify_line(section.lines[j]) == "subheading":
+            end = j
+            break
+    if subsection_is_empty(section, heading_idx + 1, end):
+        del section.lines[heading_idx:end]
+
+
+def _apply_remove_subheading(doc: SectionedDoc, op: dict) -> str:
+    section = doc.find(op["heading"])
+    if section is None:
+        return "heading_missing"
+    bounds = subsection_bounds(section, str(op["subheading"]))
+    if bounds is None:
+        return "subheading_missing"
+    start, end = bounds
+    del section.lines[start:end]
     return "applied"
 
 

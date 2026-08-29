@@ -336,7 +336,10 @@ class TestRemove:
     def test_remove_descends_into_subsections(self):
         # Removing stale bullets is the whole point — a bullet under a
         # `### subheading` must be removable, not rejected.
-        doc = _doc("## Pref\n- top bullet\n### Sub\n- sub foo bullet\n")
+        # The subsection keeps a second bullet, so this stays a test about
+        # *descending* — emptying one is `_drop_emptied_subsection`'s rule and
+        # is covered in tests/test_curation_subheading_removal.py.
+        doc = _doc("## Pref\n- top bullet\n### Sub\n- sub foo bullet\n- sub other\n")
         new_doc, applied, rejected = apply_ops(
             doc, [{"op": "remove", "heading": "Pref", "match": "foo"}]
         )
@@ -344,8 +347,9 @@ class TestRemove:
         assert applied and applied[0]["outcome"] == "applied"
         section = new_doc.find("Pref")
         assert "- sub foo bullet" not in section.lines
-        # The subheading line and the other bullet survive.
+        # The subheading line and the other bullets survive.
         assert "### Sub" in section.lines
+        assert "- sub other" in section.lines
         assert "- top bullet" in section.lines
 
     def test_remove_true_miss_still_noop_when_subsections_present(self):

@@ -171,12 +171,16 @@ class TestRemove:
         assert serialize_overlay_doc(new) == "- alpha rule\n- alpha other\n"
 
     def test_reaches_into_a_subsection(self):
-        section = parse_overlay_doc("- top\n\n### Rules\n\n- nested rule\n")
+        # A second bullet keeps the subsection non-empty, so this stays a test
+        # about *reaching in*; the emptied case belongs to the delete-on-empty
+        # rule in tests/test_curation_subheading_removal.py.
+        section = parse_overlay_doc("- top\n\n### Rules\n\n- nested rule\n- other rule\n")
         new, outcome = apply_overlay_op(section, {"op": "remove", "match": "nested"})
         assert outcome == "applied"
         body = serialize_overlay_doc(new)
         assert "nested rule" not in body
         assert "### Rules" in body
+        assert "- other rule" in body
 
     def test_a_subheading_line_is_never_a_match(self):
         section = parse_overlay_doc("### Rules\n\n- a bullet\n")
@@ -214,13 +218,14 @@ class TestRemove:
 
     def test_a_named_subsection_disambiguates_a_multiple_match(self):
         section = parse_overlay_doc(
-            "- alpha top\n\n### Rules\n\n- alpha nested\n"
+            "- alpha top\n\n### Rules\n\n- alpha nested\n- keep me\n"
         )
         new, outcome = apply_overlay_op(
             section, {"op": "remove", "match": "alpha", "subheading": "Rules"}
         )
         assert outcome == "applied"
-        assert serialize_overlay_doc(new) == "- alpha top\n\n### Rules\n\n"
+        # `- alpha top` is untouched: the named subsection is what disambiguated.
+        assert serialize_overlay_doc(new) == "- alpha top\n\n### Rules\n\n- keep me\n"
 
 
 class TestReplace:

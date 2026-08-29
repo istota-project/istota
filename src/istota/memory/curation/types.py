@@ -91,15 +91,22 @@ def subheading_text(line: str) -> str:
     return line.strip().lstrip("#").strip()
 
 
-def subsection_region_indices(section: Section, subheading: str) -> tuple[int, int] | None:
-    """Return `(start, end)` line indices of the bullet region under `subheading`.
+def subsection_bounds(section: Section, subheading: str) -> tuple[int, int] | None:
+    """Return `(heading_index, end)` for the subsection named `subheading`.
 
-    `subheading` is matched against `### …` lines case-insensitively with the
-    `#` markers stripped (so a `#### Nested` heading is matchable too, and is
-    also treated as a region boundary). `start` is the line just after the
-    matched subheading line; `end` is the next subheading line (any level) or
-    the end of the section. On duplicate subheading names the **first** match
-    wins. Returns None when no subheading matches.
+    `heading_index` is the `### …` line *itself*; `end` is the next subheading
+    line (any level) or the end of the section. Matching is case-insensitive
+    with the `#` markers stripped, so a `#### Nested` heading is matchable too
+    and is also treated as a region boundary. On duplicate subheading names the
+    **first** match wins. Returns None when no subheading matches, including
+    for an empty target — a caller must never be handed whichever subsection
+    happened to come first.
+
+    Two callers want two different things from this scan and the difference is
+    exactly one line. `subsection_region_indices` wants the *bullet region* and
+    so skips the heading; a removal wants the heading too, because leaving it
+    behind is what orphans a `### ` with nothing under it. Splitting the scan
+    out is what stops those two answers drifting.
     """
     target = subheading.strip().lstrip("#").strip().lower()
     if not target:
@@ -115,5 +122,28 @@ def subsection_region_indices(section: Section, subheading: str) -> tuple[int, i
             if classify_line(section.lines[j]) == "subheading":
                 end = j
                 break
-        return (i + 1, end)
+        return (i, end)
     return None
+
+
+def subsection_region_indices(section: Section, subheading: str) -> tuple[int, int] | None:
+    """Return `(start, end)` line indices of the bullet region under `subheading`.
+
+    The region *excludes* the heading line — `start` is the line just after it.
+    See `subsection_bounds`, which this is one line away from.
+    """
+    bounds = subsection_bounds(section, subheading)
+    if bounds is None:
+        return None
+    return (bounds[0] + 1, bounds[1])
+
+
+def subsection_is_empty(section: Section, start: int, end: int) -> bool:
+    """Is the region `[start, end)` blank — no bullet, no prose, nothing?
+
+    Used by the delete-on-empty rule: a subsection whose last bullet has just
+    been removed leaves a heading with nothing under it, which then rides into
+    every prompt that loads the document. Prose counts as content, so a
+    subsection still holding a paragraph keeps its heading.
+    """
+    return not any(line.strip() for line in section.lines[start:end])

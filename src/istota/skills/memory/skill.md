@@ -71,6 +71,7 @@ istota-skill memory add-heading --heading "Travel" --line "Default vehicle is th
 istota-skill memory remove --heading "Preferences" --match "morning meetings"
 istota-skill memory replace --heading "Preferences" --match "prefers tea" --line "Prefers black coffee"
 istota-skill memory remove-heading --heading "Old Project"
+istota-skill memory remove-subheading --heading "Notes" --subheading "Old workflow"
 ```
 
 Rules:
@@ -78,7 +79,7 @@ Rules:
 - The heading must already exist for `append`; on `heading_missing` the CLI returns the list of available headings — pick the closest match or use `add-heading`.
 - `add-heading` is for genuinely new topic areas only. Don't proliferate near-duplicates ("Notes", "Memory", "Stuff").
 - `remove` requires a substring unique to one bullet under the heading. The match spans the whole section — top region **and** any `### subsections`. If the substring matches multiple bullets, the CLI returns `multiple_matches`; narrow the substring. `### subheading` lines themselves are never matched.
-- To **reword** a stale bullet, use `replace --match <substr> --line <new text>` — one in-place op instead of `remove` then `append`. To drop an entire stale section, use `remove-heading`.
+- To **reword** a stale bullet, use `replace --match <substr> --line <new text>` — one in-place op instead of `remove` then `append`. To drop an entire stale section, use `remove-heading`; to drop one `### ` subsection of a section, use `remove-subheading`. Those two are the only way to remove a heading line, or prose and numbered items — `remove` only ever takes a bullet.
 - To append under a `### subsection`, pass `--subheading "Name"` to `append`. Without it, `append` targets the section's top region (above the first `###`).
 
 ### Per-skill overlays
@@ -96,10 +97,10 @@ istota-skill memory remove --skill notes --match "dated suffix"
 Rules:
 
 - Run the classification test above before writing one. A rule that must hold on tasks where the skill did not load belongs in USER.md instead — an overlay only reaches the prompt when its skill is selected.
-- An overlay is flat: no `## ` sections. `--heading` names a `### ` subsection of the overlay instead. Omitted, it means the top of the file on `append` and the whole file on `remove`/`replace` — so a bare `remove` still reaches a bullet inside a subsection. `--subheading` is refused as a second spelling of the same target, and so are `add-heading`, `remove-heading` and `headings`.
+- An overlay is flat: no `## ` sections. `--heading` names a `### ` subsection of the overlay instead. Omitted, it means the top of the file on `append` and the whole file on `remove`/`replace` — so a bare `remove` still reaches a bullet inside a subsection. `--subheading` is refused as a second spelling of the same target, and so are `add-heading`, `remove-heading` and `headings`. `remove-subheading --skill <name> --heading "Section"` drops a whole `### ` subsection of the overlay.
 - `--skill` and `--channel` cannot be combined. An unknown skill name is refused with the list of known names — run `memory skills` if you are unsure of the spelling.
 - `sensitive_actions` and `untrusted_input` accept no overlay.
-- `append` creates the file. A `remove` that leaves the file empty deletes it — but a leftover `### ` subheading is not empty, so remove that too or the skill's prompt carries a heading with nothing under it. Keep it short: past 8 KB the write is warned about, past 32 KB the file stops loading (the write still lands, so `show` and `remove` still work), and a write that would take it past 1 MB is refused outright.
+- `append` creates the file. A `remove` that leaves the file empty deletes it, and a `remove` that empties a `### ` subsection takes that subheading with it — so the prompt never carries a heading with nothing under it. A subsection still holding prose keeps its heading; use `remove-subheading` to drop one outright. Keep it short: past 8 KB the write is warned about, past 32 KB the file stops loading (the write still lands, so `show` and `remove` still work), and a write that would take it past 1 MB is refused outright.
 - A rule that applies to two skills goes in both files. There is no include mechanism.
 
 ### Don't bypass the CLI

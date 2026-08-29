@@ -48,6 +48,8 @@ from .types import (
     Section,
     classify_line,
     normalize_bullet_text,
+    subsection_bounds,
+    subsection_is_empty,
     subsection_region_indices,
     top_region_indices,
 )
@@ -64,6 +66,7 @@ _REQUIRED_FIELDS = {
     "append": ("line",),
     "remove": ("match",),
     "replace": ("match", "line"),
+    "remove_subheading": ("subheading",),
 }
 
 
@@ -115,6 +118,8 @@ def apply_overlay_op(section: Section, op: dict[str, Any]) -> tuple[Section, str
         return new_section, _apply_append(new_section, op)
     if kind == "remove":
         return new_section, _apply_remove(new_section, op)
+    if kind == "remove_subheading":
+        return new_section, _apply_remove_subheading(new_section, op)
     return new_section, _apply_replace(new_section, op)
 
 
@@ -186,6 +191,42 @@ def _apply_remove(section: Section, op: dict) -> str:
         return found  # noop_no_match | multiple_matches
 
     section.lines.pop(found)
+    _drop_emptied_subsection(section, found)
+    return "applied"
+
+
+def _drop_emptied_subsection(section: Section, removed_at: int) -> None:
+    """Take the `### ` heading with the last bullet that was under it.
+
+    Same rule as ``ops._drop_emptied_subsection``, and the reason it matters
+    more here: an overlay is loaded whole into the prompt of every task that
+    selects the skill, so a bare `### Rules` with nothing under it is a heading
+    announcing rules that do not exist. Review found exactly that state
+    surviving with ``binds: true``.
+    """
+    heading_idx = None
+    for i in range(min(removed_at, len(section.lines)) - 1, -1, -1):
+        if classify_line(section.lines[i]) == "subheading":
+            heading_idx = i
+            break
+    if heading_idx is None:
+        return
+
+    end = len(section.lines)
+    for j in range(heading_idx + 1, len(section.lines)):
+        if classify_line(section.lines[j]) == "subheading":
+            end = j
+            break
+    if subsection_is_empty(section, heading_idx + 1, end):
+        del section.lines[heading_idx:end]
+
+
+def _apply_remove_subheading(section: Section, op: dict) -> str:
+    bounds = subsection_bounds(section, str(op["subheading"]))
+    if bounds is None:
+        return "subheading_missing"
+    start, end = bounds
+    del section.lines[start:end]
     return "applied"
 
 

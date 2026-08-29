@@ -13,6 +13,8 @@ Subcommands:
                 into subsections.
   replace       Rewrite the single matching bullet in place.
   remove-heading Drop a whole `## ` section.
+  remove-subheading Drop a whole `### ` subsection, including prose and
+                 numbered items that `remove` cannot reach.
   show          Print USER.md, a CHANNEL.md or a skill overlay (or one
                 section / `### ` subsection of it).
   headings      List the `## ` heading names in order.
@@ -822,6 +824,49 @@ def cmd_remove_heading(args) -> int:
                   verb="remove-heading")
 
 
+def cmd_remove_subheading(args) -> int:
+    """Drop a whole `### ` subsection, including content `remove` cannot reach.
+
+    `remove --match` targets bullets, so a subsection built out of prose,
+    numbered items or bold sub-headers could not be removed at all — and
+    `remove-heading` only drops `## ` sections, which an overlay does not have
+    and which is one level too coarse inside USER.md. This is the verb for
+    both. On an overlay `--heading` names the `### ` directly, matching how
+    every other overlay verb reads it.
+    """
+    if getattr(args, "skill", None):
+        # Overlay: `--heading` *is* the `### `, the same shift `_overlay_op`
+        # applies to every other verb. `--subheading` alongside it would be a
+        # second spelling of one target, and `_overlay_op` refuses it there.
+        if not getattr(args, "heading", None):
+            _err(
+                "heading_required",
+                skill=args.skill,
+                verb="remove-subheading",
+                hint="on an overlay `--heading` names the `### ` subsection to drop",
+            )
+            sys.exit(1)
+        return _do_op(
+            args,
+            _overlay_op(args, {"op": "remove_subheading"}),
+            verb="remove-subheading",
+        )
+    _require_heading(args)
+    if not getattr(args, "subheading", None):
+        _err(
+            "subheading_required",
+            verb="remove-subheading",
+            hint="name the `### ` subsection to drop, e.g. --subheading 'Todo list'",
+        )
+        sys.exit(1)
+    return _do_op(
+        args,
+        {"op": "remove_subheading", "heading": args.heading,
+         "subheading": args.subheading},
+        verb="remove-subheading",
+    )
+
+
 def cmd_show(args) -> int:
     target = _resolve_target(args, verb="show")
     if target.kind == _SKILL:
@@ -991,6 +1036,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_channel_flag(p_rmh)
     _add_skill_flag(p_rmh)
 
+    p_rms = sub.add_parser(
+        "remove-subheading",
+        help="Drop a whole `### ` subsection and everything under it.",
+    )
+    p_rms.add_argument("--heading")
+    p_rms.add_argument("--subheading")
+    _add_channel_flag(p_rms)
+    _add_skill_flag(p_rms)
+
     p_show = sub.add_parser("show", help="Print USER.md, a CHANNEL.md, or a skill overlay (--skill), optionally filtered to one heading.")
     p_show.add_argument("--heading")
     _add_channel_flag(p_show)
@@ -1017,6 +1071,7 @@ def main(argv=None) -> int:
         "remove": cmd_remove,
         "replace": cmd_replace,
         "remove-heading": cmd_remove_heading,
+        "remove-subheading": cmd_remove_subheading,
         "show": cmd_show,
         "headings": cmd_headings,
         "skills": cmd_skills,

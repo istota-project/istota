@@ -28,6 +28,7 @@ SEED_USER_MD = (
     "### Email\n"
     "\n"
     "- Always sign off with name\n"
+    "- Use plain text\n"
     "\n"
 )
 
@@ -142,8 +143,11 @@ class TestRemove:
         assert out["outcome"] == "applied"
         body = user_md.read_text()
         assert "Always sign off with name" not in body
-        # The subheading and the other section content survive.
+        # The subheading and the other section content survive. `### Email`
+        # keeps a second bullet, so this stays a test about scoping rather than
+        # about the delete-on-empty rule (tests/test_curation_subheading_removal.py).
         assert "### Email" in body
+        assert "Use plain text" in body
         assert "Prefers short replies" in body
 
 
