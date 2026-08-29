@@ -1,4 +1,4 @@
-"""Provision a user's default Talk rooms (#general / #logs / #alerts).
+"""Provision a user's default Talk rooms (`general` / `logs` / `alerts`).
 
 Docker installs get these from ``docker/istota/entrypoint.sh``, which creates
 the rooms and seeds their tokens into the rendered config. A bare-metal
@@ -15,7 +15,7 @@ every deploy:
 
 - **Idempotent by participant-scoped lookup.** A room is reused when one of the
   same name already exists *with the target user in it*. The bot sits in every
-  user's rooms, so a bare name match would hand one user another's ``#logs`` on
+  user's rooms, so a bare name match would hand one user another's ``logs`` on
   a shared Nextcloud — participation is what keeps them apart.
 - **Orphan adoption.** A room created here whose follow-up invite failed has the
   bot as its only human participant, so the participation lookup above would
@@ -30,11 +30,28 @@ every deploy:
   you turn it off — so refilling every empty column on every deploy would
   re-enable a log the user switched off. That is the ISSUE-102 timezone clobber
   in a new place.
+- **Reuse by remembered token, name only on a first provision.** A display-name
+  match cannot survive a rename, and the room's name belongs to the user: they
+  renamed ``general`` to ``#general`` from the web UI, the rename propagated to
+  Talk, and the next deploy found no group room called ``general`` and made one
+  (ISSUE-342). So the token of every room a run resolves is written to the
+  reserved ``_provisioned_rooms`` KV namespace, and a later run prefers that
+  token over the name. The *writing* is the ``provision-rooms`` command's, not
+  this module's — ``cmd_nextcloud_provision_rooms`` reads the record, threads it
+  in, and records the result, because it is also the thing that decides which
+  names are in scope for the run. ``general`` is what forced this: ``pending_channel_rooms``
+  drops ``logs`` and ``alerts`` from the work list once their profile columns
+  hold a token, and ``CHANNEL_FIELDS`` deliberately gives ``general`` no column,
+  so it was the one name re-derived from Talk on every single deploy. The Docker
+  entrypoint never had the bug because it persists ``GENERAL_TOKEN`` in its
+  provisioning flag file and skips the lookup entirely; it reuses a token where
+  this reused a name.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,12 +65,20 @@ DEFAULT_ROOMS: tuple[str, ...] = ("general", "logs", "alerts")
 # rooms carry the execution log and the confirmation prompts.
 GROUP_ROOM_TYPE = 2
 
-# Which provisioned room seeds which user_profiles column. #general has no
+# Which provisioned room seeds which user_profiles column. `general` has no
 # channel role; it is the room the user actually talks in.
 CHANNEL_FIELDS: dict[str, str] = {
     "logs": "log_channel",
     "alerts": "alerts_channel",
 }
+
+# Where the token of each provisioned room is remembered, keyed by room name.
+# The `istota_kv` store rather than a new table: this is framework bookkeeping
+# that happens to be per-user key/value, which is exactly what the reserved
+# namespace prefix exists for (`kv_namespaces.py`). The leading underscore is
+# load-bearing — it is what stops a task reaching these rows through the `kv`
+# skill and re-pointing a deploy at a room of its choosing.
+PROVISIONED_NAMESPACE = "_provisioned_rooms"
 
 
 class ProvisionError(RuntimeError):
@@ -71,6 +96,12 @@ class ProvisionedRoom:
     invited: bool = True
     # Set when an earlier run created this room but its invite never landed.
     adopted: bool = False
+    # Set when this run tried to put the user back into a room it had already
+    # provisioned for them. Separate from `adopted` because it must not seed a
+    # profile column, and separate from `invited` because on that path
+    # `invited=False` would otherwise mean both "already in it, nothing to do"
+    # and "tried and failed" — and the CLI reports one and not the other.
+    reinvited: bool = False
 
     @property
     def seedable(self) -> bool:
@@ -103,19 +134,57 @@ def _is_user(participant: dict, user_id: str) -> bool:
     return _is_users_actor(participant) and _actor_id(participant) == user_id
 
 
-def _is_named_room(room: dict, name: str) -> bool:
-    """True for a group room called ``name``.
+def _is_group_room(room: dict) -> bool:
+    """True unless the room reports a type other than group.
 
     Talk puts the *other party's* user id in ``name`` for a one-to-one room, so
     a bare name match can adopt a private conversation with a user whose id
-    happens to be ``logs``. Reject any room that reports a type other than
-    group; a room with no ``type`` at all is accepted, since older Talk versions
-    omit it.
+    happens to be ``logs``, and a remembered token could resurrect one as a
+    channel. A room with no ``type`` at all is accepted, since older Talk
+    versions omit it.
     """
-    if room.get("displayName") != name and room.get("name") != name:
-        return False
     room_type = room.get("type")
     return room_type is None or room_type == GROUP_ROOM_TYPE
+
+
+def _is_named_room(room: dict, name: str) -> bool:
+    """True for a group room called ``name``."""
+    if room.get("displayName") != name and room.get("name") != name:
+        return False
+    return _is_group_room(room)
+
+
+#: Talk conversation types a remembered token must never resolve to: 1
+#: one-to-one, 4 the "Talk updates" changelog room, 5 a former one-to-one, 6
+#: note-to-self. Deliberately a reject list rather than the group-only test the
+#: *name* path uses. The name match needs group-only because a one-to-one puts
+#: the other party's user id in `name`, so `logs` can match a private
+#: conversation; a token carries the identity outright and needs no such
+#: protection. Requiring group there would instead reintroduce the bug: a user
+#: who link-shares their room turns it into type 3, the token match would be
+#: rejected, the name match already fails (the room was renamed — the whole
+#: premise), and a duplicate is minted every deploy again.
+_REMEMBERED_REJECT_TYPES = frozenset({1, 4, 5, 6})
+
+
+def _find_remembered_room(rooms: "list[dict]", token: str) -> dict | None:
+    """The bot's conversation with this exact token, or None.
+
+    Whatever it is called now. That is the point: the name is the user's to
+    change and the token is not, so this is the lookup that survives a rename
+    (ISSUE-342). None also covers the room having been deleted in Nextcloud or
+    the bot having been removed from it — either way it is absent from the
+    conversation list and the caller falls back to the name.
+    """
+    if not token:
+        return None
+    for room in rooms:
+        if room.get("token") != token:
+            continue
+        if room.get("type") in _REMEMBERED_REJECT_TYPES:
+            return None
+        return room
+    return None
 
 
 def _is_orphan(participants: "list[dict]", bot_user_id: str | None) -> bool:
@@ -178,14 +247,70 @@ async def ensure_room(
     *,
     bot_user_id: str | None = None,
     rooms: "list[dict] | None" = None,
+    known_token: str | None = None,
 ) -> ProvisionedRoom:
     """Reuse, adopt or create the group room ``name`` and put ``user_id`` in it.
 
     ``rooms`` lets a caller pass a room list it already fetched — provisioning
     three rooms otherwise costs three identical full-list GETs per user.
+
+    ``known_token`` is the token a previous run provisioned for this name, from
+    ``read_provisioned_tokens``. It is tried first and matched on the token
+    alone, so a room the user has since renamed is still recognised as theirs
+    (ISSUE-342). A stale token — the conversation deleted, or the bot removed
+    from it — is absent from the room list, and the name path takes over
+    unchanged.
     """
     if rooms is None:
         rooms = await client.list_conversations()
+
+    remembered = _find_remembered_room(rooms, known_token or "")
+    if remembered is not None:
+        participants = await client.get_participants(known_token)
+        if any(_is_user(p, user_id) for p in participants):
+            logger.info(
+                "Talk room already provisioned: %s -> %s", name, known_token,
+            )
+            return ProvisionedRoom(
+                name=name, token=known_token, created=False, invited=False,
+            )
+        # The room is ours and still exists; the user is not in it. Two reasons
+        # not to invite them back unconditionally.
+        #
+        # An empty participant list is more likely a failed read than a real
+        # room, which is the judgement `_is_orphan` already makes — so the two
+        # paths must not disagree about the same evidence.
+        #
+        # And a room with other humans in it is one the user *left*. Dragging
+        # them back on every deploy is the shape of the ISSUE-102 clobber this
+        # module's own docstring warns about, and unlike `logs` / `alerts`
+        # there is no profile column they could clear to opt out. A bot-only
+        # room is the case worth acting on: it is either a failed invite this
+        # tool left behind, or the user's own room they stepped out of.
+        if not participants or not _is_orphan(participants, bot_user_id):
+            logger.info(
+                "Provisioned Talk room %s (%s) exists but %s is not in it and "
+                "it is not bot-only; leaving membership alone",
+                name, known_token, user_id,
+            )
+            return ProvisionedRoom(
+                name=name, token=known_token, created=False, invited=False,
+            )
+        # `adopted` stays False on purpose, so `seedable` is False and a
+        # channel column the user cleared is not refilled behind them.
+        # `reinvited` is what carries the fact that this run *attempted* an
+        # invite, which `invited` alone cannot say: on this path `invited=False`
+        # would otherwise mean both "already in it" and "tried and failed", and
+        # the CLI's stranded warning and the Ansible `failed_when` both read it.
+        logger.info(
+            "Re-inviting %s to provisioned Talk room %s (%s)",
+            user_id, name, known_token,
+        )
+        invited = await _invite(client, known_token, name, user_id)
+        return ProvisionedRoom(
+            name=name, token=known_token, created=False, invited=invited,
+            reinvited=True,
+        )
 
     orphan: str | None = None
     for room in rooms:
@@ -224,26 +349,41 @@ async def provision_rooms(
     names: "tuple[str, ...] | list[str]" = DEFAULT_ROOMS,
     *,
     bot_user_id: str | None = None,
+    known_tokens: "dict[str, str] | None" = None,
+    resolved: "list[ProvisionedRoom] | None" = None,
 ) -> list[ProvisionedRoom]:
     """Ensure each room in ``names`` exists for ``user_id``, in order.
 
     The room list is fetched once and reused across the names. A room this call
     creates is absent from that snapshot, which is harmless: each name is looked
     up once.
+
+    ``known_tokens`` maps a room name to the token a previous run provisioned
+    for it — see ``read_provisioned_tokens``.
+
+    ``resolved`` is an out-parameter: each room is appended as it resolves, so a
+    caller can record what it got when a later name raises. Without it a Talk
+    5xx on the third room throws away the two tokens already resolved, and the
+    next deploy silently falls back to name matching for rooms that exist —
+    which is the ISSUE-342 bug, arrived at through the error path.
     """
     rooms = await client.list_conversations()
-    results = []
+    known = known_tokens or {}
+    results = resolved if resolved is not None else []
     for name in names:
         results.append(
             await ensure_room(
                 client, name, user_id, bot_user_id=bot_user_id, rooms=rooms,
+                known_token=known.get(name),
             )
         )
-    return results
+    return list(results)
 
 
 def provision_user_rooms(
     config, user_id: str, names: "tuple[str, ...] | list[str]" = DEFAULT_ROOMS,
+    *, known_tokens: "dict[str, str] | None" = None,
+    resolved: "list[ProvisionedRoom] | None" = None,
 ) -> list[ProvisionedRoom]:
     """Synchronous entry point: open a bot-auth TalkClient and provision.
 
@@ -260,11 +400,93 @@ def provision_user_rooms(
         try:
             return await provision_rooms(
                 client, user_id, names, bot_user_id=bot_user_id,
+                known_tokens=known_tokens, resolved=resolved,
             )
         finally:
             await client.aclose()
 
     return asyncio.run(_run())
+
+
+def _decode_token(raw: object) -> str:
+    """One stored value -> the Talk token, tolerating both encodings.
+
+    Values in `istota_kv` are JSON by convention — `cli.cmd_kv_get` does an
+    unguarded `json.loads` on one, so a bare string there is a traceback rather
+    than a value. The first version of this record wrote bare strings, so a
+    deployment can already have some on disk; both are read, and every write
+    from here on is JSON.
+    """
+    if not isinstance(raw, str) or not raw:
+        return ""
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return raw
+    return decoded if isinstance(decoded, str) else ""
+
+
+def read_provisioned_tokens(db_path: Path, user_id: str) -> "dict[str, str]":
+    """Room name -> the Talk token a previous run provisioned for it.
+
+    Empty on anything that goes wrong, including a database that does not exist
+    yet: an unreadable record means "provision by name", which is the behaviour
+    every install had before the record existed. Never raises — the caller is a
+    deploy step, and refusing to provision because bookkeeping was unreadable
+    would be worse than the duplicate this exists to prevent.
+    """
+    from . import db
+
+    try:
+        if not Path(db_path).exists():
+            return {}
+        with db.get_db(db_path) as conn:
+            rows = db.kv_list(conn, user_id, PROVISIONED_NAMESPACE)
+    except Exception as e:
+        logger.warning("could not read provisioned room tokens for %s: %s", user_id, e)
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        token = _decode_token(row.get("value"))
+        if token:
+            out[row["key"]] = token
+    return out
+
+
+def record_provisioned_tokens(
+    db_path: Path, user_id: str, rooms: "list[ProvisionedRoom]",
+) -> bool:
+    """Remember the token of each room, so a later rename cannot orphan it.
+
+    Written for every room the run resolved, not only the ones it created: a
+    room adopted or matched by name on this run is the one a future run must
+    recognise after it is renamed. Returns whether the write landed.
+
+    Never raises. The rooms exist on Talk by the time this runs, so failing the
+    deploy over bookkeeping would be worse than what a lost record costs: the
+    next run falls back to matching by name, which is what every install did
+    before this record existed. The caller reports the failure rather than
+    acting on it.
+    """
+    from . import db
+
+    entries = [(r.name, r.token) for r in rooms if r.name and r.token]
+    if not entries:
+        return True
+    try:
+        if not Path(db_path).exists():
+            raise FileNotFoundError(db_path)
+        with db.get_db(db_path) as conn:
+            for name, token in entries:
+                db.kv_set(
+                    conn, user_id, PROVISIONED_NAMESPACE, name, json.dumps(token),
+                )
+        return True
+    except Exception as e:
+        logger.warning(
+            "could not record provisioned room tokens for %s: %s", user_id, e,
+        )
+        return False
 
 
 def pending_channel_rooms(

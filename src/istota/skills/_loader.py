@@ -949,8 +949,84 @@ def contained_overlay_dir(overlay_dir: Path, user_root: Path) -> Path | None:
     return resolved
 
 
+def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
+    """An fd on ``{user_root}/{parts...}``, or None if any component below the
+    root is not a plain directory reached directly from the one above it.
+
+    **Deliberately stricter than ``contained_overlay_dir``**, which is the one
+    thing to know before using both. That function resolves symlinks and
+    accepts one that lands back inside ``user_root``; this refuses a symlink at
+    any component, whatever it points at, because refusing is the only answer
+    that survives the path being rewritten underneath it. A caller holding both
+    answers can therefore be told yes by one and no by the other, and that
+    divergence is worth a log line rather than a silent skip.
+
+    ``contained_overlay_dir`` answers the same question by comparing resolved
+    paths, and a comparison is only true for as long as nobody moves anything.
+    Its own docstring names the window it leaves: the check and the reads that
+    follow are separated by a directory listing and one ``open(2)`` per file,
+    and every component under ``{mount}/Users/{user_id}`` is model-writable, so
+    ``mv skills skills.real && ln -s /anywhere skills`` lands in the middle of
+    it. Measured indexing a file from outside the mount that way, with the
+    containment check passing first (ISSUE-341 item 3).
+
+    So this establishes containment **by construction** instead. Each component
+    below the root is opened with ``O_NOFOLLOW | O_DIRECTORY`` relative to the
+    one above it, which means a symlink at any level fails the open rather than
+    being followed, and the caller ends up holding an fd rather than a name.
+    The fd is pinned to an inode: whatever is renamed over the path afterwards,
+    ``scandir`` and ``openat`` through that fd still see the directory that
+    passed. What that removes is every later resolution of the components
+    *above* the leaf, which is the whole of the window — not resolution as
+    such. Each file is still opened by name relative to the fd, and what covers
+    the leaf is what always covered it, ``O_NOFOLLOW`` plus ``S_ISREG``.
+
+    ``user_root`` itself is opened following symlinks, deliberately. It is
+    ``{mount}/Users/{user_id}``, composed by the daemon out of its own config,
+    and the mount is reached through a symlink on some hosts — the same reason
+    ``contained_overlay_dir`` resolves both sides before comparing.
+
+    **Only the search reindex walks this way so far**, which is where the
+    consequence was largest: what it indexes, `!search` reads back. The same
+    check-then-resolve-by-name shape is still live on the prompt loader
+    (`_load_user_overlay`), on ``doctor``'s sweep and on the nightly inventory,
+    and the prompt path is the worse one — the same swap puts up to
+    ``OVERLAY_MAX_BYTES`` of any daemon-readable file into a skill's section.
+    Those are ISSUE-341 item 3's remaining half, not a class this function
+    closed by existing.
+
+    The caller closes the fd. Raises nothing an ordinary filesystem produces:
+    every ``OSError`` is a None. A platform without ``dir_fd`` support would
+    raise ``NotImplementedError``, which Linux and macOS both rule out.
+    """
+    # Each part must be one ordinary component. A `/` would have its own
+    # interior walked by a single `os.open`, where `O_NOFOLLOW` covers only the
+    # last component — so the by-construction claim above would quietly not
+    # hold for the middle of it. `.` and `..` climb rather than descend, and a
+    # NUL makes `os.open` raise `ValueError`, which is not an `OSError` and so
+    # would escape the guard below carrying an open fd with it.
+    for part in parts:
+        if not part or "/" in part or "\0" in part or part in (".", ".."):
+            return None
+    try:
+        fd = os.open(user_root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for part in parts:
+            nxt = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+            )
+            os.close(fd)
+            fd = nxt
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def read_overlay_bytes(
-    path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES
+    path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES, dir_fd: int | None = None
 ) -> tuple[bytes | None, str | None, int | None]:
     """Read an overlay file, refusing anything that is not a plain file.
 
@@ -981,6 +1057,18 @@ def read_overlay_bytes(
       ``OSError``, so it would escape the never-raises contract every caller
       depends on rather than degrading to "no overlay".
 
+    **``dir_fd`` changes what ``path`` means, and a caller must know it.** Given
+    one, only ``path.name`` is opened, resolved by the kernel relative to that
+    directory — so a caller holding an fd keeps its containment through this
+    call instead of handing back a name for the components above the leaf to be
+    walked again. ``path`` is still what every returned refusal is *about*, so
+    the two have to agree: pass the path you built from that directory, not an
+    absolute path from somewhere else, which would silently read a different
+    file. A path whose ``name`` is empty (``Path(".")``, ``Path("/")``) reads as
+    ``FileNotFoundError`` and so as absence, and absence is how ``memory append
+    --skill`` decides to create a file — so a directory-shaped path is the one
+    argument that fails in a direction a caller would act on.
+
     One reader for three callers — the loader, the memory CLI and ``doctor`` —
     because the three answers above are the whole of the hardening, and a
     fourth copy of them is a fourth chance for one to be left out. What the
@@ -991,7 +1079,13 @@ def read_overlay_bytes(
     reports it.
     """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        # With `dir_fd` the name is resolved by the kernel relative to a
+        # directory this process already holds open, so no component of the
+        # path above it is consulted — or swappable — a second time.
+        target = path.name if dir_fd is not None else path
+        fd = os.open(
+            target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd
+        )
     except FileNotFoundError:
         return b"", None, None
     except OSError as e:
@@ -1049,6 +1143,7 @@ def inspect_overlay(
     known_skills,
     disabled_skills=frozenset(),
     max_read_bytes: int = OVERLAY_READ_CAP_BYTES,
+    dir_fd: int | None = None,
 ) -> OverlayInspection:
     """Everything a reporting surface needs to say about one overlay file.
 
@@ -1059,6 +1154,18 @@ def inspect_overlay(
     ``binds`` is derived here, once, and the emptiness test is
     ``overlay_effective_body`` rather than ``.strip()`` — a file holding
     nothing but frontmatter has bytes and has lines and loads as nothing.
+
+    **The unknown-name gate returns before the read.** Every other gate records
+    a reason and reads on, because the size and the first line are what a
+    reporting surface shows for a file that is filed correctly and inert. An
+    unknown name is the one case where nothing about the content can matter —
+    no caller will ever load it — and it is also the only gate whose input is
+    unbounded, since the name comes off a directory the model writes to. So
+    that verdict is reached without opening the file at all (ISSUE-341 item 2).
+
+    ``dir_fd`` is passed straight to the reader: a caller holding an fd on the
+    overlay directory (``open_overlay_dir``) keeps its containment through this
+    call rather than handing back a path for the kernel to resolve again.
 
     ``disabled_skills`` defaults to empty because not every caller cares. The
     CLI passes ``effective_disabled_skills`` so its inventory can say a file is
@@ -1071,13 +1178,27 @@ def inspect_overlay(
     skill = path.name[: -len(".md")] if path.name.endswith(".md") else path.name
     reason: str | None = None
     if skill not in known_skills:
-        reason = OVERLAY_UNKNOWN_SKILL
-    elif _denylist_key(skill) in OVERLAY_DENYLIST:
+        # Return before the read, not merely before the other gates. The name
+        # is caller-supplied and the directory is model-writable, so this is
+        # the one gate whose input is unbounded — and `doctor` walks every
+        # user's directory on the daemon's start-up path with a 1 MiB ceiling
+        # per file, which a directory of large junk names turns into real
+        # work for a verdict already decided (ISSUE-341 item 2). The denylist
+        # and disabled gates deliberately still read: both name a real skill,
+        # and the size and first line are what the `skills overlays` inventory
+        # shows a user asking what to delete or re-enable.
+        return OverlayInspection(
+            skill=skill, path=path, size=None, lines=None, first_line=None,
+            reason=OVERLAY_UNKNOWN_SKILL, warnings=(),
+        )
+    if _denylist_key(skill) in OVERLAY_DENYLIST:
         reason = OVERLAY_DENYLISTED
     elif skill in disabled_skills:
         reason = OVERLAY_SKILL_DISABLED
 
-    raw, refusal, size = read_overlay_bytes(path, max_bytes=max_read_bytes)
+    raw, refusal, size = read_overlay_bytes(
+        path, max_bytes=max_read_bytes, dir_fd=dir_fd
+    )
     lines: int | None = None
     first_line: str | None = None
     warnings: list[str] = []

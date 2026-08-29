@@ -90,7 +90,7 @@ max_output_bytes: int = 102_400      # per stream, in the JSON envelope
 ```
 Per-user persistent Docker container. When `enabled`, the executor exports `ISTOTA_DEVBOX_CONTAINER`, `ISTOTA_DEVBOX_DOCKER_CLI` and `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` (container name = `f"{container_prefix}{task.user_id}"`). The skill CLI reaches the container over the **exec transport** — a Unix socket into a server running inside it. Two verbs also speak Docker, about the container rather than into it: `status` adds a `docker inspect` for the container's own facts, and `reset` wipes `/home/dev` and `docker restart`s it, entirely in Docker. Both run host-side in the CLI's own process, with the daemon's environment and no `DOCKER_HOST`.
 
-**Six keys are retired, and the sweep in `tests/test_ansible_config_template.py` is what keeps them from coming back**: `docker_socket`, `exec_timeout_seconds`, `api_proxy_enabled`, `api_proxy_socket_dir`, `api_proxy_exec_ttl_seconds` and `api_proxy_audit_log`. `load_config` reads none of them, so a value left in a TOML file is inert. The Docker-API allowlist proxy they configured is deleted whole — module, both Ansible templates, the per-user units — because its only consumer in the tree was an unconditional bind of its socket into every sandbox, and nothing in a build needs Docker any more. `exec_timeout_seconds` went with the transport's own answer to timeouts: there is no default, the task's budget governs, and a caller wanting a kill passes `--timeout`.
+**Six keys are retired, and the sweep in `tests/test_ansible_config_template.py` is what keeps them from coming back**: `docker_socket`, `exec_timeout_seconds`, `api_proxy_enabled`, `api_proxy_socket_dir`, `api_proxy_exec_ttl_seconds` and `api_proxy_audit_log`. `load_config` reads none of them, so a value left in a TOML file is inert — and since the loader became a dataclass walk it is also *named*, in the one unrecognised-key warning at startup, rather than being discarded in silence. That reverses an earlier decision not to warn about these, which was made when the alternative was hand-writing the check per key; a retired setting an operator can still see in their file is worth one line. The Docker-API allowlist proxy they configured is deleted whole — module, both Ansible templates, the per-user units — because its only consumer in the tree was an unconditional bind of its socket into every sandbox, and nothing in a build needs Docker any more. `exec_timeout_seconds` went with the transport's own answer to timeouts: there is no default, the task's budget governs, and a caller wanting a kill passes `--timeout`.
 
 **There is deliberately no `exec_socket_dir` here.** The skill CLI resolves the socket through `config.exec_socket_path`, the same helper the executor's bwrap bind and the `doctor` transport check use, so `/run/istota-exec` has one spelling in the tree. A mirror in this block could only be dead code — `ContainerConfig.exec_socket_dir` carries a non-empty default, so its value always wins — or a second knob for a value the design says has one. `tests/test_skills_devbox.py::TestTheSocketPathComesFromConfig::test_the_devbox_block_carries_no_second_spelling` holds the absence, so a later reader finds the decision rather than the gap.
 
@@ -440,14 +440,20 @@ written and never refreshed.
 **A bad value in this block never stops the daemon.** `load_config` runs in the
 scheduler, the web app, the webhook receiver and every host-side skill CLI the
 proxy spawns per call, so a typo on a knob that only draws a dashboard tile must
-not stop any of them from starting. Unlike the `[brain.tmux]` / `[brain.native]`
-parses above it, this one does not hand a raw TOML value to `int()` / `float()`
-— `int(float("inf"))` raises `OverflowError`, `int(float("nan"))` raises
-`ValueError`, and TOML spells both. A non-number, a non-finite number or a bool
-in a numeric slot logs one WARNING and takes the dataclass default.
-`subscription_usage` is stricter still: it accepts a real boolean or a quoted
-one (`"false"`, `"no"`, `"off"`, `"0"`, case-insensitive) and warns on anything
-else, because `bool("false")` is `True` and this is the field that decides
+not stop any of them from starting. No raw TOML value is ever handed to a bare
+`int()` / `float()` — `int(float("inf"))` raises `OverflowError`,
+`int(float("nan"))` raises `ValueError`, and TOML spells both. A non-finite
+number, a bool in a numeric slot, or a value that is not a number at all logs
+one WARNING and takes the dataclass default. This block used to state those
+rules in its own hand-written helpers; they are now what `config_mapper`'s
+`coerce_int` / `coerce_float` do for every numeric field in the tree, which is
+the same guarantee reached from the other direction. One difference from the
+old helpers: a *quoted* number (`"1800"`) is now read as the number rather than
+refused, matching the quoted-boolean tolerance below — a rendered config is a
+place where a value arrives quoted for reasons that have nothing to do with
+intent. `subscription_usage` is stricter still: it accepts a real boolean or a
+quoted one (`"false"`, `"no"`, `"off"`, `"0"`, case-insensitive) and warns on
+anything else, because `bool("false")` is `True` and this is the field that decides
 whether the deployment makes an unsolicited outbound request — "operator wrote
 false, poll stayed on" is the one failure it must not have.
 
@@ -780,9 +786,9 @@ Methods:
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`
 
 1. Parse TOML file
-2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[[default_briefings]]`, `[location]`, `[site]`, `[developer]`
-3. Parse `[users.*]` section → `_parse_user_data()` for each
-4. Parse `[security]` section → `SecurityConfig`
+2. **Walk the dataclass tree** (`config_mapper.apply_section`) and set every field the TOML names, coercing by declared type. This is the mechanical half and it covers the great majority of the schema — a field's TOML key is its own name, and its default is the one on the dataclass. Unknown keys are collected and reported in one warning (`report_unknown`); they are still never fatal, because a config written for a newer version has to load on an older one for a rollback to work.
+3. Two tables steer it, both in `config.py`, and `tests/test_config_mapper.py` holds each to naming real fields. `_CONFIG_HOOKS` maps a dotted key to a parse that is more than a coercion (`web.auth` and the other closed vocabularies, `security.sandbox_ro_paths`, `scheduler.email_task_queue`, `developer.container`, `health.max_document_bytes`). `_PARSED_BY_HAND` names what the walk must skip because something below builds it; `_RETIRED` names keys that are no longer fields at all, held out so each gets its own migration warning instead of a generic "unrecognised".
+4. Hand-parsed sections: `[users.*]` → `_parse_user_data()`, `[[default_briefings]]` / `[[briefing_shared_blocks]]` → their spec parsers, `[models]` (alias values kept verbatim in either shape), `[experimental]` (checked against `KNOWN_FEATURES`), and the `[email]` cross-field trio — `confirm_sender_match = "verify"` is only meaningful with an `authserv_id` to scope the verdict to, so the validator has to see both and runs after the walk has settled it.
 5. Call `load_admin_users()` → `config.admin_users`
 6. Apply env var overrides for secrets (`ISTOTA_NEXTCLOUD_APP_PASSWORD` → `nextcloud.app_password`, etc.)
 7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
@@ -857,14 +863,15 @@ class UserResource:
 
 ### To an existing sub-config (e.g., SchedulerConfig):
 1. Add field with default to dataclass in `config.py`
-2. It will auto-load from TOML `[scheduler]` section (matching field name)
+2. It auto-loads from the TOML `[scheduler]` section, matching field name and coercing to the declared type — **no loader change**. This line was in this document for a long time before it was true: the loader used to need a hand-written `.get()` per key, and eleven declared, documented, generator-written settings had no line and were silently ignored. If the field needs validating beyond its type, add a hook to `_CONFIG_HOOKS` keyed on its dotted path.
+   The scalar, optional, list, set and dict shapes are resolved structurally, so `str | None` and `list[float]` work as readily as `int`. An annotation the resolver cannot answer for is a **test failure**, not a silent skip — `tests/test_config_mapper.py::test_every_declared_field_resolves_to_a_coercion` walks the real tree, because a field ignored with only a log line is precisely the defect the walk exists to prevent, and it shipped once for `dict`.
 3. Update `config.example.toml` with documentation
 4. Update Ansible: `defaults/main.yml` + `templates/config.toml.j2`
 
 ### To add a new sub-config section:
 1. Create new `@dataclass` in `config.py`
-2. Add field to `Config` dataclass
-3. Add parsing in `load_config()` for the TOML section
+2. Add field to `Config` dataclass — the walk recurses into a nested dataclass and reads the sub-table of the same name, so there is nothing to add to `load_config`
+3. Only if the section is not a plain field tree (a list of dataclasses, a verbatim mapping, a cross-field rule) does it need a hook or an entry in `_PARSED_BY_HAND`
 4. Update `config.example.toml`, Ansible role
 
 ### To add a new per-user field:

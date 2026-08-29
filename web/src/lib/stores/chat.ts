@@ -1249,6 +1249,10 @@ function createSession(): ChatSession {
         ...next[idx],
         name: fresh.name ?? next[idx].name,
         origin: fresh.origin ?? next[idx].origin,
+        // `??` rather than a bare adopt: a promote sets this and an unbound
+        // room sends null, so taking the frame's value unconditionally would
+        // erase it the way the room-list poll used to (ISSUE-342).
+        talk_token: fresh.talk_token ?? next[idx].talk_token,
         model: fresh.model ?? null,
         effort: fresh.effort ?? null,
       };

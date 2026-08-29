@@ -138,6 +138,33 @@ class TestOverlayInventory:
         assert rows["develper"]["binds"] is False
         assert rows["develper"]["reason"]
 
+    def test_a_denylisted_file_still_reports_its_size(self, overlay_env, capsys):
+        """Ported with the verb from `memory skills` (ISSUE-341 item 2).
+
+        A denylisted name is a real skill, so `inspect_overlay` still reads the
+        file and the inventory can tell someone what is in the thing it says
+        does not bind. The contrast is an *unknown* name, which is not read at
+        all — that gate is pinned on the loader in `test_skills_loader.py`.
+        """
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "sensitive_actions.md").write_text("- planted\n")
+        _overlays()
+        row = _rows(capsys)["skills"][0]
+        assert row["reason"] == "denylisted"
+        assert row["bytes"] == len("- planted\n")
+        assert row["first_line"] == "- planted"
+
+    def test_a_misfiled_name_reports_no_size(self, overlay_env, capsys):
+        """The other half of the same gate: an unknown name is refused before
+        the read, so there is nothing to report a size from."""
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "develper.md").write_text("- a typo'd file\n")
+        _overlays()
+        row = _rows(capsys)["skills"][0]
+        assert row["reason"] == "unknown_skill"
+        assert "lines" not in row
+        assert "first_line" not in row
+
     def test_an_absent_directory_is_an_empty_inventory(self, overlay_env, capsys):
         assert not overlay_env.overlays.exists()
         _overlays()

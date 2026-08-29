@@ -148,6 +148,188 @@ class TestRoomListActivityOrder:
         # Same normalization the streamed message rows get, so the client can
         # compare a room's stamp against an arriving row's `created_at`.
         assert by_token["cpz"]["last_activity"] == "2026-04-02T07:30:00Z"
-        # The auto-created default room has never been spoken in and still
-        # carries a stamp (its creation time), so nothing sorts as undefined.
+        # A room nobody has spoken in falls back to its creation time, so
+        # nothing in the payload ever sorts as undefined.
         assert all(r.get("last_activity") for r in rooms)
+
+
+class TestListingCarriesTheTalkRef:
+    """ISSUE-342 — a promoted room has to say it is on Talk.
+
+    `RoomSettings.svelte` decides with `origin === 'talk' || !!talk_token`. A
+    promoted room keeps `origin='web'` by design, so the whole answer rests on
+    `talk_token` — and the listing never sent it. Worse, the room-list refresh
+    merges `talk_token: fresh.talk_token` unconditionally, so a poll *erased*
+    the value the promote response had just put in the store: the room reverted
+    to reading as istota-only and re-offered "Also open in Talk", which the
+    backend then refuses.
+    """
+
+    def test_promoted_room_carries_its_talk_ref(self, web_config, db_path):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.create_web_chat_room(conn, "alice", "general")
+            token = db.list_web_chat_rooms(conn, "alice")[0].token
+            db.add_room_binding(conn, token, "talk", "tk4ab9cd")
+        by_token = {r["token"]: r for r in web_app._chat_list_rooms("alice")}
+        assert by_token[token]["origin"] == "web"
+        assert by_token[token]["talk_token"] == "tk4ab9cd"
+
+    def test_talk_origin_room_carries_its_own_token(self, web_config, db_path):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
+            db.add_room_binding(conn, "cpz", "talk", "cpz")
+        by_token = {r["token"]: r for r in web_app._chat_list_rooms("alice")}
+        assert by_token["cpz"]["talk_token"] == "cpz"
+
+    def test_unpromoted_web_room_carries_none(self, web_config, db_path):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.create_web_chat_room(conn, "alice", "Ideas")
+            token = db.list_web_chat_rooms(conn, "alice")[0].token
+        by_token = {r["token"]: r for r in web_app._chat_list_rooms("alice")}
+        assert by_token[token]["talk_token"] is None
+
+    def test_one_users_binding_does_not_leak_into_anothers_listing(
+        self, web_config, db_path,
+    ):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "shared", "alice", origin="talk", name="#shared")
+            db.add_room_binding(conn, "shared", "talk", "shared")
+            db.create_web_chat_room(conn, "bob", "Ideas")
+            bob_token = db.list_web_chat_rooms(conn, "bob")[0].token
+        by_token = {r["token"]: r for r in web_app._chat_list_rooms("bob")}
+        assert bob_token in by_token
+        assert by_token[bob_token]["talk_token"] is None
+        assert "shared" not in by_token
+
+    def test_patch_response_matches_the_listing_shape(self, web_config, db_path):
+        # The PATCH response is merged into the client's room record, so a key
+        # the listing carries and the PATCH omits reads as absent to any
+        # consumer that replaces rather than spreads.
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "general")
+            db.add_room_binding(conn, room.token, "talk", "tk4ab9cd")
+        listed = {r["token"]: r for r in web_app._chat_list_rooms("alice")}[room.token]
+        patched = web_app._chat_update_room("alice", room.id, "#general", None)
+        assert patched["name"] == "#general"
+        assert patched["origin"] == listed["origin"] == "web"
+        assert patched["talk_token"] == listed["talk_token"] == "tk4ab9cd"
+
+
+class TestDefaultRoomAsksTheRegistry:
+    """ISSUE-342 — the first web visit must not mint a second `general`.
+
+    `_chat_list_rooms` calls `ensure_default_web_chat_room` before it reads the
+    registry, and that helper counted `web_chat_rooms` handles — which the
+    listing itself creates a few lines later. So a user whose rooms all came
+    from Talk looked room-less on their first visit and got a web-origin
+    `general` beside the Talk one provisioning had already made. ISSUE-134
+    named this helper in its audit list and the pass was never taken.
+    """
+
+    def test_a_talk_member_gets_no_second_general(self, web_config, db_path):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
+            db.add_room_binding(conn, "rm1a2b3c", "talk", "rm1a2b3c")
+        rooms = web_app._chat_list_rooms("alice")
+        assert [r["token"] for r in rooms] == ["rm1a2b3c"]
+
+    def test_the_default_helper_returns_a_handle_on_the_member_room(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
+            handle = db.ensure_default_web_chat_room(conn, "alice")
+        assert handle.token == "rm1a2b3c"
+        assert handle.user_id == "alice"
+
+    def test_a_user_with_no_rooms_at_all_still_gets_one(self, db_path):
+        with db.get_db(db_path) as conn:
+            room = db.ensure_default_web_chat_room(conn, "alice")
+        assert room.name == "general"
+        assert room.token.startswith("web-alice-")
+
+    def test_a_dismissed_room_does_not_count_as_having_one(self, db_path):
+        # A hidden room is not a room the user can post into, so it must not
+        # suppress the default the way a live membership does.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
+            db.dismiss_room(conn, "rm1a2b3c", "alice")
+            room = db.ensure_default_web_chat_room(conn, "alice")
+        assert room.token.startswith("web-alice-")
+
+    def test_a_shared_room_is_never_the_default_delivery_target(self, db_path):
+        # `default_web_room_token` resolves a bare `web` route — an alert, the
+        # execution log — and a room with other members in it is one they read.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "shared", "alice", origin="talk", name="general")
+            db.add_room_member(conn, "shared", "bob")
+            room = db.ensure_default_web_chat_room(conn, "alice")
+        assert room.token.startswith("web-alice-")
+
+    def test_a_channel_room_is_never_the_default_delivery_target(self, db_path):
+        # `logs` and `alerts` are machine-owned, and the boot sequence posts
+        # into `alerts` — so activity order alone would hand the user's default
+        # to whichever the daemon last wrote to, permanently.
+        from istota import user_profiles
+
+        user_profiles.update_profile_with_status(
+            db_path, "alice", log_channel="lg4d5e6f", alerts_channel="al7g8h9i",
+        )
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "lg4d5e6f", "alice", origin="talk", name="logs")
+            db.register_room(conn, "al7g8h9i", "alice", origin="talk", name="alerts")
+            room = db.ensure_default_web_chat_room(conn, "alice")
+        assert room.token.startswith("web-alice-")
+
+    def test_the_talkable_room_wins_over_the_channel_rooms(self, db_path):
+        from istota import user_profiles
+
+        user_profiles.update_profile_with_status(
+            db_path, "alice", log_channel="lg4d5e6f", alerts_channel="al7g8h9i",
+        )
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
+            db.register_room(conn, "lg4d5e6f", "alice", origin="talk", name="logs")
+            db.register_room(conn, "al7g8h9i", "alice", origin="talk", name="alerts")
+            # The daemon posted into `alerts` at boot, so it is the most
+            # recently active room. Activity order alone would pick it.
+            db.add_message(
+                conn, "al7g8h9i", role="system", body="up", origin_surface="web",
+            )
+            room = db.ensure_default_web_chat_room(conn, "alice")
+        assert room.token == "rm1a2b3c"
+
+    def test_the_listing_still_shows_every_room_it_did_not_invent(
+        self, web_config, db_path,
+    ):
+        # The listing does not need a default invented for it — it mints handles
+        # in its own loop — so a user whose only room is shared still sees that
+        # room and nothing else.
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "shared", "alice", origin="talk", name="general")
+            db.add_room_member(conn, "shared", "bob")
+        assert [r["token"] for r in web_app._chat_list_rooms("alice")] == ["shared"]
+
+    def test_an_archived_handle_is_cleared_by_the_fallback(self, db_path):
+        # The ISSUE-134 "hid it, then was re-added" state: the handle carries
+        # the per-user archived flag while the registry room does not.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
+            handle = db.ensure_web_chat_handle(conn, "alice", "rm1a2b3c", "general")
+            db.update_web_chat_room(conn, handle.id, archived=True)
+            room = db.ensure_default_web_chat_room(conn, "alice")
+        assert room.token == "rm1a2b3c"
+        assert room.archived is False
+
+    def test_web_transport_default_room_follows(self, db_path):
+        from istota.transport.web import default_web_room_token
+        cfg = Config()
+        cfg.db_path = db_path
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "rm1a2b3c", "alice", origin="talk", name="general")
+        assert default_web_room_token(cfg, "alice") == "rm1a2b3c"
