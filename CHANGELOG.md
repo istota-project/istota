@@ -133,6 +133,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Briefing schedules are now the settings page and the operator's config, and nothing else.** `BRIEFINGS.md` in your config folder is no longer read. It used to win over everything: a time or a room you set on the settings page was overridden by whatever that file said, while the page went on showing you the value you had picked. Content had already moved to the block editor, so all the file still controlled was the schedule and where it went — and it controlled those in a way nobody could see.
+
+- **Upgrade note:** on first start after the update, whatever your file held is copied into the settings, once, and the file's values win over what is stored so nothing you were actually receiving changes time or destination. From then on the settings page is the only authority and your edits stick. Your own `BRIEFINGS.md` is left where it is — it does nothing now and can be deleted. New setups get no such file. The `[briefings.components]` toggles some files still carry are not copied over: nothing has read them since content moved to blocks, and importing them would add content you have not been getting.
+
 - **Three machine-kept files no longer sit in your config folder.** The bot tracked its own edits to your memory file in `USER.md.audit.jsonl`, plus two small bookkeeping files beside it. That folder is one you read and edit by hand, and none of the three was for you. All three are now rows in the bot's own database. Nothing you did with that folder changes, and the record itself is unchanged — same entries, same fields, just somewhere else.
 
 - Two consequences worth knowing. The record is harder to lose: that folder is handed to the bot's own tasks to write in, so a task could previously delete its own edit history, or forge the fingerprint the nightly check uses to notice edits made outside the normal path. It can no longer reach either. And the bot's key-value tool now refuses any name starting with an underscore, on reads as well as writes, and leaves those names out of its listing — that is where this state lives.

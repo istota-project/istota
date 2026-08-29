@@ -2,7 +2,8 @@
 
 Consolidates briefing logic that was previously split across:
 - istota.briefing (prompt builder, data fetchers)
-- istota.briefing_loader (workspace BRIEFINGS.md loading, config merging)
+- istota.briefing_loader (config reading; the workspace BRIEFINGS.md half is
+  retired — see istota.user_briefings)
 - istota.scheduler (strip_briefing_preamble, strip_markdown)
 """
 
@@ -13,10 +14,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import tomli
-
 from ...config import BriefingConfig, Config
-from ...storage import get_user_briefings_path
 
 logger = logging.getLogger("istota.briefing")
 
@@ -624,70 +622,22 @@ def _parse_reminders(content: str) -> list[str]:
 # Config loader (from briefing_loader.py)
 # ---------------------------------------------------------------------------
 
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
-
-
-def _load_workspace_briefings(config: Config, user_id: str) -> list[BriefingConfig] | None:
-    """
-    Load briefings from a user's workspace BRIEFINGS.md file.
-
-    Returns list of BriefingConfig, or None if file doesn't exist or is unreadable.
-    """
-    if not config.use_mount:
-        return None
-
-    briefings_path = config.nextcloud_mount_path / get_user_briefings_path(user_id, config.bot_dir_name).lstrip("/")
-    if not briefings_path.exists():
-        return None
-
-    try:
-        content = briefings_path.read_text()
-        match = _TOML_BLOCK_RE.search(content)
-        if not match:
-            return []
-        toml_str = match.group(1)
-        data = tomli.loads(toml_str)
-    except Exception as e:
-        logger.warning("Failed to parse BRIEFINGS.md for %s: %s", user_id, e)
-        return None
-
-    briefings = []
-    for b in data.get("briefings", []):
-        # Workspace BRIEFINGS.md is name/cron/output only now; legacy
-        # `components` keys are ignored (blocks are the sole content model).
-        briefings.append(BriefingConfig(
-            name=b.get("name", ""),
-            cron=b.get("cron", ""),
-            conversation_token=b.get("conversation_token", ""),
-            output=b.get("output", "talk"),
-        ))
-
-    return briefings
-
-
 def get_briefings_for_user(config: Config, user_id: str) -> list[BriefingConfig]:
     """
-    Get briefings for a user with workspace > per-user config > main config precedence.
+    Get a user's briefings from the loaded config.
 
-    Workspace BRIEFINGS.md overrides admin config at the briefing name level.
+    ``UserConfig.briefings`` is TOML with the ``briefing_configs`` overlay
+    applied on top (``config._apply_user_briefings``), so this is the whole
+    picture: the operator's TOML and whatever the web UI or
+    ``istota briefing ensure`` last wrote.
+
+    Workspace ``BRIEFINGS.md`` used to be applied over that result and is
+    retired — it beat the row the settings page had just written and showed
+    back as authoritative. ``user_briefings.import_from_workspace_files``
+    carries what the file held into the table once, at boot.
+
     Briefings are returned verbatim — content is assembled from blocks by the
     briefings module; the legacy boolean-component expansion is retired.
     """
     user_config = config.users.get(user_id)
-    admin_briefings = user_config.briefings if user_config else []
-
-    # Try loading workspace briefings
-    workspace_briefings = _load_workspace_briefings(config, user_id)
-
-    if workspace_briefings:
-        # Build lookup of admin briefings by name
-        admin_by_name = {b.name: b for b in admin_briefings}
-
-        # Workspace briefings override admin by name, add new ones
-        merged_by_name = dict(admin_by_name)
-        for b in workspace_briefings:
-            merged_by_name[b.name] = b
-
-        return list(merged_by_name.values())
-
-    return list(admin_briefings)
+    return list(user_config.briefings) if user_config else []

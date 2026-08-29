@@ -29,6 +29,8 @@ Schedule + delivery are loaded from (higher precedence wins):
 1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` (Ansible) or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
 2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/title/output; DB rows win by name).
 
+Those two are the whole surface. A user's workspace `{bot_dir}/config/BRIEFINGS.md` was a third source, applied over both at read time; it is retired, and on first start after the upgrade whatever it held is imported into `briefing_configs`, once per user. An existing file is left on disk and is inert.
+
 Content **blocks** are seeded once into the per-user briefings module DB from config-authored `[[users.X.briefings.blocks]]` and are then edited in the web block editor.
 
 ## Default briefings

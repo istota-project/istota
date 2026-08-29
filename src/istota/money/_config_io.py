@@ -1,6 +1,6 @@
 """Configuration file I/O — accepts plain TOML or UPPERCASE.md with TOML blocks.
 
-The UPPERCASE.md pattern matches istota's CRON.md/BRIEFINGS.md convention:
+The UPPERCASE.md pattern matches istota's CRON.md/HEARTBEAT.md convention:
 prose explaining the config to the user, with a fenced ```toml code block
 holding the actual configuration. The first toml block is parsed.
 """

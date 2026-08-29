@@ -7052,10 +7052,17 @@ def run_daemon(
     # table on first run. Idempotent — only writes rows whose
     # (user_id, name) pair doesn't already exist. Re-applies the overlay
     # so the in-memory config reflects DB-managed briefings.
+    #
+    # The workspace pass follows it and carries each user's retired
+    # BRIEFINGS.md into the same table, once. Order matters: the file was the
+    # live authority until this release, so it must land after the TOML seed
+    # and overwrite it where the two name the same briefing — otherwise a user
+    # with both silently changes schedule at the upgrade.
     try:
         from . import user_briefings as _ub  # noqa: PLC0415
 
         _ub.import_from_user_configs(config.db_path, config.users)
+        _ub.import_from_workspace_files(config.db_path, config)
         from .config import _apply_user_briefings  # noqa: PLC0415
 
         _apply_user_briefings(config)

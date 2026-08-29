@@ -1,78 +1,50 @@
 ---
 name: briefings_config
 triggers: [briefing config, briefing schedule, briefing setup, configure briefing, set up briefing, change briefing, edit briefing, briefing time]
-description: Briefing schedule configuration in istota/config/
+description: Read and change a user's briefing schedule (time, room, delivery surface)
+cli: false
 ---
-# Briefing Schedule Configuration
+# Briefing schedule configuration
 
-Users can control their own briefing schedules by creating a `BRIEFINGS.md` file in their `{BOT_DIR}/config/` directory.
+A briefing is a scheduled summary delivered to a Talk room, an email address or a push. This skill is about **when it runs and where it goes**. What goes *in* it is a separate thing — see below.
 
-## File location
+## Where the schedule lives
 
-```
-/Users/{user_id}/{BOT_DIR}/config/BRIEFINGS.md
-```
+In the database, as `briefing_configs` rows. Two surfaces write it:
 
-## Format
+- The web UI, under Briefings → Settings.
+- `istota briefing ensure`, which the operator runs.
 
-The file is a Markdown document with TOML configuration in a fenced code block:
+Operator-set briefings can also come from `[[briefings]]` blocks in the instance `config.toml`. A database row of the same name replaces the TOML one, so a user's own change always wins over the operator default.
 
-```markdown
-# Briefing Schedule
+**There is no file to edit.** A user's workspace used to hold `{BOT_DIR}/config/BRIEFINGS.md` and that file is retired — nothing reads it. If you find one, it is inert; say so rather than editing it, and point at the settings page. Writing to it does nothing and reports success, which is the failure this retirement fixes.
 
-Your description here...
+## Reading the current schedule
 
-## Settings
+The user's briefings are in the config you were given. Read them from there rather than looking for a file.
 
-` ` `toml
-[[briefings]]
-name = "morning"
-cron = "0 6 * * *"           # cron expression in user's timezone
-conversation_token = "abc123" # Talk room to post to
-output = "talk"               # talk / email / ntfy (or a comma list, e.g. "talk,email")
+## Changing it
 
-[briefings.components]
-calendar = true
-todos = true
-markets = true    # morning → futures, evening → indices (automatic)
-news = true       # expands using admin defaults (sources, lookback)
-reminders = true
+You cannot write `briefing_configs` yourself. When a user asks to move a briefing, change its room, or add or remove one:
 
-[[briefings]]
-name = "evening"
-cron = "0 18 * * *"
-conversation_token = "abc123"
-output = "talk"
+1. Tell them what the current schedule is.
+2. Point them at Briefings → Settings in the web UI, which is where they change it.
 
-[briefings.components]
-calendar = true
-markets = true
-` ` `
-```
+Do not offer to edit a file, and do not claim the change is made.
 
-(Remove spaces from the backticks above — they are shown with spaces to prevent parsing issues.)
+## Schedule format
 
-## Component values
+Standard 5-field cron: `minute hour day-of-month month day-of-week`, evaluated in the user's configured timezone.
 
-- **Boolean `true`**: Enables the component. `markets = true` automatically shows futures for morning briefings (pre-market) and index closes for evening briefings. `news = true` expands using admin-configured defaults (sources, lookback). Simple components (`calendar`, `todos`, `reminders`) stay as-is.
-- **Dict**: Pass through unchanged, overriding defaults entirely.
+- `0 7 * * 1-5` — 7am weekdays
+- `0 18 * * *` — 6pm every day
+- `30 8 * * 1` — 8:30am Mondays
+- `0 */6 * * *` — every 6 hours
 
-Example with explicit dict (overrides defaults):
-```toml
-[briefings.components]
-markets = { enabled = true, futures = ["ES=F", "NQ=F"] }  # force specific symbols
-news = { enabled = true, lookback_hours = 6, sources = [
-    { type = "domain", value = "example.com" }
-]}
-```
+## Delivery
 
-## Precedence
+`output` names where the briefing goes: `talk` (needs a `conversation_token`), `email`, `ntfy`, or a comma-separated list such as `talk,email` to deliver to several at once.
 
-User BRIEFINGS.md overrides admin config at the briefing name level:
-- If user config defines a briefing named "morning", it replaces the admin "morning" briefing
-- Admin briefings not overridden by the user are preserved
-- New briefings in user config are added
+## Content is separate
 
-## Creating the file
-
-Use standard file write operations to create or edit the file at the `{BOT_DIR}/config/` path. The scheduler reads it on each check cycle (typically every 60 seconds).
+What appears in a briefing is built from **content blocks**, edited in the briefings editor in the web UI — not from this schedule. An older format had per-briefing component toggles for markets, news, calendar and so on; those are gone. If a user asks for different content in a briefing, that is the block editor, not the schedule.
