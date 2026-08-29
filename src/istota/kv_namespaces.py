@@ -2,9 +2,12 @@
 
 A reserved namespace holds framework state that happens to live in the KV
 store: today the USER.md curation audit trail and the fingerprints the
-bypass detector compares against (`memory/curation/audit.py`). Those rows are
-written by the daemon and by the host-side `memory` skill CLI, and read by
-neither the model nor the `kv` skill.
+bypass detector compares against (`memory/curation/audit.py`), plus
+`_provisioned_rooms` — the Talk token `provision_rooms.py` provisioned for each
+default room name, which is what lets a deploy recognise a room the user has
+since renamed instead of minting a second one (ISSUE-342). Those rows are
+written by the daemon, by the host-side `memory` skill CLI and by the
+`provision-rooms` CLI, and read by neither the model nor the `kv` skill.
 
 The rule is a name prefix rather than a list, so a fourth reserved namespace
 costs nothing here or at either enforcement point. Both of those are needed

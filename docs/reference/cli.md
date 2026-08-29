@@ -209,16 +209,21 @@ istota nextcloud capabilities                # Curated summary of what the serve
 istota nextcloud capabilities --raw          # Full /cloud/capabilities payload
 istota nextcloud capabilities --check talk,sharing.public   # Exits non-zero if any is missing
 
-istota nextcloud provision-rooms --user alice        # Ensure #general/#logs/#alerts, seed the channel tokens
+istota nextcloud provision-rooms --user alice        # Ensure general/logs/alerts, seed the channel tokens
 istota nextcloud provision-rooms --user alice --room general   # Only the named room(s); repeatable
 istota nextcloud provision-rooms --user alice --no-seed        # Create the rooms, write nothing to the profile
 istota nextcloud provision-rooms --user alice --reseed         # Re-point log_channel/alerts_channel at these rooms
 istota nextcloud provision-rooms --user alice --json           # Machine-readable
+istota nextcloud provision-rooms --user alice --adopt general=abc123  # Record an existing room and exit
 ```
 
 The `--check` form is the deployment fit-check — usable in a shell or a heartbeat `shell-command`. See [Nextcloud](../features/nextcloud.md) for the feature names and for the full `istota-skill nextcloud` surface.
 
 `provision-rooms` is what the Ansible role calls to give a bare-metal install the same default Talk rooms a Docker install gets. It is idempotent and prints `STATE: created|updated|noop`. A channel room whose profile column is already set is left alone entirely, and a token is written only for a room the run actually made usable — so it can neither overwrite a pinned value nor re-enable an execution log you turned off. `--reseed` is the deliberate re-point, and overrides both rules.
+
+Each room's token is remembered per user, so renaming a room does not make the next run create a second one under the old name (ISSUE-342). A run prefers the remembered token and only matches on the room's name when there is nothing remembered for it — the first provision, or a room whose conversation has since been deleted in Nextcloud. A remembered room the user has left is re-invited only when the bot is its sole remaining participant: a room with other people in it is one they left on purpose, and re-adding them on every deploy is not a decision a deploy gets to make.
+
+`--adopt NAME=TOKEN` writes that record by hand and exits without contacting Talk. It exists for an install that already carries a duplicate from before the record existed: the room you kept no longer answers to its old name, so nothing else can point the record at it. Repeatable. A wrong token costs nothing beyond a fall back to name matching on the next run.
 
 ### Experimental features
 

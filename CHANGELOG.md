@@ -197,6 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Renaming a chat room no longer causes a second one to appear under the old name. The deploy step that sets up your default rooms recognised them only by what they were called, so once you renamed `general` it no longer saw it and made a fresh one — every deploy, for ever. It now remembers which room it made and reuses that, falling back to the name only the first time.
+
+- **Upgrade note:** the memory starts empty, so the first deploy after this update still matches by name and records what it finds. If you have already been left with a duplicate, point it at the room you want to keep first — `istota nextcloud provision-rooms --user U --adopt general=<token>`, using the token from the room's link — then delete the other one in Nextcloud Talk. Doing it the other way round does not work: the room you kept no longer answers to the old name, so the next deploy would make a third.
+
+- A room you opened in Nextcloud Talk from the web chat now says so. The room list left out the one field that could tell the browser about the Talk side, so after any page load the room read as web-only and offered to open it in Talk a second time — which then failed, because it was already open there. It was not only stale on load: the list refreshes every half minute and overwrote the answer the "Also open in Talk" button had just given.
+
+- Your first visit to the web chat no longer creates a second room called `general`. It checked whether you had any rooms by looking at a list that is only filled in a moment later, so someone whose rooms all came from Nextcloud Talk looked like a brand-new user and got a web-only `general` alongside the Talk one. Existing duplicates are left alone rather than merged automatically; delete whichever one you do not want.
+
 - Log rotation is now something you can set on the Docker install. The three settings that control it were read when the config was written but never handed to the container, so rotation stayed on and the retention numbers were fixed at 10 MB and five files however you set them — with no error to say the setting had been dropped. All three now reach the container and are documented in the example environment file.
 
 - Resetting a dev container no longer takes `uv` away with it. The container's Python package manager was installed into the same home directory the reset wipes, so it survived the container's first boot and nothing after that — and because repository work routes those commands into the container, the next build failed with a message that named neither the container nor the reason. It is now part of the image, outside the directory a reset clears. A Rust toolchain is deliberately not in the image: it is several hundred megabytes nothing here uses, so it stays an install-when-you-need-it, and the documentation now says which tools come with the box and which do not.
