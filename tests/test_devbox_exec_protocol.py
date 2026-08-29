@@ -357,6 +357,7 @@ class TestAcknowledgements:
             "path_refused",
             "no_such_cwd",
             "spawn_failed",
+            "command_not_found",
             "too_large",
             "internal",
         }

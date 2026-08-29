@@ -192,6 +192,31 @@ def _say(message: str) -> None:
         pass
 
 
+def _refusal(ack: dict[str, Any], command: list[str]) -> str:
+    """What to say when the server refused the request outright.
+
+    One code gets a sentence of its own. Every command that reaches this client
+    was typed as itself — the shim is a file on PATH named `uv` or `cargo` —
+    so a bare "no such file or directory" reads as the shell's own answer about
+    the host, in a namespace the caller does not know they are in. Naming the
+    routing is the whole content of the message: the command was not run here,
+    it was not run there either, and where to install it is a different place
+    from where it was typed.
+
+    Any other code falls through to the generic line, which is also what an
+    older server's `spawn_failed` gets.
+    """
+    code = ack.get("code")
+    if code == proto.ERR_COMMAND_NOT_FOUND:
+        return (
+            f"{command[0]}: routed into this deployment's devbox container and "
+            f"not installed there, so nothing ran — not here and not in the "
+            f"container. Install it inside the devbox before retrying; note "
+            f"that a devbox reset removes anything installed under /home/dev."
+        )
+    return f"the devbox refused the command: {code}: {ack.get('message')}"
+
+
 def _reserve_std_descriptors() -> None:
     """Open fds 0, 1 and 2 on /dev/null if the caller left any of them closed.
 
@@ -565,10 +590,7 @@ def _run(argv: list[str]) -> int:
         sock.settimeout(None)
 
         if ack.get("status") != "ok":
-            _say(
-                f"the devbox refused the command: "
-                f"{ack.get('code')}: {ack.get('message')}"
-            )
+            _say(_refusal(ack, command))
             return EXIT_NO_CONNECT
 
         # Only past this point can the command have run, which is what makes

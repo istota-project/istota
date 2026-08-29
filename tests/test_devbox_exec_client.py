@@ -281,13 +281,50 @@ class TestTheExitStatusReachesTheShim:
         assert done.stdout == bytes(range(256))
 
     def test_a_missing_binary_is_a_refusal_and_never_a_status(self, server):
-        """`spawn_failed` arrives in the acknowledgement, so nothing ran. 120,
+        """The refusal arrives in the acknowledgement, so nothing ran. 120,
         not 127: 127 is the status the model reads most often and the shell's
         own "command not found" already owns it."""
         done = run_client(server.socket_path, "istota-no-such-binary-42", cwd=server.repos)
         assert done.returncode == EXIT_NO_CONNECT
-        assert b"spawn_failed" in done.stderr
         assert b"istota-no-such-binary-42" in done.stderr
+
+    def test_a_missing_binary_says_the_command_was_routed_into_a_container(
+        self, server
+    ):
+        """The line is the only place anyone learns where the command went.
+
+        Every command reaching this client was typed as itself, from a shell
+        whose PATH holds a shim by that name — so the server's own "no such
+        file or directory" reads as an answer about the host. ISSUE-336: a
+        `devbox reset` takes uv and any hand-installed toolchain out of
+        /home/dev, and the first `uv sync` afterwards failed with a line that
+        named neither the container nor the reason.
+        """
+        done = run_client(server.socket_path, "istota-no-such-binary-42", cwd=server.repos)
+        assert done.returncode == EXIT_NO_CONNECT
+        message = done.stderr.decode()
+        assert "devbox" in message
+        assert "not installed there" in message
+        assert "/home/dev" in message
+        assert len(done.stderr.strip().splitlines()) == 1
+
+    def test_another_refusal_still_reports_the_code_and_the_message(
+        self, fake_server
+    ):
+        """The control for the sentence above: every other code keeps the
+        generic line, which is also what an older server's `spawn_failed` for a
+        missing binary gets."""
+        srv = fake_server(
+            lambda conn, line: conn.sendall(
+                encode_ack_error("path_refused", "cwd /tmp resolves outside the root")
+            )
+        )
+        done = run_client(srv.path, "npm")
+        assert done.returncode == EXIT_NO_CONNECT
+        message = done.stderr.decode()
+        assert "path_refused" in message
+        assert "resolves outside the root" in message
+        assert "not installed there" not in message
 
     def test_a_server_side_timeout_says_why_it_killed_the_command(self, server):
         done = run_client(

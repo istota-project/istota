@@ -36,7 +36,8 @@ istota-skill devbox cp-out /home/dev/out.json /local/out.json
 
 # State + maintenance
 istota-skill devbox status         # container running? server answering? image? uptime?
-istota-skill devbox reset --yes    # wipe /home/dev, restart the container (destructive)
+istota-skill devbox reset --yes    # wipe /home/dev, restart the container (destructive —
+                                   # takes your files *and* anything installed into $HOME)
 ```
 
 ## What works inside the devbox
@@ -50,6 +51,7 @@ Everything in this section that needs a forge token depends on a host-side crede
   - A refused command exits 3 and says which rule refused it. The policy denies things that destroy (`repo delete`, `release delete`), print credentials (`auth`), grant persistence (`secret set`, `ssh-key add`), publish (`gist`, `snippet`), or run code elsewhere (`codespace ssh`, `runner`). It is an accident guard, not a security boundary — ask the user if you need one of them.
   - Exit 4 means no credential proxy is configured; exit 5 means it could not be reached, or had no token for that forge; exit 7 means no forge URL was resolvable and it refused to guess one.
   - `github-api` and `gitlab-api` are retired. They exit 2 with a pointer to `gh api` / `glab api`, which do the same job and more.
+- **The toolchain the image ships**: Python, Node, Go, `uv`/`uvx`, `git`, `gh`, `glab`, plus the usual diagnostic and media tools. Anything else — a Rust toolchain, a `pip install --user`, a language runtime — you install yourself, and it lands in `/home/dev`. **`reset --yes` empties `/home/dev`**, so it takes those with it and they do not come back on their own; what the image installs lives outside that directory and is unaffected. Install-on-demand is the intended shape for a heavy toolchain nobody uses every day, not an accident — but reinstall after a reset rather than assuming it survived.
 - **`git commit`** works without first running `git config user.*`. The baked-in `/etc/gitconfig` carries placeholder `Istota Agent <istota@local>`; override per-repo if a project needs real identity.
 
 The proxy is host-side and per-user; the in-container helper is a thin client that frames JSON requests. Stale tokens are fixed by restarting the proxy unit on the host, not by anything inside the container.

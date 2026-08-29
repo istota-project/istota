@@ -35,6 +35,7 @@ import pytest
 
 from istota.devbox_exec_protocol import (
     ERR_BAD_REQUEST,
+    ERR_COMMAND_NOT_FOUND,
     ERR_NO_SUCH_CWD,
     ERR_PATH_REFUSED,
     ERR_SPAWN_FAILED,
@@ -1237,14 +1238,31 @@ class TestMalformedRequests:
         )
         assert ack["code"] == ERR_BAD_REQUEST
 
-    def test_a_missing_binary_is_spawn_failed_and_streams_nothing(self, server):
+    def test_a_missing_binary_is_command_not_found_and_streams_nothing(self, server):
+        """Its own code rather than `spawn_failed`, because the client can only
+        say the useful thing about this one — that the command was routed into
+        a container it is not installed in (ISSUE-336)."""
         ack = server.refusal(
             encode_exec_request(
                 argv=["istota-no-such-binary-42"], cwd=str(server.repos)
             )
         )
-        assert ack["code"] == ERR_SPAWN_FAILED
+        assert ack["code"] == ERR_COMMAND_NOT_FOUND
         assert "istota-no-such-binary-42" in ack["message"]
+
+    def test_a_spawn_failure_that_is_not_a_missing_binary_stays_generic(
+        self, server, tmp_path
+    ):
+        """The discriminator, and the reason the split is on errno rather than
+        on "the spawn raised": a file that exists and cannot be executed is a
+        different problem, and telling its caller to install it is wrong."""
+        not_executable = tmp_path / "not-executable"
+        not_executable.write_text("#!/bin/sh\nexit 0\n")
+        not_executable.chmod(0o644)
+        ack = server.refusal(
+            encode_exec_request(argv=[str(not_executable)], cwd=str(server.repos))
+        )
+        assert ack["code"] == ERR_SPAWN_FAILED
 
     def test_one_bad_connection_does_not_take_the_server_down(self, server):
         server.refusal(b"{not json\n")

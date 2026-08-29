@@ -130,6 +130,7 @@ from istota_devbox_exec_protocol import (  # noqa: E402
     ACTION_WRITE_FILE,
     CHUNK_BYTES,
     ERR_BAD_REQUEST,
+    ERR_COMMAND_NOT_FOUND,
     ERR_INTERNAL,
     ERR_NO_SUCH_CWD,
     ERR_PATH_REFUSED,
@@ -195,7 +196,7 @@ _REFUSAL_REASONS = {
 SOCKET_MODE = 0o600
 
 # Named rather than probed: this always runs in the image, where bash is
-# installed, and a missing one is a loud spawn_failed rather than a silent
+# installed, and a missing one is a loud command_not_found rather than a silent
 # fallback to a shell with no pipefail.
 BASH = "bash"
 
@@ -917,6 +918,15 @@ class ExecServer:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
+        except FileNotFoundError as e:
+            # ENOENT here is the executable, not the working directory:
+            # `check_cwd` has already stat'd that and refused a missing one
+            # with `no_such_cwd`. Its own code, because the caller is always a
+            # shim and "not found" then means something the generic spawn
+            # failure cannot say — see ERR_COMMAND_NOT_FOUND.
+            raise ProtocolError(
+                ERR_COMMAND_NOT_FOUND, f"{argv[0]}: {e.strerror or e}"
+            ) from e
         except OSError as e:
             raise ProtocolError(ERR_SPAWN_FAILED, f"{argv[0]}: {e.strerror or e}") from e
 

@@ -130,6 +130,14 @@ ERR_UNKNOWN_ACTION = "unknown_action"
 ERR_PATH_REFUSED = "path_refused"
 ERR_NO_SUCH_CWD = "no_such_cwd"
 ERR_SPAWN_FAILED = "spawn_failed"
+# The one spawn failure with an answer the caller can act on: the executable
+# named by argv[0] is not in the container. Split out of ``spawn_failed``
+# because every command reaching this transport is a *shimmed* one, so "not
+# found" is never the plain shell answer it looks like — the client turns this
+# code into a line saying which container the command was routed into. An older
+# client that does not know the code prints the generic refusal, which is what
+# it did for this case before.
+ERR_COMMAND_NOT_FOUND = "command_not_found"
 ERR_TOO_LARGE = "too_large"
 ERR_INTERNAL = "internal"
 
@@ -139,6 +147,7 @@ ALL_ERROR_CODES: frozenset[str] = frozenset({
     ERR_PATH_REFUSED,
     ERR_NO_SUCH_CWD,
     ERR_SPAWN_FAILED,
+    ERR_COMMAND_NOT_FOUND,
     ERR_TOO_LARGE,
     ERR_INTERNAL,
 })
