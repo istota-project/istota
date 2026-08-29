@@ -1,14 +1,15 @@
 ---
 name: memory
-description: Persistent memory writes — USER.md (behavioral) and the knowledge graph (facts).
+description: Persistent memory writes — USER.md (behavioral), the knowledge graph (facts), and per-skill overlays.
 always_include: true
 cli: true
 ---
 
-You have two persistent memory targets for each user:
+You have three persistent memory targets for each user:
 
 - **USER.md** — behavioral instructions: how I should act, communication style, defaults, persistent preferences. Loaded automatically into your prompt as the "User memory" section.
 - **Knowledge graph** — entity-relationship triples for facts: temporal events (date-stamped) and stable factual claims (identity, family, biography, medical). Loaded automatically as the "Known facts" section.
+- **Per-skill overlays** — a behavioral rule scoped to one skill, appended to that skill's own instructions whenever it loads. Only reaches the prompt when the skill does.
 
 Reading is automatic. You never need to `cat` USER.md or query the KG before writing. Write through the CLI commands below — never `echo >>`.
 
@@ -21,6 +22,8 @@ Before storing anything in memory, decide which of these branches it falls into:
 **Stable factual claim** — a property of the user that is true regardless of date: identity, family, biography, languages spoken, places lived, employer, role. For medical: allergies and named chronic/serious conditions (`allergic_to shellfish`, `has_condition type_1_diabetes`) belong here. Quantitative health data does NOT — see "Health data" below. Cue: a noun phrase about the person, not a verb-headed instruction. Even without a date, these belong in the knowledge graph. → Use `istota-skill memory_search add-fact` (no `--from`).
 
 **Behavioral instruction** — how I should act, communication style, defaults, persistent preferences for my own behavior. Cue: it would still be true a year from now without re-confirmation, AND it tells me what to do. Phrasings: "always", "never", "default to", "prefer", "treat X as Y", "draft as", "send as". → Use `istota-skill memory append`.
+
+**Skill-specific instruction** — a behavioral rule that only bites while one particular skill is in use: a frontmatter convention for notes, a calendar routing rule, how test runs work on this deployment. → Use `istota-skill memory append --skill NAME`, which writes it into that skill's overlay (see "Per-skill overlays" below). Decide with this test first: **would it be *wrong* to ignore this rule on a task where the skill was not loaded? If yes → `USER.md`. If it is merely irrelevant there → skill overlay.** A note-naming convention is irrelevant on a task that writes no note. "Never write a new file to the base notes folder" is not — the task that most needs to hear it is the one that never recognized itself as a notes task — so that one stays in USER.md. A rule spanning three or more skills has failed the test; put it in USER.md.
 
 **Reusable task procedure** — "here is the multi-step way to do task X" distilled from a successful run (which skills/CLIs, in what order, with what gotchas). Cue: it's a *how-to*, not a fact about the user or a behavioral default. These are **learned playbooks**, stored as markdown files under `playbooks/` and recalled by relevance. In v1 they are generated only by the nightly sleep cycle from successful multi-step task trajectories — there is no runtime `playbooks add` write yet, so this branch is informational. Do not try to hand-write a playbook mid-task.
 
@@ -78,9 +81,30 @@ Rules:
 - To **reword** a stale bullet, use `replace --match <substr> --line <new text>` — one in-place op instead of `remove` then `append`. To drop an entire stale section, use `remove-heading`.
 - To append under a `### subsection`, pass `--subheading "Name"` to `append`. Without it, `append` targets the section's top region (above the first `###`).
 
+### Per-skill overlays
+
+A skill's instructions can carry a per-user addition at `config/skills/<skill-name>.md`, appended to that skill's body whenever the skill loads, under a heading saying it takes precedence over the skill's own text. It is an addition, never a replacement — keep it to a few lines.
+
+```bash
+istota-skill memory skills                       # inventory: what's customized, and does it load
+istota-skill memory show --skill notes
+istota-skill memory append --skill notes --line "Give every generated file a dated prefix"
+istota-skill memory replace --skill notes --match "dated prefix" --line "Give every generated file a dated suffix"
+istota-skill memory remove --skill notes --match "dated suffix"
+```
+
+Rules:
+
+- Run the classification test above before writing one. A rule that must hold on tasks where the skill did not load belongs in USER.md instead — an overlay only reaches the prompt when its skill is selected.
+- An overlay is flat: no `## ` sections. `--heading` names a `### ` subsection of the overlay instead. Omitted, it means the top of the file on `append` and the whole file on `remove`/`replace` — so a bare `remove` still reaches a bullet inside a subsection. `--subheading` is refused as a second spelling of the same target, and so are `add-heading`, `remove-heading` and `headings`.
+- `--skill` and `--channel` cannot be combined. An unknown skill name is refused with the list of known names — run `memory skills` if you are unsure of the spelling.
+- `sensitive_actions` and `untrusted_input` accept no overlay.
+- `append` creates the file. A `remove` that leaves the file empty deletes it — but a leftover `### ` subheading is not empty, so remove that too or the skill's prompt carries a heading with nothing under it. Keep it short: past 8 KB the write is warned about, past 32 KB the file stops loading (the write still lands, so `show` and `remove` still work), and a write that would take it past 1 MB is refused outright.
+- A rule that applies to two skills goes in both files. There is no include mechanism.
+
 ### Don't bypass the CLI
 
-Never write to USER.md or CHANNEL.md with `echo >>`, `cat >>`, `tee -a`, or direct file edits. Those bypass section routing, dedup, and the audit log, and the nightly bypass detector will flag them as legacy writes. Use `istota-skill memory` exclusively.
+Never write to USER.md, CHANNEL.md, or a skill overlay with `echo >>`, `cat >>`, `tee -a`, or direct file edits. Those bypass section routing, dedup, and the audit log, and the nightly bypass detector will flag them as legacy writes. Use `istota-skill memory` exclusively.
 
 ### Channel memory
 

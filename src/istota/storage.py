@@ -418,6 +418,53 @@ def get_user_persona_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/PERSONA.md"
 
 
+def get_user_skill_overlays_path(user_id: str, bot_dir: str) -> str:
+    """Directory of per-skill user overlay files.
+
+    One flat ``<skill-name>.md`` per skill, appended to that skill's bundled
+    body whenever the skill is loaded. Distinct from the *operator* override at
+    ``config/skills/<name>/skill.md``, which replaces the body outright — an
+    overlay is additive, so upstream skill edits keep flowing under it.
+    """
+    return f"{get_user_config_path(user_id, bot_dir)}/skills"
+
+
+def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | None:
+    """The on-disk overlay directory for a user, or None where there is none.
+
+    Both load paths — the eager one in ``executor`` and ``skills show`` — call
+    this rather than joining the mount themselves. That is the same argument as
+    injecting inside ``load_skills``, one level up: two call sites deriving one
+    path independently is a wrong ``bot_dir`` or a missing ``lstrip`` away from
+    leaving one path silently inert while both test suites stay green.
+
+    None without a mount. Overlays are filesystem reads, so an rclone-remote
+    deployment has none — the condition ``load_persona`` already applies to a
+    per-user ``PERSONA.md``.
+
+    None as well when the directory leads outside the user's own tree.
+    ``config`` and ``skills`` are ordinary entries under a root bound
+    read-write into that user's sandbox, so either can be replaced with a
+    symlink; the loader's ``O_NOFOLLOW`` covers only the overlay file itself,
+    and the files at the far end of a redirected directory are ordinary
+    regular files that pass every leaf-level guard. Returning None degrades to
+    exactly the prompt the skill would have had with no overlay at all, which
+    is what every other overlay failure path already does.
+
+    The **resolved** path is what comes back, so a caller cannot re-walk by the
+    unresolved name after the check.
+    """
+    if not config.use_mount:
+        return None
+    from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - import cycle
+
+    overlay_dir = _get_mount_path(
+        config, get_user_skill_overlays_path(user_id, config.bot_dir_name)
+    )
+    user_root = _get_mount_path(config, f"Users/{user_id}")
+    return contained_overlay_dir(overlay_dir, user_root)
+
+
 CRON_TEMPLATE = """\
 # Scheduled Jobs
 

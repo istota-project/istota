@@ -11,11 +11,16 @@ Discovery order (later wins):
 3. Legacy fallback: config/skills/_index.toml (lowest priority)
 """
 
+import errno
 import hashlib
 import importlib
 import json
 import logging
+import os
+import re
+import stat
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from ._types import EnvSpec, SkillMeta
@@ -632,6 +637,534 @@ def _resolve_skill_doc_path(
     return None
 
 
+# --------------------------------------------------------- per-skill overlays
+
+#: Skills that accept no user overlay. Not a security boundary — the user can
+#: already fork either doc through the operator override — but a guard against
+#: a casual preference line landing in the safety layer.
+OVERLAY_DENYLIST = frozenset({"sensitive_actions", "untrusted_input"})
+
+#: Above this the file is logged as suspicious but still loaded.
+OVERLAY_WARN_BYTES = 8 * 1024
+
+#: Above this the file is not loaded at all. The failure mode the cap guards
+#: against is someone — quite possibly the agent, half-remembering the
+#: *operator* override, which is replace semantics — dropping a forked 47 KB
+#: skill doc in here and getting two contradictory bodies in one prompt with no
+#: error anywhere.
+OVERLAY_MAX_BYTES = 32 * 1024
+
+#: ``{user_id}`` is substituted by the call sites, alongside ``{scripts_dir}``
+#: and the rest.
+#:
+#: Level 4 for a narrower reason than "it stays inside the skill's ``### ``",
+#: which is not true and was claimed here: the bundled bodies carry their own
+#: undemoted ``## `` headings (16 in ``developer``, 3 in ``notes``), and
+#: ``load_skills`` inserts them verbatim, so a skill's ``### `` section is
+#: already closed by its own first ``## `` long before the overlay is appended.
+#: Demoting the *bundled* bodies would be a behaviour change across every skill
+#: and every golden, and those headings are deliberate upstream authoring.
+#: What the level does buy is real and is the reason the overlay is demoted to
+#: match: the user's rules read as a subsection of their own label rather than
+#: as a new section peer to ``## Skills Reference``, so they stay attached to
+#: the skill they configure instead of floating up as general prompt text.
+OVERLAY_LABEL = "#### {user_id}'s configuration for this skill"
+
+#: Scoped to *this skill*, deliberately, and not to "anything above".
+#: ``load_skills`` renders the eager set in sorted order, so a skill body that
+#: sorts earlier is literally above this line — and ``sensitive_actions`` sorts
+#: before ``skills``, ``todos`` and every ``t``-``z`` name, while ``skills`` is
+#: ``always_include`` and therefore eager on every task. An unscoped claim of
+#: precedence would have the daemon writing "supersede anything above" around
+#: user text that sits below the safety body, which is the outcome
+#: ``OVERLAY_DENYLIST`` exists to prevent and which the denylist cannot reach,
+#: since it filters by *filename*. The Goals this implements say the overlay
+#: wins against the bundled body; that is what it now says.
+OVERLAY_PREAMBLE = (
+    "These instructions come from the user and take precedence over this "
+    "skill's instructions above, wherever the two conflict."
+)
+
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+#: A level-1 or level-2 ATX heading, in every form CommonMark accepts one: up to
+#: three leading spaces, and a space, a tab or the end of the line after the
+#: hashes. Matching the bare ``"## "`` prefix instead let five spellings through
+#: — ``" ## x"``, ``"  ## x"``, ``"   ## x"``, ``"##\tx"`` and a bare ``"##"`` —
+#: each of which is a real heading and so a real way out of the section. Level 1
+#: is included because it escapes strictly harder than level 2: it closes the
+#: whole ``## Skills Reference`` block rather than one skill's ``### ``.
+_SHALLOW_HEADING_RE = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
+
+
+#: A setext underline: ``Text`` on one line and ``===`` or ``---`` under it is a
+#: level-1 or level-2 heading, and the most compact way to write one.
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+
+#: First characters that mean the line above an underline is not a paragraph,
+#: so the pair is a list item plus a thematic break rather than a heading.
+_NOT_PARAGRAPH_START = ("#", "-", "*", "+", ">", "|", "=", "`", "~")
+
+
+def _is_setext_paragraph(line: str) -> bool:
+    """Whether ``line`` could be the text half of a setext heading."""
+    if not line.strip():
+        return False
+    if line[:1] in (" ", "\t"):
+        return False
+    return line[:1] not in _NOT_PARAGRAPH_START
+
+
+def _closed_fence_lines(lines: list[str]) -> set[int]:
+    """Indices of lines inside a code fence that is actually *closed*.
+
+    An unterminated fence is not treated as one, and that is the whole reason
+    this is a separate pass. Exempting it would hand a hand-edited overlay a way
+    to switch the demotion off for everything after a single stray ``` line —
+    and since the fence runs on past the end of the overlay, the level-2 heading
+    it protects then sits as a sibling of ``## Skills Reference`` and swallows
+    every skill rendered after it. The exemption exists to protect a sample, and
+    there is no sample without a closing fence.
+
+    Fence matching follows CommonMark on the three points that decide the
+    pairing: the closer uses the same character as the opener, it is at least as
+    long, and it carries no info string. That last one matters here — treating
+    `````python`` as a closer would end the block early and rewrite a
+    ``## `` that really is inside the user's sample, which is the one thing the
+    exemption exists to avoid.
+    """
+    fenced: set[int] = set()
+    open_at: int | None = None
+    opener = ""
+    for i, line in enumerate(lines):
+        m = _FENCE_RE.match(line)
+        if m is None:
+            continue
+        run = m.group(1)
+        if open_at is None:
+            open_at, opener = i, run
+        elif (
+            run[0] == opener[0]
+            and len(run) >= len(opener)
+            and not line[m.end():].strip()
+        ):
+            fenced.update(range(open_at, i + 1))
+            open_at = None
+    return fenced
+
+
+def _demote_overlay_headings(text: str) -> str:
+    """Push a level-1 or level-2 heading in an overlay down to level 4.
+
+    A shallow heading in an overlay detaches everything after it from the
+    ``#### <user>'s configuration for this skill`` label it was written under,
+    leaving the user's rules as a section peer to ``## Skills Reference`` — read
+    as general prompt text rather than as this skill's configuration. Demoting
+    rather than dropping is deliberate: a hand-edited file then misbehaves
+    visibly instead of losing content silently.
+
+    Closed fenced blocks are skipped. A ``## `` inside one is a sample — an
+    overlay for the notes skill quite plausibly carries a markdown template —
+    and rewriting it would corrupt the user's own text. An *unclosed* fence
+    earns no such exemption; see ``_closed_fence_lines``.
+
+    Setext headings are demoted too — ``My Rules`` with ``---`` under it is a
+    level-2 heading and the most compact way to write one, which makes it the
+    obvious hole to leave in a function whose whole job is this. The text line
+    becomes an ATX heading and the underline is left where it is, so nothing the
+    user wrote is deleted; what was a heading is then a heading plus a thematic
+    break.
+
+    Leading indentation is dropped along with the demotion, since the point is
+    that what comes out cannot be read as a heading above level 4.
+    """
+    lines = text.split("\n")
+    fenced = _closed_fence_lines(lines)
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        if i not in fenced:
+            m = _SHALLOW_HEADING_RE.match(line)
+            if m is not None:
+                out.append("####" + line[m.end():])
+                continue
+            if (
+                _SETEXT_UNDERLINE_RE.match(line)
+                and out
+                and (i - 1) not in fenced
+                and _is_setext_paragraph(out[-1])
+            ):
+                out[-1] = "#### " + out[-1].strip()
+        out.append(line)
+    return "\n".join(out)
+
+
+def _denylist_key(skill_name: str) -> str:
+    """Normalize a skill name for the denylist test.
+
+    ``load_skills`` already treats ``-`` and ``_`` as interchangeable when it
+    builds a title, and ``_resolve_skill_doc_path`` accepts a legacy flat
+    ``<name>.md`` — so a legacy ``_index.toml`` keyed ``sensitive-actions``
+    would otherwise take an overlay while ``sensitive_actions`` would not. Not
+    reachable on the shipped tree, whose bundled directories are all
+    underscored, but the exact-string test made the guard depend on a spelling
+    rather than on the skill.
+    """
+    return skill_name.replace("-", "_")
+
+
+#: A YAML mapping key, which is what a real frontmatter block is made of.
+_FRONTMATTER_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\s*:")
+
+
+def _looks_like_frontmatter(text: str) -> bool:
+    """Whether a leading ``---`` block is frontmatter rather than a rule.
+
+    ``_strip_frontmatter`` keys on the delimiter alone and returns everything
+    past the next ``---`` line. In a bundled skill doc that is safe: those are
+    written by people who know the convention. In an overlay it is silent data
+    loss — a hand-written file that opens with a ``---`` divider loses every
+    rule above the next one, and the only signal is the absence of text nobody
+    is looking for. So the block has to actually look like a mapping before any
+    of it is dropped.
+    """
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    if end == -1:
+        return False
+    body = [ln for ln in text[3:end].split("\n") if ln.strip()]
+    if not body:
+        return False
+    return all(
+        _FRONTMATTER_KEY_RE.match(ln) or ln[:1] in (" ", "\t") for ln in body
+    )
+
+
+def overlay_effective_body(text: str) -> str:
+    """What the loader will actually use from an overlay file, or ``""``.
+
+    Frontmatter stripped and whitespace trimmed — everything between decoding
+    the bytes and demoting the headings. An empty return means the loader
+    treats the file as though it were not there.
+
+    Module API because two other places have to agree with it and cannot
+    re-derive it: ``memory skills`` reports whether an overlay *binds*, and
+    the memory CLI deletes an overlay whose last bullet has gone so the
+    directory stays an honest inventory. Both used to test the raw text for
+    emptiness, which parts company with the loader on exactly one input — a
+    file holding nothing but frontmatter. That file has bytes, has lines, and
+    loads as nothing, so `ls` said configured, `binds` said true, and the
+    prompt had none of it. Deriving the answer twice is what made that
+    possible; there is one derivation now.
+    """
+    if _looks_like_frontmatter(text):
+        text = _strip_frontmatter(text)
+    return text.strip()
+
+
+#: Ceiling on what any overlay reader will pull into memory, whatever its own
+#: policy cap is. `OVERLAY_MAX_BYTES` is the *loading* rule; this is the bound
+#: on the read itself, and it is much larger deliberately — a file over the
+#: loading cap does not load, and `memory remove --skill` is the only way to
+#: bring it back under, so refusing to read it at all would leave the user with
+#: a file they can neither use nor shrink. This one exists only so a
+#: multi-gigabyte file planted at the path cannot be pulled into the daemon.
+OVERLAY_READ_CAP_BYTES = 1024 * 1024
+
+#: Why an overlay file will not reach a prompt. Stable ids: the `memory skills`
+#: inventory prints them and `doctor` maps them to statuses, so both surfaces
+#: say the same word about the same file.
+OVERLAY_UNKNOWN_SKILL = "unknown_skill"
+OVERLAY_DENYLISTED = "denylisted"
+OVERLAY_SKILL_DISABLED = "skill_disabled"
+OVERLAY_EMPTY = "empty"
+OVERLAY_OVER_CAP = "over_cap"
+OVERLAY_NOT_UTF8 = "overlay_not_utf8"
+OVERLAY_IS_A_SYMLINK = "overlay_is_a_symlink"
+OVERLAY_NOT_A_REGULAR_FILE = "overlay_not_a_regular_file"
+OVERLAY_UNREADABLY_LARGE = "overlay_unreadably_large"
+OVERLAY_UNREADABLE = "overlay_unreadable"
+
+#: Said about an overlay that *does* bind. Not reasons — a warning never makes
+#: `binds` false, because the file is loaded either way and a surface that
+#: conflated the two would tell the user their live customization is inert.
+OVERLAY_WARN_LARGE = "over_warn_bytes"
+OVERLAY_WARN_SHALLOW_HEADING = "shallow_heading"
+
+
+def contained_overlay_dir(overlay_dir: Path, user_root: Path) -> Path | None:
+    """``overlay_dir`` resolved, or None if it leads outside ``user_root``.
+
+    ``read_overlay_bytes``' ``O_NOFOLLOW`` covers the **last** path component
+    and nothing above it, and every component above it is model-writable:
+    ``{mount}/Users/{user_id}`` is bound read-write into that user's own
+    sandbox, so ``mv config config.real && ln -s /anywhere config`` is two
+    commands from inside it. The leaf files at the far end of such a link are
+    ordinary regular files, so every leaf-level guard passes and the caller
+    reads a directory of the daemon's choosing — measured putting the contents
+    of a file outside the mount into the memory-search index, from which
+    ``!search`` reads it straight back.
+
+    So containment is the same equality-under-a-known-root rule
+    ``sandbox_cache_sweeper`` and ``repos_relocate`` use, and it is stated once
+    here because four surfaces face this directory — the loader, the memory
+    CLI, the search reindex and ``doctor`` — and a copy that is right in three
+    of them is the shape of the hole above.
+
+    **The resolved path is what comes back, and callers must use it.** The
+    check and the reads that follow are separated by a directory listing and
+    one ``open(2)`` per file, so re-walking by the unresolved name reopens a
+    narrower version of the same window.
+
+    Both sides are resolved, because the mount itself is reached through a
+    symlink on some hosts and comparing a resolved path to an unresolved root
+    reads every path as outside. A missing directory resolves fine and is the
+    caller's own ``is_dir`` to check; an unreadable one returns None.
+    """
+    try:
+        resolved = Path(os.path.realpath(overlay_dir))
+        root = Path(os.path.realpath(user_root))
+    except OSError:
+        return None
+    if resolved != root and root not in resolved.parents:
+        return None
+    return resolved
+
+
+def read_overlay_bytes(
+    path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES
+) -> tuple[bytes | None, str | None, int | None]:
+    """Read an overlay file, refusing anything that is not a plain file.
+
+    Returns ``(data, refusal_reason, size)``. Exactly one of the first two is
+    set; ``size`` is the ``fstat`` size where there was an fd to take it from
+    and None otherwise. A *missing* file is ``(b"", None, None)`` — absence is
+    how ``memory append --skill`` learns to create one, so it must not read as
+    a refusal.
+
+    The overlay directory sits under ``{mount}/Users/{user_id}``, which
+    ``build_bwrap_cmd`` binds **read-write** into that user's own sandbox. Every
+    entry in it is therefore model-writable, and the filename being fixed by the
+    skill is not containment — it is the mirror image of what
+    ``skill_host_paths`` guards, where the path is free and the caller scopes
+    it. Three consequences, none of them theoretical:
+
+    - ``O_NOFOLLOW``, because a symlink planted at ``files.md`` otherwise puts
+      up to the cap in bytes of any daemon-readable file into the next prompt —
+      or, from ``doctor``, into a check detail that names another user's file.
+    - ``S_ISREG``, because a FIFO left at that name blocks ``open(2)`` until
+      someone writes to it, and both of the callers that matter run somewhere no
+      timeout covers: prompt assembly happens *before* the brain request exists,
+      and ``doctor`` runs on the daemon's start-up path. One such file wedges
+      every later task for that user, silently. ``O_NONBLOCK`` keeps the open
+      itself from blocking while the ``fstat`` decides.
+    - the size is checked on the fd *before* the read. Reading the whole file
+      and refusing afterwards bounds nothing, and ``MemoryError`` is not an
+      ``OSError``, so it would escape the never-raises contract every caller
+      depends on rather than degrading to "no overlay".
+
+    One reader for three callers — the loader, the memory CLI and ``doctor`` —
+    because the three answers above are the whole of the hardening, and a
+    fourth copy of them is a fourth chance for one to be left out. What the
+    callers do with a refusal still differs, and that stays theirs: the loader
+    degrades it to "no overlay" because its worst case is an inert
+    customization, while the CLI must not write through one (that would replace
+    whatever was planted with a file the user did not ask for) and ``doctor``
+    reports it.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return b"", None, None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return None, OVERLAY_IS_A_SYMLINK, None
+        return None, OVERLAY_UNREADABLE, None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, OVERLAY_NOT_A_REGULAR_FILE, None
+        if st.st_size > max_bytes:
+            return None, OVERLAY_UNREADABLY_LARGE, st.st_size
+        chunks: list[bytes] = []
+        remaining = max_bytes
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks), None, st.st_size
+    except OSError:
+        return None, OVERLAY_UNREADABLE, None
+    finally:
+        os.close(fd)
+
+
+@dataclass(frozen=True)
+class OverlayInspection:
+    """One overlay file, and whether it will actually reach a prompt.
+
+    ``reason`` is None exactly when the file binds. ``lines`` and ``first_line``
+    are None when there was no body to count — a refused read, or bytes that are
+    not UTF-8 — which is deliberately distinct from a file whose body counted to
+    zero, since a surface that printed ``lines: 0`` for a planted symlink would
+    be describing content it never saw.
+    """
+
+    skill: str
+    path: Path
+    size: int | None
+    lines: int | None
+    first_line: str | None
+    reason: str | None
+    warnings: tuple[str, ...]
+
+    @property
+    def binds(self) -> bool:
+        return self.reason is None
+
+
+def inspect_overlay(
+    path: Path,
+    *,
+    known_skills,
+    disabled_skills=frozenset(),
+    max_read_bytes: int = OVERLAY_READ_CAP_BYTES,
+) -> OverlayInspection:
+    """Everything a reporting surface needs to say about one overlay file.
+
+    The gates are the loader's own, in the loader's own order, because the
+    question two surfaces ask about an overlay is the same question and the
+    failure mode is that they drift: ``memory skills`` says a file binds, the
+    prompt does not contain it, and nothing anywhere reconciles the two. So
+    ``binds`` is derived here, once, and the emptiness test is
+    ``overlay_effective_body`` rather than ``.strip()`` — a file holding
+    nothing but frontmatter has bytes and has lines and loads as nothing.
+
+    ``disabled_skills`` defaults to empty because not every caller cares. The
+    CLI passes ``effective_disabled_skills`` so its inventory can say a file is
+    filed correctly and still inert; ``doctor`` deliberately passes nothing,
+    since an overlay for a skill the operator switched off is a file that will
+    bind again the moment the skill comes back and is not a defect to report.
+
+    Never raises: every read failure is a ``reason``.
+    """
+    skill = path.name[: -len(".md")] if path.name.endswith(".md") else path.name
+    reason: str | None = None
+    if skill not in known_skills:
+        reason = OVERLAY_UNKNOWN_SKILL
+    elif _denylist_key(skill) in OVERLAY_DENYLIST:
+        reason = OVERLAY_DENYLISTED
+    elif skill in disabled_skills:
+        reason = OVERLAY_SKILL_DISABLED
+
+    raw, refusal, size = read_overlay_bytes(path, max_bytes=max_read_bytes)
+    lines: int | None = None
+    first_line: str | None = None
+    warnings: list[str] = []
+
+    if refusal is not None:
+        reason = reason or refusal
+    else:
+        try:
+            text = (raw or b"").decode("utf-8")
+        except UnicodeDecodeError:
+            reason = reason or OVERLAY_NOT_UTF8
+        else:
+            effective = overlay_effective_body(text)
+            body = [ln for ln in effective.split("\n") if ln.strip()]
+            lines = len(body)
+            first_line = body[0].strip() if body else ""
+            if not body:
+                reason = reason or OVERLAY_EMPTY
+            elif size is not None and size > OVERLAY_MAX_BYTES:
+                reason = reason or OVERLAY_OVER_CAP
+            else:
+                if size is not None and size > OVERLAY_WARN_BYTES:
+                    warnings.append(OVERLAY_WARN_LARGE)
+                # The predicate is the demotion itself rather than a second
+                # regex over the text: `_demote_overlay_headings` already knows
+                # about closed fences, indented hashes and setext underlines,
+                # and a warning that disagreed with the rewrite would report a
+                # sample inside a code block or miss an underlined heading.
+                if _demote_overlay_headings(effective) != effective:
+                    warnings.append(OVERLAY_WARN_SHALLOW_HEADING)
+
+    return OverlayInspection(
+        skill=skill,
+        path=path,
+        size=size,
+        lines=lines,
+        first_line=first_line,
+        reason=reason,
+        warnings=tuple(warnings),
+    )
+
+
+def _load_user_overlay(
+    user_overlay_dir: Path | None,
+    skill_name: str,
+    bot_name: str,
+    bot_dir: str,
+) -> str | None:
+    """Read and render one skill's per-user overlay body, or None.
+
+    Every failure path returns None, so a missing directory, an unreadable file,
+    an over-cap one and a denylisted skill all degrade to exactly the prompt
+    this skill would have had with no overlay at all. The worst case here is
+    that a customization is inert.
+    """
+    if user_overlay_dir is None or _denylist_key(skill_name) in OVERLAY_DENYLIST:
+        return None
+
+    path = user_overlay_dir / f"{skill_name}.md"
+    # `max_bytes` is the loading cap here, not the absolute read ceiling: past
+    # it the file is not loaded at all, so there is nothing to gain by reading
+    # it. The CLI passes the larger bound instead, because it has to be able to
+    # read a file back in order to shrink it.
+    raw, refusal, size = read_overlay_bytes(path, max_bytes=OVERLAY_MAX_BYTES)
+    if refusal == OVERLAY_UNREADABLY_LARGE:
+        logger.warning(
+            "skill overlay %s is %s bytes (cap %d) — not loaded. An overlay "
+            "is appended to the bundled body, not a replacement for it.",
+            path, size, OVERLAY_MAX_BYTES,
+        )
+        return None
+    if refusal is not None:
+        # `debug`, not `warning`, and the level is the whole point. This runs
+        # once per eager skill per task, and every condition it reports is one
+        # a task can create for itself — a symlink or a FIFO planted at the
+        # path, or a `config` entry replaced with a regular file. At `warning`
+        # the daemon forwards it to the operator's log channel, so one planted
+        # file becomes a stream of alerts on every task for that user. The
+        # surface that is supposed to report this is `doctor`'s
+        # `config.skill_overlays`, once, on a stated cadence.
+        logger.debug(
+            "skill overlay %s could not be read (%s) — not loaded", path, refusal
+        )
+        return None
+    assert raw is not None
+
+    if len(raw) > OVERLAY_WARN_BYTES:
+        logger.warning(
+            "skill overlay %s is %d bytes, over the %d-byte guidance",
+            path, len(raw), OVERLAY_WARN_BYTES,
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        logger.warning("skill overlay %s is not valid UTF-8 — not loaded", path)
+        return None
+
+    body = overlay_effective_body(text)
+    if not body:
+        return None
+    body = _demote_overlay_headings(body)
+    return body.replace("{BOT_NAME}", bot_name).replace("{BOT_DIR}", bot_dir)
+
+
 def load_skills(
     skills_dir: Path,
     skill_names: list[str],
@@ -639,13 +1172,28 @@ def load_skills(
     bot_dir: str = "",
     skill_index: dict[str, SkillMeta] | None = None,
     bundled_dir: Path | None = None,
+    user_overlay_dir: Path | None = None,
 ) -> str:
-    """Load and concatenate selected skill docs, substituting placeholders."""
+    """Load and concatenate selected skill docs, substituting placeholders.
+
+    ``user_overlay_dir`` is the user's ``config/skills/`` directory (None when
+    the deployment has no mount, or for a caller with no user in hand). Applying
+    the overlay here rather than at the call sites is the point: there are two
+    load paths — the eager one in ``executor`` and ``skills show`` — and this
+    codebase keeps getting bitten by the two drifting.
+    """
     if not bot_dir:
         bot_dir = bot_name.lower()
 
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR
+
+    # One stat instead of one open per eager skill. Nothing creates this
+    # directory — `ensure_user_directories_v2` does not — so on almost every
+    # deployment it is absent, and the target is the network mount this repo has
+    # already moved every database off.
+    if user_overlay_dir is not None and not user_overlay_dir.is_dir():
+        user_overlay_dir = None
 
     parts = []
     for name in skill_names:
@@ -655,7 +1203,11 @@ def load_skills(
             title = name.replace("-", " ").replace("_", " ").title()
             content = _strip_frontmatter(doc_path.read_text()).strip()
             content = content.replace("{BOT_NAME}", bot_name).replace("{BOT_DIR}", bot_dir)
-            parts.append(f"### {title}\n\n{content}")
+            block = f"### {title}\n\n{content}"
+            overlay = _load_user_overlay(user_overlay_dir, name, bot_name, bot_dir)
+            if overlay:
+                block += f"\n\n{OVERLAY_LABEL}\n\n{OVERLAY_PREAMBLE}\n\n{overlay}"
+            parts.append(block)
 
     if not parts:
         return ""
@@ -700,6 +1252,12 @@ def compute_skills_fingerprint(
     Hashes all skill.toml + skill.md files from both bundled and operator dirs,
     plus legacy _index.toml and *.md files. Sorted by name for determinism.
     Returns the first 12 chars of the hex digest.
+
+    The *user* tree is deliberately not scanned, so editing a per-skill overlay
+    does not move the fingerprint and does not fire the "skills changed, here's
+    the changelog" notice in ``executor``. That is required behaviour rather
+    than an oversight: a changelog that fires because the user edited their own
+    overlay, and then says nothing about that edit, is pure noise.
     """
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR

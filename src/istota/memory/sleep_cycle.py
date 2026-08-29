@@ -17,6 +17,7 @@ from ..config import Config
 from ..usage import SYSTEM_USER_ID
 from ..storage import (
     _get_mount_path,
+    resolve_user_skill_overlays_dir,
     get_user_memories_path,
     get_user_memory_path,
     get_user_playbooks_path,
@@ -1115,6 +1116,87 @@ def _load_kg_facts_text(
         return None
 
 
+def _load_skill_overlay_inventory(
+    config: Config, user_id: str
+) -> list[tuple[str, int]]:
+    """`(skill, line count)` for every per-skill overlay that reaches a prompt.
+
+    Names and counts only — the curator has to know a topic is handled
+    elsewhere, not to re-read the rules — and it is a read: the curator does
+    not write overlays in v1, so nothing here is fed back into an op.
+
+    A file the loader would refuse is left out: a name that is not a skill, a
+    denylisted one, an empty one, one past the cap. Naming it would tell the
+    curator a rule is stored live somewhere when it is not, and deciding what
+    USER.md no longer needs is this list's one use. The disabled set is
+    `effective_disabled_skills`, so an overlay switched off instance-wide, for
+    this user, or by the capability gate is left out too — but that function is
+    not the whole of `select_skills`' pre-filter, so an overlay for a skill
+    held back by a missing dependency or by `admin_only` is still listed. The
+    claim this makes is "the loader would load this file", not "this task will
+    see it", which no nightly-time answer could make anyway.
+
+    **The candidate names come from the skill index, never from the tree.**
+    `{mount}/Users/{user_id}` is bound read-write into that user's own sandbox,
+    so a task can put any number of files in this directory, and only a file
+    named for a known skill can ever bind. Listing the directory would have
+    this nightly pass open and read every planted file to the cap before
+    discarding it; deriving one path per known skill bounds the work by the
+    operator's own tree, which is `sandbox_cache_sweeper`'s rule for the same
+    hazard. What that leaves unreported — a file named for no skill at all — is
+    `doctor`'s `config.skill_overlays` to report, and it is not something the
+    curator could act on.
+
+    Everything else about reaching those files is `_loader`'s and `storage`'s
+    rather than this module's. `resolve_user_skill_overlays_dir` carries the
+    containment rule (`config` and `skills` are both entries a task can replace
+    with a symlink to anywhere the daemon can read), and `inspect_overlay`
+    opens each file `O_NOFOLLOW` and `O_NONBLOCK` and refuses anything that is
+    not a regular file — a FIFO left at `notes.md` would otherwise block this
+    read forever, and the nightly pass runs unsandboxed with no timeout over it.
+
+    Returns [] on any failure, like `_load_kg_facts_text`, but logs first: the
+    section vanishing from every nightly prompt for every user is the exact
+    duplication this exists to stop, and silence would make a permanently
+    broken index indistinguishable from a user with no overlays.
+    """
+    try:
+        overlay_dir = resolve_user_skill_overlays_dir(config, user_id)
+        if overlay_dir is None or not overlay_dir.is_dir():
+            return []
+        # Function-local: `istota.skills` star-imports every skill on the way
+        # to `_loader`, and this module is imported by the scheduler.
+        from ..skills._loader import (
+            OVERLAY_MAX_BYTES,
+            effective_disabled_skills,
+            inspect_overlay,
+            load_skill_index,
+        )
+
+        known = load_skill_index(
+            config.skills_dir, bundled_dir=config.bundled_skills_dir
+        )
+        disabled = effective_disabled_skills(config, user_id, known)
+        rows: list[tuple[str, int]] = []
+        for skill in sorted(known):
+            if skill in disabled:
+                continue
+            found = inspect_overlay(
+                overlay_dir / f"{skill}.md",
+                known_skills=known,
+                disabled_skills=disabled,
+                max_read_bytes=OVERLAY_MAX_BYTES,
+            )
+            if found.binds and found.lines is not None:
+                rows.append((found.skill, found.lines))
+        return rows
+    except Exception as e:  # noqa: BLE001 - a prompt section is best-effort
+        logger.warning(
+            "skill overlay inventory unavailable for %s: %s", user_id, e
+        )
+        return []
+
+
 # Phase A observability for USER.md growth. Warning fires once the file
 # crosses ~8 KB — somewhere around where it starts pushing other prompt
 # sections out under typical max_memory_chars budgets. Tunable via config
@@ -1308,7 +1390,10 @@ def curate_user_memory(
             },
         )
 
-    prompt = build_op_curation_prompt(user_id, doc, dated, kg_text)
+    overlays = _load_skill_overlay_inventory(config, user_id)
+    prompt = build_op_curation_prompt(
+        user_id, doc, dated, kg_text, skill_overlays=overlays
+    )
 
     ok, output = _run_sleep_cycle_brain(
         config, prompt,

@@ -12,6 +12,7 @@ src/istota/memory/
     ├── types.py          # SectionedDoc / Section
     ├── parser.py         # parse / serialize markdown sections
     ├── ops.py            # apply_ops with validation
+    ├── overlay.py        # per-skill overlay docs: flat, one synthetic Section
     ├── prompt.py         # curation prompt + JSON-fence stripper
     ├── audit.py          # USER.md.audit.jsonl writer
     ├── file_lock.py      # per-file flock for runtime memory writes
@@ -31,6 +32,8 @@ The executor is the only consumer of memory data at task time. During prompt ass
 5. **Recalled memories** — `_recall_memories()` runs a hybrid search using the task prompt as the query, keyed on the user's namespace plus `channel:{token}` when applicable. Off by default (`auto_recall = false`). Two ISSUE-109 scope levers shape the results: **recency decay** down-weights each hit by age with a half-life of `recency_half_life_days` (default 180; 0 disables) so dense old clusters don't outrank current context on sheer mass, and **episode windows** suppress any chunk whose `valid_until` has passed so time-boxed memories age out cleanly.
 
 6. **Learned playbooks** — `_recall_playbooks()` queries only `source_type="playbook"` chunks and emits a `## Learned Playbooks` section. Gated on `playbooks.enabled` (off by default) and skipped for automated / `skip_memory` tasks.
+
+Per-skill overlays are not in this list. They are user-written durable text like USER.md, but they ride inside the skills reference rather than in a memory section: `load_skills` appends `config/skills/<skill-name>.md` to that skill's body, so an overlay reaches the prompt only when its skill is selected. They are indexed as `skill_overlay` for explicit search and, like `user_memory`, are left out of `_recall_memories`' source list — a document already delivered whole on the path that needs it has nothing to gain from being recalled in fragments.
 
 If the resulting memory section exceeds `max_memory_chars`, `_apply_memory_cap()` truncates in this order: recalled → knowledge facts → dated → playbooks. Playbooks are truncated last (most protected — an actionable procedure outranks recalled snippets and dated context). User and channel memory are always preserved.
 
@@ -92,6 +95,7 @@ curate_user_memory(config, user_id, conn)
   ├── read_user_memory_v2()              # current USER.md
   ├── read_dated_memories(max_days=3)    # last 3 days, capped at 8000 chars
   ├── _load_kg_facts_text()              # current knowledge graph
+  ├── _load_skill_overlay_inventory()    # skill overlay names + line counts, no bodies
   ├── parse_sectioned_doc()              # SectionedDoc
   ├── build_op_curation_prompt()         # prompt builder
   ├── make_brain(config.brain).execute() # configured brain (text-only, no sandbox)
@@ -158,6 +162,7 @@ SQLite tables (`schema.sql`):
 | `user_memory` | `index_file()` for USER.md (after curation or `reindex_all`) | Durable — never pruned by age |
 | `channel_memory` | `index_file()` for dated channel memory files | Ephemeral — pruned by retention |
 | `channel_memory_durable` | `index_file()` for CHANNEL.md itself | Durable — never pruned by age |
+| `skill_overlay` | `index_file()` for a per-skill overlay (`config/skills/<name>.md`), written by the memory CLI or by `reindex_all` | Durable — never pruned by age. Only a file that actually binds is indexed, and a reindex reaps the rows of one that has gone |
 | `playbook` | Sleep-cycle playbook distillation | Pruned by `playbooks.retention_days`, aged from last use |
 
 ## Knowledge graph integration
@@ -205,7 +210,7 @@ istota-skill memory_search delete-fact ID
 
 `index file` is scoped: it will only read paths inside your own workspace, the channel directory the task is running in, and the task's scratch directory. Anything indexed can be read back out through `search`, so an unscoped read would have been a way to reach files a task is not meant to see.
 
-Runtime memory *writes* go through a separate skill — `istota-skill memory append|add-heading|remove|replace|remove-heading|show|headings` — which takes a file lock and writes an audit record. Never append to `USER.md` with shell redirection.
+Runtime memory *writes* go through a separate skill — `istota-skill memory append|add-heading|remove|replace|remove-heading|show|headings|skills` — which takes a file lock and writes an audit record. Never append to `USER.md` with shell redirection. `--channel TOKEN` retargets a write to that room's `CHANNEL.md`; `--skill NAME` retargets it to that skill's per-user overlay (`config/skills/<name>.md`), and `skills` inventories the overlay directory.
 
 ## Related pages
 

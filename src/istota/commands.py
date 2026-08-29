@@ -2218,7 +2218,14 @@ def _summarize_chunk(content: str) -> str:
 
 
 # Personal / channel memory source types — not room-bound conversation turns.
-_MEMORY_SOURCE_TYPES = ("memory_file", "user_memory", "channel_memory", "channel_memory_durable")
+# `skill_overlay` is here because it is the only surface that can answer "why
+# does the bot always do X" for a rule that lives in one skill's overlay: the
+# rule reaches a prompt only on a task that selected that skill, so a user
+# searching for it from a room would otherwise get nothing.
+_MEMORY_SOURCE_TYPES = (
+    "memory_file", "user_memory", "skill_overlay",
+    "channel_memory", "channel_memory_durable",
+)
 # The full default search set: room conversation turns + every memory kind.
 _DEFAULT_SEARCH_SOURCE_TYPES = ["conversation", *_MEMORY_SOURCE_TYPES]
 # Channel-scoped memory (belongs to the current room we fetched channel:{token} for).
@@ -2253,8 +2260,8 @@ def _search_memory(
       - ``channel_memory`` / ``channel_memory_durable`` rows belong to the
         current channel (we only fetched ``channel:{current}``): tagged with the
         current room token and ``is_memory=True``.
-      - ``memory_file`` / ``user_memory`` rows are the user's personal memory —
-        not room-bound, ``is_memory=True``, room token ``None``.
+      - ``memory_file`` / ``user_memory`` / ``skill_overlay`` rows are the user's
+        personal memory — not room-bound, ``is_memory=True``, room token ``None``.
 
     Results are deduped by ``task_id`` (conversation) and
     ``(source_type, source_id)`` (memory), keeping the higher-ranked hit.
@@ -2333,7 +2340,7 @@ def _search_memory(
             entry["conversation_token"] = conversation_token
             entry["room"] = conversation_token or ""
 
-        else:  # memory_file / user_memory — personal, not room-bound
+        else:  # memory_file / user_memory / skill_overlay — personal, not room-bound
             key = (r.source_type, str(r.source_id))
             if key in seen_mem:
                 continue

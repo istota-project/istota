@@ -35,6 +35,7 @@ from .storage import (
     ensure_user_directories_v2,
     get_user_persona_path,
     get_user_scripts_path,
+    resolve_user_skill_overlays_dir,
     read_channel_memory,
     read_dated_memories,
     read_user_memory_v2,
@@ -4658,9 +4659,15 @@ def execute_task(
     skills_index = build_disclosure_index(menu, skill_index)
     logger.info("skills: eager=%d menu=%d", len(eager_skills), len(menu))
 
+    # Per-skill user overlays. Derived by the shared helper rather than here, so
+    # this path and `skills show` cannot resolve different directories.
+    # `{user_id}` in the injected label is substituted below with the rest.
+    _overlay_dir = resolve_user_skill_overlays_dir(config, task.user_id)
+
     skills_doc = load_skills(
         config.skills_dir, eager_skills, config.bot_name, config.bot_dir_name,
         skill_index=skill_index, bundled_dir=_bundled_dir,
+        user_overlay_dir=_overlay_dir,
     )
     if skills_doc:
         # Resolve per-user scripts directory

@@ -167,15 +167,28 @@ def cmd_index_file(args) -> dict:
 
 
 def cmd_reindex(args) -> dict:
-    """Reindex all conversations and memory files."""
-    from types import SimpleNamespace
+    """Reindex all conversations and memory files.
+
+    The config is the **real** one, not a `SimpleNamespace` carrying the mount
+    alone. `reindex_all` reads `bot_dir_name` to reach `config/USER.md`, and
+    `skills_dir` / `bundled_skills_dir` to know which per-skill overlays bind,
+    so a stand-in built from one env var raised `AttributeError` before the
+    first of those blocks ran — every `reindex` against a mounted deployment
+    died there, reported as a traceback with no JSON envelope. This verb is a
+    bulk reindex, so a TOML parse is not a cost worth avoiding; the rest of
+    this CLI reads env vars because it runs per search.
+    """
+    from istota.config import load_config
     from istota.memory.search import reindex_all
 
     conn = _get_conn()
     user_id = _get_user_id()
 
-    mount_path = os.environ.get("NEXTCLOUD_MOUNT_PATH", "")
-    config = SimpleNamespace(nextcloud_mount_path=Path(mount_path) if mount_path else None)
+    try:
+        config = load_config()
+    except Exception as e:  # noqa: BLE001 - the envelope contract is the point
+        conn.close()
+        return {"status": "error", "error": f"could not load config: {e}"}
 
     stats = reindex_all(conn, config, user_id, lookback_days=args.lookback_days)
     conn.close()

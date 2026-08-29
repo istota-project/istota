@@ -164,6 +164,7 @@ These files live in the user's Nextcloud folder at `/Users/{user_id}/{bot_dir}/c
 | `BRIEFINGS.md` | Briefing schedule (overrides TOML config) | [Briefings](../features/briefings.md) |
 | `CRON.md` | Scheduled jobs (markdown + TOML) | [Scheduling](../features/scheduling.md) |
 | `HEARTBEAT.md` | Health monitoring checks | [Heartbeat](../features/heartbeat.md) |
+| `skills/<name>.md` | Per-skill instruction overlay (one file per skill) | [below](#per-skill-overlays) |
 
 ### TASKS.md format
 
@@ -176,6 +177,51 @@ These files live in the user's Nextcloud folder at `/Users/{user_id}/{bot_dir}/c
 ```
 
 Status markers: `[ ]` pending, `[~]` in progress, `[x]` completed, `[!]` failed.
+
+### Per-skill overlays
+
+A user can customize one skill's instructions without forking the skill. Put a markdown file at `config/skills/<skill-name>.md` and its contents are appended to that skill's body every time the skill loads — both when the skill is selected eagerly and when the bot pulls it from the on-demand menu with `istota-skill skills show`.
+
+```
+/Users/alice/istota/config/skills/
+├── calendar.md
+├── developer.md
+└── notes.md
+```
+
+The text lands at the end of the skill's section under a `#### alice's configuration for this skill` heading, followed by a line saying these instructions take precedence over the skill's own wherever the two conflict. That is the whole precedence mechanism: position in the prompt, plus the label. There is no resolver.
+
+**Additive, not replace.** This is the difference from the operator override at `config/skills/<name>/skill.md` in the *deployment's* config directory, which substitutes the whole document. An overlay adds three lines and keeps taking upstream edits to the bundled skill; an override means hand-merging every upstream change forever. Dropping a forked skill document into the overlay path instead puts two contradictory bodies in one prompt, which is what the size cap below exists to catch.
+
+Rules:
+
+- Plain markdown, bullets preferred. YAML frontmatter is stripped if present.
+- No `# ` or `## ` headings. The overlay is rendered under a `#### ` label of its own, and a heading that shallow ends that block and floats the rules up as a new section peer to the whole skills reference, detached from the skill they configure. One written anyway is demoted to `#### ` at load time rather than dropped, so a hand-edited file misbehaves visibly; `istota doctor` warns about it. `### ` and deeper are fine.
+- Over 8 KB warns. Over 32 KB is not loaded at all — the write still lands, so the file is still readable and shrinkable through the CLI, but it reaches no prompt. Only a write that would take the file past 1 MB is refused outright, since past that the CLI could no longer read it back to shrink it.
+- `sensitive_actions` and `untrusted_input` accept no overlay. Not a security boundary — the operator override can still replace either document — but a guard against a casual preference line landing in the safety layer.
+- A file named for a skill that does not exist is silently never read. Two things report it: `istota-skill memory skills` for one user, and `istota doctor`'s `config.skill_overlays` check across every user's tree.
+- Overlays are read from the workspace mount, so a deployment without one has no overlays. Every failure above degrades to exactly the prompt the skill would have had with no overlay at all.
+- Editing an overlay does not move the skills fingerprint, so it does not fire the "skills changed" notice. That notice would otherwise appear and then say nothing about the edit that triggered it.
+
+**Which file a rule belongs in.** A rule in `USER.md` reaches every task. A rule in an overlay reaches only the tasks where that skill loaded, and skill selection is a heuristic — a menu skill's overlay arrives only if the bot decides to pull the skill. So the test is:
+
+> Would it be *wrong* to ignore this rule on a task where the skill was not loaded? If yes → `USER.md`. If it is merely irrelevant there → skill overlay.
+
+A note-naming convention is irrelevant on a task that writes no note, and belongs in the `notes` overlay. "Never write a new file to the base notes folder" is not, because the task that needs to hear it is the one that never recognized itself as a notes task; that stays in `USER.md`. A rule covering two skills is written into both files — there is no include mechanism. A rule covering three or more has failed the test.
+
+**Editing them.** Through the memory skill CLI, under the same file lock, atomic write and audit log as `USER.md`:
+
+```bash
+istota-skill memory skills                      # inventory: what is customized, and does it load
+istota-skill memory show --skill developer
+istota-skill memory append --skill developer --line "A full test run takes about an hour here — ask first."
+istota-skill memory replace --skill developer --match "about an hour" --line "A full test run takes about two hours here — ask first."
+istota-skill memory remove --skill developer --match "about two hours"
+```
+
+`append` creates the file. A `remove` that leaves the file *empty* deletes it, so the directory stays an honest inventory — note that emptiness is judged on the whole file, so an overlay whose last bullet goes but whose `### ` subheading remains is kept, and the skill's prompt then carries that heading with nothing under it. `--skill` and `--channel` are mutually exclusive, an unknown skill name is refused with the list of known ones, and `add-heading` / `remove-heading` / `headings` are refused because an overlay has no `## ` sections. Under `--skill`, `--heading` names a `### ` subsection of the overlay rather than a section of `USER.md`.
+
+Overlay text is indexed for memory search under the `skill_overlay` source type, so a search finds a rule without the user knowing which file holds it. The nightly curator is shown the inventory — skill names and line counts, never the bodies — so it does not copy a rule back into `USER.md` a week after it moved out.
 
 ## Admin vs non-admin
 
