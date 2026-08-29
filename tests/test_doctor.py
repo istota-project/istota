@@ -2654,10 +2654,16 @@ class TestSkillOverlays:
         assert "alice" not in r.detail
 
     def test_the_detail_names_at_most_a_handful(self, make_config, tmp_path):
+        # `developer` with one character dropped, nine ways. Each is a typo, so
+        # the list being truncated is the FAIL list. Deliberately not
+        # `developer{i}` — a trailing digit reads as a numbered copy and WARNs.
         config = self._config(make_config, tmp_path)
         d = self._overlays(config)
-        for i in range(9):
-            (d / f"nosuchskill{i}.md").write_text("- a rule\n")
+        name = "developer"
+        typos = [name[:i] + name[i + 1:] for i in range(len(name))]
+        assert len(set(typos)) == 9
+        for typo in typos:
+            (d / f"{typo}.md").write_text("- a rule\n")
         r = self._run(config)
         assert r.status == FAIL
         assert "9 of 9" in r.detail
@@ -2682,15 +2688,20 @@ class TestSkillOverlays:
         overlays = self._overlays(config)
         (overlays / "bad\nname\x1b[31m.md").write_text("- a rule\n")
         r = self._run(config)
-        assert r.status == FAIL
+        # WARN rather than FAIL: nothing this shape is within a typo's distance
+        # of a real skill name. Both statuses render the name through the same
+        # `_overlay_label`, which is what is under test.
+        assert r.status == WARN
         assert "\n" not in r.detail
         assert "\x1b" not in r.detail
 
     def test_a_very_long_filename_is_truncated(self, make_config, tmp_path):
+        # WARN for the same reason as the control-character case above: 200
+        # characters is not a typo of any skill name.
         config = self._config(make_config, tmp_path)
         (self._overlays(config) / ("z" * 200 + ".md")).write_text("- a rule\n")
         r = self._run(config)
-        assert r.status == FAIL
+        assert r.status == WARN
         assert len(r.detail) < 200
         assert "..." in r.detail
 
@@ -2771,3 +2782,190 @@ class TestSkillOverlays:
         )
         r = self._run(config)
         assert "private rule" not in r.detail + r.remedy
+
+    # ------------------------------------------------- typo versus scratch file
+
+    def test_a_stray_file_warns_rather_than_failing(self, make_config, tmp_path):
+        """The overlay directory is inside the tree `build_bwrap_cmd` binds
+        read-write into the user's sandbox, so any task can create a file here
+        with one `touch`. A deployment-scope FAIL an ordinary task can pin red
+        is an alert an operator learns to skip past."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "zzz.md").write_text("- scratch\n")
+        r = self._run(config)
+        assert r.status == WARN
+        assert "zzz.md" in r.detail
+        assert "unknown_skill" in r.detail
+        assert "unknown_skill" in r.remedy
+
+    def test_a_near_miss_names_the_skill_it_probably_meant(
+        self, make_config, tmp_path
+    ):
+        """A typo is the case the check exists for, so it keeps FAIL — and the
+        suggestion is what makes the report actionable without opening a shell
+        on the deployment."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "develper.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "did you mean developer" in r.detail
+
+    def test_a_typo_of_a_denylisted_name_still_fails(self, make_config, tmp_path):
+        """`sensitive_actions` takes no overlay, but a misspelling of it is
+        still a file its author believed was live."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "sensitive_action.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "did you mean sensitive_actions" in r.detail
+
+    def test_a_stray_file_does_not_hide_a_typo_beside_it(
+        self, make_config, tmp_path
+    ):
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        (d / "zzz.md").write_text("- scratch\n")
+        (d / "develper.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "develper.md" in r.detail
+
+    def test_a_stray_file_does_not_mask_a_denylisted_one(
+        self, make_config, tmp_path
+    ):
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        (d / "zzz.md").write_text("- scratch\n")
+        (d / "sensitive_actions.md").write_text("- planted\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "denylisted" in r.detail
+
+    def test_a_case_difference_alone_is_a_typo(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "Developer.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "did you mean developer" in r.detail
+
+    def test_a_backup_of_a_real_overlay_warns_rather_than_failing(
+        self, make_config, tmp_path
+    ):
+        """`<skill>2`, `<skill>~` and `<skill>.bak` are what an editor and a
+        task leave behind, and every one of them is one edit from the name it
+        was copied from — so the distance test alone reads the whole class as
+        misspellings and this is the largest hole in the fix."""
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        for name in ("developer2.md", "developer~.md", "notes.bak.md"):
+            (d / name).write_text("- a copy\n")
+        r = self._run(config)
+        assert r.status == WARN
+        assert "developer2.md" in r.detail
+
+    def test_a_short_stray_name_is_not_read_as_a_typo(self, make_config, tmp_path):
+        """`nte` is two edits from `notes`, which the long budget would accept
+        and the short one does not — the shorter the name, the more of it two
+        edits are, and the more a loose budget turns a scratch file into an
+        alert. The predicate itself is pinned in `TestOverlayNearMiss`."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "nte.md").write_text("- scratch\n")
+        r = self._run(config)
+        assert r.status == WARN
+
+
+class TestOverlayNearMiss:
+    """The predicate separating a misspelled overlay from a scratch file."""
+
+    KNOWN = ("developer", "notes", "browse", "sensitive_actions")
+
+    def _near(self, stem):
+        from istota.doctor import _overlay_near_miss
+
+        return _overlay_near_miss(stem, self.KNOWN)
+
+    def test_an_exact_name_is_not_a_near_miss(self):
+        # The caller only asks about names the index already rejected, but the
+        # predicate must not claim a name is a typo of itself.
+        assert self._near("developer") is None
+
+    def test_one_edit_on_a_long_name_is_a_typo(self):
+        assert self._near("develper") == "developer"
+        assert self._near("developerr") == "developer"
+        assert self._near("dveloper") == "developer"
+
+    def test_two_edits_on_a_long_name_are_a_typo(self):
+        assert self._near("sensitiveactons") == "sensitive_actions"
+
+    def test_three_edits_are_not(self):
+        assert self._near("develo") is None
+
+    def test_a_short_name_gets_a_tighter_budget(self):
+        assert self._near("note") == "notes"
+        assert self._near("nots") == "notes"
+        # Two edits, which the long budget accepts and the short one does not.
+        assert self._near("nte") is None
+
+    def test_the_budget_switches_at_the_stated_length(self):
+        from istota.doctor import _OVERLAY_TYPO_SHORT_NAME_CHARS, _overlay_near_miss
+
+        assert _OVERLAY_TYPO_SHORT_NAME_CHARS == 5
+        # Four characters, two edits from `browse`: short budget, so no.
+        assert _overlay_near_miss("brse", ("browse",)) is None
+        # Five characters, two edits from `browser`: long budget, so yes.
+        assert _overlay_near_miss("brwse", ("browse",)) == "browse"
+
+    def test_case_is_ignored(self):
+        assert self._near("NOTES") == "notes"
+
+    def test_an_unrelated_name_is_not_a_typo(self):
+        assert self._near("zzz") is None
+        assert self._near("scratch") is None
+        assert self._near("") is None
+
+    # ------------------------------------------------ copies, not misspellings
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "notes2", "notes-1", "notes~", "notes.bak", "notes.tmp",
+            "notes-old", "notes_new", "notes copy", "notes.orig",
+            "notes backup", "notes.save", "notes v2", "notes.bak2",
+        ],
+    )
+    def test_a_copy_of_a_real_overlay_is_not_a_typo_of_one(self, stem):
+        """A backup or a numbered copy is one or two edits from the name it was
+        made from, so the distance test alone reads every one of them as a
+        misspelling. Whoever made it did not misspell anything."""
+        assert self._near(stem) is None
+
+    def test_a_copy_marker_on_a_name_that_is_not_a_skill_is_still_a_typo(self):
+        # Strips to `develper`, which is not a skill, so it falls through to
+        # the distance test and is reported as the typo it is.
+        assert self._near("develper2") == "developer"
+
+    def test_a_bare_copy_marker_is_not_a_skill_name_plus_a_suffix(self):
+        assert self._near("2") is None
+        assert self._near("~") is None
+        assert self._near("bak") is None
+
+    def test_a_singular_of_a_real_skill_is_still_a_typo(self):
+        """The plural slip is the most common misspelling there is, and a file
+        named `note.md` for the `notes` skill reaches no prompt at all."""
+        assert self._near("note") == "notes"
+
+    def test_the_closest_candidate_wins_over_a_further_one(self):
+        from istota.doctor import _overlay_near_miss
+
+        # `notez` is one edit from `notes` and two from `notest`. Returning the
+        # first sorted match rather than the closest would answer `notest`.
+        assert _overlay_near_miss("notez", ("notest", "notes")) == "notes"
+        assert _overlay_near_miss("notez", ("notes", "notest")) == "notes"
+
+    def test_a_tie_is_broken_by_name_not_by_iteration_order(self):
+        from istota.doctor import _overlay_near_miss
+
+        # Both are exactly one edit away, so only the sort makes the answer
+        # the same for two callers holding the same names in a different order.
+        assert _overlay_near_miss("noteX", ("noteb", "notea")) == "notea"
+        assert _overlay_near_miss("noteX", ("notea", "noteb")) == "notea"
