@@ -1,5 +1,9 @@
 """Tests for curation prompt construction and JSON-fence stripping."""
 
+import os
+
+import pytest
+
 from istota.memory.curation.parser import parse_sectioned_doc
 from istota.memory.curation.prompt import build_op_curation_prompt, strip_json_fences
 from istota.memory.curation.types import SectionedDoc
@@ -83,3 +87,207 @@ class TestStripJsonFences:
     def test_handles_surrounding_whitespace(self):
         text = "  \n```json\n{\"ops\": []}\n```\n  "
         assert strip_json_fences(text) == '{"ops": []}'
+
+
+class TestSkillOverlaySection:
+    """Names and line counts, never bodies.
+
+    The curator has to know a topic is handled elsewhere so it does not re-add
+    the notes conventions to USER.md a week after they moved out. It is not
+    asked to read those rules again, and it does not write overlays in v1.
+    """
+
+    DOC = "## A\n- a\n"
+
+    def _prompt(self, overlays):
+        doc = parse_sectioned_doc(self.DOC)
+        return build_op_curation_prompt("alice", doc, "dated", None, overlays)
+
+    def test_renders_a_row_per_overlay(self):
+        prompt = self._prompt([("notes", 6), ("transcribe", 14)])
+        assert (
+            "## Skill overlays (already stored — do not duplicate to USER.md)"
+            in prompt
+        )
+        assert "- notes: 6 lines" in prompt
+        assert "- transcribe: 14 lines" in prompt
+
+    def test_section_is_omitted_when_there_are_no_overlays(self):
+        for empty in ([], (), None):
+            assert "Skill overlays" not in self._prompt(empty)
+        # The argument is optional, so the pre-overlay call shape still works.
+        doc = parse_sectioned_doc(self.DOC)
+        assert "Skill overlays" not in build_op_curation_prompt(
+            "alice", doc, "dated", None
+        )
+
+    def test_one_line_is_singular(self):
+        prompt = self._prompt([("notes", 1)])
+        assert "- notes: 1 line" in prompt
+        assert "- notes: 1 lines" not in prompt
+
+    def test_a_malformed_row_is_dropped_rather_than_raising(self):
+        """The nightly pass is the caller: a bad row costs a bullet, never the
+        whole curation run."""
+        prompt = self._prompt([("notes", 6), ("broken", None), "nonsense"])
+        assert "- notes: 6 lines" in prompt
+        assert "broken" not in prompt
+        assert "nonsense" not in prompt
+
+    def test_a_name_cannot_forge_a_line(self):
+        """Belt and braces: the caller passes known skill names only, but a
+        newline in one would otherwise write its own bullet or heading."""
+        prompt = self._prompt([("notes\n## Knowledge graph", 6)])
+        assert "- notes ## Knowledge graph: 6 lines" in prompt
+        assert "\n## Knowledge graph" not in prompt
+
+
+class TestOverlayInventoryFromDisk:
+    """`_load_skill_overlay_inventory` against a real directory.
+
+    What it walks is under `{mount}/Users/{user_id}`, which is bound read-write
+    into that user's own sandbox, so every component of it is model-plantable —
+    and the sleep cycle reads it unsandboxed, with no timeout over the read.
+    """
+
+    SKILLS = ("developer", "notes", "sensitive_actions")
+
+    @classmethod
+    def _config(cls, tmp_path, **overrides):
+        """A real Config: the reader takes `bot_dir_name`, `skills_dir`,
+        `bundled_skills_dir`, the disabled sets and the mount off it, and a
+        MagicMock answers all of them whether or not they exist."""
+        from istota.config import Config, UserConfig
+
+        bundled = tmp_path / "bundled"
+        for skill in cls.SKILLS:
+            d = bundled / skill
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "skill.md").write_text(
+                f"---\nname: {skill}\ndescription: the {skill} skill\n---\n\n# {skill}\n"
+            )
+        ops = tmp_path / "ops_skills"
+        ops.mkdir(exist_ok=True)
+        overrides.setdefault("nextcloud_mount_path", tmp_path / "mount")
+        overrides.setdefault("users", {"alice": UserConfig()})
+        return Config(
+            db_path=tmp_path / "istota.db",
+            temp_dir=tmp_path / "tmp",
+            bundled_skills_dir=bundled,
+            skills_dir=ops,
+            **overrides,
+        )
+
+    @staticmethod
+    def _overlays(config, user_id="alice"):
+        d = (
+            config.nextcloud_mount_path
+            / "Users" / user_id / config.bot_dir_name / "config" / "skills"
+        )
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _load(config, user_id="alice"):
+        from istota.memory.sleep_cycle import _load_skill_overlay_inventory
+
+        return _load_skill_overlay_inventory(config, user_id)
+
+    def _prompt_for(self, config):
+        return build_op_curation_prompt(
+            "alice",
+            parse_sectioned_doc("## A\n- a\n"),
+            "dated",
+            None,
+            self._load(config),
+        )
+
+    def test_counts_lines_and_reaches_the_prompt_without_the_body(self, tmp_path):
+        config = self._config(tmp_path)
+        (self._overlays(config) / "developer.md").write_text(
+            "- Never run the full suite in a foreground task here.\n"
+            "\n"
+            "- The box has 4 cores.\n"
+        )
+        assert self._load(config) == [("developer", 2)]
+
+        prompt = self._prompt_for(config)
+        assert "- developer: 2 lines" in prompt
+        assert "foreground task" not in prompt
+
+    def test_an_empty_directory_renders_no_section(self, tmp_path):
+        config = self._config(tmp_path)
+        self._overlays(config)
+        assert self._load(config) == []
+        assert "Skill overlays" not in self._prompt_for(config)
+
+    def test_a_missing_directory_is_not_an_error(self, tmp_path):
+        config = self._config(tmp_path)
+        assert self._load(config) == []
+
+    def test_no_mount_means_no_inventory(self, tmp_path):
+        """Overlays are filesystem reads, so an rclone-remote deployment has
+        none — the condition `load_persona` already applies to `PERSONA.md`."""
+        config = self._config(tmp_path)
+        (self._overlays(config) / "developer.md").write_text("- a rule\n")
+        remote = self._config(tmp_path, nextcloud_mount_path=None)
+        assert remote.use_mount is False
+        assert self._load(remote) == []
+
+    def test_a_file_that_will_never_bind_is_not_listed(self, tmp_path):
+        """A misspelled, denylisted or effectively empty overlay reaches no
+        prompt, so listing it would tell the curator a rule is stored live
+        somewhere when it is not."""
+        config = self._config(tmp_path)
+        d = self._overlays(config)
+        (d / "develper.md").write_text("- a typo, so it binds to nothing\n")
+        (d / "sensitive_actions.md").write_text("- planted\n")
+        (d / "notes.md").write_text("---\ntitle: x\n---\n\n   \n")
+        (d / "developer.md").write_text("- a real rule\n")
+        assert self._load(config) == [("developer", 1)]
+
+    def test_a_disabled_skill_is_not_listed(self, tmp_path):
+        from istota.config import UserConfig
+
+        config = self._config(
+            tmp_path,
+            disabled_skills=["notes"],
+            users={"alice": UserConfig(disabled_skills=["developer"])},
+        )
+        d = self._overlays(config)
+        (d / "notes.md").write_text("- switched off instance-wide\n")
+        (d / "developer.md").write_text("- switched off for alice\n")
+        assert self._load(config) == []
+
+    def test_a_planted_symlink_file_is_not_read(self, tmp_path):
+        config = self._config(tmp_path)
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN value\n")
+        (self._overlays(config) / "developer.md").symlink_to(secret)
+        assert self._load(config) == []
+        assert "TOP SECRET" not in self._prompt_for(config)
+
+    def test_a_redirected_overlay_directory_is_not_walked(self, tmp_path):
+        """`O_NOFOLLOW` covers the last component only — the files behind a
+        redirected `config/` or `skills/` are ordinary regular files that pass
+        every leaf-level guard."""
+        config = self._config(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "developer.md").write_text("- CONSTITUTIONAL SECRET TEXT\n")
+        user_config = (
+            config.nextcloud_mount_path
+            / "Users" / "alice" / config.bot_dir_name / "config"
+        )
+        user_config.mkdir(parents=True)
+        (user_config / "skills").symlink_to(elsewhere, target_is_directory=True)
+        assert self._load(config) == []
+        assert "CONSTITUTIONAL" not in self._prompt_for(config)
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+    def test_a_fifo_does_not_hang_the_nightly_pass(self, tmp_path):
+        """A FIFO with no writer blocks `open(2)`, and nothing times out this
+        read: the prompt is assembled before any brain request exists."""
+        config = self._config(tmp_path)
+        os.mkfifo(self._overlays(config) / "developer.md")
+        assert self._load(config) == []

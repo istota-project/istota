@@ -2,8 +2,41 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from .parser import serialize_sectioned_doc
 from .types import SectionedDoc
+
+
+def render_skill_overlay_inventory(
+    overlays: Sequence[tuple[str, int]] | None,
+) -> str:
+    """One bullet per overlay: skill name and line count, never the body.
+
+    The curator is told a topic is handled elsewhere so it does not re-add the
+    notes conventions to USER.md a week after they moved out of it. It is not
+    asked to read those rules again, so no body is rendered — and it does not
+    write overlays, so no op names one.
+
+    A malformed row is dropped rather than raising: this runs on the nightly
+    path where the alternative to a missing bullet is a curation pass that does
+    not happen at all. The names arrive from a caller that has already required
+    each one to be a *known* skill, so newline collapsing here is belt-and-
+    braces against a future caller that has not — a name carrying a newline
+    would otherwise forge a bullet, or a section, in the prompt.
+    """
+    rows: list[str] = []
+    for entry in overlays or ():
+        try:
+            name, lines = entry
+            count = int(lines)
+        except (TypeError, ValueError):
+            continue
+        clean = " ".join(str(name).split())
+        if not clean:
+            continue
+        rows.append(f"- {clean}: {count} line{'' if count == 1 else 's'}")
+    return "\n".join(rows)
 
 
 def build_op_curation_prompt(
@@ -11,6 +44,7 @@ def build_op_curation_prompt(
     doc: SectionedDoc,
     dated_memories: str,
     kg_facts_text: str | None,
+    skill_overlays: Sequence[tuple[str, int]] | None = None,
 ) -> str:
     parts: list[str] = []
 
@@ -31,6 +65,16 @@ def build_op_curation_prompt(
     if kg_facts_text and kg_facts_text.strip():
         parts.append("## Knowledge graph (already stored — do not duplicate to USER.md)")
         parts.append(kg_facts_text.rstrip("\n"))
+
+    overlay_rows = render_skill_overlay_inventory(skill_overlays)
+    if overlay_rows:
+        parts.append(
+            "## Skill overlays (already stored — do not duplicate to USER.md)\n"
+            "\n"
+            "The user keeps these rules in a file per skill, loaded whenever that skill\n"
+            "is. The ops below cannot edit them."
+        )
+        parts.append(overlay_rows)
 
     parts.append(
         "## Operations available\n"
