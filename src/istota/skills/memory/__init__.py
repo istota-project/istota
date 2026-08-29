@@ -77,6 +77,7 @@ from istota.memory.curation.types import (
     subsection_region_indices,
 )
 from istota.skills._loader import (
+    OVERLAY_MAX_BYTES,
     OVERLAY_READ_CAP_BYTES,
     inspect_overlay,
     read_overlay_bytes,
@@ -410,6 +411,21 @@ def _check_overlay_dir() -> Path:
     are separated by the op, so a directory swapped in between is not covered.
     This closes the planted-link case, which is the one a model reaches with a
     couple of commands; a genuine race against the daemon is not addressed.
+    `_loader.open_overlay_dir` is the shape that would close it.
+
+    **The resolved path is what comes back, and that is not only hygiene.**
+    `contained_overlay_dir` says callers must use the resolved path, and this
+    is the copy of that rule that used to return the raw one. It matters here
+    beyond the check-then-use window, because this path becomes the
+    `source_id` of every `skill_overlay` row this CLI writes, and the bulk
+    pass in `memory.search` keys the same file on its realpath. On a host
+    where any component of the mount is a symlink the two spellings differ,
+    and then one file is two sources: the bulk pass reaps the CLI's rows on
+    the way past, `_reindex_overlay`'s delete stops matching anything it
+    wrote, and an overlay grown past the cap stays searchable — the exact
+    condition ISSUE-341 item 1 exists to end. No migration is needed for rows
+    already written under the old spelling: they are absent from the next bulk
+    pass's `live` set and it reaps them.
     """
     d = _overlay_dir()
     if d.is_symlink() or (d.exists() and not d.is_dir()):
@@ -421,7 +437,7 @@ def _check_overlay_dir() -> Path:
     if resolved != resolved_root and resolved_root not in resolved.parents:
         _err("overlay_dir_outside_user_tree", path=_mount_relative(d))
         sys.exit(1)
-    return d
+    return resolved
 
 
 def _ensure_overlay_dir() -> Path:
@@ -600,7 +616,6 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
     contradict it.
     """
     from istota.skills._loader import (
-        OVERLAY_MAX_BYTES,
         OVERLAY_WARN_BYTES,
         overlay_effective_body,
     )
@@ -690,6 +705,36 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
     return _emit(payload)
 
 
+def _overlay_would_bind(skill: str | None, text: str) -> bool:
+    """Whether the loader would read this overlay back, from the text in hand.
+
+    The same question `_loader.inspect_overlay` answers from disk, asked
+    without a read: this runs outside `memory_md_lock`, so the file may already
+    have moved on, and the bytes just written are what the caller is asking
+    about. Every gate `inspect_overlay` applies that is reachable from a write
+    is here, and the two that are not are named rather than left implicit:
+    `unknown_skill` cannot occur because `_skill_overlay_path` refuses an
+    unknown name on every verb before a write is even attempted, and
+    `skill_disabled` is not applied by the bulk pass either.
+
+    `len` on the encoded text rather than a `stat`, for the same reason, and
+    it is the identical expression `_do_overlay_op` used to decide the
+    over-cap warning — so the set of writes that warn and the set that are not
+    indexed are the same set by construction.
+    """
+    from istota.skills._loader import (  # noqa: PLC0415 - matches the module's own style
+        OVERLAY_DENYLIST,
+        _denylist_key,
+        overlay_effective_body,
+    )
+
+    if skill is None or _denylist_key(skill) in OVERLAY_DENYLIST:
+        return False
+    if not overlay_effective_body(text):
+        return False
+    return len(text.encode("utf-8")) <= OVERLAY_MAX_BYTES
+
+
 def _reindex_overlay(target: Target, text: str | None) -> None:
     """Refresh the memory-search index for one overlay, or drop it.
 
@@ -703,6 +748,29 @@ def _reindex_overlay(target: Target, text: str | None) -> None:
     `text is None` means the op emptied the file and it was deleted, so the
     rows go with it. Leaving them behind would have search returning a rule the
     prompt no longer carries, which is worse than not indexing at all.
+
+    **A write the loader would not read is treated as a deletion here**, and
+    closing that gap is ISSUE-341 item 1. `_overlay_would_bind` is the test,
+    and the property worth having is that this pass and the bulk pass never
+    disagree — not that either is independently right.
+
+    Two ways a landed write reaches no prompt. A body past `OVERLAY_MAX_BYTES`
+    is allowed with a warning rather than refused, and the file it leaves is
+    read by nothing. And a **denylisted** skill takes no overlay at all: only
+    `append` and `replace` are refused against one, deliberately, so that a
+    file hand-planted at `sensitive_actions.md` stays removable through the
+    sanctioned path — which means a `remove` that leaves content behind lands
+    here with text in hand. Indexing that put model-planted text into
+    `memory_chunks`, where `!search` reads it back into a prompt: the denylist
+    defeated through the other door, and the more serious half of this fix.
+
+    In both cases the rows from a version that *did* load have to go with it,
+    rather than sit there answering for a file that stopped loading.
+
+    The entry also named a write against a *disabled* skill, and is wrong that
+    it is a divergence: the bulk pass passes no `disabled_skills` either, so
+    both index one. Whether they should is a product question rather than an
+    inconsistency, and it is left alone.
 
     Called from **outside** `memory_md_lock`, and see `_do_overlay_op` for why.
 
@@ -723,7 +791,7 @@ def _reindex_overlay(target: Target, text: str | None) -> None:
         from istota.memory.search import _delete_source_chunks, index_file
 
         with db.get_db(config.db_path) as conn:
-            if text is None:
+            if text is None or not _overlay_would_bind(target.skill, text):
                 _delete_source_chunks(conn, _user_id(), "skill_overlay", str(path))
             else:
                 index_file(conn, _user_id(), str(path), text, "skill_overlay")
