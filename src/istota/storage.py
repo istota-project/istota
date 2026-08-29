@@ -441,12 +441,28 @@ def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | No
     None without a mount. Overlays are filesystem reads, so an rclone-remote
     deployment has none — the condition ``load_persona`` already applies to a
     per-user ``PERSONA.md``.
+
+    None as well when the directory leads outside the user's own tree.
+    ``config`` and ``skills`` are ordinary entries under a root bound
+    read-write into that user's sandbox, so either can be replaced with a
+    symlink; the loader's ``O_NOFOLLOW`` covers only the overlay file itself,
+    and the files at the far end of a redirected directory are ordinary
+    regular files that pass every leaf-level guard. Returning None degrades to
+    exactly the prompt the skill would have had with no overlay at all, which
+    is what every other overlay failure path already does.
+
+    The **resolved** path is what comes back, so a caller cannot re-walk by the
+    unresolved name after the check.
     """
     if not config.use_mount:
         return None
-    return _get_mount_path(
+    from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - import cycle
+
+    overlay_dir = _get_mount_path(
         config, get_user_skill_overlays_path(user_id, config.bot_dir_name)
     )
+    user_root = _get_mount_path(config, f"Users/{user_id}")
+    return contained_overlay_dir(overlay_dir, user_root)
 
 
 CRON_TEMPLATE = """\

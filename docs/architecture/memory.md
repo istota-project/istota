@@ -158,6 +158,7 @@ SQLite tables (`schema.sql`):
 | `user_memory` | `index_file()` for USER.md (after curation or `reindex_all`) | Durable — never pruned by age |
 | `channel_memory` | `index_file()` for dated channel memory files | Ephemeral — pruned by retention |
 | `channel_memory_durable` | `index_file()` for CHANNEL.md itself | Durable — never pruned by age |
+| `skill_overlay` | `index_file()` for a per-skill overlay (`config/skills/<name>.md`), written by the memory CLI or by `reindex_all` | Durable — never pruned by age. Only a file that actually binds is indexed, and a reindex reaps the rows of one that has gone |
 | `playbook` | Sleep-cycle playbook distillation | Pruned by `playbooks.retention_days`, aged from last use |
 
 ## Knowledge graph integration

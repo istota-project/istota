@@ -285,7 +285,7 @@ Memory tables in SQLite (`schema.sql`):
 |---|---|
 | `sleep_cycle_state` | Per-user nightly state (`last_run_at`, `last_processed_task_id`) |
 | `channel_sleep_cycle_state` | Same, keyed on `conversation_token` |
-| `memory_chunks` | Indexed text chunks (`source_type` ∈ `conversation`, `memory_file`, `user_memory`, `channel_memory`, `channel_memory_durable`, `playbook`); `topic`, `entities`, `metadata_json` columns |
+| `memory_chunks` | Indexed text chunks (`source_type` ∈ `conversation`, `memory_file`, `user_memory`, `skill_overlay`, `channel_memory`, `channel_memory_durable`, `playbook`); `topic`, `entities`, `metadata_json` columns |
 | `memory_chunks_fts` | FTS5 virtual table, trigger-synced from `memory_chunks` |
 | `memory_chunks_vec` | sqlite-vec table (created lazily via `ensure_vec_table()`) |
 | `knowledge_facts` | Temporal triples with validity windows; unique-current index prevents duplicate active facts |

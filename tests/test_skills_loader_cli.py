@@ -382,6 +382,51 @@ class TestShowOverlays:
             config.nextcloud_mount_path / "Users/alice/istota/config/skills"
         )
 
+    def test_a_redirected_config_directory_yields_no_overlay_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """`config` and `skills` are ordinary entries under a root bound
+        read-write into that user's own sandbox, and the loader's `O_NOFOLLOW`
+        covers only the overlay file. The files at the far end of a redirected
+        directory are ordinary regular files that pass every leaf-level guard,
+        so the directory itself is where containment has to be."""
+        overlays = self._ctx(tmp_path, monkeypatch)
+        from istota.config import load_config
+        from istota.storage import resolve_user_skill_overlays_dir
+
+        config = load_config()
+        assert resolve_user_skill_overlays_dir(config, "alice") is not None
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "primary.md").write_text("- planted\n")
+        import shutil
+
+        shutil.rmtree(overlays)
+        overlays.symlink_to(elsewhere, target_is_directory=True)
+
+        assert resolve_user_skill_overlays_dir(config, "alice") is None
+
+    def test_a_link_that_stays_inside_the_users_own_tree_is_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        """The control. Someone who reorganised their own config directory
+        leads nowhere they could not already reach, and refusing that would
+        make the guard about symlinks rather than about containment."""
+        overlays = self._ctx(tmp_path, monkeypatch)
+        from istota.config import load_config
+        from istota.storage import resolve_user_skill_overlays_dir
+
+        config = load_config()
+        inside = config.nextcloud_mount_path / "Users/alice/skills-real"
+        inside.mkdir(parents=True)
+        import shutil
+
+        shutil.rmtree(overlays)
+        overlays.symlink_to(inside, target_is_directory=True)
+
+        assert resolve_user_skill_overlays_dir(config, "alice") == inside
+
     def test_no_mount_means_no_overlay(self, tmp_path, monkeypatch, capsys):
         """Overlays are filesystem reads, so an rclone-remote deployment skips
         them silently — the condition the per-user PERSONA.md already carries."""

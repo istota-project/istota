@@ -824,6 +824,27 @@ class TestSkillOverlays:
         assert result == self._baseline(skills_dir, bundled)
         assert any("cap" in r.message for r in caplog.records)
 
+    def test_a_planted_path_is_not_warned_about_on_every_task(
+        self, tmp_path, caplog
+    ):
+        """A symlink or a FIFO at an overlay path is a condition a task can
+        create for itself, and this runs once per eager skill per task — at
+        WARNING the daemon forwards it to the operator's log channel, so one
+        planted file becomes a stream of alerts. `doctor` reports it once."""
+        import logging
+
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        (overlays / "developer.md").symlink_to(secret)
+
+        with caplog.at_level(logging.WARNING, logger="istota.skills_loader"):
+            result = self._load(skills_dir, bundled, overlays)
+
+        assert "TOP SECRET" not in result
+        assert result == self._baseline(skills_dir, bundled)
+        assert caplog.records == []
+
     def test_at_the_cap_the_overlay_still_loads(self, tmp_path):
         """The refusal is *above* the cap, so the boundary is not off by one."""
         skills_dir, overlays, bundled = self._dirs(tmp_path)

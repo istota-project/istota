@@ -98,6 +98,10 @@ _MAX_OVERLAY_READ_BYTES = OVERLAY_READ_CAP_BYTES
 #: How much of an overlay's first line the inventory shows.
 _FIRST_LINE_CHARS = 120
 
+#: "No write happened", distinct from a write of `None` (the file was emptied
+#: and deleted, so its index rows go too).
+_UNSET = object()
+
 logger = logging.getLogger(__name__)
 
 
@@ -591,6 +595,9 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
     )
 
     path = target.path
+    # `None` is a real value here — it means the op emptied the file and it was
+    # deleted — so "no write happened" needs a value of its own.
+    applied_write: str | None | object = _UNSET
     try:
         with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir()):
             current = _read_overlay_text(path)
@@ -649,16 +656,23 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
                 else:
                     path.unlink(missing_ok=True)
                     payload["removed_file"] = True
-                _reindex_overlay(
-                    target,
-                    None if payload.get("removed_file") else new_text,
-                )
+                applied_write = None if payload.get("removed_file") else new_text
             _audit_for(args, op_dict, outcome, target=target, applied=True)
             if "line" in op_dict:
                 payload["line"] = op_dict["line"]
-            return _emit(payload)
     except MemoryMdLocked:
         return _err("locked", path=str(path))
+
+    # Outside the lock, deliberately. The bytes are already on disk and the
+    # index needs no file lock, while `index_file` can reach `embed_batch` and
+    # a cold sentence-transformers load — 34 MB resident, and a weights
+    # download on a host with no cached copy. This CLI is spawned per write, so
+    # that load is not amortized the way it is in the daemon; holding a 5s
+    # `memory_md_lock` across it would fail a concurrent writer with `locked`
+    # for a reason that has nothing to do with the file.
+    if applied_write is not _UNSET:
+        _reindex_overlay(target, applied_write)
+    return _emit(payload)
 
 
 def _reindex_overlay(target: Target, text: str | None) -> None:
@@ -666,13 +680,16 @@ def _reindex_overlay(target: Target, text: str | None) -> None:
 
     Without this the rule is discoverable only by reading the file. An overlay
     reaches a prompt solely on a task that selected its skill, so "why does the
-    bot always do X" has no other way to find one. `reindex_all` covers the
-    nightly sweep; this covers the minutes after a write, and a write is
-    exactly when someone asks whether the rule took.
+    bot always do X" has no other way to find one. `memory_search.reindex_all`
+    is the bulk pass and is only ever run by hand; this is what makes a write
+    findable at all, and a write is exactly when someone asks whether the rule
+    took.
 
     `text is None` means the op emptied the file and it was deleted, so the
     rows go with it. Leaving them behind would have search returning a rule the
     prompt no longer carries, which is worse than not indexing at all.
+
+    Called from **outside** `memory_md_lock`, and see `_do_overlay_op` for why.
 
     Best-effort in the same shape the nightly curator uses for USER.md: a
     memory index that cannot be opened must not fail a write that already

@@ -2707,6 +2707,33 @@ def _same_network(dest: str, present: set[str]) -> bool:
 #: look at rather than fifty to read here.
 _OVERLAY_REPORT_LIMIT = 5
 
+#: How much of one filename the detail carries. A filename here is text the
+#: *model* wrote — the directory is bound read-write into that user's sandbox —
+#: and a name may be 255 bytes of anything but ``/`` and NUL. The detail is
+#: printed to a terminal and rendered into the admin dashboard, so the count
+#: limit above bounds the wrong axis on its own.
+_OVERLAY_NAME_CHARS = 64
+
+#: Why an overlay will never be loaded, as opposed to loading with something
+#: worth saying about it. These are the two the spec names plus the cap: each
+#: is a misfiling that reaches no prompt, that nothing else would ever mention,
+#: and that a person fixes by renaming, shrinking or removing the file.
+_OVERLAY_FATAL_REASONS = frozenset({"unknown_skill", "denylisted", "over_cap"})
+
+
+def _overlay_label(user_id: str, name: str, note: str) -> str:
+    """One reportable filename, with the control characters taken out.
+
+    A newline in a name would forge a second line in a one-line detail, and an
+    ANSI escape would repaint an operator's terminal. Neither is hypothetical:
+    the name is chosen by whatever wrote the file, and that is a sandboxed task
+    as often as it is a person.
+    """
+    safe = "".join(ch if ch.isprintable() else "?" for ch in name)
+    if len(safe) > _OVERLAY_NAME_CHARS:
+        safe = safe[:_OVERLAY_NAME_CHARS] + "..."
+    return f"{user_id}/{safe} ({note})"
+
 
 def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
     """`(user_id, overlay dir)` for every user under the mount that has one.
@@ -2725,14 +2752,19 @@ def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
       one, so a link planted at another user's name cannot make this walk
       descend somewhere else and report a file against the wrong user;
     - the overlay directory is resolved and required to stay under its own
-      user's tree, the equality-under-a-known-root rule the memory CLI's
-      ``_check_overlay_dir`` already applies, since ``config`` and ``skills``
-      are both ordinary entries a task can replace with a link;
+      user's tree, since ``config`` and ``skills`` are both ordinary entries a
+      task can replace with a link. That rule is
+      ``_loader.contained_overlay_dir``, shared with the loader, the memory CLI
+      and the search reindex, and the **resolved** path is what is returned and
+      walked — re-walking by the unresolved name would leave the check and the
+      reads separated by a window in which the link can be swapped;
     - nothing here opens a file. ``scandir`` stats, and the read that follows
       is ``inspect_overlay``'s, which refuses a FIFO — ``doctor`` runs on the
       daemon's start-up path, where a blocking ``open(2)`` has no timeout over
       it at all.
     """
+    from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - heavy import graph
+
     users_root = mount / "Users"
     try:
         entries = sorted(os.scandir(users_root), key=lambda e: e.name)
@@ -2747,17 +2779,15 @@ def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
         except OSError:
             continue
         user_dir = Path(entry.path)
-        overlay_dir = user_dir / bot_dir / "config" / "skills"
+        resolved = contained_overlay_dir(user_dir / bot_dir / "config" / "skills", user_dir)
+        if resolved is None:
+            continue
         try:
-            if not overlay_dir.is_dir():
+            if not resolved.is_dir():
                 continue
-            resolved = Path(os.path.realpath(overlay_dir))
-            root = Path(os.path.realpath(user_dir))
         except OSError:
             continue
-        if resolved != root and root not in resolved.parents:
-            continue
-        found.append((entry.name, overlay_dir))
+        found.append((entry.name, resolved))
     return found
 
 
@@ -2788,7 +2818,17 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
       an operator sweeping for problems does not.
     - **no overlay content is quoted.** This runs across every user's tree, and
       the same result is rendered into the admin dashboard, so a filename is
-      the most that may leave one user's directory.
+      the most that may leave one user's directory. A filename is itself text
+      the model wrote, so it goes through ``_overlay_label`` rather than
+      straight into the detail.
+
+    **FAIL is reserved for a misfiling.** A name that is not a skill, a name on
+    the denylist, and a body past the loading cap are each a file a person can
+    fix by renaming, shrinking or removing it, and each is the case the check
+    exists for. Everything else ``inspect_overlay`` can report — an empty file,
+    one that is not UTF-8, one this process was refused — also loads as
+    nothing, but a transient ``EACCES`` on one user's file is not a broken
+    deployment and must not turn the one status that alerts red.
     """
     name = "config.skill_overlays"
     if not config.use_mount:
@@ -2817,11 +2857,19 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
         for path in entries:
             total += 1
             found = inspect_overlay(path, known_skills=known)
-            label = f"{user_id}/{path.name}"
-            if not found.binds:
-                dead.append(f"{label} ({found.reason})")
+            if found.reason in _OVERLAY_FATAL_REASONS:
+                dead.append(_overlay_label(user_id, path.name, found.reason))
+            elif found.reason is not None:
+                # Empty, not UTF-8, or a read this process was refused. Each
+                # loads as nothing and so belongs in the report, but none is a
+                # misfiling an operator acts on the way a renamed or shrunk
+                # file is, and a transient EACCES on one user's file must not
+                # turn a deployment-scope check red.
+                warned.append(_overlay_label(user_id, path.name, found.reason))
             elif found.warnings:
-                warned.append(f"{label} ({', '.join(found.warnings)})")
+                warned.append(
+                    _overlay_label(user_id, path.name, ", ".join(found.warnings))
+                )
 
     if not total:
         return CheckResult(
@@ -2842,13 +2890,16 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
     if warned:
         return CheckResult(
             name, WARN,
-            f"{len(warned)} of {total} overlay file(s) load with a caveat: {_overlay_list(warned)}",
+            f"{len(warned)} of {total} overlay file(s) need a look: {_overlay_list(warned)}",
             remedy=(
                 "over_warn_bytes: an overlay is appended to the bundled skill body, "
                 "not a replacement for it, so this size usually means a forked skill "
                 "doc. shallow_heading: a `# ` or `## ` heading is demoted to `#### ` "
                 "at load time, because at its written level it would end the skill's "
-                "own section."
+                "own section. empty / overlay_not_utf8 / overlay_is_a_symlink / "
+                "overlay_not_a_regular_file / overlay_unreadable: the file is there "
+                "and contributes nothing to any prompt. Run `istota-skill memory "
+                "skills` as that user for the per-file verdict."
             ),
         )
     return CheckResult(

@@ -1025,6 +1025,20 @@ class TestOverlayInventory:
         assert row["reason"] == "overlay_is_a_symlink"
         assert "first_line" not in row
 
+    def test_a_refused_read_reports_a_null_size_rather_than_the_links_own(
+        self, tmp_path, overlay_env, capsys
+    ):
+        """`bytes` is the size taken off the fd, so a refused read has none.
+        An `lstat` size would describe the symlink, not the overlay."""
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").symlink_to(secret)
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["bytes"] is None
+        assert row["reason"] == "overlay_is_a_symlink"
+
     def test_an_over_cap_file_is_reported_as_not_binding(self, overlay_env, capsys):
         from istota.skills._loader import OVERLAY_MAX_BYTES
 

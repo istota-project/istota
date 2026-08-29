@@ -892,6 +892,45 @@ OVERLAY_WARN_LARGE = "over_warn_bytes"
 OVERLAY_WARN_SHALLOW_HEADING = "shallow_heading"
 
 
+def contained_overlay_dir(overlay_dir: Path, user_root: Path) -> Path | None:
+    """``overlay_dir`` resolved, or None if it leads outside ``user_root``.
+
+    ``read_overlay_bytes``' ``O_NOFOLLOW`` covers the **last** path component
+    and nothing above it, and every component above it is model-writable:
+    ``{mount}/Users/{user_id}`` is bound read-write into that user's own
+    sandbox, so ``mv config config.real && ln -s /anywhere config`` is two
+    commands from inside it. The leaf files at the far end of such a link are
+    ordinary regular files, so every leaf-level guard passes and the caller
+    reads a directory of the daemon's choosing — measured putting the contents
+    of a file outside the mount into the memory-search index, from which
+    ``!search`` reads it straight back.
+
+    So containment is the same equality-under-a-known-root rule
+    ``sandbox_cache_sweeper`` and ``repos_relocate`` use, and it is stated once
+    here because four surfaces face this directory — the loader, the memory
+    CLI, the search reindex and ``doctor`` — and a copy that is right in three
+    of them is the shape of the hole above.
+
+    **The resolved path is what comes back, and callers must use it.** The
+    check and the reads that follow are separated by a directory listing and
+    one ``open(2)`` per file, so re-walking by the unresolved name reopens a
+    narrower version of the same window.
+
+    Both sides are resolved, because the mount itself is reached through a
+    symlink on some hosts and comparing a resolved path to an unresolved root
+    reads every path as outside. A missing directory resolves fine and is the
+    caller's own ``is_dir`` to check; an unreadable one returns None.
+    """
+    try:
+        resolved = Path(os.path.realpath(overlay_dir))
+        root = Path(os.path.realpath(user_root))
+    except OSError:
+        return None
+    if resolved != root and root not in resolved.parents:
+        return None
+    return resolved
+
+
 def read_overlay_bytes(
     path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES
 ) -> tuple[bytes | None, str | None, int | None]:
@@ -1093,7 +1132,15 @@ def _load_user_overlay(
         )
         return None
     if refusal is not None:
-        logger.warning(
+        # `debug`, not `warning`, and the level is the whole point. This runs
+        # once per eager skill per task, and every condition it reports is one
+        # a task can create for itself — a symlink or a FIFO planted at the
+        # path, or a `config` entry replaced with a regular file. At `warning`
+        # the daemon forwards it to the operator's log channel, so one planted
+        # file becomes a stream of alerts on every task for that user. The
+        # surface that is supposed to report this is `doctor`'s
+        # `config.skill_overlays`, once, on a stated cadence.
+        logger.debug(
             "skill overlay %s could not be read (%s) — not loaded", path, refusal
         )
         return None

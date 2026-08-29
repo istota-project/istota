@@ -504,6 +504,119 @@ def index_file(
     )
 
 
+def _reindex_skill_overlays(
+    conn: sqlite3.Connection, config, user_id: str
+) -> tuple[int, int]:
+    """Reindex a user's per-skill overlays. Returns `(files, chunks)`.
+
+    A rule that moved out of USER.md and into `config/skills/<name>.md` is in
+    the prompt only on a task that selected that skill, so without these rows
+    "why does the bot always do X" returns nothing and the rule is effectively
+    lost. Durable, like `user_memory` — deliberately outside
+    EPHEMERAL_SOURCE_TYPES, since it refreshes on edit rather than aging out.
+
+    Three properties this has to keep, each of which was a defect found in
+    review of the first version.
+
+    **Containment.** The directory sits under `{mount}/Users/{user_id}`, which
+    `build_bwrap_cmd` binds read-write into that user's own sandbox, so
+    `config` and `skills` are both entries a task can replace with a symlink.
+    `read_overlay_bytes`' `O_NOFOLLOW` covers only the overlay file, and the
+    files at the far end of a redirected directory are ordinary regular files
+    that pass it — measured indexing a file from outside the mount, which
+    `!search` then reads straight back. `contained_overlay_dir` is the same
+    rule the loader and the memory CLI apply, and the resolved path is what is
+    walked.
+
+    **Only what binds is indexed.** A file named for a skill that does not
+    exist, one for a denylisted skill, or one past the loading cap reaches no
+    prompt at all, so indexing it would have search return a rule that is not
+    in any prompt — the failure the delete-on-empty path exists to prevent,
+    arrived at from the other side. `doctor`'s `config.skill_overlays` is what
+    reports such a file; search declines to pretend it is live.
+
+    **Rows for a vanished file go.** Unlike USER.md, an overlay is a file the
+    workflow deletes — the memory CLI removes one whose last bullet goes, and a
+    user can delete or rename one over Nextcloud, where nothing calls the CLI.
+    `skill_overlay` is outside EPHEMERAL_SOURCE_TYPES, so `cleanup_old_chunks`
+    will never reclaim those rows and they would stay searchable forever.
+
+    The import is function-local because `istota.skills` star-imports every
+    skill on the way to `_loader`, and this module is on the executor's recall
+    path.
+    """
+    from istota.skills._loader import (
+        OVERLAY_MAX_BYTES,
+        contained_overlay_dir,
+        inspect_overlay,
+        load_skill_index,
+        read_overlay_bytes,
+    )
+
+    bot_dir = getattr(config, "bot_dir_name", "")
+    if not bot_dir:
+        return 0, 0
+    user_root = config.nextcloud_mount_path / f"Users/{user_id}"
+    overlay_dir = contained_overlay_dir(
+        user_root / bot_dir / "config" / "skills", user_root
+    )
+    if overlay_dir is None or not overlay_dir.is_dir():
+        return 0, 0
+
+    try:
+        known = load_skill_index(
+            config.skills_dir, bundled_dir=getattr(config, "bundled_skills_dir", None)
+        )
+    except Exception as e:  # noqa: BLE001 - a reindex is best-effort per source
+        logger.warning("skill overlay reindex skipped, no skill index: %s", e)
+        return 0, 0
+
+    files = chunks = 0
+    live: set[str] = set()
+    for path in sorted(overlay_dir.glob("*.md")):
+        found = inspect_overlay(
+            path, known_skills=known, max_read_bytes=OVERLAY_MAX_BYTES
+        )
+        if not found.binds:
+            continue
+        raw, refusal, _size = read_overlay_bytes(path, max_bytes=OVERLAY_MAX_BYTES)
+        if refusal is not None or not raw:
+            continue
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        live.add(str(path))
+        n = index_file(conn, user_id, str(path), content, "skill_overlay")
+        if n > 0:
+            files += 1
+            chunks += n
+
+    for stale in _stale_overlay_sources(conn, user_id, live):
+        _delete_source_chunks(conn, user_id, "skill_overlay", stale)
+    return files, chunks
+
+
+def _stale_overlay_sources(
+    conn: sqlite3.Connection, user_id: str, live: set[str]
+) -> list[str]:
+    """Indexed `skill_overlay` sources for `user_id` that no longer bind.
+
+    Scoped by ``source_type`` and ``user_id`` and compared against the set just
+    walked, so a row is dropped only when this pass positively established that
+    its file is gone from the one directory that can produce one. A pass that
+    walked nothing — no mount, no directory, an unreadable skill index —
+    returns before reaching here rather than arriving with an empty ``live``
+    set, which would read as "every overlay was deleted".
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT source_id FROM memory_chunks "
+        "WHERE user_id = ? AND source_type = 'skill_overlay'",
+        (user_id,),
+    ).fetchall()
+    return [r[0] for r in rows if r[0] not in live]
+
+
 def reindex_all(
     conn: sqlite3.Connection,
     config,
@@ -556,42 +669,9 @@ def reindex_all(
                 if n > 0:
                     stats["chunks"] += n
 
-        # Index the per-skill overlays. A rule that moved out of USER.md and
-        # into `config/skills/<name>.md` is only in the prompt on a task that
-        # selected that skill, so without this "why does the bot always do X"
-        # returns nothing and the rule is effectively lost. Durable like
-        # USER.md — deliberately outside EPHEMERAL_SOURCE_TYPES, since it
-        # refreshes on edit rather than aging out.
-        overlay_dir = (
-            config.nextcloud_mount_path
-            / f"Users/{user_id}/{config.bot_dir_name}/config/skills"
-        )
-        if overlay_dir.is_dir():
-            stats["skill_overlays"] = 0
-            # Read through the loader's own reader rather than `read_text`.
-            # This directory is under `{mount}/Users/{user_id}`, which
-            # `build_bwrap_cmd` binds read-write into that user's sandbox, so
-            # every entry in it is model-plantable: a symlink here would index
-            # a daemon-readable file into a store `!search` reads back, and a
-            # FIFO would block a reindex that runs from the sleep cycle. The
-            # import is function-local because `istota.skills` star-imports
-            # every skill on the way to `_loader`, and this module is on the
-            # executor's recall path.
-            from istota.skills._loader import read_overlay_bytes
-
-            for path in sorted(overlay_dir.glob("*.md")):
-                raw, refusal, _size = read_overlay_bytes(path)
-                if refusal is not None or not raw:
-                    continue
-                try:
-                    content = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-                if content.strip():
-                    n = index_file(conn, user_id, str(path), content, "skill_overlay")
-                    if n > 0:
-                        stats["skill_overlays"] += 1
-                        stats["chunks"] += n
+        n_files, n_chunks = _reindex_skill_overlays(conn, config, user_id)
+        stats["skill_overlays"] = n_files
+        stats["chunks"] += n_chunks
 
     # Reindex channel memory files (dated + durable CHANNEL.md)
     if config.nextcloud_mount_path:

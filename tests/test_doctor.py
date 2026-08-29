@@ -2663,6 +2663,37 @@ class TestSkillOverlays:
         assert "9 of 9" in r.detail
         assert "and 4 more" in r.detail
 
+    def test_an_empty_file_warns_rather_than_failing(self, make_config, tmp_path):
+        """It loads as nothing and belongs in the report, but FAIL is reserved
+        for the misfiling a person fixes by renaming or shrinking."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "developer.md").write_text("")
+        r = self._run(config)
+        assert r.status == WARN
+        assert "empty" in r.detail
+
+    def test_a_control_character_in_a_filename_cannot_forge_a_second_line(
+        self, make_config, tmp_path
+    ):
+        """A filename here is text the model wrote, and a name may hold anything
+        but `/` and NUL. The detail is one line, printed to a terminal and
+        rendered into the admin dashboard."""
+        config = self._config(make_config, tmp_path)
+        overlays = self._overlays(config)
+        (overlays / "bad\nname\x1b[31m.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "\n" not in r.detail
+        assert "\x1b" not in r.detail
+
+    def test_a_very_long_filename_is_truncated(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / ("z" * 200 + ".md")).write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert len(r.detail) < 200
+        assert "..." in r.detail
+
     # --------------------------------------------------- the plantable tree
 
     def test_a_symlinked_user_entry_is_not_descended_into(
@@ -2711,7 +2742,9 @@ class TestSkillOverlays:
         (self._overlays(config) / "developer.md").symlink_to(secret)
 
         r = self._run(config)
-        assert r.status == FAIL
+        # WARN, not FAIL: the file loads as nothing and belongs in the report,
+        # but it is not the misfiling a person fixes by renaming or shrinking.
+        assert r.status == WARN
         assert "overlay_is_a_symlink" in r.detail
         assert "TOP SECRET" not in r.detail + r.remedy
 
@@ -2723,7 +2756,7 @@ class TestSkillOverlays:
         os.mkfifo(self._overlays(config) / "developer.md")
 
         r = self._run(config)
-        assert r.status == FAIL
+        assert r.status == WARN
         assert "overlay_not_a_regular_file" in r.detail
 
     def test_no_overlay_content_ever_leaves_the_users_directory(

@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from types import SimpleNamespace
 
 from istota.memory.search import (
     EPHEMERAL_SOURCE_TYPES,
@@ -1290,17 +1291,45 @@ class TestReindexSkillOverlays:
     surface that can answer "why does the bot always do X" for it — without
     these rows the rule is findable only by reading the file."""
 
-    @staticmethod
-    def _config(tmp_path):
-        config = MagicMock()
-        config.nextcloud_mount_path = tmp_path / "mount"
-        config.bot_dir_name = "istota"
-        return config
+    SKILLS = ("developer", "notes", "sensitive_actions")
+
+    @classmethod
+    def _config(cls, tmp_path, **overrides):
+        """A real Config, deliberately not a MagicMock.
+
+        A MagicMock answers every attribute, so it hides exactly the defect
+        review found here: `reindex_all` reads `bot_dir_name`, `skills_dir` and
+        `bundled_skills_dir`, and its only production caller was handing it a
+        stand-in carrying the mount alone.
+        """
+        from istota.config import Config, UserConfig
+
+        bundled = tmp_path / "bundled"
+        for skill in cls.SKILLS:
+            d = bundled / skill
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "skill.md").write_text(
+                f"---\nname: {skill}\ndescription: the {skill} skill\n---\n\n# {skill}\n"
+            )
+        ops = tmp_path / "ops_skills"
+        ops.mkdir(exist_ok=True)
+        return Config(
+            db_path=tmp_path / "istota.db",
+            temp_dir=tmp_path / "tmp",
+            nextcloud_mount_path=tmp_path / "mount",
+            bundled_skills_dir=bundled,
+            skills_dir=ops,
+            users={"alice": UserConfig()},
+            **overrides,
+        )
 
     @staticmethod
-    def _overlays(tmp_path):
-        d = tmp_path / "mount" / "Users" / "alice" / "istota" / "config" / "skills"
-        d.mkdir(parents=True)
+    def _overlays(config):
+        d = (
+            config.nextcloud_mount_path
+            / "Users" / "alice" / config.bot_dir_name / "config" / "skills"
+        )
+        d.mkdir(parents=True, exist_ok=True)
         return d
 
     @staticmethod
@@ -1311,12 +1340,12 @@ class TestReindexSkillOverlays:
 
     def test_an_overlay_is_indexed_and_findable(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        overlays = self._overlays(tmp_path)
-        (overlays / "developer.md").write_text(
+        config = self._config(tmp_path)
+        (self._overlays(config) / "developer.md").write_text(
             "- Never run the full test suite in a foreground task here.\n"
         )
 
-        stats = self._reindex(conn, self._config(tmp_path))
+        stats = self._reindex(conn, config)
         assert stats["skill_overlays"] == 1
 
         rows = conn.execute(
@@ -1333,63 +1362,122 @@ class TestReindexSkillOverlays:
 
     def test_a_missing_directory_indexes_nothing_and_does_not_raise(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        (tmp_path / "mount").mkdir()
-        stats = self._reindex(conn, self._config(tmp_path))
-        assert "skill_overlays" not in stats
+        config = self._config(tmp_path)
+        (config.nextcloud_mount_path).mkdir(exist_ok=True)
+        assert self._reindex(conn, config)["skill_overlays"] == 0
         conn.close()
 
     def test_non_markdown_entries_are_skipped(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        overlays = self._overlays(tmp_path)
-        (overlays / "notes.md.bak").write_text("- stale copy\n")
-        (overlays / "README.txt").write_text("hi\n")
+        config = self._config(tmp_path)
+        d = self._overlays(config)
+        (d / "notes.md.bak").write_text("- stale copy\n")
+        (d / "README.txt").write_text("hi\n")
 
-        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        assert self._reindex(conn, config)["skill_overlays"] == 0
         conn.close()
 
     def test_an_empty_overlay_indexes_nothing(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        overlays = self._overlays(tmp_path)
-        (overlays / "developer.md").write_text("\n   \n")
+        config = self._config(tmp_path)
+        (self._overlays(config) / "developer.md").write_text("\n   \n")
 
-        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        assert self._reindex(conn, config)["skill_overlays"] == 0
         conn.close()
 
-    def test_a_planted_symlink_is_not_indexed(self, tmp_path):
+    # ------------------------------------------- only what binds is indexed
+
+    def test_an_unknown_skill_name_is_not_indexed(self, tmp_path):
+        """It reaches no prompt, so indexing it would have search return a rule
+        that is in no prompt — the failure delete-on-empty exists to prevent,
+        arrived at from the other side. `doctor` is what reports the file."""
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        (self._overlays(config) / "develper.md").write_text("- a rule\n")
+
+        assert self._reindex(conn, config)["skill_overlays"] == 0
+        conn.close()
+
+    def test_a_denylisted_skill_is_not_indexed(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        (self._overlays(config) / "sensitive_actions.md").write_text("- planted\n")
+
+        assert self._reindex(conn, config)["skill_overlays"] == 0
+        conn.close()
+
+    def test_an_over_cap_overlay_is_not_indexed(self, tmp_path):
+        from istota.skills._loader import OVERLAY_MAX_BYTES
+
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        (self._overlays(config) / "developer.md").write_text(
+            "- x\n" * (OVERLAY_MAX_BYTES // 4 + 4)
+        )
+
+        assert self._reindex(conn, config)["skill_overlays"] == 0
+        conn.close()
+
+    # ----------------------------------------------------- the plantable tree
+
+    def test_a_planted_symlink_file_is_not_indexed(self, tmp_path):
         """`{mount}/Users/{user_id}` is bound read-write into that user's own
         sandbox, so every entry here is model-plantable. A followed symlink
         would put a daemon-readable file into a store `!search` reads back."""
         conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
         secret = tmp_path / "credentials.json"
         secret.write_text("- TOP SECRET TOKEN value\n")
-        overlays = self._overlays(tmp_path)
-        (overlays / "developer.md").symlink_to(secret)
+        (self._overlays(config) / "developer.md").symlink_to(secret)
 
-        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        assert self._reindex(conn, config)["skill_overlays"] == 0
         assert conn.execute(
             "SELECT COUNT(*) FROM memory_chunks WHERE content LIKE '%TOP SECRET%'"
         ).fetchone()[0] == 0
         conn.close()
 
+    def test_a_redirected_overlay_directory_is_not_walked(self, tmp_path):
+        """`O_NOFOLLOW` on the file covers the last component only. The files at
+        the far end of a redirected `config/` or `skills/` are ordinary regular
+        files that pass every leaf-level guard, so containment is the gate."""
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "developer.md").write_text("- CONSTITUTIONAL SECRET TEXT\n")
+        user_config = (
+            config.nextcloud_mount_path
+            / "Users" / "alice" / config.bot_dir_name / "config"
+        )
+        user_config.mkdir(parents=True)
+        (user_config / "skills").symlink_to(elsewhere, target_is_directory=True)
+
+        assert self._reindex(conn, config)["skill_overlays"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE content LIKE '%CONSTITUTIONAL%'"
+        ).fetchone()[0] == 0
+        conn.close()
+
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
     def test_a_fifo_does_not_hang_the_reindex(self, tmp_path):
-        """A FIFO with no writer blocks `open(2)`. This sweep runs from the
-        sleep cycle, where nothing would time it out."""
+        """A FIFO with no writer blocks `open(2)`."""
         conn = _init_db(tmp_path / "test.db")
-        overlays = self._overlays(tmp_path)
-        os.mkfifo(overlays / "developer.md")
+        config = self._config(tmp_path)
+        os.mkfifo(self._overlays(config) / "developer.md")
 
-        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        assert self._reindex(conn, config)["skill_overlays"] == 0
         conn.close()
+
+    # --------------------------------------------------------------- staleness
 
     def test_re_running_replaces_rather_than_duplicates(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        overlays = self._overlays(tmp_path)
-        path = overlays / "developer.md"
+        config = self._config(tmp_path)
+        path = self._overlays(config) / "developer.md"
         path.write_text("- first rule about deployment hosts\n")
-        self._reindex(conn, self._config(tmp_path))
+        self._reindex(conn, config)
         path.write_text("- a completely different rule about branches\n")
-        self._reindex(conn, self._config(tmp_path))
+        self._reindex(conn, config)
 
         rows = conn.execute(
             "SELECT content FROM memory_chunks WHERE source_type = 'skill_overlay'"
@@ -1397,3 +1485,67 @@ class TestReindexSkillOverlays:
         assert len(rows) == 1
         assert "branches" in rows[0][0]
         conn.close()
+
+    def test_rows_for_a_file_deleted_outside_the_cli_are_reaped(self, tmp_path):
+        """Unlike USER.md, an overlay is a file the workflow deletes — and a
+        deletion over Nextcloud calls no CLI. `skill_overlay` is outside
+        EPHEMERAL_SOURCE_TYPES, so nothing else would ever reclaim the rows."""
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        path = self._overlays(config) / "developer.md"
+        path.write_text("- a rule that is about to be deleted\n")
+        assert self._reindex(conn, config)["skill_overlays"] == 1
+
+        path.unlink()
+        assert self._reindex(conn, config)["skill_overlays"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE source_type = 'skill_overlay'"
+        ).fetchone()[0] == 0
+        conn.close()
+
+    def test_a_pass_that_walked_nothing_reaps_nothing(self, tmp_path):
+        """An empty `live` set must never read as "every overlay was deleted".
+        Every path that walks no directory returns before the reap."""
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        overlays = self._overlays(config)
+        (overlays / "developer.md").write_text("- a rule\n")
+        assert self._reindex(conn, config)["skill_overlays"] == 1
+
+        # The directory is now redirected out of the user tree, so the walk
+        # refuses. The existing rows must survive it.
+        import shutil
+
+        shutil.rmtree(overlays)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        overlays.symlink_to(elsewhere, target_is_directory=True)
+
+        assert self._reindex(conn, config)["skill_overlays"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE source_type = 'skill_overlay'"
+        ).fetchone()[0] == 1
+        conn.close()
+
+    def test_the_only_production_caller_supplies_everything_reindex_reads(
+        self, tmp_path, monkeypatch
+    ):
+        """`istota-skill memory_search reindex` used to hand `reindex_all` a
+        `SimpleNamespace` carrying the mount alone, so with a mount configured
+        the whole verb died on `config.bot_dir_name` before any block ran."""
+        from istota.skills.memory_search import cmd_reindex
+
+        conn = _init_db(tmp_path / "test.db")
+        conn.close()
+        config = self._config(tmp_path)
+        (self._overlays(config) / "developer.md").write_text("- a rule\n")
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "test.db"))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **kw: config)
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            out = cmd_reindex(SimpleNamespace(lookback_days=1))
+
+        assert out["status"] == "ok"
+        assert out["skill_overlays"] == 1
