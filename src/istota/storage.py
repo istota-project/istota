@@ -50,7 +50,8 @@ read/write access. Everything you interact with lives here.
 Configuration files live in the `config/` subfolder:
 
 - **config/USER.md** — Persistent memory. Istota reads this at the start of every \
-task and appends to it when you ask it to remember something.
+task and appends to it when you ask it to remember something. A development \
+workflow for coding tasks is written here too — see `examples/WORKFLOW.md`.
 - **config/TASKS.md** — Task queue. Write `- [ ] do something` and Istota picks \
 it up automatically. Status updates are written back to the file.
 - **config/BRIEFINGS.md** — (Optional) Briefing schedule configuration. \
@@ -501,6 +502,63 @@ Evaluated in the user's configured timezone.
 """
 
 
+WORKFLOW_EXAMPLE = """\
+# Development workflow
+
+There is no `config/WORKFLOW.md`. A development workflow is written in
+`config/USER.md`, or in a project room's `CHANNEL.md`, under a heading of your
+own. This file is the vocabulary — what you can set, not what you should set.
+
+The developer skill ships a default for each decision below and yields to
+whatever you write. Say nothing about a decision and its default applies, so a
+workflow of three lines is a perfectly good one.
+
+## Where to write it
+
+- **config/USER.md** — applies to every coding task, whichever room it came from.
+- **CHANNEL.md** in a project's room — applies to tasks from that room only.
+- Where both carry a workflow and they disagree, `CHANNEL.md` wins for a task \
+from that room. It is the more specific statement, and the room is the project.
+
+## What you can set
+
+- **Worktree per task** — whether each task cuts its own worktree, or works \
+somewhere you name.
+- **Change tiers** — how much process a change gets, and what decides which tier \
+it is.
+- **When a test gets written** — before the implementation, alongside it, or by \
+a rule of your own.
+- **When tests run, and which** — the scope of the pass. The default is the \
+tests covering the change plus lint and typecheck over the whole repository; \
+ask here for a whole suite if you want one.
+- **Commit granularity** — coherent steps, one commit per task, or your own rule.
+- **Whether a review runs** — at which tiers, and whether at all.
+- **An MR or PR rather than a merge** — how work lands. Usually a property of \
+the project rather than of you, so a room's `CHANNEL.md` is the better home.
+- **Report shape** — the block a finished task reports in.
+
+## What you cannot set
+
+Deployment mechanics do not yield: the forge boundary and its refused verbs, the
+network allowlist, the ceiling on how long one command may run, the credential
+rules, where builds and tests run, the pre-submission checks, and every delete
+path. An instruction that collides with one of those is reported back to you
+rather than followed.
+
+## Example
+
+```markdown
+## Development workflow
+
+- Worktree per task, always.
+- No review below Standard tier.
+- Land as a merge request; never merge to the default branch yourself.
+```
+
+Every decision that block does not mention keeps its default.
+"""
+
+
 def _build_cron_seed(config: "Config", user_id: str) -> str:
     """Build seed CRON.md content, filling conversation_token from admin config."""
     token = ""
@@ -893,6 +951,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             "BRIEFINGS.md": BRIEFINGS_EXAMPLE,
             "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
             "CRON.md": CRON_EXAMPLE,
+            "WORKFLOW.md": WORKFLOW_EXAMPLE,
         }
         for filename, content in examples.items():
             (examples_dir / filename).write_text(content)

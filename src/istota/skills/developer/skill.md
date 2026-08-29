@@ -177,7 +177,9 @@ All work happens inside `$WORK_DIR`.
 
 ## The Job Lifecycle
 
-A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
+A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Where they apply, do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
+
+**These steps are this document's default, and the user's own instructions outrank them.** A development workflow written in `USER.md` — or, for a task that came from a room, in that project's `CHANNEL.md` — is already in front of you before this skill loads, and it wins wherever it speaks: which of these steps run, how much process a change gets, what counts as enough testing, how the work lands. Where both files carry one and they disagree, `CHANNEL.md` wins for a task from that room — it is the more specific statement, and the room is the project. Where neither says anything, everything below applies as written. What does not yield is the deployment's mechanics: the forge boundary and its refused verbs, the CONNECT allowlist, the 600-second ceiling, the credential rules, where builds and tests run, the pre-submission checks, and every delete path. Those are properties of the host rather than preferences, so an instruction that collides with one is something to report rather than to follow.
 
 ### 1. Preflight, before a worktree exists
 
@@ -199,7 +201,7 @@ git config --list --includes | awk -F= '{ k = $1 }
 
 ### 2. Create the worktree, then read back what was made
 
-Create it as described under "Creating a Worktree for Development". Then read back what actually exists and use those values for the rest of the run:
+A worktree per task is the default; a user who works another way says so in `USER.md` or `CHANNEL.md`, and the rule against editing live source holds wherever you work. Create it as described under "Creating a Worktree for Development". Then read back what actually exists and use those values for the rest of the run:
 
 ```bash
 cd "$WORK_DIR"
@@ -235,30 +237,32 @@ Reading existing patterns is the cheapest step here and skipping it is the most 
 
 ### 5. Pick a change tier, and say which
 
-The tier decides how much process the rest of the change gets. Pick it before writing code and state it in your report.
+The tier decides how much process the rest of the change gets. Pick it before writing code and state it in your report. The three tiers are the default shape of that decision, and a user's own instructions may set a different one.
 
 **Boundary surfaces.** Any change touching one of these is Full tier regardless of size: authn/authz, secrets and credentials, money or billing, schema migrations, deletion and other destructive paths, external API contracts and payload shapes, concurrency and locking, anything crossing a network, anything running as root or over ssh on a remote host.
 
-- **Fast** — under about 30 changed lines, one or two files, no boundary surface. Implement, add or extend one test, run the affected tests, run the suite once, commit. No pre-written failing test, and no review.
-- **Standard** — the default. Tests written alongside the implementation, full suite green before the commit, review before the MR.
-- **Full** — any boundary surface, a diff over about 150 lines, or anything you would not want to be wrong about. Failing test first, full suite before and after, review with both agents.
+- **Fast** — under about 30 changed lines, one or two files, no boundary surface. Implement, add or extend one test, run the verification pass below once, commit. No pre-written failing test, and no review.
+- **Standard** — the default. Tests written alongside the implementation, the verification pass below green before the commit, review before the MR.
+- **Full** — any boundary surface, a diff over about 150 lines, or anything you would not want to be wrong about. Failing test first, the verification pass below before and after, review with both agents.
 
-**Escalate, never downgrade.** Move up a tier the moment any of these happens: the suite goes red in a way you did not predict, you need to read a third file to understand the change, or you find a boundary surface you had not counted. Say that you escalated and why. Never move down mid-change, and never pick Fast to avoid work you already suspect is needed.
+**Escalate, never downgrade.** Move up a tier the moment any of these happens: a check goes red in a way you did not predict, you need to read a third file to understand the change, or you find a boundary surface you had not counted. Say that you escalated and why. Never move down mid-change, and never pick Fast to avoid work you already suspect is needed.
 
 ### 6. Implement, and verify as you go
 
 - **Edit files in the worktree**, never in the bare clone.
-- **Write the test first in exactly three cases**: reproducing a reported bug, where the failing test is what proves the fix; pure logic whose semantics are tricky enough that the assertion is the real spec; and any Full-tier change. In all three, run it and confirm it fails for the reason you expect.
-- **Everywhere else, write the test and the implementation together and run once.** Do not spend a separate run confirming red. Check by reading instead: an assertion that could have passed against the pre-change code is vacuous, so rewrite it.
+- **When a test gets written is a default, like the tier above it**, and the user's own instructions in `USER.md` or `CHANNEL.md` may set it otherwise. The default writes the test first in exactly three cases: reproducing a reported bug, where the failing test is what proves the fix; pure logic whose semantics are tricky enough that the assertion is the real spec; and any Full-tier change. In all three, run it and confirm it fails for the reason you expect.
+- **Everywhere else the test and the implementation are written together and run once.** A separate run to confirm red buys nothing; check by reading instead, since an assertion that could have passed against the pre-change code is vacuous and wants rewriting rather than running.
 - **Breadth**: the happy path, the specific edge case that motivated the change, and one integration test through the real seam. Not an exhaustive edge-case sweep. Integration tests are the highest-value layer — high enough to prove the system works, low enough to debug when they break. Avoid mocks; where unavoidable, mock at a system boundary, never per collaborator.
 - **Verify integration points.** If the change adds env vars, config fields, CLI commands or dependencies, check that every consumer and producer is updated together. A new env var is useless if the code reading it uses a different name than the code setting it. Adding a package to `pyproject.toml` or `package.json` is not enough — run the install and commit the lockfile.
 - **Keep metadata in step.** If you change a module's purpose, update its descriptions, docstrings and config manifests to match.
 
 ### 7. The verification budget
 
-Test and lint output is the largest single source of wasted context. Spend it deliberately.
-
-- **Failure-only output.** Use the runner's own quiet flags: `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast`.
+- **The pass is the tests covering the change, plus the repository's linters and type checker over the whole repository.** That is this document's default, and a user's own instructions in `USER.md` or `CHANNEL.md` may set a different scope; one that will not fit the 600-second tool call is honoured through the detached recipe below rather than declined. Chain the tests, the linters and the type checker into one invocation rather than three, and run it once the work is done rather than after every fix or before every commit — the tier decides whether it also runs earlier. A whole test suite is not part of the default, and the reason is worth carrying rather than only the rule: a suite is sized for CI and for a machine nobody is waiting on, while a task shares this host with the daemon and with other tasks and is bounded by the 600-second tool call. The failure this avoids is not a slow task — it is a task that started a run it could not finish, was killed partway and committed nothing, which is strictly less coverage than a narrow run that completed.
+- **The static half stays whole, and that is what makes a narrow test selection safe.** Linters and a type checker are seconds rather than minutes, they are the same command whatever changed, and they catch breakage at a distance — a renamed symbol, a dropped import, a signature that no longer fits its callers. Take their invocation from the repository's own entry point rather than inventing flags: `npm run check`, `make check`, `just check`, `tox`, whatever is already in `package.json` or the Makefile. Where that entry point also runs every test in the repository, read what it runs and invoke its lint and typecheck steps directly, selecting the tests yourself. Invoking the steps it names is fine; committing a wrapper script of your own is not, because a second entry point drifts from the real one and hides which step failed.
+- **Selecting the tests is a ladder — take the first rung that yields something.** (1) Test files the change already touches; if you edited a test, it is in scope. (2) The runner's own selector, where the ecosystem has one: `vitest related <files>`, `jest --findRelatedTests <files>`, `go test ./<changed package>/...`, `cargo test -p <crate>`. pytest has no equivalent, so a Python repository falls through to the next rung. (3) Path mirroring, in whatever form this repository uses: `src/foo/bar.py` against `tests/test_bar.py` or `tests/foo/test_bar.py`, `src/foo/bar.ts` against `src/foo/bar.test.ts`. (4) Grep the test tree for the names that changed — module path, function, class, config key, env var. That rung catches what mirroring misses, and it is the one that works in any language.
+- **One of the selected tests has to reach the change through an integration seam**, not only the unit file sitting beside it. Where there is none, that is a test to write rather than a reason to widen to everything. In a multi-stack repository the seam crosses stacks: untouched code cannot break, but anything passing between them — an API payload shape, a serialized schema, a shared fixture — is a boundary surface and pulls the other stack's tests in whether or not you edited its files.
+- **Failure-only output, and bail on the first failure while you iterate.** Test and lint output is the largest single source of wasted context, so use the runner's own quiet flags — `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast` — and `-x` or `--bail=1` while you are iterating, because one real failure beats forty cascading ones. Drop the bail flag for the pass you report.
 - **Cap the worker count to 2 before you run anything.** `pytest -n auto` and vitest's default size their pool from `cpu_count()`, so each suite claims the whole box — and you are sharing it with other tasks and the daemon itself. Two at once ask for more than exists, and the result is timeouts that have nothing to do with the code. Set `PYTEST_XDIST_AUTO_NUM_WORKERS=2` (honoured by `-n auto`) in the same call as the run, since shell state does not carry between calls; vitest takes `--maxWorkers=2`, `make` takes `-j2`. Use the environment, not the repository's `pyproject.toml`: `-n auto` is correct on a laptop and in CI, and this host is the special case.
 - **The exit status is the result, and `pipefail` is what stops a pipe throwing it away.** It is **already on** in your Bash calls (see the Bash note in Available tools for the two costs), so `pytest … | tail` no longer exits 0 on a suite that failed. It arrives through the environment, so it reaches a nested `bash script.sh` too — but bash only, and `/bin/sh` on the Debian server is dash, which has no `pipefail` at all. Write the option yourself in a script, or where you are unsure what shell you are in:
 
@@ -290,24 +294,19 @@ Test and lint output is the largest single source of wasted context. Spend it de
 
   Three details, each load-bearing. `setsid`, not a bare `&`: your bash call kills its whole process group when it returns, so a merely backgrounded run dies the moment the call that started it finishes — a new session is what escapes that. `cd` on its own line, because `&` binds looser than `&&`, so `cd "$WORK_DIR" && cmd &` backgrounds the `cd` too and scatters the files across two directories. And the **status file is the result**: it appearing is what "finished" means, and what it holds is the exit code. Do not read pass or fail out of the log text, and do not poll for a pid — a missing pid file reads exactly like a finished run.
 
-- **Bail on the first failure while iterating** (`-x`, `--bail=1`). One real failure beats forty cascading ones. Drop the flag for the final full run.
-- **One command, one output.** Chain lint, typecheck and tests into a single invocation rather than three.
-- **Affected tests during the loop, the full suite once at the end of the work.** Not after every fix and not before every commit.
-- **For the full pass, use the project's own entry point** — `npm run check`, `make check`, `just check`, `tox`, whatever the repository already has. Read the `package.json` scripts or the Makefile once and use what is there. If there is no single command, chain the linters, the type checker and the tests yourself. Do not write a wrapper script to avoid doing that; a second entry point drifts from the real one and hides which step failed.
-- **In a multi-stack repository, cover the stacks the branch touched.** Untouched code cannot break, with one exception: anything crossing between the stacks — an API payload shape, a serialized schema, a shared fixture — is a boundary surface and pulls the other stack's tests into scope whether or not you edited its files. Say which stacks the pass covered, so a partial run never reads as a whole one.
-- **Never re-run a full suite that a timeout killed.** Not with a longer timeout, not with the same command again — one job spent forty minutes on four identical attempts and produced no coverage at all while holding the host down. The next run is a *different, smaller* command: narrow to the paths the branch touched (`uv run pytest tests/foo tests/bar`), and narrow again if that is still too slow. Then say so — the report names the paths actually covered and states plainly that the full suite did not complete. Partial coverage honestly labelled is usable; "tests pass" on the strength of a suite that never ran is not. If every attempt dies at the same point and unrelated tests fail on time, the machine is the finding: stop and report that rather than narrowing further.
-
+- **Say what you ran.** The report names the command, the paths it covered and the exit status it was read from, and where the pass was narrower than the whole suite it says so plainly. Partial coverage labelled honestly is usable; an impression of a complete one is not. Name the stacks the pass covered too, so a partial run never reads as a whole one, and report an empty test selection as empty — a docs-only change, or a tree where even the last rung found nothing, still gets the static checks and is not a reason to run everything as consolation.
+- **A killed run is not re-run as it was.** Not with a longer timeout, not with the same command again: one job spent forty minutes on four identical attempts, produced no coverage at all and held the host down throughout. Narrow it and run something smaller instead. If every attempt dies at the same point and unrelated tests fail on time, the machine is the finding — stop and report that rather than narrowing further.
 - **Never re-read a file you just wrote.** The edit would have failed loudly if it had not applied.
 
 ### 8. Commit
 
-Commit in coherent steps rather than one lump. The `commit` companion carries the message format, what lands alongside a commit, and the scrub rules — follow it rather than improvising.
+Commit in coherent steps rather than one lump, unless the user's own instructions ask for a different granularity. The `commit` companion carries the message format, what lands alongside a commit, and the scrub rules — follow it rather than improvising.
 
 **Commit before you review.** The review resolves a commit range and reads it with `git diff`, `git log` and `git show`; uncommitted work appears in none of those, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed first.
 
 ### 9. Review before landing
 
-Unless the change is Fast tier, run a review after the work's full pass and after the commits exist, but before the branch is pushed. See the `code_review` companion for the command and for how to read what comes back.
+Unless the change is Fast tier, or the user's own instructions say otherwise, run a review after the work's verification pass and after the commits exist, but before the branch is pushed. See the `code_review` companion for the command and for how to read what comes back.
 
 The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
 
@@ -315,7 +314,7 @@ If the review is unavailable — the CLI is not configured, the brain is degrade
 
 ### 10. Land
 
-Push the branch and open a merge request or pull request, following the platform sections below. **Landing is an MR or a PR, not a merge.** Merge to the default branch only when the task text explicitly asks for it.
+Push the branch and open a merge request or pull request, following the platform sections below. **Landing is an MR or a PR, not a merge** — the default, and the decision `CHANNEL.md` speaks to above all, since how work lands is usually a property of the project rather than of the person. Merge to the default branch when the task text explicitly asks for it, or when the user's own instructions for this repository say that is how work lands here.
 
 ### 11. The abort path
 
@@ -325,14 +324,15 @@ Never delete a worktree whose work did not land.
 
 ### 12. Report
 
-Report in this shape every time, so the room gets a consistent block:
+Report in this shape unless the user's own instructions ask for a different one, so the room gets a consistent block:
 
 ```
 <repo>/<branch> — <task>
 
+Workflow: <USER.md | CHANNEL.md | this document's defaults — and what they left to it>
 Tier: <Fast | Standard | Full>, <why — boundary surface, size, or default>
 Worked: <what changed, one or two sentences>
-Tests: <the final full pass, the exit status it was read from, which stacks it covered; N added>
+Tests: <command, paths and stacks covered, exit status it was read from, what it did not cover; N added>
 Review: <counts by severity and what you did about them> | <skipped, why> | <not run, Fast tier>
 Landed: <MR/PR URL> | <why not>
 Worktree: <path, left in place>
@@ -340,7 +340,7 @@ Worktree: <path, left in place>
 Deferred: <anything you did not take on, and why it is separate — one line each>
 ```
 
-Omit `Deferred` when there is nothing in it. `Tests:` names an exit status rather than an impression of one — the last twenty lines of a run say nothing about the twelve failures above them.
+Omit `Deferred` when there is nothing in it. `Workflow:` names the file whose instructions were in force — `USER.md`, a room's `CHANNEL.md`, or neither — because a reader who does not know which rules the work ran under cannot tell a narrow pass that was chosen from one that was careless. `Tests:` names an exit status rather than an impression of one — the last twenty lines of a run say nothing about the twelve failures above them — and states what the pass left out, which by default is any test the selection did not reach.
 
 ## GitLab: Pushing and Creating a Merge Request
 
