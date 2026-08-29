@@ -6,6 +6,7 @@ Gracefully degrades to BM25-only if sqlite-vec or sentence-transformers is unava
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import struct
@@ -555,9 +556,11 @@ def _reindex_skill_overlays(
     """
     from istota.skills._loader import (
         OVERLAY_MAX_BYTES,
+        OVERLAY_UNREADABLE,
         contained_overlay_dir,
         inspect_overlay,
         load_skill_index,
+        open_overlay_dir,
         read_overlay_bytes,
     )
 
@@ -579,26 +582,78 @@ def _reindex_skill_overlays(
         logger.warning("skill overlay reindex skipped, no skill index: %s", e)
         return 0, 0
 
+    # The containment answer above is a comparison of resolved paths, and it
+    # stops being true the moment anything moves. Everything from here reads
+    # through an fd instead, so the directory that passed is the directory that
+    # is walked (ISSUE-341 item 3). `overlay_dir` stays in use below and is no
+    # longer the security gate: it is the *path spelling* the index keys on,
+    # and it has to match the one the per-write path writes. Both are the
+    # `realpath` — the memory CLI's `_check_overlay_dir` was the holdout and
+    # returned the raw configured path, which on a symlinked mount made one
+    # file two sources and had this pass reap the CLI's rows on the way by.
+    dir_fd = open_overlay_dir(user_root, bot_dir, "config", "skills")
+    if dir_fd is None:
+        # `contained_overlay_dir` just passed and this did not, so the two
+        # disagree — which they can, deliberately: it resolves symlinks and
+        # accepts one landing inside the user root, while the fd walk refuses a
+        # symlink at any component. The prompt loader takes the permissive
+        # answer, so on that layout an overlay reaches every prompt for its
+        # skill and is invisible to `!search` for good, and the reap below is
+        # skipped so old rows persist too. Say so once rather than going quiet.
+        logger.warning(
+            "skill overlay reindex skipped for %s: the overlay directory passed "
+            "containment but could not be opened without following a symlink",
+            user_id,
+        )
+        return 0, 0
+
     files = chunks = 0
     live: set[str] = set()
-    for path in sorted(overlay_dir.glob("*.md")):
-        found = inspect_overlay(
-            path, known_skills=known, max_read_bytes=OVERLAY_MAX_BYTES
-        )
-        if not found.binds:
-            continue
-        raw, refusal, _size = read_overlay_bytes(path, max_bytes=OVERLAY_MAX_BYTES)
-        if refusal is not None or not raw:
-            continue
+    try:
         try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        live.add(str(path))
-        n = index_file(conn, user_id, str(path), content, "skill_overlay")
-        if n > 0:
-            files += 1
-            chunks += n
+            # No dotfile filter: `Path.glob("*.md")`, which this replaced and
+            # which `doctor` and `memory skills` still use, matches them, and
+            # three listings of one directory disagreeing is the drift this
+            # module keeps being bitten by. A dotfile cannot bind anyway
+            # (`.developer.md` is the skill `.developer`), so it changes
+            # nothing beyond keeping the three the same.
+            with os.scandir(dir_fd) as entries:
+                names = sorted(e.name for e in entries if e.name.endswith(".md"))
+        except OSError:
+            return 0, 0
+        for name in names:
+            path = overlay_dir / name
+            found = inspect_overlay(
+                path, known_skills=known, max_read_bytes=OVERLAY_MAX_BYTES,
+                dir_fd=dir_fd,
+            )
+            if found.reason == OVERLAY_UNREADABLE:
+                # "This pass could not read it", which is not "it is gone".
+                # An EACCES or an EIO here would otherwise drop the file out
+                # of `live` and have the reap below delete rules the user can
+                # still see on disk, permanently — the file is not rewritten,
+                # so nothing indexes it again. Held rather than reindexed:
+                # there are no bytes to index either.
+                live.add(str(path))
+                continue
+            if not found.binds:
+                continue
+            raw, refusal, _size = read_overlay_bytes(
+                path, max_bytes=OVERLAY_MAX_BYTES, dir_fd=dir_fd
+            )
+            if refusal is not None or not raw:
+                continue
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            live.add(str(path))
+            n = index_file(conn, user_id, str(path), content, "skill_overlay")
+            if n > 0:
+                files += 1
+                chunks += n
+    finally:
+        os.close(dir_fd)
 
     for stale in _stale_overlay_sources(conn, user_id, live):
         _delete_source_chunks(conn, user_id, "skill_overlay", stale)
@@ -612,10 +667,16 @@ def _stale_overlay_sources(
 
     Scoped by ``source_type`` and ``user_id`` and compared against the set just
     walked, so a row is dropped only when this pass positively established that
-    its file is gone from the one directory that can produce one. A pass that
-    walked nothing — no mount, no directory, an unreadable skill index —
-    returns before reaching here rather than arriving with an empty ``live``
-    set, which would read as "every overlay was deleted".
+    its file is gone, or is there and reaches no prompt. A pass that walked
+    nothing — no mount, no directory, an unreadable skill index — returns
+    before reaching here rather than arriving with an empty ``live`` set, which
+    would read as "every overlay was deleted".
+
+    "Positively established" is doing real work and the caller keeps its half:
+    a file whose *read* failed this pass is added to ``live`` anyway, because
+    an ``EACCES`` or an ``EIO`` is a fact about the pass and not about the
+    file, and reaping on one deletes rules the user can still see on disk with
+    nothing left to index them again.
     """
     rows = conn.execute(
         "SELECT DISTINCT source_id FROM memory_chunks "

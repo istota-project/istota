@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import sqlite3
@@ -1045,6 +1046,25 @@ class TestOverlayInventory:
         assert row["skill"] == "develper"
         assert row["binds"] is False
         assert row["reason"] == "unknown_skill"
+        # The file is never opened for a name the index rejected, so the
+        # inventory describes nothing about its content rather than guessing.
+        # This is the user-visible half of ISSUE-341 item 2; before it, the row
+        # carried `bytes`, `lines` and `first_line`.
+        assert row["bytes"] is None
+        assert "lines" not in row
+        assert "first_line" not in row
+
+    def test_a_denylisted_file_still_reports_its_size(self, overlay_env, capsys):
+        """The contrast with the case above. A denylisted name is a real skill,
+        so the file is still read and the inventory can tell a user what is in
+        the thing they are being told does not bind."""
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "untrusted_input.md").write_text("- planted\n")
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["reason"] == "denylisted"
+        assert row["bytes"] == len("- planted\n")
+        assert row["first_line"] == "- planted"
 
     def test_a_denylisted_file_is_reported_as_not_binding(self, overlay_env, capsys):
         overlay_env.overlays.mkdir(parents=True)
@@ -1139,6 +1159,14 @@ class TestOverlayCapWarning:
         assert "over the" in out["warning"]
         assert "will not be loaded" not in out["warning"]
 
+
+
+_ID_COUNTER = itertools.count()
+
+
+def _next_id() -> int:
+    """Unique suffix per appended bullet — the op dedups identical lines."""
+    return next(_ID_COUNTER)
 
 
 class TestOverlayIndexOnWrite:
@@ -1236,6 +1264,109 @@ class TestOverlayIndexOnWrite:
         memory_main(["append", "--skill", "developer", "--line", "a rule"])
         assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
         assert (overlay_env.overlays / "developer.md").read_text() == "- a rule\n"
+
+    def test_a_write_past_the_loading_cap_is_not_indexed(
+        self, overlay_env, capsys
+    ):
+        """The write is allowed with a warning, but the file then reaches no
+        prompt at all — so indexing it would have `!search` return a rule that
+        is in nothing, which is the failure the delete-on-empty path exists to
+        prevent, arrived at from the other side. The bulk pass in
+        `search._reindex_skill_overlays` gates on exactly this and the
+        per-write pass did not (ISSUE-341 item 1)."""
+        from istota.skills._loader import OVERLAY_MAX_BYTES
+
+        self._init_index_db(overlay_env.config)
+        line = "x" * 900
+        while (overlay_env.overlays / "developer.md").exists() is False or (
+            overlay_env.overlays / "developer.md"
+        ).stat().st_size <= OVERLAY_MAX_BYTES:
+            memory_main(["append", "--skill", "developer", "--line", line + str(_next_id())])
+        payload = json.loads(capsys.readouterr().out.strip().split("\n")[-1])
+        assert "over the" in payload.get("warning", "")
+        assert self._rows(overlay_env.config) == []
+
+    def test_growing_an_indexed_overlay_past_the_cap_drops_its_rows(
+        self, overlay_env, capsys
+    ):
+        """The rows are from a version that did load. The file is inert now, so
+        leaving them behind is search answering from a prompt nobody gets."""
+        from istota.skills._loader import OVERLAY_MAX_BYTES
+
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--skill", "developer", "--line", "small rule"])
+        assert len(self._rows(overlay_env.config)) == 1
+
+        line = "y" * 900
+        while (overlay_env.overlays / "developer.md").stat().st_size <= OVERLAY_MAX_BYTES:
+            memory_main(["append", "--skill", "developer", "--line", line + str(_next_id())])
+        capsys.readouterr()
+        assert self._rows(overlay_env.config) == []
+
+    def test_a_denylisted_overlay_is_never_indexed(self, overlay_env, capsys):
+        """`remove` is allowed against a denylisted skill on purpose, so that a
+        file hand-planted at `sensitive_actions.md` is still removable through
+        the sanctioned path. But the file binds to nothing, so indexing what a
+        `remove` leaves behind puts model-planted text into `memory_chunks`,
+        which `!search` reads straight back into a prompt — the denylist
+        defeated through the other door."""
+        self._init_index_db(overlay_env.config)
+        overlay_env.overlays.mkdir(parents=True, exist_ok=True)
+        (overlay_env.overlays / "sensitive_actions.md").write_text(
+            "- PLANTED KEEPER\n- PLANTED DROPPER\n"
+        )
+        memory_main([
+            "remove", "--skill", "sensitive_actions", "--match", "DROPPER",
+        ])
+        capsys.readouterr()
+        assert self._rows(overlay_env.config) == []
+
+    def test_the_cli_and_the_bulk_pass_key_rows_the_same_way(
+        self, overlay_env, tmp_path, monkeypatch, capsys
+    ):
+        """`source_id` is a path string and two writers produce it. The bulk
+        pass keys on the realpath; this CLI keyed on the raw configured path.
+        They agree only while no component of the mount is a symlink — and
+        three docstrings in this tree say a symlinked mount is a thing that
+        happens. Where they disagree the row is written twice for one file,
+        the bulk pass reaps the CLI's spelling, and the over-cap delete above
+        stops matching anything."""
+        from istota.memory.search import _reindex_skill_overlays
+
+        real = tmp_path / "realmount"
+        (real / "Users" / "alice").mkdir(parents=True)
+        link = tmp_path / "linkmount"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(link))
+        overlay_env.config.nextcloud_mount_path = link
+
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--skill", "developer", "--line", "a rule"])
+        capsys.readouterr()
+        cli_rows = [r[0] for r in self._rows(overlay_env.config)]
+        assert len(cli_rows) == 1
+
+        conn = sqlite3.connect(str(overlay_env.config.db_path))
+        try:
+            _reindex_skill_overlays(conn, overlay_env.config, "alice")
+            conn.commit()
+        finally:
+            conn.close()
+        bulk_rows = [r[0] for r in self._rows(overlay_env.config)]
+
+        assert bulk_rows == cli_rows, (
+            "the bulk pass re-keyed the row, so one file is two sources"
+        )
+
+    def test_a_write_under_the_cap_is_still_indexed(self, overlay_env, capsys):
+        """The control for the two above: the gate must not swallow an ordinary
+        write."""
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--skill", "developer", "--line", "an ordinary rule"])
+        capsys.readouterr()
+        rows = self._rows(overlay_env.config)
+        assert len(rows) == 1
+        assert "an ordinary rule" in rows[0][1]
 
     def test_a_usermd_write_is_not_filed_as_an_overlay(self, overlay_env, capsys):
         """The overlay source type is scoped to the overlay path — a USER.md
