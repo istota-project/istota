@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -847,6 +848,204 @@ class TestOverlayPlantedPaths:
         memory_main(["append", "--skill", "developer", "--line", "a rule"])
         assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
         assert (real / "skills" / "developer.md").read_text() == "- a rule\n"
+
+
+class TestUserMdPlantedPaths:
+    """The same treatment for USER.md itself (ISSUE-339).
+
+    The overlay path was hardened when it was built; USER.md sits one directory
+    up, under the same read-write sandbox bind, and this CLI resolves it
+    host-side. The write half is the serious one — `config/` is an ancestor, so
+    a link there redirected an `append` into a directory of the model's choosing
+    with model-chosen content, as the daemon user.
+    """
+
+    def test_a_symlink_at_user_md_is_refused_on_read(
+        self, tmp_path, overlay_env, capsys
+    ):
+        secret = tmp_path / "credentials.json"
+        secret.write_text("TOP SECRET TOKEN\n")
+        overlay_env.user_md.unlink()
+        overlay_env.user_md.symlink_to(secret)
+
+        with pytest.raises(SystemExit):
+            memory_main(["show"])
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        assert json.loads(captured)["error"] == "overlay_is_a_symlink"
+
+    def test_a_symlink_at_user_md_is_refused_on_the_write_path_too(
+        self, tmp_path, overlay_env, capsys
+    ):
+        victim = tmp_path / "victim.md"
+        victim.write_text("- untouched\n")
+        overlay_env.user_md.unlink()
+        overlay_env.user_md.symlink_to(victim)
+
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--heading", "Notes", "--line", "planted"])
+        assert json.loads(capsys.readouterr().out)["error"] == "overlay_is_a_symlink"
+        assert victim.read_text() == "- untouched\n"
+
+    def test_a_fifo_at_user_md_is_refused_without_blocking(
+        self, overlay_env, capsys
+    ):
+        from .support.blocking import fails_if_it_blocks
+
+        overlay_env.user_md.unlink()
+        os.mkfifo(overlay_env.user_md)
+        with fails_if_it_blocks(what="memory show"), pytest.raises(SystemExit):
+            memory_main(["show"])
+        assert (
+            json.loads(capsys.readouterr().out)["error"]
+            == "overlay_not_a_regular_file"
+        )
+
+    def test_a_symlinked_config_dir_cannot_redirect_the_user_md_write(
+        self, tmp_path, overlay_env, capsys
+    ):
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        config_dir = overlay_env.user_md.parent
+        shutil.rmtree(config_dir)
+        config_dir.symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--heading", "Notes", "--line", "planted"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "user_md_outside_user_tree"
+        assert list(victim.iterdir()) == []
+
+    def test_a_symlinked_config_dir_cannot_redirect_the_user_md_read(
+        self, tmp_path, overlay_env, capsys
+    ):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "USER.md").write_text("## Notes\n- TOP SECRET TOKEN\n")
+        config_dir = overlay_env.user_md.parent
+        shutil.rmtree(config_dir)
+        config_dir.symlink_to(elsewhere, target_is_directory=True)
+
+        with pytest.raises(SystemExit):
+            memory_main(["show"])
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        assert json.loads(captured)["error"] == "user_md_outside_user_tree"
+
+    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(
+        self, overlay_env, capsys
+    ):
+        config_dir = overlay_env.user_md.parent
+        real = config_dir.parent / "config.real"
+        config_dir.rename(real)
+        config_dir.symlink_to(real, target_is_directory=True)
+
+        memory_main(["append", "--heading", "Notes", "--line", "a fact"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert "- a fact" in (real / "USER.md").read_text()
+
+    def test_the_user_md_cap_matches_the_daemons(self):
+        """`_MAX_USER_MD_READ_BYTES` is restated here rather than imported from
+        `istota.storage`, which this per-write CLI deliberately does not pull
+        in. If the two drift, the daemon reads a USER.md this CLI cannot edit
+        (or the reverse), which is the failure the restatement risks."""
+        from istota.skills.memory import _MAX_USER_MD_READ_BYTES
+        from istota.storage import USER_CONFIG_READ_CAP_BYTES
+
+        assert _MAX_USER_MD_READ_BYTES == USER_CONFIG_READ_CAP_BYTES
+
+    def test_a_write_that_would_pass_the_read_cap_is_refused(
+        self, overlay_env, capsys, monkeypatch
+    ):
+        """The overlay path has had this guard since it was built; USER.md had
+        none. Past the cap the CLI can no longer read the file back, so the
+        write would leave a USER.md that `show`, `append` and `remove` all
+        refuse — recoverable only from a host shell."""
+        monkeypatch.setattr("istota.skills.memory._MAX_USER_MD_READ_BYTES", 200)
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--heading", "Notes", "--line", "x" * 400,
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "user_md_would_exceed_read_cap"
+        assert "x" * 400 not in overlay_env.user_md.read_text()
+
+    def test_an_audit_entry_records_that_user_md_was_unreadable(
+        self, tmp_path, overlay_env, capsys
+    ):
+        """`user_md_size_bytes` is None for a missing file *and* for a refused
+        read, and `detect_bypass_write` compares stored sizes — so the two must
+        not collapse on exactly the files that were tampered with."""
+        memory_main(["append", "--heading", "Notes", "--line", "first"])
+        capsys.readouterr()
+        overlay_env.user_md.unlink()
+        os.mkfifo(overlay_env.user_md)
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--heading", "Notes", "--line", "second"])
+        capsys.readouterr()
+        # The read refuses before the op, so nothing is audited for the second
+        # call; the guarantee under test is that the refusal never reads as a
+        # recorded size of "absent".
+        entries = _audit_entries(tmp_path)
+        assert all(e.get("user_md_size_bytes") != 0 for e in entries)
+
+
+class TestChannelMemoryPlantedPaths:
+    """`{mount}/Channels/{token}` is bound read-write into the sandbox of every
+    task in that room, so it is the same vector as the user's own tree. The
+    token checks bound the *name*; they say nothing about where the directory
+    resolves to."""
+
+    def _channel_env(self, overlay_env, monkeypatch):
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "room1")
+        d = overlay_env.config.nextcloud_mount_path / "Channels" / "room1"
+        d.mkdir(parents=True)
+        (d / "CHANNEL.md").write_text("## Notes\n- existing\n")
+        return d
+
+    def test_a_symlinked_channel_dir_cannot_redirect_the_write(
+        self, tmp_path, overlay_env, capsys, monkeypatch
+    ):
+        d = self._channel_env(overlay_env, monkeypatch)
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        shutil.rmtree(d)
+        d.symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--channel", "room1", "--heading", "Notes",
+                "--line", "planted",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "channel_dir_outside_channel_root"
+        assert list(victim.iterdir()) == []
+
+    def test_a_symlink_at_channel_md_is_refused_on_read(
+        self, tmp_path, overlay_env, capsys, monkeypatch
+    ):
+        d = self._channel_env(overlay_env, monkeypatch)
+        secret = tmp_path / "credentials.json"
+        secret.write_text("TOP SECRET TOKEN\n")
+        (d / "CHANNEL.md").unlink()
+        (d / "CHANNEL.md").symlink_to(secret)
+
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--channel", "room1"])
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        assert json.loads(captured)["error"] == "overlay_is_a_symlink"
+
+    def test_an_ordinary_channel_write_still_works(
+        self, overlay_env, capsys, monkeypatch
+    ):
+        d = self._channel_env(overlay_env, monkeypatch)
+        memory_main([
+            "append", "--channel", "room1", "--heading", "Notes",
+            "--line", "a fact",
+        ])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert "- a fact" in (d / "CHANNEL.md").read_text()
 
 
 class TestOverlayUnreadableFiles:

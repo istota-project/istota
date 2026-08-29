@@ -1,5 +1,6 @@
 """Configuration loading for istota.cron_loader module."""
 
+import os
 
 import pytest
 
@@ -1583,3 +1584,61 @@ class TestMigrateRoundTripsSkillTask:
         assert len(jobs) == 1
         assert jobs[0].command == "istota-skill feeds run-scheduled"
         assert jobs[0].prompt == ""
+
+
+class TestCronMdPlantedPaths:
+    """CRON.md sits in `{bot_dir}/config/`, which is bound read-write into the
+    user's own sandbox, and this reader runs on the scheduler's cron-sync tick
+    — so a FIFO here wedged that loop rather than one task (ISSUE-339)."""
+
+    def test_a_symlink_at_cron_md_is_not_followed(
+        self, tmp_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        secret = tmp_path / "secret.md"
+        secret.write_text("```toml\n[[jobs]]\nname = \"planted\"\ncron = \"* * * * *\"\nprompt = \"x\"\n```\n")
+        cron_path = mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path.parent.mkdir(parents=True)
+        cron_path.symlink_to(secret)
+
+        assert load_cron_jobs(config, "alice") is None
+
+    def test_a_fifo_at_cron_md_does_not_block_the_scheduler(
+        self, mount_path, make_config_with_mount
+    ):
+        from .support.blocking import fails_if_it_blocks
+
+        config = make_config_with_mount()
+        cron_path = mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path.parent.mkdir(parents=True)
+        os.mkfifo(cron_path)
+
+        with fails_if_it_blocks(what="load_cron_jobs"):
+            assert load_cron_jobs(config, "alice") is None
+
+    def test_a_symlinked_config_dir_is_refused(
+        self, tmp_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "CRON.md").write_text("```toml\n[[jobs]]\nname = \"planted\"\ncron = \"* * * * *\"\nprompt = \"x\"\n```\n")
+        bot_dir = mount_path / "Users" / "alice" / "istota"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "config").symlink_to(outside, target_is_directory=True)
+
+        assert load_cron_jobs(config, "alice") is None
+
+    def test_an_ordinary_cron_md_still_parses(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """```toml
+[[jobs]]
+name = "daily"
+cron = "0 9 * * *"
+prompt = "morning"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert [j.name for j in jobs] == ["daily"]

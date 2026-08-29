@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import tomli
 
 from . import db
-from .storage import get_user_cron_path, get_user_scripts_path
+from .storage import get_user_scripts_path
 
 logger = logging.getLogger("istota.cron_loader")
 
@@ -200,12 +200,17 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
     if not config.use_mount:
         return None
 
-    cron_path = config.nextcloud_mount_path / get_user_cron_path(user_id, config.bot_dir_name).lstrip("/")
-    if not cron_path.exists():
+    # Hardened like every other host-side read of `{bot_dir}/config/`
+    # (ISSUE-339). This one runs on the scheduler's own cron-sync tick, so a
+    # FIFO planted at CRON.md blocked that loop rather than one task, and a
+    # symlink fed an arbitrary daemon-readable file to the TOML parser.
+    from .storage import read_user_config_file  # noqa: PLC0415 - import cycle
+
+    content = read_user_config_file(config, user_id, "CRON.md")
+    if content is None or not content:
         return None
 
     try:
-        content = cron_path.read_text()
         match = _TOML_BLOCK_RE.search(content)
         if not match:
             return []
@@ -392,13 +397,24 @@ def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) ->
 
 
 def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> None:
-    """Write CRON.md, externalizing inline multiline prompts first."""
+    """Write CRON.md, externalizing inline multiline prompts first.
+
+    Through the contained directory and the hardened writer, like every other
+    host-side write into `{bot_dir}/config/` (ISSUE-339): `mkdir(parents=True)`
+    on an unresolved path follows a link at `config/`, and a plain `write_text`
+    follows one at `CRON.md`.
+    """
+    from .storage import resolve_user_config_dir, write_regular_file  # noqa: PLC0415
+
     _externalize_multiline_prompts(config, user_id, jobs)
-    cron_path = config.nextcloud_mount_path / get_user_cron_path(
-        user_id, config.bot_dir_name
-    ).lstrip("/")
-    cron_path.parent.mkdir(parents=True, exist_ok=True)
-    cron_path.write_text(generate_cron_md(jobs))
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        logger.warning(
+            "cron_md_write_refused user=%s reason=config_dir_outside_user_tree", user_id,
+        )
+        return
+    config_dir.mkdir(parents=True, exist_ok=True)
+    write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
 
 
 def sync_cron_jobs_to_db(
@@ -548,8 +564,12 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     if not config.use_mount:
         return False
 
-    cron_path = config.nextcloud_mount_path / get_user_cron_path(user_id, config.bot_dir_name).lstrip("/")
-    if cron_path.exists() and not overwrite:
+    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        return False
+    if (config_dir / "CRON.md").exists() and not overwrite:
         return False
 
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)

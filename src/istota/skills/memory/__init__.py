@@ -78,6 +78,7 @@ from istota.memory.curation.types import (
 )
 from istota.skills._loader import (
     OVERLAY_READ_CAP_BYTES,
+    contained_overlay_dir,
     inspect_overlay,
     read_overlay_bytes,
 )
@@ -96,6 +97,16 @@ _SKILL = "skill"
 #: planted at the path cannot be pulled into the daemon's memory. Named here
 #: for the local reason; owned by `_loader`, which reads under it too.
 _MAX_OVERLAY_READ_BYTES = OVERLAY_READ_CAP_BYTES
+
+#: The same ceiling for USER.md and CHANNEL.md, which are much larger documents
+#: than an overlay and are grown by the product itself one bullet at a time.
+#:
+#: Restated rather than imported from `storage.USER_CONFIG_READ_CAP_BYTES`: this
+#: CLI is spawned per write and deliberately avoids importing `istota.storage`,
+#: which pulls in subprocess, shutil and the rclone paths for a process that
+#: runs in hundreds of milliseconds. `tests/test_skill_memory_cli.py` holds the
+#: two equal — they must be, or the daemon reads a file this CLI cannot edit.
+_MAX_USER_MD_READ_BYTES = 16 * 1024 * 1024
 
 #: How much of an overlay's first line the inventory shows.
 _FIRST_LINE_CHARS = 120
@@ -164,8 +175,40 @@ def _bot_dir() -> str:
     sys.exit(1)
 
 
+def _user_config_dir() -> Path:
+    return _mount_path() / "Users" / _user_id() / _bot_dir() / "config"
+
+
 def _user_md_path() -> Path:
-    return _mount_path() / "Users" / _user_id() / _bot_dir() / "config" / "USER.md"
+    """USER.md under a `config/` proven to be inside the user's own tree.
+
+    The same containment `_check_overlay_dir` applies one level down, and for
+    the same reason (ISSUE-339): `config` is an ordinary entry under
+    `{mount}/Users/{user_id}`, which `build_bwrap_cmd` binds **read-write**
+    into that user's sandbox, so `mv config config.real && ln -s /anywhere
+    config` is two commands from inside it. This CLI runs host-side and
+    unsandboxed, and the link's target is a string it resolves in the daemon's
+    own filesystem view — so it need not exist in the namespace at all.
+
+    The write half is the serious one. `_atomic_write` calls
+    `mkdir(parents=True)` and `os.replace`, which between them created the
+    missing directory at the far end of the link and put model-chosen content
+    in it, as the daemon user. The read half leaks the other way: `show`
+    returns whatever is at `<link>/USER.md`.
+
+    Refusing rather than degrading, because a write must not silently land
+    somewhere else and a `show` must not answer with a file the user did not
+    name. The **resolved** path comes back so a caller cannot re-walk by the
+    unresolved name — the check and the write are separated by a lock
+    acquisition and a read.
+    """
+    d = _user_config_dir()
+    user_root = _mount_path() / "Users" / _user_id()
+    resolved = contained_overlay_dir(d, user_root)
+    if resolved is None:
+        _err("user_md_outside_user_tree", path=_mount_relative(d))
+        sys.exit(1)
+    return resolved / "USER.md"
 
 
 def _channel_md_path(token: str) -> Path:
@@ -185,12 +228,24 @@ def _channel_md_path(token: str) -> Path:
             given=token, expected=env_token,
         )
         sys.exit(1)
-    return _mount_path() / "Channels" / token / "CHANNEL.md"
+    # The token checks above bound the *name*; they say nothing about where the
+    # directory it names resolves to, and `{mount}/Channels/{token}` is bound
+    # read-write into the sandbox of every task in that room. So the same
+    # containment `_user_md_path` applies, against `{mount}/Channels` — a room
+    # belongs to no single user, so the user root is the wrong ceiling here
+    # (ISSUE-339). Without it, `mv` the directory aside and drop a link in its
+    # place and `_atomic_write`'s `mkdir(parents=True)` builds the far end.
+    d = _mount_path() / "Channels" / token
+    resolved = contained_overlay_dir(d, _mount_path() / "Channels")
+    if resolved is None:
+        _err("channel_dir_outside_channel_root", path=_mount_relative(d))
+        sys.exit(1)
+    return resolved / "CHANNEL.md"
 
 
 def _overlay_dir() -> Path:
     """The user's per-skill overlay directory. May not exist."""
-    return _mount_path() / "Users" / _user_id() / _bot_dir() / "config" / "skills"
+    return _user_config_dir() / "skills"
 
 
 def _skill_index():
@@ -328,17 +383,9 @@ def _config_for_audit():
     return _Shim()
 
 
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text()
-    except FileNotFoundError:
-        return ""
-    except OSError as e:
-        _err(f"failed to read {path}: {e}")
-        sys.exit(1)
-
-
-def _read_overlay_bytes(path: Path) -> tuple[bytes | None, str | None]:
+def _read_overlay_bytes(
+    path: Path, *, max_bytes: int = _MAX_OVERLAY_READ_BYTES
+) -> tuple[bytes | None, str | None]:
     """`_loader.read_overlay_bytes` under this CLI's read ceiling.
 
     The hardening — `O_NOFOLLOW`, `S_ISREG` + `O_NONBLOCK`, and the size taken
@@ -361,13 +408,29 @@ def _read_overlay_bytes(path: Path) -> tuple[bytes | None, str | None]:
     want the bytes or the refusal and nothing else; `inspect_overlay` takes it
     from the same call for the inventory.
     """
-    data, reason, _size = read_overlay_bytes(path, max_bytes=_MAX_OVERLAY_READ_BYTES)
+    data, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
     return data, reason
 
 
-def _read_overlay_text(path: Path) -> str:
-    """`_read_overlay_bytes` with every refusal turned into an error envelope."""
-    raw, reason = _read_overlay_bytes(path)
+def _read_text(path: Path, *, max_bytes: int = _MAX_USER_MD_READ_BYTES) -> str:
+    """`_read_overlay_bytes` with every refusal turned into an error envelope.
+
+    One reader for all three documents. USER.md and CHANNEL.md joined the
+    overlays here rather than keeping the plain `read_text()` they had
+    (ISSUE-339): they sit in the same read-write sandbox bind, so a symlink
+    planted at USER.md handed this CLI a file of the daemon's choosing — which
+    `show` returned and the op that followed then wrote back over — and a FIFO
+    left there blocked `open(2)` until the skill proxy's timeout killed it.
+
+    A missing file is still `""`, because that is how `append` learns to create
+    one; it must not read as a refusal.
+
+    The `overlay_` prefix on the refusal codes is now wider than its name. The
+    constants are `_loader`'s published vocabulary and four other surfaces
+    already report them, so they are reused verbatim rather than forked; the
+    `path` on the envelope is what says which document was refused.
+    """
+    raw, reason = _read_overlay_bytes(path, max_bytes=max_bytes)
     if reason is not None:
         _err(reason, path=_mount_relative(path))
         sys.exit(1)
@@ -416,9 +479,7 @@ def _check_overlay_dir() -> Path:
         _err("overlay_dir_not_a_directory", path=_mount_relative(d))
         sys.exit(1)
     user_root = _mount_path() / "Users" / _user_id()
-    resolved = Path(os.path.realpath(d))
-    resolved_root = Path(os.path.realpath(user_root))
-    if resolved != resolved_root and resolved_root not in resolved.parents:
+    if contained_overlay_dir(d, user_root) is None:
         _err("overlay_dir_outside_user_tree", path=_mount_relative(d))
         sys.exit(1)
     return d
@@ -500,13 +561,31 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
         return
     config = _config_for_audit()
     user_id = _user_id()
-    user_md_path = _user_md_path()
     size = None
     extra = None
     if target.kind == _SKILL:
         extra = {"skill": target.skill, "target_path": _mount_relative(target.path)}
-    elif user_md_path.exists():
-        size = len(user_md_path.read_text().encode("utf-8"))
+    else:
+        # `target.path` **is** the USER.md path, already resolved once by
+        # `_resolve_target`. Calling `_user_md_path()` again here would re-walk
+        # `config/` after the write has landed and after `_update_last_seen`
+        # fingerprinted it — and it exits on a refusal, so a link swapped in
+        # during that window made a successful, recorded append report
+        # `{"error": "user_md_outside_user_tree"}` and exit 1, which the model
+        # reads as a failure and retries. It is also a redundant realpath walk
+        # on every single write (ISSUE-339).
+        user_md_path = target.path
+        # Through the hardened reader like everything else here: this was the
+        # last `read_text` on a path under the read-write sandbox bind. A
+        # refusal is recorded as such rather than silently leaving `size` None,
+        # which is what a *missing* file records — the audit trail feeds
+        # `detect_bypass_write`, so "absent" and "unreadable" must not collapse
+        # into one value on exactly the files that were tampered with.
+        raw, reason = _read_overlay_bytes(user_md_path)
+        if reason is not None:
+            extra = {"user_md_read_refused": reason}
+        elif raw:
+            size = len(raw)
     entries = [{"op": op, "outcome": outcome_or_reason}] if applied else []
     rejects = [] if applied else [{"op": op, "reason": outcome_or_reason}]
     write_audit_log(
@@ -573,6 +652,21 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
             outcome = entry.get("outcome", "applied")
             if outcome == "applied":
                 new_text = serialize_sectioned_doc(new_doc)
+                # The same pre-write ceiling `_do_overlay_op` applies, for the
+                # same reason: past the read cap this CLI can no longer read the
+                # file back, so the write would leave a USER.md that neither
+                # `show` nor `append` nor `remove` can touch — recoverable only
+                # from a host shell. Refused *before* the write rather than
+                # discovered after it, and reachable by one oversized `--line`
+                # or by enough ordinary appends (ISSUE-339).
+                size = len(new_text.encode("utf-8"))
+                if size > _MAX_USER_MD_READ_BYTES:
+                    _audit_for(args, op_dict, "user_md_would_exceed_read_cap",
+                               target=target, applied=False)
+                    return _err(
+                        "user_md_would_exceed_read_cap",
+                        bytes=size, cap=_MAX_USER_MD_READ_BYTES,
+                    )
                 _atomic_write(path, new_text)
                 _update_last_seen(path, new_text, target)
             _audit_for(args, op_dict, outcome, target=target, applied=True)
@@ -611,7 +705,7 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
     applied_write: str | None | object = _UNSET
     try:
         with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir()):
-            current = _read_overlay_text(path)
+            current = _read_text(path, max_bytes=_MAX_OVERLAY_READ_BYTES)
             section = parse_overlay_doc(current)
             new_section, outcome = apply_overlay_op(section, op_dict)
             if outcome not in ("applied", "noop_dup", "noop_no_match"):
@@ -906,7 +1000,7 @@ def cmd_show(args) -> int:
 
 
 def _show_overlay(args, target: Target) -> int:
-    text = _read_overlay_text(target.path)
+    text = _read_text(target.path, max_bytes=_MAX_OVERLAY_READ_BYTES)
     if not args.heading:
         print(text, end="" if text.endswith("\n") else "\n")
         return 0

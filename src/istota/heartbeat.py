@@ -15,7 +15,6 @@ import httpx
 
 from . import db
 from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
-from .storage import get_user_heartbeat_path
 
 if TYPE_CHECKING:
     from .config import Config
@@ -73,18 +72,19 @@ def load_heartbeat_config(
         logger.debug("Heartbeat requires mount; skipping user %s", user_id)
         return None
 
-    heartbeat_path = _get_mount_path(config, get_user_heartbeat_path(user_id, config.bot_dir_name))
-    if not heartbeat_path.exists():
-        return None
+    # Hardened like every other host-side read of `{bot_dir}/config/`
+    # (ISSUE-339). This one runs on the scheduler's heartbeat tick, so a FIFO
+    # planted at HEARTBEAT.md wedged that loop rather than a single task.
+    from .storage import read_user_config_file  # noqa: PLC0415 - import cycle
 
-    content = heartbeat_path.read_text()
-    if not content.strip():
+    content = read_user_config_file(config, user_id, "HEARTBEAT.md")
+    if content is None or not content.strip():
         return None
 
     # Extract TOML block from markdown
     match = _TOML_BLOCK_RE.search(content)
     if not match:
-        logger.debug("No TOML block found in %s", heartbeat_path)
+        logger.debug("No TOML block found in HEARTBEAT.md for %s", user_id)
         return None
 
     toml_content = match.group(1)
@@ -572,16 +572,17 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
     if not config.use_mount:
         return CheckResult(healthy=False, message="Task deadline check requires mount")
 
-    from .storage import get_user_tasks_file_path
 
-    tasks_path = _get_mount_path(config, get_user_tasks_file_path(user_id, config.bot_dir_name))
-    if not tasks_path.exists():
+    # Same hardening, same directory (ISSUE-339). A refusal is reported as a
+    # failed check rather than as "no file": a planted inode at TASKS.md is a
+    # condition an operator should see, and reporting healthy would hide it.
+    from .storage import read_user_config_file  # noqa: PLC0415 - import cycle
+
+    content = read_user_config_file(config, user_id, "TASKS.md")
+    if content is None:
+        return CheckResult(healthy=False, message="Error reading TASKS.md")
+    if not content:
         return CheckResult(healthy=True, message="No TASKS.md file")
-
-    try:
-        content = tasks_path.read_text()
-    except OSError as e:
-        return CheckResult(healthy=False, message=f"Error reading TASKS.md: {e}")
 
     # Parse tasks with deadlines
     # Look for patterns like: - [ ] Task @due(2024-01-15) or - [ ] Task (due: 2024-01-15)
