@@ -660,9 +660,13 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
                             "cap — it will not be loaded"
                         )
                     elif size > OVERLAY_WARN_BYTES:
+                        # Not a style opinion — the only thing this says is
+                        # that the hard cap is close, and past that cap the
+                        # file loads into nothing.
                         payload["warning"] = (
                             f"overlay is {size} bytes, over the "
-                            f"{OVERLAY_WARN_BYTES}-byte guidance"
+                            f"{OVERLAY_WARN_BYTES}-byte mark — it still loads, "
+                            f"but the {OVERLAY_MAX_BYTES}-byte cap is close"
                         )
                 else:
                     path.unlink(missing_ok=True)

@@ -644,8 +644,26 @@ def _resolve_skill_doc_path(
 #: a casual preference line landing in the safety layer.
 OVERLAY_DENYLIST = frozenset({"sensitive_actions", "untrusted_input"})
 
-#: Above this the file is logged as suspicious but still loaded.
-OVERLAY_WARN_BYTES = 8 * 1024
+#: Above this the file is reported but still loaded. The number is an early
+#: warning for ``OVERLAY_MAX_BYTES`` and nothing else: past that one the overlay
+#: stops loading at all, and this is the band where there is still room to
+#: shrink the file before that happens.
+#:
+#: It was 8 KB, on a different theory — that an overlay past a handful of
+#: preference lines was probably a forked skill doc, dropped in by someone
+#: half-remembering the *operator* override, which is replace semantics.
+#: ISSUE-337 ended that theory: it cut the developer skill's workflow out of the
+#: bundled body and named ``config/skills/developer.md`` as its home, so a
+#: 20-something KB overlay on that one skill is now the designed outcome. At
+#: 8 KB the threshold reported that configuration as a suspected fork on every
+#: load and held ``doctor``'s ``config.skill_overlays`` at WARN for as long as
+#: the file existed — a signal that fires on what the design asks for is
+#: training to ignore the surface it fires on.
+#:
+#: It is not a prompt-budget control and never was. Nothing measures the
+#: combined size, and the bundled body an overlay is appended to (38 KB for
+#: ``developer``) is unmeasured.
+OVERLAY_WARN_BYTES = 24 * 1024
 
 #: Above this the file is not loaded at all. The failure mode the cap guards
 #: against is someone — quite possibly the agent, half-remembering the
@@ -1135,11 +1153,17 @@ def _load_user_overlay(
         # `debug`, not `warning`, and the level is the whole point. This runs
         # once per eager skill per task, and every condition it reports is one
         # a task can create for itself — a symlink or a FIFO planted at the
-        # path, or a `config` entry replaced with a regular file. At `warning`
-        # the daemon forwards it to the operator's log channel, so one planted
-        # file becomes a stream of alerts on every task for that user. The
-        # surface that is supposed to report this is `doctor`'s
-        # `config.skill_overlays`, once, on a stated cadence.
+        # path, or a `config` entry replaced with a regular file. A `warning`
+        # reaches three places: the rotating app log, the admin Logs pane, and
+        # — from a `skills show` subprocess, which configures no logging at all,
+        # so Python's `lastResort` handler takes it — stderr, where it lands in
+        # the model's own tool output. One planted file would repeat in all
+        # three on every task for that user. The surface that is supposed to
+        # report this is `doctor`'s `config.skill_overlays`, once, on a stated
+        # cadence. (It does *not* reach the operator's Talk log channel, which
+        # this comment claimed for a while: `LogChannelSubscriber` consumes task
+        # events, and `logging_setup` installs a console and a file handler and
+        # nothing else.)
         logger.debug(
             "skill overlay %s could not be read (%s) — not loaded", path, refusal
         )
@@ -1147,9 +1171,14 @@ def _load_user_overlay(
     assert raw is not None
 
     if len(raw) > OVERLAY_WARN_BYTES:
-        logger.warning(
-            "skill overlay %s is %d bytes, over the %d-byte guidance",
-            path, len(raw), OVERLAY_WARN_BYTES,
+        # `debug`, for the reason the refusals above are, and it applies harder
+        # here: this condition persists, so at `warning` it repeats on every
+        # load of this skill for as long as the file is that size — including
+        # into the model's own tool output, since a `skills show` subprocess
+        # prints a warning bare to stderr. `doctor` reports it once instead.
+        logger.debug(
+            "skill overlay %s is %d bytes, approaching the %d-byte cap",
+            path, len(raw), OVERLAY_MAX_BYTES,
         )
 
     try:

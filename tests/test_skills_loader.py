@@ -828,9 +828,11 @@ class TestSkillOverlays:
         self, tmp_path, caplog
     ):
         """A symlink or a FIFO at an overlay path is a condition a task can
-        create for itself, and this runs once per eager skill per task — at
-        WARNING the daemon forwards it to the operator's log channel, so one
-        planted file becomes a stream of alerts. `doctor` reports it once."""
+        create for itself, and this runs once per eager skill per task. At
+        WARNING one planted file becomes a stream of records in the app log and
+        the admin Logs pane, and — from a `skills show` subprocess, which
+        configures no logging — bare on stderr, in the model's own tool output.
+        `doctor` reports it once instead."""
         import logging
 
         skills_dir, overlays, bundled = self._dirs(tmp_path)
@@ -855,7 +857,13 @@ class TestSkillOverlays:
 
         assert marker in self._load(skills_dir, bundled, overlays)
 
-    def test_over_the_warn_threshold_still_loads_but_warns(self, tmp_path, caplog):
+    def test_over_the_warn_threshold_loads_and_does_not_warn_every_load(
+        self, tmp_path, caplog
+    ):
+        """The size is worth reporting once; the condition persists, so at
+        WARNING it repeats on every load of the skill for as long as the file
+        is that size, and a `skills show` subprocess prints it bare to stderr
+        where it lands in the model's own tool output. `doctor` reports it."""
         import logging
 
         skills_dir, overlays, bundled = self._dirs(tmp_path)
@@ -863,11 +871,22 @@ class TestSkillOverlays:
         filler = "x" * (OVERLAY_WARN_BYTES + 1 - len(marker) - 1)
         (overlays / "developer.md").write_text(f"{marker}\n{filler}")
 
-        with caplog.at_level(logging.WARNING, logger="istota.skills_loader"):
+        with caplog.at_level(logging.DEBUG, logger="istota.skills_loader"):
             result = self._load(skills_dir, bundled, overlays)
 
         assert marker in result
-        assert any("guidance" in r.message for r in caplog.records)
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+        assert any("approaching" in r.message for r in caplog.records)
+
+    def test_the_warn_threshold_reports_the_cap_and_not_a_house_style(self):
+        """It sits in the upper half of the cap deliberately. At 8 KB of 32 it
+        made a separate claim — that an overlay past a handful of preference
+        lines was probably a forked skill doc — and ISSUE-337 made that claim
+        false by design, moving the developer skill's whole workflow into its
+        overlay. The only thing the number may mean now is that the cap, past
+        which the file reaches no prompt at all, is close."""
+        assert OVERLAY_WARN_BYTES < OVERLAY_MAX_BYTES
+        assert OVERLAY_WARN_BYTES >= OVERLAY_MAX_BYTES // 2
 
     def test_a_small_overlay_warns_about_nothing(self, tmp_path, caplog):
         import logging
