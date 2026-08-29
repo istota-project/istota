@@ -59,7 +59,12 @@ class TestConfigDefaults:
 
     def test_default_scheduler_config(self):
         cfg = Config()
-        assert cfg.scheduler.poll_interval == 2
+        # 5, not 2. The dataclass said 2 and the loader's own `.get()` said 5,
+        # so the value depended on whether a `[scheduler]` header was present.
+        # Every generator, the example config and `istota setup` write 5, so
+        # that is what deployments actually run and what the single default is
+        # now. See tests/test_config_mapper.py::TestOneDefaultPerField.
+        assert cfg.scheduler.poll_interval == 5
         assert cfg.scheduler.dispatch_interval == 0.5
         assert cfg.scheduler.email_poll_interval == 60
         assert cfg.scheduler.talk_poll_interval == 10
