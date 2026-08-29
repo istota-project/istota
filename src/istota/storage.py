@@ -418,6 +418,17 @@ def get_user_persona_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/PERSONA.md"
 
 
+def get_user_skill_overlays_path(user_id: str, bot_dir: str) -> str:
+    """Directory of per-skill user overlay files.
+
+    One flat ``<skill-name>.md`` per skill, appended to that skill's bundled
+    body whenever the skill is loaded. Distinct from the *operator* override at
+    ``config/skills/<name>/skill.md``, which replaces the body outright — an
+    overlay is additive, so upstream skill edits keep flowing under it.
+    """
+    return f"{get_user_config_path(user_id, bot_dir)}/skills"
+
+
 CRON_TEMPLATE = """\
 # Scheduled Jobs
 

@@ -265,3 +265,108 @@ class TestShowCompanions:
         # admin-only companion is filtered for non-admin alice → marker, no body.
         assert "# Admin Helper" not in out
         assert "<!-- companion adminhelper: unavailable -->" in out
+
+
+class TestShowOverlays:
+    """The `skills show` half of per-skill user overlays.
+
+    The eager half is witnessed by `tests/test_prompt_golden.py`'s
+    `skill_overlay` case. Neither path applies the overlay itself — both hand a
+    directory to `load_skills`, which is where the injection lives, so the two
+    cannot render it differently.
+    """
+
+    def _ctx(self, tmp_path, monkeypatch, *, mount=True):
+        bundled = tmp_path / "bundled"
+        _write_skill(bundled, "primary", "# Primary\n\nPRIMARY BODY.\n",
+                     companion_skills=["helper"])
+        _write_skill(bundled, "helper", "# Helper\n\nHELPER BODY.\n", cli=False)
+
+        mount_root = tmp_path / "mount"
+        overlays = mount_root / "Users/alice/istota/config/skills"
+        overlays.mkdir(parents=True)
+
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            temp_dir=tmp_path / "tmp",
+            nextcloud_mount_path=mount_root if mount else None,
+            bundled_skills_dir=bundled,
+            skills_dir=tmp_path / "ops_skills",
+            users={"alice": UserConfig()},
+            admin_users={"boss"},
+        )
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **kw: config)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_EXPERIMENTAL_FEATURES", raising=False)
+        return overlays
+
+    def test_show_appends_the_overlay_with_the_user_id_substituted(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        overlays = self._ctx(tmp_path, monkeypatch)
+        (overlays / "primary.md").write_text("- Never run the full suite here.\n")
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="primary"))
+        out = capsys.readouterr().out
+
+        assert "#### alice's configuration for this skill" in out
+        assert "- Never run the full suite here." in out
+        assert "{user_id}" not in out
+
+    def test_the_overlay_never_follows_a_safety_companion(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Recency would let an overlay downstream of a guardrail soften it. The
+        overlay is injected inside `load_skills`, so it lands with the primary
+        body and every companion delimiter comes after it."""
+        overlays = self._ctx(tmp_path, monkeypatch)
+        (overlays / "primary.md").write_text("- An overlay rule.\n")
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="primary"))
+        out = capsys.readouterr().out
+
+        assert out.index("- An overlay rule.") < out.index("<!-- companion: helper -->")
+        assert out.index("- An overlay rule.") < out.index("HELPER BODY.")
+
+    def test_a_companion_body_carries_no_overlay(self, tmp_path, monkeypatch, capsys):
+        """A companion rides as a guardrail, not as the skill being configured."""
+        overlays = self._ctx(tmp_path, monkeypatch)
+        (overlays / "helper.md").write_text("- HELPER OVERLAY.\n")
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="primary"))
+        out = capsys.readouterr().out
+
+        assert "HELPER BODY." in out
+        assert "HELPER OVERLAY." not in out
+        assert "configuration for this skill" not in out
+
+    def test_the_same_overlay_applies_when_that_skill_is_the_primary(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The control for the test above: the file is live, it is the companion
+        *rendering* that skips it."""
+        overlays = self._ctx(tmp_path, monkeypatch)
+        (overlays / "helper.md").write_text("- HELPER OVERLAY.\n")
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="helper"))
+        out = capsys.readouterr().out
+
+        assert "HELPER OVERLAY." in out
+
+    def test_no_mount_means_no_overlay(self, tmp_path, monkeypatch, capsys):
+        """Overlays are filesystem reads, so an rclone-remote deployment skips
+        them silently — the condition the per-user PERSONA.md already carries."""
+        overlays = self._ctx(tmp_path, monkeypatch, mount=False)
+        (overlays / "primary.md").write_text("- An overlay rule.\n")
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="primary"))
+        out = capsys.readouterr().out
+
+        assert "PRIMARY BODY." in out
+        assert "An overlay rule." not in out
+        assert "configuration for this skill" not in out

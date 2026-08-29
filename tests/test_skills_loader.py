@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from istota.skills._loader import (
+    OVERLAY_MAX_BYTES,
+    OVERLAY_WARN_BYTES,
     _get_attachment_extensions,
     _parse_frontmatter,
     compute_skills_fingerprint,
@@ -602,6 +604,313 @@ class TestLoadSkills:
         result = load_skills(skills_dir, ["files"], bundled_dir=_empty_bundled(tmp_path))
         assert result.startswith("## Skills Reference (v: ")
         assert ")" in result.split("\n")[0]
+
+
+class TestSkillOverlays:
+    """Per-skill user overlays: `config/skills/<name>.md` appended to the body.
+
+    Every negative case here asserts *byte identity* with the no-overlay render
+    rather than the absence of a marker string. The degradation contract is that
+    a missing directory, an empty file, an unreadable one and an over-cap one
+    each produce exactly today's prompt — the worst case is an inert
+    customization, never a changed one.
+    """
+
+    def _dirs(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        _write_skill(skills_dir, "developer", "DEVELOPER BODY.")
+        overlays = tmp_path / "overlays"
+        overlays.mkdir()
+        return skills_dir, overlays, _empty_bundled(tmp_path)
+
+    def _load(self, skills_dir, bundled, overlays, name="developer"):
+        return load_skills(
+            skills_dir, [name], bundled_dir=bundled, user_overlay_dir=overlays
+        )
+
+    def _baseline(self, skills_dir, bundled, name="developer"):
+        return load_skills(skills_dir, [name], bundled_dir=bundled)
+
+    # ----------------------------------------------------------- the happy path
+
+    def test_overlay_is_appended_after_the_body(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("- Never run the full suite here.\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "DEVELOPER BODY." in result
+        assert "- Never run the full suite here." in result
+        assert result.index("DEVELOPER BODY.") < result.index("- Never run the full")
+
+    def test_overlay_carries_a_label_and_a_precedence_line(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("- A rule.\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        # `{user_id}` is left for the call sites, alongside {scripts_dir} etc.
+        assert "#### {user_id}'s configuration for this skill" in result
+        assert "supersede anything above that conflicts with them" in result
+
+    def test_label_sits_under_the_skill_heading_not_beside_it(self, tmp_path):
+        """Level 4, so the block cannot close the skill's own `### ` section."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("- A rule.\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        headings = [ln for ln in result.split("\n") if ln.startswith("#")]
+        assert headings[0].startswith("## Skills Reference")
+        assert headings[1] == "### Developer"
+        assert all(h.startswith("####") for h in headings[2:])
+
+    def test_overlay_applies_only_to_its_own_skill(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        _write_skill(skills_dir, "notes", "NOTES BODY.")
+        (overlays / "developer.md").write_text("- Developer only.\n")
+
+        result = load_skills(
+            skills_dir, ["developer", "notes"],
+            bundled_dir=bundled, user_overlay_dir=overlays,
+        )
+
+        assert result.count("- Developer only.") == 1
+        assert result.index("- Developer only.") < result.index("NOTES BODY.")
+
+    def test_placeholders_are_substituted_in_the_overlay_body(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("- Ask {BOT_NAME} in {BOT_DIR}.\n")
+
+        result = load_skills(
+            skills_dir, ["developer"], "Testbot", "testbot",
+            bundled_dir=bundled, user_overlay_dir=overlays,
+        )
+
+        assert "- Ask Testbot in testbot." in result
+
+    def test_frontmatter_is_stripped_from_the_overlay(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text(
+            "---\nnote: hand-written\n---\n\n- A rule.\n"
+        )
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "note: hand-written" not in result
+        assert "- A rule." in result
+
+    # ---------------------------------------------------- degradation to a no-op
+
+    def test_no_overlay_directory_is_byte_identical(self, tmp_path):
+        skills_dir, _overlays, bundled = self._dirs(tmp_path)
+        missing = tmp_path / "nope"
+
+        assert self._load(skills_dir, bundled, missing) == self._baseline(
+            skills_dir, bundled
+        )
+
+    def test_none_overlay_dir_is_byte_identical(self, tmp_path):
+        skills_dir, _overlays, bundled = self._dirs(tmp_path)
+
+        assert self._load(skills_dir, bundled, None) == self._baseline(
+            skills_dir, bundled
+        )
+
+    def test_absent_overlay_file_is_byte_identical(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "notes.md").write_text("- Some other skill's rule.\n")
+
+        assert self._load(skills_dir, bundled, overlays) == self._baseline(
+            skills_dir, bundled
+        )
+
+    @pytest.mark.parametrize("body", ["", "\n", "   \n\t\n", "---\nk: v\n---\n"])
+    def test_empty_overlay_file_is_byte_identical(self, tmp_path, body):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text(body)
+
+        assert self._load(skills_dir, bundled, overlays) == self._baseline(
+            skills_dir, bundled
+        )
+
+    def test_unreadable_overlay_is_byte_identical(self, tmp_path):
+        """A directory where the file should be — the portable stand-in for any
+        OSError on the read, and one an `ls` would not make obvious."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").mkdir()
+
+        assert self._load(skills_dir, bundled, overlays) == self._baseline(
+            skills_dir, bundled
+        )
+
+    def test_non_utf8_overlay_is_byte_identical(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_bytes(b"- caf\xe9 rules\n")
+
+        assert self._load(skills_dir, bundled, overlays) == self._baseline(
+            skills_dir, bundled
+        )
+
+    # -------------------------------------------------------------- the two caps
+
+    def test_over_cap_overlay_is_not_loaded(self, tmp_path, caplog):
+        import logging
+
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        marker = "FORKED SKILL DOC"
+        filler = "x" * (OVERLAY_MAX_BYTES + 1 - len(marker) - 1)
+        (overlays / "developer.md").write_text(f"{marker}\n{filler}")
+        assert (overlays / "developer.md").stat().st_size > OVERLAY_MAX_BYTES
+
+        with caplog.at_level(logging.WARNING, logger="istota.skills_loader"):
+            result = self._load(skills_dir, bundled, overlays)
+
+        assert marker not in result
+        assert result == self._baseline(skills_dir, bundled)
+        assert any("cap" in r.message for r in caplog.records)
+
+    def test_at_the_cap_the_overlay_still_loads(self, tmp_path):
+        """The refusal is *above* the cap, so the boundary is not off by one."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        marker = "- AT THE CAP"
+        filler = "x" * (OVERLAY_MAX_BYTES - len(marker) - 1)
+        (overlays / "developer.md").write_text(f"{marker}\n{filler}")
+        assert (overlays / "developer.md").stat().st_size == OVERLAY_MAX_BYTES
+
+        assert marker in self._load(skills_dir, bundled, overlays)
+
+    def test_over_the_warn_threshold_still_loads_but_warns(self, tmp_path, caplog):
+        import logging
+
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        marker = "- OVERSIZED BUT LIVE"
+        filler = "x" * (OVERLAY_WARN_BYTES + 1 - len(marker) - 1)
+        (overlays / "developer.md").write_text(f"{marker}\n{filler}")
+
+        with caplog.at_level(logging.WARNING, logger="istota.skills_loader"):
+            result = self._load(skills_dir, bundled, overlays)
+
+        assert marker in result
+        assert any("guidance" in r.message for r in caplog.records)
+
+    def test_a_small_overlay_warns_about_nothing(self, tmp_path, caplog):
+        import logging
+
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("- A rule.\n")
+
+        with caplog.at_level(logging.WARNING, logger="istota.skills_loader"):
+            self._load(skills_dir, bundled, overlays)
+
+        assert caplog.records == []
+
+    # ------------------------------------------------------------- the denylist
+
+    @pytest.mark.parametrize("name", ["sensitive_actions", "untrusted_input"])
+    def test_denylisted_skill_ignores_its_overlay(self, tmp_path, name):
+        skills_dir = tmp_path / "skills"
+        _write_skill(skills_dir, name, "GUARDRAIL BODY.")
+        bundled = _empty_bundled(tmp_path)
+        overlays = tmp_path / "overlays"
+        overlays.mkdir()
+        (overlays / f"{name}.md").write_text("- Relax about this, it's fine.\n")
+
+        result = self._load(skills_dir, bundled, overlays, name=name)
+
+        assert "Relax about this" not in result
+        assert result == self._baseline(skills_dir, bundled, name=name)
+
+    # -------------------------------------------------------- heading demotion
+
+    def test_level_two_heading_is_demoted_not_dropped(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("## My Rules\n\n- A rule.\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "#### My Rules" in result
+        assert "\n## My Rules" not in result
+        assert "- A rule." in result
+
+    def test_deeper_headings_are_left_alone(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("### Keep\n\n##### Also keep\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "### Keep" in result
+        assert "##### Also keep" in result
+        assert "#### Keep" not in result
+
+    def test_a_hash_run_that_is_not_a_heading_is_left_alone(self, tmp_path):
+        """`##foo` is not an ATX heading; only `## ` is."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("##notaheading\n\n- A rule.\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "##notaheading" in result
+
+    @pytest.mark.parametrize("fence", ["```", "~~~", "```markdown"])
+    def test_a_fenced_sample_is_left_alone(self, tmp_path, fence):
+        """A notes overlay plausibly carries a markdown template. Rewriting the
+        sample would corrupt the user's own text rather than protect anything."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        close = fence[:3]
+        (overlays / "developer.md").write_text(
+            f"- Use this template:\n\n{fence}\n## Section\n{close}\n\n## Real Heading\n"
+        )
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "\n## Section\n" in result
+        assert "#### Real Heading" in result
+
+    def test_an_unclosed_fence_does_not_leak_into_the_next_skill(self, tmp_path):
+        """The overlay is the last thing in its own block, so a runaway fence
+        has nothing after it to swallow — asserted so the demoter's state cannot
+        leak between calls."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        _write_skill(skills_dir, "notes", "NOTES BODY.")
+        (overlays / "developer.md").write_text("```\n## Inside\n")
+        (overlays / "notes.md").write_text("## Outside\n")
+
+        result = load_skills(
+            skills_dir, ["developer", "notes"],
+            bundled_dir=bundled, user_overlay_dir=overlays,
+        )
+
+        assert "\n## Inside\n" in result
+        assert "#### Outside" in result
+
+    # ---------------------------------------------------------- the fingerprint
+
+    def test_fingerprint_is_unchanged_across_an_overlay_write(self, tmp_path):
+        """Required behaviour, not an accident: an overlay edit must not fire
+        the "skills changed, here's the changelog" notice, which would then say
+        nothing about the edit that fired it."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        before = compute_skills_fingerprint(skills_dir, bundled)
+
+        (overlays / "developer.md").write_text("- A rule.\n")
+        assert compute_skills_fingerprint(skills_dir, bundled) == before
+
+        (overlays / "developer.md").write_text("- A different rule entirely.\n")
+        assert compute_skills_fingerprint(skills_dir, bundled) == before
+
+        (overlays / "developer.md").unlink()
+        assert compute_skills_fingerprint(skills_dir, bundled) == before
+
+    def test_the_fingerprint_still_moves_for_a_skill_edit(self, tmp_path):
+        """The control for the test above: a fingerprint pinned by a broken hash
+        would pass that one while detecting nothing at all."""
+        skills_dir, _overlays, bundled = self._dirs(tmp_path)
+        before = compute_skills_fingerprint(skills_dir, bundled)
+
+        _write_skill(skills_dir, "developer", "DEVELOPER BODY, REVISED.")
+
+        assert compute_skills_fingerprint(skills_dir, bundled) != before
 
 
 class TestComputeSkillsFingerprint:

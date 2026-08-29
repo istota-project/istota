@@ -15,6 +15,7 @@ import hashlib
 import importlib
 import json
 import logging
+import re
 import tomllib
 from pathlib import Path
 
@@ -632,6 +633,113 @@ def _resolve_skill_doc_path(
     return None
 
 
+# --------------------------------------------------------- per-skill overlays
+
+#: Skills that accept no user overlay. Not a security boundary — the user can
+#: already fork either doc through the operator override — but a guard against
+#: a casual preference line landing in the safety layer.
+OVERLAY_DENYLIST = frozenset({"sensitive_actions", "untrusted_input"})
+
+#: Above this the file is logged as suspicious but still loaded.
+OVERLAY_WARN_BYTES = 8 * 1024
+
+#: Above this the file is not loaded at all. The failure mode the cap guards
+#: against is someone — quite possibly the agent, half-remembering the
+#: *operator* override, which is replace semantics — dropping a forked 47 KB
+#: skill doc in here and getting two contradictory bodies in one prompt with no
+#: error anywhere.
+OVERLAY_MAX_BYTES = 32 * 1024
+
+#: ``{user_id}`` is substituted by the call sites, alongside ``{scripts_dir}``
+#: and the rest. Level 4, so the block sits *inside* the skill's own ``### ``.
+OVERLAY_LABEL = "#### {user_id}'s configuration for this skill"
+OVERLAY_PREAMBLE = (
+    "These instructions come from the user and supersede anything above that "
+    "conflicts with them."
+)
+
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def _demote_overlay_headings(text: str) -> str:
+    """Push a level-2 heading in an overlay down to level 4.
+
+    The overlay rides under the skill's own ``### <Title>``, so a ``## `` line
+    inside it would close that section and leave the rest of the overlay reading
+    as a sibling of the whole skills reference. Demoting rather than dropping is
+    deliberate: a hand-edited file then misbehaves visibly instead of losing
+    content silently.
+
+    Fenced blocks are skipped. A ``## `` inside one is a sample — an overlay for
+    the notes skill quite plausibly carries a markdown template — and rewriting
+    it would corrupt the user's own text.
+    """
+    out = []
+    fence: str | None = None
+    for line in text.split("\n"):
+        m = _FENCE_RE.match(line)
+        if m:
+            marker = m.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            out.append(line)
+            continue
+        if fence is None and line.startswith("## "):
+            line = "#### " + line[3:]
+        out.append(line)
+    return "\n".join(out)
+
+
+def _load_user_overlay(
+    user_overlay_dir: Path | None,
+    skill_name: str,
+    bot_name: str,
+    bot_dir: str,
+) -> str | None:
+    """Read and render one skill's per-user overlay body, or None.
+
+    Every failure path returns None, so a missing directory, an unreadable file,
+    an over-cap one and a denylisted skill all degrade to exactly the prompt
+    this skill would have had with no overlay at all. The worst case here is
+    that a customization is inert.
+    """
+    if user_overlay_dir is None or skill_name in OVERLAY_DENYLIST:
+        return None
+
+    path = user_overlay_dir / f"{skill_name}.md"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+
+    if len(raw) > OVERLAY_MAX_BYTES:
+        logger.warning(
+            "skill overlay %s is %d bytes (cap %d) — not loaded. An overlay is "
+            "appended to the bundled body, not a replacement for it.",
+            path, len(raw), OVERLAY_MAX_BYTES,
+        )
+        return None
+    if len(raw) > OVERLAY_WARN_BYTES:
+        logger.warning(
+            "skill overlay %s is %d bytes, over the %d-byte guidance",
+            path, len(raw), OVERLAY_WARN_BYTES,
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        logger.warning("skill overlay %s is not valid UTF-8 — not loaded", path)
+        return None
+
+    body = _strip_frontmatter(text).strip()
+    if not body:
+        return None
+    body = _demote_overlay_headings(body)
+    return body.replace("{BOT_NAME}", bot_name).replace("{BOT_DIR}", bot_dir)
+
+
 def load_skills(
     skills_dir: Path,
     skill_names: list[str],
@@ -639,8 +747,16 @@ def load_skills(
     bot_dir: str = "",
     skill_index: dict[str, SkillMeta] | None = None,
     bundled_dir: Path | None = None,
+    user_overlay_dir: Path | None = None,
 ) -> str:
-    """Load and concatenate selected skill docs, substituting placeholders."""
+    """Load and concatenate selected skill docs, substituting placeholders.
+
+    ``user_overlay_dir`` is the user's ``config/skills/`` directory (None when
+    the deployment has no mount, or for a caller with no user in hand). Applying
+    the overlay here rather than at the call sites is the point: there are two
+    load paths — the eager one in ``executor`` and ``skills show`` — and this
+    codebase keeps getting bitten by the two drifting.
+    """
     if not bot_dir:
         bot_dir = bot_name.lower()
 
@@ -655,7 +771,11 @@ def load_skills(
             title = name.replace("-", " ").replace("_", " ").title()
             content = _strip_frontmatter(doc_path.read_text()).strip()
             content = content.replace("{BOT_NAME}", bot_name).replace("{BOT_DIR}", bot_dir)
-            parts.append(f"### {title}\n\n{content}")
+            block = f"### {title}\n\n{content}"
+            overlay = _load_user_overlay(user_overlay_dir, name, bot_name, bot_dir)
+            if overlay:
+                block += f"\n\n{OVERLAY_LABEL}\n\n{OVERLAY_PREAMBLE}\n\n{overlay}"
+            parts.append(block)
 
     if not parts:
         return ""
@@ -700,6 +820,12 @@ def compute_skills_fingerprint(
     Hashes all skill.toml + skill.md files from both bundled and operator dirs,
     plus legacy _index.toml and *.md files. Sorted by name for determinism.
     Returns the first 12 chars of the hex digest.
+
+    The *user* tree is deliberately not scanned, so editing a per-skill overlay
+    does not move the fingerprint and does not fire the "skills changed, here's
+    the changelog" notice in ``executor``. That is required behaviour rather
+    than an oversight: a changelog that fires because the user edited their own
+    overlay, and then says nothing about that edit, is pure noise.
     """
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR

@@ -283,6 +283,9 @@ class Case:
     conversation_token: str | None = None
     #: Written into the mount before assembly: user memory and channel memory.
     memory: bool = False
+    #: Writes a per-skill user overlay for the eager `notes` skill into
+    #: `config/skills/notes.md` before assembly.
+    overlay: bool = False
     #: Seeds one completed task in the same conversation, so `_build_db_context`
     #: has history to render. Fixed `created_at`, so the rendered `[timestamp]`
     #: is a constant rather than a clock reading.
@@ -347,6 +350,12 @@ CASES: tuple[Case, ...] = (
     # The standalone shape: `istota setup` ships `sandbox_enabled = false`, and
     # rule 3 then says so rather than claiming a boundary that is not there.
     Case("sandbox_off", sandboxed=False),
+    # A per-skill user overlay on the eager `notes` skill. Against
+    # `base_nextcloud`, which it differs from in nothing else, so the diff
+    # between the two goldens is exactly the injected block — where it lands
+    # relative to the body, what the label and precedence line say, and the
+    # `## ` demotion.
+    Case("skill_overlay", overlay=True),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -457,6 +466,29 @@ def _seed_memory(config: Config, case: Case) -> None:
     channel_memory.write_text("CHANNEL MEMORY: this room is for release notes.\n")
 
 
+#: Deliberately carries a `## ` heading. The loader demotes it to `####` rather
+#: than dropping it, because at level 2 it would close the skill's own `### `
+#: section and leave the rest of the overlay reading as a sibling of the whole
+#: skills reference. The golden is where that is visible as prompt text.
+OVERLAY = (
+    "## Notes rules\n\n"
+    "- Never write a new file to the base folder.\n"
+    "- Frontmatter carries `agents:` on anything the bot wrote.\n"
+)
+
+
+def _seed_overlay(config: Config, case: Case) -> None:
+    if not case.overlay:
+        return
+    from istota.storage import _get_mount_path, get_user_skill_overlays_path
+
+    overlay_dir = _get_mount_path(
+        config, get_user_skill_overlays_path(USER, config.bot_dir_name)
+    )
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    (overlay_dir / "notes.md").write_text(OVERLAY)
+
+
 def _seed_history(config: Config, case: Case) -> None:
     """One completed prior turn in the same conversation.
 
@@ -507,6 +539,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
         "discovery against a real server; see the module docstring"
     )
     _seed_memory(config, case)
+    _seed_overlay(config, case)
     _seed_history(config, case)
     task = _build_task(case)
 
@@ -596,6 +629,38 @@ def test_normalization_is_total(case, tmp_path, monkeypatch):
                 f"a wall-clock value survived normalization: {rendered!r} "
                 f"(format {fmt!r})"
             )
+
+
+def test_a_skill_overlay_adds_a_block_and_changes_nothing_else(tmp_path, monkeypatch):
+    """The eager load path's witness, stated as a difference rather than as a
+    substring.
+
+    `skill_overlay` and `base_nextcloud` differ in one seeded file, so removing
+    the injected block from the first must yield the second exactly. A substring
+    assertion would pass just as happily on a prompt that had also lost a layer
+    somewhere else, and the fingerprint arm is the one that would go quiet if
+    `compute_skills_fingerprint` ever started scanning the user tree — which
+    would fire the skills changelog on an overlay edit and then say nothing
+    about it.
+    """
+    base = assemble(CASES_BY_NAME["base_nextcloud"], tmp_path / "base", monkeypatch)
+    overlaid = assemble(CASES_BY_NAME["skill_overlay"], tmp_path / "overlaid", monkeypatch)
+
+    block = (
+        "\n\n#### alice's configuration for this skill\n\n"
+        "These instructions come from the user and supersede anything above "
+        "that conflicts with them.\n\n"
+        "#### Notes rules\n\n"
+        "- Never write a new file to the base folder.\n"
+        "- Frontmatter carries `agents:` on anything the bot wrote."
+    )
+    assert block in overlaid, "the overlay block is not in the assembled prompt"
+    assert overlaid.replace(block, "") == base
+
+    # The `## ` the fixture wrote was demoted rather than dropped: at level 2 it
+    # would have closed `### Notes` and left the rules reading as a sibling of
+    # the whole skills reference.
+    assert "\n## Notes rules" not in overlaid
 
 
 def test_every_golden_file_belongs_to_a_case():

@@ -105,10 +105,29 @@ def _workspace_dir(config, user_id: str) -> str:
     return f"{config.rclone_remote}:{base}"
 
 
+def _overlay_dir(config, user_id: str):
+    """The user's per-skill overlay directory, or None.
+
+    Overlays are read off the filesystem, so a deployment without the mount has
+    none — the same condition the per-user PERSONA.md already carries.
+    """
+    from istota.storage import get_user_skill_overlays_path
+
+    if not (config.use_mount and config.nextcloud_mount_path is not None):
+        return None
+    nc_path = get_user_skill_overlays_path(user_id, config.bot_dir_name)
+    return config.nextcloud_mount_path / nc_path.lstrip("/")
+
+
 def _render_companion_body(config, name: str, meta) -> str | None:
     """Render one companion skill's body (frontmatter stripped, placeholders
     substituted) WITHOUT the ``## Skills Reference`` wrapper — it rides under a
     delimiter beneath the primary skill. Returns None if the doc can't be read.
+
+    Deliberately no per-skill user overlay here: a companion rides as a
+    guardrail, not as the skill the user is configuring. An overlay for a skill
+    currently being rendered as a companion still applies when that skill is
+    loaded as the primary one.
     """
     from istota.skills._loader import _resolve_skill_doc_path, _strip_frontmatter
 
@@ -142,6 +161,7 @@ def cmd_show(args) -> None:
         config.bot_dir_name,
         skill_index=skill_index,
         bundled_dir=config.bundled_skills_dir,
+        user_overlay_dir=_overlay_dir(config, ctx["user_id"]),
     )
     if not body:
         _output_error(f"no documentation found for skill {name!r}")
