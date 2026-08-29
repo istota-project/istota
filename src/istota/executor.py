@@ -3160,8 +3160,13 @@ def native_fs_roots(
     #
     # The fallback root is operator-owned, outside `repos_dir`, and bound into
     # no sandbox, so there is no writer to race there.
+    # Called unconditionally, and only the `_add` is gated: the resolver
+    # *creates* the cache directory, and that side effect is what the rest of
+    # the task path expects to have happened by now. Folding the call into the
+    # branch would have skipped creating it on exactly the shape that needs it.
+    _native_cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
     if not sandbox_cache_is_derived(config, task.user_id):
-        _add(write, resolve_sandbox_cache_dir(config, task.user_id))
+        _add(write, _native_cache_dir)
 
     # No deny root for another user's cache, and its absence is the point.
     # ISSUE-319 needed one here because the cache root was shared and sat inside
