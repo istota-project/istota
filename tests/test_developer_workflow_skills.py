@@ -614,61 +614,121 @@ class TestBodiesDoNotContradict:
 # ---------------------------------------------------------------------------
 # ISSUE-337: the workflow defers, the deployment's mechanics do not.
 
-# Anything that mentions a test suite at all, so a new line has to be classified
-# rather than slipping past a pattern aimed at today's phrasings.
-_SUITE_MENTION = re.compile(r"\bsuites?\b|\bfull pass\b", re.IGNORECASE)
+# Anything that mentions a run over more than what the change touched, so a new
+# line has to be classified rather than slipping past a pattern aimed at today's
+# phrasings. `verification pass` is in here because this document introduced the
+# phrase: a detector that only knows the vocabulary it replaced would not see the
+# next mandate written in the vocabulary it installed.
+_SUITE_MENTION = re.compile(r"\bsuites?\b|\bfull pass\b|\bverification pass\b", re.IGNORECASE)
 
 # What a line has to carry to count as yielding to the user on the spot.
 _DEFERENCE_MARKERS = ("user's own instructions", "USER.md", "CHANNEL.md")
 
+# ...and what a line naming the pass must not do: restate its scope. A pointer
+# that grows into "the full verification pass over the whole repository" is the
+# restatement coming back.
+_SCOPE_WORDS = re.compile(
+    r"\b(full|whole|entire)\s+(\w+\s+){0,2}(pass|suite|run|repository|tree)\b|\bevery test\b",
+    re.IGNORECASE,
+)
+
 _DEFERRED = "deferred default"  # states the default and yields on the same line
+_POINTER = "pointer"  # names the pass section 7 defines, without a scope of its own
 _NOT_A_MANDATE = "not a mandate"  # a negation, or a fact about the host
 
-# Every line of the `developer` body allowed to mention a suite, keyed by a
-# fragment that identifies it, with the reason it is allowed. An allowlist and
-# not a pattern: a regex looking for "must" or "always" passes the next mandate
-# that happens to be phrased differently, which is the failure ISSUE-337 was —
-# one bullet stating the rule and six others restating it as an order.
+
+def _digest(line):
+    import hashlib
+
+    return hashlib.sha256(line.encode()).hexdigest()[:12]
+
+
+# Every line of the `developer` body allowed to mention a pass over more than the
+# change, keyed by a fragment that locates it and a digest that pins the whole of
+# it. An allowlist and not a pattern: a regex looking for "must" or "always"
+# passes the next mandate phrased differently, which is the failure ISSUE-337 was
+# — one bullet stating the rule and six others restating it as an order. The
+# digest is what closes the other half, since a fragment match alone lets a
+# mandate be appended to a line already on the list; editing one of these lines
+# fails here on purpose, and the message carries the replacement digest.
 _SUITE_LINES_ALLOWED = [
     (
         _NOT_A_MANDATE,
         "dozens of unrelated red suites",
-        "the shape a shared node_modules fails in; names no suite to run",
+        "9016c19c3dcf",
+        "the shape a shared node_modules fails in; names no run",
     ),
     (
         _NOT_A_MANDATE,
         "not a full suite. The base branch was green",
+        "a775ea2767b0",
         "step 3 forbids the baseline pass outright",
+    ),
+    (
+        _POINTER,
+        "then the verification pass below once, commit",
+        "b9a1bfb02003",
+        "Fast tier, naming the pass section 7 defines",
+    ),
+    (
+        _POINTER,
+        "the verification pass below green before the commit",
+        "7b6c79754330",
+        "Standard tier, naming the same pass",
+    ),
+    (
+        _POINTER,
+        "the verification pass below before and after",
+        "f3260296e8cd",
+        "Full tier, naming the same pass",
     ),
     (
         _NOT_A_MANDATE,
         "the suite goes red in a way you did not predict",
+        "30d61b747f8a",
         "a trigger for escalating a tier, conditioned on a run that happened",
     ),
     (
         _NOT_A_MANDATE,
         "each suite claims the whole box",
+        "c02be78e4544",
         "the worker cap: a property of the host, and one of the mechanics",
     ),
     (
         _NOT_A_MANDATE,
         "no longer exits 0 on a suite that failed",
+        "426678448812",
         "how pipefail is read; correctness of the answer, not scope",
     ),
     (
         _NOT_A_MANDATE,
         "a long suite might have finished",
+        "9f65a12ca012",
         "why a near-ceiling timeout is the wrong fix for a long run",
     ),
     (
         _DEFERRED,
         "Affected tests during the loop, the full suite once at the end of the work",
+        "2e78b69a29b8",
         "the single statement of the shipped default",
     ),
     (
         _NOT_A_MANDATE,
         "Never re-run a full suite that a timeout killed",
+        "b96d90c65706",
         "a prohibition on re-running one",
+    ),
+    (
+        _POINTER,
+        "run a review after the work's verification pass",
+        "e5bf1007bad9",
+        "the review's place in the order, naming the same pass",
+    ),
+    (
+        _POINTER,
+        "Tests: <the final verification pass",
+        "d77f4bf79bd5",
+        "the report template's field, which stage 3 rewrites",
     ),
 ]
 
@@ -729,28 +789,40 @@ class TestWorkflowDeference:
     def test_no_surviving_full_suite_mandate(self):
         """A2. The failure this catches is the document contradicting itself —
         the deference rule stated once and the old orders left standing
-        elsewhere, where they win on repetition. Every line that mentions a
-        suite is classified here by hand, so a mandate added later fails
-        instead of passing on a pattern that did not anticipate its wording."""
+        elsewhere, where they win on repetition. Every line that mentions a run
+        wider than the change is classified here by hand and pinned by digest,
+        so both a new mandate and one grafted onto an allowed line fail rather
+        than passing on a pattern that did not anticipate the wording."""
         lines = [ln.strip() for ln in self._body().splitlines() if _SUITE_MENTION.search(ln)]
         assert lines, "the pattern matches nothing; it no longer detects anything"
 
         for line in lines:
             hits = [e for e in _SUITE_LINES_ALLOWED if e[1] in line]
             assert len(hits) == 1, (
-                "a line mentioning a test suite is not on the allowlist, or "
-                f"matches more than one entry ({len(hits)}): {line[:160]!r}"
+                "a line naming a run wider than the change is not on the "
+                f"allowlist, or matches more than one entry ({len(hits)}): {line[:160]!r}"
             )
 
-        for kind, fragment, reason in _SUITE_LINES_ALLOWED:
+        for kind, fragment, digest, reason in _SUITE_LINES_ALLOWED:
             matching = [ln for ln in lines if fragment in ln]
             assert len(matching) == 1, (
                 f"allowlist entry ({reason}) matches {len(matching)} lines, not one: {fragment!r}"
             )
+            line = matching[0]
+            assert _digest(line) == digest, (
+                f"the allowlisted line ({reason}) changed. Read the whole of it: if it "
+                f"still yields, update its digest to {_digest(line)!r}; if it now demands "
+                f"a wider run, that is the finding. Line: {line[:200]!r}"
+            )
             if kind is _DEFERRED:
-                assert any(m in matching[0] for m in _DEFERENCE_MARKERS), (
+                assert any(m in line for m in _DEFERENCE_MARKERS), (
                     "a line stating the test-scope default has to yield to the "
-                    f"user on the same line: {matching[0][:160]!r}"
+                    f"user on the same line: {line[:160]!r}"
+                )
+            if kind is _POINTER:
+                assert not _SCOPE_WORDS.search(line), (
+                    "a line naming the section 7 pass must not restate its scope, "
+                    f"which is the restatement this change removed: {line[:160]!r}"
                 )
 
         defaults = [e for e in _SUITE_LINES_ALLOWED if e[0] is _DEFERRED]
