@@ -8,7 +8,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 |---|---|
 | `files` | File operations in your workspace |
 | `sensitive_actions` | Confirmation rules for destructive operations |
-| `memory` | Persistent memory writes — USER.md (behavioral) and the knowledge graph (facts). CLI: append, add-heading, remove, replace, remove-heading, show, headings |
+| `memory` | Persistent memory writes — USER.md (behavioral), the knowledge graph (facts), and per-skill overlays. CLI: append, add-heading, remove, replace, remove-heading, show, headings, skills |
 | `scripts` | User's reusable Python scripts |
 | `memory_search` | Memory search CLI (search, index, reindex, stats, facts, timeline, add-fact, invalidate, delete-fact, fact-history) |
 | `kv` | Key-value store for persistent runtime state |

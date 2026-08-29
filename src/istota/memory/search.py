@@ -528,12 +528,20 @@ def _reindex_skill_overlays(
     rule the loader and the memory CLI apply, and the resolved path is what is
     walked.
 
-    **Only what binds is indexed.** A file named for a skill that does not
-    exist, one for a denylisted skill, or one past the loading cap reaches no
-    prompt at all, so indexing it would have search return a rule that is not
-    in any prompt — the failure the delete-on-empty path exists to prevent,
+    **Only what binds is indexed — here.** A file named for a skill that does
+    not exist, one for a denylisted skill, or one past the loading cap reaches
+    no prompt at all, so indexing it would have search return a rule that is
+    not in any prompt — the failure the delete-on-empty path exists to prevent,
     arrived at from the other side. `doctor`'s `config.skill_overlays` is what
     reports such a file; search declines to pretend it is live.
+
+    The memory CLI's per-write re-index (`skills/memory._reindex_overlay`) does
+    **not** apply this gate, and the asymmetry is worth knowing rather than
+    assuming away: a write past `OVERLAY_MAX_BYTES` is permitted with a warning
+    rather than refused (only the 1 MiB read cap refuses one), and a write
+    against a *disabled* skill is permitted outright, since the write path
+    checks index membership and the denylist but not `effective_disabled_skills`.
+    Either is searchable until this pass next runs and reaps it below.
 
     **Rows for a vanished file go.** Unlike USER.md, an overlay is a file the
     workflow deletes — the memory CLI removes one whose last bullet goes, and a

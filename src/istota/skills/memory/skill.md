@@ -89,17 +89,17 @@ A skill's instructions can carry a per-user addition at `config/skills/<skill-na
 istota-skill memory skills                       # inventory: what's customized, and does it load
 istota-skill memory show --skill notes
 istota-skill memory append --skill notes --line "Give every generated file a dated prefix"
-istota-skill memory replace --skill notes --match "dated prefix" --line "..."
-istota-skill memory remove --skill notes --match "dated prefix"
+istota-skill memory replace --skill notes --match "dated prefix" --line "Give every generated file a dated suffix"
+istota-skill memory remove --skill notes --match "dated suffix"
 ```
 
 Rules:
 
 - Run the classification test above before writing one. A rule that must hold on tasks where the skill did not load belongs in USER.md instead — an overlay only reaches the prompt when its skill is selected.
-- An overlay is flat: no `## ` sections. `--heading` names a `### ` subsection of the overlay instead, and without it the op targets the top of the file. `add-heading`, `remove-heading` and `headings` are refused.
+- An overlay is flat: no `## ` sections. `--heading` names a `### ` subsection of the overlay instead. Omitted, it means the top of the file on `append` and the whole file on `remove`/`replace` — so a bare `remove` still reaches a bullet inside a subsection. `--subheading` is refused as a second spelling of the same target, and so are `add-heading`, `remove-heading` and `headings`.
 - `--skill` and `--channel` cannot be combined. An unknown skill name is refused with the list of known names — run `memory skills` if you are unsure of the spelling.
 - `sensitive_actions` and `untrusted_input` accept no overlay.
-- `append` creates the file; a `remove` that takes the last line deletes it. Over 8 KB warns, over 32 KB stops loading entirely.
+- `append` creates the file. A `remove` that leaves the file empty deletes it — but a leftover `### ` subheading is not empty, so remove that too or the skill's prompt carries a heading with nothing under it. Keep it short: past 8 KB the write is warned about, past 32 KB the file stops loading (the write still lands, so `show` and `remove` still work), and a write that would take it past 1 MB is refused outright.
 - A rule that applies to two skills goes in both files. There is no include mechanism.
 
 ### Don't bypass the CLI

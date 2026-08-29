@@ -196,10 +196,10 @@ The text lands at the end of the skill's section under a `#### alice's configura
 Rules:
 
 - Plain markdown, bullets preferred. YAML frontmatter is stripped if present.
-- No `# ` or `## ` headings. The block already sits inside the skill's own `### ` section and a heading that shallow breaks out of it, taking every skill rendered after it along. One written anyway is demoted to `#### ` at load time rather than dropped, so a hand-edited file misbehaves visibly; `istota doctor` warns about it.
-- Over 8 KB warns. Over 32 KB is not loaded at all.
+- No `# ` or `## ` headings. The overlay is rendered under a `#### ` label of its own, and a heading that shallow ends that block and floats the rules up as a new section peer to the whole skills reference, detached from the skill they configure. One written anyway is demoted to `#### ` at load time rather than dropped, so a hand-edited file misbehaves visibly; `istota doctor` warns about it. `### ` and deeper are fine.
+- Over 8 KB warns. Over 32 KB is not loaded at all — the write still lands, so the file is still readable and shrinkable through the CLI, but it reaches no prompt. Only a write that would take the file past 1 MB is refused outright, since past that the CLI could no longer read it back to shrink it.
 - `sensitive_actions` and `untrusted_input` accept no overlay. Not a security boundary — the operator override can still replace either document — but a guard against a casual preference line landing in the safety layer.
-- A file named for a skill that does not exist is silently never read. `istota doctor`'s `config.skill_overlays` check is the only thing that says so, across every user's tree.
+- A file named for a skill that does not exist is silently never read. Two things report it: `istota-skill memory skills` for one user, and `istota doctor`'s `config.skill_overlays` check across every user's tree.
 - Overlays are read from the workspace mount, so a deployment without one has no overlays. Every failure above degrades to exactly the prompt the skill would have had with no overlay at all.
 - Editing an overlay does not move the skills fingerprint, so it does not fire the "skills changed" notice. That notice would otherwise appear and then say nothing about the edit that triggered it.
 
@@ -215,11 +215,11 @@ A note-naming convention is irrelevant on a task that writes no note, and belong
 istota-skill memory skills                      # inventory: what is customized, and does it load
 istota-skill memory show --skill developer
 istota-skill memory append --skill developer --line "A full test run takes about an hour here — ask first."
-istota-skill memory replace --skill developer --match "about an hour" --line "..."
-istota-skill memory remove --skill developer --match "about an hour"
+istota-skill memory replace --skill developer --match "about an hour" --line "A full test run takes about two hours here — ask first."
+istota-skill memory remove --skill developer --match "about two hours"
 ```
 
-`append` creates the file; a `remove` that takes the last line deletes it, so the directory stays an honest inventory. `--skill` and `--channel` are mutually exclusive, an unknown skill name is refused with the list of known ones, and `add-heading` / `remove-heading` / `headings` are refused because an overlay has no `## ` sections. Under `--skill`, `--heading` names a `### ` subsection of the overlay rather than a section of `USER.md`.
+`append` creates the file. A `remove` that leaves the file *empty* deletes it, so the directory stays an honest inventory — note that emptiness is judged on the whole file, so an overlay whose last bullet goes but whose `### ` subheading remains is kept, and the skill's prompt then carries that heading with nothing under it. `--skill` and `--channel` are mutually exclusive, an unknown skill name is refused with the list of known ones, and `add-heading` / `remove-heading` / `headings` are refused because an overlay has no `## ` sections. Under `--skill`, `--heading` names a `### ` subsection of the overlay rather than a section of `USER.md`.
 
 Overlay text is indexed for memory search under the `skill_overlay` source type, so a search finds a rule without the user knowing which file holds it. The nightly curator is shown the inventory — skill names and line counts, never the bodies — so it does not copy a rule back into `USER.md` a week after it moved out.
 
