@@ -273,6 +273,17 @@ class SchedulerConfig:
     # it: the two answer the same disk, and a cache that went over its ceiling
     # is not urgent — it is over budget, not broken.
     sandbox_cache_sweep_interval: int = 21600
+    # Seconds between per-skill overlay memory-search reindex passes (ISSUE-343,
+    # 0 = off). An overlay is a file the *user* writes, so there is no write path
+    # to index from — the memory CLI's per-write reindex went with the overlay
+    # write verbs, and it never covered a text-editor edit over Nextcloud
+    # anyway, which is the authoring mode the file is for. A full directory pass
+    # is the only seam that covers every route. Here rather than in the sleep
+    # cycle, which is where it first went: `check_sleep_cycles` returns early
+    # when `sleep_cycle.enabled` is false and again when the primary brain's
+    # breaker is open, and a reindex that makes no brain call has no business
+    # behind either gate. Six hours, matching the two sweeps above.
+    skill_overlay_reindex_interval: int = 21600
     db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
     db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
     db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
@@ -2779,6 +2790,7 @@ def load_config(config_path: Path | None = None) -> Config:
             doctor_check_interval=sched.get("doctor_check_interval", 3600),
             worktree_reap_interval=sched.get("worktree_reap_interval", 21600),
             sandbox_cache_sweep_interval=sched.get("sandbox_cache_sweep_interval", 21600),
+            skill_overlay_reindex_interval=sched.get("skill_overlay_reindex_interval", 21600),
             db_backup_enabled=sched.get("db_backup_enabled", True),
             db_backup_interval=sched.get("db_backup_interval", 86400),
             db_backup_dir=sched.get("db_backup_dir", ""),
