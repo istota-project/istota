@@ -551,13 +551,26 @@ class TestBodiesDoNotContradict:
         )
         assert "PYTEST_XDIST_AUTO_NUM_WORKERS" in self._body("developer")
 
-    def test_commit_precedes_review_in_the_lifecycle(self):
-        """The review resolves a commit range, so a lifecycle that numbers the
-        review before the commit reviews an empty diff and comes back clean."""
-        body = self._body("developer")
-        commit_step = body.index("### 8. Commit")
-        review_step = body.index("### 9. Review before landing")
-        assert commit_step < review_step
+    def test_the_review_body_says_to_commit_first(self):
+        """The review resolves a commit range, so a dirty worktree reviews an
+        empty diff and comes back clean for the wrong reason. The developer
+        body used to carry this as lifecycle step ordering; with the lifecycle
+        gone it belongs to the tool that has the property."""
+        body = self._body("code_review")
+        assert "Commit first" in body
+        assert "empty diff" in body
+
+    def test_the_review_body_does_not_mandate_when(self):
+        """`code_review` rides as a companion in the same response as
+        `developer`, so a mandate here is exactly as binding as one there."""
+        body = self._body("code_review")
+        assert "Whenever you are asked to" in body
+        for mandate in ("unless the change is Fast tier",
+                        "Fast-tier changes are not reviewed"):
+            assert mandate not in body, (
+                f"{mandate!r} re-imposes a review policy, and names a tier the "
+                "developer skill no longer defines"
+            )
     """The whole reason the split is safe: pulling `developer` from the menu
     delivers all three bodies in the same response, so the commit scrub rules
     and the review gate are never a second round trip the model may skip."""
@@ -594,7 +607,7 @@ class TestBodiesDoNotContradict:
         assert "Never `git add -A`" in out
         assert "A `skipped` review is not a clean review." in out
         # And the spine itself.
-        assert "The Job Lifecycle" in out
+        assert "machinery, not method" in out
 
     def test_non_admin_gets_commit_and_a_marker_for_code_review(
         self, tmp_path, monkeypatch, capsys
@@ -774,302 +787,86 @@ _DEFERRED_DECISIONS = {
 }
 
 
-class TestWorkflowDeference:
-    """ISSUE-337. The body carries deployment mechanics and a development
-    routine under one voice, and the routine shipped as an order to every
-    deployment — a task followed it into a full suite on a host that takes 70
-    minutes to run one, was killed at 47, and committed nothing. The routine is
-    now a default that yields to `USER.md` and `CHANNEL.md`; the mechanics are
-    not.
+class TestTheBodyPrescribesNoWorkflow:
+    """ISSUE-337 made the developer skill's routine a default that yields. The
+    routine is now **gone**: the body is machinery only, and the process is the
+    caller's to ask for.
 
-    The audit here reads the `developer` body alone, while a menu pull
-    delivers `commit` and `code_review` in the same response. Both still
-    state their own workflow rules unconditionally — commit granularity in
-    one, the Fast-tier review exemption in the other — and the spec puts
-    those two bodies out of scope. Widening the scan is the fix if that
-    decision changes."""
+    That is a stronger property than deference and it needs guarding, because
+    the natural way to answer "the model did not run tests" is to put a rule
+    back in here — which re-ships one contributor's habits to every install,
+    which is what ISSUE-337 was filed about. A workflow belongs in `USER.md`,
+    in `config/skills/developer.md`, or in a project room's `CHANNEL.md`.
 
-    def _body(self):
+    The audit reads the `developer` body alone, while a menu pull delivers
+    `commit` and `code_review` in the same response. Both still state their own
+    rules; those two bodies stay out of scope here."""
+
+    def _body(self) -> str:
         return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
 
-    def _step_body(self, body, heading):
-        """The text under one heading, the heading line itself excluded, up to
-        the next `##` or `###`. Excluding it is the point: a deference marker
-        written into a heading would otherwise satisfy a check about the text
-        underneath. Not the module-level `_section` further down this file,
-        which stops at `####` as well and returns a different slice."""
-        # To the end of the heading *line*, not of the string searched for: a
-        # marker appended to the heading is still in the heading.
-        start = body.index("\n", body.index(heading)) + 1
-        rest = body[start:]
-        following = re.search(r"^#{2,3} ", rest, re.MULTILINE)
-        return rest[: following.start()] if following else rest
+    def test_there_is_no_lifecycle_section(self):
+        body = self._body()
+        for banned in ("## The Job Lifecycle", "### 7. The verification budget",
+                       "### 9. Review before landing", "### 12. Report",
+                       "### 5. Pick a change tier"):
+            assert banned not in body, (
+                f"{banned!r} is back in the developer body; a workflow belongs "
+                "in USER.md or in the user's developer overlay, not here"
+            )
 
-    def test_the_lifecycle_states_the_deference_rule(self):
-        """A1. The skill body arrives mid-task, after user and channel memory
-        are already in the system prompt, so it is the later and more specific
-        document — which is why an override written in `CHANNEL.md` lost to it
-        on 2026-08-28. Deference is the skill spending that lateness on
-        pointing back at the earlier document. It has to name both files: a
-        rule naming only `USER.md` leaves per-project workflow nowhere to go,
-        and one naming only `CHANNEL.md` reaches no task from the 1:1."""
-        lifecycle = self._step_body(self._body(), "## The Job Lifecycle")
-        paragraphs = [p for p in lifecycle.split("\n\n") if "USER.md" in p]
-        assert len(paragraphs) == 1, (
-            "the deference rule is one paragraph near the top of the lifecycle; "
-            f"found {len(paragraphs)} mentioning USER.md"
+    def test_it_says_it_is_machinery_rather_than_method(self):
+        assert "machinery, not method" in self._body()
+
+    def test_it_says_tests_and_reviews_are_asked_for(self):
+        """The single sentence the whole trim rests on. Without it the absence
+        of a workflow reads as an omission the model should fill in."""
+        body = self._body()
+        assert "run tests and reviews when you are asked to" in body
+
+    def test_it_names_every_place_a_workflow_can_come_from(self):
+        """Naming only `USER.md` was the pre-overlay answer and sends a coding
+        workflow into the file read on every task, coding or not."""
+        body = self._body()
+        for home in ("USER.md", "config/skills/developer.md", "CHANNEL.md"):
+            assert home in body, f"the body never tells the model to look in {home}"
+
+    def test_the_mechanics_still_do_not_yield(self):
+        """The other half. A body that yields on everything would let a task
+        talk itself past the forge boundary or a delete path."""
+        body = self._body()
+        assert "does **not** yield" in body or "What does **not** yield" in body
+        for mechanic in ("forge boundary", "CONNECT allowlist", "credential rules",
+                         "delete path"):
+            assert mechanic in body, f"{mechanic!r} is no longer named as non-negotiable"
+
+    def test_no_surviving_test_or_review_mandate(self):
+        """Scans for the imperative forms that would re-impose a process."""
+        body = self._body()
+        for phrase in (
+            "always run the full suite",
+            "run a review before",
+            "must run the tests",
+            "Unless the change is Fast tier",
+            "Commit in coherent steps rather than one lump",
+        ):
+            assert phrase not in body, (
+                f"{phrase!r} re-imposes a workflow the skill no longer owns"
+            )
+
+    def test_the_cap_is_not_stated_as_a_number(self):
+        """The body said "600 seconds" three times. Nothing in istota sets that:
+        it is the Claude Code harness's ceiling, while NativeBrain's bash tool
+        defaults to `bash_timeout_seconds = 120` — so on a deployment with
+        `fallback = "native"` a task planned against 600 is killed at 120 with
+        nothing to show, which is the exact failure the advice exists to stop."""
+        body = self._body()
+        assert "600" not in body, (
+            "a specific tool-call ceiling is back in the body; it depends on "
+            "which brain is driving and on what the caller passed"
         )
-        rule = paragraphs[0]
-        assert "CHANNEL.md" in rule, "the rule names USER.md but not CHANNEL.md"
-        # The tie-break: the model has no other way to resolve two workflows.
-        assert "`CHANNEL.md` wins" in rule, rule
-        # And which set of instructions does not yield, since a user asking for
-        # work in place under /srv/app collides with a pre-submission check.
-        assert "does not yield" in rule and "mechanics" in rule, rule
+        assert "Do not plan against a specific number of seconds" in body
 
-    def test_no_surviving_full_suite_mandate(self):
-        """A2. The failure this catches is the document contradicting itself —
-        the deference rule stated once and the old orders left standing
-        elsewhere, where they win on repetition. Every line that mentions a run
-        wider than the change is classified here by hand and pinned by digest,
-        so both a new mandate and one grafted onto an allowed line fail rather
-        than passing on a pattern that did not anticipate the wording."""
-        lines = [ln.strip() for ln in self._body().splitlines() if _SUITE_MENTION.search(ln)]
-        assert lines, "the pattern matches nothing; it no longer detects anything"
-
-        for line in lines:
-            hits = [e for e in _SUITE_LINES_ALLOWED if e[1] in line]
-            assert len(hits) == 1, (
-                "a line naming a run wider than the change is not on the "
-                f"allowlist, or matches more than one entry ({len(hits)}): {line[:160]!r}"
-            )
-
-        for kind, fragment, digest, reason in _SUITE_LINES_ALLOWED:
-            matching = [ln for ln in lines if fragment in ln]
-            assert len(matching) == 1, (
-                f"allowlist entry ({reason}) matches {len(matching)} lines, not one: {fragment!r}"
-            )
-            line = matching[0]
-            assert _digest(line) == digest, (
-                f"the allowlisted line ({reason}) changed. Read the whole of it: if it "
-                f"still yields, update its digest to {_digest(line)!r}; if it now demands "
-                f"a wider run, that is the finding. Line: {line[:200]!r}"
-            )
-            if kind is _DEFERRED:
-                assert any(m in line for m in _DEFERENCE_MARKERS), (
-                    "a line stating the test-scope default has to yield to the "
-                    f"user on the same line: {line[:160]!r}"
-                )
-            if kind is _POINTER:
-                assert not _SCOPE_WORDS.search(line), (
-                    "a line naming the section 7 pass must not restate its scope, "
-                    f"which is the restatement this change removed: {line[:160]!r}"
-                )
-
-        defaults = [e for e in _SUITE_LINES_ALLOWED if e[0] is _DEFERRED]
-        assert len(defaults) == 1, (
-            "the default is stated once. Six restatements of it are what "
-            f"ISSUE-337 cost; this allowlist carries {len(defaults)}"
-        )
-
-    def test_the_tier_bullets_name_one_pass_and_no_scope_of_their_own(self):
-        """A3. A tier decides how much *process* a change gets, and section 7
-        decides how much testing. Two of the three bullets used to decide both,
-        which put the mandate in the section the model reads first and left
-        section 7 arguing with it. Each bullet now names the one pass section 7
-        defines and states no scope of its own. Deliberately overlapping the
-        line-level guard above: these are the three lines a future "but Full
-        tier should really run everything" lands on, and a duplicated check on
-        the likeliest regression is cheap."""
-        section = self._step_body(self._body(), "### 5. Pick a change tier, and say which")
-        bullets = [ln for ln in section.splitlines() if ln.startswith("- **")]
-        assert [b.split("**")[1] for b in bullets] == ["Fast", "Standard", "Full"], bullets
-        for bullet in bullets:
-            assert "the verification pass below" in bullet, (
-                "a tier bullet does not name the pass section 7 defines, so it is "
-                f"deciding a scope of its own: {bullet[:140]!r}"
-            )
-            assert not re.search(r"\bsuites?\b", bullet, re.IGNORECASE), (
-                f"a tier escalates to a suite: {bullet[:140]!r}"
-            )
-            assert not _SCOPE_WORDS.search(bullet), (
-                f"a tier bullet restates a run scope: {bullet[:140]!r}"
-            )
-
-    LADDER_LEAD = "take the first rung that yields something"
-
-    def test_the_selection_ladder_is_present_and_ordered(self):
-        """A4. The narrow default is only safe if the model can work out what
-        "the tests covering the change" means in the repository in front of it,
-        and this skill ships to every deployment rather than to this one. The
-        drift to fear is a rewrite by someone working in a Python repository
-        who keeps rung 3 and rung 4, which is all pytest needs, and quietly
-        drops the runners that can answer the question themselves. So the four
-        rungs are required in order, and rung 2 is required to still name the
-        four ecosystems that have a selector.
-
-        Order matters as much as membership: rung 4 is a grep, and a ladder
-        that reached it before trying the runner's own selector would be
-        slower and less accurate everywhere the selector exists."""
-        section = self._step_body(self._body(), "### 7. The verification budget")
-        assert self.LADDER_LEAD in section, (
-            "the selection ladder is gone; the narrow default now names no way "
-            "of arriving at a selection"
-        )
-        ladder = section[section.index(self.LADDER_LEAD) :]
-        following = ladder.find("\n- **")
-        if following != -1:
-            ladder = ladder[:following]
-
-        marks = []
-        for rung in (1, 2, 3, 4):
-            # Either form: `(2)` inline, or `2.` if the ladder is ever unfolded
-            # into a nested list. What is pinned is the ladder, not its markup.
-            # `[ \t]` and not `\s`, which would swallow the preceding newlines
-            # and report an offset before the marker.
-            found = list(
-                re.finditer(rf"\({rung}\)|^[ \t]*{rung}\.[ \t]", ladder, re.MULTILINE)
-            )
-            assert len(found) == 1, (
-                f"rung {rung} appears {len(found)} times in the ladder, not once. "
-                "A second marker makes the ordering check below read whichever "
-                "one comes first, which is how an out-of-order ladder passes"
-            )
-            marks.append(found[0].start())
-        assert marks == sorted(marks), f"the four rungs are out of order: {marks}"
-
-        # Each rung is checked for the content that makes it that rung. Without
-        # this the ordering check passes on a ladder of four bare markers, and a
-        # rung emptied of everything but its number is the likeliest way the
-        # ladder degrades under a later edit.
-        rungs = [ladder[a:b] for a, b in zip(marks, marks[1:] + [len(ladder)])]
-        assert "already touches" in rungs[0], "rung 1 no longer names the tests the change edited"
-        for selector in ("vitest related", "--findRelatedTests", "go test ./", "cargo test -p"):
-            # `go test ./` and not `go test`: the latter is a substring of
-            # `cargo test -p`, so the Go rung would be held up by the Rust one
-            # and could be deleted with the assertion still green.
-            assert selector in rungs[1], (
-                f"rung 2 no longer names {selector!r}; a repository whose runner "
-                "can select for itself is sent to the grep instead"
-            )
-        assert "pytest" in rungs[1], (
-            "rung 2 does not say pytest has no selector, so a Python repository "
-            "either stops here or invents one"
-        )
-        assert "mirroring" in rungs[2], "rung 3 no longer names path mirroring"
-        assert "grep" in rungs[3].lower(), (
-            "rung 4 is no longer the grep, which is the only rung that works in "
-            "a repository the other three do not recognise"
-        )
-
-    def test_the_killed_run_rule_survives_and_is_not_about_suites(self):
-        """The rule that outlived the mandate it was attached to. It read
-        "never re-run a full suite that a timeout killed", and the run this
-        default produces is not a suite — so a task that narrowed, was killed
-        again, and reached for the same command would find nothing addressed to
-        it. Generalizing it also takes it off the allowlist above, since the
-        line no longer mentions a suite for the scan to catch; this assertion
-        is what stops it being deleted along with the mandate."""
-        section = self._step_body(self._body(), "### 7. The verification budget")
-        killed = [ln for ln in section.splitlines() if "killed run" in ln.lower()]
-        assert len(killed) == 1, (
-            f"the killed-run rule is stated once in section 7; found {len(killed)}"
-        )
-        line = killed[0]
-        assert not re.search(r"\bsuites?\b", line, re.IGNORECASE), (
-            f"the rule is about any killed run, not only about suites: {line[:140]!r}"
-        )
-        # The negations, not the nouns. Asserting on "longer timeout" and "same
-        # command" alone passes an inverted rule — "retry it with a longer
-        # timeout, and then with the same command again" carries both phrases
-        # and instructs the exact behaviour that cost forty minutes.
-        lowered = line.lower()
-        for forbidden in ("not with a longer timeout", "not with the same command"):
-            assert forbidden in lowered, (
-                f"the rule no longer forbids {forbidden[8:]!r}, so a re-run of the "
-                f"killed command reads as sanctioned: {line[:140]!r}"
-            )
-
-    REPORT_HEADING = "### 12. Report"
-
-    def _report_field(self, name):
-        """The template lines starting `<name>: `, inside section 12's fence.
-
-        A list rather than the line, so a duplicated field is a failure here
-        instead of whichever copy the scan reached first. Scoped to the fenced
-        block rather than to the section, because the fence is the part the
-        model copies: a field moved out of it into the surrounding prose has
-        left the template, and a scan of the whole section would not notice."""
-        section = self._step_body(self._body(), self.REPORT_HEADING)
-        blocks = section.split("```")
-        assert len(blocks) >= 3, (
-            f"section {self.REPORT_HEADING!r} has no fenced template block, so "
-            "there is nothing for the model to copy"
-        )
-        return [ln for ln in blocks[1].splitlines() if ln.startswith(f"{name}: ")]
-
-    def test_the_report_tests_field_admits_a_partial_pass(self):
-        """A5. The field asked for "the final full pass, the exit status it
-        was read from, which stacks it covered", and a template field is what
-        the model fills in when the work is done — so a task that ran
-        something narrower either widened it to produce that sentence or wrote
-        a sentence its run did not support. Both were observed. It now asks
-        for what was run and for what it left out, which is answerable
-        honestly whatever the scope was.
-
-        The `_SUITE_MENTION` scan is reused rather than a hand-written list of
-        forbidden words: it is the same pattern the line-level audit uses, so
-        a demand for a wider run reintroduced here fails on the phrasing that
-        audit already knows about rather than on one guessed at here."""
-        fields = self._report_field("Tests")
-        assert len(fields) == 1, f"section 12 has {len(fields)} `Tests:` fields, not one"
-        line = fields[0]
-        assert not _SUITE_MENTION.search(line), (
-            "the report template asks for a run wider than the change again, "
-            f"which is where the demand was hardest to see: {line!r}"
-        )
-        for required in ("paths", "exit status", "did not cover"):
-            assert required in line, (
-                f"the `Tests:` field no longer asks for {required!r}, so a narrow "
-                f"pass can be reported without saying what it was: {line!r}"
-            )
-
-    def test_the_report_records_which_workflow_was_in_force(self):
-        """A6. The defaults now yield, so two tasks on one deployment can run
-        under different rules and produce reports of the same shape. Without
-        this field a reader cannot tell a narrow pass the user asked for from
-        one nobody sanctioned, and the deference rule becomes unauditable from
-        the only artifact anybody reads."""
-        fields = self._report_field("Workflow")
-        assert len(fields) == 1, f"section 12 has {len(fields)} `Workflow:` fields, not one"
-        line = fields[0]
-        for name in ("USER.md", "CHANNEL.md"):
-            assert name in line, (
-                f"the `Workflow:` field does not offer {name} as an answer, so a "
-                f"task working under it has nowhere to say so: {line!r}"
-            )
-        assert "default" in line.lower(), (
-            "the field offers no answer for the deployment that wrote neither "
-            f"file, which is every new one: {line!r}"
-        )
-
-    @pytest.mark.parametrize(
-        "decision,heading", sorted(_DEFERRED_DECISIONS.items())
-    )
-    def test_every_deferred_decision_says_so_where_it_is_stated(self, decision, heading):
-        """A2, the other half. The rule at the top is not enough on its own:
-        each decision it governs has to say it yields in the section where the
-        decision is made, because that is what the model is reading when it
-        acts. Scoped to the section, not to the line — the marker is what
-        matters, not the wording, so a rewrite that keeps the deference and
-        changes the sentence passes, and a new mandate bullet added elsewhere
-        in the same section passes this one too. That gap is what the
-        line-level guard above covers."""
-        section = self._step_body(self._body(), heading)
-        assert any(m in section for m in _DEFERENCE_MARKERS), (
-            f"section {heading!r} decides {decision} and never says the user's "
-            "own instructions may set it otherwise"
-        )
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1922,7 +1719,7 @@ class TestCredentialFreeConfigs:
         return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
 
     def _preflight(self) -> str:
-        return _extract("git config --list --includes | awk", "# end of the credential check")
+        return _extract('config --list --includes | awk', "# end of the credential check")
 
     def test_the_invariant_is_stated(self):
         assert "**A remote URL never carries a credential.**" in self._body(), (
@@ -2081,7 +1878,7 @@ class TestVerificationBudgetKeepsTheExitStatus:
     def test_the_budget_says_a_pipe_discards_the_test_status(self):
         """The one line the entry asked for, in section 7 rather than in a
         general principles section elsewhere."""
-        budget = _section(self._body(), "### 7. The verification budget")
+        budget = _section(self._body(), "### Running something that takes a while")
         assert "pipefail" in budget, (
             "the verification budget tells the model to trim test output and "
             "never says a pipe discards the status it is trimming"
@@ -2115,7 +1912,7 @@ class TestVerificationBudgetKeepsTheExitStatus:
     def test_the_report_names_the_status_the_pass_was_read_from(self):
         """Second line of defence. `Tests: full suite green` is the sentence a
         human acts on, so the template has to ask where "green" came from."""
-        report = _section(self._body(), "### 12. Report")
+        report = _section(self._body(), "### Running something that takes a while")
         assert "exit status" in report, (
             "the report template accepts a claim of a green suite without "
             "naming the exit status it was read from"
