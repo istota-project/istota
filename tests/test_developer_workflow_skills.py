@@ -1076,15 +1076,34 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _USER_RULES_DOC = _REPO_ROOT / "docs" / "development" / "development-rules-user.md"
 
 
+def _example_section(heading: str) -> str:
+    """The text under one `##` heading of the seeded `examples/WORKFLOW.md`."""
+    start = WORKFLOW_EXAMPLE.index("\n", WORKFLOW_EXAMPLE.index(heading)) + 1
+    rest = WORKFLOW_EXAMPLE[start:]
+    following = re.search(r"^#{1,2} ", rest, re.MULTILINE)
+    return rest[: following.start()] if following else rest
+
+
 def _pasteable_block(doc: str) -> str:
-    """The fenced ```markdown block a reader copies out of the docs file.
+    """The fenced markdown block a reader copies out of the docs file.
 
     Scoping the audit to the block rather than to the whole page is what makes
     it mean something: prose above it can mention a decision in passing, and a
-    reader who pastes the block still gets nothing for it."""
-    opener = "```markdown\n"
-    start = doc.index(opener) + len(opener)
-    return doc[start : doc.index("\n```", start)]
+    reader who pastes the block still gets nothing for it.
+
+    The fence is matched on its own run length rather than with an `index` for
+    three backticks. The page's outer fence is four, precisely so the block can
+    contain a three-backtick one, and a substring search finds the inner fence
+    first the moment anyone adds one — silently narrowing the audit to whatever
+    is above it. Two fences, or none, is an assertion rather than a `ValueError`
+    out of `str.index`, which reads as broken harness rather than a missing
+    block."""
+    fences = re.findall(r"^(`{3,})markdown$\n(.*?)^\1$", doc, re.MULTILINE | re.DOTALL)
+    assert len(fences) == 1, (
+        f"the docs page has {len(fences)} fenced markdown blocks, not one; "
+        "the audit below cannot tell which is the block a reader pastes"
+    )
+    return fences[0][1]
 
 
 class TestTheVocabularyIsWrittenDownForUsers:
@@ -1106,10 +1125,16 @@ class TestTheVocabularyIsWrittenDownForUsers:
         return _USER_RULES_DOC.read_text()
 
     @pytest.mark.parametrize("decision", sorted(_DEFERRED_DECISIONS))
-    def test_the_pasteable_block_restores_every_deferred_decision(self, decision):
+    def test_the_pasteable_block_names_every_deferred_decision(self, decision):
         """The page's whole claim is that pasting the block restores the
         pre-337 workflow. A decision missing from it is one the paster silently
-        keeps the new default for, having been told otherwise."""
+        keeps the new default for, having been told otherwise.
+
+        Naming is all this holds. That a line carries the *pre-337 answer* is
+        checked only for the one decision whose default actually changed, in
+        the test below; the other seven kept theirs, so a wrong answer there
+        would be a wrong answer about the shipped default too, and the body
+        audit above is what holds that."""
         block = _pasteable_block(self._doc())
         assert decision.lower() in block.lower(), (
             f"the block a reader pastes into USER.md says nothing about "
@@ -1119,10 +1144,34 @@ class TestTheVocabularyIsWrittenDownForUsers:
     @pytest.mark.parametrize("decision", sorted(_DEFERRED_DECISIONS))
     def test_the_seeded_example_names_every_deferred_decision(self, decision):
         """`examples/WORKFLOW.md` is the vocabulary rather than an answer: a
-        decision it omits is one the user never learns they may set."""
-        assert decision.lower() in WORKFLOW_EXAMPLE.lower(), (
-            f"the seeded examples/WORKFLOW.md never names {decision!r}, so a "
-            "user reading it does not know that decision is theirs to make"
+        decision it omits is one the user never learns they may set.
+
+        Scoped to the section that is the vocabulary, not to the whole file.
+        The file ends with an illustrative three-line workflow, and one of its
+        lines repeats a decision's name — so a whole-file search reported
+        "worktree per task" present with its vocabulary bullet deleted, which
+        is the one decision most likely to be trimmed as obvious."""
+        section = _example_section("## What you can set")
+        assert decision.lower() in section.lower(), (
+            f"the seeded examples/WORKFLOW.md never names {decision!r} where it "
+            "lists what a user may set, so a user reading it does not know that "
+            "decision is theirs to make"
+        )
+
+    def test_the_pasteable_block_restores_the_full_suite(self):
+        """"When tests run, and which" is the only deferred decision whose
+        default changed rather than merely losing its mandate, so it is the
+        only one where naming the decision and restoring the old answer come
+        apart. A block that names it and asks for the new narrow pass restores
+        nothing, while the page's heading still promises the old routine."""
+        block = _pasteable_block(self._doc())
+        line = next(
+            ln for ln in block.splitlines()
+            if ln.lower().startswith("- when tests run, and which")
+        )
+        assert "suite" in line.lower(), (
+            "the block's test-scope line does not ask for a suite, so pasting "
+            f"it leaves the post-337 default in place: {line!r}"
         )
 
     def test_the_seeded_example_names_both_files_and_the_tie_break(self):

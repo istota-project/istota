@@ -50,7 +50,8 @@ read/write access. Everything you interact with lives here.
 Configuration files live in the `config/` subfolder:
 
 - **config/USER.md** — Persistent memory. Istota reads this at the start of every \
-task and appends to it when you ask it to remember something.
+task and appends to it when you ask it to remember something. A development \
+workflow for coding tasks is written here too — see `examples/WORKFLOW.md`.
 - **config/TASKS.md** — Task queue. Write `- [ ] do something` and Istota picks \
 it up automatically. Status updates are written back to the file.
 - **config/BRIEFINGS.md** — (Optional) Briefing schedule configuration. \
@@ -502,7 +503,7 @@ Evaluated in the user's configured timezone.
 
 
 WORKFLOW_EXAMPLE = """\
-# Development Workflow
+# Development workflow
 
 There is no `config/WORKFLOW.md`. A development workflow is written in
 `config/USER.md`, or in a project room's `CHANNEL.md`, under a heading of your
@@ -540,8 +541,9 @@ the project rather than of you, so a room's `CHANNEL.md` is the better home.
 
 Deployment mechanics do not yield: the forge boundary and its refused verbs, the
 network allowlist, the ceiling on how long one command may run, the credential
-rules, where builds and tests run, and every delete path. An instruction that
-collides with one of those is reported back to you rather than followed.
+rules, where builds and tests run, the pre-submission checks, and every delete
+path. An instruction that collides with one of those is reported back to you
+rather than followed.
 
 ## Example
 

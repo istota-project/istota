@@ -2,9 +2,9 @@
 
 The `developer` skill used to order one development routine on every deployment: a worktree per task, three change tiers, a full test suite at the end of the work, a review before landing, a merge request rather than a merge. ISSUE-337 turned those orders into defaults that yield to whatever the user has written in `USER.md`, or in a project room's `CHANNEL.md`.
 
-Two of the defaults also changed. The verification pass is now the tests covering the change plus the repository's linters and type checker over the whole tree, and no tier escalates to a full suite any more. Everything else kept its old default and lost only its mandate.
+Some of them changed as well as losing their mandate. The verification pass narrowed to the tests covering the change plus the repository's linters and type checker over the whole tree; no tier escalates to a full suite any more; and the report block gained a `Workflow:` line naming whose rules the task ran under. Everything else kept its old default.
 
-Deployment mechanics did not move. The forge boundary and its refused verbs, the network allowlist, the ceiling on a single command, the credential rules, where builds and tests run, and every delete path are still stated as facts, and nothing written in either file overrides them.
+Deployment mechanics did not move. The forge boundary and its refused verbs, the network allowlist, the ceiling on a single command, the credential rules, where builds and tests run, the pre-submission checks, and every delete path are still stated as facts, and nothing written in either file overrides them.
 
 **If you want the shipped defaults, paste nothing.** They apply as written when neither file says anything about development workflow. This page is for the other case.
 
@@ -12,7 +12,7 @@ Deployment mechanics did not move. The forge boundary and its refused verbs, the
 
 Paste the block below into your `USER.md` — the file at `config/USER.md` inside your bot folder — to get the old routine back on every coding task. Paste it into a project room's `CHANNEL.md` instead to scope it to that project. Where both files carry a workflow and they disagree, `CHANNEL.md` wins for a task from that room.
 
-Nothing else is needed. Both files are already in the system prompt at the start of every task, and neither is ever truncated.
+Nothing else is needed. `USER.md` is in the system prompt of every task, and a room's `CHANNEL.md` is in the system prompt of every task from that room; neither is ever truncated. That difference in reach is the thing to weigh when choosing between them — a workflow written only in a room's `CHANNEL.md` reaches nothing from the 1:1, from a cron job, or from another room.
 
 One warning before you paste it. The full-suite line is the rule ISSUE-337 was filed about: a suite that cannot finish inside a single command is killed partway and produces no coverage at all, which is worse than a narrow pass that completed. Keep it only if the suite finishes on the host the task runs on, and expect it to be run detached rather than under a timeout.
 
@@ -33,6 +33,8 @@ These rules outrank the `developer` skill's defaults.
 
 ## Trimming it
 
-`USER.md` is loaded into every task, not only coding ones, and `memory/sleep_cycle.py` warns once it passes about 8 KB. The block is a menu rather than a set: drop the lines you do not care about, and each decision you leave out keeps the skill's default. A user who only wants the full suite back writes one line.
+Length here is not free, and the cost lands where you will not see it. `USER.md` itself is never truncated, but the memory block around it is capped: past `max_memory_chars` the assembler drops recalled memories first, then knowledge-graph facts, then dated memories, then playbooks. A long block is paid for out of what the bot remembers, on every task rather than only coding ones, and `memory/sleep_cycle.py` warns separately once the file passes about 8 KB.
+
+So treat the block as a menu rather than a set: drop the lines you do not care about, and each decision you leave out keeps the skill's default. A user who only wants the full suite back writes one line.
 
 The seeded `examples/WORKFLOW.md` in a user's bot folder is the same vocabulary written for the user rather than for this repository. It is the file to point someone at who wants to write their own workflow instead of restoring this one.
