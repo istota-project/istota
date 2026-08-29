@@ -14,6 +14,7 @@ spawning nothing, and a raising check reported rather than propagated.
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -2512,3 +2513,228 @@ class TestTheBackendAgreementCheck:
 
         assert result.status == WARN
         assert result.remedy
+
+
+
+class TestSkillOverlays:
+    """`config.skill_overlays` is the only thing that ever says a per-skill
+    overlay will not be read. Every case here asserts the check did **not**
+    SKIP — a suite asserting "no FAIL" is green on exactly the broken tree.
+    """
+
+    NAME = "config.skill_overlays"
+
+    @staticmethod
+    def _config(make_config, tmp_path, **overrides):
+        bundled = tmp_path / "bundled"
+        for skill in ("developer", "notes", "browse", "sensitive_actions"):
+            d = bundled / skill
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "skill.md").write_text(
+                f"---\nname: {skill}\ndescription: the {skill} skill\n---\n\n# {skill}\n"
+            )
+        return make_config(bundled_skills_dir=bundled, **overrides)
+
+    @staticmethod
+    def _overlays(config, user_id="alice"):
+        d = (
+            Path(config.nextcloud_mount_path)
+            / "Users" / user_id / config.bot_dir_name / "config" / "skills"
+        )
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _run(self, config):
+        results = run_checks(config, only=(self.NAME,))
+        assert len(results) == 1
+        return results[0]
+
+    # ------------------------------------------------------------ the gates
+
+    def test_it_skips_without_a_mount(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path, nextcloud_mount_path=None)
+        r = self._run(config)
+        assert r.status == SKIP
+        assert "mount" in r.detail
+
+    def test_it_skips_when_there_are_no_user_trees_yet(self, make_config, tmp_path):
+        r = self._run(self._config(make_config, tmp_path))
+        assert r.status == SKIP
+
+    def test_no_overlays_anywhere_is_ok_and_not_a_skip(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (Path(config.nextcloud_mount_path) / "Users" / "alice").mkdir(parents=True)
+        r = self._run(config)
+        assert r.status == OK
+        assert r.status != SKIP
+
+    # ---------------------------------------------------------- the findings
+
+    def test_a_good_overlay_is_ok(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "developer.md").write_text("- one rule\n")
+        r = self._run(config)
+        assert r.status == OK
+        assert r.status != SKIP
+
+    def test_a_misspelled_skill_name_fails(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "develper.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "develper.md" in r.detail
+        assert "unknown_skill" in r.detail
+        assert r.remedy
+
+    def test_a_denylisted_skill_fails(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "sensitive_actions.md").write_text("- planted\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "denylisted" in r.detail
+
+    def test_an_over_cap_overlay_fails(self, make_config, tmp_path):
+        from istota.skills._loader import OVERLAY_MAX_BYTES
+
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "developer.md").write_text(
+            "- x\n" * (OVERLAY_MAX_BYTES // 4 + 4)
+        )
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "over_cap" in r.detail
+
+    def test_an_oversized_overlay_warns(self, make_config, tmp_path):
+        from istota.skills._loader import OVERLAY_WARN_BYTES
+
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "developer.md").write_text(
+            "- x\n" * (OVERLAY_WARN_BYTES // 4 + 4)
+        )
+        r = self._run(config)
+        assert r.status == WARN
+        assert "over_warn_bytes" in r.detail
+        assert r.remedy
+
+    def test_a_shallow_heading_warns(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "notes.md").write_text("## My rules\n\n- a rule\n")
+        r = self._run(config)
+        assert r.status == WARN
+        assert "shallow_heading" in r.detail
+
+    def test_a_fail_outranks_a_warning(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        (d / "develper.md").write_text("- a rule\n")
+        (d / "notes.md").write_text("## heading\n- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+
+    def test_a_disabled_skill_is_deliberately_not_reported(self, make_config, tmp_path):
+        """Its overlay binds again the moment the skill is switched back on, so
+        it is a fact about the configuration and not a defect in the file.
+        `memory skills` still says so for the user asking about their own."""
+        config = self._config(make_config, tmp_path, disabled_skills=["browse"])
+        (self._overlays(config) / "browse.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == OK
+
+    def test_it_walks_every_user_tree_not_just_the_configured_ones(
+        self, make_config, tmp_path
+    ):
+        """A user whose config block was removed still has files on disk, and
+        one left there is exactly what nothing else would report."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config, "alice") / "developer.md").write_text("- ok\n")
+        (self._overlays(config, "bob") / "develper.md").write_text("- broken\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "bob/develper.md" in r.detail
+        assert "alice" not in r.detail
+
+    def test_the_detail_names_at_most_a_handful(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        for i in range(9):
+            (d / f"nosuchskill{i}.md").write_text("- a rule\n")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "9 of 9" in r.detail
+        assert "and 4 more" in r.detail
+
+    # --------------------------------------------------- the plantable tree
+
+    def test_a_symlinked_user_entry_is_not_descended_into(
+        self, make_config, tmp_path
+    ):
+        """Every component under `{mount}/Users/{user_id}` is model-writable, so
+        a link planted at another name must not make the walk descend elsewhere
+        and report a file against the wrong user."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config, "alice") / "develper.md").write_text("- broken\n")
+        users = Path(config.nextcloud_mount_path) / "Users"
+        (users / "mallory").symlink_to(users / "alice", target_is_directory=True)
+
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "alice/develper.md" in r.detail
+        assert "mallory" not in r.detail
+
+    def test_an_overlay_dir_redirected_out_of_the_user_tree_is_skipped(
+        self, make_config, tmp_path
+    ):
+        """`config/` and `skills/` are ordinary entries a task can replace with
+        a link. Following one would report — and open — files anywhere the
+        daemon can read."""
+        config = self._config(make_config, tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "develper.md").write_text("- planted\n")
+        user_config = (
+            Path(config.nextcloud_mount_path)
+            / "Users" / "alice" / config.bot_dir_name / "config"
+        )
+        user_config.mkdir(parents=True)
+        (user_config / "skills").symlink_to(elsewhere, target_is_directory=True)
+
+        r = self._run(config)
+        assert r.status == OK
+        assert "develper" not in r.detail
+
+    def test_a_symlinked_overlay_file_is_reported_and_never_read(
+        self, make_config, tmp_path
+    ):
+        config = self._config(make_config, tmp_path)
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        (self._overlays(config) / "developer.md").symlink_to(secret)
+
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "overlay_is_a_symlink" in r.detail
+        assert "TOP SECRET" not in r.detail + r.remedy
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+    def test_a_fifo_does_not_hang_the_check(self, make_config, tmp_path):
+        """`doctor` runs on the daemon's start-up path, where a blocking
+        `open(2)` has no timeout over it at all."""
+        config = self._config(make_config, tmp_path)
+        os.mkfifo(self._overlays(config) / "developer.md")
+
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "overlay_not_a_regular_file" in r.detail
+
+    def test_no_overlay_content_ever_leaves_the_users_directory(
+        self, make_config, tmp_path
+    ):
+        """The same result is rendered into the admin dashboard, which every
+        admin reads. A filename is the most that may cross out of one user's
+        tree."""
+        config = self._config(make_config, tmp_path)
+        (self._overlays(config) / "develper.md").write_text(
+            "- alice's private rule about her doctor\n"
+        )
+        r = self._run(config)
+        assert "private rule" not in r.detail + r.remedy

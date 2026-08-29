@@ -2699,6 +2699,171 @@ def _same_network(dest: str, present: set[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Per-skill user overlays
+# ---------------------------------------------------------------------------
+
+#: How many offending files the detail names before it stops. A check's detail
+#: is one line, and a tree with fifty broken overlays is one problem to go and
+#: look at rather than fifty to read here.
+_OVERLAY_REPORT_LIMIT = 5
+
+
+def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
+    """`(user_id, overlay dir)` for every user under the mount that has one.
+
+    Walked rather than taken from ``config.users`` because a user whose config
+    block was removed still has a tree on disk, and a file left there is exactly
+    the kind of thing nobody would otherwise be told about.
+
+    Hardened the way every other reader of this tree is, and for the same
+    reason: ``{mount}/Users/{user_id}`` is bound **read-write** into that user's
+    own sandbox, so every path component under it is model-plantable. Three
+    consequences here specifically, because this walk crosses *all* users where
+    the loader and the CLI each stay inside one:
+
+    - a user entry is required to be a real directory rather than a symlink to
+      one, so a link planted at another user's name cannot make this walk
+      descend somewhere else and report a file against the wrong user;
+    - the overlay directory is resolved and required to stay under its own
+      user's tree, the equality-under-a-known-root rule the memory CLI's
+      ``_check_overlay_dir`` already applies, since ``config`` and ``skills``
+      are both ordinary entries a task can replace with a link;
+    - nothing here opens a file. ``scandir`` stats, and the read that follows
+      is ``inspect_overlay``'s, which refuses a FIFO — ``doctor`` runs on the
+      daemon's start-up path, where a blocking ``open(2)`` has no timeout over
+      it at all.
+    """
+    users_root = mount / "Users"
+    try:
+        entries = sorted(os.scandir(users_root), key=lambda e: e.name)
+    except OSError:
+        return []
+
+    found: list[tuple[str, Path]] = []
+    for entry in entries:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        user_dir = Path(entry.path)
+        overlay_dir = user_dir / bot_dir / "config" / "skills"
+        try:
+            if not overlay_dir.is_dir():
+                continue
+            resolved = Path(os.path.realpath(overlay_dir))
+            root = Path(os.path.realpath(user_dir))
+        except OSError:
+            continue
+        if resolved != root and root not in resolved.parents:
+            continue
+        found.append((entry.name, overlay_dir))
+    return found
+
+
+def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
+    """Every per-skill user overlay on the mount either binds, or is named here.
+
+    An overlay is ``config/skills/<skill-name>.md`` appended to that skill's
+    body whenever the skill loads. Nothing else in the system ever says a word
+    about one: a file named for a skill that does not exist is silently never
+    read, and so is one for a skill that takes no overlay, and so is one past
+    the loading cap. Each looks configured from ``ls``, and the user's rule is
+    simply absent from every prompt with nothing anywhere reporting it. That is
+    the same failure class as the missing watermark and the devbox ``command not
+    found`` — the defect is the absence of a signal rather than the presence of
+    a bug.
+
+    No process, no read past the cap, and ``probe`` is unused: this is a
+    ``scandir`` per user plus one bounded read per overlay file.
+
+    The gates are ``_loader.inspect_overlay``, shared with the ``memory
+    skills`` inventory, so the two surfaces cannot disagree about which files
+    are live. Two differences are deliberate:
+
+    - **a disabled skill is not reported.** Its overlay binds again the moment
+      the operator switches the skill back on, so it is a fact about the
+      configuration rather than a defect in the file. The inventory does say
+      so, because a user asking "is my customization live?" wants that answer;
+      an operator sweeping for problems does not.
+    - **no overlay content is quoted.** This runs across every user's tree, and
+      the same result is rendered into the admin dashboard, so a filename is
+      the most that may leave one user's directory.
+    """
+    name = "config.skill_overlays"
+    if not config.use_mount:
+        return CheckResult(
+            name, SKIP, "no workspace mount configured, so overlays are not read"
+        )
+    mount = Path(config.nextcloud_mount_path)
+    if not (mount / "Users").is_dir():
+        return CheckResult(name, SKIP, f"{mount}/Users does not exist yet")
+
+    try:
+        from .skills._loader import inspect_overlay, load_skill_index  # noqa: PLC0415
+        known = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(name, SKIP, f"the skill index could not be loaded: {exc}")
+
+    dirs = _overlay_dirs(mount, config.bot_dir_name)
+    total = 0
+    dead: list[str] = []
+    warned: list[str] = []
+    for user_id, overlay_dir in dirs:
+        try:
+            entries = sorted(overlay_dir.glob("*.md"))
+        except OSError:
+            continue
+        for path in entries:
+            total += 1
+            found = inspect_overlay(path, known_skills=known)
+            label = f"{user_id}/{path.name}"
+            if not found.binds:
+                dead.append(f"{label} ({found.reason})")
+            elif found.warnings:
+                warned.append(f"{label} ({', '.join(found.warnings)})")
+
+    if not total:
+        return CheckResult(
+            name, OK,
+            f"no per-skill overlays filed under {mount}/Users/*/{config.bot_dir_name}/config/skills",
+        )
+    if dead:
+        return CheckResult(
+            name, FAIL,
+            f"{len(dead)} of {total} overlay file(s) will never be loaded: {_overlay_list(dead)}",
+            remedy=(
+                "A file here is only read when its name is a known skill that takes "
+                "an overlay and its body is under the loading cap. Run `istota-skill "
+                "memory skills` as that user for the per-file verdict, then rename, "
+                "shrink or remove it."
+            ),
+        )
+    if warned:
+        return CheckResult(
+            name, WARN,
+            f"{len(warned)} of {total} overlay file(s) load with a caveat: {_overlay_list(warned)}",
+            remedy=(
+                "over_warn_bytes: an overlay is appended to the bundled skill body, "
+                "not a replacement for it, so this size usually means a forked skill "
+                "doc. shallow_heading: a `# ` or `## ` heading is demoted to `#### ` "
+                "at load time, because at its written level it would end the skill's "
+                "own section."
+            ),
+        )
+    return CheckResult(
+        name, OK, f"{total} overlay file(s) across {len(dirs)} user tree(s), all load"
+    )
+
+
+def _overlay_list(items: list[str]) -> str:
+    shown = ", ".join(items[:_OVERLAY_REPORT_LIMIT])
+    if len(items) > _OVERLAY_REPORT_LIMIT:
+        shown += f", and {len(items) - _OVERLAY_REPORT_LIMIT} more"
+    return shown
+
+
+# ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
 
@@ -2727,6 +2892,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.container", check_developer_container),
     ("web.static", check_web_static),
     ("web.basemap", check_basemap),
+    ("config.skill_overlays", check_skill_overlays),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -2769,6 +2935,9 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment, not image: it reads the rendered config and reaches the
     # network. A bare `docker run` can answer neither.
     "web.basemap": DEPLOYMENT,
+    # Deployment: it walks the workspace mount, which a bare `docker run` has
+    # none of.
+    "config.skill_overlays": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 
