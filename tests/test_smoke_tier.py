@@ -1712,3 +1712,263 @@ class TestTheReposIsolationPathsAgree:
 
         assert 'OWN_USER = "testuser"' in source
         assert 'OTHER_USER = "someone-else"' in source
+
+
+class TestTheForgeScenarioClonesIntoTheBoundSubtree:
+    """`tests/smoke/test_forge_e2e.py` must clone where the sandbox actually binds.
+
+    `developer.repos_dir` is a root of per-user subtrees and `build_bwrap_cmd`
+    binds `{repos_dir}/{user_id}`, never the root. The root still *exists* inside
+    the namespace — bwrap creates it on the ephemeral root tmpfs as the bind's
+    parent — so a `git clone` into it succeeds, reaches the network, and is gone
+    by the next Bash call, which gets a fresh sandbox. That is ISSUE-338: the
+    happy path cloned into `/data/repos`, the `cd` in the following turn failed
+    with "No such file or directory", and `glab` never ran at all. The symptom
+    was an absence of REST calls, which reads as a broken forge chain rather
+    than as a checkout that evaporated.
+
+    Nothing about that is visible without Docker, and it cost an hour to find,
+    so the drift is caught here instead. `TestTheReposIsolationPathsAgree` is the
+    same idea for the neighbouring scenario; that one was written after the split
+    and got the layout right, which is exactly why only this file went stale.
+
+    The scripts are read off the module rather than out of the file text. A
+    textual scan matches this class's own explanation of the bug as readily as
+    the bug, which is how the first draft of it went red on a fixed file — and a
+    guard that cannot tell prose from a command is one somebody silences.
+
+    Proven able to fail: with the scripts reverted to `cd /data/repos` and
+    `cd /data/repos/project`, both tests here go red — the first naming the
+    literal, the second the missing `$DEVELOPER_REPOS_DIR`. Recorded because
+    `.claude/rules/testbed.md` is explicit that reading a test tells you almost
+    nothing about whether it can fail.
+
+    `_scripts` names the two multi-turn scripts one by one. A rename fails
+    loudly through `getattr`; a *third* script added later is unguarded until
+    somebody adds it here, which is the known limit of this class.
+    """
+
+    @staticmethod
+    def _scripts() -> dict[str, str]:
+        from tests.smoke import test_forge_e2e as scenario
+
+        return {
+            name: getattr(scenario, name)
+            for name in ("_CLONE_AND_PUSH", "_OPEN_MR")
+        }
+
+    def test_no_script_names_the_repos_root_as_a_literal_path(self):
+        """Anywhere in the script, not only after `cd`.
+
+        A `cd` scan states the rule too narrowly to hold it: the identical drift
+        re-enters as `git clone {url} /data/repos/project` or `git -C
+        /data/repos …`, neither of which is a `cd`, and both of which reproduce
+        ISSUE-338 exactly. The root is not a string a correct script has any use
+        for — `$DEVELOPER_REPOS_DIR` is how you name the part that is bound — so
+        the honest rule is that the literal does not appear at all, and it needs
+        no per-verb knowledge to enforce.
+        """
+        from testbed.services.gitlab import CONTAINER_REPOS_DIR
+
+        for name, script in self._scripts().items():
+            assert CONTAINER_REPOS_DIR not in script, (
+                f"{name} names the repos root {CONTAINER_REPOS_DIR} as a "
+                "literal. The sandbox binds only the task's own subtree under "
+                "it, so anything written to the root lands on bwrap's "
+                "ephemeral root tmpfs and is gone by the next Bash call "
+                "(ISSUE-338). Use $DEVELOPER_REPOS_DIR"
+            )
+
+    def test_every_script_takes_the_checkout_root_from_the_daemon(self):
+        """`$DEVELOPER_REPOS_DIR` rather than a literal, and that is the point.
+
+        The developer skill's `setup_env` is the one place that knows the
+        layout, and it exports the answer — which is also the recipe `skill.md`
+        gives the model. A scenario reading that variable needs no update the
+        next time the layout moves; a scenario restating the path is what went
+        stale here. It buys one assertion for free, too: `set -u` aborts if the
+        variable was never exported, so the scripts fail loudly rather than
+        cloning somewhere else.
+        """
+        for name, script in self._scripts().items():
+            assert "$DEVELOPER_REPOS_DIR" in script, (
+                f"{name} names no checkout root the daemon derives, so it "
+                "works against a path it chose rather than the bound one"
+            )
+
+
+class TestTheToolOutputInDiagnostics:
+    """`Stack.tool_output`, which every failing scenario now prints.
+
+    Needs no container: it is a string transform over what the endpoint
+    recorded. That matters most for the scrub — the assertion it protects is
+    `test_the_token_is_injected_without_the_model_ever_holding_it`, which fires
+    exactly when a credential reached the conversation, so a report that
+    rendered it verbatim would publish the secret it had just caught.
+    """
+
+    class _Endpoint:
+        def __init__(self, results):
+            self._results = results
+
+        def tool_results(self):
+            return list(self._results)
+
+    class _Exploding:
+        def tool_results(self):
+            raise RuntimeError("the endpoint is gone")
+
+    def _stack(self, results, *, env=None, services=None) -> compose_support.Stack:
+        stack = compose_support.Stack(
+            profile=profiles.BASE,
+            args=["docker", "compose", "--project-name", "p"],
+            services=services or {},
+            env=env,
+        )
+        stack.services["model"] = (
+            results
+            if hasattr(results, "tool_results")
+            else self._Endpoint(results)
+        )
+        return stack
+
+    def test_each_call_is_its_own_labelled_block(self):
+        rendered = self._stack(["first", "second"]).tool_output()
+
+        assert "[call 0]\nfirst" in rendered
+        assert "[call 1]\nsecond" in rendered
+
+    def test_no_tool_calls_says_so_rather_than_rendering_empty(self):
+        """An empty string in a failure report reads as "nothing went wrong
+        here", which for this seam is the opposite of the truth."""
+        assert self._stack([]).tool_output() == "(the model made no tool calls)"
+
+    def test_an_over_long_block_keeps_both_ends(self):
+        """The Bash tool truncates at the head and appends its notice and exit
+        code at the tail, so a tail-only window shows the notice and nothing
+        that produced it."""
+        text = "START" + ("x" * 5000) + "END"
+
+        rendered = self._stack([text]).tool_output(per_call=100)
+
+        assert "START" in rendered
+        assert "END" in rendered
+        assert "chars elided" in rendered
+        assert "x" * 200 not in rendered
+
+    def test_a_block_under_the_cap_is_untouched(self):
+        rendered = self._stack(["short and whole"]).tool_output(per_call=100)
+
+        assert "chars elided" not in rendered
+        assert "short and whole" in rendered
+
+    def test_a_credential_from_the_compose_environment_is_scrubbed(self):
+        env = {"ISTOTA_DEVELOPER_GITLAB_TOKEN": "s3cr3t-value", "USER_NAME": "bob"}
+
+        rendered = self._stack(
+            ["the token was s3cr3t-value and the user was bob"], env=env
+        ).tool_output()
+
+        assert "s3cr3t-value" not in rendered
+        assert "<ISTOTA_DEVELOPER_GITLAB_TOKEN>" in rendered
+        # Only the credential-shaped keys; a scrub that ate everything would
+        # make the report useless rather than safe.
+        assert "bob" in rendered
+
+    def test_a_stub_credential_is_scrubbed_on_the_lean_shape(self):
+        """The lean shape renders its config on the host and passes no compose
+        environment, so the env half of the scrub is empty there — which is
+        precisely the shape the forge scenarios run on."""
+
+        class _Stub:
+            credential = "forge-token-value"
+
+        rendered = self._stack(
+            ["glab used forge-token-value"], services={"gitlab": _Stub()}
+        ).tool_output()
+
+        assert "forge-token-value" not in rendered
+        assert "<gitlab credential>" in rendered
+
+    def test_a_failing_endpoint_is_reported_rather_than_raising(self):
+        """`diagnostics` runs only when something already failed; a render that
+        raises replaces the diagnosis with a harness traceback."""
+        rendered = self._stack(self._Exploding()).tool_output()
+
+        assert "unavailable" in rendered
+        assert "the endpoint is gone" in rendered
+
+
+class TestTheForgeScenarioFailureMarkers:
+    """`_assert_every_command_succeeded`'s predicate, in the default suite.
+
+    The helper lives in a Docker-gated file, but what it does is match strings,
+    and two of its branches are ones no scenario exercises today: the SIGPIPE
+    exit that must *not* count as a failure, and the spawn-failure body that
+    carries no bracketed marker at all. A branch nothing runs is a branch that
+    is wrong whenever somebody finally reaches it — and the way they reach it is
+    by copying this helper into the next scenario.
+    """
+
+    @staticmethod
+    def _failed(text: str) -> bool:
+        from tests.smoke.test_forge_e2e import _FAILURE_MARKERS, _is_sigpipe_only
+
+        return (
+            any(marker in text for marker in _FAILURE_MARKERS)
+            and not _is_sigpipe_only(text)
+        )
+
+    def test_a_clean_command_is_not_a_failure(self):
+        assert not self._failed("+ git push\nEverything up-to-date\n")
+
+    def test_a_non_zero_exit_is_a_failure(self):
+        assert self._failed("+ cd /nowhere\nNo such file or directory\n[exit code: 1]")
+
+    def test_an_annotated_sigpipe_is_not_a_failure(self):
+        """`pipefail` is on for every command the daemon runs, so a correct
+        `… | head -1` makes bash exit 141. The tool annotates that one rather
+        than treating it as a fault, and so must this."""
+        from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
+
+        assert not self._failed(f"yes | head -1\ny\n[exit code: {SIGPIPE_EXIT}] {SIGPIPE_NOTE}")
+
+    def test_a_bare_141_without_the_note_is_still_a_failure(self):
+        """The note is what distinguishes the two, so a command that genuinely
+        returned 141 must not be excused by the exit code alone."""
+        assert self._failed("[exit code: 141]")
+
+    def test_a_sigpipe_alongside_a_real_failure_is_a_failure(self):
+        from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
+
+        text = (
+            f"[exit code: {SIGPIPE_EXIT}] {SIGPIPE_NOTE}\n[command timed out after 5s]"
+        )
+        assert self._failed(text)
+
+    def test_a_command_that_never_started_is_a_failure(self):
+        """The Bash tool's one failure return with no bracketed marker.
+
+        It is what an unusable bwrap, a refused namespace or a bad cwd looks
+        like — the first thing this file's header tells you to suspect, and the
+        thing a marker-only checker cannot see.
+        """
+        assert self._failed("Failed to start command: [Errno 2] No such file or directory")
+
+    def test_the_markers_match_what_the_bash_tool_actually_emits(self):
+        """Restated strings, held against their source.
+
+        Every marker here is a literal copied out of the tool. A checker whose
+        literals have drifted reports every scenario clean, which is the exact
+        shape of failure this tier keeps producing.
+        """
+        from tests.smoke.test_forge_e2e import _FAILURE_MARKERS
+
+        source = (REPO / "src" / "istota" / "session" / "tools" / "bash.py").read_text()
+
+        for marker in _FAILURE_MARKERS:
+            assert marker in source, (
+                f"{marker!r} is no longer a string the Bash tool emits, so "
+                "the scenario checker is looking for something that never "
+                "appears"
+            )
