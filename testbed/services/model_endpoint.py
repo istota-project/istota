@@ -129,8 +129,15 @@ class ScriptedEndpoint(HttpStub):
 
         The bodies are the whole conversation — system prompt, memory, tool
         results — and dumping them into every failure report would bury the
-        three lines that say what went wrong. A scenario that needs the content
-        has `transcript()`.
+        three lines that say what went wrong.
+
+        Three views, narrowest first. `tool_results()` is what the commands
+        printed, which is where a failure names itself and is what
+        `Stack.diagnostics` renders alongside these counts. `transcript()` is
+        every message ever sent, for a scenario asserting on something the model
+        was told rather than on something a command said. This stays counts
+        only: what it answers is whether the endpoint served the turns it was
+        scripted for, and no amount of content answers that.
         """
         with self._lock:
             served, scripted, seen = self.served, len(self.turns), len(self.requests)
@@ -220,6 +227,54 @@ class ScriptedEndpoint(HttpStub):
             for message in body.get("messages") or []:
                 parts.append(str(message.get("content")))
         return "\n".join(parts)
+
+    def tool_results(self) -> list[str]:
+        """What each Bash call printed, one entry per call, in call order.
+
+        `transcript()` is the whole conversation and is dominated by the system
+        prompt — 60KB of it per request, repeated once per turn — so a scenario
+        that dumps it on failure buries the twenty lines that say what went
+        wrong. This is just the tool-role messages, which is where a command's
+        stdout, its stderr and the Bash tool's `[exit code: N]` suffix all land.
+
+        **Keyed on `tool_call_id`, not on the content**, and that is the whole
+        difference between "one entry per call" and "one entry per distinct
+        output". Every request carries the whole history, so some deduplication
+        is needed or the first turn's output appears once per later turn — but
+        deduplicating by content silently merges two calls that printed the same
+        bytes, and `bash.py` returns the literal `(no output)` for every command
+        that printed nothing, which is not an exotic case. The caller labels
+        these by index, so a merge there does not lose a block, it *renumbers*
+        every block after it — a diagnostic that misattributes which command
+        produced a line, in the one function that exists to attribute it.
+
+        `_message_to_wire` sets `tool_call_id` on every tool-role message it
+        emits (`src/istota/llm/openai_compat.py`), so the key is always present
+        on this path; content stands in only if some other producer omits it.
+
+        Never raises on a malformed body. `do_POST` guards the body itself but
+        not the shape of `messages`, and the callers here are assertion helpers
+        and a failure-report renderer — an `AttributeError` from either reads as
+        a harness crash mid-scenario rather than as the thing that went wrong.
+        """
+        with self._lock:
+            bodies = list(self.requests)
+        results: dict[str, str] = {}
+        for body in bodies:
+            messages = body.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                if message.get("role") != "tool":
+                    continue
+                content = str(message.get("content"))
+                key = str(message.get("tool_call_id") or content)
+                results.setdefault(key, content)
+        # Insertion-ordered since 3.7, so this is first-seen order, which is the
+        # order the calls were made.
+        return list(results.values())
 
 
 def _chunks(text: str, size: int) -> list[str]:

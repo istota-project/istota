@@ -17,13 +17,26 @@ asserting anything extra.
 The wrapper is something the model execs, so every scenario depends on
 bubblewrap working inside the container, and none of these failures would name
 it.
+
+**A scenario spanning two Bash calls must keep its checkout under
+`$DEVELOPER_REPOS_DIR`**, which is the task's own subtree and the only part of
+`developer.repos_dir` the sandbox binds. The root is present inside the
+namespace as that bind's parent on bwrap's ephemeral root tmpfs, so writing
+there succeeds and then disappears with the sandbox — one call's work, gone
+before the next. ISSUE-338 was this file cloning into the root, and it presented
+as a forge that took no REST calls rather than as a checkout that was thrown
+away. `tests/test_smoke_tier.py::TestTheForgeScenarioClonesIntoTheBoundSubtree`
+catches the same drift without Docker.
 """
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 import pytest
 
-from testbed.services.gitlab import FORGE_PROJECT, FORGE_TOKEN
+from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
+from testbed.services.gitlab import CONTAINER_REPOS_DIR, FORGE_PROJECT, FORGE_TOKEN
 
 pytestmark = pytest.mark.smoke
 
@@ -37,9 +50,41 @@ BRANCH = "feature/from-the-smoke-tier"
 # Written as one Bash call rather than several turns: what is under test is the
 # chain, not the agent loop's ability to sequence, and every extra turn is
 # another scripted response to keep in step.
+#
+# **The checkout goes under `$DEVELOPER_REPOS_DIR`, never under the configured
+# `repos_dir` root, and that distinction is load-bearing across turns.**
+# `build_bwrap_cmd` binds `{repos_dir}/{user_id}`; the root itself exists inside
+# the namespace only as that bind's parent on bwrap's ephemeral root tmpfs. A
+# clone into the root therefore succeeds, reaches the network, and is gone by
+# the next Bash call, which gets a fresh sandbox. That was ISSUE-338: this file
+# was written before the per-user split, `cd /data/repos/project` in the second
+# turn failed with "No such file or directory", `glab` never ran, and the
+# symptom was an absence of REST calls that read as a broken forge chain.
+#
+# The variable rather than the literal, because the developer skill's
+# `setup_env` is the one place that knows the layout and it exports the answer —
+# which is also the recipe `skill.md` gives the model. `set -u` (in `set -eux`)
+# aborts if it was never exported, and the `-n` test catches the empty string
+# that `-u` lets through, so the scenario cannot quietly clone somewhere else.
+#
+# **`_ENTER_REPOS_ROOT` must stay free of literal braces.** It is interpolated
+# into `_CLONE_AND_PUSH`, which is the one template `.format(clone_url=...)` is
+# applied to later — and f-string interpolation does not re-escape braces in the
+# value it substitutes. So `echo "REPOS_ROOT=${DEVELOPER_REPOS_DIR}"`, a brace
+# expansion, or a `--format={...}` added here becomes a `KeyError` from
+# `.format()` in two of the three call sites. `_OPEN_MR` is not formatted and so
+# does not share the hazard, which is what makes the asymmetry easy to miss.
+_REPOS_ROOT_MARK = "REPOS_ROOT"
+
+_ENTER_REPOS_ROOT = f"""
+test -n "$DEVELOPER_REPOS_DIR"
+echo "{_REPOS_ROOT_MARK}=$DEVELOPER_REPOS_DIR"
+cd "$DEVELOPER_REPOS_DIR"
+"""
+
 _CLONE_AND_PUSH = f"""
 set -eux
-cd /data/repos
+{_ENTER_REPOS_ROOT}
 git clone {{clone_url}} project
 cd project
 git checkout -b {BRANCH}
@@ -51,7 +96,7 @@ git push -u origin {BRANCH}
 
 _OPEN_MR = f"""
 set -eux
-cd /data/repos/project
+cd "$DEVELOPER_REPOS_DIR/project"
 glab mr create --title "A merge request from the smoke tier" \
   --description "opened by tests/smoke/test_forge_e2e.py" \
   --source-branch {BRANCH} --target-branch main \
@@ -83,6 +128,138 @@ def _script(*commands: str) -> list[dict]:
     return [*turns, {"text": "done"}]
 
 
+#: What the Bash tool says when a command did not come back clean.
+#:
+#: Four, not one, and each is a different way for the tool to report. Three are
+#: bracketed suffixes appended to the output (`session/tools/bash.py`); the
+#: fourth is a whole result body returned *instead* of running anything, when
+#: the spawn itself raised — which after `sandbox_wrap` means an unusable
+#: bwrap, a refused namespace or a bad cwd. That one carries no bracketed
+#: marker at all, and it is the failure this file's own header sends you to
+#: `test_sandbox_in_stack.py` for, so a checker blind to it is blind to the
+#: first thing to suspect.
+_FAILURE_MARKERS = (
+    "[exit code: ",
+    "[command aborted]",
+    "[command timed out",
+    "Failed to start command:",
+)
+
+
+def _assert_every_command_succeeded(stack, task) -> None:
+    """No Bash call in this task came back a failure.
+
+    `assert task["status"] == "completed"` cannot say this and never could. The
+    model is scripted: it ignores tool output and returns a fixed answer on its
+    closing turn, so the task reaches `completed` with `success=True` whatever
+    the commands did. Every scenario in this file therefore rested entirely on
+    its service-side assertion, and when one of those failed it failed as a bare
+    empty list — the sentence explaining why having gone to stderr inside the
+    sandbox and no further. That is the second half of ISSUE-338.
+
+    **Exit 141 is excluded, and it is the one exit code that has to be.**
+    `pipefail` is on for every command the daemon runs, so a correct
+    `… | head -1` makes bash exit 141 and the tool annotates it with
+    `SIGPIPE_NOTE` rather than treating it as a fault. No script here
+    short-circuits a pipe today, which is exactly why this needs writing down:
+    this helper is the pattern the next scenario in the file will copy, and the
+    first one that pipes into `head` would otherwise fail for being right.
+
+    **The scan is endpoint-wide, not scoped to `task`.** `rescript` clears the
+    recorded requests at every reset, so in practice the record holds this
+    scenario's turns and nothing else; the residual is a poller task landing
+    mid-script and taking a real tool turn. Left as is deliberately — a poller
+    arriving after the script is consumed gets the exhausted-script frame and
+    makes no tool calls, and one arriving before steals turn 0 and breaks the
+    scenario loudly anyway. Recorded so the next reader does not reinstate the
+    testbed's watermark rule here by rewriting it.
+
+    Called *before* the service-side assertion, deliberately: a failed command
+    explains an absent REST call, whereas an absent REST call explains nothing.
+
+    Proven able to fail: reverting `_OPEN_MR` to `cd /data/repos/project` turned
+    this red with `+ cd /data/repos/project` / `No such file or directory` /
+    `[exit code: 1]` rendered in the report, where the pre-fix file failed as
+    `assert 0 == 1`.
+    """
+    failures = [
+        text
+        for text in stack.endpoint.tool_results()
+        if any(marker in text for marker in _FAILURE_MARKERS)
+        and not _is_sigpipe_only(text)
+    ]
+    assert not failures, (
+        "a command in the scenario failed, so whatever the assertions below "
+        "would have measured never ran\n" + stack.diagnostics(task)
+    )
+
+
+def _is_sigpipe_only(text: str) -> bool:
+    """A result whose sole complaint is the annotated SIGPIPE exit.
+
+    `SIGPIPE_NOTE` is what distinguishes "bash exited 141 because a reader
+    closed the pipe" from a command that genuinely returned 141, and the tool
+    only ever appends it to the former.
+    """
+    if SIGPIPE_NOTE not in text:
+        return False
+    others = [m for m in _FAILURE_MARKERS if m != "[exit code: "]
+    return f"[exit code: {SIGPIPE_EXIT}]" in text and not any(
+        marker in text for marker in others
+    )
+
+
+def _assert_the_checkout_is_in_the_bound_subtree(stack, task) -> None:
+    """`$DEVELOPER_REPOS_DIR` named a subtree of the root, not the root.
+
+    The positive half of the ISSUE-338 guard, and it needs saying out loud
+    rather than being inferred from the scenario passing. `_ENTER_REPOS_ROOT`
+    echoes the value the daemon exported; this reads it back and requires it to
+    be a strict child of the configured `repos_dir`. Equality with the root is
+    the pre-split layout, under which the clone lands on bwrap's ephemeral root
+    tmpfs and every later turn finds it gone.
+
+    Stated as "one level below the root" rather than as `{root}/testuser` so it
+    says what the sandbox actually binds without pinning the harness's default
+    user id, and compared on path components rather than with `startswith` —
+    which accepts `/data/repos/../elsewhere` as a child of `/data/repos`.
+
+    The `set -x` trace is not a hazard here even though it carries the same
+    text: bash writes it as `+ echo REPOS_ROOT=…`, so it fails `startswith`.
+    Nor is the neighbouring hazard `test_sandbox_repos_isolation.py` records —
+    a harness echoing the script back — since the command travels on the
+    assistant message's `tool_calls` and `tool_results()` filters on role.
+
+    Proven able to fail: reverting the scripts to the pre-fix literals turned
+    this red on its "never echoed REPOS_ROOT" path.
+    """
+    marker = f"{_REPOS_ROOT_MARK}="
+    root_parts = PurePosixPath(CONTAINER_REPOS_DIR).parts
+    for text in stack.endpoint.tool_results():
+        for line in text.splitlines():
+            if not line.startswith(marker):
+                continue
+            root = line[len(marker):].strip()
+            parts = PurePosixPath(root).parts
+            contained = (
+                len(parts) == len(root_parts) + 1
+                and parts[: len(root_parts)] == root_parts
+                and ".." not in parts
+            )
+            assert contained, (
+                f"DEVELOPER_REPOS_DIR is {root!r}, which is not a per-user "
+                f"subtree one level below {CONTAINER_REPOS_DIR}. The sandbox "
+                "binds that subtree, so a checkout anywhere else does not "
+                "survive the turn that made it (ISSUE-338)"
+            )
+            return
+    raise AssertionError(
+        f"the scenario never echoed {_REPOS_ROOT_MARK}, so its first command "
+        "did not run and nothing below is about the forge\n"
+        + stack.diagnostics(task)
+    )
+
+
 @FORGE
 class TestTheHappyPath:
     """Clone, branch, commit, push, open a merge request.
@@ -111,6 +288,8 @@ class TestTheHappyPath:
         )
 
         assert task["status"] == "completed", stack.diagnostics(task)
+        _assert_the_checkout_is_in_the_bound_subtree(stack, task)
+        _assert_every_command_succeeded(stack, task)
         opened = forge.rest_calls("POST", "/merge_requests")
         assert len(opened) == 1, stack.diagnostics(task)
         # `payload()` rather than `body`, which is the raw bytes the client
@@ -139,6 +318,8 @@ class TestTheHappyPath:
         )
 
         assert task["status"] == "completed", stack.diagnostics(task)
+        _assert_the_checkout_is_in_the_bound_subtree(stack, task)
+        _assert_every_command_succeeded(stack, task)
         assert BRANCH in forge.branches(FORGE_PROJECT), stack.diagnostics(task)
 
 
@@ -222,6 +403,11 @@ class TestTokenIsolation:
             status="completed", task_id=task_id, timeout=300
         )
 
+        # The positive counterpart to `TestTheNegativeControl`'s EXIT=6. That
+        # control says a *missing* binary reports itself; without this, nothing
+        # said the shipped image's `glab` exits 0 for the same verb, and the
+        # pair only compared two ways of failing.
+        _assert_every_command_succeeded(stack, task)
         transcript = stack.endpoint.transcript()
         assert "GITLAB_TOKEN_SET=0" in transcript, (
             "GITLAB_TOKEN was readable from the model's own environment\n"
@@ -266,6 +452,7 @@ class TestTokenIsolation:
             status="completed", task_id=task_id, timeout=300
         )
 
+        _assert_every_command_succeeded(stack, task)
         assert forge.authenticated_git_calls(), (
             "git never answered the stub's challenge; the credential helper "
             "did not reach the skill proxy\n" + stack.diagnostics(task)

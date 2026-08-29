@@ -216,3 +216,85 @@ class TestTheEndpointIsAddressableFromAnotherProcess:
                 raise AssertionError(f"port {port} still accepts connections")
             except ConnectionRefusedError:
                 raise OSError("refused, as it should be")
+
+
+class TestToolResults:
+    """The narrow view of the conversation `Stack.diagnostics` renders.
+
+    Pure and string-shaped, so it belongs here rather than behind a Docker
+    marker — which matters because its consumers are assertion helpers in
+    `tests/smoke/`, where a wrong answer is a scenario that passes for the wrong
+    reason and nothing says so.
+
+    The request bodies are appended directly. `do_POST` is what normally fills
+    that list, and driving it through a real socket is what the rest of this
+    file is for; these cases are about the reader, and the shapes they need — a
+    malformed body, a history repeated across turns — are ones a working daemon
+    never sends.
+    """
+
+    @staticmethod
+    def _endpoint_with(*bodies):
+        from testbed.services.model_endpoint import ScriptedEndpoint
+
+        endpoint = ScriptedEndpoint([{"text": "ok"}])
+        endpoint.requests.extend(bodies)
+        return endpoint
+
+    @staticmethod
+    def _turn(*results):
+        return {
+            "messages": [
+                {"role": "system", "content": "a system prompt"},
+                *(
+                    {"role": "tool", "tool_call_id": call_id, "content": text}
+                    for call_id, text in results
+                ),
+            ]
+        }
+
+    def test_a_result_repeated_across_turns_is_reported_once(self):
+        """Every request carries the whole history, so without deduplication
+        the first turn's output appears once per later turn."""
+        endpoint = self._endpoint_with(
+            self._turn(("call-0", "first")),
+            self._turn(("call-0", "first"), ("call-1", "second")),
+        )
+
+        assert endpoint.tool_results() == ["first", "second"]
+
+    def test_two_calls_printing_the_same_bytes_stay_two_calls(self):
+        """Why the key is `tool_call_id` and not the content.
+
+        `bash.py` returns the literal `(no output)` for any command that printed
+        nothing, so two distinct silent commands collide. Merging them does not
+        merely lose a block — the caller labels by index, so it renumbers every
+        block after it, and a diagnostic that misattributes which command
+        produced a line is the thing this seam exists to fix.
+        """
+        endpoint = self._endpoint_with(
+            self._turn(("call-0", "(no output)"), ("call-1", "(no output)"))
+        )
+
+        assert endpoint.tool_results() == ["(no output)", "(no output)"]
+
+    def test_a_malformed_body_is_skipped_rather_than_raising(self):
+        """`do_POST` guards the body but not the shape of `messages`.
+
+        Both callers sit on a failure path — two assertion helpers and a report
+        renderer — where an AttributeError reads as a harness crash mid-scenario
+        rather than as the thing that went wrong.
+        """
+        endpoint = self._endpoint_with(
+            {"messages": {"role": "tool"}},
+            {"messages": ["not a dict"]},
+            {"messages": None},
+            self._turn(("call-0", "survived")),
+        )
+
+        assert endpoint.tool_results() == ["survived"]
+
+    def test_an_endpoint_that_served_nothing_reports_nothing(self):
+        from testbed.services.model_endpoint import ScriptedEndpoint
+
+        assert ScriptedEndpoint([{"text": "ok"}]).tool_results() == []
