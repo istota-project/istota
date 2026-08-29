@@ -9,6 +9,12 @@ env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"},{"var":"GITLAB_URL","from
 
 Work in git repositories, manage merge requests on GitLab and pull requests on GitHub. Uses bare clones + git worktrees for branch isolation.
 
+**This document is machinery, not method.** It tells you how the repositories, the forge CLIs and the build sandbox on this deployment work, and what will go wrong if you use them incorrectly. It does not tell you how to work: it prescribes no change tiers, no test-first rule, no verification budget, no review step, no report template, and no opinion about whether work lands as a merge or a merge request.
+
+**So run tests and reviews when you are asked to, and not otherwise.** A request to fix a bug is a request to fix a bug. If the user wants a process — tests before the commit, a review before landing, a worktree per task however small — it comes from them: from the task itself, from a development workflow in `USER.md` or in `config/skills/developer.md`, or, for a task from a project's room, from that room's `CHANNEL.md`. Where one of those speaks, follow it. Where none does, do the work you were asked for and say what you did.
+
+What does **not** yield is this deployment's mechanics: the forge boundary and its refused verbs, the CONNECT allowlist, the cap on how long a single command may run, the credential rules, where builds and tests run, and every delete path. Those are properties of the host rather than preferences, so an instruction that collides with one is something to report rather than to follow.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -55,6 +61,56 @@ Four things do change, and none is guessable from the error you get.
 - **`make` is normally not routed, and neither is anything it invokes.** That is deliberate: routing `make` would route every `git`, `gh` and `python3` in a recipe with it. A recipe calling `npm` or `cargo` is fine, because each of those routes on its own. A recipe calling `./node_modules/.bin/<tool>` by path is not, and neither is an absolute `.venv/bin/<tool>` you invoke yourself — that venv's interpreter exists only in the container. Use `uv run <tool>` instead.
 - **Do not rely on a background process outliving the command that started it.** The container kills the whole process group when the command ends, so `npm run dev &` is gone when that command returns and `nohup` does not save it. Start and use anything long-running inside one command.
 - **Some exit statuses are the transport reporting rather than your command.** Each prints one stderr line starting `istota-devbox-exec:`, which is what tells them apart — including `141` and `130`, which the shim can produce standing in for a command that never ran. `120` — nothing ran: either the container could not be reached, or it refused the request. Read the stderr line: a refusal naming the working directory means you are outside `$DEVELOPER_REPOS_DIR`, so `cd` into the worktree and re-run; a refusal saying the command is routed into the container and not installed there means exactly that — it ran nowhere, and the fix is to install it in the container rather than to look for a host copy (the image ships `uv`, Node, Go and Python; a Rust toolchain is an on-demand `rustup` install and does not survive a `devbox reset`); an unreachable container is worth reporting rather than retrying. `121` — the two halves of the transport are different versions, which is an operator problem. `122` — a malformed reply. `123` — the connection dropped after the command had started, so **what it did is unknown**: say exactly that rather than reporting success or failure, and read the tree's state before repeating anything that writes.
+
+### Installing a project's dependencies
+
+Nothing here says *when* to install — only what this deployment does that a plain `npm install` will not tell you.
+
+- **Never share a `node_modules` or a `.venv` between worktrees.** Vite, Vitest and esbuild resolve plugins and their native binaries through the real path of `node_modules`, so a borrowed tree fails at transform time and surfaces as dozens of unrelated red suites. Each worktree gets its own.
+- **Copy the gitignored files the stack needs to run** — `.env`, local config, test fixtures kept out of git. Never print their contents.
+- **A refused connection during an install is a boundary, not a flake.** npm and crates.io are reachable, and PyPI unless the operator turned it off; a package that fetches a binary from somewhere else — `node-gyp` headers, Playwright browsers, a GitHub release asset — is not, and no number of retries will change that. Say which host was refused and stop, rather than reinstalling. The operator adds hosts through `extra_hosts`; you cannot. Installs that run in the container are not bounded this way, so a refusal there is a real network failure.
+- **A zero exit from an install is not evidence it completed.** npm hides lifecycle-script output, so a postinstall binary fetch refused at that same boundary still prints `added N packages` and exits 0, leaving an empty cache directory the task meets much later as a missing binary. For anything that downloads a binary at install time — Puppeteer, Playwright, `node-gyp`, `esbuild`, `sharp`, any package with an `install` or `postinstall` script — re-run with `--foreground-scripts`, or check the artifact is there, before treating the install as done. Where the package has a skip variable (`PUPPETEER_SKIP_DOWNLOAD=1`, `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`), set it so the install is honest and fast rather than silently empty — then report the binary as unavailable behind the boundary and stop, because skipping the download does not put it there.
+- **From plain Node that boundary reads as a DNS failure.** npm, `uv`, `git` and `curl` honour `HTTPS_PROXY`, so a blocked host is refused at the proxy with a 403 against a `CONNECT` the tool itself names. Node ignores proxy environment by default, so a postinstall script written in JS never reaches the proxy at all: it resolves DNS inside the network namespace and fails with `EAI_AGAIN` or `ENOTFOUND`. Same boundary and same answer — name the host and stop — but it does not look like one, and it is not a flake to retry.
+
+### Running something that takes a while
+
+None of this says *whether* to run tests — that is the request's to make, or the user's. It is how to run one on this host without throwing the result away.
+
+- **The exit status is the result, and a pipe throws it away unless `pipefail` is on.** It is already on in your Bash calls, so `pytest … | tail` no longer exits 0 on a suite that failed. It arrives through the environment, so it reaches a nested `bash script.sh` too — but bash only, and `/bin/sh` on Debian is dash, which has no `pipefail` at all. Write it yourself in a script, or capture and check instead:
+
+  ```bash
+  set -o pipefail                               # same Bash call as the pipe
+  uv run pytest -q --no-header | tail -n 20
+  ```
+
+  Or capture, check, then read — no shell option involved, and the whole log survives:
+
+  ```bash
+  uv run pytest -q --no-header > "$WORK_DIR/.check.log" 2>&1; STATUS=$?
+  tail -n 20 "$WORK_DIR/.check.log"
+  exit "$STATUS"                                # last statement of the call
+  ```
+
+- **Cap the worker count to 2 before you run anything.** `pytest -n auto` and vitest's default size their pool from `cpu_count()`, so each suite claims the whole box — and you share it with the daemon and with other tasks. Two at once ask for more than exists, and the result is timeouts that have nothing to do with the code. Set `PYTEST_XDIST_AUTO_NUM_WORKERS=2` in the same call as the run, since shell state does not carry between calls; vitest takes `--maxWorkers=2`, `make` takes `-j2`. Use the environment rather than the repository's config: `-n auto` is right on a laptop and in CI, and this host is the special case.
+
+- **A run that might outlast one tool call goes detached, not up against the cap.** Do not reach for `timeout 590 …`: it guarantees a kill at the moment a long run might have finished and throws away what it had produced. **Do not plan against a specific number of seconds** — the cap depends on which brain is driving and on what the caller passed, so treat it as short and detach anything that might not comfortably fit.
+
+  ```bash
+  cd "$WORK_DIR" || exit 1
+  rm -f .check.status
+  setsid sh -c 'uv run pytest -q --no-header > .check.log 2>&1; echo $? > .check.status' &
+  ```
+
+  ```bash
+  cd "$WORK_DIR" && cat .check.status 2>/dev/null || echo still running   # poll
+  cd "$WORK_DIR" && tail -n 30 .check.log        # separate call, once it appeared
+  ```
+
+  Three details, each load-bearing. `setsid`, not a bare `&`: your bash call kills its whole process group when it returns, so a merely backgrounded run dies the moment the call that started it finishes — a new session is what escapes that. `cd` on its own line, because `&` binds looser than `&&`, so `cd "$WORK_DIR" && cmd &` backgrounds the `cd` too and scatters the files across two directories. And the **status file is the result**: it appearing is what "finished" means, and what it holds is the exit code. Do not read pass or fail out of the log text, and do not poll for a pid — a missing pid file reads exactly like a finished run.
+
+- **A killed run is not re-run as it was.** Not with a longer timeout, not with the same command again: one job spent forty minutes on four identical attempts, produced no coverage at all and held the host down throughout. Run something smaller instead. If every attempt dies at the same point and unrelated tests fail on time, the machine is the finding — stop and report that.
+
+- **Say what you ran**: the command, the paths and stacks it covered, and the exit status it was read from. Partial coverage labelled honestly is usable; an impression of a complete run is not.
 
 ## Directory Layout
 
@@ -137,22 +193,36 @@ done
 
 ### Reading current source from a bare clone
 
-**Invariant: `refs/remotes/origin/HEAD` resolves, `HEAD` is a `refs/heads/` ref
-that does not, and you never name a local branch — always `origin/<branch>` or
-`origin/HEAD`.** The first lets every later step discover the base branch
-instead of assuming `main`; the rest keeps a clone-day fossil unreadable rather
-than silently stale. To read the live tree in one step that can't point at a
-stale ref:
+**Invariant: `refs/remotes/origin/HEAD` resolves, `HEAD` is a `refs/heads/` ref that does not, and you never name a local branch — always `origin/<branch>` or `origin/HEAD`.** The first lets every later step discover the base branch instead of assuming `main`; the rest keeps a clone-day fossil unreadable rather than silently stale. To read the live tree in one step that can't point at a stale ref:
 
 ```bash
 # dev-show <BARE_DIR> <path> — current source from origin/HEAD, always fetched.
 git -C "$BARE_DIR" fetch -q origin && git -C "$BARE_DIR" show origin/HEAD:"$path"
 ```
 
-Use this (or `git -C "$BARE_DIR" log origin/HEAD`) for any hand-rolled
-verification read. Never `git show main:<path>` / `git log master` on a bare clone.
+Use this (or `git -C "$BARE_DIR" log origin/HEAD`) for any hand-rolled verification read. Never `git show main:<path>` / `git log master` on a bare clone.
 
 ## Creating a Worktree for Development
+
+Two reads before you cut one, whatever the task is.
+
+**The base branch is whatever the repository says it is.** Never assume `main`; plenty are still on `master`, and a worktree branched from a base that does not exist is the commonest way this dies.
+
+```bash
+git -C "$BARE_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main | origin/master
+git -C "$BARE_DIR" fetch origin --prune
+```
+
+**A credential in the repository's own config is a stop.** Repo-local config is not covered by the environment's git hardening, and everything under `$DEVELOPER_REPOS_DIR` is writable by tasks, so this is a tripwire rather than a guarantee — the daemon sweeps these at setup, and one appearing here appeared afterwards.
+
+```bash
+git -C "$BARE_DIR" config --list --includes | awk -F= '{ k = $1 }
+    k ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "credential embedded in a config key"; next }
+    /^http\..*extraheader=/ || /:\/\/[^\/@]*:[^\/@]+@/ { print k }'   # end of the credential check
+```
+
+It prints a setting's *name*, never its value. If it prints anything: stop, report that line as a credential to rotate, and do not work in that repository — every worktree you cut inherits the setting, and the next `git remote -v` puts it in your context.
+
 
 ```bash
 TASK_ID="$ISTOTA_TASK_ID"
@@ -174,173 +244,6 @@ git -C "$BARE_DIR" worktree add -b "$BRANCH" "$WORK_DIR" "origin/$DEFAULT_BRANCH
 ```
 
 All work happens inside `$WORK_DIR`.
-
-## The Job Lifecycle
-
-A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Where they apply, do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
-
-**These steps are this document's default, and the user's own instructions outrank them.** A development workflow written in `USER.md` — or, for a task that came from a room, in that project's `CHANNEL.md` — is already in front of you before this skill loads, and it wins wherever it speaks: which of these steps run, how much process a change gets, what counts as enough testing, how the work lands. Where both files carry one and they disagree, `CHANNEL.md` wins for a task from that room — it is the more specific statement, and the room is the project. Where neither says anything, everything below applies as written. What does not yield is the deployment's mechanics: the forge boundary and its refused verbs, the CONNECT allowlist, the 600-second ceiling, the credential rules, where builds and tests run, the pre-submission checks, and every delete path. Those are properties of the host rather than preferences, so an instruction that collides with one is something to report rather than to follow.
-
-### 1. Preflight, before a worktree exists
-
-Batch these reads and act on them together. Do not start work that cannot land.
-
-```bash
-cd "$BARE_DIR"
-git rev-parse --is-bare-repository
-git symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main or origin/master
-git fetch origin --prune
-git config --list --includes | awk -F= '{ k = $1 }
-    k ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "credential embedded in a config key"; next }
-    /^http\..*extraheader=/ || /:\/\/[^\/@]*:[^\/@]+@/ { print k }'   # end of the credential check
-```
-
-- No repository, or the fetch fails: stop and report. Do not clone something else and carry on.
-- The base branch is whatever `symbolic-ref` reports, stripped of `origin/`. Never assume `main` — plenty of repositories are still on `master`, and a worktree branched from a base that does not exist is the single most common way this dies.
-- The credential check reads the whole config, not just remotes, and prints a setting's *name* and never its value. It printing anything: stop. Every worktree you cut inherits that setting, and the next `git remote -v` puts it in your context. Report what it printed — that line only, never the value — as a credential to rotate, and do not work in that repository. The daemon sweeps these at task setup, so one appearing here appeared afterwards. It matches `:secret@` rather than a bare `@` because `git@github.com:owner/repo` is a username; it is a tripwire and simpler than the daemon's sweep, so a clean result is not proof.
-
-### 2. Create the worktree, then read back what was made
-
-A worktree per task is the default; a user who works another way says so in `USER.md` or `CHANNEL.md`, and the rule against editing live source holds wherever you work. Create it as described under "Creating a Worktree for Development". Then read back what actually exists and use those values for the rest of the run:
-
-```bash
-cd "$WORK_DIR"
-git rev-parse --show-toplevel   # the worktree path
-git branch --show-current       # the branch name
-```
-
-Refer to those two values from here on. Nothing later should hardcode the branch name you intended to create; a push or an MR against a branch name that does not exist fails in a way that reads like an API problem and is not.
-
-### 3. Make the worktree runnable, do not baseline it
-
-A fresh worktree has the tracked files and nothing else.
-
-- **Install only the stack the task touches.** A repository with a Python service and a frontend has an install for each, and a task that only touches one has no use for the other. If the work reaches the other stack later, install it then.
-- **Never share a `node_modules` or a `.venv` between worktrees.** Vite, Vitest and esbuild resolve plugins and their native binaries through the real path of `node_modules`, so a borrowed tree fails at transform time and surfaces as dozens of unrelated red suites. Each worktree gets its own.
-- **Copy the gitignored files the stack needs to run** — `.env`, local config, test fixtures kept out of git. Never print their contents.
-- **A refused connection during an install is a boundary, not a flake.** npm and crates.io are reachable, and PyPI unless the operator turned it off; a package that fetches a binary from somewhere else — `node-gyp` headers, Playwright browsers, a GitHub release asset — is not, and no number of retries will change that. Say which host was refused and stop, rather than reinstalling. The operator adds hosts through `extra_hosts`; you cannot. Installs that run in the container (see "Where Builds and Tests Run") are not bounded this way, so a refusal there is a real network failure.
-- **A zero exit from an install is not evidence it completed.** npm hides lifecycle-script output, so a postinstall binary fetch refused at that same boundary still prints `added N packages` and exits 0, leaving an empty cache directory the task meets much later as a missing binary. For anything that downloads a binary at install time — Puppeteer, Playwright, `node-gyp`, `esbuild`, `sharp`, any package with an `install` or `postinstall` script — re-run with `--foreground-scripts`, or check the artifact is there, before treating the install as done. Where the package has a skip variable (`PUPPETEER_SKIP_DOWNLOAD=1`, `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`), set it so the install is honest and fast rather than silently empty — then report the binary as unavailable behind the boundary and stop, because skipping the download does not put it there.
-- **From plain Node that boundary reads as a DNS failure.** npm, `uv`, `git` and `curl` honour `HTTPS_PROXY`, so a blocked host is refused at the proxy with a 403 against a `CONNECT` the tool itself names. Node ignores proxy environment by default, so a postinstall script written in JS never reaches the proxy at all: it resolves DNS inside the network namespace and fails with `EAI_AGAIN` or `ENOTFOUND`. Same boundary and same answer — name the host and stop — but it does not look like one, and it is not a flake to retry.
-- **Prove it can run tests, cheaply.** A collection step (`pytest --collect-only -q`, one small component test), not a full suite. The base branch was green when it was last committed, so a full pass here re-confirms what the last commit already established. What is unknown is whether *this worktree* can run anything.
-
-If the collection step fails, that is the environment and not the code. Fix the setup and retry. If it fails in a way you cannot explain, stop and report rather than starting work on a worktree you cannot run.
-
-### 4. Understand before changing
-
-Before writing any code, read enough of the codebase to understand the existing patterns:
-
-- **Read `CLAUDE.md`, `AGENTS.md`, and any `.claude/rules/` files** in the repository — these carry project-specific conventions and architecture notes that must be followed.
-- **Read existing code** that does something similar to what you are implementing. Match the naming conventions, error handling patterns, env var names and module structure already in use. Never guess — grep for how other modules solve the same problem.
-- **Check how the module integrates** with the rest of the system. If you are adding a new skill, plugin or module, look at how existing ones are wired in (env vars, config, imports, tests) and copy the established pattern.
-
-Reading existing patterns is the cheapest step here and skipping it is the most common source of bugs. Five minutes reading saves an hour of debugging.
-
-### 5. Pick a change tier, and say which
-
-The tier decides how much process the rest of the change gets. Pick it before writing code and state it in your report. The three tiers are the default shape of that decision, and a user's own instructions may set a different one.
-
-**Boundary surfaces.** Any change touching one of these is Full tier regardless of size: authn/authz, secrets and credentials, money or billing, schema migrations, deletion and other destructive paths, external API contracts and payload shapes, concurrency and locking, anything crossing a network, anything running as root or over ssh on a remote host.
-
-- **Fast** — under about 30 changed lines, one or two files, no boundary surface. Implement, add or extend one test, run the verification pass below once, commit. No pre-written failing test, and no review.
-- **Standard** — the default. Tests written alongside the implementation, the verification pass below green before the commit, review before the MR.
-- **Full** — any boundary surface, a diff over about 150 lines, or anything you would not want to be wrong about. Failing test first, the verification pass below before and after, review with both agents.
-
-**Escalate, never downgrade.** Move up a tier the moment any of these happens: a check goes red in a way you did not predict, you need to read a third file to understand the change, or you find a boundary surface you had not counted. Say that you escalated and why. Never move down mid-change, and never pick Fast to avoid work you already suspect is needed.
-
-### 6. Implement, and verify as you go
-
-- **Edit files in the worktree**, never in the bare clone.
-- **When a test gets written is a default, like the tier above it**, and the user's own instructions in `USER.md` or `CHANNEL.md` may set it otherwise. The default writes the test first in exactly three cases: reproducing a reported bug, where the failing test is what proves the fix; pure logic whose semantics are tricky enough that the assertion is the real spec; and any Full-tier change. In all three, run it and confirm it fails for the reason you expect.
-- **Everywhere else the test and the implementation are written together and run once.** A separate run to confirm red buys nothing; check by reading instead, since an assertion that could have passed against the pre-change code is vacuous and wants rewriting rather than running.
-- **Breadth**: the happy path, the specific edge case that motivated the change, and one integration test through the real seam. Not an exhaustive edge-case sweep. Integration tests are the highest-value layer — high enough to prove the system works, low enough to debug when they break. Avoid mocks; where unavoidable, mock at a system boundary, never per collaborator.
-- **Verify integration points.** If the change adds env vars, config fields, CLI commands or dependencies, check that every consumer and producer is updated together. A new env var is useless if the code reading it uses a different name than the code setting it. Adding a package to `pyproject.toml` or `package.json` is not enough — run the install and commit the lockfile.
-- **Keep metadata in step.** If you change a module's purpose, update its descriptions, docstrings and config manifests to match.
-
-### 7. The verification budget
-
-- **The pass is the tests covering the change, plus the repository's linters and type checker over the whole repository.** That is this document's default, and a user's own instructions in `USER.md` or `CHANNEL.md` may set a different scope; one that will not fit the 600-second tool call is honoured through the detached recipe below rather than declined. Chain the tests, the linters and the type checker into one invocation rather than three, and run it once the work is done rather than after every fix or before every commit — the tier decides whether it also runs earlier. A whole test suite is not part of the default, and the reason is worth carrying rather than only the rule: a suite is sized for CI and for a machine nobody is waiting on, while a task shares this host with the daemon and with other tasks and is bounded by the 600-second tool call. The failure this avoids is not a slow task — it is a task that started a run it could not finish, was killed partway and committed nothing, which is strictly less coverage than a narrow run that completed.
-- **The static half stays whole, and that is what makes a narrow test selection safe.** Linters and a type checker are seconds rather than minutes, they are the same command whatever changed, and they catch breakage at a distance — a renamed symbol, a dropped import, a signature that no longer fits its callers. Take their invocation from the repository's own entry point rather than inventing flags: `npm run check`, `make check`, `just check`, `tox`, whatever is already in `package.json` or the Makefile. Where that entry point also runs every test in the repository, read what it runs and invoke its lint and typecheck steps directly, selecting the tests yourself. Invoking the steps it names is fine; committing a wrapper script of your own is not, because a second entry point drifts from the real one and hides which step failed.
-- **Selecting the tests is a ladder — take the first rung that yields something.** (1) Test files the change already touches; if you edited a test, it is in scope. (2) The runner's own selector, where the ecosystem has one: `vitest related <files>`, `jest --findRelatedTests <files>`, `go test ./<changed package>/...`, `cargo test -p <crate>`. pytest has no equivalent, so a Python repository falls through to the next rung. (3) Path mirroring, in whatever form this repository uses: `src/foo/bar.py` against `tests/test_bar.py` or `tests/foo/test_bar.py`, `src/foo/bar.ts` against `src/foo/bar.test.ts`. (4) Grep the test tree for the names that changed — module path, function, class, config key, env var. That rung catches what mirroring misses, and it is the one that works in any language.
-- **One of the selected tests has to reach the change through an integration seam**, not only the unit file sitting beside it. Where there is none, that is a test to write rather than a reason to widen to everything. In a multi-stack repository the seam crosses stacks: untouched code cannot break, but anything passing between them — an API payload shape, a serialized schema, a shared fixture — is a boundary surface and pulls the other stack's tests in whether or not you edited its files.
-- **Failure-only output, and bail on the first failure while you iterate.** Test and lint output is the largest single source of wasted context, so use the runner's own quiet flags — `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast` — and `-x` or `--bail=1` while you are iterating, because one real failure beats forty cascading ones. Drop the bail flag for the pass you report.
-- **Cap the worker count to 2 before you run anything.** `pytest -n auto` and vitest's default size their pool from `cpu_count()`, so each suite claims the whole box — and you are sharing it with other tasks and the daemon itself. Two at once ask for more than exists, and the result is timeouts that have nothing to do with the code. Set `PYTEST_XDIST_AUTO_NUM_WORKERS=2` (honoured by `-n auto`) in the same call as the run, since shell state does not carry between calls; vitest takes `--maxWorkers=2`, `make` takes `-j2`. Use the environment, not the repository's `pyproject.toml`: `-n auto` is correct on a laptop and in CI, and this host is the special case.
-- **The exit status is the result, and `pipefail` is what stops a pipe throwing it away.** It is **already on** in your Bash calls (see the Bash note in Available tools for the two costs), so `pytest … | tail` no longer exits 0 on a suite that failed. It arrives through the environment, so it reaches a nested `bash script.sh` too — but bash only, and `/bin/sh` on the Debian server is dash, which has no `pipefail` at all. Write the option yourself in a script, or where you are unsure what shell you are in:
-
-  ```bash
-  set -o pipefail                               # same Bash call as the pipe
-  uv run pytest -q --no-header | tail -n 20
-  ```
-
-  Or capture, check, then read — no shell option involved, and the whole log survives:
-
-  ```bash
-  uv run pytest -q --no-header > "$WORK_DIR/.check.log" 2>&1; STATUS=$?
-  tail -n 20 "$WORK_DIR/.check.log"
-  exit "$STATUS"                                # last statement of the call
-  ```
-
-- **A run that might outlast the tool call goes detached, not up against the ceiling.** A bash call is capped at 600 seconds, and the reflex fix — `timeout 590 uv run pytest …` — is the worst of both: it guarantees a kill at the moment a long suite might have finished, and throws away what the run had produced. Start it in its own session, writing both its output and its **exit status** to files:
-
-  ```bash
-  cd "$WORK_DIR" || exit 1
-  rm -f .check.status
-  setsid sh -c 'uv run pytest -q --no-header > .check.log 2>&1; echo $? > .check.status' &
-  ```
-
-  ```bash
-  cd "$WORK_DIR" && cat .check.status 2>/dev/null || echo still running   # poll
-  cd "$WORK_DIR" && tail -n 30 .check.log        # separate call, once it appeared
-  ```
-
-  Three details, each load-bearing. `setsid`, not a bare `&`: your bash call kills its whole process group when it returns, so a merely backgrounded run dies the moment the call that started it finishes — a new session is what escapes that. `cd` on its own line, because `&` binds looser than `&&`, so `cd "$WORK_DIR" && cmd &` backgrounds the `cd` too and scatters the files across two directories. And the **status file is the result**: it appearing is what "finished" means, and what it holds is the exit code. Do not read pass or fail out of the log text, and do not poll for a pid — a missing pid file reads exactly like a finished run.
-
-- **Say what you ran.** The report names the command, the paths it covered and the exit status it was read from, and where the pass was narrower than the whole suite it says so plainly. Partial coverage labelled honestly is usable; an impression of a complete one is not. Name the stacks the pass covered too, so a partial run never reads as a whole one, and report an empty test selection as empty — a docs-only change, or a tree where even the last rung found nothing, still gets the static checks and is not a reason to run everything as consolation.
-- **A killed run is not re-run as it was.** Not with a longer timeout, not with the same command again: one job spent forty minutes on four identical attempts, produced no coverage at all and held the host down throughout. Narrow it and run something smaller instead. If every attempt dies at the same point and unrelated tests fail on time, the machine is the finding — stop and report that rather than narrowing further.
-- **Never re-read a file you just wrote.** The edit would have failed loudly if it had not applied.
-
-### 8. Commit
-
-Commit in coherent steps rather than one lump, unless the user's own instructions ask for a different granularity. The `commit` companion carries the message format, what lands alongside a commit, and the scrub rules — follow it rather than improvising.
-
-**Commit before you review.** The review resolves a commit range and reads it with `git diff`, `git log` and `git show`; uncommitted work appears in none of those, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed first.
-
-### 9. Review before landing
-
-Unless the change is Fast tier, or the user's own instructions say otherwise, run a review after the work's verification pass and after the commits exist, but before the branch is pushed. See the `code_review` companion for the command and for how to read what comes back.
-
-The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
-
-If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached, no reviewer returned a usable answer — that is a state of the environment, not of the diff. It comes back `skipped`. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself — a bad range, a path outside the allowed roots — and it is yours to correct: report it and do not open the MR.
-
-### 10. Land
-
-Push the branch and open a merge request or pull request, following the platform sections below. **Landing is an MR or a PR, not a merge** — the default, and the decision `CHANNEL.md` speaks to above all, since how work lands is usually a property of the project rather than of the person. Merge to the default branch when the task text explicitly asks for it, or when the user's own instructions for this repository say that is how work lands here.
-
-### 11. The abort path
-
-Whenever a step above says stop: stop, change nothing further, and leave the worktree and branch exactly as they are. They hold the work. Report what failed with the command output, the worktree path and branch name, what state the base branch is in, and what you would do next.
-
-Never delete a worktree whose work did not land.
-
-### 12. Report
-
-Report in this shape unless the user's own instructions ask for a different one, so the room gets a consistent block:
-
-```
-<repo>/<branch> — <task>
-
-Workflow: <USER.md | CHANNEL.md | this document's defaults — and what they left to it>
-Tier: <Fast | Standard | Full>, <why — boundary surface, size, or default>
-Worked: <what changed, one or two sentences>
-Tests: <command, paths and stacks covered, exit status it was read from, what it did not cover; N added>
-Review: <counts by severity and what you did about them> | <skipped, why> | <not run, Fast tier>
-Landed: <MR/PR URL> | <why not>
-Worktree: <path, left in place>
-
-Deferred: <anything you did not take on, and why it is separate — one line each>
-```
-
-Omit `Deferred` when there is nothing in it. `Workflow:` names the file whose instructions were in force — `USER.md`, a room's `CHANNEL.md`, or neither — because a reader who does not know which rules the work ran under cannot tell a narrow pass that was chosen from one that was careless. `Tests:` names an exit status rather than an impression of one — the last twenty lines of a run say nothing about the twelve failures above them — and states what the pass left out, which by default is any test the selection did not reach.
 
 ## GitLab: Pushing and Creating a Merge Request
 
@@ -511,26 +414,11 @@ glab ci get -p "$PIPELINE_ID"
 
 ## Worktree Retention and Cleanup
 
-**Worktrees are reaped automatically once their work has landed. Do not clean up
-after yourself, and never clean up after another task** — you cannot see whether
-the task that made it is still running, and the sweep's retention window can.
+**Worktrees are reaped automatically once their work has landed. Do not clean up after yourself, and never clean up after another task** — you cannot see whether the task that made it is still running, and the sweep's retention window can.
 
-`worktree_reaper.py` runs on the scheduler's own interval, not at task start. It
-removes only a worktree that is clean (untracked and gitignored files included),
-unlocked, idle for `developer.worktree_retention_hours` (24 by default), and
-carrying no commit that is not already upstream — squash- and rebase-merged
-branches included, since it asks `git cherry` rather than testing ancestry.
-Everything else is kept and counted. So leaving a worktree in place after
-opening an MR is correct: the branch is not upstream, the sweep keeps it, and a
-later sweep takes it away once the MR merges. Uncommitted work there is safe only
-until the branch lands. `git worktree lock "$WORK_DIR" --reason "..."` pins one
-indefinitely; unlock it when done, or it is a leak with your name on it.
+`worktree_reaper.py` runs on the scheduler's own interval, not at task start. It removes only a worktree that is clean (untracked and gitignored files included), unlocked, idle for `developer.worktree_retention_hours` (24 by default), and carrying no commit that is not already upstream — squash- and rebase-merged branches included, since it asks `git cherry` rather than testing ancestry. Everything else is kept and counted. So leaving a worktree in place after opening an MR is correct: the branch is not upstream, the sweep keeps it, and a later sweep takes it away once the MR merges. Uncommitted work there is safe only until the branch lands. `git worktree lock "$WORK_DIR" --reason "..."` pins one indefinitely; unlock it when done, or it is a leak with your name on it.
 
-**To read the default branch as a tree**, use your own task worktree — the
-recipe above branches from `origin/$DEFAULT_BRANCH`, so it *is* the default
-branch until you commit. Never `worktree add` a checkout named after a branch:
-`project--main` is detached, outside the naming convention, and reads like a
-canonical checkout other work might trust (ISSUE-288).
+**To read the default branch as a tree**, use your own task worktree — the recipe above branches from `origin/$DEFAULT_BRANCH`, so it *is* the default branch until you commit. Never `worktree add` a checkout named after a branch: `project--main` is detached, outside the naming convention, and reads like a canonical checkout other work might trust (ISSUE-288).
 
 To take a worktree out by hand rather than waiting for the sweep:
 
@@ -539,9 +427,7 @@ git -C "$BARE_DIR" worktree remove "$WORK_DIR"     # no --force: a refusal is th
 git -C "$BARE_DIR" update-ref -d "refs/heads/$BRANCH"
 ```
 
-`update-ref -d`, not `branch -d`: this clone's HEAD points at a deleted ref by
-design (the fossil cleanup above) and `branch -d` consults HEAD, so it fails on
-every branch here, merged ones included.
+`update-ref -d`, not `branch -d`: this clone's HEAD points at a deleted ref by design (the fossil cleanup above) and `branch -d` consults HEAD, so it fails on every branch here, merged ones included.
 
 ## Quick Reference
 
@@ -566,6 +452,7 @@ Check the help before trusting a spelling from memory — the deployed CLIs may 
 
 ## Error Handling
 
+- **Whenever something says stop**: stop, change nothing further, and leave the worktree and branch exactly as they are — they hold the work. Report what failed with the command output, the worktree path and branch name, what state the base branch is in, and what you would do next. **Never delete a worktree whose work did not land.**
 - **Tests fail**: Fix the code and re-run. Do not push failing tests.
 - **Push rejected (non-fast-forward)**: Fetch and rebase onto the target branch:
   ```bash

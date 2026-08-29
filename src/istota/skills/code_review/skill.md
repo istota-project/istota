@@ -10,7 +10,7 @@ env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"},{"var":"ISTOTA_BRAIN_NATI
 
 # Code review
 
-A review runs over a branch's diff and comes back with findings you have to act on. It is part of the development lifecycle rather than optional diligence — see the `developer` skill for where it sits.
+A review runs over a branch's diff and comes back with findings you have to act on. **Run one when you are asked to** — by the task, or by a development workflow the user has written in `USER.md`, in `config/skills/developer.md`, or in a project room's `CHANNEL.md`. This document is how to run one and what to do with what comes back, not a rule that one must happen.
 
 ## Running one
 
@@ -27,11 +27,11 @@ Never pass the diff, the file contents, or any prompt text. The command assemble
 
 ## When to run one
 
-- Before pushing a branch and opening a merge request or pull request, unless the change is Fast tier.
-- At the close of each stage of a staged piece of work, over that stage's commits rather than everything since the work began.
-- Whenever the user asks for one, over whatever range they name.
+Whenever you are asked to, over whatever range is named. Where the user's own workflow says when a review happens — before a push, at the close of a stage, above some size — follow that. Where nothing says, a review is not implied by the work being finished.
 
-Fast-tier changes are not reviewed. That is what the tier is for.
+**Commit first, whatever the trigger.** The review resolves a commit range and reads it with `git diff`, `git log` and `git show`; uncommitted work appears in none of those, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed before the command runs, and fixes land as their own commits rather than amending one the review already read.
+
+Reviewing a stage of a larger piece of work means reviewing *that stage's* commits, not everything since the work began — the earlier stages were reviewed at their own boundary.
 
 ## What comes back
 
