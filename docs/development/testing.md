@@ -33,7 +33,43 @@ uv run pytest tests/test_doctor.py                           # one file, no sema
 uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 ```
 
-`addopts` in `pyproject.toml` pins `-n auto`, so the suite runs under pytest-xdist by default. New tests must be order-independent. For a local edit loop, `--testmon -n0` reruns only what your change touched; `-v` is only readable with `-n0`, since xdist interleaves worker output.
+`addopts` in `pyproject.toml` pins `-n auto`, so the suite runs under pytest-xdist by default. New tests must be order-independent. `-v` is only readable with `-n0`, since xdist interleaves worker output. For a local edit loop use `scripts/qt`, below — **not** a bare `--testmon`, which this repo's `addopts` silently disables.
+
+### The edit loop: `scripts/qt`
+
+```bash
+scripts/qt                     # only the tests your change affects
+scripts/qt --full              # the whole suite, refreshing testmon's data
+scripts/qt tests/test_db.py    # scoped, still incrementally
+```
+
+The full suite is ~16,700 tests in ~110s, and it is **throughput-bound across every core** — roughly 740s of CPU over 110s of wall, with no long pole (the slowest single test is 5s). Measured consequences: xdist's `worksteal`, `loadfile` and `loadscope` are all *slower* than the default `load`; gating the twenty slowest infrastructure files removes 1,179 tests and 4% of the wall time; and making individual tests cheaper backfires if it trades CPU for I/O. There is no version of "make the suite faster" that pays. The only lever is running fewer tests.
+
+`scripts/qt` is that lever. pytest-testmon records which tests executed which source lines, so an ordinary Python change reruns a handful of tests in under a second, and a change that affects nothing exits immediately.
+
+**Do not work out the affected set by reading the code instead.** Both intuitive methods were measured against what actually executes, and both are wrong in both directions at once. Editing `shell_argv()` in `shell_exec.py` touches 101 tests across six files:
+
+| Method | Files picked | Of the 101 tests |
+|---|---|---|
+| Name-matched file | `tests/test_shell_exec.py` | 12 |
+| grep `tests/` for `shell_exec` | 4 | 12 |
+| `scripts/qt` | 6 | 101 |
+
+grep adds nothing over the name match. It picks three files that never exercise the function and misses `test_scheduler.py` (35 tests), `test_heartbeat.py` (26) and `native/test_tools_bash.py` (25) — which are exactly the three consumers `AGENTS.md` documents as depending on this function's `pipefail` semantics, so the tests that would catch a regression are the ones both methods skip. The reason is structural: dependence runs through call chains, not through text, and those files call something that calls `shell_argv` without ever naming it.
+
+It fails the other way too. The same grep picks seven files for `git_remote_scrub.py` where one holds every test that exercises the changed function. And the name match assumes a file that often does not exist — of five sampled modules, `usage_render.py` is covered by `tests/test_cli_render_cost.py` and `process_group.py` by `tests/test_process_group_kill.py`.
+
+Where a module does have a clean 1:1 test file, the guess is right and `qt` adds nothing. The point is that you cannot tell which case you are in without asking, and `qt` asks.
+
+Two properties of the wrapper are worth knowing, because both are traps if you invoke testmon by hand:
+
+**testmon and `-m` are mutually exclusive.** testmon turns its selection off entirely the moment it sees a marker expression — it says so on a line most people scroll past: `testmon: selection automatically deactivated because -m was used`. This repo's `addopts` always carries one, for the discretionary-tier deselection, so a hand-run `uv run pytest --testmon` quietly runs *everything* while looking like it worked. `qt` clears `addopts` and applies the same deselection through `ISTOTA_DESELECT_TIERS=1`, which `tests/conftest.py` reads. `tests/test_tier_deselection.py` keeps the two sets in step, and fails loudly in the direction that matters — a marker deselected by `addopts` and missing from `DISCRETIONARY_MARKERS` would have an incremental run building Docker images.
+
+**testmon cannot see into a subprocess.** About sixty of this repo's test files drive a shell script, a git binary, a Dockerfile or a rendered template rather than the product's own Python. Measured: changing `scripts/check-private-data.sh` selects **zero** tests, while the 39 tests that exercise that script sit right there. So `qt` does not trust testmon with non-Python changes at all — any changed file that is not `.py` (prose aside) falls back to the full suite. That is the conservative direction, and it is why the fallback is automatic rather than a flag you have to remember.
+
+`.testmondata` is gitignored and local to one checkout, so **each worktree pays for its own**: the first `scripts/qt` in a fresh one finds no data and runs a full traced suite (~132s, against 110s untraced) to build it. That is once per worktree, not once per change, and it is the same run you would have done before the first commit anyway — but it means `qt` is not free the first time you reach for it in a new tree. Delete the file to force a rebuild; every `--full` run refreshes it in passing.
+
+Two habits keep it useful. Run `scripts/qt --full` rather than a bare `pytest` for the pre-commit full run, so the data stays current instead of going stale the moment you run the suite another way. And reach for `--par` (or `--full`) when the change is to something central: `db.py` selects ~4,500 tests, which is most of the suite, and serially that is slower than just running everything.
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Every run ends with one verdict line on stderr — `qtest: PASS exit=0 time=3m41s cmd: uv run pytest`, or `FAIL`, or `KILLED-SIGKILL`, or `NO-SLOT` — so a run read through `| tail`, which reports the pipe's exit code rather than the suite's, still says plainly how it went; stdout is left untouched. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
