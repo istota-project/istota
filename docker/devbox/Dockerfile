@@ -133,9 +133,10 @@ RUN set -eux; \
 # toolchain went away permanently, from an operation whose own name promises a
 # clean box rather than a smaller one (ISSUE-336).
 #
-# So uv comes from the same pinned image `docker/istota/Dockerfile` copies it
-# from, and lands outside the mount where nothing at runtime can mask or delete
-# it. istota is a uv project and `uv`/`uvx`/`pip` are in
+# So uv comes from the upstream image, pinned to a release the way
+# `docker/test/Dockerfile` pins it (`docker/istota/Dockerfile` still tracks
+# `:latest`), and lands outside the mount where nothing at runtime can mask or
+# delete it. istota is a uv project and `uv`/`uvx`/`pip` are in
 # `config.DEFAULT_SHIM_COMMANDS`, so on a devbox-backed deployment a missing uv
 # is not a missing tool in a scratch box — it is `uv sync` failing inside a
 # shim, at a remove from anywhere the reader would look.
