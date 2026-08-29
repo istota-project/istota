@@ -9,6 +9,15 @@ For DB-aware ops (currently `add_fact`, which writes to `knowledge_facts`),
 use the sibling `apply_ops_with_db()`. Keeps `apply_ops()` pure for callers
 that only need file ops.
 
+Four helpers below are module API rather than private, and `overlay.py` is
+why: a per-skill user overlay is a flat file with no `## ` sections, so it
+cannot go through `apply_ops` at all, but the *semantics* of what a bullet is
+and where an appended one lands must be the same on both documents.
+`insert_bullet_in_region`, `find_unique_bullet`, `normalize_to_bullet` and
+`validate_appendable_line` carry all of that. Copying any of them into the
+overlay applier would be the drift. USER.md op semantics are unchanged — the
+promotion is a rename.
+
 Op shapes
 ---------
 - append:      {"op": "append", "heading": str, "line": str,
@@ -174,13 +183,13 @@ def _apply_ops_inner(
     return new_doc, applied, rejected
 
 
-def _normalize_to_bullet(text: str) -> str:
+def normalize_to_bullet(text: str) -> str:
     """Strip an existing bullet marker if any and re-emit as `- {body}`."""
     body = normalize_bullet_text(text)
     return "- " + body
 
 
-def _validate_appendable_line(line: str) -> str | None:
+def validate_appendable_line(line: str) -> str | None:
     """Return None if line is OK, else a reject reason.
 
     Heading-like content (`#` runs followed by whitespace or EOL) is rejected
@@ -203,11 +212,11 @@ def _apply_append(doc: SectionedDoc, op: dict) -> str:
         return "heading_missing"
 
     line = op["line"]
-    reason = _validate_appendable_line(line)
+    reason = validate_appendable_line(line)
     if reason:
         return reason
 
-    new_bullet = _normalize_to_bullet(line)
+    new_bullet = normalize_to_bullet(line)
     new_text_lower = normalize_bullet_text(new_bullet).lower()
 
     sub = op.get("subheading")
@@ -215,7 +224,7 @@ def _apply_append(doc: SectionedDoc, op: dict) -> str:
         region = subsection_region_indices(section, str(sub))
         if region is None:
             return "subheading_missing"
-        return _insert_bullet_in_region(section, region, new_bullet, new_text_lower)
+        return insert_bullet_in_region(section, region, new_bullet, new_text_lower)
 
     start, end = top_region_indices(section)
     # Dedup: any bullet line in top region whose normalized text matches?
@@ -281,7 +290,7 @@ def _apply_add_heading(doc: SectionedDoc, op: dict) -> str:
         if not line.strip():
             # Drop blank inputs silently — they're not useful in a new section.
             continue
-        new_section_lines.append(_normalize_to_bullet(line))
+        new_section_lines.append(normalize_to_bullet(line))
 
     if not new_section_lines:
         return "empty_lines"
@@ -292,7 +301,7 @@ def _apply_add_heading(doc: SectionedDoc, op: dict) -> str:
     return "applied"
 
 
-def _insert_bullet_in_region(
+def insert_bullet_in_region(
     section: Section, region: tuple[int, int], new_bullet: str, new_text_lower: str
 ) -> str:
     """Append `new_bullet` at the end of the `(start, end)` line region.
@@ -321,7 +330,7 @@ def _insert_bullet_in_region(
     return "applied"
 
 
-def _find_unique_bullet(section: Section, needle: str) -> int | str:
+def find_unique_bullet(section: Section, needle: str) -> int | str:
     """Return the index of the single bullet whose text contains `needle`.
 
     Searches every bullet line in the section — top region AND subsections —
@@ -351,7 +360,7 @@ def _apply_remove(doc: SectionedDoc, op: dict) -> str:
     if not match or not match.strip():
         return "empty_match"
 
-    found = _find_unique_bullet(section, match.strip().lower())
+    found = find_unique_bullet(section, match.strip().lower())
     if isinstance(found, str):
         return found  # noop_no_match | multiple_matches
 
@@ -367,11 +376,11 @@ def _apply_replace(doc: SectionedDoc, op: dict) -> str:
     if not match or not match.strip():
         return "empty_match"
     line = op["line"]
-    reason = _validate_appendable_line(line)
+    reason = validate_appendable_line(line)
     if reason:
         return reason
 
-    found = _find_unique_bullet(section, match.strip().lower())
+    found = find_unique_bullet(section, match.strip().lower())
     if isinstance(found, str):
         return found  # noop_no_match | multiple_matches
 
@@ -379,7 +388,7 @@ def _apply_replace(doc: SectionedDoc, op: dict) -> str:
     # Preserve the matched bullet's indentation so a nested (subsection)
     # bullet keeps its depth after the rewrite.
     indent = original[: len(original) - len(original.lstrip())]
-    new_line = indent + _normalize_to_bullet(line)
+    new_line = indent + normalize_to_bullet(line)
     new_text_lower = normalize_bullet_text(new_line).lower()
     # Don't manufacture a duplicate: if the new text already exists as a bullet
     # anywhere in the section (the matched bullet itself, or another one), leave
