@@ -177,7 +177,7 @@ All work happens inside `$WORK_DIR`.
 
 ## The Job Lifecycle
 
-A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
+A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Where they apply, do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
 
 **These steps are this document's default, and the user's own instructions outrank them.** A development workflow written in `USER.md` — or, for a task that came from a room, in that project's `CHANNEL.md` — is already in front of you before this skill loads, and it wins wherever it speaks: which of these steps run, how much process a change gets, what counts as enough testing, how the work lands. Where both files carry one and they disagree, `CHANNEL.md` wins for a task from that room — it is the more specific statement, and the room is the project. Where neither says anything, everything below applies as written. What does not yield is the deployment's mechanics: the forge boundary and its refused verbs, the CONNECT allowlist, the 600-second ceiling, the credential rules, where builds and tests run, the pre-submission checks, and every delete path. Those are properties of the host rather than preferences, so an instruction that collides with one is something to report rather than to follow.
 

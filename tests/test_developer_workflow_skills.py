@@ -614,12 +614,23 @@ class TestBodiesDoNotContradict:
 # ---------------------------------------------------------------------------
 # ISSUE-337: the workflow defers, the deployment's mechanics do not.
 
-# Anything that mentions a run over more than what the change touched, so a new
-# line has to be classified rather than slipping past a pattern aimed at today's
-# phrasings. `verification pass` is in here because this document introduced the
-# phrase: a detector that only knows the vocabulary it replaced would not see the
-# next mandate written in the vocabulary it installed.
-_SUITE_MENTION = re.compile(r"\bsuites?\b|\bfull pass\b|\bverification pass\b", re.IGNORECASE)
+# Anything naming a run wider than the change, so a new line has to be classified
+# rather than slipping past a pattern aimed at today's wording. Two arms are
+# deliberate. `verification pass` is here because this document introduced the
+# phrase, and a detector knowing only the vocabulary it removed would not see the
+# next mandate written in the vocabulary it installed. The quantifier arm is here
+# because the likeliest next mandate says "every test in the repository" or "the
+# whole test run" and never says "suite" at all. Fenced lines are in scope on
+# purpose: a comment in a recipe the model copies is an instruction, and the
+# report template's `Tests:` field is inside a fence.
+_SUITE_MENTION = re.compile(
+    r"\bsuites?\b"
+    r"|\b(full|whole|entire|complete)\s+(\w+\s+){0,2}(pass|run|suite|tests|repository|tree)\b"
+    r"|\bverification pass\b"
+    r"|\bevery test\b"
+    r"|\ball the tests\b",
+    re.IGNORECASE,
+)
 
 # What a line has to carry to count as yielding to the user on the spot.
 _DEFERENCE_MARKERS = ("user's own instructions", "USER.md", "CHANNEL.md")
@@ -707,6 +718,12 @@ _SUITE_LINES_ALLOWED = [
         "why a near-ceiling timeout is the wrong fix for a long run",
     ),
     (
+        _NOT_A_MANDATE,
+        "Drop the flag for the final full run",
+        "fd9f3b4ae69c",
+        "which flag to drop on a run that happens; demands no run",
+    ),
+    (
         _DEFERRED,
         "Affected tests during the loop, the full suite once at the end of the work",
         "2e78b69a29b8",
@@ -717,6 +734,12 @@ _SUITE_LINES_ALLOWED = [
         "Never re-run a full suite that a timeout killed",
         "b96d90c65706",
         "a prohibition on re-running one",
+    ),
+    (
+        _NOT_A_MANDATE,
+        "prints the whole run and will bury the transcript",
+        "65aaf08d4c59",
+        "CI log output, not a test run",
     ),
     (
         _POINTER,
@@ -751,18 +774,30 @@ class TestWorkflowDeference:
     deployment — a task followed it into a full suite on a host that takes 70
     minutes to run one, was killed at 47, and committed nothing. The routine is
     now a default that yields to `USER.md` and `CHANNEL.md`; the mechanics are
-    not."""
+    not.
+
+    The audit here reads the `developer` body alone, while a menu pull
+    delivers `commit` and `code_review` in the same response. Both still
+    state their own workflow rules unconditionally — commit granularity in
+    one, the Fast-tier review exemption in the other — and the spec puts
+    those two bodies out of scope. Widening the scan is the fix if that
+    decision changes."""
 
     def _body(self):
         return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
 
-    def _section(self, body, heading):
-        """The text of one `###` step, up to the next heading."""
-        start = body.index(heading)
-        rest = body[start + len(heading) :]
+    def _step_body(self, body, heading):
+        """The text under one heading, the heading line itself excluded, up to
+        the next `##` or `###`. Excluding it is the point: a deference marker
+        written into a heading would otherwise satisfy a check about the text
+        underneath. Not the module-level `_section` further down this file,
+        which stops at `####` as well and returns a different slice."""
+        # To the end of the heading *line*, not of the string searched for: a
+        # marker appended to the heading is still in the heading.
+        start = body.index("\n", body.index(heading)) + 1
+        rest = body[start:]
         following = re.search(r"^#{2,3} ", rest, re.MULTILINE)
-        end = start + len(heading) + (following.start() if following else len(rest))
-        return body[start:end]
+        return rest[: following.start()] if following else rest
 
     def test_the_lifecycle_states_the_deference_rule(self):
         """A1. The skill body arrives mid-task, after user and channel memory
@@ -772,7 +807,7 @@ class TestWorkflowDeference:
         pointing back at the earlier document. It has to name both files: a
         rule naming only `USER.md` leaves per-project workflow nowhere to go,
         and one naming only `CHANNEL.md` reaches no task from the 1:1."""
-        lifecycle = self._section(self._body(), "## The Job Lifecycle")
+        lifecycle = self._step_body(self._body(), "## The Job Lifecycle")
         paragraphs = [p for p in lifecycle.split("\n\n") if "USER.md" in p]
         assert len(paragraphs) == 1, (
             "the deference rule is one paragraph near the top of the lifecycle; "
@@ -836,11 +871,14 @@ class TestWorkflowDeference:
     )
     def test_every_deferred_decision_says_so_where_it_is_stated(self, decision, heading):
         """A2, the other half. The rule at the top is not enough on its own:
-        each decision it governs has to say it yields where the decision is
-        made, because that is the line the model is reading when it acts. The
-        marker is what matters, not the wording — a rewrite that keeps the
-        deference and changes the sentence should pass."""
-        section = self._section(self._body(), heading)
+        each decision it governs has to say it yields in the section where the
+        decision is made, because that is what the model is reading when it
+        acts. Scoped to the section, not to the line — the marker is what
+        matters, not the wording, so a rewrite that keeps the deference and
+        changes the sentence passes, and a new mandate bullet added elsewhere
+        in the same section passes this one too. That gap is what the
+        line-level guard above covers."""
+        section = self._step_body(self._body(), heading)
         assert any(m in section for m in _DEFERENCE_MARKERS), (
             f"section {heading!r} decides {decision} and never says the user's "
             "own instructions may set it otherwise"
