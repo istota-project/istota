@@ -209,6 +209,8 @@ Rules:
 
 A note-naming convention is irrelevant on a task that writes no note, and belongs in the `notes` overlay. "Never write a new file to the base notes folder" is not, because the task that needs to hear it is the one that never recognized itself as a notes task; that stays in `USER.md`. A rule covering two skills is written into both files — there is no include mechanism. A rule covering three or more has failed the test.
 
+Apply the test to the **action** rather than the topic. If what the rule governs can be done with the skill unloaded, the rule is not skill-specific however much it sounds like it, and an overlay is the wrong home because it will not be loaded on the task that gets it wrong. Editing `CRON.md` is the case that looks most like an exception and is not: only the `reminders` and `schedules` skills write that file, but it is an ordinary file in the config directory that any task can edit, and a malformed edit unschedules every job silently — so its rules belong in `USER.md`.
+
 **Editing them.** Through the memory skill CLI, under the same file lock, atomic write and audit log as `USER.md`:
 
 ```bash
