@@ -354,9 +354,12 @@ def _delete_source_chunks(
     return len(chunk_ids)
 
 
-# Default ephemeral source types swept by cleanup_old_chunks. user_memory and
-# any future channel-durable type are intentionally excluded — those refresh
-# on file edit, not by age.
+# Default ephemeral source types swept by cleanup_old_chunks. user_memory,
+# skill_overlay and any future channel-durable type are intentionally excluded
+# — those refresh on file edit, not by age. Ageing a skill overlay out would
+# be worse than ageing out USER.md: an overlay only reaches a prompt on a task
+# that selected its skill, so search is the one surface that can find a rule
+# for the skills a user rarely uses, which is exactly where a stale index bites.
 EPHEMERAL_SOURCE_TYPES: tuple[str, ...] = ("conversation", "memory_file", "channel_memory")
 
 
@@ -552,6 +555,43 @@ def reindex_all(
                 n = index_file(conn, user_id, str(user_md), content, "user_memory")
                 if n > 0:
                     stats["chunks"] += n
+
+        # Index the per-skill overlays. A rule that moved out of USER.md and
+        # into `config/skills/<name>.md` is only in the prompt on a task that
+        # selected that skill, so without this "why does the bot always do X"
+        # returns nothing and the rule is effectively lost. Durable like
+        # USER.md — deliberately outside EPHEMERAL_SOURCE_TYPES, since it
+        # refreshes on edit rather than aging out.
+        overlay_dir = (
+            config.nextcloud_mount_path
+            / f"Users/{user_id}/{config.bot_dir_name}/config/skills"
+        )
+        if overlay_dir.is_dir():
+            stats["skill_overlays"] = 0
+            # Read through the loader's own reader rather than `read_text`.
+            # This directory is under `{mount}/Users/{user_id}`, which
+            # `build_bwrap_cmd` binds read-write into that user's sandbox, so
+            # every entry in it is model-plantable: a symlink here would index
+            # a daemon-readable file into a store `!search` reads back, and a
+            # FIFO would block a reindex that runs from the sleep cycle. The
+            # import is function-local because `istota.skills` star-imports
+            # every skill on the way to `_loader`, and this module is on the
+            # executor's recall path.
+            from istota.skills._loader import read_overlay_bytes
+
+            for path in sorted(overlay_dir.glob("*.md")):
+                raw, refusal, _size = read_overlay_bytes(path)
+                if refusal is not None or not raw:
+                    continue
+                try:
+                    content = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if content.strip():
+                    n = index_file(conn, user_id, str(path), content, "skill_overlay")
+                    if n > 0:
+                        stats["skill_overlays"] += 1
+                        stats["chunks"] += n
 
     # Reindex channel memory files (dated + durable CHANNEL.md)
     if config.nextcloud_mount_path:

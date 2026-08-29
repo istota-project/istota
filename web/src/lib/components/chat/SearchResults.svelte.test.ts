@@ -83,6 +83,18 @@ describe('SearchResults', () => {
     expect(link!.getAttribute('href')).toContain('#message_5');
   });
 
+  it('labels a skill overlay hit as memory rather than as a conversation', () => {
+    // A type missing from MEMORY_TYPES is not dropped — it falls through to the
+    // conversation branch and is labelled with a room name it has none of.
+    const { container } = render(SearchResults, {
+      data: data([memory({ source_type: 'skill_overlay', summary: 'never run the full suite' })]),
+      onJump: vi.fn(),
+    });
+    expect(container.querySelector('.card.memory')).not.toBeNull();
+    expect(container.querySelector('.source')?.textContent?.trim()).toBe('Skill overlay');
+    expect(container.querySelector('.jump-btn')).toBeNull();
+  });
+
   it('renders an empty state for no results', () => {
     const { container } = render(SearchResults, { data: data([]), onJump: vi.fn() });
     expect(container.querySelector('.empty')).not.toBeNull();

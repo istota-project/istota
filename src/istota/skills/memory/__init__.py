@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -96,6 +97,8 @@ _MAX_OVERLAY_READ_BYTES = OVERLAY_READ_CAP_BYTES
 
 #: How much of an overlay's first line the inventory shows.
 _FIRST_LINE_CHARS = 120
+
+logger = logging.getLogger(__name__)
 
 
 def _emit(payload: dict) -> int:
@@ -212,8 +215,8 @@ def _skill_index():
     return index, config
 
 
-def _skill_overlay_path(skill: str, *, verb: str) -> Path:
-    """Resolve `--skill NAME` to its overlay path, or refuse and exit.
+def _skill_overlay_path(skill: str, *, verb: str) -> tuple[Path, object]:
+    """Resolve `--skill NAME` to its overlay path and Config, or refuse and exit.
 
     Two refusals, and the first is the write-time half of the typo defense:
     `--skill develper` would otherwise create a file that binds to nothing and
@@ -242,7 +245,7 @@ def _skill_overlay_path(skill: str, *, verb: str) -> Path:
     """
     from istota.skills._loader import OVERLAY_DENYLIST, _denylist_key
 
-    index, _config = _skill_index()
+    index, config = _skill_index()
     if skill not in index:
         _err(
             "unknown_skill",
@@ -261,13 +264,19 @@ def _skill_overlay_path(skill: str, *, verb: str) -> Path:
             denylist=sorted(OVERLAY_DENYLIST),
         )
         sys.exit(1)
-    return _check_overlay_dir() / f"{skill}.md"
+    return _check_overlay_dir() / f"{skill}.md", config
 
 
 class Target(NamedTuple):
     path: Path
     kind: str
     skill: str | None = None
+    #: The loaded Config, on the `--skill` path only. Carried rather than
+    #: re-derived because resolving an overlay target already loads one, and
+    #: the re-index that follows the write needs the same object — a second
+    #: `load_config()` in a CLI spawned per write is a second TOML parse and a
+    #: second skills-directory scan for an answer already in hand.
+    config: object | None = None
 
 
 def _resolve_target(args, *, verb: str) -> Target:
@@ -283,7 +292,8 @@ def _resolve_target(args, *, verb: str) -> Target:
         _err("skill_and_channel_are_exclusive", skill=skill, channel=token)
         sys.exit(1)
     if skill:
-        return Target(_skill_overlay_path(skill, verb=verb), _SKILL, skill)
+        path, config = _skill_overlay_path(skill, verb=verb)
+        return Target(path, _SKILL, skill, config)
     if token:
         return Target(_channel_md_path(token), _CHANNEL)
     return Target(_user_md_path(), _USER)
@@ -639,12 +649,54 @@ def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
                 else:
                     path.unlink(missing_ok=True)
                     payload["removed_file"] = True
+                _reindex_overlay(
+                    target,
+                    None if payload.get("removed_file") else new_text,
+                )
             _audit_for(args, op_dict, outcome, target=target, applied=True)
             if "line" in op_dict:
                 payload["line"] = op_dict["line"]
             return _emit(payload)
     except MemoryMdLocked:
         return _err("locked", path=str(path))
+
+
+def _reindex_overlay(target: Target, text: str | None) -> None:
+    """Refresh the memory-search index for one overlay, or drop it.
+
+    Without this the rule is discoverable only by reading the file. An overlay
+    reaches a prompt solely on a task that selected its skill, so "why does the
+    bot always do X" has no other way to find one. `reindex_all` covers the
+    nightly sweep; this covers the minutes after a write, and a write is
+    exactly when someone asks whether the rule took.
+
+    `text is None` means the op emptied the file and it was deleted, so the
+    rows go with it. Leaving them behind would have search returning a rule the
+    prompt no longer carries, which is worse than not indexing at all.
+
+    Best-effort in the same shape the nightly curator uses for USER.md: a
+    memory index that cannot be opened must not fail a write that already
+    landed on disk. Both gates are read because either one off means the
+    operator asked for no automatic indexing.
+    """
+    path = target.path
+    config = target.config
+    try:
+        if not (
+            config.memory_search.enabled
+            and config.memory_search.auto_index_memory_files
+        ):
+            return
+        from istota import db
+        from istota.memory.search import _delete_source_chunks, index_file
+
+        with db.get_db(config.db_path) as conn:
+            if text is None:
+                _delete_source_chunks(conn, _user_id(), "skill_overlay", str(path))
+            else:
+                index_file(conn, _user_id(), str(path), text, "skill_overlay")
+    except Exception:  # noqa: BLE001 - the write already landed; indexing is best-effort
+        logger.debug("skill overlay re-index failed for %s", path, exc_info=True)
 
 
 def _overlay_subheadings(section) -> list[str]:

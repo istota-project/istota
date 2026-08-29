@@ -13,9 +13,13 @@
     onJump?: (roomToken: string, taskId: number) => void;
   } = $props();
 
+  // Mirrors `_MEMORY_SOURCE_TYPES` in commands.py. A type missing here is not
+  // dropped from the results — it falls through to the conversation branch and
+  // is labelled with a room name it has none of.
   const MEMORY_TYPES = new Set([
     'memory_file',
     'user_memory',
+    'skill_overlay',
     'channel_memory',
     'channel_memory_durable',
   ]);
@@ -38,6 +42,10 @@
   // A friendly label for a memory result's source.
   function memoryLabel(r: SearchResultItem): string {
     if (r.source_type === 'user_memory') return 'USER.md';
+    // Not named per skill: the only thing carrying the skill name is
+    // `source_id`, which is the full mount path, and the card is not worth
+    // putting the deployment's filesystem layout in the browser for.
+    if (r.source_type === 'skill_overlay') return 'Skill overlay';
     if (r.source_type === 'channel_memory' || r.source_type === 'channel_memory_durable')
       return r.room_name || 'CHANNEL.md';
     return 'Memory';

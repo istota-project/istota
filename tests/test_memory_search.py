@@ -1,6 +1,7 @@
 """Tests for the memory search core module."""
 
 import json
+import os
 import sqlite3
 import sys
 import threading
@@ -11,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from istota.memory.search import (
+    EPHEMERAL_SOURCE_TYPES,
     SearchResult,
     _apply_recency_decay,
     _content_hash,
@@ -1279,3 +1281,119 @@ class TestMemoryChunkWindowMigration:
         db._run_migrations(conn)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(memory_chunks)")}
         assert {"valid_from", "valid_until"} <= cols
+
+
+
+class TestReindexSkillOverlays:
+    """A rule that moved out of USER.md into one skill's overlay reaches a
+    prompt only on a task that selected that skill. Search is then the only
+    surface that can answer "why does the bot always do X" for it — without
+    these rows the rule is findable only by reading the file."""
+
+    @staticmethod
+    def _config(tmp_path):
+        config = MagicMock()
+        config.nextcloud_mount_path = tmp_path / "mount"
+        config.bot_dir_name = "istota"
+        return config
+
+    @staticmethod
+    def _overlays(tmp_path):
+        d = tmp_path / "mount" / "Users" / "alice" / "istota" / "config" / "skills"
+        d.mkdir(parents=True)
+        return d
+
+    @staticmethod
+    def _reindex(conn, config):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            return reindex_all(conn, config, "alice", lookback_days=1)
+
+    def test_an_overlay_is_indexed_and_findable(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        overlays = self._overlays(tmp_path)
+        (overlays / "developer.md").write_text(
+            "- Never run the full test suite in a foreground task here.\n"
+        )
+
+        stats = self._reindex(conn, self._config(tmp_path))
+        assert stats["skill_overlays"] == 1
+
+        rows = conn.execute(
+            "SELECT source_id FROM memory_chunks WHERE source_type = 'skill_overlay'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0].endswith("config/skills/developer.md")
+        conn.close()
+
+    def test_it_is_durable_not_ephemeral(self):
+        """Like user_memory: refreshed on edit, never aged out. An overlay for
+        a rarely-used skill is exactly where a swept index would bite."""
+        assert "skill_overlay" not in EPHEMERAL_SOURCE_TYPES
+
+    def test_a_missing_directory_indexes_nothing_and_does_not_raise(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        (tmp_path / "mount").mkdir()
+        stats = self._reindex(conn, self._config(tmp_path))
+        assert "skill_overlays" not in stats
+        conn.close()
+
+    def test_non_markdown_entries_are_skipped(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        overlays = self._overlays(tmp_path)
+        (overlays / "notes.md.bak").write_text("- stale copy\n")
+        (overlays / "README.txt").write_text("hi\n")
+
+        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        conn.close()
+
+    def test_an_empty_overlay_indexes_nothing(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        overlays = self._overlays(tmp_path)
+        (overlays / "developer.md").write_text("\n   \n")
+
+        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        conn.close()
+
+    def test_a_planted_symlink_is_not_indexed(self, tmp_path):
+        """`{mount}/Users/{user_id}` is bound read-write into that user's own
+        sandbox, so every entry here is model-plantable. A followed symlink
+        would put a daemon-readable file into a store `!search` reads back."""
+        conn = _init_db(tmp_path / "test.db")
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN value\n")
+        overlays = self._overlays(tmp_path)
+        (overlays / "developer.md").symlink_to(secret)
+
+        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE content LIKE '%TOP SECRET%'"
+        ).fetchone()[0] == 0
+        conn.close()
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+    def test_a_fifo_does_not_hang_the_reindex(self, tmp_path):
+        """A FIFO with no writer blocks `open(2)`. This sweep runs from the
+        sleep cycle, where nothing would time it out."""
+        conn = _init_db(tmp_path / "test.db")
+        overlays = self._overlays(tmp_path)
+        os.mkfifo(overlays / "developer.md")
+
+        assert self._reindex(conn, self._config(tmp_path))["skill_overlays"] == 0
+        conn.close()
+
+    def test_re_running_replaces_rather_than_duplicates(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        overlays = self._overlays(tmp_path)
+        path = overlays / "developer.md"
+        path.write_text("- first rule about deployment hosts\n")
+        self._reindex(conn, self._config(tmp_path))
+        path.write_text("- a completely different rule about branches\n")
+        self._reindex(conn, self._config(tmp_path))
+
+        rows = conn.execute(
+            "SELECT content FROM memory_chunks WHERE source_type = 'skill_overlay'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert "branches" in rows[0][0]
+        conn.close()

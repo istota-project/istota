@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1069,3 +1071,109 @@ class TestOverlayCapWarning:
         out = json.loads(capsys.readouterr().out)
         assert "over the" in out["warning"]
         assert "will not be loaded" not in out["warning"]
+
+
+
+class TestOverlayIndexOnWrite:
+    """`reindex_all` covers the nightly sweep; this covers the minutes after a
+    write, which is exactly when a user asks whether the rule took."""
+
+    @staticmethod
+    def _init_index_db(config):
+        schema = Path(__file__).parent.parent / "schema.sql"
+        conn = sqlite3.connect(str(config.db_path))
+        conn.executescript(schema.read_text())
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _rows(config):
+        conn = sqlite3.connect(str(config.db_path))
+        try:
+            return conn.execute(
+                "SELECT source_id, content FROM memory_chunks "
+                "WHERE source_type = 'skill_overlay'"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_an_append_is_searchable_immediately(self, overlay_env, capsys):
+        self._init_index_db(overlay_env.config)
+        memory_main([
+            "append", "--skill", "developer",
+            "--line", "Never run the full suite in a foreground task",
+        ])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+
+        rows = self._rows(overlay_env.config)
+        assert len(rows) == 1
+        assert rows[0][0].endswith("skills/developer.md")
+        assert "foreground task" in rows[0][1]
+
+    def test_a_second_append_replaces_rather_than_duplicates(
+        self, overlay_env, capsys
+    ):
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--skill", "developer", "--line", "first rule"])
+        memory_main(["append", "--skill", "developer", "--line", "second rule"])
+        capsys.readouterr()
+
+        rows = self._rows(overlay_env.config)
+        assert len(rows) == 1
+        assert "first rule" in rows[0][1] and "second rule" in rows[0][1]
+
+    def test_removing_the_last_bullet_drops_the_rows_with_the_file(
+        self, overlay_env, capsys
+    ):
+        """The file is deleted when its last bullet goes, so the index has to go
+        with it — search returning a rule the prompt no longer carries is worse
+        than not indexing at all."""
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--skill", "developer", "--line", "only rule"])
+        assert len(self._rows(overlay_env.config)) == 1
+
+        memory_main(["remove", "--skill", "developer", "--match", "only rule"])
+        assert json.loads(capsys.readouterr().out.strip().split("\n")[-1])[
+            "removed_file"
+        ] is True
+        assert self._rows(overlay_env.config) == []
+
+    def test_a_removal_that_leaves_content_reindexes_what_is_left(
+        self, overlay_env, capsys
+    ):
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--skill", "developer", "--line", "keep this rule"])
+        memory_main(["append", "--skill", "developer", "--line", "drop this rule"])
+        memory_main(["remove", "--skill", "developer", "--match", "drop this"])
+        capsys.readouterr()
+
+        rows = self._rows(overlay_env.config)
+        assert len(rows) == 1
+        assert "keep this rule" in rows[0][1]
+        assert "drop this rule" not in rows[0][1]
+
+    def test_indexing_is_off_when_the_operator_turned_it_off(
+        self, overlay_env, capsys
+    ):
+        self._init_index_db(overlay_env.config)
+        overlay_env.config.memory_search.auto_index_memory_files = False
+        memory_main(["append", "--skill", "developer", "--line", "a rule"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert self._rows(overlay_env.config) == []
+
+    def test_a_write_still_succeeds_when_the_index_cannot_be_opened(
+        self, overlay_env, capsys
+    ):
+        """No schema at `db_path`. The bytes are already on disk by then, so an
+        indexing failure must not turn a landed write into an error."""
+        memory_main(["append", "--skill", "developer", "--line", "a rule"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert (overlay_env.overlays / "developer.md").read_text() == "- a rule\n"
+
+    def test_a_usermd_write_is_not_filed_as_an_overlay(self, overlay_env, capsys):
+        """The overlay source type is scoped to the overlay path — a USER.md
+        write must not land rows under it."""
+        self._init_index_db(overlay_env.config)
+        memory_main(["append", "--heading", "Notes", "--line", "a note"])
+        capsys.readouterr()
+        assert self._rows(overlay_env.config) == []
