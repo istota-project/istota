@@ -15,7 +15,9 @@ import hashlib
 import importlib
 import json
 import logging
+import os
 import re
+import stat
 import tomllib
 from pathlib import Path
 
@@ -651,11 +653,34 @@ OVERLAY_WARN_BYTES = 8 * 1024
 OVERLAY_MAX_BYTES = 32 * 1024
 
 #: ``{user_id}`` is substituted by the call sites, alongside ``{scripts_dir}``
-#: and the rest. Level 4, so the block sits *inside* the skill's own ``### ``.
+#: and the rest.
+#:
+#: Level 4 for a narrower reason than "it stays inside the skill's ``### ``",
+#: which is not true and was claimed here: the bundled bodies carry their own
+#: undemoted ``## `` headings (16 in ``developer``, 3 in ``notes``), and
+#: ``load_skills`` inserts them verbatim, so a skill's ``### `` section is
+#: already closed by its own first ``## `` long before the overlay is appended.
+#: Demoting the *bundled* bodies would be a behaviour change across every skill
+#: and every golden, and those headings are deliberate upstream authoring.
+#: What the level does buy is real and is the reason the overlay is demoted to
+#: match: the user's rules read as a subsection of their own label rather than
+#: as a new section peer to ``## Skills Reference``, so they stay attached to
+#: the skill they configure instead of floating up as general prompt text.
 OVERLAY_LABEL = "#### {user_id}'s configuration for this skill"
+
+#: Scoped to *this skill*, deliberately, and not to "anything above".
+#: ``load_skills`` renders the eager set in sorted order, so a skill body that
+#: sorts earlier is literally above this line — and ``sensitive_actions`` sorts
+#: before ``skills``, ``todos`` and every ``t``-``z`` name, while ``skills`` is
+#: ``always_include`` and therefore eager on every task. An unscoped claim of
+#: precedence would have the daemon writing "supersede anything above" around
+#: user text that sits below the safety body, which is the outcome
+#: ``OVERLAY_DENYLIST`` exists to prevent and which the denylist cannot reach,
+#: since it filters by *filename*. The Goals this implements say the overlay
+#: wins against the bundled body; that is what it now says.
 OVERLAY_PREAMBLE = (
-    "These instructions come from the user and supersede anything above that "
-    "conflicts with them."
+    "These instructions come from the user and take precedence over this "
+    "skill's instructions above, wherever the two conflict."
 )
 
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -670,6 +695,24 @@ _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _SHALLOW_HEADING_RE = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
 
 
+#: A setext underline: ``Text`` on one line and ``===`` or ``---`` under it is a
+#: level-1 or level-2 heading, and the most compact way to write one.
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+
+#: First characters that mean the line above an underline is not a paragraph,
+#: so the pair is a list item plus a thematic break rather than a heading.
+_NOT_PARAGRAPH_START = ("#", "-", "*", "+", ">", "|", "=", "`", "~")
+
+
+def _is_setext_paragraph(line: str) -> bool:
+    """Whether ``line`` could be the text half of a setext heading."""
+    if not line.strip():
+        return False
+    if line[:1] in (" ", "\t"):
+        return False
+    return line[:1] not in _NOT_PARAGRAPH_START
+
+
 def _closed_fence_lines(lines: list[str]) -> set[int]:
     """Indices of lines inside a code fence that is actually *closed*.
 
@@ -681,8 +724,12 @@ def _closed_fence_lines(lines: list[str]) -> set[int]:
     every skill rendered after it. The exemption exists to protect a sample, and
     there is no sample without a closing fence.
 
-    Fence matching follows CommonMark on the two points that decide the pairing:
-    the closer uses the same character as the opener, and it is at least as long.
+    Fence matching follows CommonMark on the three points that decide the
+    pairing: the closer uses the same character as the opener, it is at least as
+    long, and it carries no info string. That last one matters here — treating
+    `````python`` as a closer would end the block early and rewrite a
+    ``## `` that really is inside the user's sample, which is the one thing the
+    exemption exists to avoid.
     """
     fenced: set[int] = set()
     open_at: int | None = None
@@ -694,7 +741,11 @@ def _closed_fence_lines(lines: list[str]) -> set[int]:
         run = m.group(1)
         if open_at is None:
             open_at, opener = i, run
-        elif run[0] == opener[0] and len(run) >= len(opener):
+        elif (
+            run[0] == opener[0]
+            and len(run) >= len(opener)
+            and not line[m.end():].strip()
+        ):
             fenced.update(range(open_at, i + 1))
             open_at = None
     return fenced
@@ -703,30 +754,146 @@ def _closed_fence_lines(lines: list[str]) -> set[int]:
 def _demote_overlay_headings(text: str) -> str:
     """Push a level-1 or level-2 heading in an overlay down to level 4.
 
-    The overlay rides under the skill's own ``### <Title>``, so a shallow
-    heading inside it would close that section and leave the rest of the overlay
-    reading as a sibling of the whole skills reference. Demoting rather than
-    dropping is deliberate: a hand-edited file then misbehaves visibly instead
-    of losing content silently.
+    A shallow heading in an overlay detaches everything after it from the
+    ``#### <user>'s configuration for this skill`` label it was written under,
+    leaving the user's rules as a section peer to ``## Skills Reference`` — read
+    as general prompt text rather than as this skill's configuration. Demoting
+    rather than dropping is deliberate: a hand-edited file then misbehaves
+    visibly instead of losing content silently.
 
     Closed fenced blocks are skipped. A ``## `` inside one is a sample — an
     overlay for the notes skill quite plausibly carries a markdown template —
     and rewriting it would corrupt the user's own text. An *unclosed* fence
     earns no such exemption; see ``_closed_fence_lines``.
 
+    Setext headings are demoted too — ``My Rules`` with ``---`` under it is a
+    level-2 heading and the most compact way to write one, which makes it the
+    obvious hole to leave in a function whose whole job is this. The text line
+    becomes an ATX heading and the underline is left where it is, so nothing the
+    user wrote is deleted; what was a heading is then a heading plus a thematic
+    break.
+
     Leading indentation is dropped along with the demotion, since the point is
     that what comes out cannot be read as a heading above level 4.
     """
     lines = text.split("\n")
     fenced = _closed_fence_lines(lines)
-    out = []
+    out: list[str] = []
     for i, line in enumerate(lines):
         if i not in fenced:
             m = _SHALLOW_HEADING_RE.match(line)
             if m is not None:
-                line = "####" + line[m.end():]
+                out.append("####" + line[m.end():])
+                continue
+            if (
+                _SETEXT_UNDERLINE_RE.match(line)
+                and out
+                and (i - 1) not in fenced
+                and _is_setext_paragraph(out[-1])
+            ):
+                out[-1] = "#### " + out[-1].strip()
         out.append(line)
     return "\n".join(out)
+
+
+def _denylist_key(skill_name: str) -> str:
+    """Normalize a skill name for the denylist test.
+
+    ``load_skills`` already treats ``-`` and ``_`` as interchangeable when it
+    builds a title, and ``_resolve_skill_doc_path`` accepts a legacy flat
+    ``<name>.md`` — so a legacy ``_index.toml`` keyed ``sensitive-actions``
+    would otherwise take an overlay while ``sensitive_actions`` would not. Not
+    reachable on the shipped tree, whose bundled directories are all
+    underscored, but the exact-string test made the guard depend on a spelling
+    rather than on the skill.
+    """
+    return skill_name.replace("-", "_")
+
+
+#: A YAML mapping key, which is what a real frontmatter block is made of.
+_FRONTMATTER_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\s*:")
+
+
+def _looks_like_frontmatter(text: str) -> bool:
+    """Whether a leading ``---`` block is frontmatter rather than a rule.
+
+    ``_strip_frontmatter`` keys on the delimiter alone and returns everything
+    past the next ``---`` line. In a bundled skill doc that is safe: those are
+    written by people who know the convention. In an overlay it is silent data
+    loss — a hand-written file that opens with a ``---`` divider loses every
+    rule above the next one, and the only signal is the absence of text nobody
+    is looking for. So the block has to actually look like a mapping before any
+    of it is dropped.
+    """
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    if end == -1:
+        return False
+    body = [ln for ln in text[3:end].split("\n") if ln.strip()]
+    if not body:
+        return False
+    return all(
+        _FRONTMATTER_KEY_RE.match(ln) or ln[:1] in (" ", "\t") for ln in body
+    )
+
+
+def _read_overlay_bytes(path: Path) -> bytes | None:
+    """Read an overlay file, refusing anything that is not a plain file.
+
+    The overlay directory sits under ``{mount}/Users/{user_id}``, which
+    ``build_bwrap_cmd`` binds **read-write** into that user's own sandbox. Every
+    entry in it is therefore model-writable, and the filename being fixed by the
+    skill is not containment — it is the mirror image of what
+    ``skill_host_paths`` guards, where the path is free and the caller scopes
+    it. Three consequences, none of them theoretical:
+
+    - ``O_NOFOLLOW``, because a symlink planted at ``files.md`` otherwise puts
+      up to the cap in bytes of any daemon-readable file into the next prompt.
+    - ``S_ISREG``, because a FIFO left at that name blocks ``open(2)`` until
+      someone writes to it, and prompt assembly runs *before* the brain request
+      exists, so no task timeout covers it — one such file wedges every later
+      task for that user, silently. ``O_NONBLOCK`` keeps the open itself from
+      blocking while the ``fstat`` decides.
+    - the size is checked on the fd *before* the read. Reading the whole file
+      and refusing afterwards bounds nothing, and ``MemoryError`` is not an
+      ``OSError``, so it would escape the never-raises contract the caller
+      depends on rather than degrading to "no overlay".
+
+    Returns None on every refusal, so each one degrades to exactly the prompt
+    the skill would have had with no overlay at all.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            logger.warning(
+                "skill overlay %s is not a regular file — not loaded", path
+            )
+            return None
+        if st.st_size > OVERLAY_MAX_BYTES:
+            logger.warning(
+                "skill overlay %s is %d bytes (cap %d) — not loaded. An overlay "
+                "is appended to the bundled body, not a replacement for it.",
+                path, st.st_size, OVERLAY_MAX_BYTES,
+            )
+            return None
+        chunks: list[bytes] = []
+        remaining = OVERLAY_MAX_BYTES
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _load_user_overlay(
@@ -742,22 +909,14 @@ def _load_user_overlay(
     this skill would have had with no overlay at all. The worst case here is
     that a customization is inert.
     """
-    if user_overlay_dir is None or skill_name in OVERLAY_DENYLIST:
+    if user_overlay_dir is None or _denylist_key(skill_name) in OVERLAY_DENYLIST:
         return None
 
     path = user_overlay_dir / f"{skill_name}.md"
-    try:
-        raw = path.read_bytes()
-    except OSError:
+    raw = _read_overlay_bytes(path)
+    if raw is None:
         return None
 
-    if len(raw) > OVERLAY_MAX_BYTES:
-        logger.warning(
-            "skill overlay %s is %d bytes (cap %d) — not loaded. An overlay is "
-            "appended to the bundled body, not a replacement for it.",
-            path, len(raw), OVERLAY_MAX_BYTES,
-        )
-        return None
     if len(raw) > OVERLAY_WARN_BYTES:
         logger.warning(
             "skill overlay %s is %d bytes, over the %d-byte guidance",
@@ -770,7 +929,9 @@ def _load_user_overlay(
         logger.warning("skill overlay %s is not valid UTF-8 — not loaded", path)
         return None
 
-    body = _strip_frontmatter(text).strip()
+    if _looks_like_frontmatter(text):
+        text = _strip_frontmatter(text)
+    body = text.strip()
     if not body:
         return None
     body = _demote_overlay_headings(body)
@@ -799,6 +960,13 @@ def load_skills(
 
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR
+
+    # One stat instead of one open per eager skill. Nothing creates this
+    # directory — `ensure_user_directories_v2` does not — so on almost every
+    # deployment it is absent, and the target is the network mount this repo has
+    # already moved every database off.
+    if user_overlay_dir is not None and not user_overlay_dir.is_dir():
+        user_overlay_dir = None
 
     parts = []
     for name in skill_names:

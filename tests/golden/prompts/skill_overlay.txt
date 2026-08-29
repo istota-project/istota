@@ -85,7 +85,7 @@ user=alice
 
 #### alice's configuration for this skill
 
-These instructions come from the user and supersede anything above that conflicts with them.
+These instructions come from the user and take precedence over this skill's instructions above, wherever the two conflict.
 
 #### Notes rules
 

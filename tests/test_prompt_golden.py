@@ -648,8 +648,8 @@ def test_a_skill_overlay_adds_a_block_and_changes_nothing_else(tmp_path, monkeyp
 
     block = (
         "\n\n#### alice's configuration for this skill\n\n"
-        "These instructions come from the user and supersede anything above "
-        "that conflicts with them.\n\n"
+        "These instructions come from the user and take precedence over this "
+        "skill's instructions above, wherever the two conflict.\n\n"
         "#### Notes rules\n\n"
         "- Never write a new file to the base folder.\n"
         "- Frontmatter carries `agents:` on anything the bot wrote."
