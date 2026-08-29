@@ -2734,6 +2734,11 @@ _OVERLAY_FATAL_REASONS = frozenset({"denylisted", "over_cap"})
 #: short. Two edits out of four characters is most of the name, so at that
 #: length the budget is what turns every scratch file into an alert; the same
 #: two out of nine is a slip.
+#: `_loader.OVERLAY_UNKNOWN_SKILL`, restated so the label helpers need no
+#: import of a module whose graph is heavy; the two are pinned equal by
+#: `tests/test_doctor.py`.
+_UNKNOWN = "unknown_skill"
+
 _OVERLAY_TYPO_SHORT_NAME_CHARS = 5
 _OVERLAY_TYPO_BUDGET_SHORT = 1
 _OVERLAY_TYPO_BUDGET_LONG = 2
@@ -2822,8 +2827,15 @@ _OVERLAY_DERIVED_SUFFIX_RE = re.compile(
 _OVERLAY_MAX_DERIVED_SUFFIXES = 3
 
 
-def _is_derived_copy(stem: str, known_skills: Collection[str]) -> bool:
-    """True when ``stem`` is a real skill name plus a copy-or-backup marker.
+def _derived_copy_of(stem: str, known_skills: Collection[str]) -> str | None:
+    """The skill ``stem`` is a copy of, or None when it is not a copy of one.
+
+    Returns the name rather than a bool so the report can say *which* file it
+    was copied from: an operator reading ``unknown_skill`` against ``notes2.md``
+    is otherwise told, by the WARN remedy, that the name is "not close enough
+    to a skill to be a typo" — which is arithmetically false, since it is one
+    edit away. It is here because it is a copy, and the label now says so.
+
 
     ``notes.bak`` is not a misspelling of ``notes``; it is a copy of it, and
     whoever made it did not believe it was live. The distance test cannot tell
@@ -2839,11 +2851,91 @@ def _is_derived_copy(stem: str, known_skills: Collection[str]) -> bool:
     for _ in range(_OVERLAY_MAX_DERIVED_SUFFIXES):
         match = _OVERLAY_DERIVED_SUFFIX_RE.search(remaining)
         if match is None or match.start() == 0:
-            return False
+            return None
         remaining = remaining[: match.start()]
         if remaining in known_skills:
-            return True
-    return False
+            return remaining
+    return None
+
+
+#: Split a filename into the words a person would read in it. A skill whose
+#: every word appears is *named* by that filename even when the edit distance
+#: is large, which is the direction distance is blind in: the more deliberately
+#: someone decorates a name — ``developer.local``, ``01-developer``,
+#: ``developer-overlay`` — the further it gets from ``developer`` and the
+#: quieter a distance-only rule becomes, while the author's belief that the
+#: file was live only gets more obvious.
+_OVERLAY_TOKEN_SPLIT_RE = re.compile(r"[^0-9A-Za-z]+")
+
+#: Below this a skill name is too short to carry meaning as a token — ``kv``
+#: would match any filename with a ``kv`` word in it.
+_OVERLAY_MIN_TOKEN_CHARS = 4
+
+
+def _overlay_denylist() -> frozenset[str]:
+    from .skills._loader import OVERLAY_DENYLIST  # noqa: PLC0415 - heavy import graph
+
+    return OVERLAY_DENYLIST
+
+
+def _denylist_key(name: str) -> str:
+    from .skills._loader import _denylist_key as key  # noqa: PLC0415 - heavy import graph
+
+    return key(name)
+
+
+def _names_a_skill(stem: str, known_skills: Collection[str]) -> str | None:
+    """The skill ``stem`` names outright, or None.
+
+    Every word of the skill has to appear as a word of the filename, so
+    ``developer.local`` and ``01-developer`` name ``developer`` while
+    ``develop`` does not name anything. The longest match wins, so
+    ``sensitive_actions_old`` reports the two-word skill rather than a
+    one-word skill that happens to share a token.
+
+    The false positive is real and accepted: ``release-notes.md`` names
+    ``notes`` and will FAIL. It is also a file sitting in the overlay directory
+    that reaches no prompt, so the report is not wrong about it — only louder
+    than that particular name deserves.
+    """
+    tokens = {t.casefold() for t in _OVERLAY_TOKEN_SPLIT_RE.split(stem) if t}
+    if not tokens:
+        return None
+    best: str | None = None
+    for skill in sorted(known_skills):
+        if len(skill) < _OVERLAY_MIN_TOKEN_CHARS:
+            continue
+        words = [w for w in _OVERLAY_TOKEN_SPLIT_RE.split(skill) if w]
+        if words and all(w.casefold() in tokens for w in words):
+            if best is None or len(skill) > len(best):
+                best = skill
+    return best
+
+
+def _classify_unknown_overlay(
+    stem: str, known_skills: Collection[str]
+) -> tuple[bool, str]:
+    """``(fails, note)`` for a filename that is not a known skill name.
+
+    One place, because the severity and the words shown to the operator have to
+    agree: every earlier version of this had a label that stated a reason the
+    branch above it had not actually used.
+    """
+    copy_of = _derived_copy_of(stem, known_skills)
+    if copy_of is not None:
+        return False, f"{_UNKNOWN}, a copy of {copy_of}.md"
+    near = _overlay_near_miss(stem, known_skills)
+    if near is not None:
+        if _denylist_key(near) in _overlay_denylist():
+            # Suggesting a rename here would walk the operator straight into
+            # the next FAIL: that name takes no overlay, and the write path
+            # refuses it too.
+            return True, f"{_UNKNOWN}, closest is {near}, which takes no overlay"
+        return True, f"{_UNKNOWN}, did you mean {near}?"
+    named = _names_a_skill(stem, known_skills)
+    if named is not None:
+        return True, f"{_UNKNOWN}, names the {named} skill but is not {named}.md"
+    return False, _UNKNOWN
 
 
 def _overlay_near_miss(stem: str, known_skills: Collection[str]) -> str | None:
@@ -2857,7 +2949,7 @@ def _overlay_near_miss(stem: str, known_skills: Collection[str]) -> str | None:
     A dropped plural is on the FAIL side by design: ``note.md`` for the
     ``notes`` skill, ``task.md`` for ``tasks``. Those read as scratch names,
     and they are also the most common way there is to misspell a skill — a
-    file whose rules reach no prompt either way. ``_is_derived_copy`` carves
+    file whose rules reach no prompt either way. ``_derived_copy_of`` carves
     off the class that is genuinely not a misspelling.
 
     Compared case-insensitively, because ``Developer.md`` is a misfiling by the
@@ -2878,7 +2970,7 @@ def _overlay_near_miss(stem: str, known_skills: Collection[str]) -> str | None:
     is asking about a name the index never rejected, which is not a typo of
     anything.
     """
-    if not stem or _is_derived_copy(stem, known_skills):
+    if not stem:
         return None
     budget = (
         _OVERLAY_TYPO_BUDGET_SHORT
@@ -3038,19 +3130,11 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
             found = inspect_overlay(path, known_skills=known)
             if found.reason == OVERLAY_UNKNOWN_SKILL:
                 # The one reason a task produces with a single `touch`, so the
-                # severity turns on whether the name looks like a typo of a
-                # real skill rather than on the reason alone. See ISSUE-340 and
-                # `_OVERLAY_FATAL_REASONS`.
-                near = _overlay_near_miss(found.skill, known)
-                if near is not None:
-                    dead.append(_overlay_label(
-                        user_id, path.name,
-                        f"{OVERLAY_UNKNOWN_SKILL}, did you mean {near}?",
-                    ))
-                else:
-                    warned.append(
-                        _overlay_label(user_id, path.name, OVERLAY_UNKNOWN_SKILL)
-                    )
+                # severity turns on what the name looks like rather than on the
+                # reason alone. See ISSUE-340 and `_OVERLAY_FATAL_REASONS`.
+                fails, note = _classify_unknown_overlay(found.skill, known)
+                bucket = dead if fails else warned
+                bucket.append(_overlay_label(user_id, path.name, note))
             elif found.reason in _OVERLAY_FATAL_REASONS:
                 dead.append(_overlay_label(user_id, path.name, found.reason))
             elif found.reason is not None:
@@ -3071,40 +3155,60 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
             f"no per-skill overlays filed under {mount}/Users/*/{config.bot_dir_name}/config/skills",
         )
     if dead:
+        detail = (
+            f"{len(dead)} of {total} overlay file(s) are misfiled and will never "
+            f"be loaded: {_overlay_list(dead)}"
+        )
+        if warned:
+            # Never let a FAIL swallow the WARN list. Before ISSUE-340 split
+            # `unknown_skill`, every one of these was fatal and so every one
+            # was named; afterwards a single planted typo would have reported
+            # "1 of 21" and hidden the other twenty — including a real overlay
+            # sitting just under the loading cap — which is a count that reads
+            # in the reassuring direction and an alert an attacker can aim.
+            detail += (
+                f"; {len(warned)} more reach no prompt or need a look: "
+                f"{_overlay_list(warned)}"
+            )
         return CheckResult(
-            name, FAIL,
-            f"{len(dead)} of {total} overlay file(s) will never be loaded: {_overlay_list(dead)}",
+            name, FAIL, detail,
             remedy=(
                 "A file here is only read when its name is a known skill that takes "
                 "an overlay and its body is under the loading cap. A `did you mean` "
-                "is a filename one or two characters off a real skill, so the rules "
-                "in it reach no prompt at all — rename it. Run `istota-skill memory "
-                "skills` as that user for the per-file verdict, then rename, shrink "
-                "or remove it."
+                "is a filename one or two characters off a real skill and a `names "
+                "the X skill` is one built around a real name, so the rules in "
+                "either reach no prompt at all — rename it to `X.md`. "
+                + _OVERLAY_WARN_REMEDY
             ),
         )
     if warned:
         return CheckResult(
             name, WARN,
             f"{len(warned)} of {total} overlay file(s) need a look: {_overlay_list(warned)}",
-            remedy=(
-                "over_warn_bytes: the file is within a few KB of the loading cap, "
-                "past which it stops reaching any prompt at all — shrink it, or move "
-                "the rules that belong to another skill into that skill's own "
-                "overlay. shallow_heading: a `# ` or `## ` heading is demoted to `#### ` "
-                "at load time, because at its written level it would end the skill's "
-                "own section. unknown_skill: the name is not a skill and is not "
-                "close enough to one to be a typo, so it is most likely a scratch "
-                "file a task left behind — delete it, or rename it if it was meant "
-                "to be an overlay. empty / overlay_not_utf8 / overlay_is_a_symlink / "
-                "overlay_not_a_regular_file / overlay_unreadable: the file is there "
-                "and contributes nothing to any prompt. Run `istota-skill memory "
-                "skills` as that user for the per-file verdict."
-            ),
+            remedy=_OVERLAY_WARN_REMEDY,
         )
     return CheckResult(
         name, OK, f"{total} overlay file(s) across {len(dirs)} user tree(s), all load"
     )
+
+
+#: Shared by the WARN result and by the tail of the FAIL result, because a
+#: FAIL now carries the warned files too and an operator reading it needs the
+#: same glossary either way.
+_OVERLAY_WARN_REMEDY = (
+    "over_warn_bytes: the file is within a few KB of the loading cap, past "
+    "which it stops reaching any prompt at all — shrink it, or move the rules "
+    "that belong to another skill into that skill's own overlay. "
+    "shallow_heading: a `# ` or `## ` heading is demoted to `#### ` at load "
+    "time, because at its written level it would end the skill's own section. "
+    "unknown_skill with `a copy of X.md`: an editor or a task left a backup "
+    "beside the real overlay — delete it. unknown_skill on its own: the name "
+    "resembles no skill, so it is most likely a scratch file — delete it, or "
+    "rename it if it was meant to be an overlay. empty / overlay_not_utf8 / "
+    "overlay_is_a_symlink / overlay_not_a_regular_file / overlay_unreadable: "
+    "the file is there and contributes nothing to any prompt. Run "
+    "`istota-skill memory skills` as that user for the per-file verdict."
+)
 
 
 def _overlay_list(items: list[str]) -> str:

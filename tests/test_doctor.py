@@ -2812,12 +2812,15 @@ class TestSkillOverlays:
 
     def test_a_typo_of_a_denylisted_name_still_fails(self, make_config, tmp_path):
         """`sensitive_actions` takes no overlay, but a misspelling of it is
-        still a file its author believed was live."""
+        still a file its author believed was live. The note must not suggest
+        renaming to it — that name is refused by the write path and FAILs here
+        as `denylisted`."""
         config = self._config(make_config, tmp_path)
         (self._overlays(config) / "sensitive_action.md").write_text("- a rule\n")
         r = self._run(config)
         assert r.status == FAIL
-        assert "did you mean sensitive_actions" in r.detail
+        assert "sensitive_actions" in r.detail
+        assert "takes no overlay" in r.detail
 
     def test_a_stray_file_does_not_hide_a_typo_beside_it(
         self, make_config, tmp_path
@@ -2862,6 +2865,47 @@ class TestSkillOverlays:
         r = self._run(config)
         assert r.status == WARN
         assert "developer2.md" in r.detail
+
+    def test_a_fail_never_hides_the_files_that_only_warn(
+        self, make_config, tmp_path
+    ):
+        """One planted typo must not suppress the rest of the report. Before
+        the severity split every unknown name was fatal, so every one was
+        named; afterwards a FAIL branch that returned without rendering
+        `warned` reported "1 of 21" and hid twenty files that also reach no
+        prompt — a count that reads in the reassuring direction, and a
+        suppression an attacker can aim with a single `touch`."""
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        (d / "develper.md").write_text("- a rule\n")
+        for i in range(20):
+            (d / f"projectnotes{i}.md").write_text("- scratch\n")
+
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "1 of 21" in r.detail
+        assert "20 more" in r.detail
+        assert "projectnotes0.md" in r.detail
+        # The glossary for the warned half travels with the FAIL remedy.
+        assert "unknown_skill on its own" in r.remedy
+
+    def test_a_fail_does_not_hide_an_overlay_near_the_loading_cap(
+        self, make_config, tmp_path
+    ):
+        """The pointed version of the case above: the file being hidden is a
+        real, loading overlay a few KB from the cliff past which it silently
+        stops reaching any prompt."""
+        from istota.skills._loader import OVERLAY_WARN_BYTES
+
+        config = self._config(make_config, tmp_path)
+        d = self._overlays(config)
+        (d / "developer.md").write_text("- x\n" * (OVERLAY_WARN_BYTES // 4 + 4))
+        (d / "notse.md").write_text("- planted\n")
+
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "over_warn_bytes" in r.detail
+        assert "developer.md" in r.detail
 
     def test_a_short_stray_name_is_not_read_as_a_typo(self, make_config, tmp_path):
         """`nte` is two edits from `notes`, which the long budget would accept
@@ -2925,35 +2969,6 @@ class TestOverlayNearMiss:
 
     # ------------------------------------------------ copies, not misspellings
 
-    @pytest.mark.parametrize(
-        "stem",
-        [
-            "notes2", "notes-1", "notes~", "notes.bak", "notes.tmp",
-            "notes-old", "notes_new", "notes copy", "notes.orig",
-            "notes backup", "notes.save", "notes v2", "notes.bak2",
-        ],
-    )
-    def test_a_copy_of_a_real_overlay_is_not_a_typo_of_one(self, stem):
-        """A backup or a numbered copy is one or two edits from the name it was
-        made from, so the distance test alone reads every one of them as a
-        misspelling. Whoever made it did not misspell anything."""
-        assert self._near(stem) is None
-
-    def test_a_copy_marker_on_a_name_that_is_not_a_skill_is_still_a_typo(self):
-        # Strips to `develper`, which is not a skill, so it falls through to
-        # the distance test and is reported as the typo it is.
-        assert self._near("develper2") == "developer"
-
-    def test_a_bare_copy_marker_is_not_a_skill_name_plus_a_suffix(self):
-        assert self._near("2") is None
-        assert self._near("~") is None
-        assert self._near("bak") is None
-
-    def test_a_singular_of_a_real_skill_is_still_a_typo(self):
-        """The plural slip is the most common misspelling there is, and a file
-        named `note.md` for the `notes` skill reaches no prompt at all."""
-        assert self._near("note") == "notes"
-
     def test_the_closest_candidate_wins_over_a_further_one(self):
         from istota.doctor import _overlay_near_miss
 
@@ -2969,3 +2984,94 @@ class TestOverlayNearMiss:
         # the same for two callers holding the same names in a different order.
         assert _overlay_near_miss("noteX", ("noteb", "notea")) == "notea"
         assert _overlay_near_miss("noteX", ("notea", "noteb")) == "notea"
+
+    def test_a_singular_of_a_real_skill_is_still_a_typo(self):
+        """The plural slip is the most common misspelling there is, and a file
+        named `note.md` for the `notes` skill reaches no prompt at all."""
+        assert self._near("note") == "notes"
+
+
+class TestClassifyUnknownOverlay:
+    """Severity and wording for a filename the skill index rejected.
+
+    One helper decides both, because every earlier version of this had a label
+    stating a reason the branch above it had not used.
+    """
+
+    KNOWN = ("developer", "notes", "browse", "sensitive_actions")
+
+    def _classify(self, stem):
+        from istota.doctor import _classify_unknown_overlay
+
+        return _classify_unknown_overlay(stem, self.KNOWN)
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "notes2", "notes-1", "notes~", "notes.bak", "notes.tmp",
+            "notes-old", "notes_new", "notes copy", "notes.orig",
+            "notes backup", "notes.save", "notes v2", "notes.bak2",
+        ],
+    )
+    def test_a_copy_of_a_real_overlay_warns_and_says_what_it_copies(self, stem):
+        """Each is one or two edits from the name it was made from, so distance
+        alone reads the whole class as misspellings. Whoever made it misspelled
+        nothing — and the label has to say that, or the WARN remedy tells the
+        operator the name is 'not close enough to a skill to be a typo', which
+        for `notes2` is arithmetically false."""
+        fails, note = self._classify(stem)
+        assert fails is False
+        assert note == "unknown_skill, a copy of notes.md"
+
+    def test_a_copy_marker_on_a_name_that_is_not_a_skill_is_still_a_typo(self):
+        # Strips to `develper`, which is not a skill, so it falls through.
+        fails, note = self._classify("develper2")
+        assert fails is True
+        assert "did you mean developer" in note
+
+    def test_a_bare_copy_marker_is_not_a_skill_name_plus_a_suffix(self):
+        for stem in ("2", "~", "bak"):
+            assert self._classify(stem) == (False, "unknown_skill")
+
+    def test_a_typo_is_fatal_and_names_the_skill(self):
+        assert self._classify("develper") == (
+            True, "unknown_skill, did you mean developer?"
+        )
+
+    def test_a_typo_of_a_denylisted_name_does_not_suggest_a_rename(self):
+        """`sensitive_actions` takes no overlay and the write path refuses it,
+        so `did you mean sensitive_actions?` would walk the operator from this
+        FAIL straight into the next one."""
+        fails, note = self._classify("sensitive_action")
+        assert fails is True
+        assert "takes no overlay" in note
+        assert "did you mean" not in note
+
+    @pytest.mark.parametrize(
+        "stem",
+        ["developer.local", "01-developer", "developer-overlay", "developer_overlay",
+         "my-developer-rules"],
+    )
+    def test_a_name_built_around_a_real_skill_is_fatal(self, stem):
+        """Distance is blind in exactly this direction: the more deliberately a
+        name is decorated the further it gets from the skill, while its author's
+        belief that the file was live only gets more obvious."""
+        fails, note = self._classify(stem)
+        assert fails is True
+        assert "names the developer skill but is not developer.md" in note
+
+    def test_a_two_word_skill_needs_both_words(self):
+        assert self._classify("sensitive-actions-old")[0] is True
+        assert self._classify("actions-only")[0] is False
+
+    def test_a_scratch_name_is_neither(self):
+        assert self._classify("zzz") == (False, "unknown_skill")
+        assert self._classify("scratch") == (False, "unknown_skill")
+
+    def test_a_copy_beats_a_containment_match(self):
+        # `developer2` names `developer` and is also a copy of it. The copy
+        # reading is the quieter and the correct one.
+        assert self._classify("developer2") == (
+            False, "unknown_skill, a copy of developer.md"
+        )
+
