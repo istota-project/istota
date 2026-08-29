@@ -42,10 +42,8 @@ Env vars used:
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
-import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -75,6 +73,11 @@ from istota.memory.curation.types import (
     subheading_text,
     subsection_region_indices,
 )
+from istota.skills._loader import (
+    OVERLAY_READ_CAP_BYTES,
+    inspect_overlay,
+    read_overlay_bytes,
+)
 
 #: Target kinds. `_resolve_target` used to answer a bool; three destinations
 #: with three different audit rules is one answer too many for one.
@@ -87,8 +90,9 @@ _SKILL = "skill"
 #: loader's cap does not load, and `remove` is the only way to bring it back
 #: under — refusing to read it would leave the user with a file they can
 #: neither use nor shrink. This bound exists only so a multi-gigabyte file
-#: planted at the path cannot be pulled into the daemon's memory.
-_MAX_OVERLAY_READ_BYTES = 1024 * 1024
+#: planted at the path cannot be pulled into the daemon's memory. Named here
+#: for the local reason; owned by `_loader`, which reads under it too.
+_MAX_OVERLAY_READ_BYTES = OVERLAY_READ_CAP_BYTES
 
 #: How much of an overlay's first line the inventory shows.
 _FIRST_LINE_CHARS = 120
@@ -310,59 +314,30 @@ def _read_text(path: Path) -> str:
 
 
 def _read_overlay_bytes(path: Path) -> tuple[bytes | None, str | None]:
-    """Read an overlay file. Returns `(data, refusal_reason)`; exactly one is set.
+    """`_loader.read_overlay_bytes` under this CLI's read ceiling.
 
-    A missing file is `(b"", None)` — absence is how `append` learns to create
-    one, so it must not read as a refusal.
+    The hardening — `O_NOFOLLOW`, `S_ISREG` + `O_NONBLOCK`, and the size taken
+    off the fd before the read — is the loader's, in the loader's own function,
+    because this CLI is spawned **host-side** by the skill proxy with the
+    daemon's filesystem view while the directory it reads sits under
+    `{mount}/Users/{user_id}`, which `build_bwrap_cmd` binds **read-write** into
+    that user's sandbox. Every entry in it is model-plantable, so a plain
+    `read_text()` here is an arbitrary daemon-side file read whose result
+    `memory show --skill …` hands straight back. Three surfaces face that same
+    directory and there is one reader for it.
 
-    This CLI is spawned **host-side** by the skill proxy with the daemon's own
-    filesystem view, while the directory it reads sits under
-    `{mount}/Users/{user_id}`, which `build_bwrap_cmd` binds **read-write**
-    into that user's sandbox. So every entry in it is model-plantable, and a
-    plain `read_text()` here is an arbitrary daemon-side file read whose result
-    `memory show --skill …` hands straight back. Same threat the loader's own
-    reader answers (`skills._loader._read_overlay_bytes`), and the same three
-    answers:
+    What differs is what a refusal means, and that stays here: the loader
+    degrades one to "no overlay" because its worst case is an inert
+    customization, while here it must reach the caller. Writing through a
+    refusal would replace whatever was planted with a file the user did not ask
+    for, and reporting one as "file absent" would make `append` clobber it.
 
-    - `O_NOFOLLOW`, so a symlink at `developer.md` is refused rather than
-      followed to whatever it names.
-    - `S_ISREG` + `O_NONBLOCK`, so a FIFO left at that name cannot block the
-      open and hang the proxy until `security.skill_proxy_timeout` kills it.
-    - the size read off the fd before the read, so the bound is a bound.
-
-    It differs from the loader's in one way that matters: the loader degrades
-    every refusal to "no overlay" because its worst case is an inert
-    customization, while here a refusal must reach the caller. Writing through
-    a refusal would replace whatever was planted with a file the user did not
-    ask for, and reporting one as "file absent" would make `append` clobber it.
+    The size the reader also returns is dropped, since the two callers left
+    want the bytes or the refusal and nothing else; `inspect_overlay` takes it
+    from the same call for the inventory.
     """
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        return b"", None
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            return None, "overlay_is_a_symlink"
-        return None, "overlay_unreadable"
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None, "overlay_not_a_regular_file"
-        if st.st_size > _MAX_OVERLAY_READ_BYTES:
-            return None, "overlay_unreadably_large"
-        chunks: list[bytes] = []
-        remaining = _MAX_OVERLAY_READ_BYTES
-        while remaining > 0:
-            chunk = os.read(fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks), None
-    except OSError:
-        return None, "overlay_unreadable"
-    finally:
-        os.close(fd)
+    data, reason, _size = read_overlay_bytes(path, max_bytes=_MAX_OVERLAY_READ_BYTES)
+    return data, reason
 
 
 def _read_overlay_text(path: Path) -> str:
@@ -844,14 +819,13 @@ def cmd_skills(args) -> int:
     and is any of it live?" needs an answer of its own. `binds` is the half
     that cannot be seen from `ls` — an overlay for a misspelled, disabled or
     denylisted skill is a file that looks configured and loads into nothing.
+
+    The gates are `_loader.inspect_overlay`, not a list restated here, because
+    `doctor` asks this same question across every user's directory and the
+    failure mode of two copies is that one says a file binds while the prompt
+    does not contain it.
     """
-    from istota.skills._loader import (
-        OVERLAY_DENYLIST,
-        OVERLAY_MAX_BYTES,
-        _denylist_key,
-        effective_disabled_skills,
-        overlay_effective_body,
-    )
+    from istota.skills._loader import effective_disabled_skills
 
     index, config = _skill_index()
     disabled = effective_disabled_skills(config, _user_id(), index)
@@ -863,45 +837,23 @@ def cmd_skills(args) -> int:
 
     rows: list[dict] = []
     for entry in sorted(d.glob("*.md")):
-        skill = entry.name[: -len(".md")]
-        row: dict = {"skill": skill}
-        try:
-            row["bytes"] = entry.lstat().st_size
-        except OSError:
-            row["bytes"] = None
-        reason: str | None = None
-        if skill not in index:
-            reason = "unknown_skill"
-        elif _denylist_key(skill) in OVERLAY_DENYLIST:
-            reason = "denylisted"
-        elif skill in disabled:
-            reason = "skill_disabled"
-
-        raw, refusal = _read_overlay_bytes(entry)
-        if refusal is not None:
-            reason = reason or refusal
-        else:
-            try:
-                text = (raw or b"").decode("utf-8")
-            except UnicodeDecodeError:
-                reason = reason or "overlay_not_utf8"
-            else:
-                # The loader's own reduction, so `binds` is its answer rather
-                # than a re-derivation that agrees on five gates and not the
-                # sixth. A frontmatter-only file has bytes and lines and loads
-                # as nothing.
-                effective = overlay_effective_body(text)
-                body = [ln for ln in effective.split("\n") if ln.strip()]
-                row["lines"] = len(body)
-                row["first_line"] = body[0].strip()[:_FIRST_LINE_CHARS] if body else ""
-                if not body:
-                    reason = reason or "empty"
-                elif row["bytes"] and row["bytes"] > OVERLAY_MAX_BYTES:
-                    reason = reason or "over_cap"
-
-        row["binds"] = reason is None
-        if reason is not None:
-            row["reason"] = reason
+        found = inspect_overlay(
+            entry,
+            known_skills=index,
+            disabled_skills=disabled,
+            max_read_bytes=_MAX_OVERLAY_READ_BYTES,
+        )
+        row: dict = {"skill": found.skill, "bytes": found.size}
+        # Omitted rather than zeroed when there was no body to count: printing
+        # `lines: 0` for a planted symlink would describe content never read.
+        if found.lines is not None:
+            row["lines"] = found.lines
+            row["first_line"] = (found.first_line or "")[:_FIRST_LINE_CHARS]
+        row["binds"] = found.binds
+        if found.reason is not None:
+            row["reason"] = found.reason
+        if found.warnings:
+            row["warnings"] = list(found.warnings)
         rows.append(row)
 
     payload["skills"] = rows

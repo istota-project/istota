@@ -11,6 +11,7 @@ Discovery order (later wins):
 3. Legacy fallback: config/skills/_index.toml (lowest priority)
 """
 
+import errno
 import hashlib
 import importlib
 import json
@@ -19,6 +20,7 @@ import os
 import re
 import stat
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from ._types import EnvSpec, SkillMeta
@@ -860,8 +862,46 @@ def overlay_effective_body(text: str) -> str:
     return text.strip()
 
 
-def _read_overlay_bytes(path: Path) -> bytes | None:
+#: Ceiling on what any overlay reader will pull into memory, whatever its own
+#: policy cap is. `OVERLAY_MAX_BYTES` is the *loading* rule; this is the bound
+#: on the read itself, and it is much larger deliberately — a file over the
+#: loading cap does not load, and `memory remove --skill` is the only way to
+#: bring it back under, so refusing to read it at all would leave the user with
+#: a file they can neither use nor shrink. This one exists only so a
+#: multi-gigabyte file planted at the path cannot be pulled into the daemon.
+OVERLAY_READ_CAP_BYTES = 1024 * 1024
+
+#: Why an overlay file will not reach a prompt. Stable ids: the `memory skills`
+#: inventory prints them and `doctor` maps them to statuses, so both surfaces
+#: say the same word about the same file.
+OVERLAY_UNKNOWN_SKILL = "unknown_skill"
+OVERLAY_DENYLISTED = "denylisted"
+OVERLAY_SKILL_DISABLED = "skill_disabled"
+OVERLAY_EMPTY = "empty"
+OVERLAY_OVER_CAP = "over_cap"
+OVERLAY_NOT_UTF8 = "overlay_not_utf8"
+OVERLAY_IS_A_SYMLINK = "overlay_is_a_symlink"
+OVERLAY_NOT_A_REGULAR_FILE = "overlay_not_a_regular_file"
+OVERLAY_UNREADABLY_LARGE = "overlay_unreadably_large"
+OVERLAY_UNREADABLE = "overlay_unreadable"
+
+#: Said about an overlay that *does* bind. Not reasons — a warning never makes
+#: `binds` false, because the file is loaded either way and a surface that
+#: conflated the two would tell the user their live customization is inert.
+OVERLAY_WARN_LARGE = "over_warn_bytes"
+OVERLAY_WARN_SHALLOW_HEADING = "shallow_heading"
+
+
+def read_overlay_bytes(
+    path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES
+) -> tuple[bytes | None, str | None, int | None]:
     """Read an overlay file, refusing anything that is not a plain file.
+
+    Returns ``(data, refusal_reason, size)``. Exactly one of the first two is
+    set; ``size`` is the ``fstat`` size where there was an fd to take it from
+    and None otherwise. A *missing* file is ``(b"", None, None)`` — absence is
+    how ``memory append --skill`` learns to create one, so it must not read as
+    a refusal.
 
     The overlay directory sits under ``{mount}/Users/{user_id}``, which
     ``build_bwrap_cmd`` binds **read-write** into that user's own sandbox. Every
@@ -871,51 +911,156 @@ def _read_overlay_bytes(path: Path) -> bytes | None:
     it. Three consequences, none of them theoretical:
 
     - ``O_NOFOLLOW``, because a symlink planted at ``files.md`` otherwise puts
-      up to the cap in bytes of any daemon-readable file into the next prompt.
+      up to the cap in bytes of any daemon-readable file into the next prompt —
+      or, from ``doctor``, into a check detail that names another user's file.
     - ``S_ISREG``, because a FIFO left at that name blocks ``open(2)`` until
-      someone writes to it, and prompt assembly runs *before* the brain request
-      exists, so no task timeout covers it — one such file wedges every later
-      task for that user, silently. ``O_NONBLOCK`` keeps the open itself from
-      blocking while the ``fstat`` decides.
+      someone writes to it, and both of the callers that matter run somewhere no
+      timeout covers: prompt assembly happens *before* the brain request exists,
+      and ``doctor`` runs on the daemon's start-up path. One such file wedges
+      every later task for that user, silently. ``O_NONBLOCK`` keeps the open
+      itself from blocking while the ``fstat`` decides.
     - the size is checked on the fd *before* the read. Reading the whole file
       and refusing afterwards bounds nothing, and ``MemoryError`` is not an
-      ``OSError``, so it would escape the never-raises contract the caller
+      ``OSError``, so it would escape the never-raises contract every caller
       depends on rather than degrading to "no overlay".
 
-    Returns None on every refusal, so each one degrades to exactly the prompt
-    the skill would have had with no overlay at all.
+    One reader for three callers — the loader, the memory CLI and ``doctor`` —
+    because the three answers above are the whole of the hardening, and a
+    fourth copy of them is a fourth chance for one to be left out. What the
+    callers do with a refusal still differs, and that stays theirs: the loader
+    degrades it to "no overlay" because its worst case is an inert
+    customization, while the CLI must not write through one (that would replace
+    whatever was planted with a file the user did not ask for) and ``doctor``
+    reports it.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return None
+    except FileNotFoundError:
+        return b"", None, None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return None, OVERLAY_IS_A_SYMLINK, None
+        return None, OVERLAY_UNREADABLE, None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            logger.warning(
-                "skill overlay %s is not a regular file — not loaded", path
-            )
-            return None
-        if st.st_size > OVERLAY_MAX_BYTES:
-            logger.warning(
-                "skill overlay %s is %d bytes (cap %d) — not loaded. An overlay "
-                "is appended to the bundled body, not a replacement for it.",
-                path, st.st_size, OVERLAY_MAX_BYTES,
-            )
-            return None
+            return None, OVERLAY_NOT_A_REGULAR_FILE, None
+        if st.st_size > max_bytes:
+            return None, OVERLAY_UNREADABLY_LARGE, st.st_size
         chunks: list[bytes] = []
-        remaining = OVERLAY_MAX_BYTES
+        remaining = max_bytes
         while remaining > 0:
             chunk = os.read(fd, remaining)
             if not chunk:
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
-        return b"".join(chunks)
+        return b"".join(chunks), None, st.st_size
     except OSError:
-        return None
+        return None, OVERLAY_UNREADABLE, None
     finally:
         os.close(fd)
+
+
+@dataclass(frozen=True)
+class OverlayInspection:
+    """One overlay file, and whether it will actually reach a prompt.
+
+    ``reason`` is None exactly when the file binds. ``lines`` and ``first_line``
+    are None when there was no body to count — a refused read, or bytes that are
+    not UTF-8 — which is deliberately distinct from a file whose body counted to
+    zero, since a surface that printed ``lines: 0`` for a planted symlink would
+    be describing content it never saw.
+    """
+
+    skill: str
+    path: Path
+    size: int | None
+    lines: int | None
+    first_line: str | None
+    reason: str | None
+    warnings: tuple[str, ...]
+
+    @property
+    def binds(self) -> bool:
+        return self.reason is None
+
+
+def inspect_overlay(
+    path: Path,
+    *,
+    known_skills,
+    disabled_skills=frozenset(),
+    max_read_bytes: int = OVERLAY_READ_CAP_BYTES,
+) -> OverlayInspection:
+    """Everything a reporting surface needs to say about one overlay file.
+
+    The gates are the loader's own, in the loader's own order, because the
+    question two surfaces ask about an overlay is the same question and the
+    failure mode is that they drift: ``memory skills`` says a file binds, the
+    prompt does not contain it, and nothing anywhere reconciles the two. So
+    ``binds`` is derived here, once, and the emptiness test is
+    ``overlay_effective_body`` rather than ``.strip()`` — a file holding
+    nothing but frontmatter has bytes and has lines and loads as nothing.
+
+    ``disabled_skills`` defaults to empty because not every caller cares. The
+    CLI passes ``effective_disabled_skills`` so its inventory can say a file is
+    filed correctly and still inert; ``doctor`` deliberately passes nothing,
+    since an overlay for a skill the operator switched off is a file that will
+    bind again the moment the skill comes back and is not a defect to report.
+
+    Never raises: every read failure is a ``reason``.
+    """
+    skill = path.name[: -len(".md")] if path.name.endswith(".md") else path.name
+    reason: str | None = None
+    if skill not in known_skills:
+        reason = OVERLAY_UNKNOWN_SKILL
+    elif _denylist_key(skill) in OVERLAY_DENYLIST:
+        reason = OVERLAY_DENYLISTED
+    elif skill in disabled_skills:
+        reason = OVERLAY_SKILL_DISABLED
+
+    raw, refusal, size = read_overlay_bytes(path, max_bytes=max_read_bytes)
+    lines: int | None = None
+    first_line: str | None = None
+    warnings: list[str] = []
+
+    if refusal is not None:
+        reason = reason or refusal
+    else:
+        try:
+            text = (raw or b"").decode("utf-8")
+        except UnicodeDecodeError:
+            reason = reason or OVERLAY_NOT_UTF8
+        else:
+            effective = overlay_effective_body(text)
+            body = [ln for ln in effective.split("\n") if ln.strip()]
+            lines = len(body)
+            first_line = body[0].strip() if body else ""
+            if not body:
+                reason = reason or OVERLAY_EMPTY
+            elif size is not None and size > OVERLAY_MAX_BYTES:
+                reason = reason or OVERLAY_OVER_CAP
+            else:
+                if size is not None and size > OVERLAY_WARN_BYTES:
+                    warnings.append(OVERLAY_WARN_LARGE)
+                # The predicate is the demotion itself rather than a second
+                # regex over the text: `_demote_overlay_headings` already knows
+                # about closed fences, indented hashes and setext underlines,
+                # and a warning that disagreed with the rewrite would report a
+                # sample inside a code block or miss an underlined heading.
+                if _demote_overlay_headings(effective) != effective:
+                    warnings.append(OVERLAY_WARN_SHALLOW_HEADING)
+
+    return OverlayInspection(
+        skill=skill,
+        path=path,
+        size=size,
+        lines=lines,
+        first_line=first_line,
+        reason=reason,
+        warnings=tuple(warnings),
+    )
 
 
 def _load_user_overlay(
@@ -935,9 +1080,24 @@ def _load_user_overlay(
         return None
 
     path = user_overlay_dir / f"{skill_name}.md"
-    raw = _read_overlay_bytes(path)
-    if raw is None:
+    # `max_bytes` is the loading cap here, not the absolute read ceiling: past
+    # it the file is not loaded at all, so there is nothing to gain by reading
+    # it. The CLI passes the larger bound instead, because it has to be able to
+    # read a file back in order to shrink it.
+    raw, refusal, size = read_overlay_bytes(path, max_bytes=OVERLAY_MAX_BYTES)
+    if refusal == OVERLAY_UNREADABLY_LARGE:
+        logger.warning(
+            "skill overlay %s is %s bytes (cap %d) — not loaded. An overlay "
+            "is appended to the bundled body, not a replacement for it.",
+            path, size, OVERLAY_MAX_BYTES,
+        )
         return None
+    if refusal is not None:
+        logger.warning(
+            "skill overlay %s could not be read (%s) — not loaded", path, refusal
+        )
+        return None
+    assert raw is not None
 
     if len(raw) > OVERLAY_WARN_BYTES:
         logger.warning(

@@ -1,6 +1,7 @@
 """Tests for istota.skills._loader."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from istota.skills._loader import (
     OVERLAY_LABEL,
     OVERLAY_MAX_BYTES,
+    OVERLAY_READ_CAP_BYTES,
     OVERLAY_WARN_BYTES,
     _get_attachment_extensions,
     _parse_frontmatter,
@@ -17,6 +19,7 @@ from istota.skills._loader import (
     expand_companions,
     format_cli_skills,
     get_skill_availability,
+    inspect_overlay,
     load_skill_index,
     load_skills,
     load_skills_changelog,
@@ -2531,3 +2534,172 @@ class TestFormatCliSkills:
             ),
         }
         assert format_cli_skills(index, is_admin=False) == ""
+
+
+
+class TestInspectOverlay:
+    """The one predicate two reporting surfaces share.
+
+    `memory skills` and `doctor config.skill_overlays` ask the same question of
+    the same directory, and the failure this guards is that they drift: one
+    says a file binds while the prompt does not contain it. Every gate below is
+    the loader's own, so a change to what loads changes both answers at once.
+    """
+
+    KNOWN = {"developer": object(), "notes": object(), "sensitive_actions": object()}
+
+    def _write(self, tmp_path, name, text):
+        d = tmp_path / "skills"
+        d.mkdir(exist_ok=True)
+        p = d / name
+        p.write_text(text)
+        return p
+
+    def test_a_plain_overlay_binds(self, tmp_path):
+        p = self._write(tmp_path, "developer.md", "- one rule\n- two\n")
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds
+        assert found.reason is None
+        assert found.skill == "developer"
+        assert found.lines == 2
+        assert found.first_line == "- one rule"
+        assert found.size == len("- one rule\n- two\n")
+        assert found.warnings == ()
+
+    def test_an_unknown_name_does_not_bind(self, tmp_path):
+        p = self._write(tmp_path, "develper.md", "- a rule\n")
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is False
+        assert found.reason == "unknown_skill"
+
+    def test_a_denylisted_skill_does_not_bind(self, tmp_path):
+        p = self._write(tmp_path, "sensitive_actions.md", "- a rule\n")
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is False
+        assert found.reason == "denylisted"
+
+    def test_a_disabled_skill_does_not_bind_when_the_caller_asks(self, tmp_path):
+        p = self._write(tmp_path, "notes.md", "- a rule\n")
+        assert inspect_overlay(p, known_skills=self.KNOWN).binds is True
+        found = inspect_overlay(p, known_skills=self.KNOWN, disabled_skills={"notes"})
+        assert found.binds is False
+        assert found.reason == "skill_disabled"
+
+    def test_a_frontmatter_only_file_reads_as_empty_not_as_two_lines(self, tmp_path):
+        """The gate is the loader's `overlay_effective_body`, not `.strip()`."""
+        p = self._write(tmp_path, "developer.md", "---\ncreated: 2026-08-28\n---\n")
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is False
+        assert found.reason == "empty"
+        assert found.lines == 0
+
+    def test_a_symlink_is_refused_and_its_target_is_never_read(self, tmp_path):
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        d = tmp_path / "skills"
+        d.mkdir()
+        p = d / "developer.md"
+        p.symlink_to(secret)
+
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is False
+        assert found.reason == "overlay_is_a_symlink"
+        assert found.lines is None
+        assert found.first_line is None
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+    def test_a_fifo_is_refused_without_blocking(self, tmp_path):
+        """A FIFO with no writer blocks `open(2)` forever. Both callers run
+        somewhere no timeout covers — prompt assembly before the brain request
+        exists, and doctor on the daemon's start-up path."""
+        d = tmp_path / "skills"
+        d.mkdir()
+        p = d / "developer.md"
+        os.mkfifo(p)
+
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is False
+        assert found.reason == "overlay_not_a_regular_file"
+
+    def test_over_the_loading_cap_does_not_bind(self, tmp_path):
+        p = self._write(
+            tmp_path, "developer.md", "- x\n" * (OVERLAY_MAX_BYTES // 4 + 4)
+        )
+        assert p.stat().st_size > OVERLAY_MAX_BYTES
+        found = inspect_overlay(
+            p, known_skills=self.KNOWN, max_read_bytes=OVERLAY_READ_CAP_BYTES
+        )
+        assert found.binds is False
+        assert found.reason == "over_cap"
+
+    def test_past_the_read_ceiling_it_is_not_even_read(self, tmp_path):
+        p = self._write(tmp_path, "developer.md", "- x\n" * 300)
+        found = inspect_overlay(p, known_skills=self.KNOWN, max_read_bytes=64)
+        assert found.reason == "overlay_unreadably_large"
+        assert found.lines is None
+        assert found.size == p.stat().st_size
+
+    def test_over_the_guidance_binds_but_warns(self, tmp_path):
+        p = self._write(
+            tmp_path, "developer.md", "- x\n" * (OVERLAY_WARN_BYTES // 4 + 4)
+        )
+        found = inspect_overlay(
+            p, known_skills=self.KNOWN, max_read_bytes=OVERLAY_READ_CAP_BYTES
+        )
+        assert found.binds is True
+        assert "over_warn_bytes" in found.warnings
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "## Escapes the section\n- a rule\n",
+            "# Escapes harder\n- a rule\n",
+            "   ## indented but still a heading\n",
+            "My Rules\n---\n- a rule\n",
+        ],
+    )
+    def test_a_shallow_heading_binds_but_warns(self, tmp_path, body):
+        p = self._write(tmp_path, "developer.md", body)
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is True
+        assert "shallow_heading" in found.warnings
+
+    def test_a_heading_inside_a_closed_fence_is_not_warned_about(self, tmp_path):
+        """The warning is the demotion's own answer, so it knows about fences —
+        an overlay for the notes skill quite plausibly carries a template."""
+        p = self._write(
+            tmp_path, "notes.md", "- Use this template:\n\n```\n## Heading\n```\n"
+        )
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is True
+        assert found.warnings == ()
+
+    def test_non_utf8_does_not_bind(self, tmp_path):
+        d = tmp_path / "skills"
+        d.mkdir()
+        p = d / "developer.md"
+        p.write_bytes(b"- caf\xff\xfe\n")
+        found = inspect_overlay(p, known_skills=self.KNOWN)
+        assert found.binds is False
+        assert found.reason == "overlay_not_utf8"
+
+    def test_an_absent_file_reads_as_empty_rather_than_as_a_refusal(self, tmp_path):
+        """`memory append --skill` learns from absence that it must create the
+        file, so a missing path must not come back as a read failure."""
+        d = tmp_path / "skills"
+        d.mkdir()
+        found = inspect_overlay(d / "developer.md", known_skills=self.KNOWN)
+        assert found.reason == "empty"
+
+    def test_the_name_gate_does_not_short_circuit_the_read_hardening(self, tmp_path):
+        """An unknown name is still a planted path. The reason reported first is
+        the name, but nothing about the file's bytes reaches the caller."""
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        d = tmp_path / "skills"
+        d.mkdir()
+        (d / "develper.md").symlink_to(secret)
+
+        found = inspect_overlay(d / "develper.md", known_skills=self.KNOWN)
+        assert found.reason == "unknown_skill"
+        assert found.first_line is None
