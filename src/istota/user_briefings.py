@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -355,10 +356,11 @@ def parse_briefings_md(text: str) -> list[dict] | None:
     """The ``[[briefings]]`` entries in a workspace ``BRIEFINGS.md``.
 
     ``None`` means the file could not be understood — unparseable TOML, or a
-    shape that is not a list of tables. An empty list means it was read fine
-    and named no briefings, which is what the shipped (fully commented out)
-    seed produced. The caller treats those two differently: only the second
-    is grounds for marking a user done.
+    shape that is not a list of tables (``[briefings]`` written as one table
+    rather than ``[[briefings]]`` lands here). An empty list means it was read
+    fine and named no briefings, which is what the shipped (fully commented
+    out) seed produced. The caller treats those two differently: only the
+    second is grounds for marking a user done.
     """
     import tomli
 
@@ -376,6 +378,152 @@ def parse_briefings_md(text: str) -> list[dict] | None:
     return [e for e in entries if isinstance(e, dict)]
 
 
+def _workspace_is_live(config: "Any", mount: Path, user_id: str, bot_dir: str) -> bool:
+    """Positive evidence that this user's workspace is really readable.
+
+    An absent ``BRIEFINGS.md`` means one of two very different things, and the
+    sentinel must only be burned for the first: the user genuinely had no file,
+    or the tree it lives in is not there to read. An rclone mount that has not
+    come up leaves a plain empty directory behind — every path check reports it
+    as fine and every read returns nothing — and ``ensure_user_directories_v2``
+    runs earlier in the same boot and will happily create the workspace on the
+    underlying disk, so even the directory's existence is not enough on its own.
+
+    ``ismount`` is the cheap discriminator, and it is gated on
+    ``storage_is_nextcloud`` for the same reason ``doctor.check_mount_liveness``
+    gates it: the local single-user install points ``nextcloud_mount_path`` at a
+    plain directory under the user's home that nothing ever mounts, so requiring
+    a mount point there would mean the import never converged.
+    """
+    try:
+        if getattr(config, "storage_is_nextcloud", False) and not os.path.ismount(mount):
+            return False
+        from .storage import get_user_config_path
+        return (mount / get_user_config_path(user_id, bot_dir).lstrip("/")).is_dir()
+    except OSError:
+        return False
+
+
+@dataclass
+class _PendingImport:
+    """One user's file, read off the mount before any DB lock is taken."""
+
+    user_id: str
+    entries: list[dict]
+    mark_done: bool
+
+
+def _read_one_user(
+    config: "Any", mount: Path, bot_dir: str, user_id: str,
+) -> _PendingImport | None:
+    """Read and parse one user's file. ``None`` means do nothing for them now.
+
+    No database handle reaches this function, deliberately — see
+    ``import_from_workspace_files`` for why.
+    """
+    from .storage import get_user_briefings_path
+
+    path = mount / get_user_briefings_path(user_id, bot_dir).lstrip("/")
+    try:
+        present = path.exists()
+    except OSError as e:
+        logger.warning("BRIEFINGS.md unreadable for %s: %s", user_id, e)
+        return None
+
+    if not present:
+        if not _workspace_is_live(config, mount, user_id, bot_dir):
+            # The tree is not there to read. Saying "no file" here would burn
+            # the sentinel and lose a schedule that exists only in that file.
+            logger.warning(
+                "BRIEFINGS.md: %s's workspace is not readable; leaving the "
+                "import for a later start", user_id,
+            )
+            return None
+        return _PendingImport(user_id=user_id, entries=[], mark_done=True)
+
+    try:
+        # `errors="replace"` rather than the locale default: a container with
+        # LANG unset decodes as ASCII, and UnicodeDecodeError is a ValueError,
+        # so a single non-ASCII character in the user's own prose above the
+        # fence would fail every boot for ever without ever being imported.
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        # Transient fact about this boot; leave the sentinel unset and retry.
+        logger.warning("BRIEFINGS.md unreadable for %s: %s", user_id, e)
+        return None
+
+    entries = parse_briefings_md(text)
+    if entries is None:
+        logger.warning(
+            "BRIEFINGS.md for %s could not be parsed; leaving it for the next "
+            "start rather than dropping what it holds", user_id,
+        )
+        return None
+
+    return _PendingImport(user_id=user_id, entries=entries, mark_done=True)
+
+
+def _row_from_entry(entry: dict, user_id: str) -> tuple[str, str, str, str] | None:
+    """Validate one file entry into row values, or reject it.
+
+    Types are checked rather than coerced. ``str()`` on a TOML array writes its
+    Python repr into a column — ``"['talk', 'email']"`` as an output descriptor
+    is a briefing that delivers nowhere, recorded permanently — and this file is
+    writable by the user and by the model in that user's sandbox.
+    """
+    name = entry.get("name")
+    cron = entry.get("cron")
+    if not isinstance(name, str) or not name.strip():
+        logger.warning(
+            "BRIEFINGS.md entry for %s has no usable name; skipped", user_id,
+        )
+        return None
+    name = name.strip()
+    if not isinstance(cron, str) or not cron.strip():
+        # This used to *suppress* the briefing: the old loader built an entry
+        # with an empty cron, it replaced the config one by name, and
+        # `check_briefings` skips a briefing with no cron. Skipping the entry
+        # here leaves the existing row's own cron in place, so a briefing the
+        # user had switched off this way starts running again. Not inferred as
+        # a disable — an absent cron is as likely half-finished as deliberate —
+        # but named loudly, because it is the one silent resumption.
+        logger.warning(
+            "BRIEFINGS.md: %s's entry %r has no cron and was not imported; if "
+            "a briefing of that name is configured elsewhere it will now run",
+            user_id, name,
+        )
+        return None
+
+    token = entry.get("conversation_token", "")
+    if not isinstance(token, str):
+        logger.warning(
+            "BRIEFINGS.md: %s's entry %r has a non-string conversation_token; "
+            "dropped", user_id, name,
+        )
+        token = ""
+
+    output = entry.get("output", "talk")
+    if not isinstance(output, str) or not _output_is_deliverable(output):
+        # `ensure_briefing` refuses an output descriptor that resolves to no
+        # destination, so storing one here writes a row the web UI cannot
+        # re-save. "none" and whitespace both resolve to nothing.
+        logger.warning(
+            "BRIEFINGS.md: %s's entry %r has an unusable output %r; "
+            "importing as talk", user_id, name, output,
+        )
+        output = "talk"
+
+    return name, cron.strip(), token, output
+
+
+def _output_is_deliverable(output: str) -> bool:
+    try:
+        from .transport import parse_output_target
+        return bool(parse_output_target(output))
+    except Exception:  # pragma: no cover - defensive
+        return bool(output.strip())
+
+
 def import_from_workspace_files(db_path: Path, config: "Any") -> int:
     """One-shot: carry each user's ``BRIEFINGS.md`` into ``briefing_configs``.
 
@@ -385,17 +533,35 @@ def import_from_workspace_files(db_path: Path, config: "Any") -> int:
     so it was the live authority for ``cron``, ``conversation_token`` and
     ``output``.
 
-    That is why the file wins here, over an existing row, exactly once. The
-    bar for a retirement is that nothing observable changes at the switch, and
-    the file's value is what was running. Skipping where a row exists would
-    instead start honouring a web-UI edit the file had been suppressing, which
-    looks like the schedule changing itself. After the sentinel is set the
-    table is the only authority and a later edit stands.
+    Those three are what the file wins here, over an existing row, exactly
+    once, because the file's value is what was actually running and a
+    retirement should not change the schedule as it lands. **Two columns are
+    deliberately left with the row, and both are behaviour changes at the
+    switch rather than exceptions to the rule.** ``enabled``: a row disabled in
+    the web UI is dropped from ``UserConfig.briefings`` by
+    ``config._apply_user_briefings``, and the old file merge then added the
+    briefing straight back, so a briefing the user had switched off kept
+    running — re-enabling it here would make that bug durable instead of
+    ending it. ``title``: the file's entry replaced the row wholesale with a
+    blank title, so a title typed into the web UI was being ignored at render
+    time; keeping the row's is the same correction. After the sentinel is set
+    the table is the only authority and a later edit stands.
 
-    ``components`` is deliberately not carried over. The read path has
-    discarded it since blocks became the content model, so importing it would
-    feed ``briefings/_migrate.py`` and hand the user content they have not had
-    for releases.
+    ``components`` is not carried over either. The read path has discarded the
+    file's since blocks became the content model, so importing them would feed
+    ``briefings/_migrate.py`` and hand the user content they have not had for
+    releases. An existing row's components are left alone, which is a narrower
+    claim than "components are not imported": ``_apply_user_briefings``
+    reattaches them, so a briefing whose module DB has not yet been initialised
+    can still seed blocks from them.
+
+    **Every file is read before the connection is opened.** The obvious shape —
+    one connection wrapping the loop — takes a write lock on the framework DB
+    at the first user and holds it across every remaining user's stat and read
+    against the rclone mount, on the daemon's foreground boot path. This file's
+    sibling ``import_from_user_configs`` uses that shape safely because it does
+    no I/O inside it; ``scheduler.run_daemon`` moved the startup doctor onto a
+    thread for exactly this reason, a hung FUSE mount blocking uninterruptibly.
 
     Best-effort and never raises: this runs on the scheduler's boot path.
     Returns the number of rows written.
@@ -407,25 +573,51 @@ def import_from_workspace_files(db_path: Path, config: "Any") -> int:
     if not getattr(config, "use_mount", False) or mount is None:
         return 0
 
-    try:
-        from .storage import get_user_briefings_path
-    except Exception:  # pragma: no cover - defensive
+    bot_dir = getattr(config, "bot_dir_name", "istota")
+    user_ids = list(getattr(config, "users", {}) or {})
+    if not user_ids:
         return 0
 
-    bot_dir = getattr(config, "bot_dir_name", "istota")
-    written = 0
-
+    # 1. Which users are still outstanding. A short read, no write lock.
     try:
         with _connect(db_path) as conn:
-            for user_id in list(getattr(config, "users", {}) or {}):
+            pending_ids = [u for u in user_ids if not _sentinel_seen(conn, u)]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("BRIEFINGS.md import skipped: %s", e)
+        return 0
+
+    if not pending_ids:
+        return 0
+
+    # 2. Read the mount with no database handle held.
+    reads: list[_PendingImport] = []
+    for user_id in pending_ids:
+        try:
+            pending = _read_one_user(config, Path(mount), bot_dir, user_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("BRIEFINGS.md read failed user=%s: %s", user_id, e)
+            continue
+        if pending is not None:
+            reads.append(pending)
+
+    if not reads:
+        return 0
+
+    # 3. Write. Each user gets a savepoint, so a failure part-way through one
+    #    leaves no rows behind to disagree with the sentinel it never set.
+    written = 0
+    try:
+        with _connect(db_path) as conn:
+            for pending in reads:
                 try:
-                    written += _import_one_user(
-                        conn, Path(mount), bot_dir, user_id,
-                        get_user_briefings_path,
-                    )
+                    conn.execute("SAVEPOINT briefings_md_import")
+                    written += _write_one_user(conn, pending)
+                    conn.execute("RELEASE briefings_md_import")
                 except Exception as e:  # noqa: BLE001
+                    conn.execute("ROLLBACK TO briefings_md_import")
+                    conn.execute("RELEASE briefings_md_import")
                     logger.warning(
-                        "BRIEFINGS.md import failed user=%s: %s", user_id, e,
+                        "BRIEFINGS.md import failed user=%s: %s", pending.user_id, e,
                     )
     except Exception as e:  # noqa: BLE001
         logger.warning("BRIEFINGS.md import skipped: %s", e)
@@ -439,43 +631,14 @@ def import_from_workspace_files(db_path: Path, config: "Any") -> int:
     return written
 
 
-def _import_one_user(
-    conn: sqlite3.Connection,
-    mount: Path,
-    bot_dir: str,
-    user_id: str,
-    briefings_path_for: "Any",
-) -> int:
-    if _sentinel_seen(conn, user_id):
-        return 0
-
-    path = mount / briefings_path_for(user_id, bot_dir).lstrip("/")
-    if not path.exists():
-        # Nothing to carry, and nothing will appear later — the seed is gone.
-        _sentinel_set(conn, user_id)
-        return 0
-
-    try:
-        entries = parse_briefings_md(path.read_text())
-    except OSError as e:
-        # A mount that was not there is a transient fact about this boot, so
-        # leave the sentinel unset and try again next time.
-        logger.warning("BRIEFINGS.md unreadable for %s: %s", user_id, e)
-        return 0
-
-    if entries is None:
-        logger.warning(
-            "BRIEFINGS.md for %s could not be parsed; leaving it for the next "
-            "start rather than dropping what it holds", user_id,
-        )
-        return 0
-
+def _write_one_user(conn: sqlite3.Connection, pending: _PendingImport) -> int:
+    user_id = pending.user_id
     written = 0
-    for entry in entries:
-        name = str(entry.get("name", "") or "")
-        cron = str(entry.get("cron", "") or "")
-        if not name or not cron:
+    for entry in pending.entries:
+        row = _row_from_entry(entry, user_id)
+        if row is None:
             continue
+        name, cron, token, output = row
         conn.execute(
             """
             INSERT INTO briefing_configs
@@ -487,18 +650,18 @@ def _import_one_user(
                 conversation_token = excluded.conversation_token,
                 output = excluded.output
             """,
-            (
-                user_id,
-                name,
-                cron,
-                str(entry.get("conversation_token", "") or ""),
-                str(entry.get("output", "talk") or "talk"),
-            ),
+            (user_id, name, cron, token, output),
         )
         written += 1
+        # The whole row, not just the name: this promotes model-writable file
+        # content into durable framework state, and the audit trail for that is
+        # this line.
         logger.info(
-            "briefing imported from BRIEFINGS.md user=%s name=%s", user_id, name,
+            "briefing imported from BRIEFINGS.md user=%s name=%s cron=%r "
+            "token=%r output=%r",
+            user_id, name, cron, token, output,
         )
 
-    _sentinel_set(conn, user_id)
+    if pending.mark_done:
+        _sentinel_set(conn, user_id)
     return written
