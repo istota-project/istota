@@ -866,7 +866,7 @@ def overlay_effective_body(text: str) -> str:
     treats the file as though it were not there.
 
     Module API because two other places have to agree with it and cannot
-    re-derive it: ``memory skills`` reports whether an overlay *binds*, and
+    re-derive it: ``skills overlays`` reports whether an overlay *binds*, and
     the memory CLI deletes an overlay whose last bullet has gone so the
     directory stays an honest inventory. Both used to test the raw text for
     emptiness, which parts company with the loader on exactly one input — a
@@ -883,13 +883,13 @@ def overlay_effective_body(text: str) -> str:
 #: Ceiling on what any overlay reader will pull into memory, whatever its own
 #: policy cap is. `OVERLAY_MAX_BYTES` is the *loading* rule; this is the bound
 #: on the read itself, and it is much larger deliberately — a file over the
-#: loading cap does not load, and `memory remove --skill` is the only way to
-#: bring it back under, so refusing to read it at all would leave the user with
-#: a file they can neither use nor shrink. This one exists only so a
-#: multi-gigabyte file planted at the path cannot be pulled into the daemon.
+#: loading cap does not load, and refusing to read it as well would leave the
+#: user with a file `skills overlay` cannot show them and so cannot help them
+#: shrink. This one exists only so a multi-gigabyte file planted at the path
+#: cannot be pulled into the daemon.
 OVERLAY_READ_CAP_BYTES = 1024 * 1024
 
-#: Why an overlay file will not reach a prompt. Stable ids: the `memory skills`
+#: Why an overlay file will not reach a prompt. Stable ids: the `skills overlays`
 #: inventory prints them and `doctor` maps them to statuses, so both surfaces
 #: say the same word about the same file.
 OVERLAY_UNKNOWN_SKILL = "unknown_skill"
@@ -1033,7 +1033,7 @@ def read_overlay_bytes(
     Returns ``(data, refusal_reason, size)``. Exactly one of the first two is
     set; ``size`` is the ``fstat`` size where there was an fd to take it from
     and None otherwise. A *missing* file is ``(b"", None, None)`` — absence is
-    how ``memory append --skill`` learns to create one, so it must not read as
+    how a reporting surface learns there is no overlay, so it must not read as
     a refusal.
 
     The overlay directory sits under ``{mount}/Users/{user_id}``, which
@@ -1149,7 +1149,7 @@ def inspect_overlay(
 
     The gates are the loader's own, in the loader's own order, because the
     question two surfaces ask about an overlay is the same question and the
-    failure mode is that they drift: ``memory skills`` says a file binds, the
+    failure mode is that they drift: ``skills overlays`` says a file binds, the
     prompt does not contain it, and nothing anywhere reconciles the two. So
     ``binds`` is derived here, once, and the emptiness test is
     ``overlay_effective_body`` rather than ``.strip()`` — a file holding
@@ -1185,7 +1185,7 @@ def inspect_overlay(
         # per file, which a directory of large junk names turns into real
         # work for a verdict already decided (ISSUE-341 item 2). The denylist
         # and disabled gates deliberately still read: both name a real skill,
-        # and the size and first line are what the `memory skills` inventory
+        # and the size and first line are what the `skills overlays` inventory
         # shows a user asking what to delete or re-enable.
         return OverlayInspection(
             skill=skill, path=path, size=None, lines=None, first_line=None,

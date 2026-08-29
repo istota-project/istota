@@ -3207,7 +3207,7 @@ _OVERLAY_WARN_REMEDY = (
     "rename it if it was meant to be an overlay. empty / overlay_not_utf8 / "
     "overlay_is_a_symlink / overlay_not_a_regular_file / overlay_unreadable: "
     "the file is there and contributes nothing to any prompt. Run "
-    "`istota-skill memory skills` as that user for the per-file verdict."
+    "`istota-skill skills overlays` as that user for the per-file verdict."
 )
 
 

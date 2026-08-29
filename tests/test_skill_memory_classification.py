@@ -42,9 +42,18 @@ class TestClassificationGate:
             assert label in body, f"missing classification branch: {label!r}"
 
     def test_the_skill_overlay_branch_is_present(self):
+        """The branch survives the loss of its command (ISSUE-343).
+
+        Routing a skill-scoped rule to the overlay is still the right answer;
+        what changed is that the answer is a file edit rather than a verb. The
+        branch has to say so, or the model reads "skill overlay" and reaches
+        for the `--skill` flag that no longer exists.
+        """
         gate = _section("### Classify before writing")
         assert "Skill-specific instruction" in gate
-        assert "memory append --skill" in gate
+        assert "overlay" in gate
+        assert "not through this CLI" in gate
+        assert "--skill" not in gate
 
     def test_the_overlay_branch_carries_the_prohibition_test(self):
         """The gate that decides USER.md vs overlay, not just a mention of the
@@ -63,22 +72,34 @@ class TestClassificationGate:
         assert "not loaded" in gate
         assert "merely irrelevant" in gate
 
-    def test_the_overlay_section_states_the_flat_document_rules(self):
-        """`--heading` means something different under `--skill`, and three
-        verbs are refused outright. A model that guesses either wastes a turn
-        on a JSON refusal it could have read here.
+    def test_the_overlay_section_sends_the_model_to_the_file(self):
+        """The two things a model gets wrong here (ISSUE-343).
 
-        Scoped to the overlay section rather than run over the whole body: all
-        three verb names are ordinary USER.md verbs documented above, so a
-        whole-body `in` check passes against the file as it stood before this
-        section existed and pins nothing.
+        First, that this CLI writes overlays — it does not, and a model that
+        assumes otherwise burns a turn on argparse's usage dump, which it sees
+        as an empty answer because argparse writes to stderr. Second, that a
+        landed edit is a live one: binding is decided by the loader, a file
+        that does not bind is completely silent, and `skills overlays` is the
+        only thing that says so.
+
+        Scoped to the overlay section rather than the whole body, because
+        "does not write" is a claim that has to sit where the model is reading
+        when it decides.
         """
         section = _section("### Per-skill overlays")
-        assert "memory skills" in section
-        assert "refused" in section
-        for verb in ["add-heading", "remove-heading", "headings"]:
-            assert verb in section
+        assert "does not write them" in section.lower()
+        assert "skills overlays" in section
+        assert "binds: true" in section
         assert "sensitive_actions" in section and "untrusted_input" in section
+
+    def test_the_overlay_section_offers_no_write_verb(self):
+        """A control on the test above: the section must not still carry the
+        vocabulary of the retired verbs. `--skill` in particular reads as a
+        flag to pass, and passing it now exits 2 with nothing on stdout."""
+        section = _section("### Per-skill overlays")
+        assert "--skill" not in section
+        for verb in ["memory append", "memory remove", "memory replace"]:
+            assert verb not in section
 
     def test_routes_to_both_cli_targets(self):
         body = _body()

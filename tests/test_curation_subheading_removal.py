@@ -10,16 +10,15 @@ Two gaps found while migrating a real `USER.md` into per-skill overlays
 - Removing a subsection's last bullet left the heading behind, orphaned. The
   file-level rule ("a `remove` that empties a file deletes the file, so `ls`
   stays honest") already says what should happen one level up.
+
+Both were fixed on USER.md and on the per-skill overlays at once. The overlay
+half is gone with the overlay write verbs (ISSUE-343); what is left here is
+the USER.md half, which is where the rule now lives alone.
 """
 
 import pytest
 
 from istota.memory.curation.ops import apply_ops
-from istota.memory.curation.overlay import (
-    apply_overlay_op,
-    parse_overlay_doc,
-    serialize_overlay_doc,
-)
 from istota.memory.curation.parser import parse_sectioned_doc, serialize_sectioned_doc
 from istota.memory.curation.types import subsection_region_indices
 
@@ -180,53 +179,6 @@ class TestDeleteOnEmptySubsection:
         assert "### Keep me" in out
 
 
-class TestOverlayRemoveSubheading:
-    """The same two rules for an overlay, where `### ` is the only heading level."""
-
-    OVERLAY = (
-        "- a flat bullet\n"
-        "\n"
-        "### Rules\n"
-        "\n"
-        "- the only rule\n"
-        "\n"
-        "### Other\n"
-        "\n"
-        "- keep me\n"
-    )
-
-    def test_remove_subheading_drops_the_subsection(self):
-        section = parse_overlay_doc(self.OVERLAY)
-        section, outcome = apply_overlay_op(
-            section, {"op": "remove_subheading", "subheading": "Rules"}
-        )
-        assert outcome == "applied"
-        out = serialize_overlay_doc(section)
-        assert "### Rules" not in out
-        assert "- the only rule" not in out
-        assert "### Other" in out
-        assert "- a flat bullet" in out
-
-    def test_removing_the_last_bullet_takes_the_heading(self):
-        """Stage 5's review found a bare `### Rules` surviving with binds=true,
-        putting a heading with no rules under it into every prompt."""
-        section = parse_overlay_doc(self.OVERLAY)
-        section, outcome = apply_overlay_op(
-            section, {"op": "remove", "match": "the only rule"}
-        )
-        assert outcome == "applied"
-        out = serialize_overlay_doc(section)
-        assert "### Rules" not in out
-        assert "### Other" in out
-
-    def test_missing_subheading_is_rejected(self):
-        section = parse_overlay_doc(self.OVERLAY)
-        _, outcome = apply_overlay_op(
-            section, {"op": "remove_subheading", "subheading": "Nope"}
-        )
-        assert outcome == "subheading_missing"
-
-
 class TestRegionHelperUnchanged:
     """`subsection_region_indices` keeps excluding the heading line — every
     existing caller wants the bullet region, and the removal path is what
@@ -242,7 +194,7 @@ class TestRegionHelperUnchanged:
 
 
 class TestRemoveSubheadingCli:
-    """The verb end to end, through the skill CLI, on both target kinds."""
+    """The verb end to end, through the skill CLI."""
 
     def test_drops_a_prose_subsection_from_user_md(self, tmp_path, monkeypatch, capsys):
         import json

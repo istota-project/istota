@@ -4486,6 +4486,75 @@ def sandbox_cache_sweep_root(config: Config) -> tuple[Path, list[str] | None] | 
     return None
 
 
+def check_skill_overlay_reindex(config: Config) -> list:
+    """Refresh the memory-search index for every user's per-skill overlays.
+
+    Returns the user ids whose overlays produced rows, for the caller's log
+    line. Never raises: one user's failure must not cost the rest the pass.
+
+    **Why this is a scheduler tick and not part of the sleep cycle** (ISSUE-343).
+    An overlay is a document the *user* authors, so there is no write path to
+    hang indexing off — the memory CLI used to reindex after each of its own
+    overlay writes, and that went with the write verbs. It was the wrong seam
+    regardless: a text-editor edit over Nextcloud, which is how a file the user
+    owns is normally changed, called no CLI and was never indexed. A full
+    directory pass is the only thing that covers every authoring route, and
+    `search.reindex_skill_overlays` already reaps rows for a file that no longer
+    binds, so a pass is also what expires a deleted overlay.
+
+    It went into `process_user_sleep_cycle` first, above that function's early
+    returns so a user with no interactions still got a pass. Review found the
+    gate one level up: `check_sleep_cycles` returns before calling it at all
+    when `sleep_cycle.enabled` is false, and again when `primary_brain_unavailable`
+    is open. `memory_search.enabled` and `sleep_cycle.enabled` are independent
+    settings, so that left a supported deployment — search on, sleep cycle off —
+    on which *nothing* indexed an overlay, where index-on-write had. And a
+    usage-limit cooldown cost a night's indexing for work that makes no brain
+    call. Neither gate has anything to do with this, so it sits on a cadence of
+    its own beside the other two maintenance passes.
+
+    Its own connection, not the sleep cycle's. That pass holds one write
+    transaction for its whole per-user run, and `index_file` deletes and
+    re-inserts unconditionally — there is no content hash — so every binding
+    overlay is re-embedded on each pass. That work belongs outside a
+    transaction spanning an LLM call, which is the same reason the retired
+    per-write reindex ran outside the CLI's own `memory_md_lock`.
+    """
+    if not (
+        config.memory_search.enabled and config.memory_search.auto_index_memory_files
+    ):
+        return []
+    if not config.use_mount:
+        return []
+
+    touched: list[str] = []
+    try:
+        from .memory.search import reindex_skill_overlays
+    except Exception as e:  # noqa: BLE001 - optional extra; a reindex is best-effort
+        logger.debug("skill overlay reindex unavailable: %s", e)
+        return []
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            for user_id in config.users:
+                try:
+                    files, chunks = reindex_skill_overlays(conn, config, user_id)
+                except Exception as e:  # noqa: BLE001 - one user must not cost the rest
+                    logger.debug(
+                        "skill overlay reindex failed for %s: %s", user_id, e
+                    )
+                    continue
+                if files:
+                    touched.append(user_id)
+                    logger.info(
+                        "Reindexed %d skill overlays (%d chunks) for %s",
+                        files, chunks, user_id,
+                    )
+    except Exception as e:  # noqa: BLE001 - never take the loop down
+        logger.debug("skill overlay reindex pass failed: %s", e)
+    return touched
+
+
 def check_sandbox_cache_sweep(config: Config) -> list:
     """Bound the per-user package caches, wherever this deployment puts them.
 
@@ -7153,6 +7222,9 @@ def run_daemon(
     # boot run to double up with.
     last_worktree_reap = 0.0
     last_cache_sweep = 0.0
+    # Same seeding, different reason: a restart is the one moment an overlay
+    # edited while the daemon was down is guaranteed to be unindexed.
+    last_overlay_reindex = 0.0
     # Seeded to now, not 0: the boot run above already swept, so a 0 here would
     # re-run the whole registry on the first tick seconds later.
     last_doctor_check = time.time()
@@ -7433,6 +7505,26 @@ def run_daemon(
                 background_checks,
             )
             last_cache_sweep = now
+
+        # Reindex per-skill overlays for memory search (ISSUE-343). An overlay
+        # is a user-written file with no CLI write path, so a periodic full
+        # directory pass is the only seam that sees an edit at all. Backgrounded
+        # like the sweeps above: it embeds every binding overlay, and a cold
+        # sentence-transformers load on the loop thread would starve dispatch.
+        if (
+            config.memory_search.enabled
+            and config.memory_search.auto_index_memory_files
+            and config.use_mount
+            and config.scheduler.skill_overlay_reindex_interval
+            and now - last_overlay_reindex
+            >= config.scheduler.skill_overlay_reindex_interval
+        ):
+            _spawn_background_check(
+                "skill-overlay-reindex",
+                lambda: check_skill_overlay_reindex(config),
+                background_checks,
+            )
+            last_overlay_reindex = now
 
         # Snapshot local DBs to the mount for off-host durability (they left the
         # Nextcloud-synced workspaces when they moved to local disk). Also off

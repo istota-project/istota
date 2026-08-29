@@ -505,7 +505,7 @@ def index_file(
     )
 
 
-def _reindex_skill_overlays(
+def reindex_skill_overlays(
     conn: sqlite3.Connection, config, user_id: str
 ) -> tuple[int, int]:
     """Reindex a user's per-skill overlays. Returns `(files, chunks)`.
@@ -529,20 +529,30 @@ def _reindex_skill_overlays(
     rule the loader and the memory CLI apply, and the resolved path is what is
     walked.
 
-    **Only what binds is indexed — here.** A file named for a skill that does
-    not exist, one for a denylisted skill, or one past the loading cap reaches
-    no prompt at all, so indexing it would have search return a rule that is
-    not in any prompt — the failure the delete-on-empty path exists to prevent,
-    arrived at from the other side. `doctor`'s `config.skill_overlays` is what
-    reports such a file; search declines to pretend it is live.
+    **Only what binds is indexed — with one deliberate exception.** A file
+    named for a skill that does not exist, one for a denylisted skill, or one
+    past the loading cap reaches no prompt at all, so indexing it would have
+    search return a rule that is not in any prompt — the failure the
+    delete-on-empty path exists to prevent, arrived at from the other side.
+    `doctor`'s `config.skill_overlays` is what reports such a file; search
+    declines to pretend it is live.
 
-    The memory CLI's per-write re-index (`skills/memory._reindex_overlay`) does
-    **not** apply this gate, and the asymmetry is worth knowing rather than
-    assuming away: a write past `OVERLAY_MAX_BYTES` is permitted with a warning
-    rather than refused (only the 1 MiB read cap refuses one), and a write
-    against a *disabled* skill is permitted outright, since the write path
-    checks index membership and the denylist but not `effective_disabled_skills`.
-    Either is searchable until this pass next runs and reaps it below.
+    The exception is `effective_disabled_skills`, which is **not** passed to
+    `inspect_overlay` here, so an overlay for a skill the operator or the user
+    switched off stays indexed while `skills overlays` reports it
+    `binds: false, reason: skill_disabled`. That is ISSUE-341 item 1 and it is
+    left standing on purpose: a disabled skill is a reversible state, and a
+    user who asks "why does the bot always do X" about a rule they wrote should
+    find it rather than be told nothing exists. The three gates above are
+    permanent properties of the file; this one is a setting.
+
+    **This is the only automatic indexing an overlay gets** (ISSUE-343). The
+    memory CLI used to re-index on each of its own writes, and that seam went
+    with the write verbs — it never covered the authoring mode the file is
+    actually for, since a user editing `config/skills/<name>.md` in a text
+    editor called no CLI. A full directory pass covers both by construction,
+    which is why the two callers are `reindex_all` and the nightly sleep cycle
+    rather than anything on a write path.
 
     **Rows for a vanished file go.** Unlike USER.md, an overlay is a file the
     workflow deletes — the memory CLI removes one whose last bullet goes, and a
@@ -564,6 +574,13 @@ def _reindex_skill_overlays(
         read_overlay_bytes,
     )
 
+    # `use_mount` before the join, not after: `nextcloud_mount_path` is None on
+    # an rclone-remote deployment and `None / "Users/…"` is a TypeError. This
+    # was survivable while the only caller was a hand-run `memory_search
+    # reindex`; it is now on a scheduler cadence, where the raise would be
+    # swallowed by the caller's own `except Exception` and reported nowhere.
+    if not getattr(config, "use_mount", False):
+        return 0, 0
     bot_dir = getattr(config, "bot_dir_name", "")
     if not bot_dir:
         return 0, 0
@@ -586,11 +603,12 @@ def _reindex_skill_overlays(
     # stops being true the moment anything moves. Everything from here reads
     # through an fd instead, so the directory that passed is the directory that
     # is walked (ISSUE-341 item 3). `overlay_dir` stays in use below and is no
-    # longer the security gate: it is the *path spelling* the index keys on,
-    # and it has to match the one the per-write path writes. Both are the
-    # `realpath` — the memory CLI's `_check_overlay_dir` was the holdout and
-    # returned the raw configured path, which on a symlinked mount made one
-    # file two sources and had this pass reap the CLI's rows on the way by.
+    # longer the security gate: it is the *path spelling* the index keys on.
+    # It is the `realpath`. There is no per-write path left to agree with —
+    # ISSUE-343 retired the overlay write verbs and this pass is now the only
+    # writer of `skill_overlay` rows — but the spelling still matters across
+    # runs of this function, since a row keyed on the raw configured path
+    # would be reaped as stale by the next pass on a symlinked mount.
     dir_fd = open_overlay_dir(user_root, bot_dir, "config", "skills")
     if dir_fd is None:
         # `contained_overlay_dir` just passed and this did not, so the two
@@ -612,7 +630,7 @@ def _reindex_skill_overlays(
     try:
         try:
             # No dotfile filter: `Path.glob("*.md")`, which this replaced and
-            # which `doctor` and `memory skills` still use, matches them, and
+            # which `doctor` and `skills overlays` still use, matches them, and
             # three listings of one directory disagreeing is the drift this
             # module keeps being bitten by. A dotfile cannot bind anyway
             # (`.developer.md` is the skill `.developer`), so it changes
@@ -738,7 +756,7 @@ def reindex_all(
                 if n > 0:
                     stats["chunks"] += n
 
-        n_files, n_chunks = _reindex_skill_overlays(conn, config, user_id)
+        n_files, n_chunks = reindex_skill_overlays(conn, config, user_id)
         stats["skill_overlays"] = n_files
         stats["chunks"] += n_chunks
 

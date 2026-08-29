@@ -9,14 +9,15 @@ For DB-aware ops (currently `add_fact`, which writes to `knowledge_facts`),
 use the sibling `apply_ops_with_db()`. Keeps `apply_ops()` pure for callers
 that only need file ops.
 
-Four helpers below are module API rather than private, and `overlay.py` is
-why: a per-skill user overlay is a flat file with no `## ` sections, so it
-cannot go through `apply_ops` at all, but the *semantics* of what a bullet is
-and where an appended one lands must be the same on both documents.
-`insert_bullet_in_region`, `find_unique_bullet`, `normalize_to_bullet` and
-`validate_appendable_line` carry all of that. Copying any of them into the
-overlay applier would be the drift. USER.md op semantics are unchanged — the
-promotion is a rename.
+Four helpers below — `insert_bullet_in_region`, `find_unique_bullet`,
+`normalize_to_bullet`, `validate_appendable_line` — are module API rather than
+private, and the reason has expired. They were promoted for `overlay.py`, which
+re-expressed these ops over a flat per-skill overlay so the two documents could
+not drift on what a bullet is or where an appended one lands. ISSUE-343 deleted
+that module with the overlay write verbs, so all four now have no caller outside
+this file. Left public rather than re-privatized in the same change: the rename
+back is churn across every call site here for no behavioural gain, and USER.md
+op semantics never depended on their visibility either way.
 
 Op shapes
 ---------

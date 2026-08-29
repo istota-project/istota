@@ -2687,7 +2687,7 @@ class TestOpenOverlayDir:
 class TestInspectOverlay:
     """The one predicate two reporting surfaces share.
 
-    `memory skills` and `doctor config.skill_overlays` ask the same question of
+    `skills overlays` and `doctor config.skill_overlays` ask the same question of
     the same directory, and the failure this guards is that they drift: one
     says a file binds while the prompt does not contain it. Every gate below is
     the loader's own, so a change to what loads changes both answers at once.
@@ -2860,8 +2860,8 @@ class TestInspectOverlay:
         assert found.reason == "overlay_not_utf8"
 
     def test_an_absent_file_reads_as_empty_rather_than_as_a_refusal(self, tmp_path):
-        """`memory append --skill` learns from absence that it must create the
-        file, so a missing path must not come back as a read failure."""
+        """A reporting surface learns from absence that there is no overlay,
+        so a missing path must not come back as a read failure."""
         d = tmp_path / "skills"
         d.mkdir()
         found = inspect_overlay(d / "developer.md", known_skills=self.KNOWN)
