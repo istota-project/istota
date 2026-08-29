@@ -2194,8 +2194,11 @@ export interface ChatRoom {
   /** Surface the room was created on. Talk-origin rooms surface here
    * automatically once the bot is messaged in them. */
   origin?: 'web' | 'talk';
-  /** Set once the room has been promoted to (or originated as) a Talk room. */
-  talk_token?: string;
+  /** The bound Talk conversation, or null when the room is web-only. Sent on
+   * every room the listing returns, not only on a fresh promote response — the
+   * room-list refresh writes this key unconditionally, so a listing that
+   * omitted it erased the promote's own answer on the next poll. */
+  talk_token?: string | null;
   /** Unread bot/system messages on the web surface (server-computed; excludes
    * the user's own turns). Absent on older backends → treat as 0. */
   unread_count?: number;

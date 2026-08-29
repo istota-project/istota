@@ -1713,6 +1713,44 @@ def cmd_nextcloud_provision_rooms(args):
         print(f"Error: DB not found at {db_path}; run `istota init` first", file=sys.stderr)
         sys.exit(1)
 
+    # `--adopt NAME=TOKEN` records a token for a room that already exists and
+    # exits. It is the repair path for an install upgraded past ISSUE-342 with
+    # a duplicate already on it: the record starts empty, so the first run after
+    # the upgrade still matches by name — and for the room that *caused* the
+    # report, the name no longer matches anything. Without this the only way to
+    # point the record at the room you kept is to rename it back to `general`
+    # for one deploy and then rename it again, which is the user undoing the
+    # thing they wanted. Talk is not contacted; a wrong token simply falls back
+    # to name matching on the next run.
+    if args.adopt:
+        adopted: list = []
+        for pair in args.adopt:
+            name, sep, token = pair.partition("=")
+            name, token = name.strip(), token.strip()
+            if not sep or not name or not token:
+                print(
+                    f"Error: --adopt takes NAME=TOKEN, got {pair!r}", file=sys.stderr,
+                )
+                sys.exit(1)
+            adopted.append(
+                provision_rooms_mod.ProvisionedRoom(
+                    name=name, token=token, created=False, invited=False,
+                )
+            )
+        if not provision_rooms_mod.record_provisioned_tokens(
+            db_path, args.user, adopted,
+        ):
+            print(
+                f"Error: could not record room tokens for {args.user!r}; "
+                "see the log for the cause.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for room in adopted:
+            print(f"  recorded {room.name} = {room.token}")
+        print("STATE: updated")
+        return
+
     names = tuple(args.room) if args.room else provision_rooms_mod.DEFAULT_ROOMS
     # Don't mint a `logs` room beside the hand-made one an operator pinned in
     # inventory; `user ensure` has already written that token by now.
@@ -1723,11 +1761,35 @@ def cmd_nextcloud_provision_rooms(args):
         print("STATE: noop")
         return
 
+    # What a previous run provisioned, so a room the user has since renamed is
+    # reused rather than duplicated (ISSUE-342). Empty on a first run or an
+    # unreadable DB, which puts us back on the name-matching path.
+    known_tokens = provision_rooms_mod.read_provisioned_tokens(db_path, args.user)
+
+    # `partial` is filled as each room resolves, so a failure on the third name
+    # still records the two that succeeded — those rooms exist on Talk, and
+    # losing their tokens puts the next deploy back on name matching for them.
+    partial: list = []
     try:
-        rooms = provision_rooms_mod.provision_user_rooms(config, args.user, names)
+        rooms = provision_rooms_mod.provision_user_rooms(
+            config, args.user, names, known_tokens=known_tokens, resolved=partial,
+        )
     except Exception as e:
+        provision_rooms_mod.record_provisioned_tokens(db_path, args.user, partial)
         print(f"Error: could not provision Talk rooms for {args.user!r}: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # A lost record is not a broken deploy — the next run falls back to matching
+    # by name, which is what every install did before the record existed — so
+    # this warns rather than exiting. It still has to be visible: silently
+    # reverting to name matching is the bug.
+    if not provision_rooms_mod.record_provisioned_tokens(db_path, args.user, rooms):
+        print(
+            f"Warning: could not record the room tokens for {args.user!r}. The "
+            "rooms exist, but a later rename may produce a duplicate until this "
+            "is fixed; see the log for the cause.",
+            file=sys.stderr,
+        )
 
     seeded: dict = {}
     seed_state = "noop"
@@ -1736,9 +1798,11 @@ def cmd_nextcloud_provision_rooms(args):
             db_path, args.user, rooms, force=args.reseed,
         )
 
+    # A re-invite counts as `updated` whichever way it went: it either added a
+    # participant, or it failed and the operator needs the play to say so.
     if any(r.created for r in rooms):
         state = "created"
-    elif seed_state != "noop" or any(r.adopted for r in rooms):
+    elif seed_state != "noop" or any(r.adopted or r.reinvited for r in rooms):
         state = "updated"
     else:
         state = "noop"
@@ -1750,6 +1814,7 @@ def cmd_nextcloud_provision_rooms(args):
                 {
                     "name": r.name, "token": r.token, "created": r.created,
                     "invited": r.invited, "adopted": r.adopted,
+                    "reinvited": r.reinvited,
                 }
                 for r in rooms
             ],
@@ -1763,9 +1828,11 @@ def cmd_nextcloud_provision_rooms(args):
                 note = "created"
             elif room.adopted:
                 note = "adopted"
+            elif room.reinvited:
+                note = "re-invited"
             else:
                 note = "existing"
-            if not room.invited and (room.created or room.adopted):
+            if not room.invited and (room.created or room.adopted or room.reinvited):
                 note += ", invite FAILED"
             print(f"  {room.name}: {room.token} ({note})")
         for field, token in sorted(seeded.items()):
@@ -1773,8 +1840,13 @@ def cmd_nextcloud_provision_rooms(args):
 
     # A room the user was never added to is one they cannot read, so say so
     # loudly. The next run adopts that room and retries rather than making
-    # another one, but a persistent failure needs an operator.
-    stranded = [r.name for r in rooms if not r.invited and (r.created or r.adopted)]
+    # another one, but a persistent failure needs an operator. `reinvited` is in
+    # the predicate because a failed re-invite leaves exactly that state and
+    # would otherwise print `existing` and exit 0.
+    stranded = [
+        r.name for r in rooms
+        if not r.invited and (r.created or r.adopted or r.reinvited)
+    ]
     if stranded:
         print(
             f"Warning: could not add {args.user!r} to: {', '.join(stranded)}. "
@@ -2338,6 +2410,14 @@ def main():
         "--reseed",
         action="store_true",
         help="Re-point log_channel/alerts_channel at these rooms, overwriting what's set",
+    )
+    nc_rooms_parser.add_argument(
+        "--adopt",
+        action="append",
+        default=None,
+        metavar="NAME=TOKEN",
+        help="Record an existing Talk room as the provisioned one and exit; "
+             "repeatable. Use it to point the record at a room you renamed",
     )
     nc_rooms_parser.add_argument("--json", action="store_true", help="Machine-readable output")
 

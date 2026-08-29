@@ -10,6 +10,15 @@ from typing import TYPE_CHECKING
 
 import tomli
 
+from .config_mapper import (
+    Hook,
+    _KEEP,
+    apply_section,
+    coerce_float,
+    coerce_int,
+    report_unknown,
+)
+
 if TYPE_CHECKING:
     import sqlite3
 
@@ -224,7 +233,14 @@ class ConversationConfig:
 
 @dataclass
 class SchedulerConfig:
-    poll_interval: int = 2  # seconds between task queue checks
+    # 5, not 2, because 5 is what every deployment actually runs: the Ansible
+    # template, the Docker render, `config.example.toml` and `istota setup` all
+    # write it. The dataclass said 2 and the loader's own `.get()` said 5, and
+    # nothing reconciled them -- so the value depended on whether a `[scheduler]`
+    # header happened to be present, and the local install (whose wizard writes
+    # that header with one unrelated key under it) got 5. Resolving to 2 would
+    # have quietly put every laptop install on 2.5x the database polling.
+    poll_interval: int = 5  # seconds between task queue checks
     dispatch_interval: float = 0.5  # seconds between pending-task dispatch scans within a poll tick (0 or >= poll_interval = legacy single dispatch per tick)
     email_poll_interval: int = 60  # seconds between email polls
     email_poll_batch_size: int = 50  # messages one poll tick will walk. A batch boundary, not a window: the remainder is left for the next tick and drains, rather than falling off the end (ISSUE-250)
@@ -2594,6 +2610,243 @@ def _valid_task_queue(raw: object) -> str:
     return "background"
 
 
+# Dotted keys the dataclass walk must not touch, each because parsing it takes
+# a decision the walk has no way to make. Grouped by what the decision is.
+#
+# Keeping this list explicit is the whole discipline: a key here is a claim that
+# something below reads it, and `tests/test_config_mapper.py` holds the two
+# halves together by requiring every entry to name a real field or section.
+_PARSED_BY_HAND = frozenset({
+    # Collections of dataclasses, built by their own parsers from list-of-table
+    # TOML rather than from a field of a declared type.
+    "users",
+    "default_briefings",
+    "briefing_shared_blocks",
+
+    # Cross-field: `confirm_sender_match = "verify"` is only meaningful with an
+    # authserv-id to scope the verdict to, so the validator has to see both.
+    "email.confirm_sender_match",
+    "email.authserv_id",
+    "email.outbound_approval_floor",
+
+    # Sections whose sub-structure is not a plain field tree: `[models.aliases]`
+    # values are kept verbatim in either of two shapes for the namespace-aware
+    # validation loop below, and `[experimental] features` is checked against
+    # KNOWN_FEATURES.
+    "models",
+    "experimental",
+})
+"""Dotted keys the walk must not touch because something below parses them.
+
+Every entry names a real field on the dataclass tree, which is what
+``tests/test_config_mapper.py`` checks -- an entry that stops naming one is a
+key nothing reads any more, and the walk would have been the thing to notice.
+"""
+
+_RETIRED = frozenset({
+    "skills",
+    "ntfy",
+    "site.enabled",
+    "site.base_path",
+    "security.sandbox_admin_db_write",
+    # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
+    "scheduler.istota_file_poll_interval",
+})
+"""Keys that are no longer fields at all, each with its own migration warning.
+
+Held out of the walk so an operator gets the specific line naming what replaced
+the key rather than a generic "unrecognised" beside it. The opposite of
+:data:`_PARSED_BY_HAND`: an entry here that *does* name a live field is the
+error, and the same test checks that direction too.
+"""
+
+_NOT_CONFIGURATION = frozenset({
+    # Set by the loader itself from the path it resolved, and exported as
+    # `ISTOTA_CONFIG_PATH` to every task, cron `command:` job, heartbeat shell
+    # command and host-side skill CLI. A file naming a different path would
+    # have the daemon read one config and every subprocess read another --
+    # breaking the invariant `executor.py` states where it does the export --
+    # and `scheduler` derives the triggers directory from it as well.
+    "config_path",
+    # A test seam deciding where every skill body and skill CLI module is
+    # resolved from. `admin_config_view` deliberately excludes it from the
+    # config pane as "meaningless to an operator", so an operator who set it
+    # would have no surface anywhere showing they had.
+    "bundled_skills_dir",
+    # Overwritten by `load_admin_users()` a few lines below, so setting it here
+    # never did anything. That makes it exactly the false negative the
+    # unknown-key report exists to remove, on an authorization-shaped key.
+    "admin_users",
+})
+"""Declared fields that are not settings, and must not be writable from TOML.
+
+Rejected rather than skipped: being a real field is what would otherwise keep
+these out of the unknown-key report, so a skip would hand an operator silence
+in the one case where nothing else will ever tell them.
+"""
+
+_HANDWRITTEN = _PARSED_BY_HAND | _RETIRED
+
+_RENAMED_KEYS = {
+    # The one key in the file that had two accepted spellings. The old loader
+    # carried it as a nested `get` fallback, which a walk over field names
+    # cannot express -- a hook is keyed on the *new* name and never sees the
+    # old one. Kept working rather than retired: silently reverting to the
+    # default is the failure this whole change is about.
+    ("scheduler", "istota_file_poll_interval"): "tasks_file_poll_interval",
+}
+
+
+def _apply_renamed_keys(data: dict, config: "Config") -> None:
+    """Honour a key's previous spelling, and say that it moved.
+
+    Runs after the walk so the current spelling always wins where both are
+    present. Warns either way, because a config carrying the old name will
+    otherwise carry it for years -- the file is rewritten by Ansible on every
+    deploy but not on the Docker or hand-written shapes.
+    """
+    for (section, old), new in _RENAMED_KEYS.items():
+        block = data.get(section)
+        if not isinstance(block, dict) or old not in block:
+            continue
+        logger.warning(
+            "[%s] %s was renamed to %s. The old name still works and will be "
+            "removed; rename the key.", section, old, new,
+        )
+        if new in block:
+            continue
+        target = getattr(config, section, None)
+        value = coerce_int(block[old], f"{section}.{old}")
+        if target is not None and value is not _KEEP:
+            setattr(target, new, value)
+
+
+def _advisor_model(raw: object, key: str) -> object:
+    """The advisor model name, which must be a string or nothing.
+
+    Keeps its own message rather than taking the generic one: this field is
+    resolved through the alias table like `model`, and an operator who wrote a
+    table here has made a different mistake from one who wrote a number.
+    """
+    if isinstance(raw, str):
+        return raw
+    logging.getLogger("istota.config").warning(
+        "advisor_model must be a string, got %s; ignoring", type(raw).__name__,
+    )
+    return _KEEP
+
+
+def _non_negative_int(raw: object, key: str) -> object:
+    """A count where zero is meaningful and a negative value is a typo."""
+    value = coerce_int(raw, key)
+    if value is _KEEP:
+        return _KEEP
+    if value < 0:
+        logger.warning(
+            "[config] %s=%r must be >= 0; keeping the default", key, raw,
+        )
+        return _KEEP
+    return value
+
+
+def _positive_float(raw: object, key: str) -> object:
+    """A number that must be greater than zero to mean anything.
+
+    The generic float coercion already refuses a bool and a non-finite value --
+    NaN compares false against every threshold, so it would switch off the
+    comparison it feeds rather than failing. This adds the sign, for a ceiling
+    where zero or negative would mean the same thing.
+    """
+    value = coerce_float(raw, key)
+    if value is _KEEP:
+        return _KEEP
+    if value <= 0:
+        logger.warning(
+            "[config] %s=%r is not a positive number; keeping the default", key, raw,
+        )
+        return _KEEP
+    return value
+
+
+def _forge_cli_list(raw: object, key: str) -> object:
+    """A forge-CLI policy list, tolerating the bare-string hand-edit."""
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, (list, tuple)):
+        return [str(entry) for entry in raw]
+    logger.warning(
+        "[config] %s=%r is not a list of strings; keeping the default", key, raw,
+    )
+    return _KEEP
+
+
+def _one_of(*valid: str) -> Hook:
+    """A hook for a field whose value must come from a closed vocabulary.
+
+    Warns naming the valid values and keeps the dataclass default, which is the
+    established handling for these: an unknown mode is a typo, and picking the
+    safe default beats both guessing and refusing to boot. The two settings
+    where a wrong value is a *security* decision rather than a mode --
+    `email.outbound_approval_floor` and `email.confirm_sender_match` --
+    deliberately do not use this and raise instead.
+    """
+
+    def hook(raw: object, key: str) -> object:
+        if raw in valid:
+            return raw
+        logger.warning(
+            "[config] %s=%r is not a known value (expected %s); using the default",
+            key, raw, " or ".join(repr(v) for v in valid),
+        )
+        return _KEEP
+
+    return hook
+
+
+# Per-key parsing that is more than a type coercion but less than a section.
+# A hook takes the raw TOML value and the dotted key, and returns the value to
+# set -- or `_KEEP` to leave the dataclass default standing.
+_CONFIG_HOOKS: dict[str, Hook] = {
+    "web.auth": _one_of("nextcloud", "none"),
+    "web.token_storage": _one_of("ephemeral", "encrypted"),
+    # Normalised from three historical spellings, and the retired `backend` key
+    # is warned about rather than ignored -- an operator who wrote
+    # `backend = "none"` to keep builds off the container had that honoured
+    # until it was retired.
+    "developer.container": lambda raw, key: ContainerConfig(
+        **_parse_container_block(raw)
+    ),
+    # A bare string is the plausible hand-edit, and the generic list coercion
+    # would iterate it into one rule per character -- eighteen entries that
+    # match nothing and warn about nothing. Read it as the single entry it was
+    # meant to be.
+    "developer.forge_cli_extra_denied": lambda raw, key: _forge_cli_list(raw, key),
+    "developer.forge_cli_permit": lambda raw, key: _forge_cli_list(raw, key),
+    # An empty string means "unset" here, not a relative path of `.`.
+    "security.sandbox_cache_dir": lambda raw, key: str(raw or ""),
+    "security.sandbox_cache_max_gb": _positive_float,
+    # Each of these validates against a closed vocabulary or a path policy and
+    # warns in its own terms. They are the validators the walk exists to leave
+    # alone.
+    "security.sandbox_ro_paths": lambda raw, key: _validate_sandbox_ro_paths(raw),
+    "scheduler.email_task_queue": lambda raw, key: _valid_task_queue(raw),
+    "advisor_model": _advisor_model,
+    # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
+    # reads as the opposite of what someone typing one meant.
+    "health.max_document_bytes": _non_negative_int,
+    # A brain name is compared literally downstream, so surrounding whitespace
+    # in a rendered config is a name that matches nothing.
+    "brain.fallback": lambda raw, key: (
+        raw.strip() if isinstance(raw, str) else _KEEP
+    ),
+    # Both sides are stringified: a TOML table can key on a bare word and value
+    # it with a number, and every consumer of this map indexes it with strings.
+    "brain.source_type_overrides": lambda raw, key: (
+        {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else _KEEP
+    ),
+}
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
@@ -2632,249 +2885,48 @@ def load_config(config_path: Path | None = None) -> Config:
     config = Config()
     config.config_path = config_path
 
-    if "namespace" in data:
-        config.namespace = data["namespace"]
-
-    if "bot_name" in data:
-        config.bot_name = data["bot_name"]
-
-    if "emissaries_enabled" in data:
-        config.emissaries_enabled = data["emissaries_enabled"]
-
-    if "model" in data:
-        config.model = data["model"]
-
-    if "effort" in data:
-        config.effort = data["effort"]
-
-    if "advisor_model" in data:
-        if isinstance(data["advisor_model"], str):
-            config.advisor_model = data["advisor_model"]
-        else:
-            logging.getLogger("istota.config").warning(
-                "advisor_model must be a string, got %s; ignoring",
-                type(data["advisor_model"]).__name__,
-            )
-
-    if "max_memory_chars" in data:
-        config.max_memory_chars = data["max_memory_chars"]
-    if "max_knowledge_facts" in data:
-        config.max_knowledge_facts = data["max_knowledge_facts"]
-
-    if "db_path" in data:
-        config.db_path = Path(data["db_path"])
-
-    if "rclone_remote" in data:
-        config.rclone_remote = data["rclone_remote"]
-
-    if "nextcloud_mount_path" in data:
-        config.nextcloud_mount_path = Path(data["nextcloud_mount_path"])
-
-    if "skills_dir" in data:
-        config.skills_dir = Path(data["skills_dir"])
-
-    if "disabled_skills" in data:
-        config.disabled_skills = data["disabled_skills"]
-
-    if "custom_system_prompt" in data:
-        config.custom_system_prompt = data["custom_system_prompt"]
-
-    if "temp_dir" in data:
-        config.temp_dir = Path(data["temp_dir"])
-
-    if "module_data_dir" in data:
-        config.module_data_dir = Path(data["module_data_dir"])
-
-    if "nextcloud" in data:
-        nc = data["nextcloud"]
-        config.nextcloud = NextcloudConfig(
-            url=nc.get("url", ""),
-            username=nc.get("username", ""),
-            app_password=nc.get("app_password", ""),
-            share_default_expire_days=int(nc.get("share_default_expire_days", 14)),
-            dav_prefix=str(nc.get("dav_prefix", "")),
-            auto_share_bot_dir=bool(nc.get("auto_share_bot_dir", True)),
-        )
-
-    if "talk" in data:
-        talk = data["talk"]
-        config.talk = TalkConfig(
-            enabled=talk.get("enabled", True),
-            bot_username=talk.get("bot_username", "istota"),
-        )
+    # The mechanical half of the load: every field whose TOML key is its own
+    # name and whose only requirement is its declared type. See
+    # `istota.config_mapper` for why this is a walk over the dataclasses rather
+    # than a line per key -- three classes of defect came out of the second copy
+    # of the schema this replaces.
+    #
+    # Sections carrying real judgement are named in `_HANDWRITTEN` and parsed by
+    # hand below; the walk neither maps nor reports those.
+    unknown: list[str] = []
+    apply_section(
+        config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
+        skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
+    )
+    _apply_renamed_keys(data, config)
+    report_unknown(unknown, config_path)
 
     if "users" in data:
         for nc_username, user_data in data["users"].items():
             config.users[nc_username] = _parse_user_data(user_data, nc_username)
 
     if "email" in data:
+        # The one genuinely cross-field parse in the file, and the reason it
+        # cannot be a hook: `confirm_sender_match = "verify"` is only meaningful
+        # with an authserv-id to scope the verdict to -- unscoped, the verdict
+        # comes off whichever header arrived on top, which the sender writes.
+        # So the validator has to see both, which means it runs after the walk
+        # has settled `authserv_id` rather than while it is setting fields.
+        #
+        # Both of these raise rather than warning-and-defaulting. There is no
+        # safe value to fall back to: one names an inbound authentication
+        # policy and the other an outbound approval floor, and picking either
+        # direction overrides an operator who meant the other.
         email = data["email"]
-        # Resolved before the constructor because `confirm_sender_match = "verify"`
-        # is only valid with an authserv-id to scope the verdict to, and the
-        # validator has to see both to say so.
-        authserv_id = _validate_authserv_id(email.get("authserv_id", ""))
-        config.email = EmailConfig(
-            enabled=email.get("enabled", False),
-            imap_host=email.get("imap_host", ""),
-            imap_port=email.get("imap_port", 993),
-            imap_user=email.get("imap_user", ""),
-            imap_password=email.get("imap_password", ""),
-            smtp_host=email.get("smtp_host", ""),
-            smtp_port=email.get("smtp_port", 587),
-            smtp_user=email.get("smtp_user", ""),
-            smtp_password=email.get("smtp_password", ""),
-            poll_folder=email.get("poll_folder", "INBOX"),
-            bot_email=email.get("bot_email", ""),
-            confirm_sender_match=_validate_confirm_sender_match(
-                email.get("confirm_sender_match", "off"), authserv_id,
-            ),
-            dmarc_canary=email.get("dmarc_canary", True),
-            dmarc_canary_warn_on_missing=email.get("dmarc_canary_warn_on_missing", False),
-            authserv_id=authserv_id,
-            imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
-            outbound_approval_floor=_validate_outbound_approval_floor(
-                email.get("outbound_approval_floor", "untrusted"),
-            ),
+        config.email.authserv_id = _validate_authserv_id(
+            email.get("authserv_id", config.email.authserv_id)
         )
-
-    if "conversation" in data:
-        conv = data["conversation"]
-        config.conversation = ConversationConfig(
-            enabled=conv.get("enabled", True),
-            lookback_count=conv.get("lookback_count", 10),
-            selection_model=conv.get("selection_model", "fast"),
-            selection_timeout=conv.get("selection_timeout", 30.0),
-            skip_selection_threshold=conv.get("skip_selection_threshold", 3),
-            use_selection=conv.get("use_selection", True),
-            always_include_recent=conv.get("always_include_recent", 5),
-            context_truncation=conv.get("context_truncation", 0),
-            context_recency_hours=conv.get("context_recency_hours", 0),
-            context_min_messages=conv.get("context_min_messages", 10),
-            previous_tasks_count=conv.get("previous_tasks_count", 3),
-            talk_context_limit=conv.get("talk_context_limit", 100),
+        config.email.confirm_sender_match = _validate_confirm_sender_match(
+            email.get("confirm_sender_match", config.email.confirm_sender_match),
+            config.email.authserv_id,
         )
-
-    if "scheduler" in data:
-        sched = data["scheduler"]
-        config.scheduler = SchedulerConfig(
-            poll_interval=sched.get("poll_interval", 5),
-            dispatch_interval=sched.get("dispatch_interval", 0.5),
-            email_poll_interval=sched.get("email_poll_interval", 60),
-            email_poll_batch_size=sched.get("email_poll_batch_size", 50),
-            email_rate_limit_messages=sched.get("email_rate_limit_messages", 60),
-            email_sender_rate_limit_messages=sched.get("email_sender_rate_limit_messages", 20),
-            email_rate_limit_window_seconds=sched.get("email_rate_limit_window_seconds", 3600),
-            email_task_queue=_valid_task_queue(sched.get("email_task_queue", "background")),
-            email_confirmation_prompts_per_window=sched.get("email_confirmation_prompts_per_window", 3),
-            email_max_body_chars=sched.get("email_max_body_chars", 32000),
-            email_max_attachment_bytes=sched.get("email_max_attachment_bytes", 26214400),
-            email_max_attachment_bytes_per_poll=sched.get(
-                "email_max_attachment_bytes_per_poll", 104857600,
-            ),
-            briefing_check_interval=sched.get("briefing_check_interval", 60),
-            tasks_file_poll_interval=sched.get("tasks_file_poll_interval", sched.get("istota_file_poll_interval", 30)),
-            shared_file_check_interval=sched.get("shared_file_check_interval", 120),
-            heartbeat_check_interval=sched.get("heartbeat_check_interval", 60),
-            db_health_check_interval=sched.get("db_health_check_interval", 86400),
-            doctor_check_interval=sched.get("doctor_check_interval", 3600),
-            worktree_reap_interval=sched.get("worktree_reap_interval", 21600),
-            sandbox_cache_sweep_interval=sched.get("sandbox_cache_sweep_interval", 21600),
-            db_backup_enabled=sched.get("db_backup_enabled", True),
-            db_backup_interval=sched.get("db_backup_interval", 86400),
-            db_backup_dir=sched.get("db_backup_dir", ""),
-            db_backup_retention=sched.get("db_backup_retention", 7),
-            scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
-            loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
-            host_pressure_enabled=sched.get("host_pressure_enabled", True),
-            # Coerced rather than passed through. These feed the admission
-            # gate, and a TOML string or float reaches `min_available_mb * 1024`
-            # inside the comparison — either raising TypeError from dispatch or
-            # comparing wrongly and silently. The neighbouring keys get away
-            # with a bare get(); the gate is a boundary they are not.
-            host_pressure_sample_interval_seconds=int(
-                sched.get("host_pressure_sample_interval_seconds", 30)
-            ),
-            host_pressure_psi_threshold=float(
-                sched.get("host_pressure_psi_threshold", 40.0)
-            ),
-            host_pressure_alert_cooldown_seconds=int(
-                sched.get("host_pressure_alert_cooldown_seconds", 900)
-            ),
-            host_pressure_shmem_unaccounted_alert_mb=int(
-                sched.get("host_pressure_shmem_unaccounted_alert_mb", 1024)
-            ),
-            host_pressure_docker_socket=sched.get(
-                "host_pressure_docker_socket", "/var/run/docker.sock"
-            ),
-            min_available_memory_mb=int(sched.get("min_available_memory_mb", 768)),
-            task_cgroup_enabled=sched.get("task_cgroup_enabled", True),
-            # Coerced for the same reason the gate's keys are: these reach
-            # arithmetic (`mb * 1024 * 1024`, `percent * 1000`) whose result is
-            # written into a kernel file, and a TOML string would either raise
-            # inside the spawn path or write a value the kernel rejects.
-            task_memory_max_mb=int(sched.get("task_memory_max_mb", 2048)),
-            task_pids_max=int(sched.get("task_pids_max", 512)),
-            task_cpu_max_percent=int(sched.get("task_cpu_max_percent", 200)),
-            host_pressure_breadcrumb_interval_seconds=sched.get(
-                "host_pressure_breadcrumb_interval_seconds", 300
-            ),
-            talk_poll_interval=sched.get("talk_poll_interval", 10),
-            talk_poll_timeout=sched.get("talk_poll_timeout", 30),
-            talk_poll_wait=sched.get("talk_poll_wait", 2.0),
-            progress_updates=sched.get("progress_updates", True),
-            progress_show_tool_use=sched.get("progress_show_tool_use", True),
-            progress_show_text=sched.get("progress_show_text", False),
-            event_log_enabled=sched.get("event_log_enabled", True),
-            stream_text_gate_chars=sched.get("stream_text_gate_chars", 280),
-            push_notification_threshold_seconds=sched.get("push_notification_threshold_seconds", 30),
-            push_notification_sources=sched.get("push_notification_sources", []),
-            task_timeout_minutes=sched.get("task_timeout_minutes", 30),
-            confirmation_timeout_minutes=sched.get("confirmation_timeout_minutes", 120),
-            stale_pending_warn_minutes=sched.get("stale_pending_warn_minutes", 30),
-            stale_pending_fail_hours=sched.get("stale_pending_fail_hours", 2),
-            max_retry_age_minutes=sched.get("max_retry_age_minutes", 60),
-            worker_heartbeat_seconds=sched.get("worker_heartbeat_seconds", 60),
-            worker_stuck_minutes=sched.get("worker_stuck_minutes", 10),
-            task_retention_days=sched.get("task_retention_days", 7),
-            usage_retention_days=sched.get("usage_retention_days", 180),
-            email_retention_days=sched.get("email_retention_days", 7),
-            processed_email_retention_days=sched.get("processed_email_retention_days", 90),
-            temp_file_retention_days=sched.get("temp_file_retention_days", 7),
-            worker_idle_timeout=sched.get("worker_idle_timeout", 10),
-            worker_idle_poll_interval=sched.get("worker_idle_poll_interval", 0.5),
-            main_loop_read_timeout_ms=sched.get("main_loop_read_timeout_ms", 2000),
-            scheduled_job_max_consecutive_failures=sched.get("scheduled_job_max_consecutive_failures", 5),
-            cron_max_staleness_minutes=sched.get("cron_max_staleness_minutes", 60),
-            max_foreground_workers=sched.get("max_foreground_workers", 5),
-            max_background_workers=sched.get("max_background_workers", 3),
-            user_max_foreground_workers=sched.get("user_max_foreground_workers", 2),
-            user_max_background_workers=sched.get("user_max_background_workers", 1),
-            # Coerced for the same reason the gate's keys are: these reach
-            # arithmetic that decides how many worker threads exist, and a TOML
-            # string would compare wrongly against an int rather than raising
-            # anywhere a reader would look.
-            long_task_threshold_minutes=int(
-                sched.get("long_task_threshold_minutes", 10)
-            ),
-            user_max_long_workers=int(sched.get("user_max_long_workers", 1)),
-            max_long_workers=int(sched.get("max_long_workers", 2)),
-        )
-
-    if "browser" in data:
-        br = data["browser"]
-        config.browser = BrowserConfig(
-            enabled=br.get("enabled", False),
-            api_url=br.get("api_url", "http://localhost:9223"),
-            vnc_url=br.get("vnc_url", ""),
-        )
-
-    if "devbox" in data:
-        dx = data["devbox"]
-        config.devbox = DevboxConfig(
-            enabled=dx.get("enabled", False),
-            container_prefix=dx.get("container_prefix", "devbox-"),
-            docker_cli=dx.get("docker_cli", "/usr/bin/docker"),
-            max_output_bytes=dx.get("max_output_bytes", 102_400),
+        config.email.outbound_approval_floor = _validate_outbound_approval_floor(
+            email.get("outbound_approval_floor", config.email.outbound_approval_floor)
         )
 
     if "ntfy" in data:
@@ -2892,222 +2944,6 @@ def load_config(config_path: Path | None = None) -> Config:
             "[skills] block in config.toml is no longer used — skill disclosure "
             "is now intrinsic (no progressive_disclosure / always_eager / "
             "auto_lazy_threshold_chars knobs)."
-        )
-
-    if "brain" in data:
-        br = data["brain"]
-        native_raw = br.get("native", {})
-        if not isinstance(native_raw, dict):
-            native_raw = {}
-        wf_raw = native_raw.get("web_fetch", {})
-        if not isinstance(wf_raw, dict):
-            wf_raw = {}
-        _wf_defaults = WebFetchConfig()
-        web_fetch_cfg = WebFetchConfig(
-            enabled=bool(wf_raw.get("enabled", _wf_defaults.enabled)),
-            timeout_seconds=float(wf_raw.get("timeout_seconds", _wf_defaults.timeout_seconds)),
-            max_bytes=int(wf_raw.get("max_bytes", _wf_defaults.max_bytes)),
-            max_content_chars=int(
-                wf_raw.get("max_content_chars", _wf_defaults.max_content_chars)
-            ),
-            max_redirects=int(wf_raw.get("max_redirects", _wf_defaults.max_redirects)),
-            allow_http=bool(wf_raw.get("allow_http", _wf_defaults.allow_http)),
-            allowed_ports=(
-                [int(p) for p in wf_raw["allowed_ports"]]
-                if isinstance(wf_raw.get("allowed_ports"), list)
-                else list(_wf_defaults.allowed_ports)
-            ),
-            user_agent=str(wf_raw.get("user_agent", _wf_defaults.user_agent)),
-            allow_hosts=(
-                [str(h) for h in wf_raw["allow_hosts"]]
-                if isinstance(wf_raw.get("allow_hosts"), list)
-                else []
-            ),
-            block_hosts=(
-                [str(h) for h in wf_raw["block_hosts"]]
-                if isinstance(wf_raw.get("block_hosts"), list)
-                else []
-            ),
-            extra_blocked_cidrs=(
-                [str(c) for c in wf_raw["extra_blocked_cidrs"]]
-                if isinstance(wf_raw.get("extra_blocked_cidrs"), list)
-                else []
-            ),
-            require_url_provenance=bool(
-                wf_raw.get("require_url_provenance", _wf_defaults.require_url_provenance)
-            ),
-        )
-        native = NativeBrainConfig(
-            provider=native_raw.get("provider", "openai_compat"),
-            model=native_raw.get("model", ""),
-            effort=native_raw.get("effort", ""),
-            base_url=native_raw.get("base_url", "https://api.anthropic.com/v1"),
-            api_key=native_raw.get("api_key", ""),
-            extra_headers=dict(native_raw.get("extra_headers", {}) or {}),
-            context_window=int(native_raw.get("context_window", 0)),
-            max_turns=int(native_raw.get("max_turns", 100)),
-            max_tokens=int(native_raw.get("max_tokens", 16384)),
-            model_overrides=dict(native_raw.get("model_overrides", {}) or {}),
-            compaction_reserve_tokens=int(native_raw.get("compaction_reserve_tokens", 0)),
-            compaction_keep_recent_tokens=int(
-                native_raw.get("compaction_keep_recent_tokens", 0)
-            ),
-            # Absent key → None (derive from base_url); present → explicit bool.
-            prompt_caching=(
-                bool(native_raw["prompt_caching"])
-                if "prompt_caching" in native_raw
-                else None
-            ),
-            web_fetch=web_fetch_cfg,
-            bash_spill_full_output=bool(
-                native_raw.get("bash_spill_full_output", True)
-            ),
-            turn_budget_nudge=bool(native_raw.get("turn_budget_nudge", True)),
-            turn_budget_nudge_early_percent=int(
-                native_raw.get("turn_budget_nudge_early_percent", 50)
-            ),
-            turn_budget_nudge_remaining=[
-                int(x)
-                for x in native_raw.get("turn_budget_nudge_remaining", [15, 5])
-                if isinstance(x, (int, float)) or str(x).lstrip("-").isdigit()
-            ],
-            model_catalog_fetch=bool(native_raw.get("model_catalog_fetch", True)),
-            model_catalog_cache_ttl_hours=float(
-                native_raw.get("model_catalog_cache_ttl_hours", 24.0)
-            ),
-        )
-        overrides_raw = br.get("source_type_overrides", {})
-        if not isinstance(overrides_raw, dict):
-            overrides_raw = {}
-        tmux_raw = br.get("tmux", {})
-        if not isinstance(tmux_raw, dict):
-            tmux_raw = {}
-        _tmux_defaults = TmuxBrainConfig()
-
-        def _str_list(key: str) -> list[str]:
-            raw = tmux_raw.get(key)
-            if not isinstance(raw, list):
-                return list(getattr(_tmux_defaults, key))
-            return [str(x) for x in raw]
-
-        tmux_cfg = TmuxBrainConfig(
-            fallback_trip_threshold=int(
-                tmux_raw.get("fallback_trip_threshold", _tmux_defaults.fallback_trip_threshold)
-            ),
-            fallback_cooldown_seconds=float(
-                tmux_raw.get("fallback_cooldown_seconds", _tmux_defaults.fallback_cooldown_seconds)
-            ),
-            ready_timeout_seconds=float(
-                tmux_raw.get("ready_timeout_seconds", _tmux_defaults.ready_timeout_seconds)
-            ),
-            tmux_command_timeout=float(
-                tmux_raw.get("tmux_command_timeout", _tmux_defaults.tmux_command_timeout)
-            ),
-            cli_version_pin=str(tmux_raw.get("cli_version_pin", _tmux_defaults.cli_version_pin)),
-            ready_markers=_str_list("ready_markers"),
-            trust_markers=_str_list("trust_markers"),
-            theme_markers=_str_list("theme_markers"),
-            bypass_warning_marker=str(
-                tmux_raw.get("bypass_warning_marker", _tmux_defaults.bypass_warning_marker)
-            ),
-            bypass_accept_marker=str(
-                tmux_raw.get("bypass_accept_marker", _tmux_defaults.bypass_accept_marker)
-            ),
-            error_markers=_str_list("error_markers"),
-            usage_limit_markers=_str_list("usage_limit_markers"),
-        )
-        cc_raw = br.get("claude_code", {})
-        if not isinstance(cc_raw, dict):
-            cc_raw = {}
-        _cc_defaults = ClaudeCodeBrainConfig()
-        _cc_logger = logging.getLogger("istota.config")
-
-        # Unlike the [brain.tmux] and [brain.native] parses above, this one does
-        # not hand a raw TOML value to int()/float()/bool(). It cannot afford
-        # to: `int(float("inf"))` raises OverflowError, `int(float("nan"))`
-        # raises ValueError, and TOML really does spell `inf` and `nan`. That
-        # exception escapes load_config, which runs in the scheduler, the web
-        # app, the webhook receiver and every host-side skill CLI the proxy
-        # spawns per call — so a typo on a knob that only draws a dashboard tile
-        # would stop the daemon from starting. `_validate_claude_code_brain`
-        # promises the block corrects rather than refuses; that promise has to
-        # start here, at the point the value enters.
-        def _cc_number(key: str, cast):
-            default = getattr(_cc_defaults, key)
-            if key not in cc_raw:
-                return default
-            raw = cc_raw[key]
-            # bool is a subclass of int, so `= true` would otherwise become 1 —
-            # a one-second TTL, i.e. a fetch per read, arriving past the floor
-            # that exists to prevent exactly that.
-            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-                _cc_logger.warning(
-                    "[brain.claude_code] %s=%r is not a number; using %r",
-                    key, raw, default,
-                )
-                return default
-            if not math.isfinite(raw):
-                _cc_logger.warning(
-                    "[brain.claude_code] %s=%r is not a finite number; using %r",
-                    key, raw, default,
-                )
-                return default
-            return cast(raw)
-
-        # The one field whose whole job is to stop an unsolicited outbound
-        # request, so a value that is not plainly a boolean must not resolve to
-        # "on". `bool("false")` is True, and a YAML boolean reaching a quoted
-        # slot in a rendered config is a failure mode this repo has already had.
-        def _cc_enabled():
-            default = _cc_defaults.subscription_usage
-            if "subscription_usage" not in cc_raw:
-                return default
-            raw = cc_raw["subscription_usage"]
-            if isinstance(raw, bool):
-                return raw
-            if isinstance(raw, str):
-                text = raw.strip().lower()
-                if text in ("true", "yes", "on", "1"):
-                    return True
-                if text in ("false", "no", "off", "0"):
-                    return False
-            _cc_logger.warning(
-                "[brain.claude_code] subscription_usage=%r is not a boolean; using %r",
-                raw, default,
-            )
-            return default
-
-        claude_code_cfg = ClaudeCodeBrainConfig(
-            subscription_usage=_cc_enabled(),
-            subscription_usage_cache_ttl_seconds=_cc_number(
-                "subscription_usage_cache_ttl_seconds", int
-            ),
-            subscription_usage_timeout_seconds=_cc_number(
-                "subscription_usage_timeout_seconds", float
-            ),
-            subscription_usage_warn_percent=_cc_number(
-                "subscription_usage_warn_percent", float
-            ),
-            subscription_usage_high_percent=_cc_number(
-                "subscription_usage_high_percent", float
-            ),
-            subscription_usage_stale_after_seconds=_cc_number(
-                "subscription_usage_stale_after_seconds", int
-            ),
-        )
-        config.brain = BrainConfig(
-            kind=br.get("kind", "claude_code"),
-            native=native,
-            tmux=tmux_cfg,
-            claude_code=claude_code_cfg,
-            source_type_overrides={
-                str(k): str(v) for k, v in overrides_raw.items()
-            },
-            fallback=str(br.get("fallback", "")).strip(),
-            fallback_on_transient=bool(
-                br.get("fallback_on_transient", BrainConfig.fallback_on_transient)
-            ),
-            fallback_cooldown_seconds=int(br.get("fallback_cooldown_seconds", 900)),
         )
 
     # [models] table — operator-controlled alias registry. The mapping is
@@ -3172,101 +3008,8 @@ def load_config(config_path: Path | None = None) -> Config:
     else:
         config.briefing_shared_blocks = _parse_shared_block_specs(DEFAULT_SHARED_BLOCKS)
 
-    if "briefings" in data:
-        br = data["briefings"]
-        config.briefings = BriefingsModuleConfig(
-            archive_retention_days=br.get("archive_retention_days", 90),
-            default_lookback_hours=br.get("default_lookback_hours", 12),
-            max_source_chars=br.get("max_source_chars", 5000),
-            max_browse_chars=br.get("max_browse_chars", 20000),
-            newsletter_max_links_per_source=br.get(
-                "newsletter_max_links_per_source", 20,
-            ),
-            shared_block_timezone=br.get("shared_block_timezone", "UTC"),
-        )
-
-    if "health" in data:
-        h = data["health"]
-        default_max_doc = 25 * 1024 * 1024
-        try:
-            max_doc = int(h.get("max_document_bytes", default_max_doc))
-        except (TypeError, ValueError):
-            logger.warning(
-                "[health] max_document_bytes must be an integer; using default"
-            )
-            max_doc = default_max_doc
-        if max_doc < 0:
-            # Clamping to 0 would read as "unlimited" — the opposite of what
-            # someone typing a negative number meant.
-            logger.warning(
-                "[health] max_document_bytes must be >= 0 (0 = unlimited); "
-                "using default"
-            )
-            max_doc = default_max_doc
-        config.health = HealthModuleConfig(max_document_bytes=max_doc)
-
-    if "money" in data:
-        config.money = MoneyModuleConfig(
-            autoclass_lookup=bool(
-                data["money"].get("autoclass_lookup", True)
-            ),
-        )
-
-    if "logging" in data:
-        log = data["logging"]
-        config.logging = LoggingConfig(
-            level=log.get("level", "INFO"),
-            output=log.get("output", "console"),
-            file=log.get("file", ""),
-            rotate=log.get("rotate", True),
-            max_size_mb=log.get("max_size_mb", 10),
-            backup_count=log.get("backup_count", 5),
-        )
-
-    if "memory_search" in data:
-        ms = data["memory_search"]
-        config.memory_search = MemorySearchConfig(
-            enabled=ms.get("enabled", True),
-            auto_index_conversations=ms.get("auto_index_conversations", True),
-            auto_index_memory_files=ms.get("auto_index_memory_files", True),
-            auto_recall=ms.get("auto_recall", False),
-            auto_recall_limit=ms.get("auto_recall_limit", 5),
-        )
-
-    if "playbooks" in data:
-        pb = data["playbooks"]
-        config.playbooks = PlaybooksConfig(
-            enabled=pb.get("enabled", False),
-            recall_limit=pb.get("recall_limit", 3),
-            min_tool_calls=pb.get("min_tool_calls", 4),
-            retention_days=pb.get("retention_days", 0),
-            max_chars=pb.get("max_chars", 0),
-        )
-
-    if "sleep_cycle" in data:
-        sc = data["sleep_cycle"]
-        config.sleep_cycle = SleepCycleConfig(
-            enabled=sc.get("enabled", False),
-            cron=sc.get("cron", "0 2 * * *"),
-            memory_retention_days=sc.get("memory_retention_days", 0),
-            lookback_hours=sc.get("lookback_hours", 24),
-            auto_load_dated_days=sc.get("auto_load_dated_days", 3),
-            curate_user_memory=sc.get("curate_user_memory", False),
-            curation_log_summary=sc.get("curation_log_summary", True),
-        )
-
-    if "channel_sleep_cycle" in data:
-        csc = data["channel_sleep_cycle"]
-        config.channel_sleep_cycle = ChannelSleepCycleConfig(
-            enabled=csc.get("enabled", True),
-            cron=csc.get("cron", "0 3 * * *"),
-            lookback_hours=csc.get("lookback_hours", 24),
-            memory_retention_days=csc.get("memory_retention_days", 0),
-        )
-
     if "site" in data:
         s = data["site"]
-        config.site = SiteConfig(hostname=s.get("hostname", ""))
         # The agent-writable static web root was removed (ISSUE-194). A stale
         # block from a pre-removal deploy must not fail load, but the operator
         # needs to know nothing is serving that directory on istota's behalf
@@ -3281,206 +3024,12 @@ def load_config(config_path: Path | None = None) -> Config:
                 ", ".join(retired),
             )
 
-    if "caldav" in data:
-        cd = data["caldav"]
-        config.caldav = CaldavConfig(
-            url=cd.get("url", ""),
-            username=cd.get("username", ""),
-            password=cd.get("password", ""),
-        )
-
-    if "location" in data:
-        loc = data["location"]
-        config.location = LocationReceiverConfig(
-            enabled=loc.get("enabled", False),
-            webhooks_port=loc.get("webhooks_port", 8765),
-            accuracy_threshold_m=loc.get("accuracy_threshold_m", 100.0),
-            visit_exit_minutes=loc.get("visit_exit_minutes", 5.0),
-            reconcile_enabled=loc.get("reconcile_enabled", True),
-            reconcile_lookback_hours=loc.get("reconcile_lookback_hours", 6.0),
-            reconcile_buffer_minutes=loc.get("reconcile_buffer_minutes", 10.0),
-            reconcile_grace_minutes=loc.get("reconcile_grace_minutes", 10.0),
-            reconcile_min_pings=loc.get("reconcile_min_pings", 3),
-            reconcile_min_dwell_sec=loc.get("reconcile_min_dwell_sec", 60),
-        )
-
-    if "google_workspace" in data:
-        gw = data["google_workspace"]
-        config.google_workspace = GoogleWorkspaceConfig(
-            enabled=gw.get("enabled", False),
-            client_id=gw.get("client_id", ""),
-            client_secret=gw.get("client_secret", ""),
-            scopes=gw.get("scopes", GoogleWorkspaceConfig().scopes),
-        )
-
-    if "web" in data:
-        w = data["web"]
-        map_data = w.get("map", {})
-        _map_defaults = WebMapConfig()
-        web_map = WebMapConfig(
-            provider=map_data.get("provider", _map_defaults.provider),
-            api_key=map_data.get("api_key", _map_defaults.api_key),
-            dark_style=map_data.get("dark_style", _map_defaults.dark_style),
-            light_style=map_data.get("light_style", _map_defaults.light_style),
-            attribution=map_data.get("attribution", _map_defaults.attribution),
-        )
-        chat_data = w.get("chat", {})
-        _chat_defaults = WebChatConfig()
-        web_chat = WebChatConfig(
-            max_prompt_chars=chat_data.get("max_prompt_chars", _chat_defaults.max_prompt_chars),
-            max_attachment_mb=chat_data.get("max_attachment_mb", _chat_defaults.max_attachment_mb),
-            attachment_extensions=chat_data.get(
-                "attachment_extensions", _chat_defaults.attachment_extensions
-            ),
-            rate_limit_messages=chat_data.get("rate_limit_messages", _chat_defaults.rate_limit_messages),
-            rate_limit_window_seconds=chat_data.get(
-                "rate_limit_window_seconds", _chat_defaults.rate_limit_window_seconds
-            ),
-            sse_poll_interval_ms=chat_data.get("sse_poll_interval_ms", _chat_defaults.sse_poll_interval_ms),
-            client_poll_interval_ms=chat_data.get(
-                "client_poll_interval_ms", _chat_defaults.client_poll_interval_ms
-            ),
-            talk_read_sync_interval=chat_data.get(
-                "talk_read_sync_interval", _chat_defaults.talk_read_sync_interval
-            ),
-            room_stream_poll_interval_ms=chat_data.get(
-                "room_stream_poll_interval_ms",
-                _chat_defaults.room_stream_poll_interval_ms,
-            ),
-            room_stream_keepalive_seconds=chat_data.get(
-                "room_stream_keepalive_seconds",
-                _chat_defaults.room_stream_keepalive_seconds,
-            ),
-            room_stream_max_batch=chat_data.get(
-                "room_stream_max_batch", _chat_defaults.room_stream_max_batch
-            ),
-            room_stream_max_bytes=chat_data.get(
-                "room_stream_max_bytes", _chat_defaults.room_stream_max_bytes
-            ),
-            room_stream_room_check_seconds=chat_data.get(
-                "room_stream_room_check_seconds",
-                _chat_defaults.room_stream_room_check_seconds,
-            ),
-        )
-        _token_storage = w.get("token_storage", "ephemeral")
-        if _token_storage not in ("ephemeral", "encrypted"):
-            logger.warning(
-                "[web] token_storage=%r is not a known value "
-                "(expected 'ephemeral' or 'encrypted'); using 'ephemeral'",
-                _token_storage,
-            )
-            _token_storage = "ephemeral"
-        _auth = w.get("auth", "nextcloud")
-        if _auth not in ("nextcloud", "none"):
-            logger.warning(
-                "[web] auth=%r is not a known value (expected 'nextcloud' or "
-                "'none'); using 'nextcloud'",
-                _auth,
-            )
-            _auth = "nextcloud"
-        config.web = WebConfig(
-            enabled=w.get("enabled", False),
-            port=w.get("port", 8766),
-            auth=_auth,
-            oauth2_provider=w.get("oauth2_provider", ""),
-            oauth2_client_id=w.get("oauth2_client_id", ""),
-            oauth2_client_secret=w.get("oauth2_client_secret", ""),
-            oauth2_token_endpoint=w.get("oauth2_token_endpoint", ""),
-            oauth2_userinfo_endpoint=w.get("oauth2_userinfo_endpoint", ""),
-            oauth2_redirect_uri=w.get("oauth2_redirect_uri", ""),
-            token_storage=_token_storage,
-            session_secret_key=w.get("session_secret_key", ""),
-            chat=web_chat,
-            map=web_map,
-        )
-
-    if "developer" in data:
-        dev = data["developer"]
-        extra = {}
-        # `gitlab_api_allowlist`, `github_api_allowlist` and
-        # `api_timeout_seconds` were read here until the devbox proxy stopped
-        # making REST calls of its own. `config.toml.j2` no longer renders
-        # them, but a host keeps its last-rendered file until Ansible runs
-        # again, and a hand-written config.toml may carry them for years. They
-        # are deliberately not warned about: the loader ignores unknown keys by
-        # design (below), so such a file loads clean and inert.
-        for _key in ("forge_cli_extra_denied", "forge_cli_permit"):
-            if _key in dev:
-                _val = dev[_key]
-                # A bare string is the plausible hand-edit, and `list("gh pr
-                # merge")` turns it into eighteen one-character rules that
-                # match nothing and warn about nothing. Read it as the single
-                # entry it was meant to be.
-                if isinstance(_val, str):
-                    _val = [_val] if _val else []
-                extra[_key] = [str(_entry) for _entry in _val]
-        for _key in ("gh_bin_path", "glab_bin_path"):
-            if _key in dev:
-                # `str()` for the same reason as the loop above: a hand-edited
-                # value of the wrong type would otherwise reach `os.execve` as
-                # a non-string and raise a TypeError instead of reporting a
-                # bad path.
-                extra[_key] = str(dev[_key])
-        # Unknown keys are ignored rather than fatal, matching the rest of the
-        # loader: only the fields named here are read off the block.
-        rev = dev.get("review", {})
-        review_kwargs = {
-            name: rev[name]
-            for name in (
-                "enabled",
-                "conformance_model",
-                "bughunt_model",
-                "both_agents_threshold_lines",
-                "boundary_patterns",
-                "max_diff_chars",
-                "max_context_chars",
-                "max_file_chars",
-                "max_callers_per_symbol",
-                "max_need_files",
-                "timeout_seconds",
-                "max_calls_per_task",
-            )
-            if name in rev
-        }
-        container_kwargs = _parse_container_block(dev.get("container", {}))
-        config.developer = DeveloperConfig(
-            enabled=dev.get("enabled", False),
-            repos_dir=dev.get("repos_dir", ""),
-            gitlab_url=dev.get("gitlab_url", "https://gitlab.com"),
-            gitlab_token=dev.get("gitlab_token", ""),
-            gitlab_username=dev.get("gitlab_username", ""),
-            gitlab_default_namespace=dev.get("gitlab_default_namespace", ""),
-            gitlab_reviewer=dev.get("gitlab_reviewer", ""),
-            gitlab_reviewer_id=dev.get("gitlab_reviewer_id", ""),
-            github_url=dev.get("github_url", "https://github.com"),
-            github_token=dev.get("github_token", ""),
-            github_username=dev.get("github_username", ""),
-            github_default_owner=dev.get("github_default_owner", ""),
-            github_reviewer=dev.get("github_reviewer", ""),
-            # Never parsed before this: the field existed and both the env spec
-            # in skills/developer/skill.md and config.example.toml advertised
-            # it, but the branch dropped the key, so `author_credit` was always
-            # "" and DEVELOPER_AUTHOR_CREDIT never got set. The `commit` skill
-            # makes that variable the one permitted commit trailer.
-            author_credit=dev.get("author_credit", ""),
-            devbox_proxy_enabled=dev.get("devbox_proxy_enabled", True),
-            devbox_proxy_socket_dir=dev.get("devbox_proxy_socket_dir", "/var/run/istota"),
-            devbox_proxy_audit_log=dev.get("devbox_proxy_audit_log", ""),
-            worktree_reap_enabled=dev.get("worktree_reap_enabled", True),
-            worktree_retention_hours=dev.get("worktree_retention_hours", 24.0),
-            review=ReviewConfig(**review_kwargs),
-            container=ContainerConfig(**container_kwargs),
-            **extra,
-        )
-
     if "security" in data:
         sec = data["security"]
-        net_data = sec.get("network", {})
-        network_config = NetworkConfig(
-            enabled=net_data.get("enabled", True),
-            allow_pypi=net_data.get("allow_pypi", True),
-            extra_hosts=net_data.get("extra_hosts", []),
-        )
+        # Two things the walk cannot say. The first is a key that was removed
+        # rather than renamed: the framework database is bound into no sandbox
+        # for anyone now, so there is no bind left to widen and a file still
+        # carrying this needs telling rather than a generic "unrecognised".
         if "sandbox_admin_db_write" in sec:
             logger.warning(
                 "[security] sandbox_admin_db_write is no longer supported and is "
@@ -3488,74 +3037,9 @@ def load_config(config_path: Path | None = None) -> Config:
                 "sandbox at all any more (for admins or anyone else); writes go "
                 "through skill CLIs and deferred ops. Remove the key."
             )
-        # The sweep flag and its ceiling are read the strict way the
-        # `[brain.claude_code]` block is, not the terse way the keys around them
-        # are. `bool("false")` is True, and this is the one key in this section
-        # that decides whether a *delete* path runs on a cadence: "the operator
-        # wrote false and the sweep stayed on" is the failure it must not have.
-        # A ceiling that is not a finite number would disable the ceiling rather
-        # than the sweep — NaN compares false against everything, so nothing
-        # would ever look over-budget or under it.
-        def _sweep_enabled() -> bool:
-            if "sandbox_cache_sweep_enabled" not in sec:
-                return True
-            raw = sec["sandbox_cache_sweep_enabled"]
-            if isinstance(raw, bool):
-                return raw
-            if isinstance(raw, str):
-                text = raw.strip().lower()
-                if text in ("true", "yes", "on", "1"):
-                    return True
-                if text in ("false", "no", "off", "0"):
-                    return False
-            logger.warning(
-                "[security] sandbox_cache_sweep_enabled=%r is not a boolean; using True",
-                raw,
-            )
-            return True
-
-        def _sweep_ceiling() -> float:
-            default = 10.0
-            if "sandbox_cache_max_gb" not in sec:
-                return default
-            raw = sec["sandbox_cache_max_gb"]
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                value = float("nan")
-            if isinstance(raw, bool) or not math.isfinite(value) or value <= 0:
-                logger.warning(
-                    "[security] sandbox_cache_max_gb=%r is not a positive number; using %s",
-                    raw, default,
-                )
-                return default
-            return value
-
-        config.security = SecurityConfig(
-            sandbox_enabled=sec.get("sandbox_enabled", True),
-            skill_proxy_enabled=sec.get("skill_proxy_enabled", True),
-            skill_proxy_timeout=sec.get("skill_proxy_timeout", 300),
-            network=network_config,
-            **({
-                "passthrough_env_vars": sec["passthrough_env_vars"]
-            } if "passthrough_env_vars" in sec else {}),
-            # Never parsed before this: the field existed and both
-            # config.example.toml and the Ansible template advertised it, but
-            # load_config dropped the key on the floor, so every deployment ran
-            # the hardcoded default and no operator could narrow it.
-            **({
-                "sandbox_ro_paths": _validate_sandbox_ro_paths(
-                    sec["sandbox_ro_paths"],
-                )
-            } if "sandbox_ro_paths" in sec else {}),
-            sandbox_cache_dir=str(sec.get("sandbox_cache_dir", "") or ""),
-            sandbox_cache_sweep_enabled=_sweep_enabled(),
-            sandbox_cache_max_gb=_sweep_ceiling(),
-        )
-        if (
-            config.security.sandbox_enabled
-            and not config.security.skill_proxy_enabled
-        ):
+        # The second is a pair of settings that are each individually valid and
+        # wrong together.
+        if config.security.sandbox_enabled and not config.security.skill_proxy_enabled:
             logger.warning(
                 "[security] sandbox_enabled with skill_proxy_enabled = false: "
                 "skill CLIs will run inside the sandbox, where the databases "

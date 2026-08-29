@@ -425,6 +425,11 @@ istota_nextcloud_share_default_expire_days: 14
 # web-set one (ISSUE-102). Re-pointing a channel on purpose is
 # `istota nextcloud provision-rooms --user U --reseed`, by hand.
 #
+# Renaming a room is safe: each room's token is remembered on first provision
+# and later runs match on it, so a room renamed on either surface is still
+# recognised. Matching on the display name alone made every deploy mint a
+# second room under the old name (ISSUE-342).
+#
 # Also gated on istota_talk_enabled and on a non-empty app password. Set to
 # false to manage the rooms yourself.
 istota_provision_talk_rooms: true

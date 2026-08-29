@@ -216,11 +216,21 @@ Audit files stranded above the new limit are removed on the next deploy. Setting
 
 ## Default Talk rooms
 
-`istota_provision_talk_rooms` (default `true`) creates `#general`, `#logs` and `#alerts` for each user on deploy and fills in the channel tokens, which a bare-metal install previously had no way to get — the setting that turns the execution log on asked for a room token the operator could not know yet. It calls `istota nextcloud provision-rooms` and is idempotent.
+`istota_provision_talk_rooms` (default `true`) creates `general`, `logs` and `alerts` for each user on deploy and fills in the channel tokens, which a bare-metal install previously had no way to get — the setting that turns the execution log on asked for a room token the operator could not know yet. It calls `istota nextcloud provision-rooms` and is idempotent.
 
 The rooms are private group rooms, not public ones: a public room is joinable by anyone holding its link, which is wrong for rooms carrying an execution log and security alerts. Rooms that already exist are reused untouched, so this only affects new installs.
 
-A channel you already set is left alone, and so is one you deliberately cleared — turning the execution log off in the web UI stays off across deploys. Also gated on `istota_talk_enabled` and a non-empty app password.
+**Renaming a room is safe.** Each room's token is remembered on first provision, and later runs look it up by token, so a room you renamed on either surface is still recognised as yours. The name is only used the first time. Before that record existed, renaming `general` made the next deploy create a second room under the old name — and then another on the deploy after that (ISSUE-342).
+
+The record starts empty on the first deploy after an upgrade, so that run still matches by name. If you are already carrying a duplicate, point the record at the room you kept before deploying:
+
+```bash
+istota nextcloud provision-rooms --user alice --adopt general=<token>
+```
+
+`--adopt` writes the record and exits without contacting Talk; the token is the last path segment of the room's link. Then delete the other room. Deleting first does not work — the room you kept no longer answers to `general`, so the next deploy would make a third.
+
+A channel you already set is left alone, and so is one you deliberately cleared — turning the execution log off in the web UI stays off across deploys. Reusing a remembered room never counts as making it usable, so that holds for a renamed room too. Also gated on `istota_talk_enabled` and a non-empty app password.
 
 ## Inlined dependencies
 
