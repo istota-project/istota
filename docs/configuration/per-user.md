@@ -8,7 +8,7 @@ Per-user data lives in three DB tables and (optionally) the user's Nextcloud wor
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
 2. `[users.alice]` block in main `config/config.toml` (the docker entrypoint path) — DB rows still win at config-load time.
-3. User workspace files in Nextcloud (`PERSONA.md`, `BRIEFINGS.md`, `CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md`).
+3. User workspace files in Nextcloud (`PERSONA.md`, `CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md`).
 
 > The legacy `config/users/{user_id}.toml` file (and its `.user.json` overlay) was retired with the OIDC retirement / Phase 7 sweep. The `config/users/` directory is gone, Ansible no longer renders per-user TOML, and `Config.users_dir` / `load_user_configs()` no longer exist.
 
@@ -161,7 +161,6 @@ These files live in the user's Nextcloud folder at `/Users/{user_id}/{bot_dir}/c
 | `USER.md` | Persistent memory (auto-loaded into prompts) | [Memory](../features/memory.md) |
 | `TASKS.md` | File-based task queue with status markers | [Scheduling](../features/scheduling.md) |
 | `PERSONA.md` | Personality customization (overrides global) | [Persona](persona.md) |
-| `BRIEFINGS.md` | Briefing schedule (overrides TOML config) | [Briefings](../features/briefings.md) |
 | `CRON.md` | Scheduled jobs (markdown + TOML) | [Scheduling](../features/scheduling.md) |
 | `HEARTBEAT.md` | Health monitoring checks | [Heartbeat](../features/heartbeat.md) |
 | `skills/<name>.md` | Per-skill instruction overlay (one file per skill) | [below](#per-skill-overlays) |

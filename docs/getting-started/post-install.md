@@ -66,7 +66,6 @@ After the bot runs for the first time for a user, it creates a directory structu
 │   │   ├── USER.md          # Persistent memory
 │   │   ├── TASKS.md         # File-based task queue
 │   │   ├── PERSONA.md       # Personality customization
-│   │   ├── BRIEFINGS.md     # Briefing schedule
 │   │   ├── CRON.md          # Scheduled jobs
 │   │   └── HEARTBEAT.md     # Health monitoring config
 │   ├── exports/             # Bot-generated files
