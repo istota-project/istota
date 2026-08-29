@@ -357,6 +357,31 @@ class TestShowOverlays:
 
         assert "HELPER OVERLAY." in out
 
+    def test_both_load_paths_derive_the_same_directory(self, tmp_path, monkeypatch):
+        """The half of "both paths behave identically" that is actually
+        duplicated.
+
+        The injected block's *content* cannot differ — both paths hand a
+        directory to `load_skills` and neither renders anything itself. What each
+        caller computes for itself is the directory, and a wrong `bot_dir` or a
+        missing `lstrip` there leaves one path silently inert while both suites
+        stay green. Both now go through one helper; this is what says so.
+        """
+        self._ctx(tmp_path, monkeypatch)
+        from istota.config import load_config
+        from istota.skills.skills import _overlay_dir
+        from istota.storage import resolve_user_skill_overlays_dir
+
+        config = load_config()
+
+        assert _overlay_dir(config, "alice") == resolve_user_skill_overlays_dir(
+            config, "alice"
+        )
+        # And it is the documented layout, not merely two equal wrong answers.
+        assert _overlay_dir(config, "alice") == (
+            config.nextcloud_mount_path / "Users/alice/istota/config/skills"
+        )
+
     def test_no_mount_means_no_overlay(self, tmp_path, monkeypatch, capsys):
         """Overlays are filesystem reads, so an rclone-remote deployment skips
         them silently — the condition the per-user PERSONA.md already carries."""

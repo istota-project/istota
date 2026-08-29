@@ -108,15 +108,13 @@ def _workspace_dir(config, user_id: str) -> str:
 def _overlay_dir(config, user_id: str):
     """The user's per-skill overlay directory, or None.
 
-    Overlays are read off the filesystem, so a deployment without the mount has
-    none — the same condition the per-user PERSONA.md already carries.
+    One line, and deliberately not its own derivation: `executor` resolves the
+    same directory for the eager path, and the two agreeing is what keeps an
+    overlay from applying on one path and not the other.
     """
-    from istota.storage import get_user_skill_overlays_path
+    from istota.storage import resolve_user_skill_overlays_dir
 
-    if not (config.use_mount and config.nextcloud_mount_path is not None):
-        return None
-    nc_path = get_user_skill_overlays_path(user_id, config.bot_dir_name)
-    return config.nextcloud_mount_path / nc_path.lstrip("/")
+    return resolve_user_skill_overlays_dir(config, user_id)
 
 
 def _render_companion_body(config, name: str, meta) -> str | None:

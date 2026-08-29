@@ -660,34 +660,71 @@ OVERLAY_PREAMBLE = (
 
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
+#: A level-1 or level-2 ATX heading, in every form CommonMark accepts one: up to
+#: three leading spaces, and a space, a tab or the end of the line after the
+#: hashes. Matching the bare ``"## "`` prefix instead let five spellings through
+#: — ``" ## x"``, ``"  ## x"``, ``"   ## x"``, ``"##\tx"`` and a bare ``"##"`` —
+#: each of which is a real heading and so a real way out of the section. Level 1
+#: is included because it escapes strictly harder than level 2: it closes the
+#: whole ``## Skills Reference`` block rather than one skill's ``### ``.
+_SHALLOW_HEADING_RE = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
+
+
+def _closed_fence_lines(lines: list[str]) -> set[int]:
+    """Indices of lines inside a code fence that is actually *closed*.
+
+    An unterminated fence is not treated as one, and that is the whole reason
+    this is a separate pass. Exempting it would hand a hand-edited overlay a way
+    to switch the demotion off for everything after a single stray ``` line —
+    and since the fence runs on past the end of the overlay, the level-2 heading
+    it protects then sits as a sibling of ``## Skills Reference`` and swallows
+    every skill rendered after it. The exemption exists to protect a sample, and
+    there is no sample without a closing fence.
+
+    Fence matching follows CommonMark on the two points that decide the pairing:
+    the closer uses the same character as the opener, and it is at least as long.
+    """
+    fenced: set[int] = set()
+    open_at: int | None = None
+    opener = ""
+    for i, line in enumerate(lines):
+        m = _FENCE_RE.match(line)
+        if m is None:
+            continue
+        run = m.group(1)
+        if open_at is None:
+            open_at, opener = i, run
+        elif run[0] == opener[0] and len(run) >= len(opener):
+            fenced.update(range(open_at, i + 1))
+            open_at = None
+    return fenced
+
 
 def _demote_overlay_headings(text: str) -> str:
-    """Push a level-2 heading in an overlay down to level 4.
+    """Push a level-1 or level-2 heading in an overlay down to level 4.
 
-    The overlay rides under the skill's own ``### <Title>``, so a ``## `` line
-    inside it would close that section and leave the rest of the overlay reading
-    as a sibling of the whole skills reference. Demoting rather than dropping is
-    deliberate: a hand-edited file then misbehaves visibly instead of losing
-    content silently.
+    The overlay rides under the skill's own ``### <Title>``, so a shallow
+    heading inside it would close that section and leave the rest of the overlay
+    reading as a sibling of the whole skills reference. Demoting rather than
+    dropping is deliberate: a hand-edited file then misbehaves visibly instead
+    of losing content silently.
 
-    Fenced blocks are skipped. A ``## `` inside one is a sample — an overlay for
-    the notes skill quite plausibly carries a markdown template — and rewriting
-    it would corrupt the user's own text.
+    Closed fenced blocks are skipped. A ``## `` inside one is a sample — an
+    overlay for the notes skill quite plausibly carries a markdown template —
+    and rewriting it would corrupt the user's own text. An *unclosed* fence
+    earns no such exemption; see ``_closed_fence_lines``.
+
+    Leading indentation is dropped along with the demotion, since the point is
+    that what comes out cannot be read as a heading above level 4.
     """
+    lines = text.split("\n")
+    fenced = _closed_fence_lines(lines)
     out = []
-    fence: str | None = None
-    for line in text.split("\n"):
-        m = _FENCE_RE.match(line)
-        if m:
-            marker = m.group(1)[0]
-            if fence is None:
-                fence = marker
-            elif marker == fence:
-                fence = None
-            out.append(line)
-            continue
-        if fence is None and line.startswith("## "):
-            line = "#### " + line[3:]
+    for i, line in enumerate(lines):
+        if i not in fenced:
+            m = _SHALLOW_HEADING_RE.match(line)
+            if m is not None:
+                line = "####" + line[m.end():]
         out.append(line)
     return "\n".join(out)
 

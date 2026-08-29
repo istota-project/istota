@@ -429,6 +429,26 @@ def get_user_skill_overlays_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/skills"
 
 
+def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | None:
+    """The on-disk overlay directory for a user, or None where there is none.
+
+    Both load paths — the eager one in ``executor`` and ``skills show`` — call
+    this rather than joining the mount themselves. That is the same argument as
+    injecting inside ``load_skills``, one level up: two call sites deriving one
+    path independently is a wrong ``bot_dir`` or a missing ``lstrip`` away from
+    leaving one path silently inert while both test suites stay green.
+
+    None without a mount. Overlays are filesystem reads, so an rclone-remote
+    deployment has none — the condition ``load_persona`` already applies to a
+    per-user ``PERSONA.md``.
+    """
+    if not config.use_mount:
+        return None
+    return _get_mount_path(
+        config, get_user_skill_overlays_path(user_id, config.bot_dir_name)
+    )
+
+
 CRON_TEMPLATE = """\
 # Scheduled Jobs
 

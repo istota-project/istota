@@ -35,7 +35,7 @@ from .storage import (
     ensure_user_directories_v2,
     get_user_persona_path,
     get_user_scripts_path,
-    get_user_skill_overlays_path,
+    resolve_user_skill_overlays_dir,
     read_channel_memory,
     read_dated_memories,
     read_user_memory_v2,
@@ -4558,14 +4558,10 @@ def execute_task(
     skills_index = build_disclosure_index(menu, skill_index)
     logger.info("skills: eager=%d menu=%d", len(eager_skills), len(menu))
 
-    # Per-skill user overlays. Filesystem reads, so they need the mount — the
-    # same condition `load_persona` already applies to a per-user PERSONA.md.
+    # Per-skill user overlays. Derived by the shared helper rather than here, so
+    # this path and `skills show` cannot resolve different directories.
     # `{user_id}` in the injected label is substituted below with the rest.
-    _overlay_dir = None
-    if config.use_mount:
-        _overlay_dir = config.nextcloud_mount_path / get_user_skill_overlays_path(
-            task.user_id, config.bot_dir_name
-        ).lstrip("/")
+    _overlay_dir = resolve_user_skill_overlays_dir(config, task.user_id)
 
     skills_doc = load_skills(
         config.skills_dir, eager_skills, config.bot_name, config.bot_dir_name,

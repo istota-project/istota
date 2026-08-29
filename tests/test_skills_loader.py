@@ -844,13 +844,61 @@ class TestSkillOverlays:
         assert "#### Keep" not in result
 
     def test_a_hash_run_that_is_not_a_heading_is_left_alone(self, tmp_path):
-        """`##foo` is not an ATX heading; only `## ` is."""
+        """`##foo` is not an ATX heading — the hashes need a space, a tab or the
+        end of the line after them. Everything that *is* one is covered below."""
         skills_dir, overlays, bundled = self._dirs(tmp_path)
         (overlays / "developer.md").write_text("##notaheading\n\n- A rule.\n")
 
         result = self._load(skills_dir, bundled, overlays)
 
         assert "##notaheading" in result
+
+    @pytest.mark.parametrize(
+        "line, expected",
+        [
+            ("## Spaced", "#### Spaced"),
+            (" ## One space", "#### One space"),
+            ("  ## Two spaces", "#### Two spaces"),
+            ("   ## Three spaces", "#### Three spaces"),
+            ("##\tTabbed", "####\tTabbed"),
+            ("##", "####"),
+            ("# Level one", "#### Level one"),
+            ("#", "####"),
+            (" # One space level one", "#### One space level one"),
+        ],
+    )
+    def test_every_shallow_heading_form_is_demoted(self, tmp_path, line, expected):
+        """CommonMark allows up to three leading spaces and a tab separator, and
+        an empty heading is still a heading. Matching the bare `"## "` prefix let
+        five of these through, each a real way out of the skill's section.
+
+        Level 1 is in the list because it escapes strictly harder than level 2:
+        it closes the whole `## Skills Reference` block, not one skill's `### `.
+        """
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text(f"{line}\n\nbody\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert expected in result
+        rendered = result[result.index("supersede anything"):]
+        shallow = [
+            ln for ln in rendered.split("\n")
+            if ln.lstrip(" ").startswith("#") and not ln.lstrip(" ").startswith("###")
+        ]
+        assert shallow == [], f"a heading above level 4 survived: {shallow}"
+
+    def test_three_hashes_are_not_touched_by_the_widened_match(self, tmp_path):
+        """The control for the parametrized case above: `#{1,2}` must not eat
+        the first two hashes of a `### `, which would demote a legal heading."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("### Legal\n#### Also legal\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "### Legal" in result
+        assert "#### Also legal" in result
+        assert "##### " not in result
 
     @pytest.mark.parametrize("fence", ["```", "~~~", "```markdown"])
     def test_a_fenced_sample_is_left_alone(self, tmp_path, fence):
@@ -867,13 +915,20 @@ class TestSkillOverlays:
         assert "\n## Section\n" in result
         assert "#### Real Heading" in result
 
-    def test_an_unclosed_fence_does_not_leak_into_the_next_skill(self, tmp_path):
-        """The overlay is the last thing in its own block, so a runaway fence
-        has nothing after it to swallow — asserted so the demoter's state cannot
-        leak between calls."""
+    def test_an_unclosed_fence_earns_no_exemption(self, tmp_path):
+        """The exemption protects a *sample*, and there is no sample without a
+        closing fence.
+
+        Treating an open fence as one let a single stray ``` line switch the
+        demotion off for the whole rest of the overlay — and the fence runs on
+        past the end of the overlay, so the level-2 heading it protected became
+        a sibling of `## Skills Reference` and swallowed every skill rendered
+        after it into a code block. Both halves are asserted here: the heading
+        is demoted, and the following skill survives as a real `### `.
+        """
         skills_dir, overlays, bundled = self._dirs(tmp_path)
         _write_skill(skills_dir, "notes", "NOTES BODY.")
-        (overlays / "developer.md").write_text("```\n## Inside\n")
+        (overlays / "developer.md").write_text("```\n## Escaped Heading\n")
         (overlays / "notes.md").write_text("## Outside\n")
 
         result = load_skills(
@@ -881,8 +936,32 @@ class TestSkillOverlays:
             bundled_dir=bundled, user_overlay_dir=overlays,
         )
 
-        assert "\n## Inside\n" in result
+        assert "#### Escaped Heading" in result
+        assert "\n## Escaped Heading" not in result
+        assert "\n### Notes\n" in result
+        assert "NOTES BODY." in result
+        # The demoter keeps no state across calls either.
         assert "#### Outside" in result
+
+    def test_a_fence_closed_by_a_shorter_run_stays_open(self, tmp_path):
+        """CommonMark: the closer must be at least as long as the opener. A
+        three-backtick line inside a four-backtick block is content, so the
+        block is still unterminated and earns no exemption."""
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("````\n```\n## Still Inside\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "#### Still Inside" in result
+
+    def test_a_fence_closed_by_a_longer_run_is_exempt(self, tmp_path):
+        skills_dir, overlays, bundled = self._dirs(tmp_path)
+        (overlays / "developer.md").write_text("```\n## Sample\n`````\n## Real\n")
+
+        result = self._load(skills_dir, bundled, overlays)
+
+        assert "\n## Sample\n" in result
+        assert "#### Real" in result
 
     # ---------------------------------------------------------- the fingerprint
 
