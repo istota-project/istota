@@ -20,6 +20,7 @@ from istota.skills._loader import (
     expand_companions,
     load_skill_index,
 )
+from istota.storage import WORKFLOW_EXAMPLE
 
 
 @pytest.fixture(scope="module")
@@ -1069,6 +1070,93 @@ class TestWorkflowDeference:
             f"section {heading!r} decides {decision} and never says the user's "
             "own instructions may set it otherwise"
         )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_USER_RULES_DOC = _REPO_ROOT / "docs" / "development" / "development-rules-user.md"
+
+
+def _pasteable_block(doc: str) -> str:
+    """The fenced ```markdown block a reader copies out of the docs file.
+
+    Scoping the audit to the block rather than to the whole page is what makes
+    it mean something: prose above it can mention a decision in passing, and a
+    reader who pastes the block still gets nothing for it."""
+    opener = "```markdown\n"
+    start = doc.index(opener) + len(opener)
+    return doc[start : doc.index("\n```", start)]
+
+
+class TestTheVocabularyIsWrittenDownForUsers:
+    """Stage 4. The skill stopped ordering eight decisions and now yields on
+    each of them, which is only usable by someone who knows the eight exist.
+    Two artifacts say so — `docs/development/development-rules-user.md`, the
+    block a person pastes into `USER.md` to get the pre-337 routine back, and
+    the seeded `examples/WORKFLOW.md` every user's bot folder carries — and
+    both are read here against `_DEFERRED_DECISIONS`, the same list the body
+    audit above uses. One list, so a ninth deferred decision cannot be added
+    to the skill while the two documents keep describing eight.
+
+    The match is on the decision's own name, case-insensitively, because both
+    artifacts use it as the label of the bullet that explains it. That couples
+    the wording of a label to the wording of the list, deliberately: renaming a
+    decision here fails until both documents are renamed with it."""
+
+    def _doc(self):
+        return _USER_RULES_DOC.read_text()
+
+    @pytest.mark.parametrize("decision", sorted(_DEFERRED_DECISIONS))
+    def test_the_pasteable_block_restores_every_deferred_decision(self, decision):
+        """The page's whole claim is that pasting the block restores the
+        pre-337 workflow. A decision missing from it is one the paster silently
+        keeps the new default for, having been told otherwise."""
+        block = _pasteable_block(self._doc())
+        assert decision.lower() in block.lower(), (
+            f"the block a reader pastes into USER.md says nothing about "
+            f"{decision!r}, so pasting it does not restore that decision"
+        )
+
+    @pytest.mark.parametrize("decision", sorted(_DEFERRED_DECISIONS))
+    def test_the_seeded_example_names_every_deferred_decision(self, decision):
+        """`examples/WORKFLOW.md` is the vocabulary rather than an answer: a
+        decision it omits is one the user never learns they may set."""
+        assert decision.lower() in WORKFLOW_EXAMPLE.lower(), (
+            f"the seeded examples/WORKFLOW.md never names {decision!r}, so a "
+            "user reading it does not know that decision is theirs to make"
+        )
+
+    def test_the_seeded_example_names_both_files_and_the_tie_break(self):
+        """Naming one file leaves half the workflows nowhere to go — `USER.md`
+        alone has no per-project scope, `CHANNEL.md` alone reaches no task from
+        the 1:1 — and naming both without the tie-break leaves a user who wrote
+        both unable to predict which one a task will follow."""
+        assert "USER.md" in WORKFLOW_EXAMPLE
+        assert "CHANNEL.md" in WORKFLOW_EXAMPLE
+        assert "`CHANNEL.md` wins" in WORKFLOW_EXAMPLE, (
+            "the example names both files and never says which wins when they "
+            "disagree"
+        )
+
+    def test_the_seeded_example_says_the_mechanics_do_not_yield(self):
+        """The one thing a vocabulary page can get dangerously wrong is
+        implying the whole skill is negotiable. Section 12's split is the
+        answer and the example has to carry it."""
+        assert "do not yield" in WORKFLOW_EXAMPLE
+
+    def test_the_docs_page_says_the_defaults_need_no_paste(self):
+        """The page exists for the minority who want the old routine. A reader
+        who wants the shipped defaults must not come away thinking there is
+        something to install."""
+        doc = self._doc()
+        assert "paste nothing" in doc.lower(), (
+            "the page never says that a user wanting the shipped defaults does "
+            "nothing at all"
+        )
+
+    def test_the_docs_page_points_at_both_files(self):
+        doc = self._doc()
+        assert "USER.md" in doc
+        assert "CHANNEL.md" in doc
 
 
 class TestLoadBudget:
