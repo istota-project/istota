@@ -622,10 +622,13 @@ class TestBodiesDoNotContradict:
 # because the likeliest next mandate says "every test in the repository" or "the
 # whole test run" and never says "suite" at all. Fenced lines are in scope on
 # purpose: a comment in a recipe the model copies is an instruction, and the
-# report template's `Tests:` field is inside a fence.
+# report template's `Tests:` field is inside a fence. The separator is `[\s-]`
+# rather than `\s` because this change installs the hyphenated form —
+# "whole-repository static checks" — and a quantifier arm that only matched the
+# spaced form would miss the next mandate written in the new vocabulary.
 _SUITE_MENTION = re.compile(
     r"\bsuites?\b"
-    r"|\b(full|whole|entire|complete)\s+(\w+\s+){0,2}(pass|run|suite|tests|repository|tree)\b"
+    r"|\b(full|whole|entire|complete)[\s-]+(\w+[\s-]+){0,2}(pass|run|suite|tests|repository|tree)\b"
     r"|\bverification pass\b"
     r"|\bevery test\b"
     r"|\ball the tests\b",
@@ -639,7 +642,7 @@ _DEFERENCE_MARKERS = ("user's own instructions", "USER.md", "CHANNEL.md")
 # that grows into "the full verification pass over the whole repository" is the
 # restatement coming back.
 _SCOPE_WORDS = re.compile(
-    r"\b(full|whole|entire)\s+(\w+\s+){0,2}(pass|suite|run|repository|tree)\b|\bevery test\b",
+    r"\b(full|whole|entire)[\s-]+(\w+[\s-]+){0,2}(pass|suite|run|repository|tree)\b|\bevery test\b",
     re.IGNORECASE,
 )
 
@@ -677,8 +680,8 @@ _SUITE_LINES_ALLOWED = [
     ),
     (
         _POINTER,
-        "then the verification pass below once, commit",
-        "b9a1bfb02003",
+        "run the verification pass below once, commit",
+        "e10891ce29a1",
         "Fast tier, naming the pass section 7 defines",
     ),
     (
@@ -694,10 +697,17 @@ _SUITE_LINES_ALLOWED = [
         "Full tier, naming the same pass",
     ),
     (
+        _DEFERRED,
+        "The pass is the tests covering the change",
+        "4b06a174eb16",
+        "the single statement of the shipped default",
+    ),
+    (
         _NOT_A_MANDATE,
-        "the suite goes red in a way you did not predict",
-        "30d61b747f8a",
-        "a trigger for escalating a tier, conditioned on a run that happened",
+        "The static half stays whole",
+        "fa27d3514ad8",
+        "why the narrow selection is safe; names a repository-wide run to keep "
+        "the linters in it and to decline the tests",
     ),
     (
         _NOT_A_MANDATE,
@@ -719,21 +729,9 @@ _SUITE_LINES_ALLOWED = [
     ),
     (
         _NOT_A_MANDATE,
-        "Drop the flag for the final full run",
-        "fd9f3b4ae69c",
-        "which flag to drop on a run that happens; demands no run",
-    ),
-    (
-        _DEFERRED,
-        "Affected tests during the loop, the full suite once at the end of the work",
-        "2e78b69a29b8",
-        "the single statement of the shipped default",
-    ),
-    (
-        _NOT_A_MANDATE,
-        "Never re-run a full suite that a timeout killed",
-        "b96d90c65706",
-        "a prohibition on re-running one",
+        "Say what you ran.",
+        "6f541cd4e01b",
+        "the honesty rule: it requires the report to say the suite did not run",
     ),
     (
         _NOT_A_MANDATE,
@@ -864,6 +862,101 @@ class TestWorkflowDeference:
         assert len(defaults) == 1, (
             "the default is stated once. Six restatements of it are what "
             f"ISSUE-337 cost; this allowlist carries {len(defaults)}"
+        )
+
+    def test_the_tier_bullets_name_one_pass_and_no_scope_of_their_own(self):
+        """A3. A tier decides how much *process* a change gets, and section 7
+        decides how much testing. Two of the three bullets used to decide both,
+        which put the mandate in the section the model reads first and left
+        section 7 arguing with it. Each bullet now names the one pass section 7
+        defines and states no scope of its own. Deliberately overlapping the
+        line-level guard above: these are the three lines a future "but Full
+        tier should really run everything" lands on, and a duplicated check on
+        the likeliest regression is cheap."""
+        section = self._step_body(self._body(), "### 5. Pick a change tier, and say which")
+        bullets = [ln for ln in section.splitlines() if ln.startswith("- **")]
+        assert [b.split("**")[1] for b in bullets] == ["Fast", "Standard", "Full"], bullets
+        for bullet in bullets:
+            assert "the verification pass below" in bullet, (
+                "a tier bullet does not name the pass section 7 defines, so it is "
+                f"deciding a scope of its own: {bullet[:140]!r}"
+            )
+            assert not re.search(r"\bsuites?\b", bullet, re.IGNORECASE), (
+                f"a tier escalates to a suite: {bullet[:140]!r}"
+            )
+            assert not _SCOPE_WORDS.search(bullet), (
+                f"a tier bullet restates a run scope: {bullet[:140]!r}"
+            )
+
+    LADDER_LEAD = "take the first rung that yields something"
+
+    def test_the_selection_ladder_is_present_and_ordered(self):
+        """A4. The narrow default is only safe if the model can work out what
+        "the tests covering the change" means in the repository in front of it,
+        and this skill ships to every deployment rather than to this one. The
+        drift to fear is a rewrite by someone working in a Python repository
+        who keeps rung 3 and rung 4, which is all pytest needs, and quietly
+        drops the runners that can answer the question themselves. So the four
+        rungs are required in order, and rung 2 is required to still name the
+        four ecosystems that have a selector.
+
+        Order matters as much as membership: rung 4 is a grep, and a ladder
+        that reached it before trying the runner's own selector would be
+        slower and less accurate everywhere the selector exists."""
+        section = self._step_body(self._body(), "### 7. The verification budget")
+        assert self.LADDER_LEAD in section, (
+            "the selection ladder is gone; the narrow default now names no way "
+            "of arriving at a selection"
+        )
+        ladder = section[section.index(self.LADDER_LEAD) :]
+        following = ladder.find("\n- **")
+        if following != -1:
+            ladder = ladder[:following]
+
+        marks = []
+        for rung in (1, 2, 3, 4):
+            # Either form: `(2)` inline, or `2.` if the ladder is ever unfolded
+            # into a nested list. What is pinned is the ladder, not its markup.
+            found = re.search(rf"\({rung}\)|^\s*{rung}\.\s", ladder, re.MULTILINE)
+            assert found is not None, f"rung {rung} is missing from the selection ladder"
+            marks.append(found.start())
+        assert marks == sorted(marks), f"the four rungs are out of order: {marks}"
+
+        rung_two = ladder[marks[1] : marks[2]]
+        for selector in ("vitest related", "--findRelatedTests", "go test", "cargo test -p"):
+            assert selector in rung_two, (
+                f"rung 2 no longer names {selector!r}; a repository whose runner "
+                "can select for itself is sent to the grep instead"
+            )
+        assert "pytest" in rung_two, (
+            "rung 2 does not say pytest has no selector, so a Python repository "
+            "either stops here or invents one"
+        )
+        assert "grep" in ladder[marks[3] :].lower(), (
+            "rung 4 is no longer the grep, which is the only rung that works in "
+            "a repository the other three do not recognise"
+        )
+
+    def test_the_killed_run_rule_survives_and_is_not_about_suites(self):
+        """The rule that outlived the mandate it was attached to. It read
+        "never re-run a full suite that a timeout killed", and the run this
+        default produces is not a suite — so a task that narrowed, was killed
+        again, and reached for the same command would find nothing addressed to
+        it. Generalizing it also takes it off the allowlist above, since the
+        line no longer mentions a suite for the scan to catch; this assertion
+        is what stops it being deleted along with the mandate."""
+        section = self._step_body(self._body(), "### 7. The verification budget")
+        killed = [ln for ln in section.splitlines() if "killed run" in ln.lower()]
+        assert len(killed) == 1, (
+            f"the killed-run rule is stated once in section 7; found {len(killed)}"
+        )
+        line = killed[0]
+        assert not re.search(r"\bsuites?\b", line, re.IGNORECASE), (
+            f"the rule is about any killed run, not only about suites: {line[:140]!r}"
+        )
+        assert "longer timeout" in line and "same command" in line, (
+            "the rule no longer forbids the two re-runs that cost forty minutes: "
+            f"{line[:140]!r}"
         )
 
     @pytest.mark.parametrize(
