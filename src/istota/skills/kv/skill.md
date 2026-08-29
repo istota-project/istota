@@ -85,6 +85,21 @@ true` and a `value_chars` count of the real length. Use `--keys-only` to see
 just the keys and their sizes, `--max-value-chars 0` to get them whole, or
 `get` for a specific entry — `get` and `set-members` are never truncated.
 
+### Namespaces starting with `_` are reserved
+
+A namespace whose name begins with an underscore holds framework state and is
+refused on every verb, reads included:
+
+```bash
+istota-skill kv list _memory_audit
+# {"status":"error","error":"namespace '_memory_audit' is reserved …"}
+```
+
+They are also left out of `kv namespaces`, so nothing you see listed there will
+be refused. Pick any other name; there is nothing in these you need and nothing
+you can do with them. The refusal applies the same way to a write made inside
+the sandbox, which is replayed after the task rather than run here.
+
 ## Shared (cross-user) store — `--shared`
 
 The per-user store above is private to you. A separate **shared** store lets one

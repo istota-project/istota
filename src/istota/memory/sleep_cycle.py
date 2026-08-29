@@ -871,6 +871,23 @@ def process_user_sleep_cycle(
     """
     sleep_config = config.sleep_cycle
 
+    # One-time import of the pre-KV curation sidecars, then the files go.
+    # Two things about where this sits are deliberate.
+    #
+    # It is outside the `curate_user_memory` gate further down: that flag is
+    # off by default, but the runtime `memory` CLI wrote all three sidecars
+    # regardless, so gating the import on it would strand the files on exactly
+    # the deployments that have them.
+    #
+    # And it is before the early returns rather than at the end: a user with
+    # no interactions in the window leaves this function within a few lines,
+    # and that user's sidecars would never be reached.
+    try:
+        from .curation.audit import migrate_user_md_sidecars
+        migrate_user_md_sidecars(config, user_id)
+    except Exception as e:
+        logger.debug("curation sidecar migration failed for %s: %s", user_id, e)
+
     # Get last run state
     last_run_at, last_task_id = db.get_sleep_cycle_last_run(conn, user_id)
 
@@ -1310,8 +1327,9 @@ def curate_user_memory(
     )
     from .curation.audit import (
         detect_bypass_write,
-        get_user_md_lint_seen_path,
+        read_lint_seen,
         write_last_seen,
+        write_lint_seen,
     )
     from .curation.file_lock import (
         MemoryMdLocked,
@@ -1361,14 +1379,18 @@ def curate_user_memory(
 
     # Phase A lint pass — log only. Find date-stamped bullets that look
     # like temporal facts so we can review the catch rate before flipping
-    # on Phase B (active migration). Dedup against a sidecar so each
-    # bullet emits at most once per TTL window.
+    # on Phase B (active migration). Dedup against the stored seen set so
+    # each bullet emits at most once per TTL window.
     lint_candidates = find_temporal_bullets(doc, kg_text)
     if lint_candidates:
-        lint_candidates = filter_unseen_candidates(
+        lint_candidates, lint_seen = filter_unseen_candidates(
             lint_candidates,
-            get_user_md_lint_seen_path(config, user_id),
+            read_lint_seen(config, user_id),
         )
+        # Persisted whether or not anything survived the filter: the pass
+        # also prunes entries past the TTL, and dropping that work when
+        # every candidate was a repeat would keep expired hashes forever.
+        write_lint_seen(config, user_id, lint_seen)
     if lint_candidates:
         write_audit_log(
             config, user_id,

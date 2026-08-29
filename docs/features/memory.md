@@ -15,7 +15,7 @@ src/istota/memory/
     ├── parser.py             # Markdown ⇄ SectionedDoc round-trip
     ├── ops.py                # apply_ops() with validation
     ├── prompt.py             # Prompt builder + JSON-fence stripper
-    └── audit.py              # USER.md.audit.jsonl writer
+    └── audit.py              # audit trail + USER.md fingerprints, in the KV store
 ```
 
 `memory/sleep_cycle.py` is the cron pipeline that drives the subsystem each night. In-repo callers import explicitly (`from istota.memory.search import ...`); the `__init__.py` re-exports exist for back-compat. The `search()` function is intentionally not re-exported because it would shadow the `search` submodule.
@@ -148,7 +148,7 @@ When `[sleep_cycle] curate_user_memory = true` (opt-in, off by default), the use
    - `{"op": "add_heading", "heading": "...", "lines": [...]}` — create a new heading with one or more bullets.
    - `{"op": "remove", "heading": "...", "match": "..."}` — remove a bullet whose text contains `match` (case-insensitive substring).
 5. **Apply** ops via `apply_ops()`. Each op is independently validated — bad ops accumulate in `rejected` while good ones still apply, and the applier never raises on a malformed op.
-6. **Audit-log** the run to `USER.md.audit.jsonl` (sidecar JSONL next to USER.md, append-only, one entry per night that produced ops).
+6. **Audit-log** the run to the `_memory_audit` KV namespace (one row per night that produced ops).
 7. **Skip the write** when every applied op was a no-op (e.g. all `noop_dup` from dedup, all `noop_no_match` from missing remove targets). The check is outcome-based, not text-based, so harmless formatting drift in USER.md (CRLF, trailing whitespace on headings, missing trailing newline) doesn't trigger a spurious nightly rewrite.
 8. **Write** the new USER.md and **re-index** it under `source_type = "user_memory"` to keep search in sync with the file.
 9. **Post a one-line summary** to the user's `log_channel` if configured and `curation_log_summary = true` (default). Format: `USER.md curated: +N appended, -N removed, +N new headings`.
@@ -191,13 +191,27 @@ Outcomes recorded for applied entries: `applied`, `noop_dup`, `noop_no_match`.
 
 ### Audit log
 
-`USER.md.audit.jsonl` is a sidecar next to USER.md. Each line is a JSON object:
+The trail lives in the framework KV store (`istota_kv`), in the reserved `_memory_audit` namespace — one row per write event, keyed by the event's UTC timestamp plus a per-second counter (`2026-04-28T09:00:00Z-000`). Timestamps sort lexically, so listing the namespace reads the log oldest-first. Each value is a JSON object:
 
 ```json
 {"ts": "2026-04-28T09:00:00Z", "user_id": "alice", "applied": [...], "rejected": [...]}
 ```
 
-The log is written when at least one op was rejected even if no ops applied (so silently-bad runs are reviewable). Truly empty runs (no ops at all) leave no audit trace. There is no rotation in v1.
+The entry is written when at least one op was rejected even if no ops applied (so silently-bad runs are reviewable). Truly empty runs (no ops at all) leave no audit trace. There is no retention in v1.
+
+Two more values sit in the reserved `_memory_curation` namespace: `last_seen` (USER.md's size and sha256 as of the last write that went through the ops engine, which is what bypass detection compares against) and `lint_seen` (the Phase-A lint dedup set).
+
+**These namespaces are not reachable from the `kv` skill.** Every namespace beginning with `_` is refused by the skill CLI and by the deferred-op applier behind it, and hidden from `istota-skill kv namespaces`. Both checks are needed: the CLI covers a host-side call, the applier covers a sandboxed task, whose `kv set` writes a JSON op file the scheduler replays rather than touching the database. The boundary itself is that the framework database is bound into no sandbox at any path; the refusal stops a task reaching the same rows through the one tool that legitimately spans the whole store.
+
+Read the trail with `sqlite3`:
+
+```sql
+SELECT key, value FROM istota_kv
+WHERE user_id = 'alice' AND namespace = '_memory_audit'
+ORDER BY key;
+```
+
+**Migration.** Before this, all three lived as sidecar files next to USER.md (`USER.md.audit.jsonl`, `USER.md.last_seen.json`, `USER.md.lint_seen.json`) — in a folder the user reads by hand, and one bound read-write into their own sandbox. The nightly sleep cycle imports each into the store on its first pass and then removes it, one file at a time, and only where that file's import completed; a file with a line it could not parse is imported as far as it goes and kept. The import runs whether or not `curate_user_memory` is switched on, because the runtime CLI wrote the sidecars either way.
 
 ## Unified retention
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 
 from istota.memory.curation.lint import (
@@ -124,62 +123,64 @@ def _cand(heading: str, bullet: str) -> TemporalBulletCandidate:
 
 
 class TestFilterUnseenCandidates:
-    def test_first_run_keeps_all_and_persists(self, tmp_path):
-        seen_path = tmp_path / "USER.md.lint_seen.json"
-        cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
-        out = filter_unseen_candidates(cands, seen_path, today=date(2026, 5, 5))
-        assert len(out) == 1
-        data = json.loads(seen_path.read_text())
-        assert len(data["hashes"]) == 1
-        assert next(iter(data["hashes"].values())) == "2026-05-05"
+    """The seen set is a plain dict in and a plain dict out; the caller stores
+    it (in the KV store, via `curation.audit`). These used to round-trip it
+    through a `USER.md.lint_seen.json` sidecar the function wrote itself."""
 
-    def test_second_run_within_ttl_drops_seen(self, tmp_path):
-        seen_path = tmp_path / "USER.md.lint_seen.json"
+    def test_first_run_keeps_all_and_records_them(self):
         cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
-        filter_unseen_candidates(cands, seen_path, today=date(2026, 5, 5))
-        out = filter_unseen_candidates(cands, seen_path, today=date(2026, 5, 6))
+        out, seen = filter_unseen_candidates(cands, {}, today=date(2026, 5, 5))
+        assert len(out) == 1
+        assert len(seen) == 1
+        assert next(iter(seen.values())) == "2026-05-05"
+
+    def test_second_run_within_ttl_drops_seen(self):
+        cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
+        _, seen = filter_unseen_candidates(cands, {}, today=date(2026, 5, 5))
+        out, _ = filter_unseen_candidates(cands, seen, today=date(2026, 5, 6))
         assert out == []
 
-    def test_after_ttl_resurfaces(self, tmp_path):
-        seen_path = tmp_path / "USER.md.lint_seen.json"
+    def test_after_ttl_resurfaces(self):
         cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
-        filter_unseen_candidates(cands, seen_path, today=date(2026, 5, 5))
+        _, seen = filter_unseen_candidates(cands, {}, today=date(2026, 5, 5))
         future = date(2026, 5, 5) + timedelta(days=LINT_SEEN_TTL_DAYS + 1)
-        out = filter_unseen_candidates(cands, seen_path, today=future)
+        out, _ = filter_unseen_candidates(cands, seen, today=future)
         assert len(out) == 1
 
-    def test_unseen_candidate_passes_through(self, tmp_path):
-        seen_path = tmp_path / "USER.md.lint_seen.json"
+    def test_unseen_candidate_passes_through(self):
         first = [_cand("Notes", "ordered pen A on 2026-04-15")]
-        filter_unseen_candidates(first, seen_path, today=date(2026, 5, 5))
+        _, seen = filter_unseen_candidates(first, {}, today=date(2026, 5, 5))
         mixed = [
             _cand("Notes", "ordered pen A on 2026-04-15"),
             _cand("Notes", "ordered pen B on 2026-04-20"),
         ]
-        out = filter_unseen_candidates(mixed, seen_path, today=date(2026, 5, 6))
+        out, _ = filter_unseen_candidates(mixed, seen, today=date(2026, 5, 6))
         assert len(out) == 1
         assert out[0].bullet_text.endswith("pen B on 2026-04-20")
 
-    def test_corrupt_seen_file_treated_as_empty(self, tmp_path):
-        seen_path = tmp_path / "USER.md.lint_seen.json"
-        seen_path.write_text("not json")
+    def test_a_non_dict_seen_set_is_treated_as_empty(self):
+        """`read_lint_seen` already coerces, but a corrupt stored value must
+        not reach this function's `.items()` and raise inside a nightly pass."""
         cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
-        out = filter_unseen_candidates(cands, seen_path, today=date(2026, 5, 5))
+        out, seen = filter_unseen_candidates(cands, None, today=date(2026, 5, 5))
         assert len(out) == 1
-        data = json.loads(seen_path.read_text())
-        assert len(data["hashes"]) == 1
+        assert len(seen) == 1
 
-    def test_pruning_drops_stale_entries(self, tmp_path):
-        seen_path = tmp_path / "USER.md.lint_seen.json"
-        seen_path.write_text(json.dumps({
-            "hashes": {
-                "0" * 16: "2025-01-01",  # well past TTL
-                "1" * 16: "2026-05-01",  # within TTL
-            }
-        }))
+    def test_pruning_drops_stale_entries(self):
+        seen_in = {
+            "0" * 16: "2025-01-01",  # well past TTL
+            "1" * 16: "2026-05-01",  # within TTL
+        }
         cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
-        filter_unseen_candidates(cands, seen_path, today=date(2026, 5, 5))
-        data = json.loads(seen_path.read_text())
-        assert "0" * 16 not in data["hashes"]
-        assert "1" * 16 in data["hashes"]
-        assert len(data["hashes"]) == 2  # the one from `cands` plus the within-TTL one
+        _, seen = filter_unseen_candidates(cands, seen_in, today=date(2026, 5, 5))
+        assert "0" * 16 not in seen
+        assert "1" * 16 in seen
+        assert len(seen) == 2  # the one from `cands` plus the within-TTL one
+
+    def test_the_input_dict_is_not_mutated(self):
+        """The caller stores the returned set; mutating the argument would
+        make a failed write look like a successful one on the next read."""
+        seen_in = {"0" * 16: "2026-05-01"}
+        cands = [_cand("Notes", "ordered a Lamy 2000 on 2026-04-15")]
+        filter_unseen_candidates(cands, seen_in, today=date(2026, 5, 5))
+        assert seen_in == {"0" * 16: "2026-05-01"}

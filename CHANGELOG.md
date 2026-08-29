@@ -133,6 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Three machine-kept files no longer sit in your config folder.** The bot tracked its own edits to your memory file in `USER.md.audit.jsonl`, plus two small bookkeeping files beside it. That folder is one you read and edit by hand, and none of the three was for you. All three are now rows in the bot's own database. Nothing you did with that folder changes, and the record itself is unchanged — same entries, same fields, just somewhere else.
+
+- Two consequences worth knowing. The record is harder to lose: that folder is handed to the bot's own tasks to write in, so a task could previously delete its own edit history, or forge the fingerprint the nightly check uses to notice edits made outside the normal path. It can no longer reach either. And the bot's key-value tool now refuses any name starting with an underscore, on reads as well as writes, and leaves those names out of its listing — that is where this state lives.
+
+- **Upgrade note:** the nightly pass imports the three files and then removes them, on its own, the first time it runs after the update. It does this whether or not nightly memory tidying is switched on. A file it cannot fully read is imported as far as it goes and left in place rather than deleted, so nothing is lost silently. Read the imported record with `sqlite3 <db> "select key, value from istota_kv where user_id = '<you>' and namespace = '_memory_audit' order by key"`.
+
 - **The coding skill no longer tells you how to work.** It carried a twelve-step routine — worktree, change tiers, when tests get written, a verification budget, a review before landing, a report template — that was one contributor's habits shipped to every install. That routine is gone, and with it 22 KB of the skill. What is left is machinery: how the repositories, the forge commands and the build container on this deployment work, and what goes wrong if you use them incorrectly.
 
 - **Tests and reviews now happen when you ask for them.** A request to fix a bug is a request to fix a bug. If you want a process, write one — in your memory file, in the coding skill's own per-user file, or in a project room's memory — and the bot follows it. Nothing is imposed by default, and the parts that were never negotiable (the forge boundary, the network allowlist, the credential rules, every delete path) are unchanged.

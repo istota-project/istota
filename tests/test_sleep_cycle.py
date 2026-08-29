@@ -30,6 +30,11 @@ from istota.memory.sleep_cycle import (
 def mount_config(tmp_path):
     mount = tmp_path / "mount"
     mount.mkdir()
+    # The curation audit trail and the USER.md fingerprint are rows in the
+    # framework KV store, so curation tests need a real database behind
+    # `db_path` rather than just a path.
+    from istota import db as _db
+    _db.init_db(tmp_path / "test.db")
     return Config(
         db_path=tmp_path / "test.db",
         temp_dir=tmp_path / "temp",
@@ -886,6 +891,52 @@ def _setup_curation_fixture(mount_config, *, existing_user_md: str | None = None
     return config_dir, memories_dir
 
 
+class TestSidecarMigrationRunsUnconditionally:
+    """The pre-KV sidecars have to be imported and removed on every
+    deployment, not only where nightly curation is switched on.
+
+    `curate_user_memory` is opt-in and off by default, but the runtime `memory`
+    CLI wrote all three sidecars regardless — every entry on the deployment
+    that prompted this change has `source: "runtime"`. Putting the migration
+    behind the curation flag would strand the files on exactly the
+    installations that have them.
+    """
+
+    def _sidecar(self, mount_config, body):
+        from istota.memory.curation.audit import legacy_audit_sidecar_path
+        path = legacy_audit_sidecar_path(mount_config, "alice")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        return path
+
+    def test_migrates_with_curation_off(self, mount_config, db_path):
+        from istota.memory.curation.audit import read_audit_entries
+
+        mount_config.sleep_cycle.curate_user_memory = False
+        path = self._sidecar(
+            mount_config,
+            '{"ts": "2026-08-01T00:00:00Z", "applied": [1], "rejected": []}\n',
+        )
+        with db.get_db(db_path) as conn:
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        assert not path.exists()
+        assert len(read_audit_entries(mount_config, "alice")) == 1
+
+    def test_a_second_pass_does_not_duplicate(self, mount_config, db_path):
+        from istota.memory.curation.audit import read_audit_entries
+
+        mount_config.sleep_cycle.curate_user_memory = False
+        self._sidecar(
+            mount_config,
+            '{"ts": "2026-08-01T00:00:00Z", "applied": [1], "rejected": []}\n',
+        )
+        with db.get_db(db_path) as conn:
+            process_user_sleep_cycle(mount_config, conn, "alice")
+            process_user_sleep_cycle(mount_config, conn, "alice")
+        assert len(read_audit_entries(mount_config, "alice")) == 1
+
+
 class TestCurateUserMemory:
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_writes_updated_user_md_when_ops_applied(self, mock_run, mount_config):
@@ -1072,13 +1123,14 @@ class TestCurateUserMemory:
         )
         mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "A", "line": "- new"}]}')
         curate_user_memory(mount_config, "alice")
-        audit_path = config_dir / "USER.md.audit.jsonl"
-        assert audit_path.exists()
-        import json as _json
-        line = audit_path.read_text().strip().splitlines()[0]
-        entry = _json.loads(line)
+        from istota.memory.curation.audit import read_audit_entries
+        entries = read_audit_entries(mount_config, "alice")
+        assert entries
+        entry = entries[0]
         assert entry["user_id"] == "alice"
         assert any(a["op"]["op"] == "append" for a in entry["applied"])
+        # And nothing landed beside USER.md.
+        assert not list(config_dir.glob("USER.md.*"))
 
     @patch("istota.memory.sleep_cycle._post_curation_summary")
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
@@ -1466,13 +1518,8 @@ class TestUserMemoryObservability:
         )
         curate_user_memory(mount_config, "alice")
 
-        audit_path = config_dir / "USER.md.audit.jsonl"
-        assert audit_path.exists()
-        entries = [
-            __import__("json").loads(line)
-            for line in audit_path.read_text().splitlines()
-            if line.strip()
-        ]
+        from istota.memory.curation.audit import read_audit_entries
+        entries = read_audit_entries(mount_config, "alice")
         assert entries
         last = entries[-1]
         assert "user_md_size_bytes" in last
