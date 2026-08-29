@@ -622,16 +622,26 @@ class TestBodiesDoNotContradict:
 # because the likeliest next mandate says "every test in the repository" or "the
 # whole test run" and never says "suite" at all. Fenced lines are in scope on
 # purpose: a comment in a recipe the model copies is an instruction, and the
-# report template's `Tests:` field is inside a fence. The separator is `[\s-]`
-# rather than `\s` because this change installs the hyphenated form —
-# "whole-repository static checks" — and a quantifier arm that only matched the
-# spaced form would miss the next mandate written in the new vocabulary.
+# report template's `Tests:` field is inside a fence.
+#
+# Two arms are forward-looking rather than witnessed by today's body, and are
+# marked so nobody removes them as dead. `[\s-]` matches nothing the plain `\s`
+# did not, because the body spells it "over the whole repository"; the spec that
+# installed the vocabulary spells it "whole-repository", so the next editor may
+# too. And `run everything` is here because *this* document now uses
+# "everything" as its own word for the wide run ("a reason to widen to
+# everything"), which makes it the phrasing a future mandate reaches for while
+# saying neither "suite" nor "full". The verb is required so the two existing
+# negations, and "everything below applies as written" in the lifecycle, do not
+# have to be classified.
 _SUITE_MENTION = re.compile(
     r"\bsuites?\b"
     r"|\b(full|whole|entire|complete)[\s-]+(\w+[\s-]+){0,2}(pass|run|suite|tests|repository|tree)\b"
     r"|\bverification pass\b"
     r"|\bevery test\b"
-    r"|\ball the tests\b",
+    r"|\ball (of )?(the )?tests\b"
+    r"|\bin (its|their) entirety\b"
+    r"|\b(run|runs|running|execute|executes)[\s-]+(\w+[\s-]+){0,2}everything\b",
     re.IGNORECASE,
 )
 
@@ -699,13 +709,13 @@ _SUITE_LINES_ALLOWED = [
     (
         _DEFERRED,
         "The pass is the tests covering the change",
-        "4b06a174eb16",
+        "7647fc36eba9",
         "the single statement of the shipped default",
     ),
     (
         _NOT_A_MANDATE,
         "The static half stays whole",
-        "fa27d3514ad8",
+        "86473d7f3096",
         "why the narrow selection is safe; names a repository-wide run to keep "
         "the linters in it and to decline the tests",
     ),
@@ -730,7 +740,7 @@ _SUITE_LINES_ALLOWED = [
     (
         _NOT_A_MANDATE,
         "Say what you ran.",
-        "6f541cd4e01b",
+        "699521a79ead",
         "the honesty rule: it requires the report to say the suite did not run",
     ),
     (
@@ -917,22 +927,39 @@ class TestWorkflowDeference:
         for rung in (1, 2, 3, 4):
             # Either form: `(2)` inline, or `2.` if the ladder is ever unfolded
             # into a nested list. What is pinned is the ladder, not its markup.
-            found = re.search(rf"\({rung}\)|^\s*{rung}\.\s", ladder, re.MULTILINE)
-            assert found is not None, f"rung {rung} is missing from the selection ladder"
-            marks.append(found.start())
+            # `[ \t]` and not `\s`, which would swallow the preceding newlines
+            # and report an offset before the marker.
+            found = list(
+                re.finditer(rf"\({rung}\)|^[ \t]*{rung}\.[ \t]", ladder, re.MULTILINE)
+            )
+            assert len(found) == 1, (
+                f"rung {rung} appears {len(found)} times in the ladder, not once. "
+                "A second marker makes the ordering check below read whichever "
+                "one comes first, which is how an out-of-order ladder passes"
+            )
+            marks.append(found[0].start())
         assert marks == sorted(marks), f"the four rungs are out of order: {marks}"
 
-        rung_two = ladder[marks[1] : marks[2]]
-        for selector in ("vitest related", "--findRelatedTests", "go test", "cargo test -p"):
-            assert selector in rung_two, (
+        # Each rung is checked for the content that makes it that rung. Without
+        # this the ordering check passes on a ladder of four bare markers, and a
+        # rung emptied of everything but its number is the likeliest way the
+        # ladder degrades under a later edit.
+        rungs = [ladder[a:b] for a, b in zip(marks, marks[1:] + [len(ladder)])]
+        assert "already touches" in rungs[0], "rung 1 no longer names the tests the change edited"
+        for selector in ("vitest related", "--findRelatedTests", "go test ./", "cargo test -p"):
+            # `go test ./` and not `go test`: the latter is a substring of
+            # `cargo test -p`, so the Go rung would be held up by the Rust one
+            # and could be deleted with the assertion still green.
+            assert selector in rungs[1], (
                 f"rung 2 no longer names {selector!r}; a repository whose runner "
                 "can select for itself is sent to the grep instead"
             )
-        assert "pytest" in rung_two, (
+        assert "pytest" in rungs[1], (
             "rung 2 does not say pytest has no selector, so a Python repository "
             "either stops here or invents one"
         )
-        assert "grep" in ladder[marks[3] :].lower(), (
+        assert "mirroring" in rungs[2], "rung 3 no longer names path mirroring"
+        assert "grep" in rungs[3].lower(), (
             "rung 4 is no longer the grep, which is the only rung that works in "
             "a repository the other three do not recognise"
         )
@@ -954,10 +981,16 @@ class TestWorkflowDeference:
         assert not re.search(r"\bsuites?\b", line, re.IGNORECASE), (
             f"the rule is about any killed run, not only about suites: {line[:140]!r}"
         )
-        assert "longer timeout" in line and "same command" in line, (
-            "the rule no longer forbids the two re-runs that cost forty minutes: "
-            f"{line[:140]!r}"
-        )
+        # The negations, not the nouns. Asserting on "longer timeout" and "same
+        # command" alone passes an inverted rule — "retry it with a longer
+        # timeout, and then with the same command again" carries both phrases
+        # and instructs the exact behaviour that cost forty minutes.
+        lowered = line.lower()
+        for forbidden in ("not with a longer timeout", "not with the same command"):
+            assert forbidden in lowered, (
+                f"the rule no longer forbids {forbidden[8:]!r}, so a re-run of the "
+                f"killed command reads as sanctioned: {line[:140]!r}"
+            )
 
     @pytest.mark.parametrize(
         "decision,heading", sorted(_DEFERRED_DECISIONS.items())
