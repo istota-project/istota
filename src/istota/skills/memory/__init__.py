@@ -1,8 +1,9 @@
-"""Memory skill CLI — runtime writes to USER.md / CHANNEL.md.
+"""Memory skill CLI — runtime writes to USER.md / CHANNEL.md / skill overlays.
 
-Single write path through the curation ops engine (`apply_ops`). Used by
-the always-included memory skill so durable memory writes don't bypass
-heading routing, dedup, or the audit log.
+Single write path through the curation ops engine (`apply_ops`, and
+`curation.overlay` for the flat per-skill files). Used by the always-included
+memory skill so durable memory writes don't bypass heading routing, dedup, or
+the audit log.
 
 Subcommands:
   append        Append a bullet under an existing `## heading` (optionally
@@ -14,11 +15,20 @@ Subcommands:
   remove-heading Drop a whole `## ` section.
   show          Print the current contents of USER.md (or one section).
   headings      List the `## ` heading names in order.
+  skills        Inventory of the per-skill overlay files: what is customized,
+                and whether each one actually binds.
 
 Each write subcommand can target the channel memory file by passing
 `--channel TOKEN`. The TOKEN is validated against `ISTOTA_CONVERSATION_TOKEN`
 when set, to refuse cross-channel writes from a runtime task that's
 been scoped to a different conversation.
+
+`--skill NAME` targets that skill's per-user overlay instead
+(`config/skills/<name>.md`, appended to the skill's bundled body by
+`skills._loader.load_skills`). Overlays are flat — no `## ` sections — so
+`--heading` under `--skill` names a `### ` subsection of the overlay rather
+than a section of USER.md, and `add-heading` / `remove-heading` have nothing
+to act on and are refused.
 
 Env vars used:
   ISTOTA_USER_ID            User whose USER.md is targeted.
@@ -31,11 +41,14 @@ Env vars used:
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 from istota.memory.curation.audit import (
     write_audit_log,
@@ -47,10 +60,37 @@ from istota.memory.curation.file_lock import (
     memory_md_lock,
 )
 from istota.memory.curation.ops import apply_ops
+from istota.memory.curation.overlay import (
+    apply_overlay_op,
+    parse_overlay_doc,
+    serialize_overlay_doc,
+)
 from istota.memory.curation.parser import (
     parse_sectioned_doc,
     serialize_sectioned_doc,
 )
+from istota.memory.curation.types import (
+    classify_line,
+    subheading_text,
+    subsection_region_indices,
+)
+
+#: Target kinds. `_resolve_target` used to answer a bool; three destinations
+#: with three different audit rules is one answer too many for one.
+_USER = "user"
+_CHANNEL = "channel"
+_SKILL = "skill"
+
+#: Ceiling on what this CLI will read back before editing. Distinct from the
+#: loader's `OVERLAY_MAX_BYTES` and much larger, deliberately: a file over the
+#: loader's cap does not load, and `remove` is the only way to bring it back
+#: under — refusing to read it would leave the user with a file they can
+#: neither use nor shrink. This bound exists only so a multi-gigabyte file
+#: planted at the path cannot be pulled into the daemon's memory.
+_MAX_OVERLAY_READ_BYTES = 1024 * 1024
+
+#: How much of an overlay's first line the inventory shows.
+_FIRST_LINE_CHARS = 120
 
 
 def _emit(payload: dict) -> int:
@@ -134,12 +174,87 @@ def _channel_md_path(token: str) -> Path:
     return _mount_path() / "Channels" / token / "CHANNEL.md"
 
 
-def _resolve_target(args) -> tuple[Path, bool]:
-    """Return `(path, is_channel)`."""
+def _overlay_dir() -> Path:
+    """The user's per-skill overlay directory. May not exist."""
+    return _mount_path() / "Users" / _user_id() / _bot_dir() / "config" / "skills"
+
+
+def _skill_index():
+    """Return `(skill_index, config)`, loading the config lazily.
+
+    Deliberately not imported at module scope. This CLI is spawned per write
+    and the rest of it deliberately reads env vars rather than a Config — see
+    `_config_for_audit`. Only the `--skill` paths need to know which skill
+    names exist, so only they pay for the TOML parse and the frontmatter scan.
+    """
+    from istota.config import load_config
+    from istota.skills._loader import load_skill_index
+
+    config = load_config()
+    index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    return index, config
+
+
+def _skill_overlay_path(skill: str, *, verb: str) -> Path:
+    """Resolve `--skill NAME` to its overlay path, or refuse and exit.
+
+    Two refusals, and the first is the write-time half of the typo defense:
+    `--skill develper` would otherwise create a file that binds to nothing and
+    that nothing would ever report, so the name is checked against the loaded
+    skill index and the known names come back with the error — mirroring how
+    `heading_missing` returns `available_headings`.
+
+    The second is the denylist. `sensitive_actions` and `untrusted_input` take
+    no overlay: not a security boundary, since the user can already fork either
+    document through the operator override, but a guard against a casual
+    preference line landing in the safety layer. Only the verbs that *put text
+    in* are refused — `append` and `replace`. `remove` and `show` cannot add a
+    line, and refusing them would leave a hand-planted file in that directory
+    with no way to read it or take it out.
+    """
+    from istota.skills._loader import OVERLAY_DENYLIST, _denylist_key
+
+    index, _config = _skill_index()
+    if skill not in index:
+        _err(
+            "unknown_skill",
+            skill=skill,
+            available_skills=sorted(index),
+        )
+        sys.exit(1)
+    if verb in ("append", "replace") and _denylist_key(skill) in OVERLAY_DENYLIST:
+        _err(
+            "denylisted_skill",
+            skill=skill,
+            denylist=sorted(OVERLAY_DENYLIST),
+        )
+        sys.exit(1)
+    return _check_overlay_dir() / f"{skill}.md"
+
+
+class Target(NamedTuple):
+    path: Path
+    kind: str
+    skill: str | None = None
+
+
+def _resolve_target(args, *, verb: str) -> Target:
+    """Resolve the write/read destination from `--channel` / `--skill`.
+
+    `--skill` and `--channel` name different files under different rules, and
+    a caller that passed both has not said which it meant. Refused rather than
+    given a precedence, so a typo cannot silently write to the other one.
+    """
     token = getattr(args, "channel", None)
+    skill = getattr(args, "skill", None)
+    if token and skill:
+        _err("skill_and_channel_are_exclusive", skill=skill, channel=token)
+        sys.exit(1)
+    if skill:
+        return Target(_skill_overlay_path(skill, verb=verb), _SKILL, skill)
     if token:
-        return _channel_md_path(token), True
-    return _user_md_path(), False
+        return Target(_channel_md_path(token), _CHANNEL)
+    return Target(_user_md_path(), _USER)
 
 
 def _config_for_audit():
@@ -164,6 +279,112 @@ def _read_text(path: Path) -> str:
     except OSError as e:
         _err(f"failed to read {path}: {e}")
         sys.exit(1)
+
+
+def _read_overlay_bytes(path: Path) -> tuple[bytes | None, str | None]:
+    """Read an overlay file. Returns `(data, refusal_reason)`; exactly one is set.
+
+    A missing file is `(b"", None)` — absence is how `append` learns to create
+    one, so it must not read as a refusal.
+
+    This CLI is spawned **host-side** by the skill proxy with the daemon's own
+    filesystem view, while the directory it reads sits under
+    `{mount}/Users/{user_id}`, which `build_bwrap_cmd` binds **read-write**
+    into that user's sandbox. So every entry in it is model-plantable, and a
+    plain `read_text()` here is an arbitrary daemon-side file read whose result
+    `memory show --skill …` hands straight back. Same threat the loader's own
+    reader answers (`skills._loader._read_overlay_bytes`), and the same three
+    answers:
+
+    - `O_NOFOLLOW`, so a symlink at `developer.md` is refused rather than
+      followed to whatever it names.
+    - `S_ISREG` + `O_NONBLOCK`, so a FIFO left at that name cannot block the
+      open and hang the proxy until `security.skill_proxy_timeout` kills it.
+    - the size read off the fd before the read, so the bound is a bound.
+
+    It differs from the loader's in one way that matters: the loader degrades
+    every refusal to "no overlay" because its worst case is an inert
+    customization, while here a refusal must reach the caller. Writing through
+    a refusal would replace whatever was planted with a file the user did not
+    ask for, and reporting one as "file absent" would make `append` clobber it.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return b"", None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return None, "overlay_is_a_symlink"
+        return None, "overlay_unreadable"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "overlay_not_a_regular_file"
+        if st.st_size > _MAX_OVERLAY_READ_BYTES:
+            return None, "overlay_unreadably_large"
+        chunks: list[bytes] = []
+        remaining = _MAX_OVERLAY_READ_BYTES
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks), None
+    except OSError:
+        return None, "overlay_unreadable"
+    finally:
+        os.close(fd)
+
+
+def _read_overlay_text(path: Path) -> str:
+    """`_read_overlay_bytes` with every refusal turned into an error envelope."""
+    raw, reason = _read_overlay_bytes(path)
+    if reason is not None:
+        _err(reason, path=str(path))
+        sys.exit(1)
+    assert raw is not None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _err("overlay_not_utf8", path=str(path))
+        sys.exit(1)
+
+
+def _check_overlay_dir() -> Path:
+    """Refuse a stand-in planted at `config/skills/`. Creates nothing.
+
+    `O_NOFOLLOW` on the overlay file covers the *last* path component only, so
+    a `ln -s ~/.claude config/skills` inside the sandbox slips past it: every
+    read and write then resolves through the link to a directory of the
+    model's choosing. `mkdir(exist_ok=True)` and `os.replace` follow it too.
+    The filename is bounded to a known skill's `<name>.md`, so nothing can be
+    *aimed* at a chosen file — but the directory can, and this `lstat` is what
+    stops it. Every `--skill` path runs it, reads included: a read through a
+    redirected directory is the same hole in the cheaper direction.
+
+    Not atomic with the write that follows — the check and the `os.replace`
+    are separated by the op, so a directory swapped in between is not covered.
+    This closes the planted-link case, which is the one a model reaches with a
+    single command; a genuine race against the daemon is not addressed here.
+    """
+    d = _overlay_dir()
+    if d.is_symlink() or (d.exists() and not d.is_dir()):
+        _err("overlay_dir_not_a_directory", path=str(d))
+        sys.exit(1)
+    return d
+
+
+def _ensure_overlay_dir() -> Path:
+    """`_check_overlay_dir`, then create it at 0755 if it is not there yet."""
+    d = _check_overlay_dir()
+    if not d.exists():
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o755)
+        except OSError:
+            pass
+    return d
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -191,39 +412,64 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def _audit_for(args, op: dict, outcome_or_reason: str, *,
-               user_md_path: Path, is_channel: bool, applied: bool) -> None:
-    """Write a JSONL audit entry for runtime CLI writes against USER.md.
+def _mount_relative(path: Path) -> str:
+    """`path` as written from the mount root, falling back to the absolute form.
 
-    Channel-memory writes are not currently audited — CHANNEL.md has no
-    nightly curator and the audit module only knows about USER.md paths.
+    The audit sidecar sits inside the tree this is relative to, so the absolute
+    prefix would be the same on every entry and carry no information — and it
+    would restate the deployment's filesystem layout in a file the user reads
+    over Nextcloud.
     """
-    if is_channel:
+    try:
+        return str(path.relative_to(_mount_path()))
+    except ValueError:
+        return str(path)
+
+
+def _audit_for(args, op: dict, outcome_or_reason: str, *,
+               target: Target, applied: bool) -> None:
+    """Write a JSONL audit entry for a runtime CLI write.
+
+    USER.md and overlay writes are audited into the same per-user sidecar;
+    an overlay entry carries `skill` and `target_path` so the two are
+    distinguishable, and no `user_md_size_bytes`, because the size of the file
+    that was written is not USER.md's and recording it under that key would be
+    a lie the growth curves are read off.
+
+    Channel-memory writes are not audited — CHANNEL.md has no nightly curator
+    and the audit module only knows about USER.md paths.
+    """
+    if target.kind == _CHANNEL:
         return
     config = _config_for_audit()
     user_id = _user_id()
-    if applied:
-        write_audit_log(
-            config, user_id,
-            applied=[{"op": op, "outcome": outcome_or_reason}],
-            rejected=[],
-            user_md_size_bytes=len(user_md_path.read_text().encode("utf-8"))
-            if user_md_path.exists() else None,
-            source="runtime",
-        )
-    else:
-        write_audit_log(
-            config, user_id,
-            applied=[],
-            rejected=[{"op": op, "reason": outcome_or_reason}],
-            user_md_size_bytes=len(user_md_path.read_text().encode("utf-8"))
-            if user_md_path.exists() else None,
-            source="runtime",
-        )
+    user_md_path = _user_md_path()
+    size = None
+    extra = None
+    if target.kind == _SKILL:
+        extra = {"skill": target.skill, "target_path": _mount_relative(target.path)}
+    elif user_md_path.exists():
+        size = len(user_md_path.read_text().encode("utf-8"))
+    entries = [{"op": op, "outcome": outcome_or_reason}] if applied else []
+    rejects = [] if applied else [{"op": op, "reason": outcome_or_reason}]
+    write_audit_log(
+        config, user_id,
+        applied=entries,
+        rejected=rejects,
+        user_md_size_bytes=size,
+        source="runtime",
+        extra=extra,
+    )
 
 
-def _update_last_seen(path: Path, text: str, is_channel: bool) -> None:
-    if is_channel:
+def _update_last_seen(path: Path, text: str, target: Target) -> None:
+    """Refresh the USER.md fingerprint the nightly bypass detector reads.
+
+    Only for a USER.md write. Stamping it after an overlay or channel write
+    would record a fingerprint of a file the detector never compares against,
+    masking a real out-of-band edit to USER.md itself.
+    """
+    if target.kind != _USER:
         return
     import hashlib
     write_last_seen(
@@ -246,8 +492,11 @@ def _lock_dir() -> Path | None:
     return deferred_lock_dir(Path(deferred)) if deferred else None
 
 
-def _do_op(args, op_dict: dict) -> int:
-    path, is_channel = _resolve_target(args)
+def _do_op(args, op_dict: dict, *, verb: str) -> int:
+    target = _resolve_target(args, verb=verb)
+    if target.kind == _SKILL:
+        return _do_overlay_op(args, target, op_dict)
+    path = target.path
     try:
         with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir()):
             current = _read_text(path)
@@ -260,8 +509,7 @@ def _do_op(args, op_dict: dict) -> int:
                 extras = {}
                 if reason in ("heading_missing", "heading_exists"):
                     extras["available_headings"] = [s.heading for s in doc.sections]
-                _audit_for(args, op_dict, reason,
-                           user_md_path=path, is_channel=is_channel, applied=False)
+                _audit_for(args, op_dict, reason, target=target, applied=False)
                 return _err(reason, **extras)
 
             entry = applied[0]
@@ -269,9 +517,8 @@ def _do_op(args, op_dict: dict) -> int:
             if outcome == "applied":
                 new_text = serialize_sectioned_doc(new_doc)
                 _atomic_write(path, new_text)
-                _update_last_seen(path, new_text, is_channel)
-            _audit_for(args, op_dict, outcome,
-                       user_md_path=path, is_channel=is_channel, applied=True)
+                _update_last_seen(path, new_text, target)
+            _audit_for(args, op_dict, outcome, target=target, applied=True)
             payload = {
                 "status": "ok",
                 "outcome": outcome,
@@ -284,38 +531,179 @@ def _do_op(args, op_dict: dict) -> int:
         return _err("locked", path=str(path))
 
 
+def _do_overlay_op(args, target: Target, op_dict: dict) -> int:
+    """Parse-modify-write one per-skill overlay file.
+
+    Two behaviours the USER.md path has no equivalent of. `append` creates the
+    file (and the directory) when neither exists, because an overlay's normal
+    starting state is absent rather than empty. And a `remove` that takes the
+    last bullet deletes the file instead of leaving a blank one, so `ls` on the
+    directory stays an honest inventory of what is customized — an empty file
+    there reads as "this skill is configured" and would need `memory skills` to
+    contradict it.
+    """
+    from istota.skills._loader import OVERLAY_MAX_BYTES, OVERLAY_WARN_BYTES
+
+    path = target.path
+    try:
+        with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir()):
+            current = _read_overlay_text(path)
+            section = parse_overlay_doc(current)
+            new_section, outcome = apply_overlay_op(section, op_dict)
+            if outcome not in ("applied", "noop_dup", "noop_no_match"):
+                extras = {}
+                if outcome == "subheading_missing":
+                    extras["available_subheadings"] = _overlay_subheadings(section)
+                _audit_for(args, op_dict, outcome, target=target, applied=False)
+                return _err(outcome, skill=target.skill, **extras)
+
+            payload: dict = {
+                "status": "ok",
+                "outcome": outcome,
+                "skill": target.skill,
+            }
+            if outcome == "applied":
+                new_text = serialize_overlay_doc(new_section)
+                if new_text.strip():
+                    _ensure_overlay_dir()
+                    _atomic_write(path, new_text)
+                    size = len(new_text.encode("utf-8"))
+                    payload["bytes"] = size
+                    # An overlay past the loader's hard cap is not loaded at
+                    # all, so a write that crosses it produces a file that is
+                    # silently inert. Nothing else would say so at write time.
+                    if size > OVERLAY_MAX_BYTES:
+                        payload["warning"] = (
+                            f"overlay is {size} bytes, over the {OVERLAY_MAX_BYTES}-byte "
+                            "cap — it will not be loaded"
+                        )
+                    elif size > OVERLAY_WARN_BYTES:
+                        payload["warning"] = (
+                            f"overlay is {size} bytes, over the "
+                            f"{OVERLAY_WARN_BYTES}-byte guidance"
+                        )
+                else:
+                    path.unlink(missing_ok=True)
+                    payload["removed_file"] = True
+            _audit_for(args, op_dict, outcome, target=target, applied=True)
+            if "line" in op_dict:
+                payload["line"] = op_dict["line"]
+            return _emit(payload)
+    except MemoryMdLocked:
+        return _err("locked", path=str(path))
+
+
+def _overlay_subheadings(section) -> list[str]:
+    return [
+        subheading_text(line)
+        for line in section.lines
+        if classify_line(line) == "subheading"
+    ]
+
+
+def _overlay_op(args, op: dict) -> dict:
+    """Rewrite a USER.md-shaped op for an overlay's flatter address space.
+
+    An overlay has no `## ` level, so `--heading` moves down one: it names a
+    `### ` subsection, which is what `--subheading` names on USER.md. Passing
+    both would be two spellings of one target, so `--subheading` is refused
+    rather than silently ignored or silently preferred.
+    """
+    if getattr(args, "subheading", None):
+        _err("subheading_not_valid_with_skill", skill=args.skill)
+        sys.exit(1)
+    op = {k: v for k, v in op.items() if k != "heading"}
+    heading = getattr(args, "heading", None)
+    if heading:
+        op["subheading"] = heading
+    return op
+
+
+def _require_heading(args) -> None:
+    """USER.md and CHANNEL.md ops must name a `## ` section; overlays must not.
+
+    Enforced here rather than by `required=True` so the refusal is the same
+    JSON envelope every other refusal in this CLI is, instead of argparse's
+    exit-2 usage dump on stderr — which the model, reading stdout, sees as an
+    empty answer.
+    """
+    if not getattr(args, "heading", None):
+        _err(
+            "heading_required",
+            hint="--heading names a `## ` section of USER.md; use --skill for an overlay",
+        )
+        sys.exit(1)
+
+
+def _refuse_skill(args, verb: str) -> None:
+    if getattr(args, "skill", None):
+        _err(
+            "heading_ops_not_valid_with_skill",
+            skill=args.skill,
+            verb=verb,
+            hint=(
+                "overlays have no `## ` sections — use append/remove/replace to "
+                "edit one, and `show --skill` / `skills` to inspect one"
+            ),
+        )
+        sys.exit(1)
+
+
 def cmd_append(args) -> int:
+    if getattr(args, "skill", None):
+        return _do_op(args, _overlay_op(args, {"op": "append", "line": args.line}),
+                      verb="append")
+    _require_heading(args)
     op = {"op": "append", "heading": args.heading, "line": args.line}
     subheading = getattr(args, "subheading", None)
     if subheading:
         op["subheading"] = subheading
-    return _do_op(args, op)
+    return _do_op(args, op, verb="append")
 
 
 def cmd_add_heading(args) -> int:
+    _refuse_skill(args, "add-heading")
     return _do_op(
-        args, {"op": "add_heading", "heading": args.heading, "lines": list(args.line)}
+        args, {"op": "add_heading", "heading": args.heading, "lines": list(args.line)},
+        verb="add-heading",
     )
 
 
 def cmd_remove(args) -> int:
-    return _do_op(args, {"op": "remove", "heading": args.heading, "match": args.match})
+    if getattr(args, "skill", None):
+        return _do_op(args, _overlay_op(args, {"op": "remove", "match": args.match}),
+                      verb="remove")
+    _require_heading(args)
+    return _do_op(args, {"op": "remove", "heading": args.heading, "match": args.match},
+                  verb="remove")
 
 
 def cmd_replace(args) -> int:
+    if getattr(args, "skill", None):
+        return _do_op(
+            args,
+            _overlay_op(args, {"op": "replace", "match": args.match, "line": args.line}),
+            verb="replace",
+        )
+    _require_heading(args)
     return _do_op(
         args,
         {"op": "replace", "heading": args.heading, "match": args.match, "line": args.line},
+        verb="replace",
     )
 
 
 def cmd_remove_heading(args) -> int:
-    return _do_op(args, {"op": "remove_heading", "heading": args.heading})
+    _refuse_skill(args, "remove-heading")
+    return _do_op(args, {"op": "remove_heading", "heading": args.heading},
+                  verb="remove-heading")
 
 
 def cmd_show(args) -> int:
-    path, _is_channel = _resolve_target(args)
-    text = _read_text(path)
+    target = _resolve_target(args, verb="show")
+    if target.kind == _SKILL:
+        return _show_overlay(args, target)
+    text = _read_text(target.path)
     if args.heading:
         doc = parse_sectioned_doc(text)
         section = doc.find(args.heading)
@@ -336,15 +724,103 @@ def cmd_show(args) -> int:
     return 0
 
 
+def _show_overlay(args, target: Target) -> int:
+    text = _read_overlay_text(target.path)
+    if not args.heading:
+        print(text, end="" if text.endswith("\n") else "\n")
+        return 0
+    section = parse_overlay_doc(text)
+    region = subsection_region_indices(section, args.heading)
+    if region is None:
+        return _err(
+            "subheading_missing",
+            skill=target.skill,
+            available_subheadings=_overlay_subheadings(section),
+        )
+    start, end = region
+    # `start` is the line after the matched `### ` line; include the heading
+    # itself so the output is a self-contained block, as the USER.md path is.
+    body = "\n".join(section.lines[start - 1:end])
+    print(body, end="" if body.endswith("\n") else "\n")
+    return 0
+
+
 def cmd_headings(args) -> int:
-    path, _ = _resolve_target(args)
-    text = _read_text(path)
+    _refuse_skill(args, "headings")
+    target = _resolve_target(args, verb="headings")
+    text = _read_text(target.path)
     doc = parse_sectioned_doc(text)
     print(json.dumps(
         {"status": "ok", "headings": [s.heading for s in doc.sections]},
         ensure_ascii=False,
     ))
     return 0
+
+
+def cmd_skills(args) -> int:
+    """Inventory of the overlay directory: what is customized, and does it bind.
+
+    Per-file layout is what makes this command necessary and what it pays for:
+    no single `cat` shows the whole configuration, so "what have I customized,
+    and is any of it live?" needs an answer of its own. `binds` is the half
+    that cannot be seen from `ls` — an overlay for a misspelled, disabled or
+    denylisted skill is a file that looks configured and loads into nothing.
+    """
+    from istota.skills._loader import (
+        OVERLAY_DENYLIST,
+        OVERLAY_MAX_BYTES,
+        _denylist_key,
+        effective_disabled_skills,
+    )
+
+    index, config = _skill_index()
+    disabled = effective_disabled_skills(config, _user_id(), index)
+
+    d = _check_overlay_dir()
+    payload: dict = {"status": "ok", "dir": _mount_relative(d), "skills": []}
+    if not d.is_dir():
+        return _emit(payload)
+
+    rows: list[dict] = []
+    for entry in sorted(d.glob("*.md")):
+        skill = entry.name[: -len(".md")]
+        row: dict = {"skill": skill}
+        try:
+            row["bytes"] = entry.lstat().st_size
+        except OSError:
+            row["bytes"] = None
+        reason: str | None = None
+        if skill not in index:
+            reason = "unknown_skill"
+        elif _denylist_key(skill) in OVERLAY_DENYLIST:
+            reason = "denylisted"
+        elif skill in disabled:
+            reason = "skill_disabled"
+
+        raw, refusal = _read_overlay_bytes(entry)
+        if refusal is not None:
+            reason = reason or refusal
+        else:
+            try:
+                text = (raw or b"").decode("utf-8")
+            except UnicodeDecodeError:
+                reason = reason or "overlay_not_utf8"
+            else:
+                body = [ln for ln in text.split("\n") if ln.strip()]
+                row["lines"] = len(body)
+                row["first_line"] = body[0].strip()[:_FIRST_LINE_CHARS] if body else ""
+                if not body:
+                    reason = reason or "empty"
+                elif row["bytes"] and row["bytes"] > OVERLAY_MAX_BYTES:
+                    reason = reason or "over_cap"
+
+        row["binds"] = reason is None
+        if reason is not None:
+            row["reason"] = reason
+        rows.append(row)
+
+    payload["skills"] = rows
+    return _emit(payload)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -360,42 +836,68 @@ def build_parser() -> argparse.ArgumentParser:
             help="Target /Channels/<token>/CHANNEL.md instead of USER.md.",
         )
 
+    def _add_skill_flag(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--skill",
+            help=(
+                "Target this skill's per-user overlay (config/skills/<name>.md) "
+                "instead of USER.md. Overlays are flat: --heading names a "
+                "`### ` subsection of the overlay, not a `## ` section."
+            ),
+        )
+
+    # `--heading` is deliberately not `required=True` on the ops that accept
+    # `--skill`: it is required for USER.md and CHANNEL.md and optional for an
+    # overlay, which argparse cannot express, and `_require_heading` refuses in
+    # the CLI's own JSON envelope rather than argparse's stderr usage dump.
     p_app = sub.add_parser("append", help="Append a bullet under an existing heading.")
-    p_app.add_argument("--heading", required=True)
+    p_app.add_argument("--heading")
     p_app.add_argument("--line", required=True)
     p_app.add_argument(
         "--subheading",
         help="Append under this `### subheading` of the heading instead of the top region.",
     )
     _add_channel_flag(p_app)
+    _add_skill_flag(p_app)
 
     p_add = sub.add_parser("add-heading", help="Add a new heading with one or more bullets.")
     p_add.add_argument("--heading", required=True)
     p_add.add_argument("--line", action="append", required=True,
                        help="Bullet line; pass multiple times for multiple bullets.")
     _add_channel_flag(p_add)
+    _add_skill_flag(p_add)
 
     p_rm = sub.add_parser("remove", help="Remove a bullet under a heading (unique substring).")
-    p_rm.add_argument("--heading", required=True)
+    p_rm.add_argument("--heading")
     p_rm.add_argument("--match", required=True)
     _add_channel_flag(p_rm)
+    _add_skill_flag(p_rm)
 
     p_rep = sub.add_parser("replace", help="Rewrite the single matching bullet in place.")
-    p_rep.add_argument("--heading", required=True)
+    p_rep.add_argument("--heading")
     p_rep.add_argument("--match", required=True)
     p_rep.add_argument("--line", required=True)
     _add_channel_flag(p_rep)
+    _add_skill_flag(p_rep)
 
     p_rmh = sub.add_parser("remove-heading", help="Drop a whole `## ` section.")
     p_rmh.add_argument("--heading", required=True)
     _add_channel_flag(p_rmh)
+    _add_skill_flag(p_rmh)
 
     p_show = sub.add_parser("show", help="Print USER.md (optionally filtered to one heading).")
     p_show.add_argument("--heading")
     _add_channel_flag(p_show)
+    _add_skill_flag(p_show)
 
     p_h = sub.add_parser("headings", help="List the `## ` heading names.")
     _add_channel_flag(p_h)
+    _add_skill_flag(p_h)
+
+    sub.add_parser(
+        "skills",
+        help="Inventory the per-skill overlay files and whether each one binds.",
+    )
 
     return parser
 
@@ -411,6 +913,7 @@ def main(argv=None) -> int:
         "remove-heading": cmd_remove_heading,
         "show": cmd_show,
         "headings": cmd_headings,
+        "skills": cmd_skills,
     }
     rc = commands[args.command](args)
     if rc:

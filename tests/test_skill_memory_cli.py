@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -400,3 +402,474 @@ class TestBotDirFallback:
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "error"
         assert "could not infer" in out["error"]
+
+
+# --------------------------------------------------------- per-skill overlays
+
+OVERLAY_SKILLS = ("developer", "notes", "sensitive_actions", "untrusted_input", "browse")
+
+
+@pytest.fixture
+def overlay_env(tmp_path, monkeypatch):
+    """USER.md set up as usual, plus a Config whose skill index is ours.
+
+    The `--skill` paths load a Config where the rest of this CLI reads env
+    vars, so the index has to be pinned or the tests would assert against
+    whatever skills happen to be bundled.
+    """
+    from istota.config import Config, UserConfig
+
+    user_md = _setup_user(tmp_path, monkeypatch)
+    bundled = tmp_path / "bundled"
+    for name in OVERLAY_SKILLS:
+        d = bundled / name
+        d.mkdir(parents=True)
+        (d / "skill.md").write_text(
+            f"---\nname: {name}\ndescription: the {name} skill\n---\n\n# {name}\n"
+        )
+    config = Config(
+        db_path=tmp_path / "istota.db",
+        temp_dir=tmp_path / "tmp",
+        nextcloud_mount_path=tmp_path / "mount",
+        bundled_skills_dir=bundled,
+        skills_dir=tmp_path / "ops_skills",
+        users={"alice": UserConfig()},
+    )
+    monkeypatch.setattr("istota.config.load_config", lambda *a, **kw: config)
+    overlays = user_md.parent / "skills"
+    return SimpleNamespace(user_md=user_md, overlays=overlays, config=config)
+
+
+class TestOverlayAppend:
+    def test_append_creates_the_directory_and_the_file(self, overlay_env, capsys):
+        assert not overlay_env.overlays.exists()
+        memory_main([
+            "append", "--skill", "developer",
+            "--line", "Never run the full suite here",
+        ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["outcome"] == "applied"
+        assert out["skill"] == "developer"
+        f = overlay_env.overlays / "developer.md"
+        assert f.read_text() == "- Never run the full suite here\n"
+        assert oct(f.stat().st_mode)[-3:] == "644"
+        assert oct(overlay_env.overlays.stat().st_mode)[-3:] == "755"
+
+    def test_append_to_an_existing_overlay(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- first rule\n")
+        memory_main(["append", "--skill", "developer", "--line", "second rule"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert f.read_text() == "- first rule\n- second rule\n"
+
+    def test_append_duplicate_is_a_noop(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- first rule\n")
+        memory_main(["append", "--skill", "developer", "--line", "First Rule"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "noop_dup"
+        assert f.read_text() == "- first rule\n"
+
+    def test_append_under_a_subsection(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- top rule\n\n### Testing\n\n- existing\n")
+        memory_main([
+            "append", "--skill", "developer", "--heading", "Testing",
+            "--line", "added",
+        ])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        body = f.read_text()
+        assert body.index("- existing") < body.index("- added")
+
+    def test_append_under_a_missing_subsection_lists_what_there_is(
+        self, overlay_env, capsys
+    ):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_text("### Testing\n\n- a\n")
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--skill", "developer", "--heading", "Nope", "--line", "x",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "subheading_missing"
+        assert out["available_subheadings"] == ["Testing"]
+
+    def test_a_level_two_heading_cannot_be_written(self, overlay_env, capsys):
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", "developer", "--line", "## Rules"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "line_starts_with_hash"
+        assert not (overlay_env.overlays / "developer.md").exists()
+
+    def test_subheading_flag_is_refused_with_skill(self, overlay_env, capsys):
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--skill", "developer",
+                "--subheading", "Testing", "--line", "x",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "subheading_not_valid_with_skill"
+
+    def test_append_writes_an_audit_entry_naming_the_target(
+        self, overlay_env, capsys
+    ):
+        memory_main(["append", "--skill", "developer", "--line", "Audit me"])
+        capsys.readouterr()
+        audit = overlay_env.user_md.parent / "USER.md.audit.jsonl"
+        entry = json.loads(audit.read_text().strip().splitlines()[-1])
+        assert entry["source"] == "runtime"
+        assert entry["skill"] == "developer"
+        assert entry["target_path"] == "Users/alice/istota/config/skills/developer.md"
+        assert entry["applied"][0]["outcome"] == "applied"
+        # Not USER.md's size — that key is read as USER.md growth.
+        assert "user_md_size_bytes" not in entry
+
+    def test_overlay_write_does_not_move_the_user_md_fingerprint(
+        self, overlay_env, capsys
+    ):
+        # The last_seen sidecar is what the nightly bypass detector compares
+        # against. Stamping it here would mask an out-of-band USER.md edit.
+        memory_main(["append", "--skill", "developer", "--line", "x"])
+        capsys.readouterr()
+        assert not (overlay_env.user_md.parent / "USER.md.last_seen.json").exists()
+
+
+class TestOverlayRemoveAndReplace:
+    def test_remove_takes_one_bullet(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- alpha rule\n- beta rule\n")
+        memory_main(["remove", "--skill", "developer", "--match", "alpha"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert f.read_text() == "- beta rule\n"
+
+    def test_removing_the_last_bullet_deletes_the_file(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- only rule\n")
+        memory_main(["remove", "--skill", "developer", "--match", "only"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        assert out["removed_file"] is True
+        assert not f.exists()
+        # The directory stays — an empty one is an honest "nothing customized".
+        assert overlay_env.overlays.is_dir()
+
+    def test_multiple_matches_leaves_the_file_alone(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- alpha one\n- alpha two\n")
+        before = f.read_text()
+        with pytest.raises(SystemExit):
+            memory_main(["remove", "--skill", "developer", "--match", "alpha"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "multiple_matches"
+        assert out["skill"] == "developer"
+        assert f.read_text() == before
+
+    def test_no_match_is_a_noop_not_an_error(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- alpha\n")
+        memory_main(["remove", "--skill", "developer", "--match", "gamma"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "noop_no_match"
+        assert f.read_text() == "- alpha\n"
+
+    def test_replace_rewrites_in_place(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "notes.md"
+        f.write_text("- author: legacy_name\n- other rule\n")
+        memory_main([
+            "replace", "--skill", "notes",
+            "--match", "author: legacy_name", "--line", "author: current_name",
+        ])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert f.read_text() == "- author: current_name\n- other rule\n"
+
+
+class TestOverlayTargetRefusals:
+    def test_unknown_skill_is_refused_with_the_known_names(self, overlay_env, capsys):
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", "develper", "--line", "x"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "unknown_skill"
+        assert out["skill"] == "develper"
+        assert "developer" in out["available_skills"]
+        assert not overlay_env.overlays.exists()
+
+    def test_a_traversal_name_is_not_a_known_skill(self, overlay_env, capsys):
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", "../../USER", "--line", "x"])
+        assert json.loads(capsys.readouterr().out)["error"] == "unknown_skill"
+
+    @pytest.mark.parametrize("skill", ["sensitive_actions", "untrusted_input"])
+    def test_append_to_a_denylisted_skill_is_refused(self, overlay_env, capsys, skill):
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", skill, "--line", "be nicer"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "denylisted_skill"
+        assert out["skill"] == skill
+        assert not (overlay_env.overlays / f"{skill}.md").exists()
+
+    def test_replace_on_a_denylisted_skill_is_refused(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "untrusted_input.md"
+        f.write_text("- planted by hand\n")
+        with pytest.raises(SystemExit):
+            memory_main([
+                "replace", "--skill", "untrusted_input",
+                "--match", "planted", "--line", "softened",
+            ])
+        assert json.loads(capsys.readouterr().out)["error"] == "denylisted_skill"
+        assert f.read_text() == "- planted by hand\n"
+
+    def test_remove_on_a_denylisted_skill_is_the_escape_hatch(
+        self, overlay_env, capsys
+    ):
+        # `remove` and `show` cannot put text into the safety layer, and
+        # refusing them would leave a hand-planted file unreadable and
+        # undeletable through the only sanctioned write path.
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "untrusted_input.md"
+        f.write_text("- planted by hand\n")
+        memory_main(["remove", "--skill", "untrusted_input", "--match", "planted"])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert not f.exists()
+
+    def test_skill_and_channel_together_are_refused(self, overlay_env, capsys):
+        with pytest.raises(SystemExit):
+            memory_main([
+                "append", "--skill", "developer", "--channel", "room-1", "--line", "x",
+            ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "skill_and_channel_are_exclusive"
+        assert not overlay_env.overlays.exists()
+
+    @pytest.mark.parametrize("verb", ["add-heading", "remove-heading"])
+    def test_heading_ops_are_refused_with_skill(self, overlay_env, capsys, verb):
+        argv = [verb, "--skill", "developer", "--heading", "Rules"]
+        if verb == "add-heading":
+            argv += ["--line", "x"]
+        with pytest.raises(SystemExit):
+            memory_main(argv)
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "heading_ops_not_valid_with_skill"
+        assert out["verb"] == verb
+
+    def test_user_md_ops_still_require_a_heading(self, overlay_env, capsys):
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--line", "x"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "heading_required"
+
+
+class TestOverlayPlantedPaths:
+    """The overlay directory is bound read-write into the user's sandbox and
+    this CLI runs host-side with the daemon's filesystem view, so every entry
+    in it is model-plantable."""
+
+    def test_a_symlink_at_the_overlay_path_is_refused_not_followed(
+        self, tmp_path, overlay_env, capsys
+    ):
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").symlink_to(secret)
+
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--skill", "developer"])
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        assert json.loads(captured)["error"] == "overlay_is_a_symlink"
+
+    def test_a_symlink_is_refused_on_the_write_path_too(
+        self, tmp_path, overlay_env, capsys
+    ):
+        victim = tmp_path / "victim.md"
+        victim.write_text("- untouched\n")
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").symlink_to(victim)
+
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", "developer", "--line", "planted"])
+        assert json.loads(capsys.readouterr().out)["error"] == "overlay_is_a_symlink"
+        assert victim.read_text() == "- untouched\n"
+
+    def test_a_fifo_at_the_overlay_path_is_refused_without_blocking(
+        self, overlay_env, capsys
+    ):
+        # A blocking `open(2)` here hangs host-side work until the proxy
+        # timeout, so the refusal has to come from O_NONBLOCK + S_ISREG rather
+        # than from a read that never returns.
+        overlay_env.overlays.mkdir(parents=True)
+        os.mkfifo(overlay_env.overlays / "developer.md")
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--skill", "developer"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "overlay_not_a_regular_file"
+
+    def test_a_symlinked_overlay_directory_is_refused(
+        self, tmp_path, overlay_env, capsys
+    ):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        overlay_env.overlays.symlink_to(elsewhere, target_is_directory=True)
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--skill", "developer", "--line", "x"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "overlay_dir_not_a_directory"
+        assert list(elsewhere.iterdir()) == []
+
+    @pytest.mark.parametrize("argv", [["show"], ["skills"]])
+    def test_the_read_paths_refuse_a_symlinked_directory_too(
+        self, tmp_path, overlay_env, capsys, argv
+    ):
+        # O_NOFOLLOW covers the last path component only, so a redirected
+        # directory would otherwise be read straight through on every verb
+        # that does not write.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "developer.md").write_text("- TOP SECRET TOKEN\n")
+        overlay_env.overlays.symlink_to(elsewhere, target_is_directory=True)
+        with pytest.raises(SystemExit):
+            memory_main(argv + (["--skill", "developer"] if argv == ["show"] else []))
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        assert json.loads(captured)["error"] == "overlay_dir_not_a_directory"
+
+
+class TestOverlayShow:
+    def test_show_prints_the_whole_overlay(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_text("- one\n- two\n")
+        memory_main(["show", "--skill", "developer"])
+        assert capsys.readouterr().out == "- one\n- two\n"
+
+    def test_show_filters_to_a_subsection(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_text(
+            "- top\n\n### Testing\n\n- nested\n\n### Other\n\n- elsewhere\n"
+        )
+        memory_main(["show", "--skill", "developer", "--heading", "Testing"])
+        out = capsys.readouterr().out
+        assert "### Testing" in out
+        assert "- nested" in out
+        assert "elsewhere" not in out
+        assert "- top" not in out
+
+    def test_show_of_an_absent_overlay_is_empty_not_an_error(self, overlay_env, capsys):
+        memory_main(["show", "--skill", "developer"])
+        assert capsys.readouterr().out.strip() == ""
+
+
+class TestOverlayInventory:
+    def test_empty_directory_reports_nothing_customized(self, overlay_env, capsys):
+        memory_main(["skills"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["skills"] == []
+
+    def test_rows_carry_size_line_count_and_first_line(self, overlay_env, capsys):
+        body = "- Never run the full suite here\n- Use scripts/qt\n"
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_text(body)
+        memory_main(["skills"])
+        rows = json.loads(capsys.readouterr().out)["skills"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["skill"] == "developer"
+        assert row["binds"] is True
+        assert row["lines"] == 2
+        assert row["first_line"] == "- Never run the full suite here"
+        assert row["bytes"] == len(body)
+
+    def test_a_misspelled_file_is_reported_as_not_binding(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "develper.md").write_text("- a rule\n")
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["skill"] == "develper"
+        assert row["binds"] is False
+        assert row["reason"] == "unknown_skill"
+
+    def test_a_denylisted_file_is_reported_as_not_binding(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "untrusted_input.md").write_text("- planted\n")
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "denylisted"
+
+    def test_a_disabled_skill_is_reported_as_not_binding(self, overlay_env, capsys):
+        overlay_env.config.disabled_skills = ["browse"]
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "browse.md").write_text("- a rule\n")
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "skill_disabled"
+
+    def test_a_planted_symlink_is_reported_rather_than_read(
+        self, tmp_path, overlay_env, capsys
+    ):
+        secret = tmp_path / "credentials.json"
+        secret.write_text("- TOP SECRET TOKEN\n")
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").symlink_to(secret)
+        memory_main(["skills"])
+        captured = capsys.readouterr().out
+        assert "TOP SECRET" not in captured
+        row = json.loads(captured)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "overlay_is_a_symlink"
+        assert "first_line" not in row
+
+    def test_an_over_cap_file_is_reported_as_not_binding(self, overlay_env, capsys):
+        from istota.skills._loader import OVERLAY_MAX_BYTES
+
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md").write_text(
+            "- padding\n" * (OVERLAY_MAX_BYTES // 10 + 10)
+        )
+        memory_main(["skills"])
+        row = json.loads(capsys.readouterr().out)["skills"][0]
+        assert row["binds"] is False
+        assert row["reason"] == "over_cap"
+
+    def test_non_markdown_entries_are_not_listed(self, overlay_env, capsys):
+        overlay_env.overlays.mkdir(parents=True)
+        (overlay_env.overlays / "developer.md.bak").write_text("- a rule\n")
+        (overlay_env.overlays / "README.txt").write_text("hi\n")
+        memory_main(["skills"])
+        assert json.loads(capsys.readouterr().out)["skills"] == []
+
+
+class TestOverlayCapWarning:
+    def test_crossing_the_hard_cap_warns_that_it_will_not_load(
+        self, overlay_env, capsys
+    ):
+        from istota.skills._loader import OVERLAY_MAX_BYTES
+
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- padding\n" * (OVERLAY_MAX_BYTES // 10))
+        memory_main(["append", "--skill", "developer", "--line", "one more rule"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        assert "will not be loaded" in out["warning"]
+
+    def test_crossing_the_guidance_warns_without_claiming_it_is_inert(
+        self, overlay_env, capsys
+    ):
+        from istota.skills._loader import OVERLAY_WARN_BYTES
+
+        overlay_env.overlays.mkdir(parents=True)
+        f = overlay_env.overlays / "developer.md"
+        f.write_text("- padding\n" * (OVERLAY_WARN_BYTES // 10))
+        memory_main(["append", "--skill", "developer", "--line", "one more rule"])
+        out = json.loads(capsys.readouterr().out)
+        assert "over the" in out["warning"]
+        assert "will not be loaded" not in out["warning"]
