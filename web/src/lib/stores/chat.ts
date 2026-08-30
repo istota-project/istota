@@ -55,7 +55,11 @@ import {
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
-import { isKnownCommand, resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
+import {
+  isKnownCommand,
+  loadCommandNames,
+  resetCommandCatalogue,
+} from '$lib/components/chat/autocomplete/providers';
 import {
   applyEvent as applySegmentEvent,
   type ChatMessage,
@@ -2179,6 +2183,31 @@ function createSession(): ChatSession {
   }
 
   async function init() {
+    // Warm the command catalogue, because `send()` reads its snapshot
+    // synchronously to decide whether a body typed against a running turn is
+    // answered inline or queued (ISSUE-300, ISSUE-238). `isKnownCommand` with
+    // no names argument reads a module-level set that is empty until some
+    // caller has awaited a fetch, and the only other callers are the
+    // autocomplete providers, which fetch lazily — on the keystroke that opens
+    // the popover, resolving some time after it. So without this a `!stop`
+    // typed and sent quickly enough is not recognised as a command and is
+    // queued *behind* the turn it was meant to cancel, which is the one
+    // outcome the inline-command exemption exists to prevent.
+    //
+    // Here rather than in the composer, which is where it used to live as a
+    // side effect of a derivation it no longer has: the consumer of the
+    // snapshot owns loading it, and this is the function `teardown`'s
+    // `resetCommandCatalogue()` pairs with. Fire-and-forget and idempotent —
+    // the catalogue caches its own promise — so it needs no generation guard.
+    //
+    // Caught rather than left to `void`: `loadCatalogue` already degrades a
+    // failed *fetch* to an empty catalogue, so anything reaching here is a
+    // throw from the call itself, and an unhandled rejection out of the
+    // store's boot path is noise wherever it lands. An empty catalogue is the
+    // conservative answer this had before the warm existed — a command is not
+    // recognised and the message queues — so failing quietly loses nothing
+    // that was not already lost.
+    void loadCommandNames().catch(() => {});
     // `onMount` does not await this and `onDestroy` calls teardown regardless,
     // so a navigation away mid-load would otherwise let the rest of init run
     // *after* teardown — starting a stream, a timer and a visibility listener

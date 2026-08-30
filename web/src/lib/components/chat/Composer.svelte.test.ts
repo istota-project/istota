@@ -1187,6 +1187,44 @@ describe('Composer drafts', () => {
     expect(readDraft('room:3')).toBe('');
   });
 
+  it('holds the draft of an ordinary send whose own POST flips busy under it', async () => {
+    // The real parent flips `busy` — and with it `queueing` — synchronously
+    // inside `onSend`: the store's `send()` reaches `status.set('sending')`
+    // before it returns. Reading the prop *after* that call therefore reported
+    // every ordinary send from an idle room as queued, cleared the draft on
+    // submit and wrote no `unsettledSends` entry — leaving `settleDraft` and
+    // `switchDraft`'s in-flight refusal both inert, with the durability
+    // mechanism switched off and nothing saying so.
+    //
+    // A bare `vi.fn()` cannot model that, which is why every other draft test
+    // in this file passes either way. `rerender` assigns into the same
+    // reactive props object synchronously, so this reproduces the flip.
+    const utils: { rerender?: (p: Record<string, unknown>) => Promise<void> } = {};
+    const onSend = vi.fn(() => {
+      void utils.rerender?.({ busy: true, queueing: true, onCancel: () => {} });
+    });
+    const rendered = mount({
+      draftKey: 'room:3',
+      onSend,
+      busy: false,
+      queueing: false,
+      sendSettled: { n: 0, key: null },
+    });
+    utils.rerender = rendered.rerender;
+    await type(rendered.textarea, 'going out');
+
+    await fireEvent.click(btn(document.body, 'Send')!);
+    expect(onSend).toHaveBeenCalled();
+    // Held, not dropped: this send has no durable copy until the ack.
+    expect(readDraft('room:3')).toBe('going out');
+
+    // And the ack still recognises it, which is the half that needs the map
+    // entry the queued branch would have skipped.
+    await rendered.rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
+    expect(readDraft('room:3')).toBe('');
+  });
+
   it('leaves an unacked send its draft when a second message is queued behind it', async () => {
     // The one case where an enqueue must not clear the slot: it belongs to a
     // message whose POST is still open, whose stored copy is the only one that

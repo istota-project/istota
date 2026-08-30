@@ -70,6 +70,20 @@
      * ack is waited for. The composer is told rather than deriving it, because
      * the rule lives in the store's `send()` — the composer cannot see whether
      * the room is busy for a reason that queues.
+     *
+     * It is read once, at the top of `submit`, before `onSend` runs. See the
+     * note there: the send flips this prop under the handler that reads it.
+     *
+     * **Two things it does not distinguish**, both accepted rather than
+     * overlooked. A mid-turn `!command` is answered inside the request and
+     * queued nowhere, but arrives here as `true` and so has its draft cleared;
+     * that is the better of the two wrongs, since the alternative was an
+     * `unsettledSends` entry no ack ever settles (`sendInlineCommand` does not
+     * bump `sendSettled`), holding the slot for the session. And the store can
+     * still *refuse* an enqueue — a room that left `$rooms` mid-click — where
+     * the draft has already been cleared against a queue entry that was never
+     * written. Closing that means `send()` reporting acceptance, which is a
+     * change to its signature rather than to this component.
      */
     queueing?: boolean;
     /**
@@ -667,6 +681,16 @@
     // A citation does not make an empty message sendable — it is a pointer,
     // not content.
     if (!t && attachments.length === 0) return;
+    // Read *before* the send, and this is not a style choice. `onSend` runs the
+    // store's `send()` synchronously, which reaches `status.set('sending')`
+    // before it returns, so the page's `busy` — and with it this prop — has
+    // already flipped by the time the draft branch below is reached. Read
+    // there, every ordinary send from an idle room looked queued: the draft it
+    // is supposed to hold through the ack was cleared on submit instead, and
+    // no `unsettledSends` entry was written, which left `settleDraft` and
+    // `switchDraft`'s in-flight refusal with nothing to act on. The whole
+    // durability mechanism was inert and nothing said so.
+    const queued = queueing;
     onSend(t, attachments, replyTo);
     text = '';
     attachments = [];
@@ -698,7 +722,7 @@
         // over whatever typing this submit left in the slot, and the map entry
         // stays its owner's.
         writeDraft(activeDraftKey, held);
-      } else if (queueing) {
+      } else if (queued) {
         // Queued, so the send queue is now the durable copy and it was written
         // under its own key the moment the message was accepted. Holding the
         // draft as well would put a second copy of the same text in a slot

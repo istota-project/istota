@@ -354,4 +354,26 @@ describe('send/stop control styling', () => {
     expect(notPrevented).toBe(true);
     expect(field.value).toBe('the eleventh');
   });
+
+  it('takes the refusal from the caller, so an idle room can still send', async () => {
+    // The cap governs the queue, and the queue is only consulted while a turn
+    // is running — an idle room's send takes the ordinary path and is capped by
+    // nothing. The page gates `queueFull` on `busy` for that reason, and this
+    // is the composer's half of it: handed false, it refuses nothing and shows
+    // nothing, however many held rows are sitting in the transcript.
+    const onSend = vi.fn();
+    const { container } = render(Composer, {
+      props: { onSend, busy: false, queueFull: false },
+    });
+    const field = container.querySelector('textarea')!;
+    await fireEvent.input(field, { target: { value: 'send it' } });
+
+    expect(container.querySelector('.notice-row')).toBeNull();
+    const send = container.querySelector<HTMLButtonElement>(
+      '.icon-btn.send:not([aria-label="Finish recording"])',
+    )!;
+    expect(send.disabled).toBe(false);
+    await fireEvent.click(send);
+    expect(onSend).toHaveBeenCalledWith('send it', [], null);
+  });
 });

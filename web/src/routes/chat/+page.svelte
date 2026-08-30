@@ -150,7 +150,14 @@
   // Past the cap the composer refuses with the reason on screen and keeps the
   // text in the field. The store refuses at the same cap on the way in, which
   // is the backstop under this rather than a substitute for it.
-  const queueFull = $derived(queuedHere >= MAX_QUEUED_PER_ROOM);
+  //
+  // Gated on `busy`, because that is the condition the cap itself is under:
+  // `send()` only reaches `enqueueSend` while the room is not idle, so in an
+  // idle room the same message takes the ordinary path and consults no cap.
+  // Ungated, a room holding ten *held* rows — which is what a restored queue
+  // looks like on every page load — refused every send in an idle room, with
+  // a notice saying messages were waiting on a turn that was not running.
+  const queueFull = $derived(busy && queuedHere >= MAX_QUEUED_PER_ROOM);
 
   // The message the next send will cite. Held as the bare id, because that is
   // all the composer ever names and all the draft ever stores; the author
