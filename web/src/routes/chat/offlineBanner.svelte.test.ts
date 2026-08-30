@@ -1,6 +1,6 @@
 /**
- * What the chat page says about being offline: the banner, and the room-list
- * badge for what is waiting to send.
+ * What the chat page says about being offline: the banner, the room-list badge
+ * for what is waiting to send, and what an empty room reads as.
  *
  * Two things here are load-bearing and neither is the wording. The row is tied
  * to the connectivity store rather than to a failed request, so it goes as soon
@@ -30,6 +30,7 @@ vi.mock('$lib/stores/chat', async () => {
     sendReturned: writable({ n: 0, token: null, text: '', attachments: [] }),
     outboundDrafts: writable([]),
     externalTurnDisplay: writable('full'),
+    offlineTranscript: writable(false),
     queuedCounts: writable({}),
   };
   // Every method the page reaches for answers with a resolved promise —
@@ -161,5 +162,42 @@ describe('the room-list queued badge', () => {
     render(Page);
     await waitFor(() => expect(roomRow('Room 1')).toBeInTheDocument());
     expect(screen.queryByTitle(/not sent yet/)).toBeNull();
+  });
+});
+
+/**
+ * An empty room with nothing cached for it (ISSUE-202).
+ *
+ * A room that has never been opened with a connection has no saved tail, so
+ * offline it renders empty — honest, and silent about why. The invitation to
+ * ask something is the wrong sentence there: it reads as an empty room rather
+ * than as a room that cannot be read from here, and it says nothing about the
+ * composer underneath still working.
+ */
+describe('an empty transcript with nothing cached', () => {
+  const NOTHING_SAVED = /Nothing from this room is saved on this device/;
+
+  function setEmptyRoom(offline: boolean) {
+    const session = getChatSession() as unknown as Record<string, { set: (v: unknown) => void }>;
+    session.rooms.set([]);
+    session.queuedCounts.set({});
+    session.activeRoomId.set(null);
+    session.messages.set([]);
+    session.view.set('room');
+    session.offlineTranscript.set(offline);
+  }
+
+  it('says nothing is saved for the room rather than inviting a question', async () => {
+    setEmptyRoom(true);
+    render(Page);
+    await waitFor(() => expect(screen.getByText(NOTHING_SAVED)).toBeInTheDocument());
+    expect(screen.queryByText(/Ask Istota anything/)).toBeNull();
+  });
+
+  it('keeps the ordinary invitation for a room that is simply empty', async () => {
+    setEmptyRoom(false);
+    render(Page);
+    await waitFor(() => expect(screen.getByText(/Ask Istota anything/)).toBeInTheDocument());
+    expect(screen.queryByText(NOTHING_SAVED)).toBeNull();
   });
 });

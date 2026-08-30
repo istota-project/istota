@@ -894,6 +894,20 @@
             {:else if $view === 'all'}
               <MessageSquare size={28} />
               <p>No messages yet</p>
+            {:else if $offlineTranscript}
+              <!-- An empty room offline is two different facts, and the prompt
+                   to ask something is only right for one of them. Nothing is
+                   saved for this room — it was never opened with a connection,
+                   or its tail has expired — and saying so is the difference
+                   between a room that is empty and a room that cannot be read
+                   from here. The composer below still queues, which is why the
+                   second line says so rather than leaving it to be found. -->
+              <MessageSquare size={28} />
+              <p>Nothing from this room is saved on this device.</p>
+              <span class="hint">
+                Its messages are here again when you’re back online. You can still write one — it
+                waits until then.
+              </span>
             {:else}
               <MessageSquare size={28} />
               <p>
