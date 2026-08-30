@@ -105,7 +105,7 @@ _KEEP_NAMES = frozenset({
     # The golden-regeneration switch, which is a harness input like the tier
     # selectors above but matches neither keep-prefix. Scrubbing it did not
     # merely disable the feature — it made the documented command
-    # (`ISTOTA_UPDATE_GOLDEN=1 uv run pytest tests/test_prompt_golden.py -n0`,
+    # (`uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0`,
     # in AGENTS.md and `.claude/rules/testbed.md`) report the goldens as
     # *failing* while writing nothing, which reads as a real prompt regression.
     # `test_prompt_golden.updating()` is what keeps a stale value from rubber

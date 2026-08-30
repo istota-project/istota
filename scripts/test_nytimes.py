@@ -94,8 +94,8 @@ def main():
     # Step 2: Find article links
     links = r.get("links", [])
     articles = [
-        l for l in links
-        if "/202" in l.get("href", "") and len(l.get("text", "").strip()) > 15
+        link for link in links
+        if "/202" in link.get("href", "") and len(link.get("text", "").strip()) > 15
     ]
     check("found articles on index", len(articles) >= 5, f"got {len(articles)}")
 

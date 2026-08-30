@@ -29,7 +29,6 @@ Each tool_call turn drives one loop iteration; the first text-only turn ends it.
 """
 
 import argparse
-import asyncio
 import json
 import sys
 import tempfile

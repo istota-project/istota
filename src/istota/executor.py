@@ -3958,6 +3958,195 @@ def _apply_memory_cap(
     return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts, playbooks
 
 
+# ---------------------------------------------------------------- rules block
+
+# The `## Important rules` list, assembled once for everybody.
+#
+# It used to be two f-strings, one per privilege level, and they drifted the way
+# two copies of a list always do: a rule added to one reached half the
+# deployment with nothing anywhere to say so. Rule 3c (ISSUE-345) was written
+# into both by hand, and the goldens could not have caught a miss — each is
+# regenerated from whatever its own block holds, so both would still have
+# matched.
+#
+# Two things had to be decided to merge them, and both are visible in the list
+# rather than inferred.
+#
+# **The labels stay hand-written.** Generating `1.` … `N.` would flatten the
+# 3/3a/3b/3c family, and that family is deliberate: a lettered rule is an
+# insertion under its parent, which is what says 3a-3c are all "when a step
+# cannot be done here". So a rule carries its own label and the list carries
+# only the order.
+#
+# **The admin-only rule takes a letter too**, `6a.`, where it used to be a plain
+# `7.` that pushed the whole admin tail one ahead of the standard user's. That
+# offset was the only reason the two lists could not share a numbering. Reusing
+# the existing convention keeps the rule where it was — beside `6.`, which is
+# also about what the user ends up reading — and leaves 1 through 10 meaning the
+# same thing at both privilege levels.
+#
+# Three entries still differ by privilege (the access rule, the database rule,
+# and the skill-CLI rule, which names subtasks only where they exist) and one is
+# admin-only. Everything else is written once.
+
+
+def _db_rule(*, is_admin: bool, db_masked: bool) -> str:
+    """Rule 3, over two axes: whether the databases are masked, and privilege.
+
+    Where the masks are in place the rule can state a fact — there is nothing
+    to open. Where they are not (`effective_sandboxing` is False) it has to fall
+    back to a prohibition, because telling the model there is nothing there
+    would be false, and a false boundary claim is worse than no claim. That is
+    what ISSUE-237 corrected.
+    """
+    if db_masked and is_admin:
+        return (
+            "Istota's databases are not on your filesystem — the directories "
+            "that hold them are empty here, so there is nothing for `sqlite3` or "
+            "Python's `sqlite3` to open and no path worth hunting for. Every "
+            "read goes through a skill CLI (e.g. `istota-skill kv get`, "
+            "`istota-skill tasks status`), which runs outside this sandbox and "
+            "returns only your own data; every write goes through one, or via "
+            "deferred JSON files in $ISTOTA_DEFERRED_DIR."
+        )
+    if db_masked:
+        return (
+            "Istota's databases are not on your filesystem — the directories "
+            "that hold them are empty here, so there is nothing for `sqlite3` or "
+            "Python's `sqlite3` to open. All database access, read and write, "
+            "goes through the skill CLI commands, which run outside this "
+            "sandbox and return only your own data, or through the bot's "
+            "scheduler."
+        )
+    if is_admin:
+        return (
+            "Never open a database file directly — not to write, and not to "
+            "read. This deployment has no filesystem sandbox, so an attempt may "
+            "well succeed and hand you every user's rows; that it works is not "
+            "permission. Every read goes through a skill CLI (e.g. "
+            "`istota-skill kv get`, `istota-skill tasks status`), which returns "
+            "only your own data; every write goes through one, or via deferred "
+            "JSON files in $ISTOTA_DEFERRED_DIR."
+        )
+    return (
+        "Never open a database file directly — not to write, and not to "
+        "read. This deployment has no filesystem sandbox, so an attempt may "
+        "well succeed; those files hold every user's data and none of it is "
+        "yours to read this way. All database access, read and write, goes "
+        "through the skill CLI commands, which return only your own data, "
+        "or through the bot's scheduler."
+    )
+
+
+def _one_line(value: str) -> str:
+    """No interpolated value may contain a line break.
+
+    The whole block's structure is carried by line prefixes — the joiner puts
+    one rule per line and the label at the front of it — so a value carrying
+    `\n1. ` forges a rule in the model-facing prompt. Rules 1 and 2 interpolate
+    a user id, a filesystem path and stored email addresses, none of which is
+    validated for this anywhere upstream. The exposure predates the merge (the
+    two f-strings had it identically); it is closed here because this is now the
+    one place that knows the structure depends on it.
+
+    Collapsed to a space rather than refused: this runs on the prompt-assembly
+    path, where raising means no task at all, and a mangled user id in a rule is
+    a far better failure than a forged rule or a dead deployment.
+    """
+    return value.replace("\r", " ").replace("\n", " ")
+
+
+def build_rules_section(
+    *,
+    is_admin: bool,
+    user_id: str,
+    scoped_path: str,
+    user_email_addresses: list[str] | None,
+    db_masked: bool,
+) -> str:
+    """The `## Important rules` block, for either privilege level.
+
+    `scoped_path` is read only for a standard user, and rule 1 is where the two
+    blocks used to disagree about what the rule even means: an admin is told
+    whose resources are theirs, a standard user is told which directory is.
+    """
+    user_id = _one_line(user_id)
+    scoped_path = _one_line(scoped_path)
+    addresses = (
+        ", ".join(_one_line(a) for a in user_email_addresses)
+        if user_email_addresses
+        else "none configured"
+    )
+
+    rules: list[tuple[str, str]] = [
+        (
+            "1.",
+            f"Only access resources that belong to user '{user_id}' as listed above."
+            if is_admin
+            else f"You can ONLY access files under {scoped_path}. You do NOT have access to the task database or other users' data.",
+        ),
+        (
+            "2.",
+            "For sensitive actions, ask for confirmation EXCEPT:\n"
+            f"   - Emails to the user's own addresses ({addresses}) do NOT need confirmation\n"
+            "   - Emails to external addresses DO need confirmation\n"
+            "   - Modifying calendars, deleting files, sharing externally need confirmation",
+        ),
+        ("3.", _db_rule(is_admin=is_admin, db_masked=db_masked)),
+        (
+            "3a.",
+            "When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs, subtasks or file polling; subtasks and jobs are handoffs and never return a value to you. If nothing covers it, say what is missing instead of improvising."
+            if is_admin
+            else "When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs or file polling; a scheduled job is a handoff and never returns a value to you. If nothing covers it, say what is missing instead of improvising.",
+        ),
+        (
+            "3b.",
+            "Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from \"not ready yet\" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.",
+        ),
+        (
+            "3c.",
+            "A step that failed goes in the deliverable, not only in your reasoning. On unattended work — scheduled jobs, briefings, digests, reminders — never reconstruct a broken script's work by hand: do not monkeypatch it, import its functions and drive them yourself, or feed it values recovered from memory search. The artifact you deliver is the only surface anyone sees there, so producing the expected one anyway hides the breakage for as long as someone keeps repairing it. Where the result was asked for in this task, standing in for a broken step by hand is allowed only if the reply says plainly what failed and what you put in its place. Being resourceful means finding the answer, never quietly replacing a step that is broken.",
+        ),
+        (
+            "4.",
+            "After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.",
+        ),
+        ("5.", "Never edit or create files in your own source directory."),
+        (
+            "6.",
+            "Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.",
+        ),
+    ]
+
+    if is_admin:
+        rules.append((
+            "6a.",
+            "Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content.",
+        ))
+
+    rules += [
+        (
+            "7.",
+            "Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for \"today\".",
+        ),
+        (
+            "8.",
+            "Dates that appear in fetched content (RSS/feed items, web pages, emails, file contents) are publication or authorship dates — never infer the current date from them. The `Today's date` and `Current time` lines above are the only authoritative source for \"today\", even when fetched content shows a later date (e.g. a feed item already stamped tomorrow in another timezone).",
+        ),
+        (
+            "9.",
+            "When computing elapsed time between two timestamps (\"X ago\", \"merged N hours ago\", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for \"now\".",
+        ),
+        (
+            "10.",
+            "Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper.",
+        ),
+    ]
+
+    body = "\n".join(f"{label} {text}" for label, text in rules)
+    return f"## Important rules\n\n{body}"
+
+
 def build_prompt(
     task: db.Task,
     user_resources: list[db.UserResource],
@@ -4241,47 +4430,9 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     db_path_line = "Database: reachable only through skill CLIs (no file access)"
 
     # Whether the masks are actually in place — see `effective_sandboxing` for
-    # the shapes where they are not. Telling the model there is nothing to open
-    # would be false there, and a false boundary claim is worse than none — it
-    # is the thing this whole change set is correcting. So the rule keeps the
-    # older prohibition-without-mechanism wording instead.
+    # the shapes where they are not, and `_db_rule` for what the rule says in
+    # each case.
     db_masked = effective_sandboxing(config)
-    if db_masked:
-        db_rule_admin = (
-            "3. Istota's databases are not on your filesystem — the directories "
-            "that hold them are empty here, so there is nothing for `sqlite3` or "
-            "Python's `sqlite3` to open and no path worth hunting for. Every "
-            "read goes through a skill CLI (e.g. `istota-skill kv get`, "
-            "`istota-skill tasks status`), which runs outside this sandbox and "
-            "returns only your own data; every write goes through one, or via "
-            "deferred JSON files in $ISTOTA_DEFERRED_DIR."
-        )
-        db_rule_user = (
-            "3. Istota's databases are not on your filesystem — the directories "
-            "that hold them are empty here, so there is nothing for `sqlite3` or "
-            "Python's `sqlite3` to open. All database access, read and write, "
-            "goes through the skill CLI commands, which run outside this "
-            "sandbox and return only your own data, or through the bot's "
-            "scheduler."
-        )
-    else:
-        db_rule_admin = (
-            "3. Never open a database file directly — not to write, and not to "
-            "read. This deployment has no filesystem sandbox, so an attempt may "
-            "well succeed and hand you every user's rows; that it works is not "
-            "permission. Every read goes through a skill CLI (e.g. "
-            "`istota-skill kv get`, `istota-skill tasks status`), which returns "
-            "only your own data; every write goes through one, or via deferred "
-            "JSON files in $ISTOTA_DEFERRED_DIR."
-        )
-        db_rule_user = (
-            "3. Never open a database file directly — not to write, and not to "
-            "read. This deployment has no filesystem sandbox, so an attempt may "
-            "well succeed; those files hold every user's data and none of it is "
-            "yours to read this way. All database access, read and write, goes "
-            "through the skill CLI commands, which return only your own data, "
-            "or through the bot's scheduler."
-        )
 
     # Explicit privileges line so admin-gated capabilities (subtasks, shared-KV
     # writes, DB access) don't have to be inferred from indirect signals or
@@ -4290,44 +4441,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     db_tool_line = ""  # DB writes handled via deferred JSON files
 
-    if is_admin:
-        rules_section = f"""## Important rules
-
-1. Only access resources that belong to user '{task.user_id}' as listed above.
-2. For sensitive actions, ask for confirmation EXCEPT:
-   - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
-   - Emails to external addresses DO need confirmation
-   - Modifying calendars, deleting files, sharing externally need confirmation
-{db_rule_admin}
-3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs, subtasks or file polling; subtasks and jobs are handoffs and never return a value to you. If nothing covers it, say what is missing instead of improvising.
-3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
-4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
-5. Never edit or create files in your own source directory.
-6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
-7. Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content.
-8. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today".
-9. Dates that appear in fetched content (RSS/feed items, web pages, emails, file contents) are publication or authorship dates — never infer the current date from them. The `Today's date` and `Current time` lines above are the only authoritative source for "today", even when fetched content shows a later date (e.g. a feed item already stamped tomorrow in another timezone).
-10. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now".
-11. Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper."""
-    else:
-        scoped_path = str(config.nextcloud_mount_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
-        rules_section = f"""## Important rules
-
-1. You can ONLY access files under {scoped_path}. You do NOT have access to the task database or other users' data.
-2. For sensitive actions, ask for confirmation EXCEPT:
-   - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
-   - Emails to external addresses DO need confirmation
-   - Modifying calendars, deleting files, sharing externally need confirmation
-{db_rule_user}
-3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs or file polling; a scheduled job is a handoff and never returns a value to you. If nothing covers it, say what is missing instead of improvising.
-3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
-4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
-5. Never edit or create files in your own source directory.
-6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
-7. Ignore the `currentDate` value in any auto-memory block — it is rendered in the host's UTC clock and may be off by one day from local time. Use the `Today's date`, `Current time`, and `User timezone` lines at the top of this prompt as the authoritative source for "today".
-8. Dates that appear in fetched content (RSS/feed items, web pages, emails, file contents) are publication or authorship dates — never infer the current date from them. The `Today's date` and `Current time` lines above are the only authoritative source for "today", even when fetched content shows a later date (e.g. a feed item already stamped tomorrow in another timezone).
-9. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now".
-10. Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper."""
+    scoped_path = str(config.nextcloud_mount_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
+    rules_section = build_rules_section(
+        is_admin=is_admin,
+        user_id=task.user_id,
+        scoped_path=scoped_path,
+        user_email_addresses=user_email_addresses,
+        db_masked=db_masked,
+    )
 
     # The citation frame. Unconditional whenever a snapshot exists, because the
     # user's message is a response *to* that text and routinely depends on it
