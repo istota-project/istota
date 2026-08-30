@@ -159,7 +159,17 @@ reconcile_min_dwell_sec: int = 60
 auth: str = "nextcloud"            # "nextcloud" | "none"; env ISTOTA_WEB_AUTH; unknown → warning + "nextcloud"
 port: int = 8766
 token_storage: str = "ephemeral"   # "ephemeral" | "encrypted"; anything else → warning + ephemeral
+max_avatar_kb: int = 4096          # profile-picture upload cap; header + running total
 ```
+`max_avatar_kb` bounds one endpoint, and it is deliberately not the same number
+as nginx's `client_max_body_size` (rendered from
+`istota_web_chat_max_attachment_mb`, 100 MB). nginx bounds what reaches the
+process at all; this bounds what the avatar route accepts, and it is checked
+twice — on the declared `Content-Length` before the body is read, and again on
+the running total as the stream arrives, because the declared length is a
+claim. Neither substitutes for the other, and a cap checked on
+`len(await file.read())` would materialize whatever nginx let through before
+refusing. Ansible: `istota_web_max_avatar_kb`.
 `auth = "none"` is the local single-user no-auth mode: `web_app._require_api_auth`
 early-returns the fixed local user (`Config.local_user_id`), `_user_is_web_admin`
 is True for that user, `_verify_origin` no-ops, and `_resolve_session_secret`

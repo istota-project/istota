@@ -530,6 +530,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | `oauth2_token_endpoint` | `""` | Optional server-to-server token URL override |
 | `oauth2_userinfo_endpoint` | `""` | Optional server-to-server userinfo URL override |
 | `oauth2_redirect_uri` | `""` | Explicit redirect URI override; otherwise derived from request |
+| `max_avatar_kb` | `4096` | Byte cap on a profile-picture upload, in KB. Enforced on the declared `Content-Length` before the body is read and again on the running total. Separate from nginx's `client_max_body_size`, which bounds what reaches the process at all and is sized for chat attachments |
 | `session_secret_key` | `""` | Session signing key (or `ISTOTA_WEB_SESSION_SECRET_KEY` env) |
 
 ### `[web.chat]`

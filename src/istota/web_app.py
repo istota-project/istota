@@ -1281,6 +1281,13 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         "features": features,
         "contact": contact,
         "nextcloud_token": nextcloud_token,
+        # Content hashes for the two identities the client always renders, so
+        # it can build an immutable URL for each without a round trip. A third
+        # party's hash deliberately does not travel here or per message: the
+        # client asks `/avatars/user/{id}` with no version and pays one
+        # conditional request per author per session, which is cheaper than a
+        # field on every row of the byte-budgeted room-event stream.
+        "avatars": _avatar_hashes(username),
     }
 
 
@@ -7352,6 +7359,403 @@ async def chat_download_file(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# ---- Avatars ----
+#
+# Four routes: the deployment's bot icon, one user's picture, and the caller's
+# own upload and removal. The store and the decode path are `avatars.py`; what
+# lives here is who may see a face, what a cache may keep, and the two size
+# checks that stand in front of the decoder.
+#
+# **The refused case and the empty case are one answer.** A 403 for "not
+# visible" and a 404 for "no avatar" would let any authenticated caller
+# enumerate the deployment's user list one id at a time, and an avatar is a
+# face. Same rule as message stars: not-found and not-a-member are deliberately
+# indistinguishable. `_avatar_not_found` is the single response object every
+# such branch returns, so the three cases cannot drift apart by editing one.
+#
+# **The cache table, and why branch 5 is not `immutable`:**
+#
+#   1. no stored avatar, or not visible  404  private, max-age=30
+#   2. If-None-Match matches             304  whatever 3/4/5 would have sent
+#   3. `v` absent or stale               200  private, no-cache
+#   4. `v` matches, bot or self          200  private, max-age=31536000, immutable
+#   5. `v` matches, a co-member          200  private, max-age=300
+#
+# Membership is revocable and is revoked by code that already exists
+# (`db.remove_room_member` from the room delete and archive paths, and the
+# member wipe on room teardown). A year-long `immutable` entry for a
+# co-member's face survives all of that, which would make the authorization
+# predicate unenforceable exactly when it starts mattering. Five minutes is
+# long enough to cover a transcript render and short enough that revocation
+# takes effect. The self and bot cases are not revocable, so they keep the long
+# cache. Branch 2 re-sends `Cache-Control` because a 304 that omits it leaves
+# the stored entry on whatever freshness it was first cached with, and the
+# three 200 branches do not agree.
+#
+# Branch 1 is a short negative cache rather than `no-store`: with `no-store` a
+# room holding one avatar-less member costs a 404 on every page load forever.
+#
+# **The shared-device residual, stated rather than left implicit.** `private`
+# excludes shared intermediary caches and says nothing about the browser's own
+# disk cache surviving a logout. On a browser profile two people take turns
+# using, the second can pull the first's own face out of cache with no session.
+# Accepted: it is one person's face on a machine they were just signed into,
+# the same class as the back button showing the last rendered page, and it is
+# bounded to branch 4 and to branch 5's five minutes. If that ever becomes
+# unacceptable the answer is `private, no-store` plus client-side blob URLs,
+# not a longer header.
+#
+# `Content-Disposition` is deliberately not `attachment`, unlike `/chat/files`:
+# that endpoint serves arbitrary user-supplied bytes, this serves bytes the app
+# itself encoded as WebP one function ago, and it has to render in an `<img>`.
+
+# Multipart envelope allowance on top of the byte cap: a boundary, one part's
+# headers and the trailing CRLFs. Generous, because it only decides when the
+# stream is cut off — the cap that decides what is *stored* is checked again on
+# the file part itself, inside `avatars.normalize`.
+_AVATAR_MULTIPART_ALLOWANCE = 8192
+
+# **A per-request memory budget, enforced as a one-at-a-time decode.**
+#
+# `avatars.normalize` bounds the decode on the declared pixel count, but that
+# is not the whole peak: Pillow decompresses a PNG's text chunks inside
+# `Image.open`, before any ceiling this app can see, bounded only by Pillow's
+# own `MAX_TEXT_MEMORY` (64 MiB). Measured, a 67 KB PNG of nothing but text
+# chunks peaks near 67 MB and is then accepted as an ordinary avatar. So one
+# upload can cost far more than its 4 MB cap suggests, and the only knobs that
+# would fix it at the source are Pillow module globals shared with the
+# executor's attachment pre-shrink running in another thread — which is exactly
+# why `avatars.py` writes none of them.
+#
+# What the route can bound is how many uploads pay that peak at once. One
+# worker of its own, following the doctor deep-check executor above: an avatar
+# upload is a rare, ~50ms interactive action, so serializing costs nothing
+# worth measuring, and on the default executor a burst would both multiply the
+# peak and pin workers shared with every other `to_thread` caller in a
+# single-process uvicorn.
+_avatar_decode_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="avatar-decode",
+)
+
+
+def _avatar_not_found() -> JSONResponse:
+    """The one answer for every "you get no picture here" branch."""
+    return JSONResponse(
+        {"error": "not found"},
+        status_code=404,
+        headers={
+            "Cache-Control": "private, max-age=30",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _avatar_if_none_match(header: str | None, content_hash: str) -> bool:
+    """Whether a conditional request already holds the current bytes.
+
+    Takes a list, `W/` prefixes and `*`, because a browser sends back what it
+    was given and an intermediary is free to weaken a strong validator.
+    """
+    if not header:
+        return False
+    for candidate in header.split(","):
+        token = candidate.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        if token.strip('"') == content_hash:
+            return True
+    return False
+
+
+def _avatar_response(
+    request: Request,
+    *,
+    content_hash: str,
+    mime: str,
+    image: bytes,
+    version: str,
+    revocable: bool,
+) -> Response:
+    """Branches 2 to 5 of the table above, in that order."""
+    if version and version == content_hash:
+        cache = (
+            "private, max-age=300" if revocable
+            else "private, max-age=31536000, immutable"
+        )
+    else:
+        cache = "private, no-cache"
+    headers = {
+        "Cache-Control": cache,
+        "ETag": f'"{content_hash}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if _avatar_if_none_match(request.headers.get("if-none-match"), content_hash):
+        return Response(status_code=304, headers=headers)
+    # `mime` is read from the column and never sniffed. It can only hold
+    # `NORMALIZED_MIME`, because that is the only thing `normalize` emits.
+    return Response(content=image, media_type=mime, headers=headers)
+
+
+def _load_bot_avatar():
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        return avatars.get_bot_avatar(conn)
+
+
+def _load_visible_user_avatar(viewer: str, subject: str):
+    """The subject's picture, or None when the caller may not have it.
+
+    Not-visible and not-present collapse to one return value here rather than
+    at the route, so no caller can accidentally tell them apart.
+    """
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        if viewer != subject and not db.shares_room_with(conn, viewer, subject):
+            return None
+        return avatars.get_user_avatar(conn, subject)
+
+
+def _avatar_hashes(username: str) -> dict:
+    """The two content hashes `/me` carries, or nulls.
+
+    Best-effort. `/me` is the identity every page in the app reads, and these
+    two keys are decoration on it: a framework database that predates the
+    avatar migration must cost the decoration, not the route.
+    """
+    if _config is None:
+        return {"user": None, "bot": None}
+    from . import avatars, db
+
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return {
+                "user": avatars.user_avatar_hash(conn, username),
+                "bot": avatars.bot_avatar_hash(conn),
+            }
+    except sqlite3.Error:
+        logger.debug("avatar hashes unavailable for /me", exc_info=True)
+        return {"user": None, "bot": None}
+
+
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    """Read the request body, refusing before it exists in memory.
+
+    Two checks, and neither substitutes for the other. The declared length is
+    what lets the refusal happen before a byte is read; the running total is
+    the enforcement, because the declared length is a claim. The only upstream
+    bound is nginx's `client_max_body_size`, which the deployment renders from
+    the chat attachment limit and sets to 100 MB — so a cap checked on
+    `len(await file.read())` materializes up to that per concurrent request
+    before refusing.
+    """
+    from .avatars import AvatarError
+
+    declared = request.headers.get("content-length")
+    try:
+        length = int(declared)
+    except (TypeError, ValueError):
+        # A multipart upload from a browser always sets it.
+        raise AvatarError(413, "the upload must declare its length") from None
+    if length < 0 or length > limit:
+        raise AvatarError(413, "that upload is too large")
+
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > limit:
+            # The rest of the stream is not read.
+            raise AvatarError(413, "that upload is too large")
+    return bytes(buf)
+
+
+async def _avatar_upload_part(request: Request, raw: bytes, max_bytes: int):
+    """The `file` part of an already-bounded multipart body."""
+    # Starlette's `UploadFile`, not FastAPI's: FastAPI's is a *subclass* it
+    # substitutes when it does the parsing itself, and this parser is ours, so
+    # an `isinstance` against the subclass refuses every real upload.
+    from starlette.datastructures import UploadFile as _UploadedPart
+    from starlette.formparsers import MultiPartException, MultiPartParser
+
+    from .avatars import AvatarError
+
+    async def _one_shot():
+        yield raw
+
+    parser = MultiPartParser(
+        request.headers,
+        _one_shot(),
+        max_files=4,
+        max_fields=8,
+        # Starlette's own default is 1 MiB, which would refuse an ordinary
+        # photograph well under our cap. The cap that decides what is stored is
+        # `normalize`'s, on the part itself.
+        max_part_size=max_bytes + _AVATAR_MULTIPART_ALLOWANCE,
+    )
+    try:
+        form = await parser.parse()
+    except MultiPartException as e:
+        raise AvatarError(400, "that upload is not a valid multipart body") from e
+    try:
+        part = form.get("file")
+        if not isinstance(part, _UploadedPart):
+            raise AvatarError(400, "the upload needs a `file` part")
+        return await part.read(), part.content_type
+    finally:
+        await form.close()
+
+
+async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
+    """A multipart request body → normalized WebP bytes and their sha256.
+
+    Raises `AvatarError`; every route renders that the same way. Shared by the
+    user's own upload and by the admin bot-icon upload, so the two size checks
+    and the decode budget cannot be applied to one and forgotten on the other.
+    """
+    from . import avatars
+    from .avatars import AvatarError
+
+    max_bytes = (_config.web.max_avatar_kb * 1024) if _config else 0
+    if max_bytes <= 0:
+        raise AvatarError(503, "avatar uploads are not configured")
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise AvatarError(400, "expected a multipart upload with a `file` part")
+
+    raw = await _read_bounded_body(request, max_bytes + _AVATAR_MULTIPART_ALLOWANCE)
+    part, declared = await _avatar_upload_part(request, raw, max_bytes)
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _avatar_decode_executor,
+        # Resolved at call time so the module attribute is what runs.
+        lambda: avatars.normalize(
+            part, declared_format=declared, max_bytes=max_bytes,
+        ),
+    )
+
+
+@api_router.get("/avatars/bot")
+async def avatar_bot(
+    request: Request,
+    v: str = "",
+    _user: dict = Depends(_require_api_auth),
+):
+    """The deployment's bot icon. Any authenticated caller.
+
+    Behind auth because every other API route is, not because the bytes are
+    secret — the login page serves the same icon unauthenticated.
+    """
+    if _config is None:
+        return _avatar_not_found()
+    icon = await asyncio.to_thread(_load_bot_avatar)
+    if icon is None:
+        return _avatar_not_found()
+    return _avatar_response(
+        request,
+        content_hash=icon.content_hash,
+        mime=icon.mime,
+        image=icon.image,
+        version=v,
+        revocable=False,
+    )
+
+
+@api_router.get("/avatars/user/{user_id}")
+async def avatar_user(
+    user_id: str,
+    request: Request,
+    v: str = "",
+    user: dict = Depends(_require_api_auth),
+):
+    """One user's picture: the caller's own, or a co-member's.
+
+    Every refusal is `_avatar_not_found`. See the section header for why that
+    is the same answer as "this user has no picture".
+    """
+    if _config is None:
+        return _avatar_not_found()
+    viewer = user["username"]
+    avatar = await asyncio.to_thread(_load_visible_user_avatar, viewer, user_id)
+    if avatar is None:
+        return _avatar_not_found()
+    return _avatar_response(
+        request,
+        content_hash=avatar.content_hash,
+        mime=avatar.mime,
+        image=avatar.image,
+        version=v,
+        # The one revocable grant on this endpoint.
+        revocable=viewer != user_id,
+    )
+
+
+def _store_user_avatar(username: str, image: bytes, content_hash: str) -> None:
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        avatars.put_user_avatar(
+            conn, username, source=avatars.SOURCE_UPLOAD,
+            image=image, content_hash=content_hash,
+        )
+
+
+@api_router.put("/settings/avatar")
+async def settings_upload_avatar(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Replace the caller's own uploaded picture.
+
+    Deliberately takes `request` rather than an `UploadFile` parameter: FastAPI
+    reads and parses the whole body before it solves dependencies, so a
+    declared-length check written as a dependency would run after the thing it
+    is meant to bound had already been spooled.
+    """
+    from . import avatars
+    from .avatars import AvatarError
+
+    try:
+        image, digest = await _read_avatar_upload(request)
+    except AvatarError as e:
+        # `ChatFileError`'s shape, not FastAPI's `HTTPException`: the frontend
+        # upload helpers read `body.error`.
+        return JSONResponse({"error": e.message}, status_code=e.status)
+
+    await asyncio.to_thread(_store_user_avatar, user["username"], image, digest)
+    logger.info(
+        "avatar uploaded user=%s bytes=%d hash=%s",
+        user["username"], len(image), digest[:12],
+    )
+    return {"hash": digest, "mime": avatars.NORMALIZED_MIME, "bytes": len(image)}
+
+
+def _drop_user_avatar(username: str) -> bool:
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        return avatars.delete_user_avatar(conn, username, avatars.SOURCE_UPLOAD)
+
+
+@api_router.delete("/settings/avatar")
+async def settings_delete_avatar(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Remove the caller's uploaded picture, revealing any imported one.
+
+    Only the `upload` row goes. Idempotent: no row is `{"deleted": false}`,
+    not a 404.
+    """
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    deleted = await asyncio.to_thread(_drop_user_avatar, user["username"])
+    return {"deleted": deleted}
 
 
 # ---- Google Workspace API routes ----

@@ -3674,6 +3674,36 @@ def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> b
     return row is not None
 
 
+def shares_room_with(conn: sqlite3.Connection, user_a: str, user_b: str) -> bool:
+    """True when both users are members of at least one room in common.
+
+    The visibility predicate for a co-member's avatar. Written now rather than
+    when web rooms gain a second member, because retrofitting an authorization
+    predicate onto a URL clients have already cached is the worse order — and
+    group Talk rooms are already multi-member, so it is not purely future work.
+
+    Wider than "a co-member sees a co-member", and deliberately so rather than
+    by oversight: `_istota_members_for_conversation` seeds `room_members` for
+    every istota user in a Talk conversation the first time the poll registers
+    it, and `ingest.record_inbound` adds any sender. So the real predicate is
+    "anyone who can put A in a Talk room with them can read A's face" — the
+    same access they already have to A's name and presence in Talk. Accepted
+    for a face; a future source with more to disclose must not inherit it
+    unexamined.
+
+    `idx_room_members_user` covers both sides of the self-join.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM room_members a
+        JOIN room_members b ON a.room_token = b.room_token
+        WHERE a.user_id = ? AND b.user_id = ? LIMIT 1
+        """,
+        (user_a, user_b),
+    ).fetchone()
+    return row is not None
+
+
 def dismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """Tombstone a room as hidden for `user_id` (the web hide action). Durable
     against the poll-time membership backfill — `list_member_rooms` excludes a

@@ -1114,6 +1114,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # post-as-user Talk mirroring of web messages and web<->Talk read-state sync.
 # NC OAuth2 tokens grant full account access, so this is a deliberate opt-in.
 # token_storage = "ephemeral"                      # "ephemeral" | "encrypted"
+#
+# Byte cap on a profile-picture upload, in KB. Checked on the declared
+# Content-Length before the body is read and again on the running total, so an
+# oversized upload is refused rather than buffered. Distinct from nginx's
+# client_max_body_size, which is sized for chat attachments.
+# max_avatar_kb = 4096
 
 # Background tiles for the map surfaces (location today; anything geospatial
 # later). The default needs no key and no setup, so this block is only for an

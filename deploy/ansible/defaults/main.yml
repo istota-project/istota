@@ -972,6 +972,12 @@ istota_web_secret_key: ""                # Session signing key (vault); generate
 # "encrypted" retains it in web_user_tokens, encrypted with the web-only key
 # below. NC OAuth2 tokens grant full account access — a deliberate opt-in.
 istota_web_token_storage: "ephemeral"
+# Byte cap on a profile-picture upload, in KB. Checked on the declared
+# Content-Length before the body is read and again on the running total.
+# Distinct from istota_web_chat_max_attachment_mb, which nginx's
+# client_max_body_size is rendered from: that bounds what reaches the process
+# at all, this bounds what the avatar endpoint accepts.
+istota_web_max_avatar_kb: 4096
 # Web-only Fernet key (vault); >=32 chars. Rendered into web-secrets.env and
 # loaded only by the web unit, never the scheduler or webhooks units.
 istota_web_token_key: ""

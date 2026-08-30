@@ -1054,6 +1054,14 @@ class WebConfig:
     # ISTOTA_WEB_TOKEN_KEY — enables post-as-user Talk mirroring + read sync.
     token_storage: str = "ephemeral"
     session_secret_key: str = ""
+    # Byte cap on a profile-picture upload, in KB. Enforced twice by the avatar
+    # routes — on the declared Content-Length before the body is read, and
+    # again on the running total as the stream arrives — because
+    # `UploadFile.read()` materializes whatever nginx let through, and nginx is
+    # sized for chat attachments (100 MB), not for a 192px avatar. The two
+    # limits are different numbers on purpose and neither substitutes for the
+    # other.
+    max_avatar_kb: int = 4096
     chat: WebChatConfig = field(default_factory=WebChatConfig)
     map: WebMapConfig = field(default_factory=WebMapConfig)
 
