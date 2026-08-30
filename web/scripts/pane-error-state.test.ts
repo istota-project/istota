@@ -3,7 +3,19 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — plain .mjs module, no types
-import { findPaneErrorViolations, ifChains } from './pane-error-state.mjs';
+import {
+  findHeldChromeViolations,
+  findPaneErrorViolations,
+  ifChains,
+} from './pane-error-state.mjs';
+
+// A page with a whole-pane failure, minus the chrome gate each case supplies.
+const PANE = `
+{#if loading}
+  <div class="center-msg">Loading…</div>
+{:else if error}
+  <div class="center-msg error">{error}</div>
+{/if}`;
 
 const WEB_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(WEB_ROOT, 'src');
@@ -130,12 +142,91 @@ describe('findPaneErrorViolations', () => {
   });
 });
 
+describe('findHeldChromeViolations', () => {
+  it('catches a toolbar held back for loading but not for the failure beside it', () => {
+    const found = findHeldChromeViolations(`
+{#if !loading}
+  <div class="money-toolbar"><span>{total} entries</span></div>
+{/if}
+${PANE}`);
+    expect(found).toHaveLength(1);
+    expect(found[0].cond).toBe('!loading');
+  });
+
+  it('passes the feeds form, which holds it back for both', () => {
+    expect(
+      findHeldChromeViolations(`
+{#if !loading && !error}
+  <div class="money-toolbar"><span>{total} entries</span></div>
+{/if}
+${PANE}`),
+    ).toEqual([]);
+  });
+
+  it('leaves a page whose error is a banner over rendered content alone', () => {
+    // No whole-pane failure here, so withholding chrome on `!loading` alone is
+    // right: the layout under the banner still renders and still needs its bar.
+    expect(
+      findHeldChromeViolations(`
+{#if error}
+  <div class="banner error">{error}</div>
+{/if}
+
+{#if !loading}
+  <div class="money-toolbar"><span>{total} entries</span></div>
+{/if}
+
+{#if loading}
+  <div class="center-msg">Loading…</div>
+{:else}
+  <div class="rows">…</div>
+{/if}`),
+    ).toEqual([]);
+  });
+
+  it('does not read an if/else as a withheld gate', () => {
+    // `{#if !loading}…{:else}…` picks between two renderings rather than
+    // withholding one, so the error state is not left under a half-drawn header.
+    expect(
+      findHeldChromeViolations(`
+{#if !loading}
+  <div class="bar">…</div>
+{:else}
+  <div class="bar placeholder">…</div>
+{/if}
+${PANE}`),
+    ).toEqual([]);
+  });
+
+  it('leaves a gate carrying conditions of its own alone', () => {
+    // SettingsLayout's shape. Its extra terms mean the gate is about whether
+    // there is a header to draw, not about withholding one behind a load.
+    expect(
+      findHeldChromeViolations(`
+{#if !loading && (title || description)}
+  <header>…</header>
+{/if}
+${PANE}`),
+    ).toEqual([]);
+  });
+});
+
 describe('the routes themselves', () => {
   it('render every whole-pane load failure as .center-msg error', () => {
     const offenders: string[] = [];
     for (const file of svelteFiles(SRC)) {
       for (const v of findPaneErrorViolations(readFileSync(file, 'utf8'))) {
         offenders.push(`${relative(WEB_ROOT, file)}:${v.line}  {:else if ${v.cond}}  ${v.markup}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('give that failure the whole pane, holding chrome back behind it', () => {
+    const offenders: string[] = [];
+    for (const file of svelteFiles(SRC)) {
+      for (const v of findHeldChromeViolations(readFileSync(file, 'utf8'))) {
+        offenders.push(`${relative(WEB_ROOT, file)}:${v.line}  {#if ${v.cond}}`);
       }
     }
     expect(offenders).toEqual([]);

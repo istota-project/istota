@@ -164,12 +164,13 @@
 </script>
 
 <div class="invoices-content">
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message. The bar used to stay put (with only its count dropped)
-       to stop the table shifting up and back down on a reload; that shift
-       cannot happen now, because the table is not on screen while loading —
-       bar and table arrive together. -->
-  {#if !loading}
+  <!-- Held back behind both whole-pane states, so the pane shows nothing but
+       the centered message. The bar used to stay put (with only its count
+       dropped) to stop the table shifting up and back down on a reload; that
+       shift cannot happen now, because the table is not on screen while
+       loading — bar and table arrive together. On error the count is also a
+       lie: it reports 0 invoices of a list that failed to load. -->
+  {#if !loading && !error}
     <div class="money-toolbar control-row">
       <span class="money-result-count"
         >{invoiceCount} invoices ({outstandingCount} outstanding)</span

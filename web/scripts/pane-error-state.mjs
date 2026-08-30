@@ -137,3 +137,44 @@ export function findPaneErrorViolations(source) {
   }
   return found;
 }
+
+/** A chrome gate that holds back for the loading state and nothing else. */
+const HELD_FOR_LOADING_ONLY = /^!\s*loading$/;
+
+/**
+ * Pages whose header or toolbar is held back behind the loading state but not
+ * behind the failure beside it.
+ *
+ * Getting the message's own class right only centres it in the box it is given.
+ * A page that renders its toolbar above it has given it the pane *less* the
+ * toolbar, so the message sits low and matches neither the loading state it
+ * replaces nor the same failure on a page with no toolbar. Feeds was the only
+ * page in the tree writing `!loading && !error`, which is most of why feeds was
+ * the one that looked right.
+ *
+ * The count in such a toolbar is usually wrong as well — "0 entries" is derived
+ * from data that failed to load — so this is not only about the geometry.
+ *
+ * Scoped to files that actually have a whole-pane failure: `{#if !loading}` is
+ * perfectly correct on a page whose error is a banner over rendered content.
+ */
+export function findHeldChromeViolations(source) {
+  const chains = ifChains(source);
+  const hasWholePaneFailure = chains.some(
+    (chain) =>
+      chain.branches.some((b) => CENTER_MSG.test(b.content)) &&
+      chain.branches.some((b) => MENTIONS_ERROR.test(b.cond)),
+  );
+  if (!hasWholePaneFailure) return [];
+
+  const found = [];
+  for (const chain of chains) {
+    // A gate, not a chain: one branch and no else. An if/else picks between two
+    // renderings rather than withholding one.
+    if (chain.branches.length !== 1) continue;
+    const [gate] = chain.branches;
+    if (!HELD_FOR_LOADING_ONLY.test(gate.cond)) continue;
+    found.push({ line: gate.line, cond: gate.cond });
+  }
+  return found;
+}

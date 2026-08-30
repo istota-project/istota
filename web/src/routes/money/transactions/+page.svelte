@@ -234,7 +234,7 @@
 </script>
 
 <div class="txn-content">
-  {#if !loading}
+  {#if !loading && !error}
     <div class="money-toolbar control-row">
       <span class="money-result-count">{total.toLocaleString()} entries</span>
     </div>
