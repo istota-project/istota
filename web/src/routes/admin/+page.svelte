@@ -1,14 +1,18 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
+    AVATAR_ACCEPT,
+    deleteBotAvatar,
     getAdminStats,
+    uploadBotAvatar,
     type AdminStats,
     type AdminStatsJob,
     type AdminStatsUser,
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import { NoticeBanner, StatTile } from '$lib/components/ui';
+  import { Avatar, Button, Field, FileDropZone, NoticeBanner, StatTile } from '$lib/components/ui';
+  import { getCurrentUser } from '$lib/userContext';
   import {
     formatCost,
     formatContext,
@@ -28,6 +32,67 @@
 
   const REFRESH_MS = 60_000;
   let timer: ReturnType<typeof setInterval> | null = null;
+
+  /* The bot icon. The identity the layout resolved carries the current hash,
+     and `reload()` is what publishes a new one to the nav and the chat gutter
+     — this page never fetches `/me` itself. */
+  const identity = getCurrentUser();
+  let botIconFile: File | null = $state(null);
+  let botIconBusy = $state(false);
+  let botIconBusyLabel = $state('');
+  let botIconError = $state('');
+  let botIconNote = $state('');
+
+  /* The dropzone is a picker rather than a staging area — there is no Save step
+     — so a picked file is taken and sent. `botIconBusy` is read rather than
+     merely checked: a file picked while one is going up stays in the zone, and
+     this effect re-runs and sends it when the first upload settles. Two
+     concurrent PUTs would resolve in either order, and this row is
+     deployment-wide, so the loser would be everyone's icon. */
+  $effect(() => {
+    if (botIconBusy || !botIconFile) return;
+    const picked = botIconFile;
+    botIconFile = null;
+    void uploadBotIcon(picked);
+  });
+
+  async function uploadBotIcon(file: File) {
+    botIconBusy = true;
+    botIconBusyLabel = 'Saving the icon…';
+    botIconError = '';
+    botIconNote = '';
+    try {
+      await uploadBotAvatar(file);
+      /* The preview reads the shared record, so a reload that does not paint
+         leaves it on the old hash — which the browser holds as `immutable` and
+         will not re-fetch. Say so rather than showing a stale icon silently. */
+      if (!(await identity.reload()))
+        botIconNote = 'Icon saved. The page could not refresh — reload to see it.';
+    } catch (e) {
+      botIconError = (e as Error).message || 'Could not save that icon.';
+    } finally {
+      botIconBusy = false;
+      botIconBusyLabel = '';
+    }
+  }
+
+  async function removeBotIcon() {
+    botIconBusy = true;
+    botIconBusyLabel = 'Removing the icon…';
+    botIconError = '';
+    botIconNote = '';
+    try {
+      const { deleted } = await deleteBotAvatar();
+      const confirmed = await identity.reload();
+      if (!confirmed) botIconNote = 'Removed. The page could not refresh — reload to see it.';
+      else if (!deleted) botIconNote = 'There was nothing to remove.';
+    } catch (e) {
+      botIconError = (e as Error).message || 'Could not remove that icon.';
+    } finally {
+      botIconBusy = false;
+      botIconBusyLabel = '';
+    }
+  }
 
   async function refresh() {
     try {
@@ -930,6 +995,62 @@
       </dl>
     </section>
 
+    <!-- Bot icon.
+         The one control on a page of read-only cards, so it sits at the foot
+         rather than above the status an operator scans first. A card here and
+         not a pane of its own: the admin dashboard is one page, and a single
+         upload control does not earn a section in the sidebar. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>Bot icon</h2>
+      </header>
+      <Field label="Picture" labelled={false} wide error={botIconError} warning={botIconNote}>
+        <div class="bot-icon">
+          <span class="bot-icon-preview">
+            <!-- Named rather than decorative: here the picture is the thing
+                 being edited, and the only other signal is whether Remove
+                 exists. -->
+            <Avatar
+              kind="bot"
+              version={identity.user.avatars?.bot ?? null}
+              label={identity.user.bot_name || 'Istota'}
+              alt="The bot icon"
+            />
+          </span>
+          <div class="bot-icon-pick">
+            <!-- The busy line replaces the picker rather than sitting beside
+                 it, for the two reasons the settings control states: nothing
+                 else on the card says an upload is running, and unmounting the
+                 zone is what resets the native input inside it, so re-picking
+                 the file whose upload just failed does something. -->
+            {#if botIconBusyLabel}
+              <p class="hint busy" aria-live="polite">{botIconBusyLabel}</p>
+            {:else}
+              <FileDropZone bind:file={botIconFile} accept={AVATAR_ACCEPT}>
+                <span>Drop an icon here, paste one, or choose a file.</span>
+              </FileDropZone>
+            {/if}
+            {#if identity.user.avatars?.bot}
+              <Button variant="secondary" size="sm" disabled={botIconBusy} onclick={removeBotIcon}
+                >Remove</Button
+              >
+            {/if}
+          </div>
+        </div>
+      </Field>
+      <p class="hint">
+        Shown wherever the web UI names the bot. It applies to everyone on this deployment.
+        {#if stats.storage.nextcloud_username}
+          This is not the picture Nextcloud shows for
+          <code>{stats.storage.nextcloud_username}</code>, and changing it here does not change that
+          one — set it in Nextcloud if you want them to match.
+        {:else}
+          This is separate from the bot's Nextcloud profile picture, which Nextcloud shows in Talk;
+          changing it here does not change that one.
+        {/if}
+      </p>
+    </section>
+
     {#if stats.error}
       <div class="banner error">Partial data: {stats.error}</div>
     {/if}
@@ -947,6 +1068,38 @@
 	   moved that bar into the layout, which is shared with Configuration and
 	   Logs — neither of which auto-refreshes, so the note belongs with the data
 	   it describes rather than with the chrome. */
+  /* The bot-icon control, laid out like the settings page's own picture field
+     so the two read as one control in two places. The size goes on the wrapper
+     rather than on the primitive, which reads it and holds no opinion about how
+     big an identity is. */
+  .bot-icon {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  .bot-icon-preview {
+    flex: 0 0 auto;
+    --avatar-size: 4rem;
+  }
+
+  .bot-icon-pick {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  /* Stands in for the dropzone while an icon is going up or coming down, so the
+     column keeps roughly its height instead of collapsing and pulling the
+     Remove button up under the cursor that just left it. */
+  .bot-icon-pick .busy {
+    margin: 0;
+    padding: var(--space-4) 0;
+  }
+
   .refresh-note {
     margin-top: var(--space-4);
     font-size: var(--text-xs);

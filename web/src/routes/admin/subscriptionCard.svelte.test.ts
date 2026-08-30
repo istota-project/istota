@@ -28,12 +28,43 @@ import type { AdminStats, AdminSubscription } from '$lib/api';
  *   and carries it.
  */
 
-vi.mock('$lib/api', () => ({ getAdminStats: vi.fn() }));
+vi.mock('$lib/api', () => ({
+  getAdminStats: vi.fn(),
+  // The page's bot-icon control imports these; nothing here exercises it.
+  AVATAR_ACCEPT: 'image/png',
+  uploadBotAvatar: vi.fn(),
+  deleteBotAvatar: vi.fn(),
+}));
 
 import { getAdminStats } from '$lib/api';
+import type { User } from '$lib/api';
 import Page from './+page.svelte';
+import Harness from '$lib/currentUserHarness.test.svelte';
 
 afterEach(cleanup);
+
+// The page reads the identity the root layout resolved rather than fetching one
+// (ISSUE-355), so the harness stands in for that layout. Nothing on this card
+// turns on what is in the record.
+const person: User = {
+  username: 'alice',
+  display_name: 'Alice',
+  bot_name: 'Istota',
+  is_admin: true,
+  features: {
+    chat: true,
+    feeds: false,
+    location: false,
+    money: false,
+    health: false,
+    briefings: false,
+    google_workspace: false,
+    google_workspace_enabled: false,
+    admin: true,
+  },
+};
+
+const renderPage = () => render(Harness, { component: Page, user: person });
 
 const usageTotals = () => ({
   rows: 0,
@@ -127,7 +158,7 @@ const populated = (over: Partial<AdminSubscription> = {}): AdminSubscription => 
 /** Render the page with one subscription payload and wait for the card. */
 async function show(subscription: AdminSubscription) {
   vi.mocked(getAdminStats).mockResolvedValue(stats(subscription));
-  const { container } = render(Page);
+  const { container } = renderPage();
   await screen.findByText('Claude Code subscription');
   return container;
 }
@@ -145,7 +176,7 @@ async function show(subscription: AdminSubscription) {
  */
 async function showAbsent(subscription: AdminSubscription | undefined) {
   vi.mocked(getAdminStats).mockResolvedValue(stats(subscription));
-  const { container } = render(Page);
+  const { container } = renderPage();
   await screen.findByText('Auto-refreshes every 60s.');
   return container;
 }

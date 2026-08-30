@@ -297,6 +297,8 @@ export interface AdminStats {
     last_backup: string | null;
     nextcloud_configured: boolean;
     nextcloud_mount_healthy: boolean;
+    /** The bot's own Nextcloud account, for the bot-icon control's copy. */
+    nextcloud_username?: string | null;
   };
   runtime?: {
     mode: 'standalone' | 'server';
@@ -3185,19 +3187,19 @@ export interface AvatarUpload {
 }
 
 /**
- * Replace the caller's own profile picture.
+ * PUT one picture as multipart, to whichever avatar endpoint owns it.
  *
  * Shaped like `uploadChatAttachment` rather than routed through `apiFetch`,
  * because every refusal here is one the user has to read: the server sends
  * `{error}` with a 413 for a file over the cap and a 415 for a format it will
  * not decode, and `apiFetch` would collapse both into `API error: 413`.
  */
-export async function uploadAvatar(file: File): Promise<AvatarUpload> {
+async function putAvatar(path: string, file: File): Promise<AvatarUpload> {
   const form = new FormData();
   form.append('file', file);
   let resp: Response;
   try {
-    resp = await fetch(`${base}/api/settings/avatar`, {
+    resp = await fetch(`${base}${path}`, {
       method: 'PUT',
       credentials: 'same-origin',
       body: form,
@@ -3213,6 +3215,11 @@ export async function uploadAvatar(file: File): Promise<AvatarUpload> {
   return data as AvatarUpload;
 }
 
+/** Replace the caller's own profile picture. */
+export async function uploadAvatar(file: File): Promise<AvatarUpload> {
+  return putAvatar('/api/settings/avatar', file);
+}
+
 /**
  * Remove the caller's uploaded picture, revealing any imported one.
  *
@@ -3220,6 +3227,27 @@ export async function uploadAvatar(file: File): Promise<AvatarUpload> {
  */
 export async function deleteAvatar(): Promise<{ deleted: boolean }> {
   return apiFetch('/settings/avatar', { method: 'DELETE' });
+}
+
+/**
+ * Replace the deployment's bot icon. Admin only.
+ *
+ * Deployment-wide and one row, so two admins setting it at once resolve as
+ * last writer wins. It is *not* the bot's Nextcloud Talk avatar and cannot
+ * change it — the daemon holds an app password, and Nextcloud's avatar route
+ * is session-and-CSRF-guarded — which is why the control says so.
+ */
+export async function uploadBotAvatar(file: File): Promise<AvatarUpload> {
+  return putAvatar('/api/admin/avatar', file);
+}
+
+/**
+ * Clear the bot icon, reverting to the amber initial chip.
+ *
+ * `{deleted: false}` when there was none — idempotent, not a 404.
+ */
+export async function deleteBotAvatar(): Promise<{ deleted: boolean }> {
+  return apiFetch('/admin/avatar', { method: 'DELETE' });
 }
 
 const CHAT_ATTACHMENT_PATH = '/chat/attachments';

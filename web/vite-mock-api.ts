@@ -3090,6 +3090,42 @@ const avatarsHandler: MockHandler = ({ url, method }) => {
     user.avatars.user = null;
     return { deleted };
   }
+  // The bot icon is deployment-wide, so the mock keeps one flag rather than a
+  // per-user one. The dev server has no admin gate to reproduce, and putting
+  // one here would make the control untestable on the surface it exists for.
+  if (path === '/istota/api/admin/avatar' && method === 'PUT') {
+    user.avatars.bot = MOCK_AVATAR_HASH;
+    return { hash: MOCK_AVATAR_HASH, mime: 'image/webp', bytes: MOCK_AVATAR_WEBP.length };
+  }
+  if (path === '/istota/api/admin/avatar' && method === 'DELETE') {
+    const deleted = user.avatars.bot !== null;
+    user.avatars.bot = null;
+    return { deleted };
+  }
+  if (path === '/istota/api/avatars/bot' && method === 'GET') {
+    if (!user.avatars.bot) {
+      return {
+        __status: 404,
+        error: 'not found',
+        __headers: { 'Cache-Control': 'private, max-age=30' },
+      };
+    }
+    const version = new URLSearchParams(url.split('?')[1] ?? '').get('v');
+    return {
+      __raw: MOCK_AVATAR_WEBP,
+      __contentType: 'image/webp',
+      __disposition: 'inline',
+      __headers: {
+        // The bot icon is not a revocable grant, so a matching version keeps
+        // the long cache the real endpoint sends.
+        'Cache-Control':
+          version === user.avatars.bot
+            ? 'private, max-age=31536000, immutable'
+            : 'private, no-cache',
+        ETag: `"${user.avatars.bot}"`,
+      },
+    };
+  }
   const prefix = '/istota/api/avatars/user/';
   if (path.startsWith(prefix) && method === 'GET') {
     const subject = decodeURIComponent(path.slice(prefix.length));
