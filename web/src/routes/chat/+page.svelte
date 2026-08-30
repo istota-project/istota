@@ -41,6 +41,7 @@
     loaded,
     hasMore,
     loadingOlder,
+    offlineTranscript,
     view,
     scrollTarget,
     sendSettled,
@@ -893,7 +894,7 @@
 				     quiet marker once the start of the conversation is reached. -->
           {#if $loadingOlder}
             <div class="older-status" role="status">Loading older messages…</div>
-          {:else if !$hasMore}
+          {:else if !$hasMore && !$offlineTranscript}
             <div class="older-status begin">Beginning of conversation</div>
           {/if}
           {#each $messages as message, i (message.cid)}

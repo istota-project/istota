@@ -52,6 +52,19 @@ import {
   writeQueue,
   MAX_QUEUED_PER_ROOM,
 } from '$lib/stores/sendQueue';
+import { online } from '$lib/stores/connectivity';
+import {
+  appendTranscriptRows,
+  deleteTranscript,
+  pruneOffline,
+  readConfig,
+  readRooms,
+  readTranscript,
+  removeCachedMessages,
+  writeConfig,
+  writeRooms,
+  writeTranscript,
+} from '$lib/offline/db';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
@@ -278,6 +291,13 @@ export interface ChatSession {
   hasMore: Writable<boolean>;
   loadingOlder: Writable<boolean>;
   loadOlder: () => Promise<void>;
+  // True when what the transcript is showing came out of the offline cache
+  // rather than off the wire (ISSUE-202). `hasMore` is forced false alongside
+  // it — an older page is a fetch, and offline there is none to be had — so
+  // this is what tells the page apart from the case `hasMore: false` normally
+  // means, which is that the top of the pane really is the start of the
+  // conversation.
+  offlineTranscript: Writable<boolean>;
   init: () => Promise<void>;
   selectRoom: (id: number) => Promise<void>;
   selectRoomByToken: (token: string) => Promise<boolean>;
@@ -376,11 +396,15 @@ function createSession(): ChatSession {
   // `loadingOlder` a re-entrancy guard the scroll handler reads. Reset per room.
   const hasMore = writable(false);
   const loadingOlder = writable(false);
+  const offlineTranscript = writable(false);
   let oldestCursor: { ts: string; id: number } | null = null;
   function resetPaging() {
     oldestCursor = null;
     hasMore.set(false);
     loadingOlder.set(false);
+    // Cleared with the rest of the transcript's state, so the flag is only
+    // ever true for a transcript `loadHistory` actually left on the cache.
+    offlineTranscript.set(false);
   }
 
   let cidCounter = 0;
@@ -640,10 +664,16 @@ function createSession(): ChatSession {
   // `GET /chat/config`: `init()` already awaits that before anything else, so
   // the id is known before there is anything to restore. Until it is, the
   // queue is in memory only and nothing is written.
-  let queueUserId: string | null = null;
+  //
+  // The offline cache below is keyed the same way and for the same reason, so
+  // this is the id both stores hang off rather than the queue's alone: one
+  // person's cached transcript must not paint into another's session on a
+  // profile two people take turns using, exactly as one person's queued
+  // message must not be restored into the other's room.
+  let storageUserId: string | null = null;
   const QUEUE_KEY_INFIX = ':room:';
   const queueKeyFor = (token: string) =>
-    queueUserId ? `${queueUserId}${QUEUE_KEY_INFIX}${token}` : null;
+    storageUserId ? `${storageUserId}${QUEUE_KEY_INFIX}${token}` : null;
 
   /**
    * Write one room's queue out, or drop its stored copy when it is empty.
@@ -695,11 +725,11 @@ function createSession(): ChatSession {
    * result next time.
    */
   function restoreQueues() {
-    if (!queueUserId) return;
+    if (!storageUserId) return;
     // Only this user's own keys. A browser profile two people take turns using
     // holds both their queues under the one storage key, and one person's
     // committed message must never be restored into the other's transcript.
-    const prefix = `${queueUserId}${QUEUE_KEY_INFIX}`;
+    const prefix = `${storageUserId}${QUEUE_KEY_INFIX}`;
     const known = new Set(get(rooms).map((r) => r.token));
     for (const [storedKey, entries] of Object.entries(readAllQueues())) {
       if (!storedKey.startsWith(prefix)) continue;
@@ -718,6 +748,84 @@ function createSession(): ChatSession {
         })),
       );
     }
+  }
+
+  // ---- The offline read cache (ISSUE-202) ------------------------------
+  //
+  // What the server last said, per room, so the transcript paints with no
+  // connection at all. `offline/db.ts` holds the storage and its bounds; what
+  // is here is when to read it, when to write it, and the one thing storage
+  // cannot decide — which rows count as the same turn on the way in.
+  //
+  // Two writers. `loadHistory` replaces a room's tail wholesale from a fetch,
+  // and the room stream folds each frame into whatever is already stored, for
+  // *any* room rather than the one on screen: that is what leaves a background
+  // room current when the user switches to it with no connection.
+  //
+  // Nothing here is awaited on a render path and nothing here can throw — every
+  // helper resolves, an unusable database reading as an empty cache — so a
+  // storage failure costs the offline paint and nothing else.
+
+  /**
+   * How long a room's streamed frames are collected before they are written.
+   *
+   * A trailing debounce rather than a write per frame: a turn arrives as a
+   * burst (the user row, the assistant row running, the same row finished), and
+   * one transaction per burst is the difference between a write and a write
+   * storm on a room the user is not even looking at. Trailing rather than
+   * leading, because the last frame of a burst is the one worth having.
+   */
+  const CACHE_WRITE_DEBOUNCE_MS = 2000;
+  const pendingCacheRows = new Map<
+    string,
+    { rows: ChatRoomEvent[]; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  /** Write one room's collected frames out, cancelling whatever is scheduled. */
+  function flushCachedRoom(token: string) {
+    const pending = pendingCacheRows.get(token);
+    if (!pending) return;
+    pendingCacheRows.delete(token);
+    clearTimeout(pending.timer);
+    void appendTranscriptRows(storageUserId, token, pending.rows);
+  }
+
+  function flushCachedRooms() {
+    for (const token of [...pendingCacheRows.keys()]) flushCachedRoom(token);
+  }
+
+  /** Collect a streamed row for its room's cached tail. */
+  function cacheStreamedRow(row: ChatRoomEvent) {
+    const token = row.room_token;
+    if (!storageUserId || !token) return;
+    const pending = pendingCacheRows.get(token);
+    if (pending) {
+      pending.rows.push(row);
+      return;
+    }
+    pendingCacheRows.set(token, {
+      rows: [row],
+      timer: setTimeout(() => flushCachedRoom(token), CACHE_WRITE_DEBOUNCE_MS),
+    });
+  }
+
+  /**
+   * Take deleted messages out of the cache as well as off the screen.
+   *
+   * Including out of whatever is waiting to be written: a frame collected a
+   * moment ago can name a row the deletion has just removed, and letting the
+   * flush land after the removal would put it back until the room is next
+   * loaded in full.
+   */
+  function forgetCachedMessages(msgIds: number[]) {
+    if (!storageUserId || !msgIds.length) return;
+    const gone = new Set(msgIds);
+    for (const pending of pendingCacheRows.values()) {
+      pending.rows = pending.rows.filter(
+        (r) => typeof r.msg_id !== 'number' || !gone.has(r.msg_id),
+      );
+    }
+    void removeCachedMessages(storageUserId, msgIds);
   }
 
   /**
@@ -1500,6 +1608,12 @@ function createSession(): ChatSession {
       pendingSend.rows.push(row);
       return;
     }
+    // Every applied frame goes to the offline cache, for whichever room it
+    // names rather than the one on screen — that is the whole point of doing it
+    // here, at the funnel, instead of in `appendStreamedRow`. A held frame is
+    // cached when the buffer drains back through this function, so the two
+    // early returns above skip it exactly once each.
+    cacheStreamedRow(row);
     const room = get(rooms).find((r) => r.token === token);
     if (room && room.id === get(activeRoomId) && get(view) === 'room') {
       appendStreamedRow(row);
@@ -1517,8 +1631,12 @@ function createSession(): ChatSession {
   // a badge the deleting client's own read cursor may already have cleared.
   function applyDeletions(deletions: { msg_id: number }[]) {
     if (!deletions.length) return;
-    const gone = new Set(deletions.map((d) => d.msg_id));
+    const ids = deletions.map((d) => d.msg_id);
+    const gone = new Set(ids);
     messages.update((arr) => arr.filter((m) => m.msgId == null || !gone.has(m.msgId)));
+    // A row deleted while online must not come back the next time the app
+    // opens without a connection.
+    forgetCachedMessages(ids);
   }
 
   // Replay the frames held for the duration of a send, now that the turn's
@@ -1979,22 +2097,33 @@ function createSession(): ChatSession {
     };
   }
 
-  async function loadHistory(roomId: number, timeoutMs = 0) {
-    const hist = await getRoomMessages(roomId, { timeoutMs });
-    // A reload of the room already on screen (a stream recovery) still has its
-    // client-only rows in `messages`; one reached via a room switch has them in
-    // the holding map. Stashing first puts both cases in one place, so the
-    // carry below is the only thing that has to know where they came from.
-    const prev = get(messages);
-    stashStrandedSends();
-    const roomToken = get(rooms).find((r) => r.id === roomId)?.token ?? null;
+  /**
+   * Rebuild the transcript from a room's wire rows and return its task index.
+   *
+   * Extracted because the offline cache paints the same room from the same
+   * shape a moment before the fetch does, and the two must produce identical
+   * rows — which they do by construction here, sharing one pass and one
+   * `buildHistoryMessage`. A cached row that could render differently from a
+   * fetched one is the whole failure mode caching the *wire* row avoids.
+   *
+   * `prev` is what was on screen before, which is where the client-only rows
+   * come back from. `null` as the token means every room to
+   * `carryClientOnlyRows`, which is right for the All view and wrong here — a
+   * room missing from `$rooms` would inherit every other room's held rows, so
+   * carry nothing rather than everything.
+   */
+  function paintRoomRows(
+    rows: ChatHistory['messages'],
+    prev: ChatMessage[],
+    roomToken: string | null,
+  ): Map<number, number> {
     // taskId → cid for assistant placeholders, so an in-flight task's stream
     // binds to the message the server already laid out in order.
     const cidByTask = new Map<number, number>();
     // Reset the per-room dedup set, then record every notification already in
     // the transcript so the idle poller only appends ones that arrive later.
     seenNotifIds.clear();
-    const msgs: ChatMessage[] = hist.messages.map((m) => {
+    const msgs: ChatMessage[] = rows.map((m) => {
       const cm = buildHistoryMessage(m);
       if (m.role === 'assistant' && typeof m.task_id === 'number') {
         cidByTask.set(m.task_id, cm.cid);
@@ -2004,9 +2133,6 @@ function createSession(): ChatSession {
       }
       return cm;
     });
-    // `null` means every room to `carryClientOnlyRows`, which is right for the
-    // All view and wrong here — a room missing from `$rooms` would inherit
-    // every other room's held rows. Carry nothing rather than everything.
     messages.set(roomToken ? carryClientOnlyRows(prev, msgs, roomToken) : msgs);
     // A queued entry restored from storage has no row anywhere — the queue
     // outlived every transcript that ever rendered it — so the carry above
@@ -2015,6 +2141,94 @@ function createSession(): ChatSession {
     // for the room being rendered, and this is the one place that knows which
     // that is.
     if (roomToken) appendQueuedRows(roomToken);
+    return cidByTask;
+  }
+
+  async function loadHistory(roomId: number, timeoutMs = 0) {
+    // Issued before the cache is read, so the cached paint happens *while* the
+    // request is in flight rather than after it. Online that makes the cache a
+    // first frame the fetch replaces; offline it is the only frame there is.
+    const fetching = getRoomMessages(roomId, { timeoutMs });
+    // The `await` that handles this rejection is several statements below, and
+    // a promise that rejects with nothing attached in the meantime is an
+    // unhandled rejection — which offline is the ordinary case, not the rare
+    // one.
+    fetching.catch(() => {});
+    // A reload of the room already on screen (a stream recovery) still has its
+    // client-only rows in `messages`; one reached via a room switch has them in
+    // the holding map. Stashing first puts both cases in one place, so the
+    // carry below is the only thing that has to know where they came from.
+    let prev = get(messages);
+    stashStrandedSends();
+    const roomToken = get(rooms).find((r) => r.id === roomId)?.token ?? null;
+    // Whether there is a transcript to protect. A recovery reload runs against
+    // a full one, and painting the cache into that would swap a live transcript
+    // for an older tail and then swap it back — so the cache only ever fills a
+    // room that has nothing in it, which is every path the user can see it on:
+    // a room switch and `init()` both clear first.
+    const empty = !prev.some((m) => !isClientOnly(m));
+    let painted = false;
+
+    if (roomToken && empty) {
+      const cached = await readTranscript(storageUserId, roomToken);
+      // The read is an await, so the room may have changed under it. Same
+      // guard the drain at the foot of this function uses.
+      if (cached && roomId === get(activeRoomId) && get(view) === 'room') {
+        paintRoomRows(cached.messages, prev, roomToken);
+        // Re-read rather than reused: the paint has just taken the held rows
+        // out of `strandedSends`, so a second carry against the original
+        // `prev` would find neither copy and drop them.
+        prev = get(messages);
+        painted = true;
+        oldestCursor = cached.oldestCursor;
+        hasMore.set(false);
+        loadingOlder.set(false);
+      }
+    }
+
+    let hist: ChatHistory;
+    try {
+      hist = await fetching;
+    } catch (e) {
+      // Only a gap is tolerated here, and the connectivity store is what says
+      // so — `apiFetch` has already reported this very request to it, so by
+      // the time the throw arrives the answer is current. Anything else (a
+      // 500, a body that would not parse) is a real failure and still throws:
+      // reporting a server error as "you are offline" would put the banner up
+      // on a working connection and leave the user waiting for it to clear.
+      if (get(online)) throw e;
+      offlineTranscript.set(true);
+      // `loadOlder` is a fetch, so there is no older page to be had; a
+      // spinner that can never resolve is worse than an absent affordance.
+      hasMore.set(false);
+      loadingOlder.set(false);
+      // Nothing cached for this room, and nothing on screen either — but the
+      // queued and failed rows are still this room's, and they are the ones
+      // carrying the actions the user has offline. An empty room with its
+      // outbox visible beats a blank pane.
+      if (!painted && roomToken && empty) {
+        messages.set(carryClientOnlyRows(prev, [], roomToken));
+        appendQueuedRows(roomToken);
+      }
+      return;
+    }
+    offlineTranscript.set(false);
+    const cidByTask = paintRoomRows(hist.messages, prev, roomToken);
+    if (roomToken) {
+      // A room the server says is empty gives up its cached tail rather than
+      // storing an empty one: the entry would read as no cache on the way back
+      // out anyway, while still holding one of `MAX_CACHED_ROOMS` slots.
+      if (hist.messages.length) {
+        void writeTranscript(storageUserId, {
+          roomId,
+          roomToken,
+          messages: hist.messages,
+          oldestCursor: hist.oldest_cursor ?? null,
+        });
+      } else {
+        void deleteTranscript(storageUserId, roomToken);
+      }
+    }
     // Seed paging state from the first-load response.
     oldestCursor = hist.oldest_cursor ?? null;
     hasMore.set(!!hist.has_more);
@@ -2263,8 +2477,21 @@ function createSession(): ChatSession {
     // by a generation check; teardown bumps the counter.
     const gen = ++initGeneration;
     const superseded = () => gen !== initGeneration;
+    // Collect what has aged out of the cache. Here rather than on a timer
+    // because an expired entry costs storage and not correctness — every read
+    // refuses one anyway — so the app opening is soon enough, and it is the one
+    // moment where work nobody is waiting on is free.
+    void pruneOffline();
     try {
-      const cfg = await getChatConfig().catch(() => null);
+      const live = await getChatConfig().catch(() => null);
+      if (superseded()) return;
+      // The cached config stands in for a fetch that did not answer, which is
+      // only reachable on a remount: the id it is keyed by comes from a config
+      // read, so a session that has never had one has nothing to look this up
+      // by. Worth the read anyway — without it a remount offline reverts the
+      // external-turn display to its default, silently expanding every
+      // stranger's mail in the transcript.
+      const cfg = live ?? (await readConfig(storageUserId));
       if (superseded()) return;
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
       // Who the send queue's storage key belongs to. It rides on the config
@@ -2278,12 +2505,38 @@ function createSession(): ChatSession {
       // remount would otherwise clear an id this session already knew — and
       // persistence would go quietly off, leaving a drained message stored and
       // restored later as a bubble for something already sent.
-      if (cfg) queueUserId = cfg.user_id ?? null;
+      if (cfg) storageUserId = cfg.user_id ?? null;
+      // After the id is known, or it would be stored under nothing. Only a
+      // live read is worth writing back — re-storing what was just read would
+      // push its own expiry out forever.
+      if (live && storageUserId) void writeConfig(storageUserId, live);
       // Normalized rather than adopted: the column takes any string a hand
       // edit puts in it, and an unrecognized value must read as the default
       // instead of leaving the transcript with no branch to take.
       externalTurnDisplay.set(normalizeExternalTurnDisplay(cfg?.external_turn_display));
-      const { rooms: list } = await getChatRooms();
+      // Same shape as the transcript below: ask, paint whatever is stored
+      // while the answer is on its way, then reconcile. The room list is what
+      // the sidebar renders *and* what the transcript cache is read through —
+      // a cached tail is keyed by token, and the token comes from here — so
+      // with no room list there is no offline anything.
+      const fetchingRooms = getChatRooms();
+      fetchingRooms.catch(() => {});
+      const cachedRooms = await readRooms(storageUserId);
+      if (superseded()) return;
+      if (cachedRooms?.length) rooms.set(sortRoomsByActivity(cachedRooms));
+      let list: ChatRoom[];
+      try {
+        list = (await fetchingRooms).rooms;
+        void writeRooms(storageUserId, list);
+      } catch (e) {
+        // Offline with a cached list, the rest of `init` is worth running: the
+        // queue restores, the last room paints from its own cache, and the
+        // stream machinery starts and reconnects on its own when the
+        // connection comes back. Anything else is a real failure and still
+        // reaches the notice below.
+        if (get(online) || !cachedRooms?.length) throw e;
+        list = get(rooms);
+      }
       if (superseded()) return;
       rooms.set(sortRoomsByActivity(list));
       // After the room list, because the queue is keyed by token and a key
@@ -2446,6 +2699,15 @@ function createSession(): ChatSession {
     if (!token) return;
     strandedSends.delete(token);
     sendQueue.delete(token);
+    // The cached transcript goes, and it goes here rather than only on a real
+    // delete. A queue holds text the user committed to sending, so an archive
+    // or another device's `remove` frame must not destroy it; a cache holds
+    // what the server already has, so keeping it buys a stale copy of a room
+    // that is off the list, and the room coming back refetches it in full.
+    // Whatever is still collected for it goes too, or the next flush would
+    // write the entry straight back.
+    pendingCacheRows.delete(token);
+    void deleteTranscript(storageUserId, token);
     // The *stored* copy deliberately stays. Two of this function's three
     // callers are recoverable — an archive is undone by unarchiving, and a
     // `remove` frame can be another device's edit — and dropping the key here
@@ -3554,6 +3816,11 @@ function createSession(): ChatSession {
     // Invalidate any `init()` still in flight, so a navigation away mid-load
     // can't install a stream / timer / listener behind us.
     initGeneration += 1;
+    // Write out what the debounce is still holding, rather than dropping it:
+    // a navigation away is exactly the moment the last two seconds of frames
+    // are worth keeping, and leaving the timers armed would fire them into a
+    // torn-down session.
+    flushCachedRooms();
     stopActive();
     stopRoomStream();
     stopRoomsRefresh();
@@ -3577,6 +3844,7 @@ function createSession(): ChatSession {
     hasMore,
     loadingOlder,
     loadOlder,
+    offlineTranscript,
     init,
     selectRoom,
     selectRoomByToken,
