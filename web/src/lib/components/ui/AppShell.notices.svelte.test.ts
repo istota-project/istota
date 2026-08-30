@@ -47,3 +47,31 @@ describe('AppShell notice host', () => {
     expect(header?.contains(screen.getByTestId('notice-region'))).toBe(true);
   });
 });
+
+/**
+ * The band overlays; it does not reflow.
+ *
+ * Asserted against the **source**, not a computed style: jsdom applies no
+ * Svelte component `<style>` and performs no layout, so `getComputedStyle` and
+ * `getBoundingClientRect` are both vacuous here — an assertion built on either
+ * passes whether or not the rule exists. (The same reasoning `DraftCard`'s
+ * max-width test records.)
+ *
+ * It is pinned because a caller now depends on it: chat states being offline
+ * through a sticky notice precisely because the band costs the transcript no
+ * height. A drawer that reflowed would silently reintroduce the problem that
+ * change was made to fix, and the chat suite could not see it.
+ */
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+describe('the notice band is out of flow', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(resolve(here, 'NoticeDrawer.svelte'), 'utf8');
+
+  it('positions its region absolutely, so content beneath it does not move', () => {
+    const rule = source.match(/\.notice-region\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toMatch(/position:\s*absolute/);
+  });
+});

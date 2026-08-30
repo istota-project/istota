@@ -11,7 +11,6 @@
     Chip,
     ConfirmDialog,
     CountPill,
-    NoticeBanner,
   } from '$lib/components/ui';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
@@ -26,7 +25,7 @@
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
   import { REPLY_EXCERPT_CHARS, isClientOnly, type MessageReply } from '$lib/stores/segments';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError, notifyWarning, dismissNotice } from '$lib/stores/notices';
   import { online } from '$lib/stores/connectivity';
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
@@ -352,10 +351,49 @@
       .catch(() => {});
   });
 
+  // Being offline, said once, in the notice band.
+  //
+  // It used to be a row inside the composer dock and then a `NoticeBanner` in
+  // the shell's `extras` band. Both were wrong in the same direction: docked it
+  // read as a caption on the text box, and as a banner it was a bordered card
+  // costing ~55px of a phone's pane for one sentence of chrome. The band
+  // overlays rather than reflows, so the transcript is exactly as long offline
+  // as on — which is what a statement about the app, rather than about the
+  // conversation, should cost.
+  //
+  // `sticky` is what makes a notice honest here. Connectivity is a condition,
+  // not an event, and the three ways this file's own machinery takes an event
+  // off screen — the navigation clear, the 30s handover, the queue trim — would
+  // each retract it while the composer still could not reach anything. A sticky
+  // notice is exempt from all three and still steps aside for events, so a
+  // failed send is not stuck behind it.
+  //
+  // The effect is the whole lifecycle: `$online` going true is what takes it
+  // down, so nothing can leave it up over a working connection.
+  let offlineNoticeId: number | null = null;
+  $effect(() => {
+    if (!$online) {
+      offlineNoticeId = notifyWarning('Offline — messages will send when you’re back.', {
+        duration: 0,
+        sticky: true,
+        key: 'chat:offline',
+      });
+      return;
+    }
+    if (offlineNoticeId !== null) {
+      dismissNotice(offlineNoticeId);
+      offlineNoticeId = null;
+    }
+  });
+
   // Stop the active stream when leaving /chat so the EventSource / poll timer
   // doesn't linger; remounting re-subscribes from persisted events.
   onDestroy(() => {
     if (highlightTimer) clearTimeout(highlightTimer);
+    // Sticky survives the navigation clear by design, so leaving /chat has to
+    // take it down by hand — the sentence promises the send queue will drain,
+    // and no other route has one to promise.
+    if (offlineNoticeId !== null) dismissNotice(offlineNoticeId);
     session.teardown();
   });
 
@@ -741,40 +779,6 @@
         </Chip>
       {/snippet}
     </ShellHeader>
-  {/snippet}
-
-  <!-- Connectivity is a state, not an event, so it is stated in a band that
-       stays until it changes — never a `notify()`, which would announce it once
-       and then take the only explanation away while the composer still cannot
-       reach anything. `notices.ts` says the same thing from the other side: a
-       page's own persistent condition belongs in that page's banner, where it
-       can stay put and be re-read.
-
-       It is the shell's `extras` band rather than a row inside the composer
-       dock, which is where it used to sit. Docked, it read as a part of the
-       composer — a caption on the text box rather than a statement about the
-       app — and it was the composer's own condition that gave it its shape:
-       painting the pane fill so the transcript did not show through, holding
-       the home-indicator inset in an aggregate view that had no composer, and
-       forcing the dock to render at all in a read-only pane just to carry it.
-       In the band it is app chrome, reflows the content instead of floating
-       over it, and is the same warn-variant alert every other persistent
-       condition in the app uses. It is withheld from no view: the aggregate
-       panes cannot be read offline either, so the sentence is as true there.
-
-       Chat-scoped rather than in `AppShell` itself, since the promise it makes
-       is the send queue's and nothing outside chat has one to make. -->
-  {#snippet extras()}
-    {#if !$online}
-      <!-- `role="status"` on the wrapper rather than the alert. The docked row
-           carried it and `NoticeBanner` is a `role="note"`, which is not a live
-           region — so without this the one user who cannot see the banner
-           appear is told nothing at all. It goes on the wrapper because the
-           component's role is its own and a caller must not overwrite it. -->
-      <div class="offline-alert" role="status">
-        <NoticeBanner title="Offline — messages will send when you’re back." variant="warn" />
-      </div>
-    {/if}
   {/snippet}
 
   {#snippet sidebar()}
@@ -1199,15 +1203,6 @@
     height: calc(var(--composer-h, 0px) + 1rem);
   }
 
-  /* Inset for the offline alert in the shell's band. The band spans the pane
-	   edge to edge, and a card sitting flush against the header and the sides
-	   reads as a strip of chrome rather than as the alert component it is; the
-	   inline value is the same 0.75rem the rest of the app's page insets use.
-	   Nothing about the alert's own shape is set here — the border, the fill and
-	   both type sizes belong to `NoticeBanner`. */
-  .offline-alert {
-    padding: var(--space-2) var(--space-3);
-  }
   /* Wrapper anchors the floating jump-to-latest button to the bottom of the
 	   scroll area; the button offsets itself above the docked composer. */
   .messages-wrap {

@@ -82,3 +82,50 @@ if (typeof globalThis.localStorage === 'undefined') {
   };
   Object.defineProperty(globalThis, 'localStorage', { value: stub, configurable: true });
 }
+
+// jsdom implements no part of the Web Animations API, and Svelte 5 drives every
+// transition through `element.animate` — so a test that renders a component
+// which merely *transitions* something dies in the framework rather than on its
+// own assertion. It surfaces as an unhandled rejection attributed to whichever
+// file was running, which is the same invisible-flake shape as the scroll-lock
+// timer above.
+//
+// The first file to need it was the chat page's, once the offline notice moved
+// into `NoticeDrawer` — the drawer slides its band in, so any page rendering an
+// `AppShell` with a live notice reaches this.
+//
+// Finished on arrival: nothing here asserts on a transition's *progress*, only
+// on what is on screen once it has run, so a stub that completes immediately is
+// the honest one. A test that ever needs the in-between must drive it itself
+// rather than loosening this.
+if (!('animate' in Element.prototype)) {
+  Object.defineProperty(Element.prototype, 'animate', {
+    value: () => {
+      const animation = {
+        cancel: () => {},
+        finish: () => {},
+        pause: () => {},
+        play: () => {},
+        reverse: () => {},
+        commitStyles: () => {},
+        persist: () => {},
+        currentTime: 0,
+        startTime: 0,
+        playbackRate: 1,
+        playState: 'finished',
+        finished: Promise.resolve(),
+        onfinish: null,
+        oncancel: null,
+        effect: { getComputedTiming: () => ({ duration: 0 }) },
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      };
+      // Svelte reads `finished` and also assigns `onfinish`; resolve the
+      // microtask so a caller awaiting either is not left hanging.
+      queueMicrotask(() => animation.onfinish?.());
+      return animation;
+    },
+    configurable: true,
+    writable: true,
+  });
+}
