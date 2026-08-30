@@ -14,7 +14,7 @@
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatHistoryMessage, ChatRoom } from '$lib/api';
+import type { ChatHistoryMessage, ChatRoom, User } from '$lib/api';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -600,3 +600,151 @@ describe('offline cache — clearing it', () => {
     vi.useRealTimers();
   });
 });
+
+/**
+ * The signed-in user, cached so the root layout has something to render when
+ * `getMe()` cannot be reached (ISSUE-354).
+ *
+ * It shares the `config` store rather than taking one of its own: `DB_VERSION`
+ * is 1 and a version bump is the one IndexedDB operation another open tab can
+ * block, so a second key shape in a key-value store is the cheaper answer.
+ */
+describe('offline cache — the signed-in user', () => {
+  function person(username: string, displayName: string): User {
+    return {
+      username,
+      display_name: displayName,
+      bot_name: 'Istota',
+      is_admin: false,
+      features: {
+        chat: true,
+        feeds: false,
+        location: false,
+        money: false,
+        health: false,
+        briefings: false,
+        google_workspace: false,
+        google_workspace_enabled: false,
+        admin: false,
+      },
+    };
+  }
+
+  it('round-trips the user', async () => {
+    const db = await freshDb();
+    await db.writeUser('alice', person('alice', 'Alice'));
+    expect((await db.readUser('alice'))?.display_name).toBe('Alice');
+  });
+
+  it('answers nothing for another user, and nothing for no user at all', async () => {
+    const db = await freshDb();
+    await db.writeUser('alice', person('alice', 'Alice'));
+    expect(await db.readUser('bob')).toBeNull();
+    expect(await db.readUser(null)).toBeNull();
+    // A write with no id stores nothing rather than inventing a key.
+    await db.writeUser(null, person('bob', 'Bob'));
+    expect(await db.readUser('bob')).toBeNull();
+  });
+
+  it('does not collide with the config kept under the same store', async () => {
+    const db = await freshDb();
+    await db.writeConfig('alice', {
+      max_prompt_chars: 10,
+      max_attachment_mb: 5,
+      attachment_extensions: ['pdf'],
+      client_poll_interval_ms: 1500,
+      user_id: 'alice',
+    });
+    await db.writeUser('alice', person('alice', 'Alice'));
+
+    expect((await db.readConfig('alice'))?.client_poll_interval_ms).toBe(1500);
+    expect((await db.readUser('alice'))?.username).toBe('alice');
+  });
+
+  it('expires with everything else in the cache', async () => {
+    const db = await freshDb();
+    const written = 1_000_000;
+    await db.writeUser('alice', person('alice', 'Alice'), written);
+    expect(await db.readUser('alice', written + db.CACHE_TTL_MS - 1)).not.toBeNull();
+    expect(await db.readUser('alice', written + db.CACHE_TTL_MS)).toBeNull();
+  });
+
+  it('is collected by the prune and by a clear', async () => {
+    const db = await freshDb();
+    const old = 1_000_000;
+    await db.writeUser('alice', person('alice', 'Alice'), old);
+    await db.pruneOffline(old + db.CACHE_TTL_MS + 1);
+    // Read at the written stamp, so this is about the prune rather than about
+    // the reader's own expiry check.
+    expect(await db.readUser('alice', old)).toBeNull();
+
+    await db.writeUser('alice', person('alice', 'Alice'));
+    expect(await db.clearOffline()).toBe(true);
+    expect(await db.readUser('alice')).toBeNull();
+  });
+
+  it('reads as an empty cache when the database cannot be opened', async () => {
+    vi.stubGlobal('indexedDB', {
+      open() {
+        throw new DOMException('denied', 'SecurityError');
+      },
+    });
+    vi.resetModules();
+    const db = await import('./db');
+
+    await expect(db.writeUser('alice', person('alice', 'Alice'))).resolves.toBeUndefined();
+    await expect(db.readUser('alice')).resolves.toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it('refuses a stored value that is not a user record', async () => {
+    const db = await freshDb();
+    // Written behind the module's back, the way a build with a different value
+    // shape would have left it. Validated to the depth the nav dereferences:
+    // a record with no `features` throws inside the template rather than here,
+    // so the layout renders none of its branches — strictly worse than the
+    // error page this cache exists to replace.
+    const shapes = [
+      { user: 'alice', savedAt: Date.now() },
+      { user: {}, savedAt: Date.now() },
+      { user: { username: 'alice' }, savedAt: Date.now() },
+      { user: { username: '', features: {} }, savedAt: Date.now() },
+      { user: { features: {} }, savedAt: Date.now() },
+    ];
+    for (const value of shapes) {
+      await putRaw(db, value, 'alice:me');
+      expect(await db.readUser('alice')).toBeNull();
+    }
+  });
+
+  it('is not fooled by a config keyed where a user record goes', async () => {
+    const db = await freshDb();
+    // Reachable only by a user literally named `alice:me`, whose config keys
+    // exactly where user `alice`'s identity does. The shape check is what makes
+    // that a null rather than a cross-user identity read; the cost is that
+    // user's config cache, which the write above silently overwrote.
+    await db.writeConfig('alice:me', {
+      max_prompt_chars: 10,
+      max_attachment_mb: 5,
+      attachment_extensions: [],
+      client_poll_interval_ms: 1500,
+    });
+    expect(await db.readUser('alice')).toBeNull();
+  });
+});
+
+/** Write a value straight into a store, bypassing the module's own writers. */
+async function putRaw(
+  db: typeof import('./db'),
+  value: unknown,
+  key: string,
+  store = db.STORE_CONFIG,
+): Promise<void> {
+  const handle = (await db.openOfflineDb())!;
+  await new Promise<void>((resolve, reject) => {
+    const tx = handle.transaction([store], 'readwrite');
+    tx.objectStore(store).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}

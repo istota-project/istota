@@ -3,6 +3,7 @@
   import { afterNavigate } from '$app/navigation';
   import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { Menu, Sun, Moon } from 'lucide-svelte';
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
@@ -11,11 +12,17 @@
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
-  import { startConnectivity } from '$lib/stores/connectivity';
+  import { online, startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
   import { shellAtLeast } from '$lib/platform/native';
-  import { forgetLastUserId } from '$lib/offline/lastUser';
+  import {
+    canReadCachedUser,
+    forgetLastUserId,
+    rememberLastUserId,
+    seedUserId,
+  } from '$lib/offline/lastUser';
+  import { readUser, writeUser } from '$lib/offline/db';
   import '../app.css';
 
   let { children } = $props();
@@ -23,6 +30,11 @@
   let user: User | null = $state(null);
   let loading = $state(true);
   let error = $state('');
+  // Whether the identity on screen came from the server *this session*, rather
+  // than from the cache or from nowhere at all. What the retry below is trying
+  // to reach, and nothing that is painted: a cached user renders exactly as a
+  // live one does, because it is the same record.
+  let live = $state(false);
 
   // A notice comments on the surface that raised it, so leaving that surface
   // retires it: an error is pinned until acknowledged, and without this one
@@ -127,10 +139,73 @@
     return () => document.removeEventListener('visibilitychange', onVisible);
   });
 
-  onMount(async () => {
-    console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
+  /**
+   * The last thing the cache can answer with, or null.
+   *
+   * Asked only about a failure the connectivity store says was a *gap*.
+   * `apiFetch` has already told the store which of the two this exception was,
+   * so the store is read here rather than the same failure being classified a
+   * second time — the read `chat.ts` already makes when its room list fetch
+   * fails. A 500 leaves the store online and gets nothing from here.
+   *
+   * Its own function so its own failure cannot escape into `loadUser`'s catch,
+   * where a throw would leave `user`, `error` and `loading` all falsy and the
+   * layout rendering none of its three branches.
+   */
+  async function cachedIdentity(): Promise<User | null> {
     try {
-      user = await getMe();
+      const seed = get(online) ? null : seedUserId();
+      return seed ? await readUser(seed) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The run counter `chat.ts` and `notifications.ts` both keep, for the reason
+   * they keep it: two loads can be in flight at once — a reconnect while the
+   * first is still awaiting — and without this the slower one wins whatever it
+   * has, which here means a month-old cached identity painted over the live one
+   * the app had just resolved.
+   */
+  let loadGeneration = 0;
+
+  /**
+   * Resolve who is signed in, and paint something either way.
+   *
+   * This gate decides whether the app renders at all — everything the offline
+   * work built sits under `{@render children()}` — so a cold launch with no
+   * connection used to end here, with a cached room list, cached transcripts,
+   * an offline banner and a send queue all present, correct and unreachable
+   * behind "Failed to load user info" (ISSUE-354).
+   *
+   * Three answers, and keeping them apart is the whole of it. A session that is
+   * over ends the session. A server that could not be *reached* falls back to
+   * the identity it last confirmed. Anything else — a server that answered and
+   * refused, or nothing cached to fall back on — is still the error page, which
+   * on a first launch is the honest outcome.
+   */
+  async function loadUser(): Promise<void> {
+    const mine = ++loadGeneration;
+    const current = () => mine === loadGeneration;
+    try {
+      const fresh = await getMe();
+      if (!current()) return;
+      user = fresh;
+      live = true;
+      // A retry that succeeds clears the message its own first attempt left.
+      error = '';
+      // The pointer the next cold launch reads its cache by (ISSUE-202).
+      // `/chat/config` writes the same value — its `user_id` *is* the username
+      // — but this runs on every route, so a session that never opens chat
+      // still leaves the shell able to find what it stored.
+      rememberLastUserId(fresh.username);
+      // Gated where the *read* is gated, unlike the pointer beside it: the
+      // pointer is one string with nothing personal in it and is written
+      // everywhere so the shell finds one already there, while this record
+      // carries the user's inbound address and no browser can either read it
+      // back or reach the settings row that clears it.
+      if (canReadCachedUser()) void writeUser(fresh.username, fresh);
       // The bell needs a count on every route, and `AppShell` is not on every
       // route — the error page renders none and neither do the money loading
       // branches — so the poll is anchored here rather than to the shell.
@@ -146,14 +221,69 @@
         // in next writes their own on the first config read; until then a cold
         // launch with no connection reads nothing, which is the right answer
         // when nobody is signed in.
+        //
+        // Ahead of every offline branch below, and ahead of the generation
+        // check too: a dead session and a dead network are different answers
+        // and must stay different, and a 401 is authoritative whoever asked.
         forgetLastUserId();
         window.location.href = `${base}/login`;
         return;
       }
-      error = 'Failed to load user info';
+      if (!current()) return;
+      const cached = await cachedIdentity();
+      if (!current()) return;
+      if (cached) {
+        user = cached;
+        // Deliberately no `startNotificationPoll()` and no write back. The poll
+        // would fail against the connection that just failed and back off into
+        // something indistinguishable from a real outage; re-storing what the
+        // cache just answered with would push its own expiry out forever and
+        // make the pointer self-confirming. Both happen on the retry below.
+        return;
+      }
+      // A retry already has an app on screen, and replacing one with an error
+      // message is the failure this branch exists to stop.
+      if (!user) error = 'Failed to load user info';
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
+  }
+
+  onMount(() => {
+    console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
+    // Seeded before the load rather than after it. The load awaits `getMe()`
+    // and then a first open of IndexedDB, which can spend three seconds, and a
+    // connection that returned inside that window would otherwise be read as
+    // the state the detector started from and never reported at all.
+    let was = get(online);
+    void loadUser();
+    // Subscribed synchronously and unconditionally, not from inside the load's
+    // own `.then()`: a cleanup returned before that promise settles cannot
+    // unsubscribe something not yet subscribed, which is the leak the comment
+    // below this hook was written about.
+    //
+    // `live` rather than "booted from the cache" is what it waits on, so the
+    // error page retries too. That page is otherwise the one screen with no way
+    // out — there is no reload affordance in the shell — and it is where a
+    // misread failure lands.
+    const unwatch = online.subscribe((reachable) => {
+      const returned = reachable && !was;
+      was = reachable;
+      if (returned && !live) void loadUser();
+    });
+    // The other signal the connectivity probe and the notification poll both
+    // already use: the user coming back to look. A retry that fails against a
+    // server that *answered* leaves the store online, so no further edge is
+    // coming and without this the app would hold a stale identity, silently,
+    // for the life of the page.
+    const onReturn = () => {
+      if (document.visibilityState === 'visible' && !live) void loadUser();
+    };
+    document.addEventListener('visibilitychange', onReturn);
+    return () => {
+      unwatch();
+      document.removeEventListener('visibilitychange', onReturn);
+    };
   });
 
   // Its own hook, and synchronous. Svelte only honours a cleanup returned from
