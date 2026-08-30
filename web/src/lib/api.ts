@@ -2220,6 +2220,16 @@ export interface ChatConfig {
   max_attachment_mb: number;
   attachment_extensions: string[];
   client_poll_interval_ms: number;
+  /**
+   * The authenticated caller's username, which the send queue's `localStorage`
+   * key is built from — a shared Talk room has one token across every member,
+   * so a bare token would hand one person's queued message to another on a
+   * browser profile two people take turns using. Published here rather than
+   * read from `getMe()` because the chat store awaits this config before
+   * anything else, and `getMe()` resolves after the restore needs it. Absent
+   * on an older backend, in which case the queue is in memory only.
+   */
+  user_id?: string;
   /** How an external-origin turn's body renders. */
   external_turn_display?: ExternalTurnDisplay;
   /** The caller's own raw setting, where `''` means "follow the operator". */

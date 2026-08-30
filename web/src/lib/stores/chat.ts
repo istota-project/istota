@@ -46,6 +46,7 @@ import {
   type SendResult,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { readAllQueues, writeQueue } from '$lib/stores/sendQueue';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
@@ -580,6 +581,128 @@ function createSession(): ChatSession {
 
   const roomTokenOf = (roomId: number) => get(rooms).find((r) => r.id === roomId)?.token;
 
+  // ---- Persistence -----------------------------------------------------
+  //
+  // A queued message is text the user has committed to sending, so losing it
+  // to a reload is worse than losing a draft — and a draft survives. The
+  // storage key needs the caller's own id (a shared Talk room has one token
+  // across every member of a browser profile), which arrives on
+  // `GET /chat/config`: `init()` already awaits that before anything else, so
+  // the id is known before there is anything to restore. Until it is, the
+  // queue is in memory only and nothing is written.
+  let queueUserId: string | null = null;
+  const QUEUE_KEY_INFIX = ':room:';
+  const queueKeyFor = (token: string) =>
+    queueUserId ? `${queueUserId}${QUEUE_KEY_INFIX}${token}` : null;
+
+  /**
+   * Write one room's queue out, or drop its stored copy when it is empty.
+   *
+   * Storage mirrors memory rather than standing beside it: every mutation of
+   * `sendQueue` calls this for the room it touched, so there is one direction
+   * of truth and no reconciliation to get wrong.
+   *
+   * `writeQueue`'s return — what was actually stored, after its clamp and its
+   * bounds — is deliberately *not* adopted back into memory. The in-memory
+   * queue is the live one, and a storage bound trimming it would delete a
+   * message the user can see on screen and expects to go out. The cost of a
+   * refused or trimmed write is a queue that does not survive a reload, which
+   * is the same cost `persisted.ts` already swallows for drafts.
+   */
+  function persistRoomQueue(token: string | null | undefined) {
+    if (!token) return;
+    const key = queueKeyFor(token);
+    if (!key) return;
+    writeQueue(key, sendQueue.get(token) ?? []);
+  }
+
+  /**
+   * Bring every stored queue back into memory, held.
+   *
+   * **A restored entry is always held.** The turn it was written against is
+   * over and unobserved, the user is not watching the room they wrote it in,
+   * and firing it on page load is the one surprise a send queue must never
+   * produce. It comes back as a queued bubble reading "Held — not sent", one
+   * tap from going out.
+   *
+   * Called from `init()` after the room list lands, because the token is what
+   * the queue is keyed by and a key naming a room this user no longer has is
+   * left alone rather than restored — there is nothing to render it in. Left
+   * *alone* rather than dropped: a room that is merely archived, or a room
+   * list that came back short, must not cost the text. The TTL collects it.
+   *
+   * A room that already has entries in memory keeps them. `init()` runs again
+   * on every remount of the page while the session outlives it, and storage is
+   * this map's mirror — so re-reading it over a live queue would duplicate
+   * every entry.
+   */
+  function restoreQueues() {
+    if (!queueUserId) return;
+    // Only this user's own keys. A browser profile two people take turns using
+    // holds both their queues under the one storage key, and one person's
+    // committed message must never be restored into the other's transcript.
+    const prefix = `${queueUserId}${QUEUE_KEY_INFIX}`;
+    const known = new Set(get(rooms).map((r) => r.token));
+    for (const [storedKey, entries] of Object.entries(readAllQueues())) {
+      if (!storedKey.startsWith(prefix)) continue;
+      const token = storedKey.slice(prefix.length);
+      if (!token || !known.has(token) || sendQueue.has(token)) continue;
+      sendQueue.set(
+        token,
+        entries.map((entry) => ({
+          ...entry,
+          // The stored cid belongs to the session that wrote it. `cidCounter`
+          // starts fresh on every load, so carrying it over would collide with
+          // a row this session is about to mint. The cid is a client-local
+          // display key, not durable identity.
+          cid: nextCid(),
+          held: true,
+        })),
+      );
+    }
+  }
+
+  /**
+   * The transcript row that mirrors a queued entry.
+   *
+   * Rebuilt rather than stored: the entry is the source of truth for what will
+   * be sent, and the row is a mirror for display. `createdAt` comes from
+   * `queuedAt` so a restored bubble keeps the time it was actually written.
+   */
+  function queuedRow(entry: QueuedSend, roomToken: string): ChatMessage {
+    return {
+      cid: entry.cid,
+      role: 'user',
+      text: entry.text,
+      segments: [],
+      streaming: false,
+      roomToken,
+      attachments: entry.attachments.map((x) => x.name),
+      attachmentPaths: entry.attachments.map((x) => x.workspace_path ?? null),
+      createdAt: new Date(entry.queuedAt).toISOString(),
+      replyTo: entry.replyTo,
+      sendState: 'queued',
+      ...(entry.held ? { queueHeld: true } : {}),
+    };
+  }
+
+  /**
+   * Give a room's queued entries their rows, for any entry that has none.
+   *
+   * A row that is merely off screen comes back through `carryClientOnlyRows`
+   * with whatever the user last saw on it, so this only ever fires for an
+   * entry restored from storage — where the queue outlived every row it had.
+   */
+  function appendQueuedRows(roomToken: string) {
+    const entries = sendQueue.get(roomToken);
+    if (!entries?.length) return;
+    messages.update((arr) => {
+      const seen = new Set(arr.map((m) => m.cid));
+      const missing = entries.filter((e) => !seen.has(e.cid));
+      return missing.length ? [...arr, ...missing.map((e) => queuedRow(e, roomToken))] : arr;
+    });
+  }
+
   /**
    * Stop every entry in a room's queue from draining on its own.
    *
@@ -605,6 +728,11 @@ function createSession(): ChatSession {
     for (const m of strandedSends.get(token) ?? []) {
       if (isQueued(m)) m.queueHeld = true;
     }
+    // Storage mirrors memory after every mutation, this one included. A
+    // restore re-holds everything regardless, so nothing depends on the flag
+    // reaching disk — but leaving one mutation out is how the two copies start
+    // disagreeing about something that later does.
+    persistRoomQueue(token);
   }
 
   /** Where a queued entry lives, or null if `cid` names no queued message. */
@@ -628,6 +756,7 @@ function createSession(): ChatSession {
     const stashed = (strandedSends.get(found.token) ?? []).filter((m) => m.cid !== cid);
     if (stashed.length) strandedSends.set(found.token, stashed);
     else strandedSends.delete(found.token);
+    persistRoomQueue(found.token);
     return { token: found.token, entry };
   }
 
@@ -1818,6 +1947,13 @@ function createSession(): ChatSession {
     // All view and wrong here — a room missing from `$rooms` would inherit
     // every other room's held rows. Carry nothing rather than everything.
     messages.set(roomToken ? carryClientOnlyRows(prev, msgs, roomToken) : msgs);
+    // A queued entry restored from storage has no row anywhere — the queue
+    // outlived every transcript that ever rendered it — so the carry above
+    // finds nothing to bring back and the bubble has to be rebuilt from the
+    // entry. Here rather than in `init()` because a row is only ever appended
+    // for the room being rendered, and this is the one place that knows which
+    // that is.
+    if (roomToken) appendQueuedRows(roomToken);
     // Seed paging state from the first-load response.
     oldestCursor = hist.oldest_cursor ?? null;
     hasMore.set(!!hist.has_more);
@@ -2042,6 +2178,12 @@ function createSession(): ChatSession {
       const cfg = await getChatConfig().catch(() => null);
       if (superseded()) return;
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
+      // Who the send queue's storage key belongs to. It rides on the config
+      // rather than being pushed down from the page, which reads it from
+      // `getMe()`: that resolves after this, so a queue keyed on it would have
+      // an ordering hazard exactly where the restore below happens. An older
+      // backend sends no `user_id`, and the queue is then in memory only.
+      queueUserId = cfg?.user_id ?? null;
       // Normalized rather than adopted: the column takes any string a hand
       // edit puts in it, and an unrecognized value must read as the default
       // instead of leaving the transcript with no branch to take.
@@ -2049,6 +2191,11 @@ function createSession(): ChatSession {
       const { rooms: list } = await getChatRooms();
       if (superseded()) return;
       rooms.set(sortRoomsByActivity(list));
+      // After the room list, because the queue is keyed by token and a key
+      // naming a room this user no longer has is left where it is. Before the
+      // history read, so `loadHistory` finds the restored entries and gives
+      // them their rows.
+      restoreQueues();
       // Seed the stream cursor BEFORE the history read, not after. A row
       // committed in between is then re-delivered by the stream and dropped by
       // the `msg_id` dedup; seeding afterwards would place it below the cursor
@@ -2204,6 +2351,13 @@ function createSession(): ChatSession {
     if (!token) return;
     strandedSends.delete(token);
     sendQueue.delete(token);
+    // The stored copy goes with it, or a room that comes back — unarchived, or
+    // re-added by another device — inherits a queue written against a
+    // conversation the user has since left. The page drops the same key again
+    // after a delete resolves, which is not redundant: a room already gone from
+    // `$rooms` by then leaves this function nothing to look up, and the page
+    // captured the token before the delete.
+    persistRoomQueue(token);
     messages.update((arr) => arr.filter((m) => !(isClientOnly(m) && m.roomToken === token)));
   }
 
@@ -2468,6 +2622,9 @@ function createSession(): ChatSession {
       queuedAt: Date.now(),
     });
     sendQueue.set(roomToken, entries);
+    // Written now rather than on unload, so a tab closed on a queued message
+    // depends on catching no departure event.
+    persistRoomQueue(roomToken);
   }
 
   async function retrySend(cid: number) {
@@ -2559,6 +2716,11 @@ function createSession(): ChatSession {
     const entry = entries?.shift();
     if (!token || !entry) return;
     if (!entries?.length) sendQueue.delete(token);
+    // Before the POST, not after: the entry is in flight now, and a reload
+    // taking the tab with it must not restore a message that has already gone.
+    // A send that then fails leaves a failed row with its own Retry, which is
+    // where that message's recovery lives from here.
+    persistRoomQueue(token);
     await beginSend(roomId, entry.cid, {
       text: entry.text,
       attachments: entry.attachments,
@@ -2627,6 +2789,7 @@ function createSession(): ChatSession {
     for (const m of strandedSends.get(found.token) ?? []) {
       if (m.cid === cid) m.queueHeld = undefined;
     }
+    persistRoomQueue(found.token);
     const roomId = get(activeRoomId);
     if (roomId != null) await drainSendQueue(roomId);
   }

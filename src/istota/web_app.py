@@ -5690,6 +5690,15 @@ async def _mirror_web_turn_as_user(
 async def chat_config(user: dict = Depends(_require_api_auth)):
     """Client-facing chat knobs, plus the caller's own display/policy settings.
 
+    `user_id` is the authenticated username, and it is here rather than left to
+    `GET /me` because of when the client needs it. The chat store's send queue
+    (ISSUE-238) is persisted per room in `localStorage` under a key carrying the
+    user — a shared Talk room has one token across every member, so on a browser
+    profile two people take turns using, a bare token would restore one person's
+    unsent message into the other's transcript. That restore happens in the
+    store's `init()`, which awaits this endpoint before anything else, so an id
+    fetched separately would arrive after the point it is needed.
+
     `outbound_approval` is the **raw** user value, where `""` means "follow the
     operator", because that is what a settings pane has to edit — resolving it
     away would make the pane unable to distinguish "unset" from a deliberate
@@ -5726,6 +5735,7 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     raw_approval = (getattr(user_config, "outbound_approval", "") or "").strip()
     profile = user_profiles.get_profile(_config.db_path, username)
     return {
+        "user_id": username,
         "max_prompt_chars": chat.max_prompt_chars,
         "max_attachment_mb": chat.max_attachment_mb,
         "attachment_extensions": chat.attachment_extensions,

@@ -43,10 +43,27 @@ const api = vi.hoisted(() => ({
 }));
 
 vi.mock('$lib/api', () => api);
-vi.mock('$lib/stores/persisted', () => ({
-  loadSetting: vi.fn(() => null),
-  saveSetting: vi.fn(),
-}));
+
+// Hoisted, so the same functions and the same backing store survive the
+// `vi.resetModules()` in `freshSession()` — a restore test has to seed storage
+// before the store module exists. `sendQueue.ts` imports this module by a
+// relative path and `chat.ts` through the alias; both resolve to one file, so
+// both get this mock. Values round-trip through JSON exactly as the real
+// `localStorage` pair does, which is what makes a seeded map an honest stand-in
+// for one written by a previous session.
+const persisted = vi.hoisted(() => {
+  const store = new Map<string, string>();
+  return {
+    store,
+    loadSetting: vi.fn((key: string, fallback: unknown) =>
+      store.has(key) ? JSON.parse(store.get(key) as string) : fallback,
+    ),
+    saveSetting: vi.fn((key: string, value: unknown) => {
+      store.set(key, JSON.stringify(value));
+    }),
+  };
+});
+vi.mock('$lib/stores/persisted', () => persisted);
 
 const notices = vi.hoisted(() => ({
   notify: vi.fn(),
@@ -131,6 +148,26 @@ async function streaming(taskId = 42) {
 
 const queuedRows = (msgs: ChatMessage[]) => msgs.filter((m) => m.sendState === 'queued');
 
+const QUEUE_KEY = 'chat.sendQueue';
+
+/** One entry as a previous session would have left it in storage. */
+function storedEntry(text: string, over: Record<string, unknown> = {}) {
+  return { cid: 1, text, attachments: [], held: false, queuedAt: Date.now(), ...over };
+}
+
+/** Seed the whole stored map, as if written before this page load. */
+function seedQueues(map: Record<string, unknown[]>, user = 'alice') {
+  const keyed: Record<string, unknown[]> = {};
+  for (const [token, entries] of Object.entries(map)) keyed[`${user}:room:${token}`] = entries;
+  persisted.store.set(QUEUE_KEY, JSON.stringify(keyed));
+}
+
+/** What is stored for a room right now. */
+function storedQueue(token: string, user = 'alice'): Record<string, unknown>[] {
+  const raw = persisted.store.get(QUEUE_KEY);
+  return raw ? (JSON.parse(raw)[`${user}:room:${token}`] ?? []) : [];
+}
+
 describe('chat store — the send queue', () => {
   beforeEach(() => {
     Object.values(api).forEach((v) => {
@@ -138,7 +175,10 @@ describe('chat store — the send queue', () => {
         (v as unknown as { mockReset(): void }).mockReset();
     });
     Object.values(notices).forEach((v) => v.mockReset());
-    api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500 });
+    persisted.store.clear();
+    persisted.loadSetting.mockClear();
+    persisted.saveSetting.mockClear();
+    api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500, user_id: 'alice' });
     api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
     api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
     api.getChatMessagesView.mockResolvedValue({ messages: [], has_more: false });
@@ -831,6 +871,211 @@ describe('chat store — the send queue', () => {
       await s.deleteRoom(1);
 
       expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual(['and another thing']);
+    });
+  });
+
+  describe('persistence', () => {
+    it('writes a queued message to storage the moment it is queued', async () => {
+      // At enqueue rather than on unload, so a tab closed on a queued message
+      // depends on catching no departure event.
+      const s = await streaming();
+
+      await s.send('and another thing');
+
+      const stored = storedQueue('t1');
+      expect(stored).toHaveLength(1);
+      expect(stored[0].text).toBe('and another thing');
+      expect(stored[0].held).toBe(false);
+    });
+
+    it('takes a drained entry out of storage', async () => {
+      const s = await streaming();
+      await s.send('first');
+      await s.send('second');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      expect(storedQueue('t1').map((e) => e.text)).toEqual(['second']);
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+    });
+
+    it('records the hold a Stop applied', async () => {
+      const s = await streaming();
+      await s.send('and another thing');
+
+      await emit('cancelled');
+
+      expect(storedQueue('t1')[0].held).toBe(true);
+      expect(queuedRows(get(s.messages))[0].queueHeld).toBe(true);
+    });
+
+    it('drops the stored copy with the room', async () => {
+      const s = await streaming();
+      await s.send('and another thing');
+      expect(storedQueue('t1')).toHaveLength(1);
+      api.deleteChatRoom.mockResolvedValue({ ok: true });
+
+      await s.deleteRoom(1);
+      await flush();
+
+      expect(storedQueue('t1')).toEqual([]);
+    });
+
+    it('drops the stored copy when a queued message is removed', async () => {
+      const s = await streaming();
+      await s.send('and another thing');
+      const cid = queuedRows(get(s.messages))[0].cid;
+
+      s.removeQueued(cid);
+
+      expect(storedQueue('t1')).toEqual([]);
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+    });
+
+    it('queues in memory only when the backend publishes no user id', async () => {
+      // The key needs the caller's own id, and an older backend does not send
+      // one. The queue still works; it just does not survive a reload.
+      api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500 });
+      const s = await streaming();
+
+      await s.send('and another thing');
+
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+      expect(persisted.store.has(QUEUE_KEY)).toBe(false);
+    });
+  });
+
+  describe('restoring a stored queue', () => {
+    it('brings a stored queue back held, and sends nothing', async () => {
+      // The turn it was written against is over and unobserved, and the user
+      // is not watching the room they wrote it in — so a page load must never
+      // fire it. The stored entry says `held: false`; the restore overrides.
+      seedQueues({ t1: [storedEntry('written before the reload')] });
+      const s = await freshSession();
+
+      await s.init();
+      await flush();
+
+      const queued = queuedRows(get(s.messages));
+      expect(queued).toHaveLength(1);
+      expect(queued[0].text).toBe('written before the reload');
+      expect(queued[0].queueHeld).toBe(true);
+      expect(queued[0].roomToken).toBe('t1');
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+    });
+
+    it('sends a restored entry once it is released', async () => {
+      seedQueues({
+        t1: [storedEntry('written before the reload', { idempotencyKey: 'stable-key' })],
+      });
+      const s = await freshSession();
+      await s.init();
+      await flush();
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 55 });
+
+      await s.releaseQueued(queuedRows(get(s.messages))[0].cid);
+      await flush();
+
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('written before the reload');
+      // The key is minted at enqueue precisely so it survives the round trip:
+      // two tabs draining the same restored entry get one task.
+      expect(api.sendChatMessage.mock.calls[0][5]).toBe('stable-key');
+    });
+
+    it('gives a restored entry its row only in the room being rendered', async () => {
+      // The entry is restored for every room at init; the *row* is rebuilt in
+      // `loadHistory`, so a background room's message appears when it is
+      // entered rather than in whatever transcript is open.
+      seedQueues({ t2: [storedEntry('for the other room')] });
+      const s = await freshSession();
+      await s.init();
+      await flush();
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+
+      await s.selectRoom(2);
+      await flush();
+
+      const queued = queuedRows(get(s.messages));
+      expect(queued.map((m) => m.text)).toEqual(['for the other room']);
+      expect(queued[0].queueHeld).toBe(true);
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+    });
+
+    it('leaves a queue stored for a room the user no longer has', async () => {
+      // Nothing can render it and nothing can drain it, so it is not restored
+      // — but it is not deleted either: an archived room, or a room list that
+      // came back short, must not cost the text. The TTL collects it.
+      seedQueues({ t9: [storedEntry('for a room that is gone')] });
+      const s = await freshSession();
+
+      await s.init();
+      await flush();
+
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(storedQueue('t9')).toHaveLength(1);
+    });
+
+    it('does not restore another user of this browser profile', async () => {
+      // A shared Talk room has one token across every member, which is why the
+      // key carries the user: without it one person's unsent message would be
+      // restored into the other's transcript.
+      seedQueues({ t1: [storedEntry('typed by somebody else')] }, 'bob');
+      const s = await freshSession();
+
+      await s.init();
+      await flush();
+
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+    });
+
+    it('mints a fresh cid rather than reusing the one that was stored', async () => {
+      // `cidCounter` starts over on every page load, so a stored cid collides
+      // with a row this session is about to mint. The cid is a client-local
+      // display key, not durable identity — and a collision means two rows
+      // answering to one id in a keyed {#each}.
+      seedQueues({ t1: [storedEntry('written before the reload', { cid: 2 })] });
+      api.getRoomMessages.mockResolvedValue({
+        messages: [
+          { msg_id: 11, role: 'user', text: 'one', created_at: '2026-08-29T09:00:00Z' },
+          { msg_id: 12, role: 'assistant', text: 'two', created_at: '2026-08-29T09:00:01Z' },
+          { msg_id: 13, role: 'user', text: 'three', created_at: '2026-08-29T09:00:02Z' },
+        ],
+        active_task: null,
+        active_tasks: [],
+      });
+      const s = await freshSession();
+
+      await s.init();
+      await flush();
+
+      const cids = get(s.messages).map((m) => m.cid);
+      expect(new Set(cids).size).toBe(cids.length);
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+    });
+
+    it('does not duplicate a queue that is still live in memory', async () => {
+      // The session outlives the page, so `init()` runs again on a remount
+      // with the queue still in memory. Storage is that map's mirror, so
+      // re-reading it over a live queue would double every entry.
+      const s = await streaming();
+      await s.send('and another thing');
+      // The turn is still running when the page comes back, so nothing drains.
+      api.getRoomMessages.mockResolvedValue({
+        messages: [],
+        active_task: null,
+        active_tasks: [{ id: 42, status: 'running' }],
+      });
+
+      s.teardown();
+      await s.init();
+      await flush();
+
+      expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual(['and another thing']);
+      expect(storedQueue('t1')).toHaveLength(1);
     });
   });
 });

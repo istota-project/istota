@@ -27,6 +27,7 @@
   import { REPLY_EXCERPT_CHARS, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
   import { dropDraft } from '$lib/stores/drafts';
+  import { dropQueue } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
   import { getMe, type ChatAttachment, type ChatRoom, type ChatView } from '$lib/api';
 
@@ -632,7 +633,14 @@
     // The composer flushes on its way out of a room, but it is switched away
     // by the store's own reselect *during* the await above — so by now the
     // stored draft is already the final one and this is the last word on it.
-    if (userId) dropDraft(`${userId}:room:${token}`);
+    if (userId) {
+      dropDraft(`${userId}:room:${token}`);
+      // And whatever was waiting to be sent into it. The store drops the room's
+      // in-memory queue on its way out, but only while the room is still in
+      // `$rooms` to be looked up by id — this holds the token captured before
+      // the delete, so it is the half that cannot miss.
+      dropQueue(`${userId}:room:${token}`);
+    }
   }
 
   async function promoteRoom() {
