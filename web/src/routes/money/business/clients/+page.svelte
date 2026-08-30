@@ -194,7 +194,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if clients.length === 0}
     <div class="money-table-empty">No clients configured yet — add your first one.</div>
   {:else}

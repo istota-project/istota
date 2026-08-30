@@ -195,7 +195,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="banner error">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if matrix && matrix.panels.length === 0 && drafts.length === 0}
   <div class="empty">
     No bloodwork on file yet.

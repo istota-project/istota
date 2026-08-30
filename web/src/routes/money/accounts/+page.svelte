@@ -80,7 +80,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="error-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if visibleNodes.length === 0}
   <div class="empty">No accounts found.</div>
 {:else}

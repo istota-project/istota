@@ -407,7 +407,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="banner error">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else}
   <section>
     <h2 class="micro-label">Active <span class="count">{active.length}</span></h2>

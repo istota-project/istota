@@ -123,7 +123,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="error-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else}
   <!-- insetBottom only on settings. Every other money section puts its own
        scroller inside the shell (.money-section-body, or transactions'

@@ -180,7 +180,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if invoices.length === 0}
     <div class="money-table-empty">No invoices found.</div>
   {:else}

@@ -243,7 +243,7 @@
   {#if loading && transactions.length === 0}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if transactions.length === 0}
     <div class="empty">No transactions found.</div>
   {:else}
