@@ -1268,10 +1268,12 @@ function createSession(): ChatSession {
         // random verb to another — real status (progress_text / tool_start /
         // the first text delta) takes over via the reducer below.
         if (payload.text && !m.progress) m.progress = String(payload.text);
-        return;
+        // Falls through: the reducer also settles the open block, because a
+        // retry re-runs under this same message (ISSUE-361). The verb stays
+        // here — it is message state, not a segment.
       }
-      // Every other event kind builds the ordered segment list. The reducer
-      // is pure and unit-tested in segments.test.ts.
+      // Every event kind builds the ordered segment list. The reducer is pure
+      // and unit-tested in segments.test.ts.
       applySegmentEvent(m, kind, payload);
     });
   }

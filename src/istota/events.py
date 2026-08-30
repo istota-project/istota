@@ -206,6 +206,9 @@ class EventWriter:
         self._seq = self._resume_seq() if enabled else 0
         self._start_time = time.monotonic()
         self._subscribers: list[EventSubscriber] = []
+        # Kinds this instance has emitted, plus any `emit_once` kind a previous
+        # attempt was found to have logged. Only `emit_once` reads it.
+        self._emitted_kinds: set[str] = set()
 
     def _resume_seq(self) -> int:
         try:
@@ -225,6 +228,7 @@ class EventWriter:
 
     def emit(self, kind: EventKind, payload: dict | None = None) -> TaskEvent:
         self._seq += 1
+        self._emitted_kinds.add(kind)
         payload = dict(payload) if payload else {}
 
         # Enforce payload size cap (deliverable kinds are exempt — see above).
@@ -264,6 +268,69 @@ class EventWriter:
                 )
 
         return event
+
+    def emit_once(self, kind: EventKind, payload: dict | None = None) -> TaskEvent | None:
+        """``emit`` unless this task has already logged an event of this kind.
+
+        For a notice that belongs to the *turn* rather than to the attempt
+        (ISSUE-361). A task that fails is retried under the same id and the
+        event log spans every attempt, so a per-attempt notice stacks up in the
+        transcript: the fallback banner appeared three times for one user
+        message, the first naming the real cause and the two behind it
+        repeating "cooling down".
+
+        Returns None when suppressed, so a caller can tell the two apart.
+
+        **The one that survives is the first, not the best.** Usually those
+        coincide, but not always: the availability breaker is process-wide, so
+        a task arriving inside another task's cooldown window is told "cooling
+        down" on its own attempt 1, and if the window closes before a later
+        attempt that attempt can call the primary for real and fail with a
+        reason it could have named. That sentence is dropped. Deduping on the
+        reason as well would keep it and is deliberately not done — the
+        invariant asked for is one notice per user message *whatever* failed,
+        and the reported bug's own shape was one `usage_limit` plus two
+        `cooldown`s, which a reason-keyed dedup renders as two.
+
+        **A subscriber must not hang state off a kind passed here**, since the
+        event it was doing that work on may not arrive. Two do today and both
+        are accounted for: the web reducer settled the open text block at a
+        reroute, which is now `task_started`'s job (a retry is that boundary
+        whether or not it failed over — `web/src/lib/stores/segments.ts`), and
+        the REPL resets its reconcile buffer, which is unreachable because
+        `run_task_inline` never retries and the REPL mints a task id per line.
+
+        The lookback costs one read, only on the first call per kind, and only
+        until an answer is cached. With the event log switched off
+        (``enabled=False``) there is nothing to look back at, so the dedup
+        narrows to this attempt — which is the whole stream a surface gets in
+        that configuration anyway.
+
+        Only meaningful for a kind nothing prunes: `db.has_task_event_kind`
+        says which. Task id is the unit, which is the turn everywhere but one:
+        a confirmation re-run resumes the same task after the user has
+        answered, so a notice raised before the park is not raised again after
+        it. Harmless as it stands — the client re-opens that task's stream from
+        seq 0, so the surviving row is replayed and still rendered.
+        """
+        if kind in self._emitted_kinds:
+            return None
+        if self._enabled and self._prior_attempt_logged(kind):
+            self._emitted_kinds.add(kind)
+            return None
+        return self.emit(kind, payload)
+
+    def _prior_attempt_logged(self, kind: str) -> bool:
+        """Did an earlier attempt of this task log `kind`? Best-effort: an
+        unreadable log answers no, so a hiccup costs a repeated notice rather
+        than a swallowed one."""
+        try:
+            from . import db
+            with db.get_db(self._db_path) as conn:
+                return db.has_task_event_kind(conn, self._task_id, kind)
+        except Exception:
+            logger.debug("EventWriter emit_once lookback failed", exc_info=True)
+            return False
 
     def finish(self) -> None:
         """Notify every subscriber that the terminal event has been emitted."""
