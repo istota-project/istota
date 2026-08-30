@@ -9,6 +9,8 @@ import { fetchChatCommands } from '$lib/api';
 import {
   commandProvider,
   getBaseModelChoices,
+  isKnownCommand,
+  loadCommandNames,
   modelAliasProvider,
   resetCommandCatalogue,
 } from './providers';
@@ -28,6 +30,10 @@ const CATALOGUE = {
     { alias: 'opus', target: 'claude-opus-4-8', effort: null },
     { alias: 'sonnet', target: 'claude-sonnet-5', effort: null },
     { alias: 'haiku', target: 'claude-haiku-4-5', effort: null },
+  ],
+  command_aliases: [
+    { alias: 'inject', target: 'steer' },
+    { alias: 'yes', target: 'confirm' },
   ],
 };
 
@@ -150,5 +156,69 @@ describe('getBaseModelChoices', () => {
       { value: 'claude-sonnet-5', label: 'sonnet' },
       { value: 'claude-haiku-4-5', label: 'haiku' },
     ]);
+  });
+});
+
+describe('isKnownCommand', () => {
+  it('recognises a registered command name', async () => {
+    await loadCommandNames();
+    expect(isKnownCommand('!stop')).toBe(true);
+  });
+
+  it('recognises a hidden alias, which dispatch resolves server-side (ISSUE-350)', async () => {
+    await loadCommandNames();
+    expect(isKnownCommand('!inject do the other thing')).toBe(true);
+    expect(isKnownCommand('!yes')).toBe(true);
+  });
+
+  it('still refuses a name the server registers under neither', async () => {
+    await loadCommandNames();
+    expect(isKnownCommand('!hepl')).toBe(false);
+    // `model` is deliberately not a command: `!model <alias> <prompt>` is a
+    // prefix that creates a task, so it must keep taking the turn path.
+    expect(isKnownCommand('!model opus write a poem')).toBe(false);
+  });
+
+  it('survives a malformed command_aliases rather than poisoning the catalogue', async () => {
+    // The assignment runs in `loadCatalogue`'s `.then`, after its `.catch`, so
+    // a throw here would reject the cached promise for the whole session and
+    // take the `!` popover and the room-settings model dropdown down with it.
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      command_aliases: { nope: true },
+    });
+    await expect(loadCommandNames()).resolves.toBeDefined();
+    expect(isKnownCommand('!stop')).toBe(true);
+    expect(isKnownCommand('!inject')).toBe(false);
+    // The other consumers of the same cached promise still resolve.
+    await expect(commandProvider().getSuggestions('')).resolves.toBeDefined();
+  });
+
+  it('ignores a fetch that resolves after its own session was torn down', async () => {
+    // Otherwise the stale assignment lands on top of the fresh one and the
+    // routing set is empty for the rest of the session, queueing every
+    // command — `!stop` included.
+    let releaseStale: (v: unknown) => void = () => {};
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((r) => {
+        releaseStale = r;
+      }),
+    );
+    const stale = loadCommandNames();
+
+    resetCommandCatalogue();
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue(CATALOGUE);
+    await loadCommandNames();
+    expect(isKnownCommand('!stop')).toBe(true);
+
+    releaseStale({ commands: [], model_aliases: [], command_aliases: [] });
+    await stale;
+    expect(isKnownCommand('!stop')).toBe(true);
+  });
+
+  it('keeps aliases out of the autocomplete suggestions', async () => {
+    const sugg = await commandProvider().getSuggestions('');
+    expect(sugg.map((s) => s.label)).not.toContain('!inject');
+    expect(sugg.map((s) => s.label)).toContain('!stop');
   });
 });

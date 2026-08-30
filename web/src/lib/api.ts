@@ -2447,8 +2447,18 @@ export interface ChatModelAlias {
   effort: string | null;
 }
 
+/** A hidden command alias: `dispatch` resolves `alias` to `target` before it
+ *  looks `target` up. Deliberately absent from `commands`, which is what feeds
+ *  `!help` and the composer autocomplete. Optional so a client built against
+ *  an older server still type-checks. */
+export interface ChatCommandAlias {
+  alias: string;
+  target: string;
+}
+
 export interface ChatCommands {
   commands: ChatCommand[];
+  command_aliases?: ChatCommandAlias[];
   model_aliases: ChatModelAlias[];
 }
 
