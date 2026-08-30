@@ -4,7 +4,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![Docs](https://img.shields.io/badge/docs-istota.cynium.com-blue)](https://istota.cynium.com/docs)
 
-**Istota is a self-hosted personal AI assistant with its own web UI.** It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. It integrates with Nextcloud for files, calendars, and messaging — a deep integration, though not a hard requirement.
+**Istota is a self-hosted personal AI assistant with its own web UI.** It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. Nextcloud is a first-class integration (files, calendars, contacts and Talk, over standard protocols with the bot as an ordinary user), but it is an integration rather than a foundation: file storage is a backend choice, and the local single-user install runs with no Nextcloud at all.
 
 It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
 
@@ -26,13 +26,14 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 
 | Area | What you get |
 |------|--------------|
-| **Messaging** | Nextcloud Talk (DMs + group rooms with @mentions), always-on web chat with live streaming, file attachments, recorded voice messages, per-room drafts that survive leaving the page, and authenticated download links for files a task produces, email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
+| **Messaging** | Always-on web chat with live streaming, file attachments, recorded voice messages, per-room drafts that survive leaving the page, and authenticated download links for files a task produces; Nextcloud Talk (DMs + group rooms with @mentions); email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
 | **Skills** | 36 skills the agent loads on demand: calendar, email, web browsing (Dockerized Chrome), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
 | **Memory** | Per-user (USER.md) and per-channel memory, nightly-extracted dated memories, hybrid BM25 + vector recall, and a temporal knowledge graph. Optional learned playbooks distilled from successful multi-step tasks. |
-| **Web UI** | Authenticated SvelteKit dashboard (Nextcloud OAuth2): multi-room chat, RSS reader, location/places map, money and health dashboards, and per-user settings. |
+| **Web UI** | SvelteKit dashboard: multi-room chat, RSS reader, location/places map, money and health dashboards, and per-user settings. Login is Nextcloud OAuth2 on a server deployment, or no login at all on a loopback-bound local install. |
 | **Scheduling** | Cron jobs via CRON.md (prompts, prompt files, or shell commands), natural-language reminders, and briefings built from reorderable content blocks — each gathering newsletters, RSS, a browsed news frontpage, markets, calendar, or todos — with a web reader and archive, delivered to Talk, email, or ntfy. |
 | **Health** | Body-stat time series, bloodwork OCR + CSV import, biomarker trends with LLM explainers, Garmin Connect sync, immunization registry, medical history, and the documents behind it — scans and discharge summaries attached to the encounter, condition or immunization they evidence. Metric storage with unit-aware display. |
 | **Monitoring** | Heartbeat checks — file age, shell commands, URL health, calendar conflicts, task deadlines, self-checks — with cooldowns, quiet hours, and per-check intervals. |
+| **Files** | Each user gets a workspace the agent reads and writes: notes, config (persona, cron jobs, briefings, heartbeat checks), an inbox, and generated exports. Back it with a Nextcloud account per user — sharing, versioning, mobile clients, and config you can edit from any device — or with a plain folder on disk. |
 | **Multi-user** | Per-user config, resource permissions, worker pools, and admin/non-admin isolation. Multiple bot instances can share one Nextcloud and interact with each other through Talk rooms. |
 | **Security** | Bubblewrap sandbox per task, credential stripping from subprocess environments, network isolation via a CONNECT proxy, and deferred DB writes for sandboxed operations. |
 | **Pluggable brain** | Swap the model backend behind one protocol: the Claude Code CLI, Istota's own in-process agentic loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, Ollama, LM Studio, vLLM), or the Claude TUI over tmux. Route whole instances or specific task types to either, and configure a fallback backend so a task keeps running when the primary hits a usage limit, is overloaded, or goes unavailable. |
@@ -40,7 +41,7 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 
 ## Install
 
-Bare metal is the canonical deployment and connects to an existing Nextcloud. Docker bundles its own Nextcloud (Postgres, Redis, the web UI, and an nginx reverse proxy) for evaluation or standalone use.
+Istota comes in two shapes. The **server** deployment is multi-user, sandboxed and Nextcloud-backed: bare metal is the canonical form and connects to an existing Nextcloud, while Docker bundles its own (Postgres, Redis, the web UI, and an nginx reverse proxy) for evaluation or standalone use. The **local** install is single-user and needs no server, no Nextcloud and no login — see below.
 
 ```bash
 # Bare metal (Debian/Ubuntu VM, connects to your Nextcloud) — recommended
@@ -59,17 +60,6 @@ To update: `sudo bash install.sh --update` (bare metal) or `cd ~/istota && git p
 Want to run Istota on your own machine without a server, Nextcloud, or login? There is a slimmed-down local shape — one `uv tool install`, an interactive `istota setup`, then `istota serve` brings up the web UI and worker in one process on `http://localhost:8766/istota` with no auth. It is single-user, unsandboxed, and trusted by construction. Pick **Standalone** at the `install.sh` prompt (or `install.sh --standalone`, run **without** sudo) to do this in one step. Update it later with `istota update`. See **[docs/getting-started/local-install.md](docs/getting-started/local-install.md)**.
 
 Full walkthroughs, optional services, and configuration: **[Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/)** · **[Bare metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/)**.
-
-## Why Nextcloud?
-
-Most AI assistant projects connect to third-party APIs for storage, calendars, and messaging, accumulating credentials and vendor dependencies. Istota instead runs on its own server and, when you connect it to Nextcloud, integrates as a regular user — files, calendars, contacts, Talk messaging, and sharing all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
-
-- **Zero Nextcloud configuration.** Create a user account, invite it to a chat.
-- **File sharing is native.** Users share files with the bot like they share with colleagues.
-- **Multi-user comes free.** Nextcloud handles user isolation, file ownership, and access control.
-- **Self-hosted end to end.** Your data stays on your server; the only external dependency is a model provider.
-
-Config files (persona, briefings, cron jobs, heartbeat checks) live in each user's Nextcloud folder, editable with any text editor. See [Why Nextcloud](https://istota.cynium.com/docs) for the full rationale.
 
 ## Development
 

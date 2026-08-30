@@ -5,7 +5,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![License](https://img.shields.io/github/license/istota-project/istota)](https://github.com/istota-project/istota/blob/main/LICENSE)
 
-**Istota** is a self-hosted personal AI assistant with its own web UI. It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. It integrates with Nextcloud for files, calendars, and messaging — a deep integration, though not a hard requirement.
+**Istota** is a self-hosted personal AI assistant with its own web UI. It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. Nextcloud is a first-class integration (files, calendars, contacts and Talk, over standard protocols with the bot as an ordinary user), but it is an integration rather than a foundation: file storage is a backend choice, and the local single-user install runs with no Nextcloud at all.
 
 It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking with travel history and saved places, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
 
@@ -29,7 +29,7 @@ When you connect it to Nextcloud, it integrates as a regular Nextcloud user: fil
 
 ## Features at a glance
 
-- **Messaging** -- Nextcloud Talk (DMs and group rooms), in-app web chat (always-on rooms with live streaming), email (IMAP/SMTP with threading), TASKS.md file polling, interactive REPL, CLI
+- **Messaging** -- In-app web chat (always-on rooms with live streaming), Nextcloud Talk (DMs and group rooms), email (IMAP/SMTP with threading), TASKS.md file polling, interactive REPL, CLI
 - **Skills** -- 36 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Beancount accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, health tracking, and more
 - **Memory** -- Per-user persistent memory (with op-based nightly curation), per-channel memory, dated memory files, BM25 + vector search, temporal knowledge graph
 - **Scheduling** -- Cron jobs via CRON.md, natural-language reminders, scheduled briefings with calendar/markets/headlines/news/todos
@@ -56,6 +56,8 @@ Most AI assistant projects treat infrastructure as someone else's problem, conne
 - **Multi-user comes free.** Nextcloud handles user isolation, file ownership, and access control.
 - **Self-hosted end to end.** Your data stays on your server. The only external dependency is a model provider — Claude, any OpenAI-compatible API, or a model you host yourself.
 - **User self-service.** Config files live in the user's Nextcloud folder. Edit with any text editor.
+
+None of it is required. With no Nextcloud configured the workspace is a plain folder on disk, the built-in web chat carries messaging, and CalDAV and IMAP point wherever you like — that is the shape the [local single-user install](getting-started/local-install.md) ships. What you give up is Talk, native file sharing, and web login: web auth is either Nextcloud OAuth2 or none at all, and no-auth is permitted only on a loopback bind.
 
 ## License
 
