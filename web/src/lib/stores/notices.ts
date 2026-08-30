@@ -46,6 +46,25 @@ export interface NoticeOptions {
    * the same event ("retrying in 3s" → "retrying in 2s").
    */
   key?: string;
+  /**
+   * This notice states a **condition**, not an event: it is true for as long as
+   * it is true, and the thing that raised it is what takes it down.
+   *
+   * Everything else in this file assumes an event — something that happened,
+   * which the user reads once. Three of those assumptions are wrong for a
+   * condition and each would take it off screen while it still held: the
+   * navigation clear, the 30s handover, and the queue trim. A sticky notice is
+   * exempt from all three.
+   *
+   * It is not exempt from *yielding*. Holding the one slot for the life of the
+   * condition is the hazard `PINNED_HANDOVER_MS` exists to prevent, so a sticky
+   * head steps aside for any event waiting behind it and takes the slot back
+   * when they are done — see `yieldStickyHead`.
+   *
+   * Reach for it only where the raiser can prove the condition ended. Today
+   * that is chat's offline notice, driven off the connectivity store.
+   */
+  sticky?: boolean;
 }
 
 export interface Notice {
@@ -57,6 +76,8 @@ export interface Notice {
   key: string;
   /** How many times this notice has been raised, counting the first. */
   count: number;
+  /** A condition rather than an event. See `NoticeOptions.sticky`. */
+  sticky: boolean;
 }
 
 /**
@@ -109,6 +130,41 @@ function clearTimer(): void {
 }
 
 /**
+ * A sticky head steps aside for events waiting behind it.
+ *
+ * The alternative for a condition that outlives every event around it is one of
+ * two bad ones: hold the slot and silence the channel for as long as the
+ * condition lasts, or take the handover and be dismissed while still true. So a
+ * sticky notice yields instead — it goes to the back, the events ahead of it
+ * run their course, and it returns to the head when the queue drains to it.
+ *
+ * Rotating immediately rather than after `PINNED_HANDOVER_MS` is the point: an
+ * event queued behind a condition would otherwise wait 30s to be seen, which is
+ * the same silencing by a slower route.
+ *
+ * Only ever rotates past a non-sticky entry, so an all-sticky queue terminates.
+ */
+function yieldStickyHead(list: Notice[]): Notice[] {
+  if (list.length < 2) return list;
+  if (!list[0].sticky) return list;
+  if (!list.some((n) => !n.sticky)) return list;
+  return [...list.slice(1), list[0]];
+}
+
+/** How long the head may hold the slot; 0 means until it is dismissed. */
+function headLifetime(list: Notice[]): number {
+  const current = list[0];
+  if (current.duration > 0) return current.duration;
+  // A condition is taken down by whatever raised it, never by a clock.
+  if (current.sticky) return 0;
+  // A pinned notice keeps the slot while it is the only thing waiting. The
+  // moment something queues behind it, holding on indefinitely would silence
+  // that one and every one after it, so it hands over after a long grace.
+  if (list.length > 1) return PINNED_HANDOVER_MS;
+  return 0;
+}
+
+/**
  * Keep the timer pointed at whatever is currently on screen. Called after every
  * queue change: a queued notice must not burn its lifetime unseen, so its clock
  * only starts when it reaches the head.
@@ -121,11 +177,7 @@ function armTimer(restart = false): void {
     return;
   }
 
-  // A pinned notice keeps the slot while it is the only thing waiting. The
-  // moment something queues behind it, holding on indefinitely would silence
-  // that one and every one after it, so it hands over after a long grace.
-  const lifetime =
-    current.duration > 0 ? current.duration : list.length > 1 ? PINNED_HANDOVER_MS : 0;
+  const lifetime = headLifetime(list);
 
   if (lifetime <= 0) {
     clearTimer();
@@ -205,13 +257,19 @@ export function notify(message: string, options: NoticeOptions = {}): number {
         action: options.action,
         key,
         count: 1,
+        sticky: options.sticky ?? false,
       },
     ];
     // Drop the oldest *queued* notice rather than the visible one or the
     // newest: the user is reading the head, and the newest is the most
-    // relevant thing that just happened.
-    while (next.length > MAX_QUEUE) next.splice(1, 1);
-    return next;
+    // relevant thing that just happened. A sticky one is never the victim —
+    // it is a condition that is still true, and nothing would raise it again.
+    while (next.length > MAX_QUEUE) {
+      const victim = next.findIndex((n, i) => i > 0 && !n.sticky);
+      if (victim < 0) break;
+      next.splice(victim, 1);
+    }
+    return yieldStickyHead(next);
   });
 
   // A repeat of the visible notice restarts its clock — the event is still
@@ -222,14 +280,21 @@ export function notify(message: string, options: NoticeOptions = {}): number {
 
 /** Take down a specific notice. A stale id is a no-op. */
 export function dismissNotice(id: number): void {
-  queue.update((list) => list.filter((n) => n.id !== id));
+  // Re-checked after the removal: dismissing the event a sticky notice stepped
+  // aside for is exactly when the condition should take the slot back.
+  queue.update((list) => yieldStickyHead(list.filter((n) => n.id !== id)));
   armTimer();
 }
 
-/** Drop every notice, live timer included. */
+/**
+ * Drop every notice, live timer included — except a sticky one, which states a
+ * condition rather than commenting on the surface being navigated away from.
+ * The raiser is what takes those down.
+ */
 export function clearNotices(): void {
   clearTimer();
-  queue.set([]);
+  queue.update((list) => list.filter((n) => n.sticky));
+  armTimer();
 }
 
 export const notifyInfo = (message: string, options: NoticeOptions = {}) =>

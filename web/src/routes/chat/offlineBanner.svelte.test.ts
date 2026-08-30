@@ -1,23 +1,25 @@
 /**
- * What the chat page says about being offline: the alert, the room-list badge
+ * What the chat page says about being offline: the notice, the room-list badge
  * for what is waiting to send, and what an empty room reads as.
  *
- * Three things here are load-bearing and none of them is the wording. The alert
- * is tied to the connectivity store rather than to a failed request, so it goes
- * as soon as the connection is back and without a reload. It is drawn on the
- * page rather than raised as a notice: a toast announces an event once and then
- * takes the explanation away while the composer still cannot reach anything,
- * which is why the empty notice queue below is an assertion rather than
- * housekeeping. And it is a `NoticeBanner` in the shell's band rather than a row
- * inside the composer dock, which is what it used to be — docked, it read as a
- * caption on the text box rather than as a statement about the app, and the
- * dock had to render in a read-only aggregate pane that has no composer just to
- * carry it.
+ * Three things here are load-bearing and none of them is the wording.
  *
- * That last one is what `is not part of the composer dock` and
- * `stands in an aggregate view` pin. Neither can be checked by looking for the
- * sentence — it was on screen under the old placement too — so each names
- * something only the new one produces.
+ * It is tied to the connectivity store rather than to a failed request, so it
+ * goes as soon as the connection is back and without a reload.
+ *
+ * It is a **sticky** notice, not a banner drawn into the page. Both earlier
+ * placements — a row in the composer dock, then a `NoticeBanner` in the shell's
+ * `extras` band — cost layout: the banner was a bordered card taking about 55px
+ * of a phone's pane for one sentence of chrome. The notice band overlays, so
+ * the transcript is exactly as long offline as on. `costs the transcript no
+ * height` is what pins that, and it is the assertion the whole change exists
+ * for.
+ *
+ * And sticky is what makes a notice honest for a condition rather than an
+ * event. The store's own machinery would otherwise retract it while it still
+ * held — see `notices.sticky.test.ts`, which owns those semantics. What this
+ * file pins is the half that belongs to the page: the raise, the take-down when
+ * the connection returns, and the take-down on leaving /chat.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
@@ -58,6 +60,15 @@ import Page from './+page.svelte';
 
 const OFFLINE_TEXT = /Offline — messages will send when you’re back/;
 
+/**
+ * The visible band's text.
+ *
+ * Scoped rather than a bare `getByText`: `NoticeDrawer` mirrors the message
+ * into two permanently-mounted `aria-live` regions as well as the band, so an
+ * unscoped query matches three nodes and throws before asserting anything.
+ */
+const bandText = () => document.querySelector('.notice-region')?.textContent ?? '';
+
 beforeEach(() => {
   // The page's own mount requests (`getMe`) go through `apiFetch`, which
   // reports every completion to the connectivity store — so a stub that
@@ -79,13 +90,10 @@ afterEach(() => {
   clearNotices();
 });
 
-/** The alert element itself, not the text node inside it. */
-const offlineAlert = () => screen.getByText(OFFLINE_TEXT).closest('.notice-banner');
-
-describe('the offline banner', () => {
+describe('the offline notice', () => {
   it('is absent while the app can reach the server', async () => {
     render(Page);
-    await waitFor(() => expect(screen.queryByText(OFFLINE_TEXT)).toBeNull());
+    await waitFor(() => expect(bandText()).not.toMatch(OFFLINE_TEXT));
   });
 
   it('appears when a request finds no server, and goes when one does', async () => {
@@ -93,70 +101,86 @@ describe('the offline banner', () => {
 
     noteTransport(false, 'unreachable');
     expect(get(online)).toBe(false);
-    await waitFor(() => expect(screen.getByText(OFFLINE_TEXT)).toBeInTheDocument());
+    await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
-    // No reload: the same store flipping back takes the row away.
+    // No reload: the same store flipping back takes it away.
     noteTransport(true);
-    await waitFor(() => expect(screen.queryByText(OFFLINE_TEXT)).toBeNull());
+    await waitFor(() => expect(bandText()).not.toMatch(OFFLINE_TEXT));
   });
 
-  it('states it on the page rather than through a notice', async () => {
+  it('is rendered by the drawer alone, never into the page\u2019s own layout', async () => {
+    // The point of the whole change, and the one claim that has to be checked
+    // structurally rather than by measuring. A first attempt asserted that the
+    // transcript was the same height offline as online; jsdom performs no
+    // layout, so every `getBoundingClientRect().height` is 0 and that assertion
+    // passed with a deliberately reintroduced 55px band in the shell. It could
+    // not fail. The real measurement was taken in a browser (the transcript is
+    // 610.62px both ways) and belongs in the commit message, not here.
+    //
+    // What jsdom *can* answer is where the sentence is rendered. The drawer's
+    // own region is absolutely positioned out of flow, pinned below; anything
+    // the page rendered itself would be a flow sibling and would reflow the
+    // pane. So: every node carrying the text belongs to the drawer.
     render(Page);
     noteTransport(false, 'unreachable');
-    await waitFor(() => expect(screen.getByText(OFFLINE_TEXT)).toBeInTheDocument());
+    await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
-    expect(get(notices)).toEqual([]);
+    const carriers = [...document.querySelectorAll('*')].filter(
+      (el) => el.children.length === 0 && OFFLINE_TEXT.test(el.textContent ?? ''),
+    );
+    expect(carriers.length).toBeGreaterThan(0);
+    for (const el of carriers) {
+      // `notice-region` is the visible band, `notice-announce` the two live
+      // regions it mirrors into. Both are NoticeDrawer's; nothing else may
+      // carry this sentence.
+      expect(el.closest('.notice-region, .notice-announce')).not.toBeNull();
+    }
   });
 
-  it('is non-dismissible: it carries no button of its own', async () => {
+  it('puts nothing in the composer dock, which is where it used to live', async () => {
     render(Page);
     noteTransport(false, 'unreachable');
-    await screen.findByText(OFFLINE_TEXT);
-    // The whole alert, not the title span — a dismiss control would be a
-    // sibling of the title, so asserting on the text node's own subtree would
-    // pass whether or not one were there.
-    expect(offlineAlert()?.querySelector('button')).toBeNull();
+    await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
+
+    const dock = document.querySelector('.composer-dock');
+    expect(dock).not.toBeNull();
+    expect(OFFLINE_TEXT.test(dock?.textContent ?? '')).toBe(false);
   });
 
-  it('is the app’s warn-variant alert rather than a row of its own', async () => {
+  it('is raised as a sticky notice, so the store cannot retract a live condition', async () => {
     render(Page);
     noteTransport(false, 'unreachable');
-    await screen.findByText(OFFLINE_TEXT);
-    // `notice-warn` is NoticeBanner's own variant class. Naming it is what
-    // makes this an assertion about the component rather than about a div that
-    // happens to hold the same sentence.
-    expect(offlineAlert()).toHaveClass('notice-warn');
+    await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
+
+    const raised = get(notices).filter((n) => n.key === 'chat:offline');
+    expect(raised).toHaveLength(1);
+    expect(raised[0].sticky).toBe(true);
+    // Pinned until something takes it down, never on a clock.
+    expect(raised[0].duration).toBe(0);
   });
 
-  it('is announced: it sits in a live region', async () => {
-    // `NoticeBanner` is a `role="note"`, which announces nothing on its own.
-    // The docked row this replaced was a `role="status"`, and losing that would
-    // leave the user who cannot see the alert appear with no report at all.
+  it('takes it down on leaving /chat, since sticky survives the navigation clear', async () => {
+    // The sentence promises the send queue will drain and no other route has
+    // one to promise, so the page that raised it has to be the page that ends
+    // it. `clearNotices` deliberately will not.
     render(Page);
     noteTransport(false, 'unreachable');
-    await screen.findByText(OFFLINE_TEXT);
-    expect(offlineAlert()?.closest('[role="status"]')).not.toBeNull();
+    await waitFor(() => expect(get(notices).some((n) => n.key === 'chat:offline')).toBe(true));
+
+    cleanup();
+    expect(get(notices).some((n) => n.key === 'chat:offline')).toBe(false);
   });
 
-  it('is not part of the composer dock', async () => {
+  it('states it once, however many requests fail', async () => {
     render(Page);
     noteTransport(false, 'unreachable');
-    await screen.findByText(OFFLINE_TEXT);
-    expect(offlineAlert()?.closest('.composer-dock')).toBeNull();
-  });
+    await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
-  it('stands in an aggregate view, which has no composer to caption', async () => {
-    // The read-only panes cannot be read offline either, so the sentence is as
-    // true there — and it no longer costs a composer dock rendered to carry it.
-    const session = getChatSession() as unknown as Record<string, { set: (v: unknown) => void }>;
-    session.view.set('all');
-    render(Page);
+    noteTransport(false, 'timeout');
     noteTransport(false, 'unreachable');
-
-    await waitFor(() => expect(screen.getByText(OFFLINE_TEXT)).toBeInTheDocument());
-    expect(document.querySelector('.composer-dock')).toBeNull();
-
-    session.view.set('room');
+    await waitFor(() =>
+      expect(get(notices).filter((n) => n.key === 'chat:offline')).toHaveLength(1),
+    );
   });
 });
 
