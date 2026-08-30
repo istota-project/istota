@@ -44,11 +44,99 @@ HYSTERESIS_THRESHOLD = 2
 DEFAULT_ACCURACY_THRESHOLD_M = 100.0
 DEFAULT_VISIT_EXIT_MINUTES = 5.0
 
+# How a stay's worth of *declared* points is thinned at ingest (ISSUE-349).
+#
+# A declared point is a coordinate the iOS shell asserts while the device is on
+# the configured home SSID, not a fix it took (ISSUE-229, which put the marker
+# on the row). It is a constant by construction, so re-sending it says nothing
+# the first one did not. The shell used to send it every 60 s for as long as the
+# device stayed put, on the reasoning that iOS would eventually pause the
+# location stream — measured over a month, it does not: 26,713 of 39,319 native
+# pings were declared, all at one coordinate, 99.4% under 70 s apart, one stay
+# running 2,326 points across 42 hours.
+#
+# The shell now establishes a stay in a few points and then stops standard
+# location updates until the device leaves, which is the real fix — it saves the
+# GPS as well as the rows, and a filter that discards a fix has still paid for
+# it. This is the backstop, not a mirror of that rule: a released build stays on
+# the phone for at least a TestFlight cycle, and every one of them keeps sending
+# a point a minute. It is deliberately looser than the client, because the
+# server cannot tell a stationary device from a quiet one and guessing wrong
+# here deletes visits.
+#
+# The floors are not tuning knobs, they are what two downstream readers need.
+# `_update_state_machine` opens a visit on HYSTERESIS_THRESHOLD consecutive
+# pings at a place, and `location.db.reconcile_visits` discards a segment of
+# fewer than `min_pings` (3) or shorter than `min_dwell_sec` (60) as a walk-by.
+# So the first points of a stay are load-bearing and are never thinned; a rule
+# that dropped them would delete visits, which is a far worse failure than the
+# duplicate rows it set out to prevent.
+DECLARED_ESTABLISHING_POINTS = 3
+DECLARED_KEEPALIVE_SEC = 900.0
+# ~11 cm. The coordinate arrives as the same JSON float every time, so this is
+# an exactness tolerance rather than a spatial one; a reconfigured zone moves by
+# orders of magnitude more, and a *measured* fix never reaches this test at all
+# because the marker gates it first.
+DECLARED_SAME_POINT_EPS_DEG = 1e-6
+
 
 def _parse_ts(ts: str) -> datetime:
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     return datetime.fromisoformat(ts)
+
+
+def is_redundant_declared_point(
+    recent: list, timestamp: str, lat: float, lon: float,
+) -> bool:
+    """Would storing this declared point add anything?
+
+    ``recent`` is the newest ``DECLARED_ESTABLISHING_POINTS`` stored rows,
+    newest first, each carrying ``timestamp``/``lat``/``lon``/``wifi_zone``.
+    The caller has already established that the *incoming* point is declared.
+
+    Suppress only when all of these hold, and read each one as a guard rather
+    than a condition — any of them failing means something happened that a
+    stored row should record:
+
+    - There are already enough rows to have established the stay. Fewer means
+      this point is one of the establishing ones.
+    - Every one of them is declared, at this same coordinate. A measured fix or
+      a different coordinate in the run means the device went somewhere and
+      came back, or the zone was reconfigured, and the stay starts again.
+    - The newest of them is less than the keepalive old. Past that, one point
+      goes in so the stay stays visible to the live views and the day keeps a
+      battery reading near its end.
+
+    An out-of-order point (older than the newest stored row) is never
+    suppressed: the run this reasons about is the tail of the table, and a
+    backfilled point is not part of it. Same for an unparseable timestamp —
+    the answer to "I cannot tell" is to store it.
+    """
+    if len(recent) < DECLARED_ESTABLISHING_POINTS:
+        return False
+    for row in recent:
+        if not row["wifi_zone"]:
+            return False
+        if (abs(row["lat"] - lat) > DECLARED_SAME_POINT_EPS_DEG
+                or abs(row["lon"] - lon) > DECLARED_SAME_POINT_EPS_DEG):
+            return False
+    try:
+        gap = (_parse_ts(timestamp) - _parse_ts(recent[0]["timestamp"])).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return 0 <= gap < DECLARED_KEEPALIVE_SEC
+
+
+def _recent_pings_for_declared_check(conn: sqlite3.Connection) -> list:
+    """The tail of the table, newest first. Indexed by
+    ``idx_location_pings_time``, and only ever run for a declared point, so a
+    measured fix pays nothing for this."""
+    return conn.execute(
+        "SELECT timestamp, lat, lon, wifi_zone FROM location_pings "
+        "ORDER BY timestamp DESC LIMIT ?",
+        (DECLARED_ESTABLISHING_POINTS,),
+    ).fetchall()
 
 
 def _get_user_db_path(user_id: str):
@@ -300,6 +388,15 @@ def _process_feature(
     # value: -1 m is a legitimate altitude (Death Valley, the Salton Sea, most
     # of the Netherlands).
     wifi_zone = bool(props.get("wifi_zone"))
+
+    if wifi_zone and is_redundant_declared_point(
+        _recent_pings_for_declared_check(conn), timestamp, lat, lon,
+    ):
+        # The stay is already on record and nothing about it has changed.
+        # Returning before the insert also skips the state machine, which is
+        # correct: this point is not an arrival, and running it again would
+        # only re-count a place the machine is already sitting on.
+        return
 
     altitude = props.get("altitude")
     if wifi_zone:
