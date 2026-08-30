@@ -1999,8 +1999,15 @@ function createSession(): ChatSession {
           // after them. A queued message was typed *behind* the turn this
           // placeholder stands for, so it belongs below it — but the carry and
           // the queued-row rebuild both ran above, so a plain push would put
-          // the running turn under the message waiting on it. A stranded failed
-          // row reads the same way round, and is covered by the same walk.
+          // the running turn under the message waiting on it.
+          //
+          // The walk skips a stranded failed row too, and that half is a
+          // judgement rather than a fact the client holds: nothing records
+          // whether the failed send was attempted before or after this task
+          // started. Treating both the same keeps one rule, and the tie-break
+          // it picks — the resumed turn above, the rows with nothing behind
+          // them below — is the one that puts every actionable row together at
+          // the bottom of the transcript.
           let at = arr.length;
           while (at > 0 && isClientOnly(arr[at - 1])) at--;
           arr.splice(at, 0, ph);

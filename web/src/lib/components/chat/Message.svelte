@@ -631,7 +631,12 @@
         {/if}
         <!-- The send's own state, on the message it belongs to. A failure here
              used to be written into the assistant placeholder, which read as
-             "the reply failed" rather than "your message never left". -->
+             "the reply failed" rather than "your message never left".
+
+             The queued branch (ISSUE-238) leaves the body above it rendering in
+             full — text, chips and the optimistic quote — because the point of
+             that row is that the user can see what they committed to sending;
+             the line and its buttons say it has not left yet. -->
         {#if sendPending}
           <div class="progress send-pending">
             <span class="dot"></span>
@@ -652,10 +657,6 @@
               </Button>
             {/if}
           </div>
-          <!-- Waiting to go out (ISSUE-238). The body above renders in full —
-               text, chips and the optimistic quote — because the point of the
-               row is that the user can see what they committed to sending; this
-               line and its buttons say it has not left yet. -->
         {:else if sendQueued}
           <div class="send-queued">
             <span class="send-queued-text">

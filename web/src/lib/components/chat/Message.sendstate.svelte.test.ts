@@ -151,6 +151,23 @@ describe('user row queued state', () => {
     expect(container.textContent).toContain('hello there');
   });
 
+  it('renders the chips and the optimistic quote as an ordinary row would', () => {
+    // The whole body, not only the text: the row exists so the user can see
+    // what they committed to sending, and a message whose file or citation
+    // vanished from the bubble is not the message they wrote. The muting
+    // (`.msg.queued`) is what says it has not gone out.
+    const { container } = mountQueued(
+      {
+        attachments: ['notes.pdf'],
+        replyTo: { msgId: 7, role: 'assistant', excerpt: 'the earlier answer' },
+      },
+      handlers,
+    );
+    expect(container.querySelector('.msg.queued')).not.toBeNull();
+    expect(container.querySelector('.attachments')?.textContent).toContain('notes.pdf');
+    expect(container.querySelector('.reply-quote')?.textContent).toContain('the earlier answer');
+  });
+
   it('offers Edit and Remove but not Send while the queue is live', () => {
     // An unheld entry drains by itself when the running turn settles. A Send
     // button would race that drain for the one slot `runTurn` owns.
