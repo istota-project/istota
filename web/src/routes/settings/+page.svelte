@@ -101,6 +101,12 @@
      change that has already landed and then PUT an empty patch. */
   let avatarFile: File | null = $state(null);
   let avatarBusy = $state(false);
+  /* What is happening, while it is. A phone photograph takes seconds to go up,
+     and with the zone back on its prompt and the preview still on the old
+     picture there was nothing on screen saying anything had been picked — which
+     reads as a control that did nothing, and invites picking the same file
+     again. */
+  let avatarBusyLabel = $state('');
   let avatarError = $state('');
   let avatarNote = $state('');
   /* What the *server* last told this page the caller's picture is. `undefined`
@@ -113,12 +119,14 @@
     uploadedHash === undefined ? (identity.user.avatars?.user ?? null) : uploadedHash,
   );
 
-  /* The dropzone is a picker here rather than a staging area — there is no
-     Save step for this control — so a picked file is taken, the zone is put
-     back to its prompt, and the upload runs. Clearing `avatarFile` re-runs this
-     effect once against `null`, which does nothing. */
+  /* The dropzone is a picker here rather than a staging area — there is no Save
+     step for this control — so a picked file is taken and the upload runs.
+     `avatarBusy` is read, not merely checked: a file picked while one is going
+     up stays in the zone, and this effect re-runs and sends it when the first
+     upload settles. Two concurrent PUTs would resolve in either order, leaving
+     the preview on one hash and the stored row on the other. */
   $effect(() => {
-    if (!avatarFile) return;
+    if (avatarBusy || !avatarFile) return;
     const picked = avatarFile;
     avatarFile = null;
     void uploadPicture(picked);
@@ -126,26 +134,37 @@
 
   async function uploadPicture(file: File) {
     avatarBusy = true;
+    avatarBusyLabel = 'Saving your picture…';
     avatarError = '';
     avatarNote = '';
     try {
       const stored = await uploadAvatar(file);
       // Adopted before the reload, because the browser holds the old `?v` URL
       // as `immutable` and would keep painting the old face until the new hash
-      // reaches the `src`. Dropped again once the shared record carries it, so
-      // a change made in another tab is not pinned by this one.
+      // reaches the `src`.
       uploadedHash = stored.hash;
-      if (await identity.reload()) uploadedHash = undefined;
-      else avatarNote = 'Picture saved. Your account details could not be refreshed.';
+      const confirmed = await identity.reload();
+      // Dropped only once the shared record actually carries the new hash —
+      // never on the strength of `reload()` reporting an answer. A reload
+      // superseded by a later one returns `true` without painting (see
+      // `loadUser` in `routes/+layout.svelte`), so trusting the boolean can
+      // put the preview back on a picture the browser holds as `immutable`
+      // and will not re-fetch. Dropping it once the record agrees is also what
+      // keeps a change made in another tab from being pinned by this one.
+      if (identity.user.avatars?.user === stored.hash) uploadedHash = undefined;
+      else if (!confirmed)
+        avatarNote = 'Picture saved. Your account details could not be refreshed.';
     } catch (e) {
       avatarError = (e as Error).message || 'Could not save that picture.';
     } finally {
       avatarBusy = false;
+      avatarBusyLabel = '';
     }
   }
 
   async function removePicture() {
     avatarBusy = true;
+    avatarBusyLabel = 'Removing your picture…';
     avatarError = '';
     avatarNote = '';
     try {
@@ -159,12 +178,19 @@
       if (!confirmed)
         avatarNote = 'Removed. Your account details could not be refreshed — reload to see it.';
       else if (!deleted)
-        avatarNote =
-          'There was nothing of yours to remove; the picture showing came from Nextcloud.';
+        // Phrased on what this page can see. `deleted: false` says only that
+        // there was no upload row of the caller's — which is also what a
+        // removal from another tab leaves behind, and there the second clause
+        // would be false, so it is added only where a picture is in fact still
+        // showing.
+        avatarNote = avatarVersion
+          ? 'There was nothing of yours to remove. The picture showing was imported from Nextcloud.'
+          : 'There was nothing to remove.';
     } catch (e) {
       avatarError = (e as Error).message || 'Could not remove that picture.';
     } finally {
       avatarBusy = false;
+      avatarBusyLabel = '';
     }
   }
 
@@ -481,20 +507,48 @@
           How Istota addresses you. User ID: <code>{profile.user_id}</code>
         </p>
 
-        <SettingsField label="Profile picture" labelled={false} wide error={avatarError}>
+        <SettingsField
+          label="Profile picture"
+          labelled={false}
+          wide
+          error={avatarError}
+          warning={avatarNote}
+        >
           <div class="picture">
             <span class="picture-preview">
+              <!-- Named rather than decorative, unlike the chat gutter: there
+                   the author's name is on the row beside it, while here the
+                   picture *is* the state being edited and the only other signal
+                   is whether Remove exists. -->
               <Avatar
                 kind="user"
                 userId={profile.user_id}
                 version={avatarVersion}
                 label={profile.display_name || profile.user_id}
+                alt="Your profile picture"
               />
             </span>
             <div class="picture-pick">
-              <FileDropZone bind:file={avatarFile} accept={AVATAR_ACCEPT}>
-                <span>Drop a picture here, paste one, or choose a file.</span>
-              </FileDropZone>
+              <!-- The busy line *replaces* the picker rather than sitting beside
+                   it, and that is load-bearing twice over. It says something is
+                   happening, which nothing else on the card does — the zone is
+                   back on its prompt and the preview still shows the old
+                   picture, so a slow upload otherwise reads as a control that
+                   did nothing. And unmounting the zone is what resets the
+                   native input inside it: `FileDropZone` clears that only from
+                   its own Clear button, which this control never renders, and a
+                   browser fires no `change` for a file the input is already
+                   holding — so re-picking the photo whose upload just failed
+                   would do nothing and say nothing. Replacing this with a
+                   `disabled` state or an overlay has to restore the reset some
+                   other way. -->
+              {#if avatarBusyLabel}
+                <p class="hint busy" aria-live="polite">{avatarBusyLabel}</p>
+              {:else}
+                <FileDropZone bind:file={avatarFile} accept={AVATAR_ACCEPT}>
+                  <span>Drop a picture here, paste one, or choose a file.</span>
+                </FileDropZone>
+              {/if}
               {#if avatarVersion}
                 <Button variant="secondary" size="sm" disabled={avatarBusy} onclick={removePicture}>
                   Remove
@@ -506,7 +560,6 @@
             Removing an uploaded picture falls back to the one imported from Nextcloud, if there is
             one. Changing it here does not change the picture Nextcloud shows.
           </p>
-          {#if avatarNote}<p class="hint">{avatarNote}</p>{/if}
         </SettingsField>
         <SettingsField label="Display name">
           <input type="text" bind:value={profile.display_name} />
@@ -817,6 +870,14 @@
     flex-direction: column;
     align-items: flex-start;
     gap: var(--space-2);
+  }
+
+  /* Stands in for the dropzone while a picture is going up or coming down, so
+     the column keeps roughly its height instead of collapsing and pulling the
+     Remove button up under the cursor that just left it. */
+  .picture-pick .busy {
+    margin: 0;
+    padding: var(--space-4) 0;
   }
 
   @media (max-width: 640px) {
