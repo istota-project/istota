@@ -213,7 +213,7 @@ Not linted at all: `*.test.ts`, which asserts on the very literals the rules for
 
 The one exception is `routes/+error.svelte`, which renders no `AppShell` — an error page has no section to be in — and instead flattens `main.app-content` from inside itself. Adding a route means adding it to that class list; several in-tree comments still count the routes by hand and go stale, so trust the class list, not the count beside it.
 
-**Loading and empty states** use `.center-msg`, the one shared whole-pane status message, and the page holds its chrome back behind the load so the message centres on the pane rather than under a half-drawn header. The older `.loading` / `.error-msg` pair survives only for a line inside a card.
+**Loading, empty and load-failure states** use `.center-msg`, the one shared whole-pane status message, and the page holds its chrome back behind the load so the message centres on the pane rather than under a half-drawn header. The failure spelling is `.center-msg error` — it is the exclusive twin of the loading branch in the same `{#if}` chain, so it must be the same box, and the older `.loading` / `.error-msg` pair survives only for a line inside a card. Do not reach for `.banner error` there either: a banner sits _above_ a layout that is still rendered, which is a different state, and using it for a whole-pane failure is how three modules ended up rendering the same failure at three sizes and two alignments. `scripts/pane-error-state.test.ts` holds the invariant, over inline controls and over the tree.
 
 **The stylesheet is four layers behind `src/app.css`, and the order is the contract.** `app.css` is now nothing but an ordered `@import` list; the rules live in `lib/styles/`.
 

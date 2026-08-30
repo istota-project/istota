@@ -190,7 +190,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error && !data}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if !data}
     <div class="empty">
       No tax configuration found. Set your filing status, year and state in

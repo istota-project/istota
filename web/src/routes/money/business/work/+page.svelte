@@ -377,7 +377,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if entries.length === 0}
     <div class="money-table-empty">No work entries found.</div>
   {:else}

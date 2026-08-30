@@ -127,7 +127,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="banner error">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if immunization}
   <form class="card form" onsubmit={save}>
     <div class="row">

@@ -212,7 +212,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error && !panel}
-    <div class="banner error">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if panel}
     <div class="header">
       <div class="header-meta">

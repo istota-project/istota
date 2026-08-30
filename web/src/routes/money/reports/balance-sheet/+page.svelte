@@ -100,7 +100,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="error-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else}
   <div class="report-content">
     <div class="net-worth-banner">

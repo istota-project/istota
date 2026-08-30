@@ -241,6 +241,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When a section cannot load its data, the message saying so now looks the same wherever you meet it. Feeds and Location centred it in the empty pane, Money showed a slightly larger one pinned to the top, and Health, Admin, Briefings and the money settings pages showed a tinted strip across the top instead — three different sizes and two different positions for one thing going wrong. All of them now render the centred line, the same box the "Loading…" message they replace was already using.
+
 - Opening the iOS app with no connection now shows you the app rather than "Failed to load user info". The offline cache was working — your recent rooms and messages were there, the composer would have queued what you typed — but the app asks the server who you are before it renders anything at all, and with no connection that question has no answer, so it stopped on the error instead of going on to read any of it. It now falls back to who you were the last time the server said, and picks the live answer back up the moment the connection returns. A session that has actually expired still logs you out, exactly as before; a first launch on a device that has never been online still shows the error, because there is nothing yet to fall back to.
 
 - The notice a room shows when nothing of it is saved on your device no longer runs edge to edge on a phone. It sits in the middle of an empty transcript, where nothing was setting a margin the way a message row does, so both lines of it touched the sides of the screen. It now keeps a gutter, like everything else in the transcript.

@@ -387,7 +387,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="banner error">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}
   <div class="empty">
     No measurements yet.

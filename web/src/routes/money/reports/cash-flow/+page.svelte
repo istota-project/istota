@@ -320,7 +320,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="error-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if months.length === 0}
   <div class="center-msg">No data for the selected period.</div>
 {:else}

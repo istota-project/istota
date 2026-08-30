@@ -83,7 +83,7 @@
   {#if loading && !report}
     <div class="center-msg">Running checks…</div>
   {:else if error && !report}
-    <div class="banner error">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if report}
     <NoticeBanner
       title={HEADLINE[report.status]}
