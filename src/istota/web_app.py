@@ -7383,16 +7383,22 @@ async def chat_download_file(
 #   4. `v` matches, bot or self          200  private, max-age=31536000, immutable
 #   5. `v` matches, a co-member          200  private, max-age=300
 #
-# Membership is revocable and is revoked by code that already exists
-# (`db.remove_room_member` from the room delete and archive paths, and the
-# member wipe on room teardown). A year-long `immutable` entry for a
-# co-member's face survives all of that, which would make the authorization
+# Co-membership is a grant that can end — a room torn down, a member dropped —
+# while the self and bot cases cannot. A year-long `immutable` entry for a
+# co-member's face outlives any of that, which would make the authorization
 # predicate unenforceable exactly when it starts mattering. Five minutes is
-# long enough to cover a transcript render and short enough that revocation
-# takes effect. The self and bot cases are not revocable, so they keep the long
-# cache. Branch 2 re-sends `Cache-Control` because a 304 that omits it leaves
-# the stored entry on whatever freshness it was first cached with, and the
-# three 200 branches do not agree.
+# long enough to cover a transcript render and short enough that a change of
+# membership takes effect. Branch 2 re-sends `Cache-Control` because a 304 that
+# omits it leaves the stored entry on whatever freshness it was first cached
+# with, and the three 200 branches do not agree.
+#
+# What the window does *not* claim is that any particular user action ends the
+# grant. On a Talk-origin room it usually does not: `room_dismissals` is a
+# display tombstone and the poll re-adds a dropped `room_members` row, so
+# hiding a shared room does not stop the two people being in that Talk
+# conversation together. `db.shares_room_with` says so at length. The cache
+# rule is the weaker and true one — whatever the predicate answers, a client
+# may hold that answer for five minutes and no longer.
 #
 # Branch 1 is a short negative cache rather than `no-store`: with `no-store` a
 # room holding one avatar-less member costs a 404 on every page load forever.
@@ -7407,6 +7413,12 @@ async def chat_download_file(
 # unacceptable the answer is `private, no-store` plus client-side blob URLs,
 # not a longer header.
 #
+# The same header has a second residual, on content rather than access:
+# removing a picture changes what `/me` reports, so nothing new asks for the
+# old URL, but a page still holding a rendered `?v=<old-hash>` — an open tab, a
+# restored session, the bfcache — keeps serving the removed face from disk with
+# no revalidation. Accepted for the same reason and with the same remedy.
+#
 # `Content-Disposition` is deliberately not `attachment`, unlike `/chat/files`:
 # that endpoint serves arbitrary user-supplied bytes, this serves bytes the app
 # itself encoded as WebP one function ago, and it has to render in an `<img>`.
@@ -7414,7 +7426,8 @@ async def chat_download_file(
 # Multipart envelope allowance on top of the byte cap: a boundary, one part's
 # headers and the trailing CRLFs. Generous, because it only decides when the
 # stream is cut off — the cap that decides what is *stored* is checked again on
-# the file part itself, inside `avatars.normalize`.
+# the file part itself, inside `avatars.normalize`. `_avatar_upload_part` holds
+# the parser to one file and two fields so the envelope cannot outgrow it.
 _AVATAR_MULTIPART_ALLOWANCE = 8192
 
 # **A per-request memory budget, enforced as a one-at-a-time decode.**
@@ -7554,6 +7567,8 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes:
     `len(await file.read())` materializes up to that per concurrent request
     before refusing.
     """
+    from starlette.requests import ClientDisconnect
+
     from .avatars import AvatarError
 
     declared = request.headers.get("content-length")
@@ -7566,19 +7581,36 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes:
         raise AvatarError(413, "that upload is too large")
 
     buf = bytearray()
-    async for chunk in request.stream():
-        buf += chunk
-        if len(buf) > limit:
-            # The rest of the stream is not read.
-            raise AvatarError(413, "that upload is too large")
+    try:
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > limit:
+                # The rest of the stream is not read.
+                raise AvatarError(413, "that upload is too large")
+    except ClientDisconnect:
+        # An upload the user cancels in the picker, or one that dies on a
+        # mobile connection, is the ordinary case rather than the exotic one.
+        # Nothing reaches the caller either way; converting it keeps a
+        # traceback per aborted upload out of the log.
+        raise AvatarError(400, "the upload was interrupted") from None
     return bytes(buf)
 
 
-async def _avatar_upload_part(request: Request, raw: bytes, max_bytes: int):
-    """The `file` part of an already-bounded multipart body."""
+async def _avatar_upload_part(request: Request, raw: bytes):
+    """The `file` part of an already-bounded multipart body.
+
+    Nothing here bounds the file part's size, and it does not need to:
+    `max_part_size` is checked only for parts *without* a filename
+    (`starlette/formparsers.py`, inside `if self._current_part.file is None`),
+    so a real upload never sees it. The body is already bounded by
+    `_read_bounded_body` and the part itself by `normalize`. `max_files` and
+    `max_fields` are held to what one upload needs, so the envelope stays
+    inside the allowance the body read grants it.
+    """
     # Starlette's `UploadFile`, not FastAPI's: FastAPI's is a *subclass* it
     # substitutes when it does the parsing itself, and this parser is ours, so
     # an `isinstance` against the subclass refuses every real upload.
+    from python_multipart.exceptions import FormParserError
     from starlette.datastructures import UploadFile as _UploadedPart
     from starlette.formparsers import MultiPartException, MultiPartParser
 
@@ -7590,16 +7622,18 @@ async def _avatar_upload_part(request: Request, raw: bytes, max_bytes: int):
     parser = MultiPartParser(
         request.headers,
         _one_shot(),
-        max_files=4,
-        max_fields=8,
-        # Starlette's own default is 1 MiB, which would refuse an ordinary
-        # photograph well under our cap. The cap that decides what is stored is
-        # `normalize`'s, on the part itself.
-        max_part_size=max_bytes + _AVATAR_MULTIPART_ALLOWANCE,
+        max_files=1,
+        max_fields=2,
     )
     try:
         form = await parser.parse()
-    except MultiPartException as e:
+    # `MultiPartException` is Starlette's own and covers the limits above.
+    # `FormParserError` is the underlying parser's, is an unrelated class, and
+    # is what a body that does not match its declared boundary actually raises
+    # — reachable by any authenticated caller, and by a truncated proxy write.
+    # Uncaught it was a 500 with a traceback, carrying none of the `{error}`
+    # shape the client reads.
+    except (MultiPartException, FormParserError) as e:
         raise AvatarError(400, "that upload is not a valid multipart body") from e
     try:
         part = form.get("file")
@@ -7613,21 +7647,27 @@ async def _avatar_upload_part(request: Request, raw: bytes, max_bytes: int):
 async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
     """A multipart request body → normalized WebP bytes and their sha256.
 
-    Raises `AvatarError`; every route renders that the same way. Shared by the
-    user's own upload and by the admin bot-icon upload, so the two size checks
-    and the decode budget cannot be applied to one and forgotten on the other.
+    Raises `AvatarError`; every route renders that the same way. One caller
+    today, the user's own upload; separated from it so the admin bot-icon
+    upload (Stage 5) takes the two size checks and the decode budget by
+    calling this rather than by reproducing them.
     """
     from . import avatars
     from .avatars import AvatarError
 
     max_bytes = (_config.web.max_avatar_kb * 1024) if _config else 0
     if max_bytes <= 0:
+        # `max_avatar_kb = 0` switches uploads off, which is the useful reading
+        # of a zero byte cap and is what the four documentation sites say. The
+        # serving routes are unaffected: an already-stored picture is still
+        # served, and an operator turning uploads off is not asking for every
+        # face in the deployment to disappear.
         raise AvatarError(503, "avatar uploads are not configured")
     if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         raise AvatarError(400, "expected a multipart upload with a `file` part")
 
     raw = await _read_bounded_body(request, max_bytes + _AVATAR_MULTIPART_ALLOWANCE)
-    part, declared = await _avatar_upload_part(request, raw, max_bytes)
+    part, declared = await _avatar_upload_part(request, raw)
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -7648,7 +7688,9 @@ async def avatar_bot(
     """The deployment's bot icon. Any authenticated caller.
 
     Behind auth because every other API route is, not because the bytes are
-    secret — the login page serves the same icon unauthenticated.
+    secret: the icon is deployment branding, and the login page is meant to
+    render it for an unauthenticated browser (Stage 5) the same way it already
+    serves the sigil and the favicon off the static mount.
     """
     if _config is None:
         return _avatar_not_found()

@@ -1118,7 +1118,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # Byte cap on a profile-picture upload, in KB. Checked on the declared
 # Content-Length before the body is read and again on the running total, so an
 # oversized upload is refused rather than buffered. Distinct from nginx's
-# client_max_body_size, which is sized for chat attachments.
+# client_max_body_size, which is sized for chat attachments. 0 switches
+# uploads off (the endpoint answers 503); a stored picture is still served.
 # max_avatar_kb = 4096
 
 # Background tiles for the map surfaces (location today; anything geospatial

@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 import threading
-import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -361,6 +363,44 @@ class TestSharesRoomWith:
         with db.get_db(db_path) as conn:
             assert db.shares_room_with(conn, "alice", "bob") is False
 
+    def test_a_hidden_room_still_counts_as_shared(self, db_path):
+        """Hiding a room in web is not leaving the conversation.
+
+        `room_dismissals` is a per-user display tombstone, and the Talk poll
+        re-adds a dropped `room_members` row the next time it registers the
+        room — so a `remove_room_member` on a Talk-origin room is not a durable
+        revocation, whatever the caller intended. The predicate is deliberately
+        the wider one, because it is the true one: the two people are still in
+        that Talk conversation together, seeing each other's names and presence
+        there. Pinned so the next reader finds a decision rather than a gap.
+        """
+        with db.get_db(db_path) as conn:
+            db.add_room_member(conn, "rm1", "alice")
+            db.add_room_member(conn, "rm1", "bob")
+            db.remove_room_member(conn, "rm1", "bob")
+            db.dismiss_room(conn, "rm1", "bob")
+            assert db.shares_room_with(conn, "alice", "bob") is False
+            # What the next poll tick does.
+            db.add_room_member(conn, "rm1", "bob")
+            assert db.shares_room_with(conn, "alice", "bob") is True
+
+
+class TestTheAcceptListIsStatedOnce:
+    def test_the_typescript_copy_equals_the_python_one(self):
+        """Two languages, one list, and nothing else holding them equal.
+
+        Same treatment `usage_render.py` and `usageFormat.ts` get: the client
+        offers what the server accepts, so a format added on one side and not
+        the other leaves the picker narrower than the endpoint (a format the
+        user cannot choose) or wider (one they find out about after uploading).
+        """
+        source = (
+            Path(__file__).resolve().parents[1] / "web" / "src" / "lib" / "api.ts"
+        ).read_text()
+        match = re.search(r"export const AVATAR_ACCEPT = '([^']+)'", source)
+        assert match, "AVATAR_ACCEPT is not declared as a single-quoted literal"
+        assert match.group(1) == avatars.ACCEPT_ATTRIBUTE
+
 
 # --- the bot icon -----------------------------------------------------------
 
@@ -496,6 +536,44 @@ class TestUploadBounds:
         )
         assert resp.status_code == 400
 
+    async def test_a_malformed_multipart_body_is_refused_not_a_500(self, alice):
+        """The parser raises past Starlette's own exception type.
+
+        `MultiPartParser.parse` wraps only `MultiPartException`; the underlying
+        `python_multipart` parser raises `MultipartParseError`, which is a
+        different class and escapes. Any authenticated caller reaches it with a
+        content type that declares a boundary the body does not have — which is
+        also what a truncated proxy write looks like — and the answer was a 500
+        with a traceback, carrying none of the `{error}` shape the client reads.
+        """
+        resp = await alice.put(
+            "/istota/api/settings/avatar",
+            content=b"garbage-not-multipart",
+            headers={**ORIGIN, "content-type": "multipart/form-data; boundary=x"},
+        )
+        assert resp.status_code == 400
+        assert "error" in resp.json()
+
+    async def test_a_client_disconnect_is_not_a_500(self):
+        """An upload the user cancels is the ordinary case, not the exotic one.
+
+        `Request.stream()` raises `ClientDisconnect`, which the route does not
+        catch, so an aborted upload logged a traceback per attempt.
+        """
+        import istota.web_app as mod
+        from starlette.requests import ClientDisconnect
+
+        class _Req:
+            headers = {"content-length": "8"}
+
+            async def stream(self):
+                yield b"0123"
+                raise ClientDisconnect()
+
+        with pytest.raises(AvatarError) as excinfo:
+            await mod._read_bounded_body(_Req(), 4096)
+        assert excinfo.value.status == 400
+
     async def test_a_multipart_body_with_no_file_part_is_refused(self, alice):
         resp = await alice.put(
             "/istota/api/settings/avatar",
@@ -517,20 +595,30 @@ class TestUploadBounds:
 
 
 class TestDecodeIsSerialized:
-    async def test_two_uploads_never_decode_at_once(self, alice, bob, monkeypatch):
-        """A per-request memory budget, enforced as a one-at-a-time decode.
+    """A per-request memory budget, enforced as a one-at-a-time decode.
 
-        `Image.open` decompresses a PNG's text chunks before any byte or pixel
-        ceiling can see them, at up to Pillow's own 64 MiB budget, so the peak
-        for one upload is far above what the 4 MB cap suggests. The route
-        cannot lower Pillow's globals (they are shared with the executor's
-        attachment pre-shrink, in another thread), so it bounds the number of
-        decodes that can be paying that peak at the same time instead.
-        """
+    `Image.open` decompresses a PNG's text chunks before any byte or pixel
+    ceiling can see them, at up to Pillow's own 64 MiB budget, so the peak for
+    one upload is far above what the 4 MB cap suggests. The route cannot lower
+    Pillow's globals (they are shared with the executor's attachment pre-shrink
+    running in another thread), so it bounds how many decodes can be paying that
+    peak at once instead.
+
+    The two tests below are a pair. `peak == 1` holds trivially if the two
+    requests simply never overlap, so the control runs the identical arrangement
+    against a two-worker executor and requires `peak == 2`: without it the
+    assertion could be measuring the scheduler rather than the budget.
+    """
+
+    async def _peak_concurrency(self, alice, bob, monkeypatch):
         live = 0
         peak = 0
         lock = threading.Lock()
         real = avatars.normalize
+        # Both decodes must be in flight together for a widened pool to show
+        # it, so the first one waits for the second to arrive rather than
+        # sleeping a hopeful interval.
+        both_in = threading.Barrier(2, timeout=5)
 
         def _slow(*args, **kwargs):
             nonlocal live, peak
@@ -538,7 +626,12 @@ class TestDecodeIsSerialized:
                 live += 1
                 peak = max(peak, live)
             try:
-                time.sleep(0.05)
+                try:
+                    both_in.wait()
+                except threading.BrokenBarrierError:
+                    # One worker: the second decode cannot arrive until this
+                    # one returns, which is the property under test.
+                    pass
                 return real(*args, **kwargs)
             finally:
                 with lock:
@@ -547,7 +640,19 @@ class TestDecodeIsSerialized:
         monkeypatch.setattr(avatars, "normalize", _slow)
         results = await asyncio.gather(_upload(alice), _upload(bob))
         assert [r.status_code for r in results] == [200, 200]
-        assert peak == 1
+        return peak
+
+    async def test_two_uploads_never_decode_at_once(self, alice, bob, monkeypatch):
+        assert await self._peak_concurrency(alice, bob, monkeypatch) == 1
+
+    async def test_the_control_reaches_two_on_a_wider_pool(
+        self, alice, bob, monkeypatch,
+    ):
+        import istota.web_app as mod
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            monkeypatch.setattr(mod, "_avatar_decode_executor", pool)
+            assert await self._peak_concurrency(alice, bob, monkeypatch) == 2
 
 
 # --- removal ----------------------------------------------------------------

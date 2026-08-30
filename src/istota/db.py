@@ -3691,6 +3691,22 @@ def shares_room_with(conn: sqlite3.Connection, user_a: str, user_b: str) -> bool
     for a face; a future source with more to disclose must not inherit it
     unexamined.
 
+    **Membership here, and not what the room list renders.** `room_dismissals`
+    and `rooms.archived` are deliberately not subtracted, though
+    `list_member_rooms` subtracts both. Hiding a room in the web UI is a
+    display decision, not leaving the conversation: the two people are still in
+    that Talk room together, and the poll re-adds a dropped `room_members` row
+    the next time it registers the room — which is what the schema comment on
+    `room_dismissals` says outright, and why the web delete and archive paths
+    pair `remove_room_member` with `dismiss_room`. So a caller must not read a
+    `remove_room_member` on a Talk-origin room as a durable revocation. What is
+    durable is a room that is gone: `delete_web_chat_room` clears its members
+    and no poll re-seeds a web-origin room.
+
+    The consequence for the avatar endpoint is stated where the cache policy
+    is: the five-minute window bounds how long a client may hold whatever this
+    answers, and claims nothing about what ends the grant.
+
     `idx_room_members_user` covers both sides of the self-join.
     """
     row = conn.execute(

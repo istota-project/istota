@@ -159,7 +159,7 @@ reconcile_min_dwell_sec: int = 60
 auth: str = "nextcloud"            # "nextcloud" | "none"; env ISTOTA_WEB_AUTH; unknown → warning + "nextcloud"
 port: int = 8766
 token_storage: str = "ephemeral"   # "ephemeral" | "encrypted"; anything else → warning + ephemeral
-max_avatar_kb: int = 4096          # profile-picture upload cap; header + running total
+max_avatar_kb: int = 4096          # profile-picture upload cap; header + running total; 0 = uploads off
 ```
 `max_avatar_kb` bounds one endpoint, and it is deliberately not the same number
 as nginx's `client_max_body_size` (rendered from

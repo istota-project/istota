@@ -3097,7 +3097,13 @@ const avatarsHandler: MockHandler = ({ url, method }) => {
     // user and no picture are one answer there, and a mock that answered them
     // apart would teach the client a distinction it must not depend on.
     if (subject !== user.username || !user.avatars.user) {
-      return { __status: 404, error: 'not found' };
+      // The negative cache is part of the answer: it is what makes one request
+      // per author per session true rather than one per page load.
+      return {
+        __status: 404,
+        error: 'not found',
+        __headers: { 'Cache-Control': 'private, max-age=30' },
+      };
     }
     const version = new URLSearchParams(url.split('?')[1] ?? '').get('v');
     return {
@@ -8989,15 +8995,23 @@ export function mockApi(): Plugin {
             return;
           }
           res.setHeader('Content-Type', 'application/json');
-          // A handler signals a non-200 by returning `__status`; the key is
-          // stripped so the payload matches what the real API returns.
-          // Without this, error paths (404 / 409 conflict / 400 validation)
-          // can't be exercised against the mock at all.
+          // A handler signals a non-200 by returning `__status`, and response
+          // headers by returning `__headers`; both keys are stripped so the
+          // payload matches what the real API returns. Without the first,
+          // error paths (404 / 409 conflict / 400 validation) can't be
+          // exercised against the mock at all.
           let payload = body;
           let code = 200;
           if (body && typeof body === 'object' && '__status' in (body as any)) {
             const { __status, ...rest } = body as any;
             code = Number(__status) || 200;
+            payload = rest;
+          }
+          if (payload && typeof payload === 'object' && '__headers' in (payload as any)) {
+            const { __headers, ...rest } = payload as any;
+            for (const [k, v] of Object.entries((__headers ?? {}) as Record<string, string>)) {
+              res.setHeader(k, v);
+            }
             payload = rest;
           }
           res.statusCode = code;

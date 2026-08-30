@@ -3165,8 +3165,14 @@ export const AVATAR_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/he
  * gets — one conditional request per author per session.
  */
 export function avatarUrl(kind: 'user' | 'bot', userId?: string, version?: string | null): string {
+  // `userId` is optional for the bot branch alone, and nothing in the type
+  // enforces the pairing. Without this, a missing id builds a URL with an
+  // empty last segment, which matches no route at all — so the browser gets
+  // FastAPI's own 404 rather than the one the endpoint sends, and the caller
+  // sees an image that failed with no way to tell why.
+  if (kind === 'user' && !userId) throw new Error('avatarUrl: a user avatar needs a userId');
   const path =
-    kind === 'bot' ? '/api/avatars/bot' : `/api/avatars/user/${encodeURIComponent(userId ?? '')}`;
+    kind === 'bot' ? '/api/avatars/bot' : `/api/avatars/user/${encodeURIComponent(userId!)}`;
   const query = version ? `?v=${encodeURIComponent(version)}` : '';
   return `${base}${path}${query}`;
 }
