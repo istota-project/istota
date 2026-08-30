@@ -289,6 +289,14 @@ class SchedulerConfig:
     # it: the two answer the same disk, and a cache that went over its ceiling
     # is not urgent — it is over budget, not broken.
     sandbox_cache_sweep_interval: int = 21600
+    # Seconds between Nextcloud profile-picture import ticks (0 = off). Six
+    # hours, and the number is a compromise the spec names rather than a round
+    # figure: the import runs on a cadence rather than at login (a 10-second
+    # Nextcloud timeout in front of authentication) or on render (the live proxy
+    # the Nextcloud decoupling is unwinding), so the cost is that a user who has
+    # just signed in for the first time sees the initial chip until the next
+    # tick. Daily would make that a whole day.
+    avatar_import_interval: int = 21600
     # Seconds between per-skill overlay memory-search reindex passes (ISSUE-343,
     # 0 = off). An overlay is a file the *user* writes, so there is no write path
     # to index from — the memory CLI's per-write reindex went with the overlay
@@ -1062,6 +1070,13 @@ class WebConfig:
     # limits are different numbers on purpose and neither substitutes for the
     # other.
     max_avatar_kb: int = 4096
+    # Whether the scheduler imports users' Nextcloud profile pictures at all.
+    # Only a *custom* avatar is ever imported: Nextcloud generates a coloured
+    # letter for a user who has set none, and importing that would swap our own
+    # initial chip for Nextcloud's version of the same idea, with nothing
+    # downstream able to tell them apart. Inert on a local storage backend,
+    # where there is no Nextcloud to ask.
+    avatar_import_from_nextcloud: bool = True
     chat: WebChatConfig = field(default_factory=WebChatConfig)
     map: WebMapConfig = field(default_factory=WebMapConfig)
 

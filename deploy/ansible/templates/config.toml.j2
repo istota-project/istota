@@ -324,6 +324,7 @@ heartbeat_check_interval = {{ istota_scheduler_heartbeat_check_interval }}
 db_health_check_interval = {{ istota_scheduler_db_health_check_interval }}
 worktree_reap_interval = {{ istota_scheduler_worktree_reap_interval }}
 sandbox_cache_sweep_interval = {{ istota_scheduler_sandbox_cache_sweep_interval }}
+avatar_import_interval = {{ istota_scheduler_avatar_import_interval }}
 main_loop_read_timeout_ms = {{ istota_scheduler_main_loop_read_timeout_ms }}
 db_backup_enabled = {{ istota_scheduler_db_backup_enabled | lower }}
 db_backup_interval = {{ istota_scheduler_db_backup_interval }}
@@ -520,6 +521,7 @@ oauth2_redirect_uri = "{{ istota_web_oauth2_redirect_uri }}"
 {% endif %}
 token_storage = "{{ istota_web_token_storage }}"
 max_avatar_kb = {{ istota_web_max_avatar_kb }}
+avatar_import_from_nextcloud = {{ istota_web_avatar_import_from_nextcloud | lower }}
 {% if not istota_use_environment_file %}
 oauth2_client_secret = "{{ istota_web_oauth2_client_secret }}"
 session_secret_key = "{{ istota_web_secret_key }}"

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -434,6 +435,94 @@ def import_probe_state(conn: sqlite3.Connection) -> dict[str, str]:
         (SOURCE_NEXTCLOUD,),
     ).fetchall()
     return {row["user_id"]: row["remote_etag"] or "" for row in rows}
+
+
+def import_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """How many `nextcloud` rows are pictures, and how many are negative probes.
+
+    Two numbers rather than one, because they mean opposite things to whoever is
+    reading: `imported` is the feature working, and `probes` is the feature
+    having asked and been told no. A deployment where every row is a probe and
+    none is a picture is either one where nobody has set a Nextcloud avatar or
+    one where the custom-avatar header never arrives — which is why the doctor
+    check reads the recorded tick state as well as these.
+
+    The same full scan `import_probe_state` is, and for the same reason: the
+    primary key is `(user_id, source)` and this names no user.
+    """
+    row = conn.execute(
+        f"""
+        SELECT
+            SUM(CASE WHEN {_IS_A_PICTURE} THEN 1 ELSE 0 END) AS imported,
+            SUM(CASE WHEN {_IS_A_PICTURE} THEN 0 ELSE 1 END) AS probes
+        FROM user_avatars WHERE source = ?
+        """,
+        (SOURCE_NEXTCLOUD,),
+    ).fetchone()
+    return {
+        "imported": int(row["imported"] or 0),
+        "probes": int(row["probes"] or 0),
+    }
+
+
+# --- what the last import tick saw ------------------------------------------
+
+# The import job runs in the daemon; `doctor` runs there too, but also in the
+# `istota doctor` process and in the web process behind the admin Health pane.
+# So "what did the last tick see" cannot be module state — it has to be written
+# down somewhere all three can read.
+#
+# `shared_kv` rather than a table of its own: it is one small JSON row of
+# deployment-wide daemon state, which is exactly what that table holds, and a
+# whole table plus a migration for six integers is not worth it. The leading
+# underscore is what keeps it away from the model — `kv_namespaces` reserves the
+# prefix, so the `kv` skill refuses the namespace on every verb and the deferred
+# op replay refuses it again for a sandboxed task.
+IMPORT_STATE_NAMESPACE = "_avatar_import"
+IMPORT_STATE_KEY = "last_tick"
+_IMPORT_STATE_WRITER = "scheduler:avatar_import"
+
+# Whether the tick could tell a user-set Nextcloud avatar from a generated one.
+# Three values, not a boolean, because "no response this tick could have carried
+# the header" is a third thing: a tick where every user answered 304 sees no
+# header at all, and reporting that as `absent` would page an operator about a
+# Nextcloud that is answering perfectly.
+HEADER_SEEN = "seen"
+HEADER_ABSENT = "absent"
+HEADER_UNOBSERVED = "unobserved"
+
+
+def write_import_state(conn: sqlite3.Connection, state: dict) -> None:
+    """Record what the tick that just finished did. Replaces the previous row."""
+    from . import db as _db
+
+    _db.shared_kv_set(
+        conn,
+        IMPORT_STATE_NAMESPACE,
+        IMPORT_STATE_KEY,
+        json.dumps(state, sort_keys=True),
+        _IMPORT_STATE_WRITER,
+    )
+
+
+def read_import_state(conn: sqlite3.Connection) -> dict | None:
+    """The last tick's record, or None when no tick has been recorded.
+
+    Returns None rather than raising on a row that will not parse: the one
+    caller is a doctor check, and a check that raised on a malformed value would
+    take the daemon's start-up path with it. A row nobody can read is
+    indistinguishable, for the operator, from no row at all.
+    """
+    from . import db as _db
+
+    row = _db.shared_kv_get(conn, IMPORT_STATE_NAMESPACE, IMPORT_STATE_KEY)
+    if row is None:
+        return None
+    try:
+        parsed = json.loads(row["value"])
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # --- the bot avatar store ---------------------------------------------------

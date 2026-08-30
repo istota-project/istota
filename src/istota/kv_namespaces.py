@@ -1,15 +1,22 @@
-"""Which `istota_kv` namespaces the model may not touch.
+"""Which KV namespaces the model may not touch.
 
 A reserved namespace holds framework state that happens to live in the KV
 store: today the USER.md curation audit trail and the fingerprints the
-bypass detector compares against (`memory/curation/audit.py`), plus
+bypass detector compares against (`memory/curation/audit.py`),
 `_provisioned_rooms` — the Talk token `provision_rooms.py` provisioned for each
 default room name, which is what lets a deploy recognise a room the user has
-since renamed instead of minting a second one (ISSUE-342). Those rows are
-written by the daemon, by the host-side `memory` skill CLI and by the
+since renamed instead of minting a second one (ISSUE-342) — and
+`_avatar_import`, what the scheduler's Nextcloud profile-picture import tick
+wrote down for `doctor`'s socket-free `web.avatar_import` check to read. Those
+rows are written by the daemon, by the host-side `memory` skill CLI and by the
 `provision-rooms` CLI, and read by neither the model nor the `kv` skill.
 
-The rule is a name prefix rather than a list, so a fourth reserved namespace
+Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
+before it dispatches a verb, so `--shared` — which reads and writes the
+deployment-wide `shared_kv` — is covered by the same line. `_avatar_import` is
+a `shared_kv` namespace and would otherwise be reachable.
+
+The rule is a name prefix rather than a list, so a fifth reserved namespace
 costs nothing here or at either enforcement point. Both of those are needed
 and neither substitutes for the other:
 

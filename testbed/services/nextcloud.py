@@ -737,6 +737,71 @@ class NextcloudService:
             )
         return result.stdout
 
+    # -- avatars ----------------------------------------------------------
+
+    def avatar_response(
+        self, uid: str, *, size: int = 192, user: str = "",
+    ) -> tuple[int, dict[str, str], int]:
+        """One GET of Nextcloud's own avatar endpoint: status, headers, length.
+
+        The endpoint `src/istota/nextcloud/avatars.py` reads, over the same
+        front door the daemon uses. It exists for one question the default suite
+        cannot answer: Nextcloud answers this with an image whether or not the
+        user set one — with none it generates a coloured letter — and the only
+        thing distinguishing the two is a response header. Every unit test of
+        that module scripts the header it is checking for, so a wrong spelling
+        passes them all and imports Nextcloud's placeholder as everybody's face.
+
+        Headers rather than a parsed verdict, and a *length* rather than the
+        body: the caller is asserting on which header arrived and how it was
+        spelled, and a picture in a pytest failure report helps nobody.
+        """
+        url = (
+            f"{self.base_url}/index.php/avatar/{quote(uid, safe='')}/{int(size)}"
+        )
+        request = Request(url, method="GET")
+        actor = user or self.admin_user
+        if actor not in self._passwords:
+            raise NextcloudError(f"no password for {actor!r}")
+        _add_basic_auth(request, actor, self._passwords[actor])
+        try:
+            with urlopen(request, timeout=TIMEOUT) as response:
+                return response.status, dict(response.headers), len(response.read())
+        except HTTPError as exc:
+            return exc.code, dict(exc.headers), len(exc.read())
+        except URLError as exc:
+            raise NextcloudError(f"GET {url} never connected: {exc}") from None
+
+    def set_avatar(self, uid: str, image: bytes) -> None:
+        """Give `uid` a *custom* avatar, through Nextcloud's own `IAvatar` API.
+
+        There is no HTTP route a test can use for this and no `occ` verb either:
+        `POST /index.php/avatar` is a session-and-CSRF-guarded web route, which
+        is the same fact that stops the daemon pushing an avatar *to* Nextcloud.
+        So this goes the way `oauth_clients` goes — raw PHP against the server's
+        own service container, inside the container — because calling
+        `IAvatar::set` is exactly what the web route does once it has a body,
+        including the bookkeeping that makes `isCustomAvatar()` true afterwards.
+
+        Both arguments travel base64 in the argv — the picture because a file
+        copy would need cleaning up, and the *uid* because that leaves nothing
+        in the generated PHP but `[A-Za-z0-9+/=]`. A PHP double-quoted literal
+        interpolates `$`, and a single-quoted one still has a backslash and a
+        `'` to escape, so a uid substituted as text is a quoting question with
+        two wrong answers. Keep the picture small; this is an argument list.
+        """
+        import base64
+
+        php = _SET_AVATAR_PHP % (
+            base64.b64encode(uid.encode()).decode("ascii"),
+            base64.b64encode(image).decode("ascii"),
+        )
+        out = self._exec(["php", "-r", php])
+        if "ISTOTA-AVATAR-SET" not in out:
+            raise NextcloudError(
+                f"setting {uid!r}'s avatar produced no confirmation:\n{out[:800]}"
+            )
+
     def enabled_apps(self) -> list[str]:
         """App ids Nextcloud reports as enabled.
 
@@ -791,6 +856,23 @@ $qb = $db->getQueryBuilder();
 $rows = $qb->select('name', 'redirect_uri')->from('oauth2_clients')
     ->executeQuery()->fetchAll();
 echo "\\n" . json_encode(array_values($rows)) . "\\n";
+"""
+
+
+# Sets a user's avatar the way the web route does — `IAvatar::set` — so the
+# `generated` bookkeeping `isCustomAvatar()` reads is written too. `HTTP_HOST` is
+# set for the same reason `_OAUTH_CLIENTS_PHP` sets it: `base.php` reads it and
+# PHP-CLI supplies none. Both `%s` are base64, so nothing substituted in here
+# can close a literal, interpolate a variable or escape anything.
+_SET_AVATAR_PHP = """
+$_SERVER['HTTP_HOST'] = 'localhost';
+require '/var/www/html/lib/base.php';
+\\OC_App::loadApps();
+$uid = base64_decode('%s');
+$data = base64_decode('%s');
+$manager = \\OC::$server->get(\\OCP\\IAvatarManager::class);
+$manager->getAvatar($uid)->set($data);
+echo "\\nISTOTA-AVATAR-SET\\n";
 """
 
 
