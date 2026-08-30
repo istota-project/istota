@@ -9,6 +9,19 @@ the failure mode substring assertions decay away from: a layer that silently
 stops being included. An intentional change is a reviewed golden update via
 ``ISTOTA_UPDATE_GOLDEN=1``.
 
+**The regeneration command puts `env` inside the `uv run`**, and the shell
+assignment in front of it that everyone reaches for first does not work on every
+deployment. ``uv`` is in ``DEFAULT_SHIM_COMMANDS``, so where a devbox is
+configured it is a shim that hands the argv to the exec server in the container
+— and ``devbox_exec_protocol`` carries no ``env`` field, deliberately and
+pinned by a test, so *nothing* set in the calling shell arrives. The run then
+compares instead of rewriting and reports thirteen failures with no hint that
+the switch was never seen. ``uv run env ISTOTA_UPDATE_GOLDEN=1 pytest`` puts
+the assignment in the argv, where it survives the trip, and is identical to the
+shell form on a host with no devbox. This is the second layer to eat this
+variable: ``tests/support/env_isolation.py`` scrubbed it in-process until it was
+named in the keep-list, with the same symptom.
+
 **No container, and no model.** ``dry_run`` returns *after* assembly rather than
 instead of it, so the path below really does run sticky-skill lookup, memory
 reads through ``storage.py``, calendar discovery and conversation-context
@@ -91,7 +104,11 @@ from istota.executor import custom_system_prompt_path, execute_task
 
 GOLDEN_DIR = Path(__file__).parent / "golden" / "prompts"
 UPDATE_ENV = "ISTOTA_UPDATE_GOLDEN"
-UPDATE_CMD = f"{UPDATE_ENV}=1 uv run pytest tests/test_prompt_golden.py -n0"
+#: The regeneration command, written once here and quoted from the three docs
+#: that document it (`test_the_documented_regeneration_command_is_one_string`).
+#: The `env` sits *inside* the `uv run`, not as a shell assignment in front of
+#: it, and that is the whole point — see the module docstring.
+UPDATE_CMD = f"uv run env {UPDATE_ENV}=1 pytest tests/test_prompt_golden.py -n0"
 DRY_RUN_PREFIX = "[DRY RUN] Would execute with prompt:\n\n"
 
 
@@ -114,8 +131,8 @@ def updating() -> bool:
     if value in ("0", "false", "no", "off"):
         return False
     raise RuntimeError(
-        f"{UPDATE_ENV}={raw!r} is neither affirmative nor negative. Use "
-        f"`{UPDATE_ENV}=1` to rewrite the goldens, or unset it to compare."
+        f"{UPDATE_ENV}={raw!r} is neither affirmative nor negative. Run "
+        f"`{UPDATE_CMD}` to rewrite the goldens, or unset it to compare."
     )
 
 USER = "alice"
@@ -737,6 +754,46 @@ def test_the_regeneration_switch_survives_the_env_scrub():
     assert scrubbed_env_names({UPDATE_ENV: "1"}) == set(), (
         f"{UPDATE_ENV} is scrubbed before {UPDATE_CMD!r} can read it"
     )
+
+
+def test_the_documented_regeneration_command_is_the_one_that_survives_a_shim():
+    """One command string, in the module and in all three docs that print it.
+
+    The switch has now been eaten by two different layers. The first was the
+    in-process scrub above. The second is the devbox: ``uv`` is in
+    ``config.DEFAULT_SHIM_COMMANDS``, so where a devbox is configured the ``uv``
+    on ``PATH`` is a shim that hands the argv to the exec server in the
+    container, and ``devbox_exec_protocol`` carries no ``env`` field at all —
+    deliberately, and pinned by ``tests/test_devbox_exec_protocol``. So a shell
+    assignment in front of the command reaches nothing, the run compares
+    instead of rewriting, and the operator gets thirteen red goldens with no
+    hint that the switch was never seen.
+
+    Two assertions, because either alone passes for the wrong reason: the
+    command must not be a shell assignment (the shape that loses the variable),
+    and the docs must print the same string the module does (a fixed constant
+    nobody quotes is not documentation).
+    """
+    assert not UPDATE_CMD.startswith(UPDATE_ENV), (
+        f"{UPDATE_CMD!r} sets {UPDATE_ENV} as a shell assignment, which a "
+        f"shimmed `uv` drops on the floor. Put it in the argv: `uv run env "
+        f"{UPDATE_ENV}=1 pytest ...`"
+    )
+    assert f"env {UPDATE_ENV}=1" in UPDATE_CMD
+
+    repo = Path(__file__).resolve().parent.parent
+    documented = (
+        "AGENTS.md",
+        ".claude/rules/testbed.md",
+        "docs/development/testing.md",
+    )
+    for name in documented:
+        text = (repo / name).read_text(encoding="utf-8")
+        assert UPDATE_CMD in text, (
+            f"{name} does not print {UPDATE_CMD!r}. It documents the "
+            f"regeneration command, and a doc left on the old spelling sends "
+            f"the next person down the path that writes nothing."
+        )
 
 
 class TestTheStorageBackendDimension:

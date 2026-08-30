@@ -326,8 +326,10 @@ Every session prints two diagnostic lines of its own: how many `docker compose e
 A diff is a failure. An intentional change is a reviewed golden update:
 
 ```bash
-ISTOTA_UPDATE_GOLDEN=1 uv run pytest tests/test_prompt_golden.py -n0
+uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0
 ```
+
+`env` goes *inside* the `uv run` rather than in front of it as a shell assignment, and on a deployment with a devbox that is the difference between rewriting and not. `uv` is in `DEFAULT_SHIM_COMMANDS`, so there it is a shim handing the argv to the exec server in the container, and `devbox_exec_protocol` carries no `env` field — deliberately, and pinned by a test — so nothing set in the calling shell arrives. The run compares instead of rewriting and reports thirteen failures with nothing to say the switch was never seen. In the argv the assignment survives, and on a host with no devbox the two forms are the same command. `tests/support/env_isolation.py` ate this same variable in-process until it was named in the keep-list, with the same symptom.
 
 Commit the resulting diff and review it like any other change. `-n0` is not optional: the orphan check has no ordering relationship with the writers under xdist, so a regeneration that adds or renames a case reports missing goldens from the run that was supposed to create them. The variable is parsed by an `updating()` helper that takes the same affirmative and negative words as `PRECOMMIT_SCANS_REQUIRED` and raises on anything else, so a stale `ISTOTA_UPDATE_GOLDEN=0` in a shell cannot quietly turn every golden into a rubber stamp.
 
