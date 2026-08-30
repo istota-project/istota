@@ -28,6 +28,9 @@
     onJumpToMessage,
     onRetry,
     retryBusy = false,
+    onQueueSend,
+    onQueueEdit,
+    onQueueRemove,
     onRoomClick,
     onJump,
     drafts = [],
@@ -65,6 +68,16 @@
     // store's `runTurn` is not re-entrant), so the button says so rather than
     // silently doing nothing.
     retryBusy?: boolean;
+    // Send a message that is waiting to go out, now (ISSUE-238). Offered only
+    // on a *held* row: an unheld one is going to drain on its own, and a second
+    // way to fire it would race that. Absent → no Send affordance, which is how
+    // read-only surfaces and the aggregate views stay read-only.
+    onQueueSend?: (cid: number) => void;
+    // Take a queued message back into the composer to edit it. The handler owns
+    // the round trip — this component only offers the affordance.
+    onQueueEdit?: (cid: number) => void;
+    // Drop a queued message without sending it.
+    onQueueRemove?: (cid: number) => void;
     // Aggregate views: click the message's room label to jump into that room.
     // Only rendered when both the handler and message.roomName are present.
     onRoomClick?: (token: string) => void;
@@ -270,14 +283,30 @@
   // `retryable` is false where a retry would fail identically (an expired
   // session), and an offer that cannot work is worse than no offer.
   const showRetry = $derived(sendFailed && message.retryable !== false && !!onRetry);
+  // ---- The send queue (ISSUE-238) -------------------------------------------
+  // A message typed into a busy room: written and committed to, never POSTed.
+  // Distinct from the *assistant* placeholder's `Queued…` progress line, which
+  // means the opposite — POSTed already, waiting for its stream.
+  const sendQueued = $derived(message.sendState === 'queued');
+  // Held means the turn this was written against ended abnormally (Stop, an
+  // error, a parked confirmation), so it will not drain on its own and the
+  // user has to say so.
+  const queueHeld = $derived(sendQueued && !!message.queueHeld);
+  // Send is a held-row affordance only. An unheld entry drains by itself when
+  // the running turn settles, and a button that fired it early would race that
+  // drain for the one slot `runTurn` owns.
+  const showQueueSend = $derived(queueHeld && !!onQueueSend);
 
   // The row is in the layout whenever any of the three could be there, so
   // revealing it never reflows the transcript under the pointer. Withheld
   // entirely from a failed send: all three act on a durable turn, and this one
   // never became one — star and delete have no `msgId` to work with, and a lone
-  // copy button would compete with the Retry that is the actual next move.
+  // copy button would compete with the Retry that is the actual next move. A
+  // queued row is withheld for the same reason and one more: it is not a turn
+  // *yet*, so every one of them would be an action on something that has not
+  // happened, competing with the Send / Edit / Remove that have.
   const hasRowActions = $derived(
-    (showCopy || showRowStar || showReply || showDelete) && !sendFailed,
+    (showCopy || showRowStar || showReply || showDelete) && !sendFailed && !sendQueued,
   );
 </script>
 
@@ -499,6 +528,7 @@
     class:active
     class:touch
     class:error={message.error}
+    class:queued={sendQueued}
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
   >
@@ -601,7 +631,12 @@
         {/if}
         <!-- The send's own state, on the message it belongs to. A failure here
              used to be written into the assistant placeholder, which read as
-             "the reply failed" rather than "your message never left". -->
+             "the reply failed" rather than "your message never left".
+
+             The queued branch (ISSUE-238) leaves the body above it rendering in
+             full — text, chips and the optimistic quote — because the point of
+             that row is that the user can see what they committed to sending;
+             the line and its buttons say it has not left yet. -->
         {#if sendPending}
           <div class="progress send-pending">
             <span class="dot"></span>
@@ -619,6 +654,27 @@
                 onclick={() => onRetry?.(message.cid)}
               >
                 Retry
+              </Button>
+            {/if}
+          </div>
+        {:else if sendQueued}
+          <div class="send-queued">
+            <span class="send-queued-text">
+              {queueHeld ? 'Held — not sent' : 'Waiting to send'}
+            </span>
+            {#if showQueueSend}
+              <Button variant="subtle" size="sm" onclick={() => onQueueSend?.(message.cid)}>
+                Send
+              </Button>
+            {/if}
+            {#if onQueueEdit}
+              <Button variant="subtle" size="sm" onclick={() => onQueueEdit?.(message.cid)}>
+                Edit
+              </Button>
+            {/if}
+            {#if onQueueRemove}
+              <Button variant="subtle" size="sm" onclick={() => onQueueRemove?.(message.cid)}>
+                Remove
               </Button>
             {/if}
           </div>
@@ -1358,6 +1414,28 @@
   }
   .send-failed-text {
     min-width: 0;
+  }
+  /* Queued (ISSUE-238). Same geometry as the failure mark, muted rather than
+	   dangerous: nothing has gone wrong, the message simply has not left. */
+  .send-queued {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+  .send-queued-text {
+    min-width: 0;
+  }
+  /* The body is dimmed, not hidden: the user is meant to reread what they wrote
+	   before deciding to edit it. Only the message content, so the status line
+	   and its buttons stay at full contrast — they are what you act on. */
+  .msg.queued .body,
+  .msg.queued .attachments,
+  .msg.queued .reply-quote {
+    opacity: 0.65;
   }
 
   /* Command (!…) output: a left-aligned block set apart from the conversation

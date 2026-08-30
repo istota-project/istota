@@ -148,37 +148,86 @@ describe('chat store — !command during a turn', () => {
     expect(get(s.activeTaskId)).toBe(42);
   });
 
-  it('refuses ordinary text, which would be a second turn', async () => {
+  it('warms the catalogue itself, so a command sent early is still answered inline', async () => {
+    // The snapshot `isKnownCommand` reads is module-level and empty until some
+    // caller has awaited a fetch. That warm used to be a side effect of the
+    // composer, which held its own reactive copy for the mode gate; ISSUE-238
+    // removed the gate and with it the only eager loader in the app, leaving
+    // the autocomplete providers — which fetch on the keystroke that opens the
+    // popover, resolving some time after it. A `!stop` typed and sent quickly
+    // enough was then not recognised as a command, and was queued behind the
+    // very turn it was meant to cancel.
+    //
+    // Deliberately does NOT call `providers.loadCommandNames()` the way
+    // `freshSession` does: the warm under test is `init`'s own.
+    vi.resetModules();
+    api.fetchChatCommands.mockResolvedValue(CATALOGUE);
+    const mod = await import('./chat');
+    const s = mod.getChatSession();
+    await s.init();
+
+    api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 42 });
+    await s.send('hello');
+    expect(get(s.status)).toBe('streaming');
+    api.sendChatMessage.mockReset();
+    api.sendChatMessage.mockResolvedValue({
+      ok: true,
+      status: 200,
+      task_id: null,
+      inline_result: 'Nothing is running.',
+    });
+
+    await s.send('!status');
+
+    // Answered inside the request, not queued — and the row is what says so:
+    // a queued message POSTs nothing and leaves a `sendState: 'queued'` row.
+    expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+    const msgs = get(s.messages);
+    expect(msgs.some((m) => m.sendState === 'queued')).toBe(false);
+    expect(msgs[msgs.length - 1].role).toBe('system');
+    expect(msgs[msgs.length - 1].text).toBe('Nothing is running.');
+  });
+
+  it('keeps ordinary text out of the request and queues it instead', async () => {
+    // The invariant is unchanged — ordinary text would be a second `runTurn`
+    // in a room that already has one, so it does not go out now. What it does
+    // instead is no longer nothing: since ISSUE-238 it is queued and drains
+    // when the running turn settles. See chat.queue.test.ts.
     const s = await streaming();
 
     await s.send('second thought');
 
     expect(api.sendChatMessage).not.toHaveBeenCalled();
-    expect(get(s.messages)).toHaveLength(2);
+    expect(get(s.messages)).toHaveLength(3);
+    expect(get(s.messages)[2].sendState).toBe('queued');
     expect(get(s.status)).toBe('streaming');
   });
 
-  it('refuses a !word the server does not register as a command', async () => {
+  it('does not take the inline path for a !word the server does not register', async () => {
     // The catalogue is the only evidence available client-side. The server
-    // would answer this one inline too ("Unknown command"), so the refusal is
-    // conservatism rather than a claim about what the endpoint would do.
+    // would answer this one inline too ("Unknown command"), so treating it as
+    // ordinary text is conservatism rather than a claim about what the
+    // endpoint would do — and ordinary text is queued.
     const s = await streaming();
 
     await s.send('!nope do the thing');
 
     expect(api.sendChatMessage).not.toHaveBeenCalled();
-    expect(get(s.messages)).toHaveLength(2);
+    expect(get(s.messages)).toHaveLength(3);
+    expect(get(s.messages)[2].sendState).toBe('queued');
   });
 
-  it('refuses the literal !model prefix, which produces a task rather than an answer', async () => {
+  it('keeps the literal !model prefix off the inline path, since it makes a task', async () => {
     // `!model <alias> <prompt>` is the one `!`-prefixed body the endpoint turns
-    // into a task. It is refused because no command is registered under the
-    // name `model` — not because `opus` is a model alias.
+    // into a task. It stays off the inline path because no command is
+    // registered under the name `model` — not because `opus` is a model alias
+    // — so it is ordinary text and queues like any other.
     const s = await streaming();
 
     await s.send('!model opus write me a poem');
 
     expect(api.sendChatMessage).not.toHaveBeenCalled();
+    expect(get(s.messages)[2].sendState).toBe('queued');
   });
 
   it('does not refuse a command whose name is also a model alias', async () => {

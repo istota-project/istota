@@ -931,6 +931,11 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 
   if (path === '/istota/api/chat/config') {
     return {
+      // The send queue's storage key is `<user>:room:<token>` and the store
+      // takes the user half from here (ISSUE-238), so without it the whole
+      // persistence half — restore-as-held, and the bubbles that go with it —
+      // is unreachable in dev while the deployed app has it.
+      user_id: user.username,
       max_prompt_chars: 32000,
       max_attachment_mb: 25,
       attachment_extensions: ['pdf', 'png', 'jpg'],

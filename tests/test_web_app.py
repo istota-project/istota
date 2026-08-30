@@ -3039,6 +3039,25 @@ class TestProfileEndpoints:
         after = await client.get("/istota/api/chat/config", cookies=cookies)
         assert after.json()["external_turn_display"] == "full"
 
+    async def test_chat_config_carries_the_authenticated_username(
+        self, tmp_path, client, app,
+    ):
+        """The send queue's storage key is built from this (ISSUE-238).
+
+        A queued message is persisted per room under `<user>:room:<token>`,
+        because a shared Talk room has one token across every member — so on a
+        browser profile two people take turns using, a bare token would restore
+        one person's unsent message into the other's transcript. It rides this
+        endpoint rather than `GET /me` because the chat store awaits this one
+        before anything else, and the restore happens in that same `init()`.
+        """
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.get("/istota/api/chat/config", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["user_id"] == "alice"
+
     async def test_update_profile_external_turn_display_rejects_unknown(
         self, tmp_path, client, app,
     ):

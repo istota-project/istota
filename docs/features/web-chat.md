@@ -14,7 +14,7 @@ Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `
 
 ## Sending a message
 
-**Enter** sends and **Shift+Enter** writes a newline; **Cmd/Ctrl+Enter** still sends, and so does the send button. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. The key does nothing while a turn is running, while a voice message is recording, or while an attachment is still uploading, and never sends the Enter that commits an input-method candidate.
+**Enter** sends and **Shift+Enter** writes a newline; **Cmd/Ctrl+Enter** still sends, and so does the send button. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. The key does nothing while a voice message is recording, while an attachment is still uploading, or while this room's send queue is full (see below), and never sends the Enter that commits an input-method candidate.
 
 A sent message becomes a `source_type="web"` task with `output_target="web"`. It is an interactive task — it loads conversation context, the room's `CHANNEL.md`, and the `guidelines/web.md` channel guidelines. Because `web` is a stream surface, the result and progress are not pushed anywhere; they live in the `task_events` log, which the `/api/chat/tasks/{id}/stream` SSE endpoint tails.
 
@@ -25,6 +25,18 @@ The live view streams:
 - **Answer text** — streamed token-by-token (both the native brain and, as of the latest release, the Claude Code brain via `--include-partial-messages`). Short lead-in narration ("Let me check…") is held back by the narration gate (`scheduler.stream_text_gate_chars`) so it can't leak into the answer area.
 
 If the SSE stream falls back to polling, the client recovers without flashing an error; a terminally-failed task surfaces a terminal frame instead of hanging on "Working…".
+
+## Sending while the bot is working
+
+Send while a turn is still running and the message is queued rather than refused. It appears in the transcript straight away as your own message, dimmed and marked **Waiting to send**, and goes out as the next turn once the current one finishes and you are still in the room. Leave the room and its queue waits there for you: it sends on your return, not while you are reading somewhere else. Turns here are agent tasks that routinely run for minutes, so waiting for one to end before you can type the next thing was the cost this removes.
+
+Your message is not sent until it drains, which is what makes a queued one still yours: **Edit** puts the text and its attachments back in the composer, **Remove** drops it. (Attachments themselves are uploaded when you pick them, as they always were, so removing a queued message leaves its files behind on the server.) The send button is always Send, and a separate **Stop** button appears to its left while a turn runs, so Send never moves under your thumb mid-tap.
+
+A queued message goes out only when the turn it was written behind finishes normally. Press Stop, or hit a failure, or leave a turn parked waiting for you to confirm something, and everything queued behind it switches to **Held — not sent** with a Send button on each row. Nothing is lost and nothing fires against work you have just abandoned; one tap releases a held message when you are ready for it. Releasing one that sits behind another held message marks it ready rather than sending it — the queue still goes out in the order you wrote it.
+
+Queued messages are stored in the browser, like drafts, so a reload keeps them — and a restored one is always held, because a page load must never send anything by itself. Ten messages per room is the limit; past it the composer says so and keeps your text in the field. A queue is dropped when you delete its room, and an entry that never goes out expires after a week.
+
+A command listed by `!commands` and typed while a turn is running is answered straight away rather than queued, so `!stop` and `!steer` still reach the turn in progress. The short aliases that are not in that list (`!yes`, `!no`, `!inject`) are not recognized by the browser, so mid-turn they queue like anything else and are answered as the next turn — type the full command instead if a turn is running.
 
 ## Message actions
 

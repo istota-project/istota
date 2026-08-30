@@ -30,12 +30,7 @@
   import { uploadChatAttachment, chatConfigOnce, type ChatAttachment } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
-  import {
-    commandProvider,
-    isKnownCommand,
-    loadCommandNames,
-    modelAliasProvider,
-  } from './autocomplete/providers';
+  import { commandProvider, modelAliasProvider } from './autocomplete/providers';
   import { createRecorder, formatElapsed } from './useRecorder.svelte';
   import { usesSoftKeyboard, isImeComposing, IME_COMMIT_GRACE_MS } from '$lib/platform/input';
   import {
@@ -53,6 +48,8 @@
     onSend,
     onCancel,
     busy = false,
+    queueing = false,
+    queueFull = false,
     placeholder = 'Message Istota…',
     draftKey = null,
     sendSettled = { n: 0, key: null },
@@ -63,6 +60,43 @@
     onSend: (text: string, attachments: ChatAttachment[], replyTo?: MessageReply | null) => void;
     onCancel?: () => void;
     busy?: boolean;
+    /**
+     * Whether a send from here will be queued rather than POSTed (ISSUE-238).
+     *
+     * It decides one thing: who holds the durable copy of the submitted text.
+     * An ordinary send has none until the backend acks, so the draft is held
+     * through the ack; a queued one is written to its own persisted queue at
+     * the moment it is accepted, so the draft is dropped there and then and no
+     * ack is waited for. The composer is told rather than deriving it, because
+     * the rule lives in the store's `send()` — the composer cannot see whether
+     * the room is busy for a reason that queues.
+     *
+     * It is read once, at the top of `submit`, before `onSend` runs. See the
+     * note there: the send flips this prop under the handler that reads it.
+     *
+     * **Two things it does not distinguish**, both accepted rather than
+     * overlooked. A mid-turn `!command` is answered inside the request and
+     * queued nowhere, but arrives here as `true` and so has its draft cleared;
+     * that is the better of the two wrongs, since the alternative was an
+     * `unsettledSends` entry no ack ever settles (`sendInlineCommand` does not
+     * bump `sendSettled`), holding the slot for the session. And the store can
+     * still *refuse* an enqueue — a room that left `$rooms` mid-click — where
+     * the draft has already been cleared against a queue entry that was never
+     * written. Closing that means `send()` reporting acceptance, which is a
+     * change to its signature rather than to this component.
+     */
+    queueing?: boolean;
+    /**
+     * Whether this room's send queue is at its cap.
+     *
+     * A refusal with a reason on screen, rather than a send that vanishes: the
+     * text stays in the field, the send button is disabled, and `wouldSend()`
+     * says no so a keyboard send falls through to the browser and writes its
+     * newline. The store refuses at the same cap, which is the backstop under
+     * this rather than a substitute for it — its refusal arrives as a toast
+     * with the text already gone from the field.
+     */
+    queueFull?: boolean;
     placeholder?: string;
     /**
      * Where unsent text is held between visits, or null to hold none. The
@@ -647,6 +681,16 @@
     // A citation does not make an empty message sendable — it is a pointer,
     // not content.
     if (!t && attachments.length === 0) return;
+    // Read *before* the send, and this is not a style choice. `onSend` runs the
+    // store's `send()` synchronously, which reaches `status.set('sending')`
+    // before it returns, so the page's `busy` — and with it this prop — has
+    // already flipped by the time the draft branch below is reached. Read
+    // there, every ordinary send from an idle room looked queued: the draft it
+    // is supposed to hold through the ack was cleared on submit instead, and
+    // no `unsettledSends` entry was written, which left `settleDraft` and
+    // `switchDraft`'s in-flight refusal with nothing to act on. The whole
+    // durability mechanism was inert and nothing said so.
+    const queued = queueing;
     onSend(t, attachments, replyTo);
     text = '';
     attachments = [];
@@ -655,9 +699,9 @@
     // request with no task to attach one to, so letting it persist would carry
     // it silently into the next message.
     onReplyChange?.(null);
-    // The draft is *not* dropped here. Until the backend acks, the stored
-    // draft is the only copy of this text that survives a reload — the failed
-    // row does not — so the drop waits for `settleDraft`.
+    // For an ordinary send the draft is *not* dropped here. Until the backend
+    // acks, the stored draft is the only copy of this text that survives a
+    // reload — the failed row does not — so the drop waits for `settleDraft`.
     //
     // Written rather than merely left alone: a submit inside the debounce
     // window would otherwise leave nothing stored at all, or a stale prefix of
@@ -668,14 +712,25 @@
       saveTimer = undefined;
       const held = unsettledSends.get(activeDraftKey);
       if (held !== undefined) {
-        // A second send is open in this room, which since ISSUE-300 means a
-        // `!command` typed while an ordinary message is still pre-ack. The
-        // command is not a draft — nothing about it is worth restoring after a
-        // reload — and the slot it would take belongs to that other message,
-        // whose stored copy is the only one that survives a reload if its send
-        // then fails. So the held text is written back over whatever typing
-        // this command left in the slot, and the map entry stays its owner's.
+        // A second send is open in this room: since ISSUE-300 a `!command`
+        // typed while an ordinary message is still pre-ack, and since
+        // ISSUE-238 a message queued behind one too. Neither is a draft — the
+        // command is not worth restoring after a reload and the queued message
+        // has its own persisted copy — and the slot they would take belongs to
+        // that other message, whose stored copy is the only one that survives
+        // a reload if its send then fails. So the held text is written back
+        // over whatever typing this submit left in the slot, and the map entry
+        // stays its owner's.
         writeDraft(activeDraftKey, held);
+      } else if (queued) {
+        // Queued, so the send queue is now the durable copy and it was written
+        // under its own key the moment the message was accepted. Holding the
+        // draft as well would put a second copy of the same text in a slot
+        // that fits one — several queued messages in one room would fight over
+        // it, and the first ack would drop the last one's stored copy — so it
+        // is cleared here rather than waiting for an ack that, for a queued
+        // message, is a whole turn away.
+        writeDraft(activeDraftKey, '');
       } else {
         // What was stored, not what was passed: an over-long message is held
         // clamped, and both the tests that recognise it again — the ack in
@@ -692,67 +747,26 @@
     if (usesSoftKeyboard()) textarea?.blur();
   }
 
-  // The send/stop control is one button in two modes — see the markup below.
   const canSend = $derived(!!text.trim() || attachments.length > 0);
 
-  // Held here rather than read from the module's own snapshot so the derivation
-  // below reruns when the fetch lands. Empty until then, which leaves the gate
-  // exactly as it was — a name we cannot confirm is not one we let through.
-  let commandNames = $state<ReadonlySet<string>>(new Set());
-  void loadCommandNames().then((n) => (commandNames = n));
-
   /**
-   * Whether what is typed is a `!command` the server answers inside the
-   * request (ISSUE-300).
+   * Whether the Stop button is on screen.
    *
-   * This is the one thing that stays sendable while a turn runs. A command is
-   * answered inline and comes back carrying no task id, so it never enters the
-   * store's `runTurn` — which is what the mode gate actually protects, a single
-   * non-re-entrant entry point rather than the server's task count. `!steer`,
-   * built for exactly this moment, is otherwise untypeable on the surface that
-   * is watching the stream.
+   * Its own control since ISSUE-238, rather than a second mode of the send
+   * button. The single two-mode control existed because an `{#if}` swap
+   * destroys the element a tap is still resolving against, and the mode flip
+   * inside one element was the mitigation — with a `MODE_FLIP_GUARD_MS` window
+   * as the mitigation's own mitigation, since a duplicate delivery could still
+   * land after the flip and read as the opposite command. Once every message
+   * is sendable while a turn runs, Send is always Send and both of those go:
+   * one button per meaning cannot be tapped for the meaning it no longer has.
    *
-   * A few commands (`!retry`, `!resume`, `!confirm`) do leave a task queued
-   * server-side. That is not this gate's business: the backend's per-channel
-   * gate serializes it and its rows arrive over the room stream, the same path
-   * a Talk turn landing mid-stream already takes.
-   *
-   * An attachment disqualifies it: a file belongs to a task.
+   * It sits to the *left* of Send so that Send never moves. A control
+   * appearing and disappearing at turn start and settle shifts only what is to
+   * its own left, so a tap aimed at Send lands on Send whatever the turn does
+   * mid-gesture.
    */
-  const isInlineCommand = $derived(attachments.length === 0 && isKnownCommand(text, commandNames));
-
-  // Stop stays the mode for a running turn, because cancelling is still what
-  // the button is for — but not over a command, where the same tap has to be
-  // able to send. `!stop` is itself a command, so the cancel is still reachable
-  // from the field in that state.
-  const showStop = $derived(busy && !!onCancel && !isInlineCommand);
-
-  // Belt to the single-element brace: even on one element, a tap can be
-  // delivered twice (a compat mouse event after the touch), and the second
-  // delivery lands after the mode has flipped — so it would read as the
-  // *opposite* command. Drop an activation whose mode differs from the one the
-  // last activation ran in, within the window a duplicate could arrive in.
-  // A repeat in the same mode is left alone: two genuine sends are harmless,
-  // and a real stop is never this fast (the mode only just changed under it).
-  const MODE_FLIP_GUARD_MS = 400;
-  let lastActivationAt = 0;
-  let lastActivationMode: 'send' | 'stop' | null = null;
-
-  function activatePrimary() {
-    const mode: 'send' | 'stop' = showStop ? 'stop' : 'send';
-    const now = Date.now();
-    if (
-      lastActivationMode !== null &&
-      mode !== lastActivationMode &&
-      now - lastActivationAt < MODE_FLIP_GUARD_MS
-    ) {
-      return;
-    }
-    lastActivationAt = now;
-    lastActivationMode = mode;
-    if (mode === 'stop') onCancel?.();
-    else submit();
-  }
+  const showStop = $derived(busy && !!onCancel);
 
   // Tapping a button with the soft keyboard up used to cost two taps, of which
   // the first only closed the keyboard. iOS takes focus off the field when a
@@ -809,13 +823,12 @@
    * has no way to read.
    */
   function wouldSend(): boolean {
-    // The mode gate. This was the one path into a send that did not consult
-    // it, so holding the key started a second turn in a room that already had
-    // one — and two overlapping turns share one echo buffer, whose drain then
-    // releases the first turn's frames before its task id exists. Not
-    // repurposed as Stop: a key that cancels work is not what it looks like it
-    // does.
-    if (showStop) return false;
+    // A running turn is no longer a refusal (ISSUE-238): the store queues what
+    // is typed against it and sends it as the next turn, so the key does what
+    // it says. What replaces it is the cap on that queue — past it there is
+    // nowhere for the message to go, and the composer says so on screen and
+    // leaves the text where the user can still see it.
+    if (queueFull) return false;
     // The send button is deliberately swapped out for Discard/Finish while a
     // voice message records, and the field is under an opaque overlay — so a
     // key that sent here would post text the user cannot see and strand the
@@ -1006,8 +1019,15 @@
       {#if uploading}<span class="attach-chip uploading">Uploading…</span>{/if}
     </div>
   {/if}
-  {#if uploadError || recorder.error}
+  <!-- Refusals, wherever they come from: an oversized file, a recorder that
+       could not start, and a send queue with no room left in it. The last one
+       is standing rather than raised by an attempt, because it is the reason
+       the send button next to it is disabled — a reason that only appeared
+       once the button had already been pressed would leave that state
+       unexplained. -->
+  {#if uploadError || recorder.error || queueFull}
     <div class="notice-row">
+      {#if queueFull}<span class="attach-error">Too many messages waiting to send.</span>{/if}
       {#if uploadError}<span class="attach-error">{uploadError}</span>{/if}
       {#if recorder.error}<span class="attach-error">{recorder.error}</span>{/if}
     </div>
@@ -1124,29 +1144,38 @@
             <Mic />
           </button>
         {/if}
-        <!-- One button across both modes, never an {#if} swap. Sending flips
-             `busy` synchronously inside the click handler, so a swap would
-             destroy the element the tap is still resolving against — and iOS
-             Safari re-hit-tests when it delivers the synthesized click, landing
-             it on whatever now occupies that spot. That is a tap on Send
-             arriving as a tap on Stop: the task was cancelled the instant it
-             started, and only a second client (rendering the room stream)
-             showed it, because the sending client had already moved on. -->
+        <!-- Two buttons, one meaning each, and Stop is the one that comes and
+             goes. Sending flips `busy` synchronously inside the click handler,
+             and iOS Safari re-hit-tests when it delivers the synthesized
+             click — so a control that changed meaning under a tap, or a Send
+             that moved because a neighbour appeared beside it, would deliver a
+             tap aimed at Send as a tap on Stop. That is a task cancelled the
+             instant it started, visible only on a second client rendering the
+             room stream, because the sending client had already moved on.
+             Stop is therefore rendered *before* Send: what appears grows the
+             row leftwards and leaves Send where the thumb left it. -->
+        {#if showStop}
+          <button
+            class="icon-btn stop"
+            onmousedown={keepFocus}
+            onclick={() => onCancel?.()}
+            type="button"
+            aria-label="Stop"
+            title="Stop"
+          >
+            <Square />
+          </button>
+        {/if}
         <button
           class="icon-btn send"
-          class:stop={showStop}
           onmousedown={keepFocus}
-          onclick={activatePrimary}
+          onclick={submit}
           type="button"
-          disabled={showStop ? false : !wouldSend()}
-          aria-label={showStop ? 'Stop' : 'Send'}
-          title={showStop ? 'Stop' : 'Send'}
+          disabled={!wouldSend()}
+          aria-label="Send"
+          title="Send"
         >
-          {#if showStop}
-            <Square />
-          {:else}
-            <ArrowUp />
-          {/if}
+          <ArrowUp />
         </button>
       {/if}
     </div>
@@ -1331,18 +1360,20 @@
      could still strand is the grey fill on the plus and mic — cosmetic, and it
      would take plumbing a touch flag through this component to close. */
   @media (hover: hover) {
-    /* `:not(.send)` is load-bearing, not tidiness: this rule outranks
-       `.icon-btn.send` by a class, so without the exclusion it would grey out
-       the filled control on hover — which is why a `.send:hover` rule used to
-       sit below re-asserting the blue, and that re-assertion is what painted
-       the *stop* button blue. See the fill note below. */
-    .icon-btn:not(.send):hover:not(:disabled) {
+    /* The two exclusions are load-bearing, not tidiness: this rule outranks
+       `.icon-btn.send` and `.icon-btn.stop` by a class, so without them it
+       would grey out a filled control on hover — which is why a `.send:hover`
+       rule used to sit below re-asserting the blue, and that re-assertion is
+       what painted the *stop* button blue. Both filled controls need naming
+       now that they are two elements. See the fill note below. */
+    .icon-btn:not(.send):not(.stop):hover:not(:disabled) {
       background: var(--surface-badge);
       color: var(--accent-hover);
     }
-    /* The filled control brightens instead. A state may adjust the fill but
-       never name it, so no state can disagree with the mode. */
-    .icon-btn.send:hover:not(:disabled) {
+    /* The filled controls brighten instead. A state may adjust a fill but
+       never name it, so no state can disagree with what the button is. */
+    .icon-btn.send:hover:not(:disabled),
+    .icon-btn.stop:hover {
       filter: brightness(1.12);
     }
   }
@@ -1350,18 +1381,19 @@
     opacity: 0.4;
     cursor: default;
   }
-  /* The send affordance is the one filled control in the bar, and its fill is
-     its mode: blue means this sends, red means this stops. Exactly two rules
-     below set that fill — the two modes — and nothing else may, at any
-     specificity. A `:hover` rule that re-declared the blue used to outrank
+  /* The two filled controls in the bar, and the fill is what each one is: blue
+     sends, red stops. Exactly these rules set a fill, and nothing else may, at
+     any specificity. A `:hover` rule that re-declared the blue used to outrank
      `.stop` by one class and paint the running task's stop button blue under
      the stop glyph, which on iOS was not a flicker but the resting state for
-     the whole turn.
+     the whole turn (ISSUE-201). They are separate elements now, which retires
+     the specificity tie the two modes used to have on one — but a state rule
+     that names a fill is the same defect on either shape, so the ban stands.
 
-     No transition either. The fill is the mode rather than a decoration of it,
-     so easing it means the colour and the glyph state different things for the
-     length of the ease — and a transition is also what invites the compositor
-     promotion that leaves WebKit painting a stale layer. Just flip it. */
+     No transition either. The fill says which button this is rather than
+     decorating it, so easing it means the colour and the glyph state different
+     things for the length of the ease — and a transition is also what invites
+     the compositor promotion that leaves WebKit painting a stale layer. */
   .icon-btn.send {
     background: var(--accent-blue);
     color: var(--on-accent-fg);
@@ -1372,15 +1404,14 @@
     color: var(--text-muted);
     opacity: 1;
   }
-  /* Last of the fill rules on purpose: it ties with the :disabled rule above on
-     specificity, so order is what decides them. Unreachable today — the stop
-     mode is never disabled — but if that changes, a disabled stop renders as an
-     enabled one rather than dropping to grey, which is the lesser wrong of the
-     two: a grey button under a stop glyph is the state this control is not
-     allowed to be in. Give it its own `.stop:disabled` rule before disabling it. */
-  .icon-btn.send.stop {
+  /* Never disabled — a Stop that is on screen at all is one there is a turn to
+     stop — so it needs no `:disabled` variant, and nothing here can tie with
+     one. A grey button under a stop glyph is the state this control is not
+     allowed to be in; give it its own rule before ever disabling it. */
+  .icon-btn.stop {
     background: var(--status-danger-fg);
     color: var(--on-accent-fg);
+    transition: none;
   }
 
   .file-hidden {

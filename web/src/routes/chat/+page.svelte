@@ -27,6 +27,7 @@
   import { REPLY_EXCERPT_CHARS, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
   import { dropDraft } from '$lib/stores/drafts';
+  import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
   import { getMe, type ChatAttachment, type ChatRoom, type ChatView } from '$lib/api';
 
@@ -136,6 +137,27 @@
     key: userId && $sendSettled.token ? `${userId}:room:${$sendSettled.token}` : null,
   });
   const busy = $derived($status === 'sending' || $status === 'streaming');
+  // How many messages are waiting to send in the open room (ISSUE-238).
+  //
+  // Counted off the transcript rather than read from the store's queue map,
+  // which is a plain Map and reactive to nothing: a queued row and its queue
+  // entry are appended and removed in the same breath, so this is the same
+  // number by a route Svelte can see. Scoped to the open room's token, since
+  // the transcript can still be holding another room's stranded rows.
+  const queuedHere = $derived(
+    $messages.filter((m) => m.sendState === 'queued' && m.roomToken === activeRoom?.token).length,
+  );
+  // Past the cap the composer refuses with the reason on screen and keeps the
+  // text in the field. The store refuses at the same cap on the way in, which
+  // is the backstop under this rather than a substitute for it.
+  //
+  // Gated on `busy`, because that is the condition the cap itself is under:
+  // `send()` only reaches `enqueueSend` while the room is not idle, so in an
+  // idle room the same message takes the ordinary path and consults no cap.
+  // Ungated, a room holding ten *held* rows — which is what a restored queue
+  // looks like on every page load — refused every send in an idle room, with
+  // a notice saying messages were waiting on a turn that was not running.
+  const queueFull = $derived(busy && queuedHere >= MAX_QUEUED_PER_ROOM);
 
   // The message the next send will cite. Held as the bare id, because that is
   // all the composer ever names and all the draft ever stores; the author
@@ -185,7 +207,12 @@
     // so the draft `submit` wrote is still stored under that room's key and
     // comes back on the way in.
     if (r.token !== activeRoom?.token) return;
-    stagedReplyId = null;
+    // The citation comes back with the text, or is cleared where there is none.
+    // `returnSend`'s own path leaves both unset — its premise is that the cited
+    // parent is gone — so that case still clears, as it always did. `editQueued`
+    // sets them, and dropping them there would quietly turn an edited reply into
+    // an ordinary message and send it without its parent.
+    stagedReplyId = r.replyToMsgId ?? r.replyTo?.msgId ?? null;
     returnedSend = { n: r.n, text: r.text, attachments: r.attachments };
   });
   let returnedSend = $state<{ n: number; text: string; attachments: ChatAttachment[] } | null>(
@@ -585,6 +612,23 @@
     tick().then(() => pinToBottom());
   }
 
+  /**
+   * Release a held queued message (ISSUE-238).
+   *
+   * Only the head of the room's queue can actually go, so releasing one behind
+   * a held entry marks it ready and sends nothing until its turn comes round —
+   * which is why this reports no failure of its own beyond a rejection.
+   */
+  function releaseQueuedSend(cid: number) {
+    atBottom = true;
+    showJumpToLatest = false;
+    // Caught for the same reason `retryFailedSend` catches: the store guards
+    // its own body, and a rejection reaching an un-awaited caller is silence
+    // where a failure should have been reported.
+    session.releaseQueued(cid).catch(() => notifyError('Couldn’t send that message.'));
+    tick().then(() => pinToBottom());
+  }
+
   // Named only when the room really is Talk-bound: a delete that reaches into
   // Nextcloud Talk is a materially bigger action than one that doesn't, and
   // saying so unconditionally would be a warning about something that isn't
@@ -632,7 +676,14 @@
     // The composer flushes on its way out of a room, but it is switched away
     // by the store's own reselect *during* the await above — so by now the
     // stored draft is already the final one and this is the last word on it.
-    if (userId) dropDraft(`${userId}:room:${token}`);
+    if (userId) {
+      dropDraft(`${userId}:room:${token}`);
+      // And whatever was waiting to be sent into it. The store drops the room's
+      // in-memory queue on its way out, but only while the room is still in
+      // `$rooms` to be looked up by id — this holds the token captured before
+      // the delete, so it is the half that cannot miss.
+      dropQueue(`${userId}:room:${token}`);
+    }
   }
 
   async function promoteRoom() {
@@ -854,6 +905,9 @@
               onDelete={askDeleteMessage}
               onRetry={inViewMode ? undefined : retryFailedSend}
               retryBusy={busy}
+              onQueueSend={inViewMode ? undefined : releaseQueuedSend}
+              onQueueEdit={inViewMode ? undefined : session.editQueued}
+              onQueueRemove={inViewMode ? undefined : session.removeQueued}
               onReply={inViewMode ? undefined : stageReply}
               onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
@@ -938,6 +992,8 @@
           }}
           onCancel={() => session.cancel()}
           {busy}
+          queueing={busy}
+          {queueFull}
           placeholder="Your message…"
           {draftKey}
           sendSettled={settleSignal}

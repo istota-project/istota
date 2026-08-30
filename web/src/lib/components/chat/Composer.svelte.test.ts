@@ -563,20 +563,45 @@ describe('Composer send control', () => {
     }
   });
 
-  it('leaves Enter a newline while a turn is running', async () => {
-    // The mode gate is the chord's rule too: a key that sends must consult it,
-    // or holding it starts a second turn in a room that already has one. What
-    // the key must not do is go dead — the send key silently doing nothing is
-    // the one failure the user has no way to read — so it falls through to the
-    // browser and writes the newline it used to.
+  it('sends on Enter while a turn is running, for the queue to take', async () => {
+    // The mode gate used to refuse every keyboard send while a turn ran,
+    // because a second `runTurn` in one room shares an echo buffer whose drain
+    // releases the first turn's frames before its task id exists. ISSUE-238
+    // serializes into that same entry point instead of refusing at the key, so
+    // the key does what it says and the store queues what it produced.
     const onSend = vi.fn();
-    const { textarea } = mount({ onSend, busy: true, onCancel: () => {} });
+    const { textarea } = mount({ onSend, busy: true, queueing: true, onCancel: () => {} });
     await type(textarea, 'let me in');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(onSend).toHaveBeenCalledWith('let me in', [], null);
+    expect(notPrevented).toBe(false);
+  });
+
+  it('leaves Enter a newline when the queue has no room left', async () => {
+    // The one refusal that replaced the mode gate. What a refusal must never
+    // do is eat the key — the send key silently doing nothing is the failure
+    // the user has no way to read — so it falls through to the browser, which
+    // writes the newline, and the reason is on screen beside the field.
+    const onSend = vi.fn();
+    const { container, textarea } = mount({
+      onSend,
+      busy: true,
+      queueing: true,
+      queueFull: true,
+      onCancel: () => {},
+    });
+    await type(textarea, 'the eleventh');
 
     const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
 
     expect(onSend).not.toHaveBeenCalled();
     expect(notPrevented).toBe(true);
+    expect(textarea.value).toBe('the eleventh');
+    expect(container.querySelector('.notice-row')?.textContent).toContain(
+      'Too many messages waiting to send',
+    );
   });
 
   it('does not send on Enter while a voice message is recording', async () => {
@@ -732,65 +757,57 @@ describe('Composer send control', () => {
     expect(document.activeElement).toBe(textarea);
   });
 
-  it('swaps to a stop control while a task is running', () => {
+  it('adds a stop control beside Send while a task is running', () => {
     const onCancel = vi.fn();
     const { container } = mount({ busy: true, onCancel });
-    expect(btn(container, 'Send')).toBeNull();
+    expect(btn(container, 'Send')).toBeTruthy();
     expect(btn(container, 'Stop')).toBeTruthy();
   });
 
-  it('keeps the same element across the send/stop flip', async () => {
+  it('keeps the same Send element when a turn starts under it', async () => {
     const onCancel = vi.fn();
     const { container, rerender } = mount({ busy: false, onCancel });
     const before = btn(container, 'Send');
     await rerender({ busy: true, onCancel });
-    // Not merely "a stop button exists": it must be the *same* node. iOS
-    // re-hit-tests when it delivers a tap's synthesized click, so a swapped
-    // element receives the tap that was aimed at its predecessor — a Send
-    // arriving as a Stop.
-    expect(btn(container, 'Stop')).toBe(before);
+    // iOS re-hit-tests when it delivers a tap's synthesized click, so a Send
+    // that was destroyed and rebuilt — or merely moved — would hand the tap to
+    // whatever took its place. Stop is what comes and goes, to Send's left.
+    expect(btn(container, 'Send')).toBe(before);
+    expect(btn(container, 'Stop')).not.toBe(before);
   });
 
-  it('ignores an activation whose mode flipped under it', async () => {
-    vi.useFakeTimers();
-    try {
-      const onSend = vi.fn();
-      const onCancel = vi.fn();
-      const { container, textarea, rerender } = mount({ onSend, onCancel, busy: false });
-      await type(textarea, 'hi');
-      const control = btn(container, 'Send')!;
-      await fireEvent.click(control);
-      expect(onSend).toHaveBeenCalledTimes(1);
+  it('has no mode left to flip, so a duplicate tap still sends', async () => {
+    // What replaced `MODE_FLIP_GUARD_MS`. A tap can be delivered twice (a
+    // compat mouse event after the touch) and the second delivery lands after
+    // `busy` has flipped — which, on one two-mode control, read as the
+    // opposite command and cancelled the task it had just started. One button
+    // per meaning is what makes that unrepresentable, and it costs no window
+    // in which a genuine second tap is dropped.
+    const onSend = vi.fn();
+    const onCancel = vi.fn();
+    const { container, textarea, rerender } = mount({ onSend, onCancel, busy: false });
+    await type(textarea, 'hi');
+    const control = btn(container, 'Send')!;
+    await fireEvent.click(control);
+    expect(onSend).toHaveBeenCalledTimes(1);
 
-      // The parent flips busy inside that same click, and the duplicate
-      // delivery lands on the control now reading Stop.
-      await rerender({ onSend, onCancel, busy: true });
-      await fireEvent.click(control);
-      expect(onCancel).not.toHaveBeenCalled();
-
-      // Past the window it is a real tap again.
-      vi.advanceTimersByTime(500);
-      await fireEvent.click(control);
-      expect(onCancel).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    // The parent flips busy inside that same click; the duplicate delivery
+    // lands on the same element, which still says Send.
+    await rerender({ onSend, onCancel, busy: true, queueing: true });
+    await type(textarea, 'again');
+    await fireEvent.click(control);
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledTimes(2);
   });
 
-  it('still allows two deliberate sends in quick succession', async () => {
-    vi.useFakeTimers();
-    try {
-      const onSend = vi.fn();
-      const { container, textarea } = mount({ onSend });
-      await type(textarea, 'one');
-      await fireEvent.click(btn(container, 'Send')!);
-      await type(textarea, 'two');
-      await fireEvent.click(btn(container, 'Send')!);
-      // The guard is about a flipped *mode*, not a rate limit.
-      expect(onSend).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('allows two deliberate sends in quick succession', async () => {
+    const onSend = vi.fn();
+    const { container, textarea } = mount({ onSend });
+    await type(textarea, 'one');
+    await fireEvent.click(btn(container, 'Send')!);
+    await type(textarea, 'two');
+    await fireEvent.click(btn(container, 'Send')!);
+    expect(onSend).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1099,15 +1116,16 @@ describe('Composer drafts', () => {
     expect(readDraft('room:3')).toBe('');
   });
 
-  it('refuses the send chord while a turn is running', async () => {
-    // The chord was the one entry into a send that did not consult the mode,
-    // so holding it started a second turn in a room that already had one —
-    // and two overlapping turns share one echo buffer.
+  it('sends on the send chord while a turn is running', async () => {
+    // The chord was the one entry into a send that did not consult the mode
+    // gate, so holding it started a second turn in a room that already had one.
+    // It consults `wouldSend()` like every other send path, and what that
+    // refuses now is a full queue rather than a running turn.
     const onSend = vi.fn();
-    const { textarea } = mount({ onSend, busy: true, onCancel: () => {} });
+    const { textarea } = mount({ onSend, busy: true, queueing: true, onCancel: () => {} });
     await type(textarea, 'let me in');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('let me in', [], null);
   });
 
   it('still sends on the chord when the button would have sent', async () => {
@@ -1139,6 +1157,92 @@ describe('Composer drafts', () => {
     await rerender({ sendSettled: { n: 1, key: 'room:3' } });
     await tick();
     expect(readDraft('room:3')).toBe('');
+  });
+
+  it('drops the draft on submit when the message is being queued', async () => {
+    // A queued message is written to its own persisted queue the moment it is
+    // accepted, so the queue — not the draft — is the copy that survives a
+    // reload. Holding it here as well would put a second copy of the same text
+    // in a slot that fits one: several queued messages in a room would fight
+    // over it, and the first ack would drop the last one's stored copy.
+    const onSend = vi.fn();
+    const { textarea, unmount } = mount({
+      draftKey: 'room:3',
+      onSend,
+      busy: true,
+      queueing: true,
+      onCancel: () => {},
+      sendSettled: { n: 0, key: null },
+    });
+    await type(textarea, 'the next thing');
+
+    await fireEvent.click(btn(document.body, 'Send')!);
+    expect(onSend).toHaveBeenCalledWith('the next thing', [], null);
+    expect(textarea.value).toBe('');
+    // No ack is waited for, and none is coming for a whole turn.
+    expect(readDraft('room:3')).toBe('');
+
+    // And the departure flush does not put it back.
+    unmount();
+    expect(readDraft('room:3')).toBe('');
+  });
+
+  it('holds the draft of an ordinary send whose own POST flips busy under it', async () => {
+    // The real parent flips `busy` — and with it `queueing` — synchronously
+    // inside `onSend`: the store's `send()` reaches `status.set('sending')`
+    // before it returns. Reading the prop *after* that call therefore reported
+    // every ordinary send from an idle room as queued, cleared the draft on
+    // submit and wrote no `unsettledSends` entry — leaving `settleDraft` and
+    // `switchDraft`'s in-flight refusal both inert, with the durability
+    // mechanism switched off and nothing saying so.
+    //
+    // A bare `vi.fn()` cannot model that, which is why every other draft test
+    // in this file passes either way. `rerender` assigns into the same
+    // reactive props object synchronously, so this reproduces the flip.
+    const utils: { rerender?: (p: Record<string, unknown>) => Promise<void> } = {};
+    const onSend = vi.fn(() => {
+      void utils.rerender?.({ busy: true, queueing: true, onCancel: () => {} });
+    });
+    const rendered = mount({
+      draftKey: 'room:3',
+      onSend,
+      busy: false,
+      queueing: false,
+      sendSettled: { n: 0, key: null },
+    });
+    utils.rerender = rendered.rerender;
+    await type(rendered.textarea, 'going out');
+
+    await fireEvent.click(btn(document.body, 'Send')!);
+    expect(onSend).toHaveBeenCalled();
+    // Held, not dropped: this send has no durable copy until the ack.
+    expect(readDraft('room:3')).toBe('going out');
+
+    // And the ack still recognises it, which is the half that needs the map
+    // entry the queued branch would have skipped.
+    await rendered.rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
+    expect(readDraft('room:3')).toBe('');
+  });
+
+  it('leaves an unacked send its draft when a second message is queued behind it', async () => {
+    // The one case where an enqueue must not clear the slot: it belongs to a
+    // message whose POST is still open, whose stored copy is the only one that
+    // survives a reload if that send then fails.
+    const { textarea, rerender } = mount({
+      draftKey: 'room:3',
+      sendSettled: { n: 0, key: null },
+    });
+    await type(textarea, 'the message that matters');
+    await fireEvent.click(btn(document.body, 'Send')!);
+    expect(readDraft('room:3')).toBe('the message that matters');
+
+    await rerender({ busy: true, queueing: true, onCancel: () => {} });
+    await tick();
+    await type(textarea, 'and then this one');
+    await fireEvent.click(btn(document.body, 'Send')!);
+
+    expect(readDraft('room:3')).toBe('the message that matters');
   });
 
   it('settles a send whose text was too long to store whole', async () => {

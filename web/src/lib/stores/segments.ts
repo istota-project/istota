@@ -232,7 +232,18 @@ export interface ChatMessage {
   // backend's ack is the pending mark *clearing*; a permanent receipt on every
   // outbound row would be clutter saying something we don't actually know (we
   // have no read receipts to be consistent with).
-  sendState?: 'sending' | 'failed';
+  //
+  // 'queued' is the send queue's own state (ISSUE-238): the message has been
+  // written and committed to, and has not been POSTed at all. It is a
+  // different thing from the assistant placeholder's `Queued…` progress line,
+  // which means the opposite — the turn is on the server and is waiting for
+  // its stream.
+  sendState?: 'sending' | 'failed' | 'queued';
+  // Only meaningful on a 'queued' row: the entry will not drain on its own.
+  // Set when the turn the message was written against ended abnormally
+  // (Stop, an error, a parked confirmation, a failed send), and on every entry
+  // restored from storage. Cleared by releasing the entry.
+  queueHeld?: boolean;
   // Render gate for the pending mark, opened by a grace timer rather than by
   // `sendState` itself. The state is true from the moment the row exists; the
   // mark only earns the screen once the send is slow enough to be worth
