@@ -11,6 +11,7 @@
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
+  import { startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
   import '../app.css';
@@ -36,6 +37,13 @@
   // Same reasoning, same scope: every section has something to type into, and
   // on a touch device the keyboard outstays its welcome in all of them.
   onMount(() => installKeyboardDismiss());
+
+  // One connectivity fact for the whole app (ISSUE-202), anchored here for the
+  // same reason the notification poll is: it is read on routes that render no
+  // `AppShell`, and the interface listeners must outlive any one page. The
+  // requests each page makes are what keep it current; this only adds the
+  // window events and the probe schedule.
+  onMount(() => startConnectivity());
 
   // Stale-build prompt. `kit.version.pollInterval` flips `updated.current` when
   // a new build ships, but SvelteKit only acts on it at the *next navigation* —

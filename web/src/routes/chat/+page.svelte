@@ -26,6 +26,7 @@
   import { getChatSession } from '$lib/stores/chat';
   import { REPLY_EXCERPT_CHARS, isClientOnly, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
+  import { online } from '$lib/stores/connectivity';
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
@@ -970,44 +971,62 @@
         </button>
       {/if}
     </div>
-    {#if !inViewMode}
+    {#if !inViewMode || !$online}
       <!-- Sending is room-scoped; aggregate views are read-only panes.
            Docked over the transcript rather than sharing the column with it, so
            the message list runs the full height of the pane and content passes
-           under the composer instead of stopping short of it. -->
+           under the composer instead of stopping short of it.
+
+           The dock also carries the offline banner, which is why it can render
+           in an aggregate view that has no composer: the banner belongs to the
+           whole pane, and the transcript already reserves the dock's measured
+           height, so putting it here keeps the newest message clear of it with
+           no second measurement. -->
       <div class="composer-dock" bind:this={dockEl}>
-        <Composer
-          onSend={(t, atts, reply) => {
-            // Sending is the end of reading back: whatever the user had scrolled
-            // up to look at, the message they just wrote — and the reply to it —
-            // is what they want to see. So the send re-arms the stick-to-bottom
-            // latch rather than respecting it, which is the one case where the
-            // "only if you were already at the bottom" rule is wrong.
-            //
-            // Pinned immediately as well as latched: `send` is async, so the
-            // message may be a network round trip away, and the transcript
-            // should be waiting at the bottom for it rather than jumping when it
-            // lands. The $messages effect covers the landing itself.
-            atBottom = true;
-            showJumpToLatest = false;
-            // See retryFailedSend: the store settles its own failures onto the
-            // message row, so this only covers a rejection that escaped it.
-            session
-              .send(t, atts, reply ?? undefined)
-              .catch(() => notifyError('Couldn’t send that message.'));
-            tick().then(() => pinToBottom());
-          }}
-          onCancel={() => session.cancel()}
-          {busy}
-          queueing={busy}
-          {queueFull}
-          placeholder="Your message…"
-          {draftKey}
-          sendSettled={settleSignal}
-          replyTo={stagedReply}
-          onReplyChange={(msgId) => (stagedReplyId = msgId)}
-          restoreSend={returnedSend}
-        />
+        {#if !$online}
+          <!-- Connectivity is a state, not an event, so it is stated where the
+               sending happens and stays there until it changes — never a
+               `notify()`, which would announce it once and then take the only
+               explanation away while the composer still cannot reach anything.
+               Muted rather than alarming: nothing has gone wrong. -->
+          <div class="offline-banner" class:floor={inViewMode} role="status">
+            Offline — messages will send when you’re back.
+          </div>
+        {/if}
+        {#if !inViewMode}
+          <Composer
+            onSend={(t, atts, reply) => {
+              // Sending is the end of reading back: whatever the user had scrolled
+              // up to look at, the message they just wrote — and the reply to it —
+              // is what they want to see. So the send re-arms the stick-to-bottom
+              // latch rather than respecting it, which is the one case where the
+              // "only if you were already at the bottom" rule is wrong.
+              //
+              // Pinned immediately as well as latched: `send` is async, so the
+              // message may be a network round trip away, and the transcript
+              // should be waiting at the bottom for it rather than jumping when it
+              // lands. The $messages effect covers the landing itself.
+              atBottom = true;
+              showJumpToLatest = false;
+              // See retryFailedSend: the store settles its own failures onto the
+              // message row, so this only covers a rejection that escaped it.
+              session
+                .send(t, atts, reply ?? undefined)
+                .catch(() => notifyError('Couldn’t send that message.'));
+              tick().then(() => pinToBottom());
+            }}
+            onCancel={() => session.cancel()}
+            {busy}
+            queueing={busy}
+            {queueFull}
+            placeholder="Your message…"
+            {draftKey}
+            sendSettled={settleSignal}
+            replyTo={stagedReply}
+            onReplyChange={(msgId) => (stagedReplyId = msgId)}
+            restoreSend={returnedSend}
+          />
+        {/if}
       </div>
     {/if}
   </div>
@@ -1126,6 +1145,25 @@
 
   .composer-reserve {
     height: calc(var(--composer-h, 0px) + 1rem);
+  }
+
+  /* The offline row, at the top of the dock. It paints the pane fill rather
+	   than being left to the fade below it: the fade only reaches full strength
+	   2.5rem in, and in an aggregate view there is no fade at all, so without a
+	   fill of its own the sentence would sit over transcript text. Same colour
+	   the fade dissolves into, so the two meet without an edge of their own. */
+  .offline-banner {
+    padding: var(--space-2) var(--space-3);
+    background: var(--chat-bg);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    text-align: center;
+  }
+  /* With no composer under it the row is the bottom of the screen, so it holds
+	   the home-indicator inset itself — `max()`, since the inset is 0 on a device
+	   without one and the padding would otherwise vanish there. */
+  .offline-banner.floor {
+    padding-bottom: max(var(--space-2), var(--safe-bottom));
   }
   /* Wrapper anchors the floating jump-to-latest button to the bottom of the
 	   scroll area; the button offsets itself above the docked composer. */
