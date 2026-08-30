@@ -60,8 +60,33 @@ import { getChatSession } from '$lib/stores/chat';
 import { online, noteTransport } from '$lib/stores/connectivity';
 import { notices, clearNotices } from '$lib/stores/notices';
 import Page from './+page.svelte';
+import Harness from '$lib/currentUserHarness.test.svelte';
+import type { User } from '$lib/api';
 
 const OFFLINE_TEXT = /Offline — messages will send when you’re back/;
+
+// The page reads the identity the root layout resolved rather than fetching one
+// (ISSUE-355), so the harness stands in for that layout. Only the author labels
+// and the draft key read it, and neither is what this file is about.
+const person: User = {
+  username: 'alice',
+  display_name: 'Alice',
+  bot_name: 'Istota',
+  is_admin: false,
+  features: {
+    chat: true,
+    feeds: false,
+    location: false,
+    money: false,
+    health: false,
+    briefings: false,
+    google_workspace: false,
+    google_workspace_enabled: false,
+    admin: false,
+  },
+};
+
+const renderPage = () => render(Harness, { component: Page, user: person });
 
 /**
  * The visible band's text.
@@ -73,7 +98,7 @@ const OFFLINE_TEXT = /Offline — messages will send when you’re back/;
 const bandText = () => document.querySelector('.notice-region')?.textContent ?? '';
 
 beforeEach(() => {
-  // The page's own mount requests (`getMe`) go through `apiFetch`, which
+  // Any request the page or its components make goes through `apiFetch`, which
   // reports every completion to the connectivity store — so a stub that
   // answered would flip the store back under the test a moment after it set
   // it. One that never settles reports nothing, leaving this file's own
@@ -95,12 +120,12 @@ afterEach(() => {
 
 describe('the offline notice', () => {
   it('is absent while the app can reach the server', async () => {
-    render(Page);
+    renderPage();
     await waitFor(() => expect(bandText()).not.toMatch(OFFLINE_TEXT));
   });
 
   it('appears when a request finds no server, and goes when one does', async () => {
-    render(Page);
+    renderPage();
 
     noteTransport(false, 'unreachable');
     expect(get(online)).toBe(false);
@@ -124,7 +149,7 @@ describe('the offline notice', () => {
     // own region is absolutely positioned out of flow, pinned below; anything
     // the page rendered itself would be a flow sibling and would reflow the
     // pane. So: every node carrying the text belongs to the drawer.
-    render(Page);
+    renderPage();
     noteTransport(false, 'unreachable');
     await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
@@ -141,7 +166,7 @@ describe('the offline notice', () => {
   });
 
   it('puts nothing in the composer dock, which is where it used to live', async () => {
-    render(Page);
+    renderPage();
     noteTransport(false, 'unreachable');
     await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
@@ -151,7 +176,7 @@ describe('the offline notice', () => {
   });
 
   it('is raised as a sticky notice, so the store cannot retract a live condition', async () => {
-    render(Page);
+    renderPage();
     noteTransport(false, 'unreachable');
     await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
@@ -166,7 +191,7 @@ describe('the offline notice', () => {
     // The sentence promises the send queue will drain and no other route has
     // one to promise, so the page that raised it has to be the page that ends
     // it. `clearNotices` deliberately will not.
-    render(Page);
+    renderPage();
     noteTransport(false, 'unreachable');
     await waitFor(() => expect(get(notices).some((n) => n.key === 'chat:offline')).toBe(true));
 
@@ -175,7 +200,7 @@ describe('the offline notice', () => {
   });
 
   it('states it once, however many requests fail', async () => {
-    render(Page);
+    renderPage();
     noteTransport(false, 'unreachable');
     await waitFor(() => expect(bandText()).toMatch(OFFLINE_TEXT));
 
@@ -226,7 +251,7 @@ describe('the room-list queued badge', () => {
 
   it('counts what is waiting in a room the user is not looking at', async () => {
     seedRooms({ t2: 3 });
-    render(Page);
+    renderPage();
     await waitFor(() => expect(screen.getByTitle('3 not sent yet')).toBeInTheDocument());
     expect(screen.getByTitle('3 not sent yet').textContent).toBe('3');
   });
@@ -235,14 +260,14 @@ describe('the room-list queued badge', () => {
     // The same rule the unread pill above it follows: a count of what you are
     // already looking at is noise.
     seedRooms({ t1: 2 }, 1);
-    render(Page);
+    renderPage();
     await waitFor(() => expect(roomRow('Room 1')).toBeInTheDocument());
     expect(screen.queryByTitle(/not sent yet/)).toBeNull();
   });
 
   it('shows nothing for a room with nothing waiting', async () => {
     seedRooms({});
-    render(Page);
+    renderPage();
     await waitFor(() => expect(roomRow('Room 1')).toBeInTheDocument());
     expect(screen.queryByTitle(/not sent yet/)).toBeNull();
   });
@@ -272,14 +297,14 @@ describe('an empty transcript with nothing cached', () => {
 
   it('says nothing is saved for the room rather than inviting a question', async () => {
     setEmptyRoom(true);
-    render(Page);
+    renderPage();
     await waitFor(() => expect(screen.getByText(NOTHING_SAVED)).toBeInTheDocument());
     expect(screen.queryByText(/Ask Istota anything/)).toBeNull();
   });
 
   it('keeps the ordinary invitation for a room that is simply empty', async () => {
     setEmptyRoom(false);
-    render(Page);
+    renderPage();
     await waitFor(() => expect(screen.getByText(/Ask Istota anything/)).toBeInTheDocument());
     expect(screen.queryByText(NOTHING_SAVED)).toBeNull();
   });

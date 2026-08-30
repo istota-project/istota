@@ -1,8 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
-    getMe,
     getProfile,
     updateProfile,
     getBriefings,
@@ -46,11 +44,17 @@
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SourceConfigFields from '$lib/components/briefings/SourceConfigFields.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
+  import { getCurrentUser } from '$lib/userContext';
 
   let loading = $state(true);
   let error = $state('');
-  let moduleEnabled = $state(true);
-  let isAdmin = $state(false);
+  /* Both read the identity the root layout resolved rather than a `/me` of this
+     page's own (ISSUE-355), and both decide only what is *shown*: the module
+     banner below, and whether the shared-block section is drawn. Every
+     authorization check behind them is server-side. */
+  const identity = getCurrentUser();
+  const moduleEnabled = $derived(identity.user.features.briefings);
+  const isAdmin = $derived(identity.user.features.admin);
 
   // --- Email delivery (per-user profile preference, not per-briefing) ---
   // Lives here rather than on /settings because it only governs how a briefing
@@ -428,15 +432,38 @@
     if (!selectedName && allNames.length) selectedName = allNames[0];
   }
 
-  onMount(async () => {
+  /* Driven by the gate rather than by the mount, because the gate is reactive
+     now. A page that mounts under a cached identity whose `features` differ
+     from the live one — offline, then the connection returns — would otherwise
+     have the banner replaced by a fully drawn configuration UI with none of its
+     data ever fetched, `loading` already false and no reload affordance to
+     recover with. The flags are `$derived`, so this is where the load has to
+     hang; guarded so the ordinary case still loads exactly once. */
+  let loadStarted = false;
+  $effect(() => {
+    if (!moduleEnabled || loadStarted) return;
+    loadStarted = true;
+    void load();
+  });
+
+  /* Its own hook for the same reason, and separate because the two gates move
+     independently: a record can gain `admin` without gaining `briefings`. */
+  let sharedBlocksStarted = false;
+  $effect(() => {
+    if (!isAdmin || sharedBlocksStarted) return;
+    sharedBlocksStarted = true;
+    reloadSharedBlocks().catch(() => (sharedBlocks = []));
+  });
+
+  /* The module being off is a settled answer, not a pending one: without this
+     the disabled banner would sit under `SettingsLayout`'s loading state for
+     the life of the page, since nothing else clears it on that path. */
+  $effect(() => {
+    if (!moduleEnabled) loading = false;
+  });
+
+  async function load() {
     try {
-      const me = await getMe();
-      moduleEnabled = me.features.briefings;
-      isAdmin = !!me.features.admin;
-      if (!moduleEnabled) return;
-      if (isAdmin) {
-        reloadSharedBlocks().catch(() => (sharedBlocks = []));
-      }
       await Promise.all([
         reloadSchedule(),
         (async () => {
@@ -464,7 +491,7 @@
     } finally {
       loading = false;
     }
-  });
+  }
 
   /** Preview of the title a blank `title` field will produce.
    *

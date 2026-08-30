@@ -3024,10 +3024,14 @@ function createSession(): ChatSession {
       if (superseded()) return;
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
       // Who the send queue's storage key belongs to. It rides on the config
-      // rather than being pushed down from the page, which reads it from
-      // `getMe()`: that resolves after this, so a queue keyed on it would have
-      // an ordering hazard exactly where the restore below happens. An older
-      // backend sends no `user_id`, and the queue is then in memory only.
+      // rather than being pushed down from the page: the page's id used to come
+      // from a `getMe()` that resolved after this, which put an ordering hazard
+      // exactly where the restore below happens. The page reads the root
+      // layout's identity now (ISSUE-355), so that hazard is gone, but the
+      // config stays the source here — this store is a module singleton that
+      // outlives every mount of the page, and taking the id from whichever page
+      // happens to be up would make its lifetime the shorter of the two. An
+      // older backend sends no `user_id`, and the queue is then in memory only.
       //
       // Guarded on the config having resolved at all, not merged with the
       // line above: the session outlives the page, so a transient failure on a
