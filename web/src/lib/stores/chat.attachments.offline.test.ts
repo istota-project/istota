@@ -125,10 +125,25 @@ function room(id: number): ChatRoom {
 
 const emptyHistory: ChatHistory = { messages: [], active_task: null, active_tasks: [] };
 
+const history = (messages: ChatHistory['messages']): ChatHistory => ({ ...emptyHistory, messages });
+
 async function freshSession() {
   vi.resetModules();
   const mod = await import('./chat');
   return mod.getChatSession();
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  // Nothing awaits this before it settles, and an unhandled rejection out of a
+  // promise held across a test is noise wherever it lands.
+  promise.catch(() => {});
+  return { promise, resolve, reject };
 }
 
 /** A staged chip whose bytes are held here rather than on the server. */
@@ -349,7 +364,9 @@ describe('chat store — attachments in the outbox', () => {
 
     const row = rowFor(s, 'a video, apparently');
     expect(row?.sendError).toContain('413');
-    // A retry cannot fix a file the server will not take; Edit is the recovery.
+    // No Retry: re-POSTing cannot change a verdict on the file. The row keeps
+    // the text on screen, which is the whole of what is left of it — the spec
+    // says Edit recovers it, and no failed row has ever offered Edit.
     expect(row?.retryable).toBe(false);
     expect(api.sendChatMessage).not.toHaveBeenCalled();
     // Neither the entry nor the bytes are kept: holding them forever is the
@@ -429,6 +446,131 @@ describe('chat store — attachments in the outbox', () => {
     expect(api.sendChatMessage.mock.calls[0][2]).toEqual(['/host/inbox/memo.m4a']);
     // Drained clean: nothing left waiting.
     expect(storedQueue('t1')).toEqual([]);
+    s.teardown();
+  });
+
+  it('holds the message when Stop is tapped while its file is going up', async () => {
+    // The one-attachment case, which is the voice note this feature is for:
+    // the last upload finishes and the pending list empties, so a check that
+    // ran only when a file remained would never see this Stop at all.
+    const upload = deferred<Record<string, unknown>>();
+    seedQueue('t1', [
+      {
+        cid: 1,
+        text: 'never mind',
+        attachments: [pendingChip('b1', 'memo.m4a')],
+        pendingAttachments: [{ blobId: 'b1', name: 'memo.m4a', mimeType: 'audio/mp4', size: 1024 }],
+        held: false,
+        queuedAt: Date.now(),
+        reason: 'offline',
+      },
+    ]);
+    db.getBlob.mockResolvedValue(heldBlob('memo.m4a'));
+    api.uploadChatAttachment.mockReturnValue(upload.promise);
+
+    const s = await freshSession();
+    await s.init();
+    await vi.waitFor(() => expect(api.uploadChatAttachment).toHaveBeenCalled());
+    await s.cancel();
+    upload.resolve(uploaded('memo.m4a'));
+
+    await vi.waitFor(() => expect(rowFor(s, 'never mind')?.sendState).toBe('queued'));
+    expect(api.sendChatMessage).not.toHaveBeenCalled();
+    expect(rowFor(s, 'never mind')?.queueHeld).toBe(true);
+    expect(storedQueue('t1')[0].held).toBe(true);
+
+    // And the latch is consumed: pressing Send on the held row sends it, where
+    // a Stop left armed would hold it again on every attempt, for good.
+    api.uploadChatAttachment.mockResolvedValue(uploaded('memo.m4a'));
+    const cid = rowFor(s, 'never mind')?.cid as number;
+    await s.releaseQueued(cid);
+    await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalled());
+    s.teardown();
+  });
+
+  it('refuses a second send of a message whose files are still uploading', async () => {
+    // A room switch drops a row that is mid-send — it is not client-only — and
+    // the switch back rebuilds it from the entry, which is still queued, then
+    // drains at the foot of the load. Without a claim the second resolution
+    // races the first over one entry's blobs, and whichever reads after the
+    // other's delete fails a message whose upload had in fact succeeded.
+    const upload = deferred<Record<string, unknown>>();
+    seedQueue('t1', [
+      {
+        cid: 1,
+        text: 'one at a time',
+        attachments: [pendingChip('b1', 'memo.m4a')],
+        pendingAttachments: [{ blobId: 'b1', name: 'memo.m4a', mimeType: 'audio/mp4', size: 1024 }],
+        held: false,
+        queuedAt: Date.now(),
+        reason: 'offline',
+      },
+    ]);
+    db.getBlob.mockResolvedValue(heldBlob('memo.m4a'));
+    api.uploadChatAttachment.mockReturnValue(upload.promise);
+
+    const s = await freshSession();
+    await s.init();
+    await vi.waitFor(() => expect(api.uploadChatAttachment).toHaveBeenCalled());
+
+    // The room switch and the switch back, which is what re-enters the drain.
+    await s.selectRoom(2);
+    await s.selectRoom(1);
+
+    upload.resolve(uploaded('memo.m4a'));
+    await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalled());
+    expect(api.uploadChatAttachment).toHaveBeenCalledTimes(1);
+    expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+    s.teardown();
+  });
+
+  it('does not let a parked upload claim a server row for a message never POSTed', async () => {
+    // `parkedAfterPost` is what lets a row that reached the wire adopt the
+    // server's copy of itself by body match, on the stream and on a history
+    // rebuild alike. An upload that failed *ahead* of the message POST reached
+    // no wire, so nothing of this message can be on the server — and a body
+    // match against somebody else's identical send is exactly what the set is
+    // bounded to prevent. Driven through the rebuild rather than the stream,
+    // which is the same adoption and does not need a poll to fire.
+    seedQueue('t1', [
+      {
+        cid: 1,
+        text: 'twin',
+        attachments: [pendingChip('b1', 'memo.m4a')],
+        pendingAttachments: [{ blobId: 'b1', name: 'memo.m4a', mimeType: 'audio/mp4', size: 1024 }],
+        held: false,
+        queuedAt: Date.now(),
+        reason: 'offline',
+      },
+    ]);
+    db.getBlob.mockResolvedValue(heldBlob('memo.m4a'));
+    api.uploadChatAttachment.mockRejectedValue(new api.UploadUnreachableError('no server'));
+
+    const s = await freshSession();
+    await s.init();
+    await vi.waitFor(() => expect(rowFor(s, 'twin')?.sendState).toBe('queued'));
+
+    // A row with the same body turns up in the room's own history: another
+    // client's send, since ours never left.
+    api.getRoomMessages.mockResolvedValue(
+      history([
+        {
+          role: 'user',
+          text: 'twin',
+          created_at: '2026-08-30T11:00:00Z',
+          msg_id: 900,
+          starred: false,
+          room_token: 't1',
+        } as ChatHistory['messages'][number],
+      ]),
+    );
+    await s.selectRoom(2);
+    await s.selectRoom(1);
+
+    const twins = get(s.messages).filter((m) => m.text === 'twin');
+    expect(twins).toHaveLength(2);
+    expect(twins.filter((m) => m.sendState === 'queued')).toHaveLength(1);
+    expect(storedQueue('t1')).toHaveLength(1);
     s.teardown();
   });
 

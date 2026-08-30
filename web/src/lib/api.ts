@@ -1,5 +1,5 @@
 import { base } from '$app/paths';
-import { uploadFromPath, type Picked } from '$lib/platform/nativePicker';
+import { uploadFromPath, nativeUploadAvailable, type Picked } from '$lib/platform/nativePicker';
 import { noteTransport } from '$lib/stores/connectivity';
 import type { BasemapSpec } from '$lib/basemap';
 
@@ -3175,6 +3175,12 @@ export async function uploadChatAttachment(item: File | Picked): Promise<ChatAtt
  */
 async function uploadFromShell(item: Picked): Promise<ChatAttachment> {
   const url = new URL(`${base}/api${CHAT_ATTACHMENT_PATH}`, location.origin).toString();
+  // Asked here rather than left to `uploadFromPath` to throw, so that the
+  // catch below is only ever the uploader's own rejection. A missing plugin is
+  // a fact about this build, not about the network, and reporting it as a gap
+  // would raise the offline banner and stop every room's queue draining over
+  // something no request observed.
+  if (!nativeUploadAvailable()) throw new Error('No native uploader.');
   let status: number;
   let body: string;
   try {

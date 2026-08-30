@@ -19,16 +19,20 @@ vi.mock('$lib/api', () => ({
   uploadChatAttachment: vi.fn(),
   fetchChatCommands: vi.fn(),
   chatConfigOnce: vi.fn(),
+  UploadUnreachableError: class UploadUnreachableError extends Error {},
 }));
 
-vi.mock('$lib/platform/nativePicker', () => ({
+const picked = vi.hoisted(() => ({
   nativePickersAvailable: vi.fn(() => true),
   takePhoto: vi.fn(async () => []),
   pickPhotos: vi.fn(async () => []),
   pickDocuments: vi.fn(async () => []),
+  // Not a seam — the real one, so a File handed to upload() behaves the way it
+  // does in the app.
   pickedFromFile: (f: File) => ({ name: f.name, type: f.type, size: f.size, blob: f }),
-  fileFromPicked: async (p: { blob?: File }) => p.blob ?? null,
+  fileFromPicked: vi.fn(async (p: { blob?: File }) => p.blob ?? null),
 }));
+vi.mock('$lib/platform/nativePicker', () => picked);
 
 const db = vi.hoisted(() => ({
   putBlob: vi.fn(),
@@ -59,7 +63,12 @@ const conn = vi.hoisted(() => {
 });
 vi.mock('$lib/stores/connectivity', () => conn);
 
-import { uploadChatAttachment, fetchChatCommands, chatConfigOnce } from '$lib/api';
+import {
+  uploadChatAttachment,
+  fetchChatCommands,
+  chatConfigOnce,
+  UploadUnreachableError,
+} from '$lib/api';
 import { pickPhotos } from '$lib/platform/nativePicker';
 import { resetCommandCatalogue } from './autocomplete/providers';
 import Composer from './Composer.svelte';
@@ -79,11 +88,14 @@ const btn = (c: HTMLElement, label: string) =>
   c.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null;
 
 /** Pick `files` through the photo row, which is the shortest path to upload(). */
-async function pick(container: HTMLElement, files: File[]) {
+async function pick(container: HTMLElement, files: unknown[]) {
   photos.mockResolvedValue(files);
   await fireEvent.click(btn(container, 'Attach file')!);
   await fireEvent.click(btn(container, 'Photo Library')!);
-  await tick();
+  // Until the in-flight marker clears: holding a file is several awaits deep
+  // (the headroom question, the read, the write) and a fixed number of ticks
+  // would silently start asserting against a half-finished batch.
+  await vi.waitFor(() => expect(container.querySelector('.attach-chip.uploading')).toBeNull());
   await tick();
 }
 
@@ -104,8 +116,12 @@ beforeEach(() => {
   photos.mockReset();
   db.putBlob.mockReset();
   db.deleteBlob.mockReset();
+  picked.fileFromPicked.mockReset();
+  picked.fileFromPicked.mockImplementation(async (p: { blob?: File }) => p.blob ?? null);
   db.putBlob.mockResolvedValue(true);
   db.deleteBlob.mockResolvedValue(undefined);
+  db.hasHeadroom.mockReset();
+  db.hasHeadroom.mockResolvedValue(true);
   chatConfig.mockReset();
   chatConfig.mockResolvedValue({
     max_prompt_chars: 32000,
@@ -212,6 +228,74 @@ describe('Composer with no connection', () => {
     const blobId = db.putBlob.mock.calls[0][0];
 
     await fireEvent.click(btn(container, 'Remove memo.m4a')!);
+
+    expect(container.querySelector('.attach-chip')).toBeNull();
+    expect(db.deleteBlob).toHaveBeenCalledWith(blobId);
+  });
+
+  it('holds a file whose own upload discovered the gap', async () => {
+    // The first file attached after the signal dies. `online` is only believed
+    // false once something has observed a failure, so this one takes the
+    // upload path — and for a voice memo the argument to `upload()` is the only
+    // copy of the recording there is. Losing it here is losing the recording.
+    conn.setOnline(true);
+    upload.mockRejectedValue(new UploadUnreachableError('no server'));
+    const { container } = render(Composer, { onSend: vi.fn() });
+    await tick();
+
+    await pick(container, [sizedFile('memo.m4a', 4096)]);
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(db.putBlob).toHaveBeenCalledTimes(1);
+    const chip = container.querySelector('.attach-chip');
+    expect(chip?.textContent).toContain('memo.m4a');
+    expect(chip?.classList.contains('pending')).toBe(true);
+    expect(container.querySelector('.attach-error')).toBeNull();
+  });
+
+  it('still reports an upload the server itself refused', async () => {
+    // The control on the fall-through above: only a gap is held. A 413 is a
+    // verdict, and holding the file would park a message the server has
+    // already said it will not take.
+    conn.setOnline(true);
+    upload.mockRejectedValue(new Error('upload failed (413)'));
+    const { container } = render(Composer, { onSend: vi.fn() });
+    await tick();
+
+    await pick(container, [sizedFile('memo.m4a', 4096)]);
+
+    expect(db.putBlob).not.toHaveBeenCalled();
+    expect(container.querySelector('.attach-chip')).toBeNull();
+    expect(container.querySelector('.attach-error')?.textContent).toContain('413');
+  });
+
+  it('says a file could not be read rather than calling it too large', async () => {
+    // A native pick whose path could not be read back is not a size refusal,
+    // and telling the user to attach it when they are online would be advice
+    // about the wrong problem.
+    picked.fileFromPicked.mockResolvedValue(null);
+    const { container } = render(Composer, { onSend: vi.fn() });
+    await tick();
+
+    await pick(container, [{ name: 'scan.pdf', type: 'application/pdf', size: 2048 }]);
+
+    expect(db.putBlob).not.toHaveBeenCalled();
+    expect(container.querySelector('.attach-error')?.textContent).toContain(
+      'Couldn’t read scan.pdf',
+    );
+  });
+
+  it('drops the held bytes when the room changes under the chip', async () => {
+    // The composer is mounted once and clears its chips on a room switch. It
+    // is the last thing that knows which blobs those were: the collector
+    // reconciles against the send queue, and this file was never queued.
+    const { container, rerender } = render(Composer, { onSend: vi.fn(), draftKey: 'u:room:t1' });
+    await tick();
+    await pick(container, [sizedFile('memo.m4a', 4096)]);
+    const blobId = db.putBlob.mock.calls[0][0];
+
+    await rerender({ onSend: vi.fn(), draftKey: 'u:room:t2' });
+    await tick();
 
     expect(container.querySelector('.attach-chip')).toBeNull();
     expect(db.deleteBlob).toHaveBeenCalledWith(blobId);

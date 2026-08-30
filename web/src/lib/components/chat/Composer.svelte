@@ -27,7 +27,12 @@
     Reply,
   } from 'lucide-svelte';
   import { IconButton } from '$lib/components/ui';
-  import { uploadChatAttachment, chatConfigOnce, type ChatAttachment } from '$lib/api';
+  import {
+    uploadChatAttachment,
+    chatConfigOnce,
+    UploadUnreachableError,
+    type ChatAttachment,
+  } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
@@ -45,7 +50,7 @@
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
   import type { MessageReply } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { putBlob, deleteBlob, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
+  import { putBlob, deleteBlob, hasHeadroom, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
   import { get } from 'svelte/store';
 
   let {
@@ -337,6 +342,14 @@
     // room's business.
     if (leavingRoom) {
       uploadEpoch++;
+      // A chip whose bytes are held here is the only copy of them, and the
+      // clear is the last thing that knows which blobs those were: the queue
+      // is what the collector reconciles against, and this file was never
+      // queued. Left behind they would sit against the shared total until the
+      // next `init()`, which in an installed app can be days. An upload still
+      // in flight cleans up after itself — it compares the epoch on the way
+      // out and drops its own blob — so the two cannot both delete one.
+      for (const a of attachments) if (a.pendingBlobId) void deleteBlob(a.pendingBlobId);
       attachments = [];
       uploading = 0;
       uploadError = '';
@@ -635,6 +648,9 @@
    */
   const OFFLINE_TOO_LARGE = 'Too large to hold offline — attach it when you’re back online.';
 
+  /** Why the last hold was refused. Set by `holdOffline`, read by `stage`. */
+  let holdRefusal = OFFLINE_TOO_LARGE;
+
   function refusalReason(file: Picked): string | null {
     // The offline bound is checked whatever the server said, and before it: the
     // server's limits arrive over the network, so with no connection `limits`
@@ -663,26 +679,32 @@
    * so a recording made with no connection takes this branch without the
    * recorder knowing anything about connectivity.
    *
-   * Returns the chip to stage, or null when the bytes were refused — over the
-   * per-file bound, over the shared total, past the origin's headroom, or an
-   * IndexedDB this browser will not give us. One sentence covers all four,
-   * because from the composer they are one fact: this file cannot be held.
+   * Returns the chip to stage, or null having set `holdRefusal` to the sentence
+   * that says why. Three of the four refusals are about space and read as one
+   * fact from here — the file cannot be kept — so they share a sentence; a file
+   * whose bytes could not be read at all is a different thing to be told.
    *
    * A file the shell picked is on disk rather than in the page, and offline the
    * shell cannot post it either — so it is read back through the picker's own
    * fallback, which produces the same `File` a browser would have handed over.
    */
   async function holdOffline(file: Picked): Promise<ChatAttachment | null> {
+    holdRefusal = OFFLINE_TOO_LARGE;
     const bytes = file.blob ?? (file.nativePath ? await fileFromPicked(file) : null);
-    if (!bytes) return null;
+    if (!bytes) {
+      holdRefusal = `Couldn’t read ${file.name}.`;
+      return null;
+    }
     const mimeType = file.type || bytes.type || 'application/octet-stream';
     const blobId = newBlobId();
     if (!blobId) return null;
-    // Refused before the file is read into memory, so an oversized pick costs
-    // the check and nothing else. `refusalReason` already turned away anything
-    // over the per-file bound; this is the shared total and the origin's own
-    // headroom, which only the store can answer.
+    // Both bounds that can be answered without the bytes are asked first, so a
+    // file that cannot be kept costs the questions and not a read of itself.
+    // `refusalReason` has already applied the per-file one; this is the
+    // origin's own headroom. The shared total needs the store and is asked
+    // inside `putBlob`, which is the one refusal that still costs the read.
     if (bytes.size > MAX_PENDING_BLOB_BYTES) return null;
+    if (!(await hasHeadroom(bytes.size))) return null;
     const stored = await putBlob(blobId, await bytes.arrayBuffer(), {
       name: file.name,
       mimeType,
@@ -745,16 +767,7 @@
       uploading++;
       try {
         if (!get(online)) {
-          const held = await holdOffline(file);
-          if (!held) {
-            if (!stale()) uploadError = OFFLINE_TOO_LARGE;
-            continue;
-          }
-          // Same room guard as the upload below, and the same reasoning —
-          // except that here the bytes are ours to take back, so a chip that
-          // would have landed in the wrong room drops its blob with it.
-          if (stale()) void deleteBlob(held.pendingBlobId as string);
-          else attachments = [...attachments, held];
+          await stage(file, stale);
           continue;
         }
         const att = await uploadChatAttachment(file);
@@ -763,11 +776,37 @@
         // tolerates. Better than a chip in a room the file was not picked in.
         if (!stale()) attachments = [...attachments, att];
       } catch (e) {
-        if (!stale()) uploadError = e instanceof Error ? e.message : 'upload failed';
+        // The upload is what *discovered* the gap. `online` is only believed
+        // false once something has observed one, so the first file attached
+        // after the signal dies takes the branch above as though it were still
+        // connected — and for a voice memo the argument to `upload()` is the
+        // only copy of the recording there is. Holding it here is what makes
+        // "recorded in a lift" work on the first try rather than the second.
+        if (e instanceof UploadUnreachableError) await stage(file, stale);
+        else if (!stale()) uploadError = e instanceof Error ? e.message : 'upload failed';
       } finally {
         if (!stale()) uploading--;
       }
     }
+  }
+
+  /**
+   * Hold a file's bytes and stage its chip, or say why we could not.
+   *
+   * `stale` is `upload`'s own room guard, passed in rather than recomputed:
+   * the epoch it closes over is the one captured when *this batch* started.
+   */
+  async function stage(file: Picked, stale: () => boolean) {
+    const held = await holdOffline(file);
+    if (!held) {
+      if (!stale()) uploadError = holdRefusal;
+      return;
+    }
+    // The same room guard the upload path uses, and the same reasoning —
+    // except that here the bytes are ours to take back, so a chip that would
+    // have landed in the wrong room drops its blob with it.
+    if (stale()) void deleteBlob(held.pendingBlobId as string);
+    else attachments = [...attachments, held];
   }
 
   /**

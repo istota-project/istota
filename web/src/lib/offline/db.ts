@@ -836,16 +836,24 @@ export async function putBlob(
 }
 
 /**
- * Whether a value read back out of storage is really a buffer of bytes.
+ * The bytes a stored record carries, or null when it carries none.
  *
  * Branded rather than `instanceof`, because a structured clone can hand back a
  * buffer belonging to a different realm — which `fake-indexeddb` does — and an
  * `instanceof` against the wrong realm's constructor rejects a perfectly good
  * one. The brand is what the value *is*; a plain object left by a build whose
  * shape has since changed reads `[object Object]` and is still refused.
+ *
+ * A view over a buffer counts and is normalized to the buffer behind it. The
+ * write side always stores an `ArrayBuffer`, so this should not arise — but
+ * "not bytes" is destructive here, failing the message and dropping its other
+ * files with it, and accepting a view costs one line against an engine or
+ * polyfill in the stack handing one back.
  */
-function isBytes(value: unknown): value is ArrayBuffer {
-  return Object.prototype.toString.call(value) === '[object ArrayBuffer]';
+function readBytes(value: unknown): ArrayBuffer | null {
+  if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return value as ArrayBuffer;
+  if (ArrayBuffer.isView(value)) return value.buffer as ArrayBuffer;
+  return null;
 }
 
 /** One held file, or null when it is gone or was never buffer-shaped. */
@@ -861,12 +869,13 @@ export async function getBlob(blobId: string): Promise<StoredBlob | null> {
         // Type-checked rather than truthiness-checked: this is handed straight
         // to an upload, and a record left half-written by a build whose shape
         // has since changed would be POSTed as `[object Object]`.
-        if (!value || !isBytes(value.bytes)) return;
+        const bytes = value ? readBytes(value.bytes) : null;
+        if (!value || !bytes) return;
         done({
-          bytes: value.bytes,
+          bytes,
           name: typeof value.name === 'string' ? value.name : 'attachment',
           mimeType: typeof value.mimeType === 'string' ? value.mimeType : '',
-          size: typeof value.size === 'number' ? value.size : value.bytes.byteLength,
+          size: typeof value.size === 'number' ? value.size : bytes.byteLength,
           createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
         });
       };

@@ -3536,6 +3536,10 @@ function createSession(): ChatSession {
    * first task, so no second task and no second bubble exist to reconcile.
    */
   async function beginSend(roomId: number, cid: number, payload: SendPayload) {
+    // A second send of the same message, while the first is still uploading
+    // its files, is refused here rather than left to the row state. See
+    // `resolvingSends`.
+    if (resolvingSends.has(cid)) return;
     updateMsg(cid, (m) => {
       m.sendState = 'sending';
       m.sendError = undefined;
@@ -3543,7 +3547,13 @@ function createSession(): ChatSession {
       m.queueHeld = undefined;
       m.sendPayload = payload;
     });
-    const resolved = await resolvePendingAttachments(roomId, cid, payload);
+    let resolved: SendPayload | null;
+    resolvingSends.add(cid);
+    try {
+      resolved = await resolvePendingAttachments(roomId, cid, payload);
+    } finally {
+      resolvingSends.delete(cid);
+    }
     // The resolution reported the outcome itself — parked, failed, or the
     // entry left under it — so there is nothing left for this send to do.
     if (!resolved) return;
@@ -3574,6 +3584,27 @@ function createSession(): ChatSession {
   const NO_PLACEHOLDER = -1;
 
   /**
+   * Sends whose files are being uploaded right now, by cid.
+   *
+   * What stops a second drain of the same entry, and it has to be this rather
+   * than the row's own `sendState`. A drain marks its row `'sending'`, and
+   * `canDrain` refuses while any row is — but a `'sending'` row is not
+   * client-only, so a room switch drops it (`stashStrandedSends` keeps only
+   * failed and queued rows) and the switch back rebuilds it from the *entry*,
+   * which is still in the queue, as `'queued'`. `loadHistory` then drains at
+   * its foot and a second resolution starts on an entry the first is still
+   * working through: whichever calls `getBlob` after the other's `deleteBlob`
+   * finds nothing and fails a message whose upload had in fact succeeded.
+   *
+   * That window exists for a plain text send too — it is the length of the
+   * POST — and the idempotency key is what makes it harmless there. Nothing
+   * makes an *upload* idempotent, and this window is as long as the file takes,
+   * so the claim is explicit. Session-lived and never persisted: it describes
+   * work in flight in this tab, which by definition does not survive a reload.
+   */
+  const resolvingSends = new Set<number>();
+
+  /**
    * Turn an entry's held bytes into host paths, one file at a time.
    *
    * The first step of a two-step send (ISSUE-202). An attachment written with
@@ -3594,6 +3625,11 @@ function createSession(): ChatSession {
    * server does not take, a `max_attachment_mb` lowered since — fails the whole
    * row and drops its bytes, because a retry cannot fix a file the server will
    * not accept and holding it forever is the wrong answer.
+   *
+   * The failed row carries no Retry, for that reason, and the text on it is all
+   * that is left of the message. The spec's §4 says the text is "recoverable
+   * through Edit"; no failed row in this app has ever offered Edit, and adding
+   * one is a decision about every failed send rather than about this path.
    */
   async function resolvePendingAttachments(
     roomId: number,
@@ -3620,26 +3656,46 @@ function createSession(): ChatSession {
     // is 'sending', and the loop honours it below.
     const owned = get(activeRoomId) === roomId;
     if (owned) status.set('sending');
+    const releaseRoom = () => {
+      if (owned && get(activeRoomId) === roomId) status.set('idle');
+    };
+    /**
+     * Stop, tapped while a file was going up.
+     *
+     * The intent is *consumed* here, not merely read: `runTurn` is the only
+     * other place that clears the flag and this path never reaches it, so
+     * leaving it set would make the row's own Send button re-enter, read the
+     * stale latch, and hold itself again — for the life of the session.
+     *
+     * The message has not been sent, so it goes back to waiting, held, like
+     * every other queue the user has abandoned work in front of.
+     */
+    const cancelled = (token: string): null => {
+      cancelRequested = false;
+      requeueRow(cid);
+      holdRoomQueue(token);
+      releaseRoom();
+      return null;
+    };
     for (;;) {
       const found = findQueued(cid);
       if (!found) {
         // Removed or edited while a file was uploading. The row went with the
-        // entry, so there is nothing to report and nothing to send.
-        if (owned && get(activeRoomId) === roomId) status.set('idle');
+        // entry, so there is nothing to send — but it is normalized off
+        // 'sending' first, because a row left in that state would wedge the
+        // room's queue behind `canDrain`'s no-row-is-sending clause.
+        requeueRow(cid);
+        releaseRoom();
         return null;
       }
+      // Ahead of the empty check below, not after it. With one attachment —
+      // the voice note this feature is written for — the last upload finishes,
+      // the list empties, and a Stop tapped during that upload would otherwise
+      // fall straight out of the loop and be cleared unread by `runTurn`.
+      if (cancelRequested) return cancelled(found.token);
       const entry = found.entries[found.idx];
       const item = entry.pendingAttachments?.[0];
       if (!item) break;
-      if (cancelRequested) {
-        // Stop, tapped while the file was going up. The message has not been
-        // sent, so it goes back to waiting — held, like every other queue the
-        // user has abandoned work in front of.
-        requeueRow(cid);
-        holdRoomQueue(found.token);
-        if (owned && get(activeRoomId) === roomId) status.set('idle');
-        return null;
-      }
       const record = await getBlob(item.blobId);
       if (!record) {
         // The bytes are gone — evicted with the origin's storage, or collected
@@ -3653,12 +3709,20 @@ function createSession(): ChatSession {
         const att = await uploadChatAttachment(
           new File([record.bytes], item.name, { type: record.mimeType }),
         );
+        // A 200 that carries no path is not a stored file. Unchecked it would
+        // be written into the queue entry as a chip the *next* read refuses,
+        // which deletes the whole message — after its bytes have been dropped
+        // as successfully uploaded. Treated as the refusal it is instead.
+        if (typeof att.path !== 'string' || !att.path) {
+          throw new Error('the server did not say where it put the file');
+        }
         // Re-found rather than reused: the awaits above are exactly where the
         // entry can have been taken out from under this.
         const after = findQueued(cid);
         if (!after) {
           void deleteBlob(item.blobId);
-          if (owned && get(activeRoomId) === roomId) status.set('idle');
+          requeueRow(cid);
+          releaseRoom();
           return null;
         }
         const live = after.entries[after.idx];
@@ -4020,10 +4084,23 @@ function createSession(): ChatSession {
       found.entries[found.idx].held = false;
     } else {
       const entries = sendQueue.get(token) ?? [];
+      const pending = pendingOf(payload!.attachments);
       entries.unshift({
         cid: userCid,
         text: payload!.text,
         attachments: payload!.attachments,
+        // Rebuilt from the chips, not carried from an entry there is none of.
+        // A chip with no path and no record behind it is exactly the shape
+        // `readEntry` refuses, so leaving this out would store a message that
+        // the next page load deletes without a word.
+        //
+        // Hardening rather than a live path: this branch needs a row whose
+        // entry is gone, and every route that takes an entry takes its row
+        // with it (`takeQueued`) or takes the room, which the token lookup
+        // above already refuses. It is written because the *shape* is now
+        // constructible, not because a caller reaches it — the cost of being
+        // wrong about that is a message deleted with no report.
+        ...(pending.length ? { pendingAttachments: pending } : {}),
         // Off the row, which is the only place the optimistic quote lives —
         // `sendPayload` carries the id the POST takes and not the excerpt the
         // bubble draws.

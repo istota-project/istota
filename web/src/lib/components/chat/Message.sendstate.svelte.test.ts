@@ -216,9 +216,14 @@ describe('user row queued state', () => {
 
   it('renders a chip for a file it is still holding, with nothing to download', () => {
     // A voice note queued offline (ISSUE-202). Its bytes are in this browser,
-    // so there is no host path and no `/chat/files` URL that could serve it —
-    // and the chip is exactly the inert label a co-member's upload already
-    // gets. The muting is `.msg.queued`'s, which covers the whole body.
+    // so there is no host path and no `/chat/files` URL that could serve it.
+    //
+    // **This asserts behaviour that predates the offline outbox and would have
+    // passed before it**, which is the point rather than an oversight: the
+    // store relies on a pending chip needing no render change at all — a null
+    // `attachmentPaths` entry already renders the inert label a co-member's
+    // upload gets, and `.msg.queued` already mutes the whole body. Pinned here
+    // so that reasoning is checked rather than assumed.
     const { container } = mountQueued(
       { attachments: ['memo.m4a'], attachmentPaths: [null] },
       handlers,
