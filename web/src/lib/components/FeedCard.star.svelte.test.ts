@@ -35,6 +35,8 @@ function entry(over: Partial<FeedEntry> = {}): FeedEntry {
     duplicate_image_count: 0,
     embed_url: '',
     file_url: '',
+    media_url: '',
+    media_type: '',
     feed: {
       id: 1,
       title: 'Example Feed',

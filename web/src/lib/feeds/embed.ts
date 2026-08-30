@@ -102,6 +102,85 @@ export function playerUrl(raw: string | null | undefined): string | null {
 }
 
 /**
+ * Extensions a browser plays from a plain URL. The TypeScript half of
+ * `PLAYABLE_MEDIA_TYPES` in `src/istota/feeds/models.py` — held equal to it by
+ * `tests/test_feeds_media_parity.py`, so do not edit one without the other.
+ *
+ * Consulted only when the feed shipped no MIME type; a stored `media_type` is
+ * what normally decides. `.ogg` is deliberately absent — Ogg is a container
+ * and `video/ogg` is registered, so guessing audio from it would lose a
+ * Theora video's picture silently. `.oga` and `.ogv` are unambiguous.
+ */
+const PLAYABLE_EXTENSIONS: Record<string, 'video' | 'audio'> = {
+  mp4: 'video',
+  m4v: 'video',
+  mov: 'video',
+  webm: 'video',
+  ogv: 'video',
+  mp3: 'audio',
+  m4a: 'audio',
+  oga: 'audio',
+  opus: 'audio',
+  wav: 'audio',
+  flac: 'audio',
+  aac: 'audio',
+};
+
+export interface InlineMedia {
+  /** Safe to use as a `<video>` / `<audio>` src. */
+  url: string;
+  kind: 'video' | 'audio';
+}
+
+/**
+ * A media file the reader can play inline, or null (ISSUE-356).
+ *
+ * Same trust posture as `playerUrl` one field over: the return value goes
+ * straight into a `src`, so the URL is re-parsed here rather than trusted,
+ * and anything that isn't http(s) is refused. Null means "not something we
+ * play" — the caller falls back to whatever it did before, never to guessing
+ * an element around an unknown URL.
+ *
+ * `kind` is the whole answer, because it is the whole question: `<video>` or
+ * `<audio>`. It comes from the stored MIME type first and the extension only
+ * as a fallback. A URL neither of them classifies is not played — an `<audio>`
+ * element around an mp4 loses the picture silently, which is a worse failure
+ * than the card simply not offering a player. The MIME type itself is not
+ * returned: a single-source element takes its format from the response's own
+ * `Content-Type`, so a `type` hint would have no consumer, and a field nothing
+ * reads is a field that drifts.
+ *
+ * The extension fallback is deliberately the same rule as the Python side's
+ * (`media_type_for_url`): the last path segment, `;params` stripped, a
+ * leading-dot filename not treated as an extension.
+ */
+export function inlineMedia(
+  rawUrl: string | null | undefined,
+  rawType?: string | null,
+): InlineMedia | null {
+  const url = parse(rawUrl);
+  if (!url) return null;
+
+  const type = (rawType || '').trim().toLowerCase();
+  let kind: 'video' | 'audio' | null = null;
+  if (type.startsWith('video/')) kind = 'video';
+  else if (type.startsWith('audio/')) kind = 'audio';
+  else if (!type) kind = extensionKind(url);
+  if (!kind) return null;
+
+  return { url: url.href, kind };
+}
+
+/** The extension half of `inlineMedia`, matching `media_type_for_url`. */
+function extensionKind(url: URL): 'video' | 'audio' | null {
+  const segment = url.pathname.split('/').pop()?.split(';')[0] ?? '';
+  const dot = segment.lastIndexOf('.');
+  // `dot > 0` rather than `>= 0`: ".mp4" is a filename, not an extension.
+  if (dot <= 0 || dot === segment.length - 1) return null;
+  return PLAYABLE_EXTENSIONS[segment.slice(dot + 1).toLowerCase()] ?? null;
+}
+
+/**
  * Short uppercase format name for an attached file, e.g. `PDF`.
  *
  * Read from the URL path, never the query — Are.na cache-busts attachments

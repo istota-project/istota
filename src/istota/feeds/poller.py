@@ -55,6 +55,8 @@ from istota.feeds.models import (
     FetchedItem,
     FetchResult,
     detect_source_type,
+    is_http_url,
+    media_type_for_url,
     poll_host,
     retry_after_from_headers,
     provider_identifier,
@@ -190,6 +192,77 @@ def _feedparser_parse(raw):
     return feedparser.parse(raw)
 
 
+def _classify_attachment(
+    url: str | None,
+    mime: str | None,
+    medium: str | None,
+    images: list[str],
+    playable: list[tuple[str, str]],
+    *,
+    untyped: str,
+) -> None:
+    """File one attachment as a hero image or as playable media (ISSUE-356).
+
+    ``<enclosure>`` and ``<media:content>`` describe the same thing in two
+    vocabularies, and this is the one place that reads either. Three pieces of
+    evidence, consulted in order and **falling through** rather than
+    short-circuiting: the MIME type, then ``medium``, then the file extension.
+
+    Falling through is the part that has to be exact. An attachment carrying a
+    type we do not recognise — ``application/octet-stream`` is a common CDN
+    default, and MRSS's ``medium`` legitimately takes values like ``document``
+    — still gets the later questions asked of it, and if none of them answers,
+    lands on ``untyped``. Short-circuiting the drop there is a hero silently
+    lost to a fix about videos, since the old ``media:content`` loop took every
+    URL it saw whatever its type said.
+
+    ``untyped`` is what an attachment no evidence classified falls back to, and
+    it differs per element because the historical defaults differed:
+    ``media:content`` kept such a thing as an image, an ``<enclosure>`` was
+    dropped unless it was typed ``image/``. Preserved rather than unified, so
+    the fix neither gains nor loses a feed a hero.
+
+    Appends in place. The caller's order is feed order, and the first playable
+    attachment is the one the reader gets.
+    """
+    if not url:
+        return
+    url = url.strip()
+    if not is_http_url(url):
+        # The URL ends up in a `src` attribute, so the sanitizer's bar — http
+        # and https only — applies on the way in. The stripped value is the one
+        # that was checked, so it is also the one that gets stored.
+        return
+
+    mime = (mime or "").lower().strip()
+    medium = (medium or "").lower().strip()
+
+    # 1. The MIME type, where it says something we understand.
+    if mime.startswith("image/"):
+        images.append(url)
+        return
+    if mime.startswith(("video/", "audio/")):
+        playable.append((url, mime))
+        return
+
+    # 2. `medium`, which an untyped or oddly-typed attachment may still carry.
+    if medium == "image":
+        images.append(url)
+        return
+    if medium in ("video", "audio"):
+        # Name the concrete format from the extension where we can, since a
+        # bare `video/*` is not a usable `type` hint.
+        playable.append((url, media_type_for_url(url) or f"{medium}/*"))
+        return
+
+    # 3. The extension, then the per-element default.
+    guessed = media_type_for_url(url)
+    if guessed:
+        playable.append((url, guessed))
+    elif untyped == "image":
+        images.append(url)
+
+
 def _rss_entry_to_item(entry) -> FetchedItem:
     """Convert a ``feedparser`` entry dict to :class:`FetchedItem`."""
     guid = (
@@ -222,14 +295,17 @@ def _rss_entry_to_item(entry) -> FetchedItem:
     # (e.g. the Guardian's ?width=140/460/700) collapse to the widest.
     body_images = extract_images(cleaned_html)
     media_images: list[str] = []
+    playable: list[tuple[str, str]] = []
     for enc in entry.get("enclosures", []) or []:
-        mime = (enc.get("type") or "").lower()
-        if mime.startswith("image/") and enc.get("href"):
-            media_images.append(enc["href"])
-    if entry.get("media_content"):
-        for m in entry["media_content"]:
-            if m.get("url"):
-                media_images.append(m["url"])
+        _classify_attachment(
+            enc.get("href"), enc.get("type"), None, media_images, playable,
+            untyped="drop",
+        )
+    for m in entry.get("media_content") or []:
+        _classify_attachment(
+            m.get("url"), m.get("type"), m.get("medium"), media_images, playable,
+            untyped="image",
+        )
 
     lead_body_image = body_images[:1]  # 0 or 1 element
     image_urls = dedupe_image_variants(lead_body_image + media_images)
@@ -242,6 +318,8 @@ def _rss_entry_to_item(entry) -> FetchedItem:
 
     published_at = _published_iso(entry)
 
+    media_url, media_type = playable[0] if playable else (None, None)
+
     return FetchedItem(
         guid=str(guid) if guid else "",
         title=title,
@@ -250,6 +328,8 @@ def _rss_entry_to_item(entry) -> FetchedItem:
         content_html=cleaned_html,
         content_text=content_text,
         image_urls=image_urls,
+        media_url=media_url,
+        media_type=media_type,
         published_at=published_at,
     )
 
@@ -422,6 +502,8 @@ def _persist_poll(
                 image_urls=item.image_urls,
                 embed_url=item.embed_url,
                 file_url=item.file_url,
+                media_url=item.media_url,
+                media_type=item.media_type,
                 published_at=item.published_at,
                 fetched_at=fetched_iso,
                 status="unread",

@@ -243,6 +243,8 @@ class EntryRecord:
     image_urls: list[str] = field(default_factory=list)
     embed_url: str | None = None
     file_url: str | None = None
+    media_url: str | None = None
+    media_type: str | None = None
     published_at: str | None = None
     fetched_at: str = ""
     status: str = "unread"      # 'unread' | 'read' | 'removed'
@@ -271,6 +273,14 @@ class FetchedItem:
     # nearly always a PDF). Distinct from embed_url: this one is opened, not
     # played, and the reader must not treat its cover page as a gallery image.
     file_url: str | None = None
+    # A media file the reader plays inline with a native <video>/<audio> — a
+    # Mastodon attachment, a podcast enclosure. A third thing from the two
+    # above and not expressible as either: ``embed_url`` means "a provider
+    # page we can rebuild a player for" and ``file_url`` means "open this
+    # somewhere else". Before ISSUE-356 a direct media URL had nowhere to go
+    # and was filed as an image, which the reader rendered as a broken <img>.
+    media_url: str | None = None
+    media_type: str | None = None       # e.g. 'video/mp4', 'audio/mpeg'
     published_at: str | None = None     # ISO 8601 UTC
 
 
@@ -309,6 +319,80 @@ def provider_identifier(url: str) -> str:
         if url.lower().startswith(scheme):
             return url[len(scheme):]
     return url
+
+
+# Media a browser can play inline from a plain URL, by file extension.
+# Consulted when a feed's MIME type and ``medium`` between them say nothing we
+# recognise — Mastodon ships both, but plenty of feeds ship a bare
+# ``<media:content url="…mp4"/>`` and the extension is then the only evidence
+# there is. Deliberately short: every entry here is a format the
+# <video>/<audio> element actually plays, so a match is a promise the reader
+# can keep. Anything unlisted falls through to the caller's own default, which
+# for a ``media:content`` is "image" — what the poller did with everything
+# before ISSUE-356.
+#
+# ``.ogg`` is deliberately absent though ``.oga`` and ``.ogv`` are here: Ogg is
+# a container, not a format, and ``video/ogg`` is registered, so guessing audio
+# from it would put a Theora video in an <audio> element and lose the picture
+# silently. That is the failure `inlineMedia` refuses on the other side; better
+# to offer no player than the wrong one.
+#
+# Mirrored in TypeScript as PLAYABLE_EXTENSIONS in web/src/lib/feeds/embed.ts.
+# tests/test_feeds_media_parity.py holds the two together — do not edit one
+# without the other.
+PLAYABLE_MEDIA_TYPES: dict[str, str] = {
+    "mp4": "video/mp4",
+    "m4v": "video/mp4",
+    "mov": "video/quicktime",
+    "webm": "video/webm",
+    "ogv": "video/ogg",
+    "mp3": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "oga": "audio/ogg",
+    "opus": "audio/ogg",
+    "wav": "audio/wav",
+    "flac": "audio/flac",
+    "aac": "audio/aac",
+}
+
+
+def media_type_for_url(url: str) -> str | None:
+    """MIME type for a playable media URL, by extension. ``None`` otherwise.
+
+    The path is parsed rather than string-matched so a query string can't
+    decide the answer: ``…/photo.jpg?poster=clip.mp4`` is a photo. An extension
+    is the tail of the *last* path segment, so ``…/clip.mp4/thumb`` is not a
+    video either. The TypeScript half of this rule is ``inlineMedia``'s
+    extension fallback; they are held equal by a parity test.
+    """
+    if not url:
+        return None
+    from urllib.parse import urlsplit
+
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
+    # `;params` are part of the path in a URL and are not part of a filename.
+    segment = path.rpartition("/")[2].partition(";")[0]
+    name, dot, ext = segment.rpartition(".")
+    # `name` empty with a dot means a leading-dot filename (".mp4"), which is a
+    # name, not an extension.
+    if not dot or not name or not ext:
+        return None
+    return PLAYABLE_MEDIA_TYPES.get(ext.lower())
+
+
+def is_http_url(url: str) -> bool:
+    """Whether a URL is one we are willing to put in a browser ``src``.
+
+    http(s) only — the bar the feed sanitizer already applies to markup, kept
+    here for the URLs that arrive as feed *attributes* rather than as markup
+    and so never pass through it. Both the poller (on the way in) and the v7
+    migration (over URLs stored before there was a check) use this one.
+    """
+    lo = (url or "").strip().lower()
+    return lo.startswith("http://") or lo.startswith("https://")
 
 
 def parse_image_urls(raw: Any) -> list[str]:

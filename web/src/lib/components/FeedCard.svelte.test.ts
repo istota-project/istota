@@ -37,6 +37,8 @@ function entry(over: Partial<FeedEntry> = {}): FeedEntry {
     duplicate_image_count: 0,
     embed_url: '',
     file_url: '',
+    media_url: '',
+    media_type: '',
     feed: {
       id: 1,
       title: 'Example Feed',
@@ -120,9 +122,17 @@ describe('display-toggle CSS contract', () => {
     ['the media block', '.feed-grid.hide-images :global(.card-image)'],
     ['galleries', '.feed-grid.hide-images :global(.card-gallery)'],
     ['images embedded in body copy', '.feed-grid.hide-images :global(.excerpt img)'],
+    ['inline video in body copy', '.feed-grid.hide-images :global(.excerpt video)'],
+    ['a video attachment', '.feed-grid.hide-images :global(.card-media:not(.audio))'],
     ['the body copy itself', '.feed-grid.hide-text :global(.excerpt)'],
   ])('hides %s only on desktop', (_label, selector) => {
     expect(desktopOnly).toContain(selector);
+  });
+
+  it('leaves an audio attachment drawn, since it is not a picture', () => {
+    // The chip means "pictures", and an <audio> player shows none. Hiding it
+    // would take the whole entry away rather than de-illustrating it.
+    expect(desktopOnly).not.toMatch(/hide-images :global\(\.card-media\)/);
   });
 
   it('has no hide rule outside the desktop query', () => {

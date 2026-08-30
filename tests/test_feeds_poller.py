@@ -366,3 +366,261 @@ class TestArenaEmbedPassthrough:
             entries = feeds_db.list_entries(conn)
 
         assert entries[0].embed_url == "https://www.youtube.com/watch?v=abc"
+
+
+# ---------------------------------------------------------------------------
+# Non-image media attachments (ISSUE-356)
+# ---------------------------------------------------------------------------
+
+
+MASTODON_VIDEO_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel><title>M</title><link>https://example.town/@someone</link>
+<item>
+  <guid isPermaLink="true">https://example.town/@someone/1</guid>
+  <link>https://example.town/@someone/1</link>
+  <pubDate>Thu, 01 May 2026 12:00:00 GMT</pubDate>
+  <description>&lt;p&gt;a clip&lt;/p&gt;</description>
+  <media:content url="https://assets.example.town/media/117/original/clip.mp4"
+     type="video/mp4" fileSize="1234567" medium="video"/>
+</item>
+</channel></rss>
+"""
+
+
+MASTODON_IMAGE_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel><title>M</title><link>https://example.town/@someone</link>
+<item>
+  <guid isPermaLink="true">https://example.town/@someone/2</guid>
+  <link>https://example.town/@someone/2</link>
+  <pubDate>Thu, 01 May 2026 12:00:00 GMT</pubDate>
+  <description>&lt;p&gt;a pic&lt;/p&gt;</description>
+  <media:content url="https://assets.example.town/media/118/original/pic.png"
+     type="image/png" fileSize="999" medium="image"/>
+</item>
+</channel></rss>
+"""
+
+
+MIXED_MEDIA_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel><title>M</title><link>https://example.town/@someone</link>
+<item>
+  <guid isPermaLink="true">https://example.town/@someone/3</guid>
+  <link>https://example.town/@someone/3</link>
+  <pubDate>Thu, 01 May 2026 12:00:00 GMT</pubDate>
+  <description>&lt;p&gt;both&lt;/p&gt;</description>
+  <media:content url="https://assets.example.town/media/119/original/still.jpg"
+     type="image/jpeg" medium="image"/>
+  <media:content url="https://assets.example.town/media/120/original/clip.mp4"
+     type="video/mp4" medium="video"/>
+</item>
+</channel></rss>
+"""
+
+
+UNTYPED_VIDEO_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel><title>M</title><link>https://example.com</link>
+<item>
+  <guid>u-1</guid>
+  <link>https://example.com/u1</link>
+  <description>&lt;p&gt;no type and no medium&lt;/p&gt;</description>
+  <media:content url="https://example.com/media/clip.mp4"/>
+</item>
+</channel></rss>
+"""
+
+
+UNTYPED_IMAGE_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel><title>M</title><link>https://example.com</link>
+<item>
+  <guid>u-2</guid>
+  <link>https://example.com/u2</link>
+  <description>&lt;p&gt;no type and no medium&lt;/p&gt;</description>
+  <media:content url="https://example.com/media/photo.jpg"/>
+</item>
+</channel></rss>
+"""
+
+
+PODCAST_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel><title>P</title><link>https://pod.example.com</link>
+<item>
+  <title>Episode 12</title>
+  <guid>pod-12</guid>
+  <link>https://pod.example.com/12</link>
+  <description>&lt;p&gt;show notes&lt;/p&gt;</description>
+  <enclosure url="https://pod.example.com/audio/12.mp3" length="99" type="audio/mpeg"/>
+</item>
+</channel></rss>
+"""
+
+
+class TestNonImageMediaAttachments:
+    """A ``media:content`` video is not a hero image (ISSUE-356).
+
+    The enclosure loop always gated on ``image/``; the ``media:content`` loop
+    did not, so Mastodon's video attachment — which arrives only as
+    ``media:content`` — landed in ``image_urls`` and the reader painted it
+    into an ``<img src>`` that never decodes.
+    """
+
+    def test_a_video_attachment_is_not_stored_as_an_image(self):
+        item = _first_item(MASTODON_VIDEO_RSS)
+        assert item.image_urls == []
+
+    def test_a_video_attachment_is_stored_as_playable_media(self):
+        item = _first_item(MASTODON_VIDEO_RSS)
+        assert item.media_url == "https://assets.example.town/media/117/original/clip.mp4"
+        assert item.media_type == "video/mp4"
+
+    def test_an_image_attachment_is_still_a_hero(self):
+        item = _first_item(MASTODON_IMAGE_RSS)
+        assert item.image_urls == ["https://assets.example.town/media/118/original/pic.png"]
+        assert item.media_url is None
+
+    def test_a_post_carrying_both_keeps_the_image_and_the_video(self):
+        item = _first_item(MIXED_MEDIA_RSS)
+        assert item.image_urls == ["https://assets.example.town/media/119/original/still.jpg"]
+        assert item.media_url == "https://assets.example.town/media/120/original/clip.mp4"
+
+    def test_an_untyped_attachment_falls_back_to_its_extension(self):
+        # No type and no medium: the extension is the only evidence there is,
+        # and a bare .mp4 is exactly the shape that broke.
+        item = _first_item(UNTYPED_VIDEO_RSS)
+        assert item.image_urls == []
+        assert item.media_url == "https://example.com/media/clip.mp4"
+        assert item.media_type == "video/mp4"
+
+    def test_an_untyped_image_still_reads_as_an_image(self):
+        # Unchanged for everything the extension does not name as playable, so
+        # no feed loses a hero to this fix.
+        item = _first_item(UNTYPED_IMAGE_RSS)
+        assert item.image_urls == ["https://example.com/media/photo.jpg"]
+        assert item.media_url is None
+
+    def test_a_video_enclosure_becomes_playable_media(self):
+        # PetaPixel's mp4 enclosure was already kept out of image_urls; it was
+        # simply dropped on the floor. It has somewhere to go now.
+        item = _first_item(PETAPIXEL_RSS)
+        assert item.image_urls == ["https://p.com/uploads/cover.jpg"]
+        assert item.media_url == "https://p.com/uploads/clip.mp4"
+        assert item.media_type == "video/mp4"
+
+    def test_an_audio_enclosure_becomes_playable_media(self):
+        item = _first_item(PODCAST_RSS)
+        assert item.media_url == "https://pod.example.com/audio/12.mp3"
+        assert item.media_type == "audio/mpeg"
+
+    @pytest.mark.parametrize("attrs", [
+        # An unrecognised MIME type must not cost the entry its hero. The old
+        # media:content loop took every URL whatever its type said, and
+        # application/octet-stream is a common CDN default.
+        'type="application/octet-stream"',
+        'type="application/octet-stream" medium="image"',
+        # A MIME type that is not a type at all.
+        'type="image"',
+        # MRSS's medium legitimately takes values outside our three.
+        'medium="document"',
+    ])
+    def test_an_oddly_typed_image_attachment_keeps_its_hero(self, attrs):
+        rss = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">'
+            "<channel><title>M</title><link>https://example.com</link><item>"
+            "<guid>odd-1</guid><link>https://example.com/odd</link>"
+            "<description>&lt;p&gt;hi&lt;/p&gt;</description>"
+            f'<media:content url="https://example.com/media/photo.jpg" {attrs}/>'
+            "</item></channel></rss>"
+        ).encode()
+        item = _first_item(rss)
+        assert item.image_urls == ["https://example.com/media/photo.jpg"]
+        assert item.media_url is None
+
+    def test_an_oddly_typed_video_attachment_still_plays(self):
+        # Same fall-through, landing on the extension rather than the default.
+        rss = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">'
+            "<channel><title>M</title><link>https://example.com</link><item>"
+            "<guid>odd-2</guid><link>https://example.com/odd2</link>"
+            "<description>&lt;p&gt;hi&lt;/p&gt;</description>"
+            '<media:content url="https://example.com/media/clip.mp4"'
+            ' type="application/octet-stream"/>'
+            "</item></channel></rss>"
+        ).encode()
+        item = _first_item(rss)
+        assert item.image_urls == []
+        assert item.media_url == "https://example.com/media/clip.mp4"
+
+    def test_an_untyped_enclosure_is_still_dropped(self):
+        # The `untyped` kwarg's whole reason for existing: an <enclosure> with
+        # no evidence was always discarded, where a media:content was kept as
+        # an image. Unifying the two would change what a feed shows.
+        rss = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<rss version="2.0">'
+            "<channel><title>E</title><link>https://example.com</link><item>"
+            "<guid>enc-1</guid><link>https://example.com/e1</link>"
+            "<description>&lt;p&gt;hi&lt;/p&gt;</description>"
+            '<enclosure url="https://example.com/media/thing" length="1"/>'
+            "</item></channel></rss>"
+        ).encode()
+        item = _first_item(rss)
+        assert item.image_urls == []
+        assert item.media_url is None
+
+    def test_a_media_url_is_stored_stripped(self):
+        # The scheme check runs on a stripped copy, so the stripped copy is
+        # what gets stored — otherwise the value checked is not the value used.
+        from istota.feeds.poller import _rss_entry_to_item
+
+        item = _rss_entry_to_item({
+            "id": "s-1",
+            "link": "https://example.com/s1",
+            "summary": "<p>hi</p>",
+            "media_content": [
+                {"url": "  https://example.com/clip.mp4  ", "type": "video/mp4"},
+            ],
+        })
+        assert item.media_url == "https://example.com/clip.mp4"
+
+    def test_a_non_http_media_url_is_refused(self):
+        # The URL is remote input and ends up in a `src`, so the sanitizer's
+        # bar — http/https only — applies on the way in, not on the way out.
+        from istota.feeds.poller import _rss_entry_to_item
+
+        item = _rss_entry_to_item({
+            "id": "x-1",
+            "link": "https://example.com/x1",
+            "summary": "<p>hi</p>",
+            "media_content": [{"url": "javascript:alert(1)", "type": "video/mp4"}],
+        })
+        assert item.media_url is None
+        assert item.image_urls == []
+
+    def test_media_reaches_storage(self, tmp_path):
+        """FetchedItem → EntryRecord → row, the seam ``embed_url`` has a test
+        for. A silent drop at any of the three puts the broken hero back."""
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="https://example.town/@someone.rss", title="M",
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=60,
+            )
+            conn.commit()
+
+        resp = _StubResponse(status_code=200, content=MASTODON_VIDEO_RSS)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=_stub_get_factory(resp))
+            entries = feeds_db.list_entries(conn)
+
+        assert entries[0].media_url == "https://assets.example.town/media/117/original/clip.mp4"
+        assert entries[0].media_type == "video/mp4"
+        assert entries[0].image_urls == []

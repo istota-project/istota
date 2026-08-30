@@ -2,7 +2,7 @@
   import { FileText, Play, Star } from 'lucide-svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
-  import { fileKind, playerUrl, providerLabel } from '$lib/feeds/embed';
+  import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';
 
   import { markReadDelay } from '$lib/stores/feeds';
   import { notifyError } from '$lib/stores/notices';
@@ -81,13 +81,43 @@
   // play control, never a page load.
   const playerSrc = $derived(player ? `${player}?autoplay=1` : '');
 
+  // A media file we play ourselves — a Mastodon video attachment, a podcast
+  // enclosure. `inlineMedia` re-parses the URL rather than trusting it and
+  // returns null for anything it can't put in a <video>/<audio> src, in which
+  // case the card falls back to whatever it would otherwise have shown.
+  // Before ISSUE-356 this URL arrived in `entry.images` and painted an <img>
+  // that never decodes. A provider embed still wins: it is the more specific
+  // affordance, and it is the one an entry would carry deliberately.
+  const media = $derived(player ? null : inlineMedia(entry.media_url, entry.media_type));
+  // A lone still that came with the clip becomes its poster rather than a hero
+  // of its own — one piece of media, shown once. Several stills are a gallery,
+  // and consuming the first as a poster would silently drop the rest, so they
+  // are left to render below the player instead. A still that is itself a
+  // playable URL is refused: a downgrade to a pre-v7 binary re-files the clip
+  // into `images`, and using it as the poster would put the mp4 back in an
+  // `<img>`-shaped hole — the exact symptom this fixed.
+  const mediaPoster = $derived(
+    media && entry.images.length === 1 && !inlineMedia(entry.images[0])
+      ? entry.images[0]
+      : undefined,
+  );
+  // Images the player did not consume. Rendered under it, because a card that
+  // quietly shows fewer pictures than the entry has is the bug one field over.
+  const mediaImages = $derived(media && !mediaPoster ? entry.images : []);
+
   // An attached document (an Are.na Attachment — nearly always a PDF). Are.na
   // renders a cover page for one, so without this the card is indistinguishable
   // from a photo and its hero click zooms page 1 instead of opening the file.
   // A video wins if an entry somehow carries both, since playing is the more
   // specific affordance.
-  const documentUrl = $derived(!player && entry.file_url ? entry.file_url : '');
+  const documentUrl = $derived(!player && !media && entry.file_url ? entry.file_url : '');
   const documentKind = $derived(fileKind(documentUrl));
+
+  // The card opens the reader on any click that isn't a link or a button, and
+  // the media element is neither. Clicking a player means "play".
+  function swallow(e: Event) {
+    e.stopPropagation();
+  }
 
   function play(e: MouseEvent) {
     // The hero is normally a lightbox trigger; for a video the click means
@@ -194,6 +224,56 @@
         {/if}
         <span class="play-badge"><Play size={26} fill="currentColor" /></span>
       </button>
+    {/if}
+    {#if entry.title}
+      <div class="card-title-overlay">
+        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+      </div>
+    {/if}
+    {#if entry.content}
+      <div class="card-body"><div class="excerpt prose">{@html entry.content}</div></div>
+    {/if}
+  {:else if media}
+    <!-- A media file we serve ourselves. No poster/play dance: the element is
+         the player, `controls` is the play affordance, and `preload="metadata"`
+         keeps a grid of cards from pulling whole clips down on scroll. No
+         width or height attribute — the stylesheet bounds it, the same rule
+         inline <video> in the body copy follows. -->
+    <div class="card-media" class:audio={media.kind === 'audio'}>
+      {#if media.kind === 'video'}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video
+          src={media.url}
+          poster={mediaPoster}
+          controls
+          playsinline
+          preload="metadata"
+          onclick={swallow}
+        ></video>
+      {:else}
+        <audio src={media.url} controls preload="metadata" onclick={swallow}></audio>
+      {/if}
+    </div>
+    {#if mediaImages.length > 0}
+      <!-- Stills the player did not take as its poster. Same gallery the
+           image branch below renders, so nothing an entry carries goes
+           unshown just because it also carried a clip. -->
+      <div class="card-gallery gallery-{Math.min(mediaImages.length, maxGrid)}">
+        {#each mediaImages.slice(0, maxGrid) as img, idx}
+          <button
+            type="button"
+            class="card-image{idx === maxGrid - 1 && mediaImages.length > maxGrid
+              ? ' gallery-more'
+              : ''}"
+            onclick={() => onImageClick(mediaImages, idx)}
+          >
+            <img src={img} alt={entry.title || ''} loading="lazy" />
+            {#if idx === maxGrid - 1 && mediaImages.length > maxGrid}
+              <span class="gallery-count">+{mediaImages.length - maxGrid + 1}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
     {/if}
     {#if entry.title}
       <div class="card-title-overlay">

@@ -229,6 +229,305 @@ class TestInitDb:
         assert feeds[0].error_count == 2
         assert feeds[0].site_url == "https://are.na/c"
 
+    def test_v6_to_v7_adds_media_columns_and_lifts_stored_videos(self, tmp_path):
+        """A v6 DB gains the media columns, and the mp4s already sitting in
+        ``image_urls`` move into them (ISSUE-356).
+
+        Existing rows are the whole point of the backfill: ``insert_entries``
+        matches on ``(feed_id, guid)`` and never overwrites a stored value
+        with an empty one, so a re-poll of the same entry leaves the broken
+        image URL exactly where it is.
+        """
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.town/@a.rss", title="M", site_url=None,
+                source_type="rss", category_id=None, poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="vid", title="Clip", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=["https://assets.example.town/media/1/clip.mp4"],
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="mixed", title="Both", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=[
+                        "https://assets.example.town/media/2/still.jpg",
+                        "https://assets.example.town/media/3/clip.mp4",
+                    ],
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="pic", title="Pic", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=["https://assets.example.town/media/4/photo.jpg"],
+                    embed_url="https://youtu.be/keep",
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        # Rewind to v6: drop the columns and the recorded version.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_url")
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_type")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','6')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+            by_guid = {e.guid: e for e in feeds_db.list_entries(conn)}
+            keys = {
+                r["entry_id"]
+                for r in conn.execute("SELECT entry_id FROM entry_images")
+            }
+            ids = {
+                r["guid"]: r["id"]
+                for r in conn.execute("SELECT id, guid FROM feed_entries")
+            }
+
+        assert {"media_url", "media_type"} <= cols
+        assert set(by_guid) == {"vid", "mixed", "pic"}
+
+        # A video-only entry loses its fake hero and gains a real player.
+        assert by_guid["vid"].image_urls == []
+        assert by_guid["vid"].media_url == "https://assets.example.town/media/1/clip.mp4"
+        assert by_guid["vid"].media_type == "video/mp4"
+
+        # A mixed entry keeps the still and lifts only the clip.
+        assert by_guid["mixed"].image_urls == [
+            "https://assets.example.town/media/2/still.jpg"
+        ]
+        assert by_guid["mixed"].media_url == "https://assets.example.town/media/3/clip.mp4"
+
+        # An entry with no video is untouched, v6 data included.
+        assert by_guid["pic"].image_urls == [
+            "https://assets.example.town/media/4/photo.jpg"
+        ]
+        assert by_guid["pic"].media_url is None
+        assert by_guid["pic"].embed_url == "https://youtu.be/keep"
+
+        # entry_images is derived from image_urls, so a lifted video must
+        # stop suppressing later posts through the dedupe index.
+        assert ids["vid"] not in keys
+
+    def test_v6_to_v7_refuses_to_promote_a_non_http_url(self, tmp_path):
+        """A v6 row was written before anything checked a scheme (ISSUE-356).
+
+        ``media_type_for_url`` reads the path, so ``javascript:x.mp4`` parses
+        as a video. The poller refuses that on the way in and nothing
+        downstream re-checks, so the migration has to apply the same bar — a
+        promoted `javascript:` URL would be served as media by the API and the
+        skill CLI alike.
+        """
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/f.rss", title="F", site_url=None,
+                source_type="rss", category_id=None, poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="bad", title="Bad", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=["javascript:alert(1)//x.mp4"],
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_url")
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_type")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','6')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            entry = feeds_db.list_entries(conn)[0]
+        assert entry.media_url is None
+        # It stays where it was, rendering as the <img> that never loads —
+        # harmless, and not something to launder into a media field.
+        assert entry.image_urls == ["javascript:alert(1)//x.mp4"]
+
+    def test_v6_to_v7_keeps_media_already_stored_when_it_runs_again(self, tmp_path):
+        """The migration can see a row that already carries media.
+
+        Reachable when an older binary has restamped ``schema_meta.version``
+        back to 6 (``init_db`` writes its own ``SCHEMA_VERSION``
+        unconditionally) and a newer one then re-runs. The stored attachment
+        wins; only the image list is corrected.
+        """
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/f.rss", title="F", site_url=None,
+                source_type="rss", category_id=None, poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="both", title="Both", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=["https://example.com/other.mp4"],
+                    media_url="https://example.com/real.mp4",
+                    media_type="video/mp4",
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        # Rewind the version only — the columns and their data stay, which is
+        # exactly the state a downgrade-then-upgrade leaves behind.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','6')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            entry = feeds_db.list_entries(conn)[0]
+        assert entry.media_url == "https://example.com/real.mp4"
+        assert entry.media_type == "video/mp4"
+        assert entry.image_urls == []
+
+    def test_v6_to_v7_is_a_no_op_the_second_time(self, tmp_path):
+        """Re-running over an already-lifted DB changes nothing.
+
+        The version is rewound and the columns are left in place, which is the
+        state a downgrade-then-upgrade actually leaves — an older binary
+        restamps ``schema_meta.version`` but cannot drop a column it does not
+        know about. The lifted row's ``image_urls`` is NULL by then, so the
+        pass does not even visit it.
+        """
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/f.rss", title="F", site_url=None,
+                source_type="rss", category_id=None, poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="vid", title="Clip", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=["https://example.com/a.mp4"],
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        # First pass: from a genuine v6 shape, columns absent.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_url")
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_type")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('version','6')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        feeds_db.init_db(path)
+
+        def _read():
+            with feeds_db.connect(path) as c:
+                e = feeds_db.list_entries(c)[0]
+            return (e.image_urls, e.media_url, e.media_type)
+
+        first = _read()
+        assert first == ([], "https://example.com/a.mp4", "video/mp4")
+
+        # Second pass: version rewound, columns and data intact.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('version','6')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        feeds_db.init_db(path)
+
+        assert _read() == first
+
+    def test_v6_to_v7_keeps_only_the_first_of_several_videos(self, tmp_path):
+        """Matching the poller, which stores one attachment per entry.
+
+        The extras leave ``image_urls`` and are stored nowhere; the migration
+        counts them so the loss is in the log rather than silent.
+        """
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/f.rss", title="F", site_url=None,
+                source_type="rss", category_id=None, poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="two", title="Two", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=[
+                        "https://example.com/one.mp4",
+                        "https://example.com/two.mp4",
+                    ],
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_url")
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN media_type")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','6')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            entry = feeds_db.list_entries(conn)[0]
+        assert entry.media_url == "https://example.com/one.mp4"
+        assert entry.image_urls == []
+
     def test_v2_to_v3_backfills_the_image_key_index(self, tmp_path):
         """A v2 DB gains ``entry_images``, backfilled from stored entries."""
         import json

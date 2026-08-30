@@ -27,6 +27,8 @@ function entry(over: Partial<FeedEntry> = {}): FeedEntry {
     duplicate_image_count: 0,
     embed_url: '',
     file_url: 'https://attachments.are.na/1/e.pdf',
+    media_url: '',
+    media_type: '',
     feed: {
       id: 1,
       title: 'pdf-library',

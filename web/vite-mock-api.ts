@@ -1899,6 +1899,8 @@ interface MockEntry {
   duplicate_image_count: number;
   embed_url: string;
   file_url: string;
+  media_url: string;
+  media_type: string;
   feed: MockFeedSource;
   status: 'read' | 'unread';
   starred: boolean;
@@ -2033,6 +2035,24 @@ function generateMockEntries(): MockEntry[] {
     const title = `${sampleTitles[i % sampleTitles.length]} (#${total - i})`;
     const snippet = sampleSnippets[i % sampleSnippets.length];
 
+    let mediaUrl = '';
+    let mediaType = '';
+    if (i % 10 === 5) {
+      mediaUrl =
+        i % 20 === 5
+          ? 'https://download.samplelib.com/mp4/sample-5s.mp4'
+          : 'https://download.samplelib.com/mp4/sample-10s.mp4';
+      mediaType = 'video/mp4';
+    } else if (i % 17 === 8) {
+      mediaUrl = 'https://download.samplelib.com/mp3/sample-3s.mp3';
+      mediaType = 'audio/mpeg';
+    }
+    // A clip that also came with a still exercises the poster path.
+    if (mediaType.startsWith('video/') && i % 30 === 5) {
+      images.length = 0;
+      images.push(`https://picsum.photos/seed/feed-${i}-poster/800/500`);
+    }
+
     entries.push({
       id: i + 1,
       title,
@@ -2046,6 +2066,14 @@ function generateMockEntries(): MockEntry[] {
       // Every 13th post stands in for an Are.na Attachment, so the document
       // card and its format badge are reachable in dev.
       file_url: i % 13 === 6 ? 'https://attachments.are.na/1/essay.pdf' : '',
+      // Every 10th post stands in for a Mastodon video attachment and every
+      // 17th for a podcast enclosure, so both native players are reachable in
+      // dev (ISSUE-356). The clips are third-party samples, so they need a
+      // working connection and their aspect ratios are whatever the host
+      // serves — the sizing rules themselves are pinned by CSS assertions in
+      // FeedCard.video.test.ts rather than by looking at these.
+      media_url: mediaUrl,
+      media_type: mediaType,
       feed,
       // First ~25% unread, rest read — gives the Unseen filter something to do.
       status: i < total * 0.25 ? 'unread' : 'read',

@@ -510,6 +510,16 @@ export interface FeedEntry {
    * treating a PDF's cover page as an ordinary gallery image.
    */
   file_url: string;
+  /**
+   * A media file played inline with a native `<video>` / `<audio>` — a
+   * Mastodon video attachment, a podcast enclosure; empty otherwise. Neither
+   * of the two above: `embed_url` is a provider watch page we rebuild a
+   * player for, `file_url` is opened elsewhere. Such a URL used to arrive in
+   * `images` and render as an `<img>` that never decodes (ISSUE-356).
+   */
+  media_url: string;
+  /** MIME type for `media_url` (e.g. `video/mp4`); empty otherwise. */
+  media_type: string;
   feed: Feed;
   status: string;
   starred: boolean;

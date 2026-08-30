@@ -138,6 +138,12 @@ def _map_entry(
         # Set for an attached document (an Are.na Attachment — usually a PDF).
         # The reader opens it instead of lightboxing the cover page.
         "file_url": entry.file_url or "",
+        # Set for a media file the reader plays inline with a native
+        # <video>/<audio> — a Mastodon video attachment, a podcast enclosure.
+        # This is the field that keeps such a URL out of `images`, where it
+        # rendered as an <img> that never decodes (ISSUE-356).
+        "media_url": entry.media_url or "",
+        "media_type": entry.media_type or "",
         "feed": {
             "id": feed.id if feed else 0,
             "title": (feed.title or feed.url) if feed else "",

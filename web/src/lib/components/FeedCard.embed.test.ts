@@ -25,6 +25,8 @@ function entry(over: Partial<FeedEntry> = {}): FeedEntry {
     duplicate_image_count: 0,
     embed_url: 'https://www.youtube.com/watch?v=B0sO1wdBhMY',
     file_url: '',
+    media_url: '',
+    media_type: '',
     feed: {
       id: 1,
       title: 'arena-influences',

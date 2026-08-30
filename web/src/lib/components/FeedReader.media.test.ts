@@ -27,6 +27,8 @@ function entry(over: Partial<FeedEntry> = {}): FeedEntry {
     duplicate_image_count: 0,
     embed_url: '',
     file_url: '',
+    media_url: '',
+    media_type: '',
     feed: {
       id: 1,
       title: 'arena-influences',
@@ -135,6 +137,90 @@ describe('the reader on an attached document', () => {
     );
     expect(container.querySelector('.reader-video')).toBeTruthy();
     expect(container.querySelector('.reader-document')).toBeNull();
+  });
+});
+
+describe('the reader on a direct media attachment (ISSUE-356)', () => {
+  function clip(over: Partial<FeedEntry> = {}) {
+    return entry({
+      title: 'a clip',
+      images: [],
+      media_url: 'https://assets.example.town/media/117/clip.mp4',
+      media_type: 'video/mp4',
+      ...over,
+    });
+  }
+
+  it('renders a <video>, not an <img>', () => {
+    const { container } = mount(clip());
+    expect(container.querySelector('video')).toBeTruthy();
+    expect(container.querySelector('img[src$=".mp4"]')).toBeNull();
+  });
+
+  it('is bounded by CSS alone — no width or height attribute', () => {
+    const { container } = mount(clip());
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video.hasAttribute('width')).toBe(false);
+    expect(video.hasAttribute('height')).toBe(false);
+    expect(video.hasAttribute('controls')).toBe(true);
+    expect(video.hasAttribute('autoplay')).toBe(false);
+  });
+
+  it('does not reach the lightbox', async () => {
+    let opened = false;
+    const { container } = mount(clip(), () => {
+      opened = true;
+    });
+    await fireEvent.click(container.querySelector('video') as HTMLElement);
+    expect(opened).toBe(false);
+  });
+
+  it('uses an accompanying still as the poster', () => {
+    const { container } = mount(
+      clip({ images: ['https://assets.example.town/media/119/still.jpg'] }),
+    );
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video.getAttribute('poster')).toBe('https://assets.example.town/media/119/still.jpg');
+    // The still is the poster, not a second hero beside the player.
+    expect(container.querySelector('.hero-img')).toBeNull();
+  });
+
+  it('draws several stills under the player rather than eating one', () => {
+    // The reader is the last place a picture could be recovered, so an entry
+    // carrying both a clip and a gallery must not lose the gallery.
+    const images = ['https://a.example/1.jpg', 'https://a.example/2.jpg'];
+    const { container } = mount(clip({ images }));
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video.hasAttribute('poster')).toBe(false);
+    expect(container.querySelectorAll('.hero-img img')).toHaveLength(2);
+  });
+
+  it('never uses a playable URL as the poster', () => {
+    const { container } = mount(
+      clip({ images: ['https://assets.example.town/media/117/clip.mp4'] }),
+    );
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video.hasAttribute('poster')).toBe(false);
+  });
+
+  it('renders an <audio> for a podcast enclosure', () => {
+    const { container } = mount(
+      clip({ media_url: 'https://pod.example.com/12.mp3', media_type: 'audio/mpeg' }),
+    );
+    expect(container.querySelector('audio')).toBeTruthy();
+    expect(container.querySelector('video')).toBeNull();
+  });
+
+  it('plays nothing for a URL that is not http(s)', () => {
+    const { container } = mount(clip({ media_url: 'javascript:alert(1)' }));
+    expect(container.querySelector('video')).toBeNull();
+    expect(container.querySelector('audio')).toBeNull();
+  });
+
+  it('prefers a provider player when an entry carries both', () => {
+    const { container } = mount(clip({ embed_url: 'https://www.youtube.com/watch?v=B0sO1wdBhMY' }));
+    expect(container.querySelector('.reader-video')).toBeTruthy();
+    expect(container.querySelector('video')).toBeNull();
   });
 });
 
