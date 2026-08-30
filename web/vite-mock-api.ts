@@ -148,6 +148,14 @@ interface MockChatTask {
   prompt: string;
   createdAt: number;
   variant?: 'simple' | 'multiround';
+  /** Milliseconds to stall after `task_started`, before any output.
+   *
+   * The send queue is only reachable while a turn is running, and an ordinary
+   * mock turn settles in a few seconds — long enough to watch, too short to
+   * type a second message into by hand. A prompt containing `slow` holds the
+   * turn open here instead, with Stop up and the composer live, which is the
+   * state the queue exists for. */
+  holdMs?: number;
   /** Attachment chip labels, persisted the way the backend persists them, so
    * a chip in dev survives leaving the room and coming back. */
   attachments?: string[];
@@ -463,7 +471,26 @@ function mockMultiRoundTaskEvents(task: MockChatTask) {
   return events;
 }
 
+/** How long a `slow` prompt holds its turn open. Long enough to type a second
+ *  message and watch it queue, short enough to sit through twice. */
+const SLOW_HOLD_MS = 45_000;
+
+/**
+ * The turn's event timeline, with any `holdMs` applied.
+ *
+ * The hold lands *after* `task_started` and before everything else, so the
+ * client goes busy immediately — Stop up, queue reachable — and simply
+ * produces nothing for a while. Shifting `task_started` too would leave the
+ * composer idle for the length of the hold, which is the opposite of what the
+ * knob is for.
+ */
 function mockTaskEvents(task: MockChatTask) {
+  const events = mockTaskEventsRaw(task);
+  if (!task.holdMs) return events;
+  return events.map((e) => (e.kind === 'task_started' ? e : { ...e, at: e.at + task.holdMs! }));
+}
+
+function mockTaskEventsRaw(task: MockChatTask) {
   if (task.variant === 'multiround') return mockMultiRoundTaskEvents(task);
   // A multi-paragraph markdown answer, chunked into small deltas so the live
   // prominent streaming (and incremental markdown) is visible.
@@ -584,6 +611,15 @@ function mockTaskEvents(task: MockChatTask) {
 // Safely past the timeline's terminal `done` (answer streams ~5.5s→~7.5s); the
 // history endpoint uses this to decide whether a task has finished streaming.
 const MOCK_TASK_DONE_MS = 8000;
+/** When a task counts as finished, which a `slow` hold pushes out with it.
+ *
+ * Three call sites read this and the event timeline reads `holdMs` separately,
+ * so a flat constant would have the message list calling a turn durable while
+ * its own stream was still holding — the room would show a finished answer
+ * with Stop still up beside it. */
+function mockTaskDoneMs(t: MockChatTask): number {
+  return MOCK_TASK_DONE_MS + (t.holdMs ?? 0);
+}
 
 // Mock !command output so the command rendering (lists, code, tables) can be
 // previewed without a live backend. Returns the inline markdown for a command,
@@ -895,7 +931,7 @@ function mockAggregateRows(): any[] {
   const now = Date.now();
   const rows: { msg: any; createdAt: number }[] = [];
   for (const t of mockChatTasks.values()) {
-    if (now - t.createdAt < MOCK_TASK_DONE_MS) continue; // durable turns only
+    if (now - t.createdAt < mockTaskDoneMs(t)) continue; // durable turns only
     const room = mockRoomFor(t.roomToken);
     if (!room || room.archived) continue;
     const turn = mockFinishedTurn(t);
@@ -919,7 +955,7 @@ function mockUnreadCount(token: string): number {
   let n = 0;
   for (const t of mockChatTasks.values()) {
     if (t.roomToken !== token) continue;
-    if (now - t.createdAt < MOCK_TASK_DONE_MS) continue;
+    if (now - t.createdAt < mockTaskDoneMs(t)) continue;
     if (t.createdAt > mockReadCursorMs) n++; // one unread assistant row per turn
   }
   return n;
@@ -1247,7 +1283,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     const messages: any[] = [];
     let active: any = null;
     for (const t of tasks) {
-      if (now - t.createdAt >= MOCK_TASK_DONE_MS) {
+      if (now - t.createdAt >= mockTaskDoneMs(t)) {
         // Finished turn: the shared builder carries msg_id/starred (and the
         // full segments/tools shape) so history matches the backend payload.
         const turn = mockFinishedTurn(t);
@@ -1329,12 +1365,16 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     // Type a message containing "multiround" to stream the multi-step shape
     // (chip → intermediate prose → chip → final) live, not just in history.
     const variant: 'simple' | 'multiround' = /multiround/i.test(text) ? 'multiround' : 'simple';
+    // Type a message containing "slow" to hold the turn open long enough to
+    // queue a second one behind it (see MockChatTask.holdMs).
+    const holdMs = /\bslow\b/i.test(text) ? SLOW_HOLD_MS : 0;
     mockChatTasks.set(id, {
       id,
       roomToken: room.token,
       prompt: text,
       createdAt: Date.now(),
       variant,
+      holdMs,
       attachments: attachmentNames,
       attachmentPaths: attachmentPaths.some(Boolean) ? attachmentPaths : undefined,
       replyToMsgId,

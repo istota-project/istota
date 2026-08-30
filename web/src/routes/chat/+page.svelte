@@ -11,6 +11,7 @@
     Chip,
     ConfirmDialog,
     CountPill,
+    NoticeBanner,
   } from '$lib/components/ui';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
@@ -742,6 +743,40 @@
     </ShellHeader>
   {/snippet}
 
+  <!-- Connectivity is a state, not an event, so it is stated in a band that
+       stays until it changes — never a `notify()`, which would announce it once
+       and then take the only explanation away while the composer still cannot
+       reach anything. `notices.ts` says the same thing from the other side: a
+       page's own persistent condition belongs in that page's banner, where it
+       can stay put and be re-read.
+
+       It is the shell's `extras` band rather than a row inside the composer
+       dock, which is where it used to sit. Docked, it read as a part of the
+       composer — a caption on the text box rather than a statement about the
+       app — and it was the composer's own condition that gave it its shape:
+       painting the pane fill so the transcript did not show through, holding
+       the home-indicator inset in an aggregate view that had no composer, and
+       forcing the dock to render at all in a read-only pane just to carry it.
+       In the band it is app chrome, reflows the content instead of floating
+       over it, and is the same warn-variant alert every other persistent
+       condition in the app uses. It is withheld from no view: the aggregate
+       panes cannot be read offline either, so the sentence is as true there.
+
+       Chat-scoped rather than in `AppShell` itself, since the promise it makes
+       is the send queue's and nothing outside chat has one to make. -->
+  {#snippet extras()}
+    {#if !$online}
+      <!-- `role="status"` on the wrapper rather than the alert. The docked row
+           carried it and `NoticeBanner` is a `role="note"`, which is not a live
+           region — so without this the one user who cannot see the banner
+           appear is told nothing at all. It goes on the wrapper because the
+           component's role is its own and a caller must not overwrite it. -->
+      <div class="offline-alert" role="status">
+        <NoticeBanner title="Offline — messages will send when you’re back." variant="warn" />
+      </div>
+    {/if}
+  {/snippet}
+
   {#snippet sidebar()}
     <Sidebar
       title="Rooms"
@@ -1001,62 +1036,49 @@
         </button>
       {/if}
     </div>
-    {#if !inViewMode || !$online}
+    {#if !inViewMode}
       <!-- Sending is room-scoped; aggregate views are read-only panes.
            Docked over the transcript rather than sharing the column with it, so
            the message list runs the full height of the pane and content passes
            under the composer instead of stopping short of it.
 
-           The dock also carries the offline banner, which is why it can render
-           in an aggregate view that has no composer: the banner belongs to the
-           whole pane, and the transcript already reserves the dock's measured
-           height, so putting it here keeps the newest message clear of it with
-           no second measurement. -->
+           It carries the composer and nothing else. The offline banner used to
+           ride here too, which is what made the dock render in an aggregate
+           view that has no composer at all; it is the shell's `extras` band
+           now, so this condition is back to the one thing the dock is for. -->
       <div class="composer-dock" bind:this={dockEl}>
-        {#if !$online}
-          <!-- Connectivity is a state, not an event, so it is stated where the
-               sending happens and stays there until it changes — never a
-               `notify()`, which would announce it once and then take the only
-               explanation away while the composer still cannot reach anything.
-               Muted rather than alarming: nothing has gone wrong. -->
-          <div class="offline-banner" class:floor={inViewMode} role="status">
-            Offline — messages will send when you’re back.
-          </div>
-        {/if}
-        {#if !inViewMode}
-          <Composer
-            onSend={(t, atts, reply) => {
-              // Sending is the end of reading back: whatever the user had scrolled
-              // up to look at, the message they just wrote — and the reply to it —
-              // is what they want to see. So the send re-arms the stick-to-bottom
-              // latch rather than respecting it, which is the one case where the
-              // "only if you were already at the bottom" rule is wrong.
-              //
-              // Pinned immediately as well as latched: `send` is async, so the
-              // message may be a network round trip away, and the transcript
-              // should be waiting at the bottom for it rather than jumping when it
-              // lands. The $messages effect covers the landing itself.
-              atBottom = true;
-              showJumpToLatest = false;
-              // See retryFailedSend: the store settles its own failures onto the
-              // message row, so this only covers a rejection that escaped it.
-              session
-                .send(t, atts, reply ?? undefined)
-                .catch(() => notifyError('Couldn’t send that message.'));
-              tick().then(() => pinToBottom());
-            }}
-            onCancel={() => session.cancel()}
-            {busy}
-            queueing={busy || !$online}
-            {queueFull}
-            placeholder="Your message…"
-            {draftKey}
-            sendSettled={settleSignal}
-            replyTo={stagedReply}
-            onReplyChange={(msgId) => (stagedReplyId = msgId)}
-            restoreSend={returnedSend}
-          />
-        {/if}
+        <Composer
+          onSend={(t, atts, reply) => {
+            // Sending is the end of reading back: whatever the user had scrolled
+            // up to look at, the message they just wrote — and the reply to it —
+            // is what they want to see. So the send re-arms the stick-to-bottom
+            // latch rather than respecting it, which is the one case where the
+            // "only if you were already at the bottom" rule is wrong.
+            //
+            // Pinned immediately as well as latched: `send` is async, so the
+            // message may be a network round trip away, and the transcript
+            // should be waiting at the bottom for it rather than jumping when it
+            // lands. The $messages effect covers the landing itself.
+            atBottom = true;
+            showJumpToLatest = false;
+            // See retryFailedSend: the store settles its own failures onto the
+            // message row, so this only covers a rejection that escaped it.
+            session
+              .send(t, atts, reply ?? undefined)
+              .catch(() => notifyError('Couldn’t send that message.'));
+            tick().then(() => pinToBottom());
+          }}
+          onCancel={() => session.cancel()}
+          {busy}
+          queueing={busy || !$online}
+          {queueFull}
+          placeholder="Your message…"
+          {draftKey}
+          sendSettled={settleSignal}
+          replyTo={stagedReply}
+          onReplyChange={(msgId) => (stagedReplyId = msgId)}
+          restoreSend={returnedSend}
+        />
       </div>
     {/if}
   </div>
@@ -1177,23 +1199,14 @@
     height: calc(var(--composer-h, 0px) + 1rem);
   }
 
-  /* The offline row, at the top of the dock. It paints the pane fill rather
-	   than being left to the fade below it: the fade only reaches full strength
-	   2.5rem in, and in an aggregate view there is no fade at all, so without a
-	   fill of its own the sentence would sit over transcript text. Same colour
-	   the fade dissolves into, so the two meet without an edge of their own. */
-  .offline-banner {
+  /* Inset for the offline alert in the shell's band. The band spans the pane
+	   edge to edge, and a card sitting flush against the header and the sides
+	   reads as a strip of chrome rather than as the alert component it is; the
+	   inline value is the same 0.75rem the rest of the app's page insets use.
+	   Nothing about the alert's own shape is set here — the border, the fill and
+	   both type sizes belong to `NoticeBanner`. */
+  .offline-alert {
     padding: var(--space-2) var(--space-3);
-    background: var(--chat-bg);
-    color: var(--text-muted);
-    font-size: var(--text-sm);
-    text-align: center;
-  }
-  /* With no composer under it the row is the bottom of the screen, so it holds
-	   the home-indicator inset itself — `max()`, since the inset is 0 on a device
-	   without one and the padding would otherwise vanish there. */
-  .offline-banner.floor {
-    padding-bottom: max(var(--space-2), var(--safe-bottom));
   }
   /* Wrapper anchors the floating jump-to-latest button to the bottom of the
 	   scroll area; the button offsets itself above the docked composer. */

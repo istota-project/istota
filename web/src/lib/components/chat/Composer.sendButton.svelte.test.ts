@@ -20,6 +20,34 @@ vi.mock('$lib/platform/nativePicker', () => ({
 import Composer from './Composer.svelte';
 
 /**
+ * Make `recorder.supported` true, so the mic button renders.
+ *
+ * Without it jsdom has no MediaRecorder, the mic is absent, and every
+ * assertion below about the row holding its width would be vacuously true —
+ * the mic is the button Stop trades places with, so a run with no mic in it
+ * cannot see the trade happen or fail to.
+ */
+class FakeMediaRecorder {
+  static isTypeSupported = () => true;
+  start() {}
+  stop() {}
+}
+function enableMic() {
+  (globalThis as Record<string, unknown>).MediaRecorder = FakeMediaRecorder;
+  Object.defineProperty(globalThis.navigator, 'mediaDevices', {
+    configurable: true,
+    value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+  });
+}
+function disableMic() {
+  delete (globalThis as Record<string, unknown>).MediaRecorder;
+  Object.defineProperty(globalThis.navigator, 'mediaDevices', {
+    configurable: true,
+    value: undefined,
+  });
+}
+
+/**
  * The send/stop control's invariants are "colour and glyph always agree" and
  * "the swap is not animated" — and both live in CSS, which jsdom does not
  * apply. Worse, jsdom's own cascade walks stylesheets in document order without
@@ -137,7 +165,10 @@ function fillOf(selector: string): string | undefined {
 }
 
 describe('send/stop control styling', () => {
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    disableMic();
+  });
 
   it('parses the rules it is about to assert on', () => {
     // The failure mode of a hand-rolled parser is reporting nothing wrong
@@ -213,7 +244,7 @@ describe('send/stop control styling', () => {
     expect(unguarded.map((r) => r.selector)).toEqual([]);
   });
 
-  it('is always Send, and grows a Stop beside it while a turn runs', async () => {
+  it('is always Send, and shows a Stop beside it while a turn runs', async () => {
     const { container, rerender } = render(Composer, {
       props: { onSend: () => {}, onCancel: () => {}, busy: false },
     });
@@ -251,8 +282,8 @@ describe('send/stop control styling', () => {
     // The reason Stop is rendered *before* Send rather than after it. iOS
     // Safari re-hit-tests when it delivers a tap's synthesized click, so a
     // Send that moved because a neighbour appeared mid-gesture would take the
-    // tap on whatever slid into its place. Growing the row leftwards leaves
-    // Send at the end of it in both states.
+    // tap on whatever slid into its place. Send is the last child of the row
+    // in both states, so it never moves.
     const { container, rerender } = render(Composer, {
       props: { onSend: () => {}, onCancel: () => {}, busy: false },
     });
@@ -267,6 +298,44 @@ describe('send/stop control styling', () => {
     await rerender({ onSend: () => {}, onCancel: () => {}, busy: true });
     expect(order().indexOf('Send')).toBe(order().length - 1);
     expect(order().indexOf('Stop')).toBe(order().length - 2);
+  });
+
+  it('holds the tool row to the same buttons while a turn runs', async () => {
+    // The composer's height depends on this. `singleRowWidth` subtracts
+    // `.tools`' measured width to decide where the text wraps, and a wrap puts
+    // the field on a row of its own with the controls underneath — so a third
+    // button appearing at turn start narrows the field by one slot and flips
+    // the whole composer to two rows for the length of the turn. Stop takes
+    // the mic's place instead of standing beside it, and the count is what
+    // says so: a `{#if}` that let both render would restore the reflow with
+    // every other assertion in this file still green.
+    enableMic();
+    const { container, rerender } = render(Composer, {
+      props: { onSend: () => {}, onCancel: () => {}, busy: false },
+    });
+    const order = () =>
+      [...container.querySelector('.tools')!.children].map((c) => c.getAttribute('aria-label'));
+
+    expect(order()).toEqual(['Record voice message', 'Send']);
+
+    await rerender({ onSend: () => {}, onCancel: () => {}, busy: true });
+    expect(order()).toEqual(['Stop', 'Send']);
+
+    await rerender({ onSend: () => {}, onCancel: () => {}, busy: false });
+    expect(order()).toEqual(['Record voice message', 'Send']);
+  });
+
+  it('keeps the mic while a turn runs that has nothing to cancel', async () => {
+    // The mic yields to Stop, not to `busy`. With no `onCancel` there is no
+    // Stop to make room for, so hiding it would cost the button and buy
+    // nothing — and leave the row a slot narrower than the idle one, which is
+    // the reflow inverted rather than fixed.
+    enableMic();
+    const { container } = render(Composer, { props: { onSend: () => {}, busy: true } });
+    const order = [...container.querySelector('.tools')!.children].map((c) =>
+      c.getAttribute('aria-label'),
+    );
+    expect(order).toEqual(['Record voice message', 'Send']);
   });
 
   it('never cancels from the send button, whatever the turn is doing', async () => {

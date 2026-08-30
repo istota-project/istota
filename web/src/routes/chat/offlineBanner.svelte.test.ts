@@ -1,14 +1,23 @@
 /**
- * What the chat page says about being offline: the banner, the room-list badge
+ * What the chat page says about being offline: the alert, the room-list badge
  * for what is waiting to send, and what an empty room reads as.
  *
- * Two things here are load-bearing and neither is the wording. The row is tied
- * to the connectivity store rather than to a failed request, so it goes as soon
- * as the connection is back and without a reload — and it is drawn on the page
- * rather than raised as a notice: a toast announces an event once and then
+ * Three things here are load-bearing and none of them is the wording. The alert
+ * is tied to the connectivity store rather than to a failed request, so it goes
+ * as soon as the connection is back and without a reload. It is drawn on the
+ * page rather than raised as a notice: a toast announces an event once and then
  * takes the explanation away while the composer still cannot reach anything,
  * which is why the empty notice queue below is an assertion rather than
- * housekeeping.
+ * housekeeping. And it is a `NoticeBanner` in the shell's band rather than a row
+ * inside the composer dock, which is what it used to be — docked, it read as a
+ * caption on the text box rather than as a statement about the app, and the
+ * dock had to render in a read-only aggregate pane that has no composer just to
+ * carry it.
+ *
+ * That last one is what `is not part of the composer dock` and
+ * `stands in an aggregate view` pin. Neither can be checked by looking for the
+ * sentence — it was on screen under the old placement too — so each names
+ * something only the new one produces.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
@@ -70,6 +79,9 @@ afterEach(() => {
   clearNotices();
 });
 
+/** The alert element itself, not the text node inside it. */
+const offlineAlert = () => screen.getByText(OFFLINE_TEXT).closest('.notice-banner');
+
 describe('the offline banner', () => {
   it('is absent while the app can reach the server', async () => {
     render(Page);
@@ -99,8 +111,52 @@ describe('the offline banner', () => {
   it('is non-dismissible: it carries no button of its own', async () => {
     render(Page);
     noteTransport(false, 'unreachable');
-    const row = await screen.findByText(OFFLINE_TEXT);
-    expect(row.querySelector('button')).toBeNull();
+    await screen.findByText(OFFLINE_TEXT);
+    // The whole alert, not the title span — a dismiss control would be a
+    // sibling of the title, so asserting on the text node's own subtree would
+    // pass whether or not one were there.
+    expect(offlineAlert()?.querySelector('button')).toBeNull();
+  });
+
+  it('is the app’s warn-variant alert rather than a row of its own', async () => {
+    render(Page);
+    noteTransport(false, 'unreachable');
+    await screen.findByText(OFFLINE_TEXT);
+    // `notice-warn` is NoticeBanner's own variant class. Naming it is what
+    // makes this an assertion about the component rather than about a div that
+    // happens to hold the same sentence.
+    expect(offlineAlert()).toHaveClass('notice-warn');
+  });
+
+  it('is announced: it sits in a live region', async () => {
+    // `NoticeBanner` is a `role="note"`, which announces nothing on its own.
+    // The docked row this replaced was a `role="status"`, and losing that would
+    // leave the user who cannot see the alert appear with no report at all.
+    render(Page);
+    noteTransport(false, 'unreachable');
+    await screen.findByText(OFFLINE_TEXT);
+    expect(offlineAlert()?.closest('[role="status"]')).not.toBeNull();
+  });
+
+  it('is not part of the composer dock', async () => {
+    render(Page);
+    noteTransport(false, 'unreachable');
+    await screen.findByText(OFFLINE_TEXT);
+    expect(offlineAlert()?.closest('.composer-dock')).toBeNull();
+  });
+
+  it('stands in an aggregate view, which has no composer to caption', async () => {
+    // The read-only panes cannot be read offline either, so the sentence is as
+    // true there — and it no longer costs a composer dock rendered to carry it.
+    const session = getChatSession() as unknown as Record<string, { set: (v: unknown) => void }>;
+    session.view.set('all');
+    render(Page);
+    noteTransport(false, 'unreachable');
+
+    await waitFor(() => expect(screen.getByText(OFFLINE_TEXT)).toBeInTheDocument());
+    expect(document.querySelector('.composer-dock')).toBeNull();
+
+    session.view.set('room');
   });
 });
 
