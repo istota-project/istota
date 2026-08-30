@@ -221,6 +221,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A message you type into web chat while the bot is still working now stays at the bottom of the transcript until it is actually sent. It was left wherever it landed, so the answer to the message before it, and then its own answer, arrived underneath it and the conversation read out of order. Once it is sent it takes its real place and everything after it follows below, as it did before.
+
 - Are.na channels no longer collect frequent rate-limit rejections. Nothing paced the poller: every channel you have is one request to the same host, and it sent them back to back, so "Refresh now" or an import of several channels reliably had the tail of the list turned away. Requests to one host are now spaced apart, which costs ordinary web feeds nothing because each of those is a different host.
 
 - A rejected poll is also no longer recorded as a broken feed. Being turned away for asking too often is not the same as a feed that has gone missing, but both wrote the same error against the channel and both doubled its wait — so a channel that was fine read as broken in the feeds diagnostics, and stayed slowed down afterwards. It is still recorded, in its own right rather than as an error: feeds settings counts the channels currently being turned away, and a poll run that was rejected everywhere reports that instead of looking like a run that simply found nothing. Where the server says when to come back, that is now when the poller comes back, never sooner than the channel's own polling interval and never beyond a ceiling.

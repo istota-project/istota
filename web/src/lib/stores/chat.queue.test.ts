@@ -868,6 +868,247 @@ describe('chat store — the send queue', () => {
     });
   });
 
+  describe('the queued row keeps the bottom of the transcript', () => {
+    // A queued message has not been POSTed. It is a pending action carrying
+    // Send / Edit / Remove, so it belongs against the composer until it
+    // drains, and everything the server produces sorts above it (ISSUE-351).
+    // The rule was written down at exactly one call site — the resume walk in
+    // `loadHistory`, covered by 'puts the restored row below the turn it is
+    // waiting on' above — and every other append pushed straight to the tail.
+    //
+    // Each case asserts an index comparison rather than a row count: counting
+    // rows passes against the pre-fix code, which produced all the same rows
+    // in the wrong order.
+
+    /** Index of the first queued row, which is where the block starts. */
+    const queuedIdx = (msgs: ChatMessage[]) => msgs.findIndex((m) => m.sendState === 'queued');
+    /**
+     * Every queued row occupies a final slot, in one contiguous run.
+     *
+     * Stated this way rather than as `queuedIdx === length - 1`, which can only
+     * hold when there is exactly one queued row and so quietly stops meaning
+     * what it says the moment a case leaves two.
+     */
+    const queuedRowsAreLast = (msgs: ChatMessage[]) => {
+      const n = queuedRows(msgs).length;
+      return n > 0 && msgs.slice(-n).every((m) => m.sendState === 'queued');
+    };
+
+    it('keeps the running turn’s own placeholder above a message queued during the ack', async () => {
+      // The reported case. The placeholder is appended on the ack, so a
+      // message queued while that POST was still open used to land above it,
+      // and the answer to the *first* turn then streamed in underneath the
+      // message that was waiting on it.
+      const s = await freshSession();
+      await s.init();
+      let ack: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValueOnce(
+        new Promise((res) => {
+          ack = res;
+        }),
+      );
+      const turn = s.send('the first turn');
+      await flush();
+      expect(get(s.status)).toBe('sending');
+
+      await s.send('typed while the ack was open');
+      await flush();
+      ack({ ok: true, status: 200, task_id: 42 });
+      await turn;
+      await flush();
+
+      const rows = get(s.messages);
+      expect(queuedRows(rows).map((m) => m.text)).toEqual(['typed while the ack was open']);
+      expect(queuedRowsAreLast(rows)).toBe(true);
+      const ph = rows.findIndex((m) => m.role === 'assistant' && m.taskId === 42);
+      expect(ph).toBeGreaterThanOrEqual(0);
+      expect(ph).toBeLessThan(queuedIdx(rows));
+    });
+
+    it('keeps a fresh send from an idle room above a held queued row', async () => {
+      // Stop holds the queue and leaves the room idle, so the next message
+      // takes the ordinary `send()` path with client-only rows already on
+      // screen — the one case that needs no second turn to reach.
+      const s = await streaming();
+      await s.send('held one');
+      await emit('cancelled');
+      expect(get(s.status)).toBe('idle');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await s.send('brand new');
+      await flush();
+
+      const rows = get(s.messages);
+      expect(queuedRows(rows)[0].queueHeld).toBe(true);
+      expect(queuedRowsAreLast(rows)).toBe(true);
+      const fresh = rows.findIndex((m) => m.text === 'brand new');
+      expect(fresh).toBeGreaterThanOrEqual(0);
+      expect(fresh).toBeLessThan(queuedIdx(rows));
+    });
+
+    it('keeps a mid-turn !command and its answer above a queued row', async () => {
+      // Chronologically the command came later and it still sorts above: the
+      // queued row is a pending action, not an event in the history.
+      const s = await streaming();
+      await s.send('queued body');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: null });
+
+      await s.send('!status');
+      await flush();
+
+      const rows = get(s.messages);
+      expect(queuedRowsAreLast(rows)).toBe(true);
+      const cmd = rows.findIndex((m) => m.text === '!status');
+      expect(cmd).toBeGreaterThanOrEqual(0);
+      expect(cmd).toBeLessThan(queuedIdx(rows));
+    });
+
+    it('keeps a turn adopted from the room stream above a queued row', async () => {
+      // A turn started on another surface arrives mid-queue: its user row goes
+      // through `appendStreamedRow` and its placeholder through
+      // `pickUpStreamedTask`, the two remaining tail pushes.
+      const s = await streaming();
+      await s.send('queued body');
+      api.getRoomEvents.mockResolvedValue({
+        events: [
+          {
+            room_token: 't1',
+            role: 'user',
+            text: 'from another surface',
+            msg_id: 900,
+            task_id: 77,
+            status: 'running',
+            created_at: new Date().toISOString(),
+          },
+        ],
+        cursor: 1,
+        gap: false,
+      });
+
+      await vi.advanceTimersByTimeAsync(4000);
+
+      const rows = get(s.messages);
+      expect(queuedRowsAreLast(rows)).toBe(true);
+      const adopted = rows.findIndex((m) => m.text === 'from another surface');
+      const ph = rows.findIndex((m) => m.role === 'assistant' && m.taskId === 77);
+      expect(adopted).toBeGreaterThanOrEqual(0);
+      expect(ph).toBeGreaterThanOrEqual(0);
+      expect(adopted).toBeLessThan(queuedIdx(rows));
+      expect(ph).toBeLessThan(queuedIdx(rows));
+    });
+
+    it('lets a drained row take its real place, with its own answer below it', async () => {
+      // The other half of the rule. The moment a message is actually sent it
+      // stops being a pending action, so its own placeholder belongs *under*
+      // it — and the message still queued behind it stays at the bottom.
+      const s = await streaming();
+      await s.send('first queued');
+      await s.send('second queued');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+      await flush();
+
+      const rows = get(s.messages);
+      const drained = rows.findIndex((m) => m.text === 'first queued');
+      const ph = rows.findIndex((m) => m.role === 'assistant' && m.taskId === 43);
+      expect(rows[drained].sendState).not.toBe('queued');
+      expect(queuedRows(rows).map((m) => m.text)).toEqual(['second queued']);
+      expect(drained).toBeLessThan(ph);
+      expect(ph).toBeLessThan(queuedIdx(rows));
+      expect(queuedRowsAreLast(rows)).toBe(true);
+    });
+
+    it('keeps a fresh send above a stranded failed row, not only above a queued one', async () => {
+      // `isClientOnly` is two predicates and the queued half is the one every
+      // case above exercises — narrowing the walk to `isQueued` alone leaves
+      // them all green. A failed send is the other half: the server has no copy
+      // of it either, it carries the Retry that is its only way back, and it
+      // belongs with the queued rows at the bottom.
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      await s.send('never left');
+      await flush();
+      const stranded = get(s.messages).find((m) => m.text === 'never left');
+      expect(stranded?.sendState).toBe('failed');
+      expect(stranded?.msgId).toBeUndefined();
+      expect(get(s.status)).toBe('idle');
+
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 44 });
+      await s.send('brand new');
+      await flush();
+
+      const rows = get(s.messages);
+      const failed = rows.findIndex((m) => m.text === 'never left');
+      const fresh = rows.findIndex((m) => m.text === 'brand new');
+      const ph = rows.findIndex((m) => m.role === 'assistant' && m.taskId === 44);
+      expect(failed).toBe(rows.length - 1);
+      expect(fresh).toBeLessThan(failed);
+      expect(ph).toBeLessThan(failed);
+    });
+
+    it('keeps a streamed row above a stranded failed row in the All view', async () => {
+      // `feedAggregateView` is the one converted call site the cases above
+      // never reach: All spans every room, so `applyRoomEvent` takes the
+      // aggregate branch instead of `appendStreamedRow`. Queued rows are
+      // deliberately not carried there (`carryClientOnlyRows`'s
+      // `token === null` branch drops them), so a failed send is the only
+      // client-only row the walk ever sees here — which is exactly why this
+      // site needs the stranded half rather than being exempt from the rule.
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      await s.send('never left');
+      await flush();
+
+      await s.selectView('all');
+      await flush();
+      expect(get(s.messages).some((m) => m.sendState === 'failed')).toBe(true);
+
+      api.getRoomEvents.mockResolvedValue({
+        events: [
+          {
+            room_token: 't2',
+            role: 'assistant',
+            text: 'from the other room',
+            msg_id: 901,
+            created_at: new Date().toISOString(),
+          },
+        ],
+        cursor: 1,
+        gap: false,
+      });
+      await vi.advanceTimersByTimeAsync(4000);
+
+      const rows = get(s.messages);
+      const failed = rows.findIndex((m) => m.sendState === 'failed');
+      const streamed = rows.findIndex((m) => m.text === 'from the other room');
+      expect(streamed).toBeGreaterThanOrEqual(0);
+      expect(failed).toBe(rows.length - 1);
+      expect(streamed).toBeLessThan(failed);
+    });
+
+    it('leaves a queued row older than the rows above it, which is what the day divider reads', async () => {
+      // Pinning the block at the bottom puts an *older* stamp there: a queued
+      // row is stamped when it was typed and a restored one keeps that for up
+      // to a week. `startsNewDay` in `routes/chat/+page.svelte` is pure
+      // adjacency, so it would date the row and draw "Yesterday" underneath
+      // today's conversation. The page skips a client-only row for that reason;
+      // this pins the store-side fact the page is reacting to, so nobody
+      // "fixes" the ordering by restamping the row instead.
+      const s = await streaming();
+      await s.send('queued body');
+      await flush();
+
+      const rows = get(s.messages);
+      const queued = rows[rows.length - 1];
+      expect(queued.sendState).toBe('queued');
+      const above = rows[rows.length - 2];
+      expect(Date.parse(queued.createdAt!)).toBeLessThanOrEqual(Date.parse(above.createdAt!));
+    });
+  });
+
   describe('a deleted room', () => {
     it('drops the room queue with the room', async () => {
       const s = await streaming();

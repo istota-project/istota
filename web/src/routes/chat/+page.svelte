@@ -24,7 +24,7 @@
     type PointerSample,
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
-  import { REPLY_EXCERPT_CHARS, type MessageReply } from '$lib/stores/segments';
+  import { REPLY_EXCERPT_CHARS, isClientOnly, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
@@ -282,8 +282,15 @@
   // True when message i is the first (rendered) message of its calendar day —
   // i.e. its day differs from the previous message's (or it's the very first).
   function startsNewDay(i: number): boolean {
-    const cur = $messages[i]?.createdAt;
+    const m = $messages[i];
+    const cur = m?.createdAt;
     if (!cur) return false;
+    // A client-only row is a pending action, not a day in the history, and it
+    // is deliberately pinned below every server row (ISSUE-351). Its stamp is
+    // when it was typed — a restored queued entry keeps that for up to a week
+    // — so dating it draws "Yesterday" underneath today's conversation and the
+    // transcript reads as running backwards.
+    if (m && isClientOnly(m)) return false;
     const curKey = localDayKey(cur);
     if (!curKey) return false;
     if (i === 0) return true;
