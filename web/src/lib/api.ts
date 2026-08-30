@@ -1,5 +1,6 @@
 import { base } from '$app/paths';
 import { uploadFromPath, type Picked } from '$lib/platform/nativePicker';
+import { noteTransport } from '$lib/stores/connectivity';
 import type { BasemapSpec } from '$lib/basemap';
 
 class AuthError extends Error {
@@ -18,16 +19,37 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
   // clobber whatever replaced it in the meantime.
   let controller: AbortController | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
   if (timeoutMs > 0 && !init?.signal) {
     controller = new AbortController();
-    timer = setTimeout(() => controller?.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller?.abort();
+    }, timeoutMs);
   }
   try {
-    const resp = await fetch(`${base}/api${path}`, {
-      ...init,
-      credentials: 'same-origin',
-      ...(controller ? { signal: controller.signal } : {}),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(`${base}/api${path}`, {
+        ...init,
+        credentials: 'same-origin',
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (e) {
+      // Every request in the app comes through here, which makes this the one
+      // place that sees what the network is actually doing (ISSUE-202). A
+      // `fetch` rejection is a transport failure or an abort, and only the
+      // first is evidence about the server: a caller that cancelled its own
+      // request has said nothing about the connection, so it must not raise
+      // the offline banner. No caller passes a signal today — the same
+      // condition the timeout guard above is written against — and the check
+      // is here so the first one to do so cannot introduce that quietly.
+      if (!init?.signal?.aborted) noteTransport(false, timedOut ? 'timeout' : 'unreachable');
+      throw e;
+    }
+    // Whatever it says, something answered. A 401 or a 500 is a server, and
+    // the connectivity store's whole job is to keep that apart from silence.
+    noteTransport(true);
     if (resp.status === 401) throw new AuthError();
     if (!resp.ok) throw new Error(`API error: ${resp.status}`);
     return resp.json();
@@ -2376,8 +2398,16 @@ export interface TaskEventDTO {
   created_at: string;
 }
 
-export function getChatConfig(): Promise<ChatConfig> {
-  return apiFetch<ChatConfig>('/chat/config');
+/**
+ * The server's chat limits.
+ *
+ * `timeoutMs` is for the connectivity probe (`stores/connectivity.ts`), which
+ * uses this call as its "is the server there" question and cannot afford to
+ * wait out a stall — a probe with no bound would leave the app believing it is
+ * offline for as long as the OS takes to give up on the socket.
+ */
+export function getChatConfig(timeoutMs = 0): Promise<ChatConfig> {
+  return apiFetch<ChatConfig>('/chat/config', undefined, timeoutMs);
 }
 
 /**
@@ -2733,6 +2763,11 @@ export async function sendChatMessage(
       signal: controller.signal,
     });
 
+    // Something answered, whatever it went on to say (ISSUE-202). Reported
+    // before the status branches below, since a 401 and a 429 are as much
+    // evidence of a reachable server as a 200 is.
+    noteTransport(true);
+
     // Also returned rather than thrown as `AuthError`: only `getMe` in the root
     // layout catches that, so from here it took the silent path below.
     if (resp.status === 401) return { ok: false, status: 401, failure: 'auth' };
@@ -2794,7 +2829,12 @@ export async function sendChatMessage(
     // the same shape as a rejection the server did answer — and a throw from
     // here is what used to escape an un-awaited caller and leave the composer
     // locked with nothing on screen (ISSUE-200).
-    return { ok: false, status: 0, failure: timedOut ? 'timeout' : 'unreachable' };
+    //
+    // The same distinction the offline outbox turns on, so the connectivity
+    // store hears it here rather than re-deriving it from the returned shape.
+    const failure: SendFailure = timedOut ? 'timeout' : 'unreachable';
+    noteTransport(false, failure);
+    return { ok: false, status: 0, failure };
   } finally {
     if (timer) clearTimeout(timer);
   }
