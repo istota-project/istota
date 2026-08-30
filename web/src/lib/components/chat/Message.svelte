@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, Star, Trash2, Reply, Mail, Info } from 'lucide-svelte';
+  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X } from 'lucide-svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
@@ -7,7 +7,7 @@
   import type { OutboundDraft } from '$lib/api';
   import { messageCopyText, renderGroups } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Button } from '$lib/components/ui';
+  import { Button, IconButton } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
@@ -683,15 +683,35 @@
                 Send
               </Button>
             {/if}
+            <!-- Edit and Remove are icons; Send is not. The two icons are what
+                 you do *to* the entry and they read from their glyphs, so the
+                 line stops being three competing words after a status. Send is
+                 the one that acts on the world — it only appears on a held row,
+                 where it is the move being offered — so it keeps its word.
+                 `sm` on both, so the icons take the same box as that Button. -->
             {#if onQueueEdit}
-              <Button variant="subtle" size="sm" onclick={() => onQueueEdit?.(message.cid)}>
-                Edit
-              </Button>
+              <IconButton
+                size="sm"
+                label="Edit queued message"
+                title="Edit"
+                onclick={() => onQueueEdit?.(message.cid)}
+              >
+                <Pencil size={15} />
+              </IconButton>
             {/if}
             {#if onQueueRemove}
-              <Button variant="subtle" size="sm" onclick={() => onQueueRemove?.(message.cid)}>
-                Remove
-              </Button>
+              <!-- `danger`, and an X rather than the turn row's Trash2: the two
+                   are different acts. Delete removes a turn everyone can see;
+                   this discards something that never went out. -->
+              <IconButton
+                size="sm"
+                danger
+                label="Remove queued message"
+                title="Remove"
+                onclick={() => onQueueRemove?.(message.cid)}
+              >
+                <X size={15} />
+              </IconButton>
             {/if}
           </div>
         {/if}
@@ -1444,6 +1464,32 @@
   }
   .send-queued-text {
     min-width: 0;
+  }
+  /* Touch targets for the row's two icon buttons, the same out-of-flow overlay
+	   device the turn-action row uses so the line keeps its height. Two
+	   differences, both because of what this row holds: the overlay grows by one
+	   `--space-2` rather than by the whole pitch, and the gap widens to
+	   `--space-3`, so no two overlays touch and none of them reaches into the
+	   Send button beside them — Send is a real control here, not a gap, and an
+	   overlay lapping its edge would take taps meant for it. That leaves 4px of
+	   dead space between the icons, which is the safe way to be wrong: a tap
+	   there hits nothing rather than the button next door. */
+  @media (max-width: 768px) {
+    .send-queued {
+      gap: var(--space-3);
+    }
+    .send-queued :global(.icon-btn) {
+      position: relative;
+    }
+    .send-queued :global(.icon-btn)::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: calc(100% + var(--space-2));
+      height: 44px;
+      transform: translate(-50%, -50%);
+    }
   }
   /* The body is dimmed, not hidden: the user is meant to reread what they wrote
 	   before deciding to edit it. Only the message content, so the status line

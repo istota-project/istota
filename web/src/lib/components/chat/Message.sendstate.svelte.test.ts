@@ -51,10 +51,17 @@ function mountQueued(over: Partial<ChatMessage>, handlers: QueueHandlers = {}) {
   });
 }
 
-/** The visible labels of the queued row's controls, in DOM order. */
+/**
+ * The accessible names of the queued row's controls, in DOM order.
+ *
+ * Not the visible text: Edit and Remove are icon-only, so their name is the
+ * `aria-label` `IconButton` requires and their `textContent` is an empty SVG.
+ * Send keeps its word and has no label of its own, so the two sources are read
+ * in that order rather than one of them being picked per control.
+ */
 function queueButtons(container: HTMLElement): string[] {
-  return [...container.querySelectorAll('.send-queued button.btn')].map((b) =>
-    (b.textContent ?? '').trim(),
+  return [...container.querySelectorAll('.send-queued button')].map(
+    (b) => b.getAttribute('aria-label') ?? (b.textContent ?? '').trim(),
   );
 }
 
@@ -178,7 +185,22 @@ describe('user row queued state', () => {
     // An unheld entry drains by itself when the running turn settles. A Send
     // button would race that drain for the one slot `runTurn` owns.
     const { container } = mountQueued({}, handlers);
-    expect(queueButtons(container)).toEqual(['Edit', 'Remove']);
+    expect(queueButtons(container)).toEqual(['Edit queued message', 'Remove queued message']);
+  });
+
+  it('names its icon-only controls, and leaves no word beside the status', () => {
+    // The point of the icons: the line reads as a status, not as a status
+    // followed by two words competing with it. So the names have to be on the
+    // buttons rather than in the row's text — an icon with no `aria-label` is
+    // an unlabelled control, which is why `IconButton` requires one.
+    const { container } = mountQueued({}, handlers);
+    const icons = [...container.querySelectorAll('.send-queued button.icon-btn')];
+    expect(icons.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Edit queued message',
+      'Remove queued message',
+    ]);
+    for (const b of icons) expect(b.querySelector('svg')).not.toBeNull();
+    expect(container.querySelector('.send-queued')?.textContent?.trim()).toBe('Waiting to send');
   });
 
   it('says it is waiting for a connection when that is what it is waiting for', () => {
@@ -238,7 +260,11 @@ describe('user row queued state', () => {
   it('says it is held and offers Send once the turn ended abnormally', () => {
     const { container } = mountQueued({ queueHeld: true }, handlers);
     expect(container.querySelector('.send-queued')?.textContent).toContain('Held — not sent');
-    expect(queueButtons(container)).toEqual(['Send', 'Edit', 'Remove']);
+    expect(queueButtons(container)).toEqual([
+      'Send',
+      'Edit queued message',
+      'Remove queued message',
+    ]);
   });
 
   it('calls each handler with the row it belongs to', async () => {
@@ -253,8 +279,10 @@ describe('user row queued state', () => {
         onQueueRemove: (cid) => removed.push(cid),
       },
     );
-    // The shared `Button` primitive, not a bare styled <button> — see web/AGENTS.md.
-    const btns = [...container.querySelectorAll<HTMLButtonElement>('.send-queued button.btn')];
+    // The shared primitives, not bare styled <button>s — see web/AGENTS.md.
+    // `Button` for Send, `IconButton` for the two icons, so the selector is
+    // every button in the row rather than one class.
+    const btns = [...container.querySelectorAll<HTMLButtonElement>('.send-queued button')];
     expect(btns).toHaveLength(3);
     for (const b of btns) await fireEvent.click(b);
     expect(sent).toEqual([12]);
