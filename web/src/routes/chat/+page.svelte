@@ -207,7 +207,12 @@
     // so the draft `submit` wrote is still stored under that room's key and
     // comes back on the way in.
     if (r.token !== activeRoom?.token) return;
-    stagedReplyId = null;
+    // The citation comes back with the text, or is cleared where there is none.
+    // `returnSend`'s own path leaves both unset — its premise is that the cited
+    // parent is gone — so that case still clears, as it always did. `editQueued`
+    // sets them, and dropping them there would quietly turn an edited reply into
+    // an ordinary message and send it without its parent.
+    stagedReplyId = r.replyToMsgId ?? r.replyTo?.msgId ?? null;
     returnedSend = { n: r.n, text: r.text, attachments: r.attachments };
   });
   let returnedSend = $state<{ n: number; text: string; attachments: ChatAttachment[] } | null>(
@@ -607,6 +612,23 @@
     tick().then(() => pinToBottom());
   }
 
+  /**
+   * Release a held queued message (ISSUE-238).
+   *
+   * Only the head of the room's queue can actually go, so releasing one behind
+   * a held entry marks it ready and sends nothing until its turn comes round —
+   * which is why this reports no failure of its own beyond a rejection.
+   */
+  function releaseQueuedSend(cid: number) {
+    atBottom = true;
+    showJumpToLatest = false;
+    // Caught for the same reason `retryFailedSend` catches: the store guards
+    // its own body, and a rejection reaching an un-awaited caller is silence
+    // where a failure should have been reported.
+    session.releaseQueued(cid).catch(() => notifyError('Couldn’t send that message.'));
+    tick().then(() => pinToBottom());
+  }
+
   // Named only when the room really is Talk-bound: a delete that reaches into
   // Nextcloud Talk is a materially bigger action than one that doesn't, and
   // saying so unconditionally would be a warning about something that isn't
@@ -883,6 +905,9 @@
               onDelete={askDeleteMessage}
               onRetry={inViewMode ? undefined : retryFailedSend}
               retryBusy={busy}
+              onQueueSend={inViewMode ? undefined : releaseQueuedSend}
+              onQueueEdit={inViewMode ? undefined : session.editQueued}
+              onQueueRemove={inViewMode ? undefined : session.removeQueued}
               onReply={inViewMode ? undefined : stageReply}
               onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
