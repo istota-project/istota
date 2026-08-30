@@ -4,7 +4,12 @@
   interface Props {
     /** Which identity this is. Decides the fallback chip's fill and the URL. */
     kind: 'user' | 'bot';
-    /** The istota user id. Required when `kind === 'user'`. */
+    /**
+     * The istota user id, which is what the endpoint keys on. Without one a
+     * `user` avatar renders the chip rather than requesting a URL it cannot
+     * build — a supported state, not an omission: a co-member's turn carries
+     * no id until the server starts naming one.
+     */
     userId?: string;
     /**
      * Content hash, when the caller knows one.

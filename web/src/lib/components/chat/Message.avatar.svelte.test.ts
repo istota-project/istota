@@ -108,7 +108,12 @@ describe('the avatar rules left Message.svelte', () => {
     );
     const styleOpen = source.indexOf('>', source.indexOf('<style'));
     const styleBlock = source.slice(styleOpen + 1, source.lastIndexOf('</style>'));
+    // Comments out, the carve-out `Avatar.svelte.test.ts` makes for the same
+    // class of assertion: the rules that left are worth explaining where they
+    // used to be, and prose naming the selector it forbids would turn this red
+    // for saying so.
+    const css = styleBlock.replace(/\/\*[\s\S]*?\*\//g, '');
 
-    expect(styleBlock).not.toMatch(/\.avatar\b/);
+    expect(css).not.toMatch(/\.avatar\b/);
   });
 });

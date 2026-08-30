@@ -126,7 +126,13 @@ describe('Avatar: what it must never do', () => {
     // theme. Running a face through it produces a negative, so the primitive
     // may not carry it — and the two sigil call sites keep it.
     expect(declarations).not.toMatch(/sigil-filter/);
-    expect(styleBlock.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/[^-\w]filter\s*:/);
+    // `-webkit-filter` renders, so the property test has to reach the prefixed
+    // spelling — `[^-\w]filter` excludes exactly the two forms that would still
+    // produce the negative. `backdrop-filter` is not one of them and is allowed
+    // through by the alternation being explicit rather than by a broad class.
+    expect(styleBlock.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(
+      /(?:^|[^\w-])(?:-webkit-)?filter\s*:/,
+    );
   });
 
   it('names no chat token, so the gutter is a call site rather than the default', () => {

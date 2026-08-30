@@ -144,6 +144,14 @@
   // email — so its absence on a user row is what identifies the viewer's own
   // words. Nothing on the row carries a co-member's user id yet, so their turns
   // keep the initial chip until `author_id` arrives.
+  //
+  // Reading an *absence* as the viewer is only safe because the server refuses
+  // to emit an empty one: `web_app._display_name_for` falls back to the user id
+  // rather than to `''`, and says in its own docstring that it does so because
+  // "an empty author would read as the viewer". The chat store folds `''` into
+  // `undefined`, so without that guarantee this would paint the viewer's face
+  // on somebody else's turn — a stronger claim than the wrong initial the same
+  // gap used to produce.
   const ownTurn = $derived(isUser && !message.author);
 
   // System (!command) output goes through the safe markdown renderer; user text

@@ -117,7 +117,13 @@
      transcript renders. `?? null` rather than left undefined: a backend that
      predates the field, or a cached record from one, then reads as "there is no
      picture" and asks for nothing, where undefined would mean "unknown" and put
-     a bare request behind every row. */
+     a bare request behind every row.
+
+     One consequence of the `live` gate on `userId` below: on an offline cold
+     boot the viewer's own turns fall back to the initial chip, because there is
+     no id to build a URL with. That is deliberate rather than an oversight —
+     the id under a guess is the wrong person's — and it is not a case for
+     dropping the gate. */
   const userAvatar = $derived(identity.user.avatars?.user ?? null);
   const botAvatar = $derived(identity.user.avatars?.bot ?? null);
   /* Who is logged in, for the composer's draft key — and **only while the
