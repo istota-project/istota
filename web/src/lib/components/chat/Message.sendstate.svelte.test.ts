@@ -175,6 +175,25 @@ describe('user row queued state', () => {
     expect(queueButtons(container)).toEqual(['Edit', 'Remove']);
   });
 
+  it('says it is waiting for a connection when that is what it is waiting for', () => {
+    // The one string the offline outbox adds (ISSUE-202). "Waiting to send" is
+    // true but reads as a queue that is about to move; an entry queued with no
+    // connection is waiting on something the user can see the banner for.
+    const { container } = mountQueued({ queueReason: 'offline' }, handlers);
+    expect(container.querySelector('.send-queued')?.textContent).toContain(
+      'Waiting for a connection',
+    );
+  });
+
+  it('says a held offline entry is held, not that it is waiting for anything', () => {
+    // Past its auto-send age a restored offline entry is held like any other,
+    // and what it waits for then is the user rather than the network.
+    const { container } = mountQueued({ queueReason: 'offline', queueHeld: true }, handlers);
+    const text = container.querySelector('.send-queued')?.textContent ?? '';
+    expect(text).toContain('Held — not sent');
+    expect(text).not.toContain('connection');
+  });
+
   it('says it is held and offers Send once the turn ended abnormally', () => {
     const { container } = mountQueued({ queueHeld: true }, handlers);
     expect(container.querySelector('.send-queued')?.textContent).toContain('Held — not sent');

@@ -1,5 +1,6 @@
 /**
- * The offline banner on the chat page.
+ * What the chat page says about being offline: the banner, and the room-list
+ * badge for what is waiting to send.
  *
  * Two things here are load-bearing and neither is the wording. The row is tied
  * to the connectivity store rather than to a failed request, so it goes as soon
@@ -29,6 +30,7 @@ vi.mock('$lib/stores/chat', async () => {
     sendReturned: writable({ n: 0, token: null, text: '', attachments: [] }),
     outboundDrafts: writable([]),
     externalTurnDisplay: writable('full'),
+    queuedCounts: writable({}),
   };
   // Every method the page reaches for answers with a resolved promise —
   // `init()` is awaited on mount, and the rest are click handlers this file
@@ -39,6 +41,7 @@ vi.mock('$lib/stores/chat', async () => {
   return { getChatSession: () => session };
 });
 
+import { getChatSession } from '$lib/stores/chat';
 import { online, noteTransport } from '$lib/stores/connectivity';
 import { notices, clearNotices } from '$lib/stores/notices';
 import Page from './+page.svelte';
@@ -97,5 +100,49 @@ describe('the offline banner', () => {
     noteTransport(false, 'unreachable');
     const row = await screen.findByText(OFFLINE_TEXT);
     expect(row.querySelector('button')).toBeNull();
+  });
+});
+
+/**
+ * The room-list badge for messages waiting to send (ISSUE-202).
+ *
+ * The drain runs for the room on screen only, so for every other room this
+ * badge is the whole of the affordance: it says which room to open for what is
+ * waiting in it to go out. Its count comes from the store's `queuedCounts`
+ * rather than from the transcript, which holds one room's rows at a time.
+ */
+describe('the room-list queued badge', () => {
+  const room = (id: number, name = `Room ${id}`) => ({
+    id,
+    token: `t${id}`,
+    name,
+    archived: false,
+    created_at: '',
+    updated_at: '',
+    origin: 'web',
+    unread_count: 0,
+  });
+
+  function seedRooms(counts: Record<string, number>) {
+    const session = getChatSession() as unknown as {
+      rooms: { set: (v: unknown) => void };
+      queuedCounts: { set: (v: unknown) => void };
+    };
+    session.rooms.set([room(1), room(2)]);
+    session.queuedCounts.set(counts);
+  }
+
+  it('counts what is waiting in a room the user is not looking at', async () => {
+    seedRooms({ t2: 3 });
+    render(Page);
+    await waitFor(() => expect(screen.getByTitle('3 waiting to send')).toBeInTheDocument());
+    expect(screen.getByTitle('3 waiting to send').textContent).toBe('3');
+  });
+
+  it('shows nothing for a room with nothing waiting', async () => {
+    seedRooms({});
+    render(Page);
+    await waitFor(() => expect(screen.getByText('Room 1')).toBeInTheDocument());
+    expect(screen.queryByTitle(/waiting to send/)).toBeNull();
   });
 });

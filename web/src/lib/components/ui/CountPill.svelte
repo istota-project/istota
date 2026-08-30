@@ -15,9 +15,20 @@
     /** Native tooltip. The count alone is not self-describing out of context,
      *  and `title` is valid on any element — unlike `aria-label`, see below. */
     title?: string;
+    /**
+     * How loudly it reads.
+     *
+     * `accent` is the badge as it has always been: something arrived and is
+     * unread. `muted` is for a count that is a *state* rather than news — the
+     * chat room list's "waiting to send" (ISSUE-202), which the user put there
+     * themselves and which nothing new has happened to. A variant rather than
+     * a second component, because everything else about the two is the same
+     * and a copy would drift on the next sizing change.
+     */
+    tone?: 'accent' | 'muted';
   }
 
-  let { count, title }: Props = $props();
+  let { count, title, tone = 'accent' }: Props = $props();
 
   const shown = $derived(count > 99 ? '99+' : String(count));
 </script>
@@ -34,7 +45,7 @@
   its button's own `aria-label`, which overrides descendant content entirely.
 -->
 {#if count > 0}
-  <span class="count-pill" {title}>{shown}</span>
+  <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
 {/if}
 
 <style>
@@ -52,5 +63,11 @@
     font-size: var(--text-xs);
     font-weight: 600;
     line-height: 1;
+  }
+  /* Same pill, stated rather than announced: the badge fill drops to the
+	   surface every other quiet chip uses and the digits to muted text. */
+  .count-pill.muted {
+    background: var(--surface-badge);
+    color: var(--text-muted);
   }
 </style>

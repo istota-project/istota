@@ -296,6 +296,17 @@
   // the running turn settles, and a button that fired it early would race that
   // drain for the one slot `runTurn` owns.
   const showQueueSend = $derived(queueHeld && !!onQueueSend);
+  // What the row is waiting *for*, which for an unheld entry is the whole
+  // difference between the two waits (ISSUE-202): a turn that will finish on
+  // its own, or a connection that may not come back for a while. A held row
+  // reads the same either way — what it is waiting for is the user.
+  const queueWaitText = $derived(
+    queueHeld
+      ? 'Held — not sent'
+      : message.queueReason === 'offline'
+        ? 'Waiting for a connection'
+        : 'Waiting to send',
+  );
 
   // The row is in the layout whenever any of the three could be there, so
   // revealing it never reflows the transcript under the pointer. Withheld
@@ -659,9 +670,7 @@
           </div>
         {:else if sendQueued}
           <div class="send-queued">
-            <span class="send-queued-text">
-              {queueHeld ? 'Held — not sent' : 'Waiting to send'}
-            </span>
+            <span class="send-queued-text">{queueWaitText}</span>
             {#if showQueueSend}
               <Button variant="subtle" size="sm" onclick={() => onQueueSend?.(message.cid)}>
                 Send

@@ -42,6 +42,7 @@
     hasMore,
     loadingOlder,
     offlineTranscript,
+    queuedCounts,
     view,
     scrollTarget,
     sendSettled,
@@ -159,7 +160,7 @@
   // Ungated, a room holding ten *held* rows — which is what a restored queue
   // looks like on every page load — refused every send in an idle room, with
   // a notice saying messages were waiting on a turn that was not running.
-  const queueFull = $derived(busy && queuedHere >= MAX_QUEUED_PER_ROOM);
+  const queueFull = $derived((busy || !$online) && queuedHere >= MAX_QUEUED_PER_ROOM);
 
   // The message the next send will cite. Held as the bare id, because that is
   // all the composer ever names and all the draft ever stores; the author
@@ -814,6 +815,7 @@
         {@const isTalk = room.origin === 'talk' || !!room.talk_token}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
+        {@const waiting = $queuedCounts[room.token] ?? 0}
         <div class="list-row room-row" class:active={room.id === $activeRoomId}>
           <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
             {#if isTalk}
@@ -834,6 +836,15 @@
                 <span class="room-name" class:unread>{room.name}</span>
                 {#if unread}
                   <CountPill count={unreadCount} title={`${unreadCount} unread`} />
+                {/if}
+                <!-- What is waiting to go out of this room (ISSUE-202). The
+								     drain runs for the room on screen only, so for every other
+								     room this badge is the whole of the affordance: it says
+								     which one to open for the message to send itself. Muted,
+								     because nothing has arrived and nothing has gone wrong —
+								     it is a state the user put there. -->
+                {#if waiting > 0}
+                  <CountPill count={waiting} tone="muted" title={`${waiting} waiting to send`} />
                 {/if}
               </span>
             </span>
@@ -1018,7 +1029,7 @@
             }}
             onCancel={() => session.cancel()}
             {busy}
-            queueing={busy}
+            queueing={busy || !$online}
             {queueFull}
             placeholder="Your message…"
             {draftKey}
