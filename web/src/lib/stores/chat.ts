@@ -62,6 +62,9 @@ import {
 } from '$lib/components/chat/autocomplete/providers';
 import {
   applyEvent as applySegmentEvent,
+  isStranded,
+  isQueued,
+  isClientOnly,
   type ChatMessage,
   type Segment,
   type ToolEntry,
@@ -487,13 +490,51 @@ function createSession(): ChatSession {
   // belongs to and nowhere else.
   const strandedSends = new Map<string, ChatMessage[]>();
 
-  // Client-only without ambiguity: a server row always carries a `msgId`.
-  const isStranded = (m: ChatMessage) => m.sendState === 'failed' && m.msgId === undefined;
-  // A message typed into a busy room: written, committed to, never POSTed.
-  const isQueued = (m: ChatMessage) => m.sendState === 'queued';
-  // The two rows the server has no copy of, and so the two a rebuild has to
-  // carry rather than drop.
-  const isClientOnly = (m: ChatMessage) => isStranded(m) || isQueued(m);
+  // `isStranded` / `isQueued` / `isClientOnly` are imported from `segments.ts`:
+  // the transcript renders these rows too, and the page needs the same
+  // predicate to keep them out of its day dividers (ISSUE-351).
+
+  /**
+   * `arr` with `row` inserted above whatever client-only rows sit at the tail.
+   *
+   * The rule the whole transcript order turns on (ISSUE-351): a client-only
+   * row has not been POSTed, so it is a pending action rather than an event in
+   * the history — it carries Send / Edit / Remove or a Retry, it belongs
+   * against the composer, and everything the server produced sorts above it.
+   * Every append into `messages` that is *not* itself a client-only row goes
+   * through here; `enqueueSend` and `appendQueuedRows` keep their plain tail
+   * pushes, because they are the block this walks back past.
+   *
+   * A drained row needs no special case. `beginSend` stamps `'sending'` on it
+   * before the POST, so it stops being client-only where it already sits, and
+   * its own placeholder then lands directly under it, above whatever is still
+   * queued behind it.
+   *
+   * **The rule is enforced at append time and is not maintained afterwards.**
+   * Two paths settle a row in place — `beginSend` above, and the failed-send
+   * adoption in `appendStreamedRow` — and where a *stranded* failed row sits
+   * above a queued one, settling the queued one splits the block: the failed
+   * row is left above a live turn until the next rebuild, where
+   * `carryClientOnlyRows` puts it back at the tail. Left alone deliberately.
+   * It is the behaviour that shipped before this walk existed, the row above
+   * is still the Retry the user wants, and the alternative — repositioning a
+   * row on settle — moves a bubble out from under the pointer heading for it.
+   *
+   * The walk covers a stranded failed row as well as a queued one, and that
+   * half is a judgement rather than a fact the client holds: nothing records
+   * whether the failed send was attempted before or after the row being
+   * appended. Treating both the same keeps one rule, and the tie-break it
+   * picks — the server's row above, the rows with nothing behind them below —
+   * is the one that puts every actionable row together at the bottom.
+   */
+  function appendAboveClientOnly(arr: ChatMessage[], row: ChatMessage): ChatMessage[] {
+    let at = arr.length;
+    while (at > 0 && isClientOnly(arr[at - 1])) at--;
+    if (at === arr.length) return [...arr, row];
+    const next = arr.slice();
+    next.splice(at, 0, row);
+    return next;
+  }
 
   /** Move whatever client-only rows are on screen into the holding map. */
   function stashStrandedSends() {
@@ -1332,7 +1373,7 @@ function createSession(): ChatSession {
       streaming: true,
       createdAt: new Date().toISOString(),
     };
-    messages.update((arr) => [...arr, ph]);
+    messages.update((arr) => appendAboveClientOnly(arr, ph));
     enqueueStream(taskId, ph.cid);
   }
 
@@ -1406,7 +1447,7 @@ function createSession(): ChatSession {
       if (seenNotifIds.has(row.notif_id)) return;
       seenNotifIds.add(row.notif_id);
     }
-    messages.update((arr) => [...arr, buildHistoryMessage(row)]);
+    messages.update((arr) => appendAboveClientOnly(arr, buildHistoryMessage(row)));
     if (row.role === 'user' && typeof row.task_id === 'number' && unsettled(row.status)) {
       pickUpStreamedTask(row.task_id, row.status);
     }
@@ -1436,7 +1477,10 @@ function createSession(): ChatSession {
     if (v === 'room' || v === 'starred') return;
     if (v === 'unread' && row.role === 'user') return;
     if (typeof row.msg_id === 'number' && get(messages).some((m) => m.msgId === row.msg_id)) return;
-    messages.update((arr) => [...arr, buildHistoryMessage(row)]);
+    // The All view carries no queued rows (`carryClientOnlyRows` drops them in
+    // the `token === null` branch) but it does carry stranded failed ones, and
+    // the tail rule is the same for those.
+    messages.update((arr) => appendAboveClientOnly(arr, buildHistoryMessage(row)));
   }
 
   function applyRoomEvent(row: ChatRoomEvent, opts: { countUnread?: boolean } = {}) {
@@ -1994,25 +2038,13 @@ function createSession(): ChatSession {
           streaming: true,
           createdAt: new Date().toISOString(),
         };
-        messages.update((arr) => {
-          // In front of whatever client-only rows are sitting at the tail, not
-          // after them. A queued message was typed *behind* the turn this
-          // placeholder stands for, so it belongs below it — but the carry and
-          // the queued-row rebuild both ran above, so a plain push would put
-          // the running turn under the message waiting on it.
-          //
-          // The walk skips a stranded failed row too, and that half is a
-          // judgement rather than a fact the client holds: nothing records
-          // whether the failed send was attempted before or after this task
-          // started. Treating both the same keeps one rule, and the tie-break
-          // it picks — the resumed turn above, the rows with nothing behind
-          // them below — is the one that puts every actionable row together at
-          // the bottom of the transcript.
-          let at = arr.length;
-          while (at > 0 && isClientOnly(arr[at - 1])) at--;
-          arr.splice(at, 0, ph);
-          return arr;
-        });
+        // In front of whatever client-only rows are sitting at the tail, not
+        // after them: a queued message was typed *behind* the turn this
+        // placeholder stands for, and the carry and the queued-row rebuild
+        // both ran above, so a plain push would put the running turn under the
+        // message waiting on it. This was the one call site that got the rule
+        // right; `appendAboveClientOnly` is that walk, extracted (ISSUE-351).
+        messages.update((arr) => appendAboveClientOnly(arr, ph));
         cid = ph.cid;
       }
       enqueueStream(at.id, cid);
@@ -2603,9 +2635,11 @@ function createSession(): ChatSession {
     // to its own transcript (and only its own) after a rebuild.
     const roomToken = get(rooms).find((r) => r.id === roomId)?.token;
     const idempotencyKey = newIdempotencyKey();
-    messages.update((a) => [
-      ...a,
-      {
+    // Above the client-only block: the room can be idle with a *held* queue on
+    // screen (Stop, an error, a parked confirmation), and this message is going
+    // out now while those are still waiting.
+    messages.update((a) =>
+      appendAboveClientOnly(a, {
         cid: userCid,
         role: 'user',
         text: trimmed,
@@ -2631,8 +2665,8 @@ function createSession(): ChatSession {
           idempotencyKey,
           replyToMsgId: replyTo?.msgId,
         },
-      },
-    ]);
+      }),
+    );
     await runTurn(roomId, userCid, trimmed, attachments, idempotencyKey, replyTo?.msgId);
   }
 
@@ -3201,9 +3235,12 @@ function createSession(): ChatSession {
           if (!m.progress) m.progress = randomAckVerb();
         });
       } else {
-        messages.update((a) => [
-          ...a,
-          {
+        // Above the client-only block. This runs on the ack, so a message
+        // typed while the POST was still open has already been queued and its
+        // row is at the tail — a plain push would put this turn's answer under
+        // the message that is waiting on this very turn (ISSUE-351).
+        messages.update((a) =>
+          appendAboveClientOnly(a, {
             cid: phCid,
             role: 'assistant',
             text: '',
@@ -3211,8 +3248,8 @@ function createSession(): ChatSession {
             streaming: true,
             progress: randomAckVerb(),
             createdAt: new Date().toISOString(),
-          },
-        ]);
+          }),
+        );
       }
     }
     if (res.task_id == null) {
@@ -3341,9 +3378,13 @@ function createSession(): ChatSession {
     const userCid = nextCid();
     const phCid = nextCid();
     const roomToken = get(rooms).find((r) => r.id === roomId)?.token;
-    messages.update((a) => [
-      ...a,
-      {
+    // Above the client-only block if there is one — `send()` routes here on a
+    // busy room, which says nothing about the queue, so the ordinary case is an
+    // empty block and a plain tail push. Where something *is* queued it was
+    // typed earlier and the command still sorts above it, deliberately: a
+    // queued row is a pending action, not an event in the history (ISSUE-351).
+    messages.update((a) =>
+      appendAboveClientOnly(a, {
         cid: userCid,
         role: 'user',
         text: trimmed,
@@ -3356,8 +3397,8 @@ function createSession(): ChatSession {
         sendState: 'sending',
         // No `sendPayload`, which is what makes the row un-retryable below
         // even if something else were to offer it one.
-      },
-    ]);
+      }),
+    );
     // The same grace-gated pending mark `runTurn` opens, and needed more here:
     // a command runs *inside* the request, so the POST stays open for its whole
     // duration (`!search` over a memory corpus is seconds of it), and the one
@@ -3405,9 +3446,8 @@ function createSession(): ChatSession {
         // and the running turn has none of its own until its own ack lands.
         return;
       }
-      messages.update((a) => [
-        ...a,
-        {
+      messages.update((a) =>
+        appendAboveClientOnly(a, {
           cid: phCid,
           role: 'assistant',
           text: '',
@@ -3415,8 +3455,8 @@ function createSession(): ChatSession {
           streaming: true,
           progress: randomAckVerb(),
           createdAt: new Date().toISOString(),
-        },
-      ]);
+        }),
+      );
       applyInlineResult(userCid, phCid, res);
       // No `status` write: the running turn still owns it.
     } catch {
