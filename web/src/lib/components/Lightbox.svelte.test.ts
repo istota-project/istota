@@ -1,0 +1,295 @@
+/**
+ * The lightbox's gesture wiring: what a finger on the image does to the
+ * transform, and which gestures still close the overlay.
+ *
+ * jsdom lays nothing out, so every rect here is zero and the translation
+ * clamps to 0 on both axes — the scale is what these assert on. The
+ * translation arithmetic is covered in `imageZoom.test.ts`, against real
+ * numbers.
+ */
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
+import { tick } from 'svelte';
+import { DOUBLE_TAP_MS } from '$lib/imageZoom';
+
+import Lightbox from './Lightbox.svelte';
+
+const IMAGES = ['https://example.com/a.jpg', 'https://example.com/b.jpg'];
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
+
+function open(onClose = vi.fn()) {
+  const { container } = render(Lightbox, { images: IMAGES, index: 0, onClose });
+  return {
+    onClose,
+    container,
+    img: container.querySelector('img') as HTMLImageElement,
+    backdrop: container.querySelector('.lightbox') as HTMLElement,
+  };
+}
+
+/**
+ * jsdom implements no PointerEvent, and the repo's existing gesture tests
+ * (`platform/input.test.ts`) drive pointer handlers with a MouseEvent. Pinch
+ * needs the pointer id as well, which no MouseEvent init carries.
+ */
+function pointer(type: string, id: number, x: number, y: number): MouseEvent {
+  const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
+  Object.defineProperty(e, 'pointerId', { value: id });
+  Object.defineProperty(e, 'pointerType', { value: 'touch' });
+  return e;
+}
+
+/**
+ * Two fingers going from `from` px apart to `to` px apart, around one center.
+ *
+ * Awaits a tick, like every gesture here: Svelte batches the DOM write, so the
+ * transform an assertion reads is the pre-gesture one without it. Nothing about
+ * that is specific to pointer events — it is why `fireEvent` is awaited too.
+ */
+async function pinch(el: Element, from: number, to: number): Promise<void> {
+  el.dispatchEvent(pointer('pointerdown', 1, 500 - from / 2, 400));
+  el.dispatchEvent(pointer('pointerdown', 2, 500 + from / 2, 400));
+  el.dispatchEvent(pointer('pointermove', 1, 500 - to / 2, 400));
+  el.dispatchEvent(pointer('pointermove', 2, 500 + to / 2, 400));
+  el.dispatchEvent(pointer('pointerup', 1, 500 - to / 2, 400));
+  el.dispatchEvent(pointer('pointerup', 2, 500 + to / 2, 400));
+  await tick();
+}
+
+/** The `scale(N)` factor currently on the image, or 1 when it carries none. */
+function scaleOf(img: HTMLElement): number {
+  const match = /scale\(([\d.]+)\)/.exec(img.style.transform);
+  return match ? Number(match[1]) : 1;
+}
+
+async function tap(el: Element, x = 500, y = 400, id = 1): Promise<void> {
+  el.dispatchEvent(pointer('pointerdown', id, x, y));
+  el.dispatchEvent(pointer('pointerup', id, x, y));
+  await tick();
+}
+
+describe('pinch to zoom', () => {
+  it('scales the image up when two fingers spread', async () => {
+    const { img } = open();
+    await pinch(img, 100, 300);
+    expect(scaleOf(img)).toBeCloseTo(3, 5);
+  });
+
+  it('scales back down when they pinch in, and stops at the fit scale', async () => {
+    const { img } = open();
+    await pinch(img, 100, 300);
+    expect(scaleOf(img)).toBeCloseTo(3, 5);
+
+    await pinch(img, 300, 200);
+    expect(scaleOf(img)).toBeCloseTo(2, 5);
+
+    // Past the fit scale the clamp takes over rather than shrinking further.
+    await pinch(img, 300, 30);
+    expect(scaleOf(img)).toBe(1);
+  });
+
+  it('sees a pinch with one finger on the backdrop', async () => {
+    // A fitted image is letterboxed, so one finger of a real pinch routinely
+    // lands beside it rather than on it.
+    const { img, backdrop } = open();
+    backdrop.dispatchEvent(pointer('pointerdown', 1, 450, 400));
+    img.dispatchEvent(pointer('pointerdown', 2, 550, 400));
+    backdrop.dispatchEvent(pointer('pointermove', 1, 350, 400));
+    img.dispatchEvent(pointer('pointermove', 2, 650, 400));
+    await tick();
+    expect(scaleOf(img)).toBeCloseTo(3, 5);
+  });
+
+  it('does not close the overlay when a pinch ends', async () => {
+    const { onClose, img } = open();
+    await pinch(img, 100, 300);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('tapping', () => {
+  it('closes on a single tap at the fit scale', async () => {
+    const { onClose, img } = open();
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('does not close on a single tap while zoomed', async () => {
+    const { onClose, img } = open();
+    await pinch(img, 100, 300);
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('zooms in on a double tap instead of closing', async () => {
+    const { onClose, img } = open();
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS / 2);
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(scaleOf(img)).toBeGreaterThan(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('returns to the fit scale on a second double tap', async () => {
+    const { img } = open();
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS / 2);
+    await tap(img);
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS / 2);
+    await tap(img);
+    expect(scaleOf(img)).toBe(1);
+  });
+
+  it('does not close after a drag that ends on the image', async () => {
+    const { onClose, img } = open();
+    await pinch(img, 100, 300);
+    img.dispatchEvent(pointer('pointerdown', 3, 500, 400));
+    img.dispatchEvent(pointer('pointermove', 3, 560, 430));
+    img.dispatchEvent(pointer('pointerup', 3, 560, 430));
+    await tick();
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('closes on a tap on the backdrop, with no double-tap wait', async () => {
+    const { onClose, backdrop } = open();
+    await tap(backdrop);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('does not close on a drag at the fit scale', async () => {
+    // A swipe across a fitted image has nothing to pan, but it is still a
+    // swipe: delivering it as a tap dismissed the overlay under the finger.
+    const { onClose, img } = open();
+    img.dispatchEvent(pointer('pointerdown', 1, 400, 400));
+    img.dispatchEvent(pointer('pointermove', 1, 520, 400));
+    img.dispatchEvent(pointer('pointerup', 1, 520, 400));
+    await tick();
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not close on a two-finger tap that never moves', async () => {
+    const { onClose, img } = open();
+    img.dispatchEvent(pointer('pointerdown', 1, 460, 400));
+    img.dispatchEvent(pointer('pointerdown', 2, 540, 400));
+    img.dispatchEvent(pointer('pointerup', 1, 460, 400));
+    img.dispatchEvent(pointer('pointerup', 2, 540, 400));
+    await tick();
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('drops a pending close when the image changes under it', async () => {
+    // The component is never unmounted by its caller, so a timer armed for one
+    // image would otherwise fire over the next.
+    const { onClose, img } = open();
+    await tap(img);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS / 2);
+    await fireEvent.keyDown(document, { key: 'ArrowRight' });
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not pair a tap with one on the previous image', async () => {
+    const { img, container } = open();
+    await tap(img);
+    await fireEvent.keyDown(document, { key: 'ArrowRight' });
+    vi.advanceTimersByTime(DOUBLE_TAP_MS / 4);
+    await tap(container.querySelector('img') as HTMLElement);
+    expect(scaleOf(container.querySelector('img') as HTMLElement)).toBe(1);
+  });
+
+  it('leaves the transform alone when a pinch is cancelled', async () => {
+    const { onClose, img } = open();
+    await pinch(img, 100, 300);
+    const held = scaleOf(img);
+
+    img.dispatchEvent(pointer('pointerdown', 5, 480, 400));
+    img.dispatchEvent(pointer('pointerdown', 6, 520, 400));
+    img.dispatchEvent(pointer('pointercancel', 5, 480, 400));
+    img.dispatchEvent(pointer('pointercancel', 6, 520, 400));
+    await tick();
+    vi.advanceTimersByTime(DOUBLE_TAP_MS * 2);
+
+    expect(scaleOf(img)).toBe(held);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('navigation', () => {
+  it('drops the zoom when moving to the next image', async () => {
+    const { img, container } = open();
+    await pinch(img, 100, 300);
+    expect(scaleOf(img)).toBeGreaterThan(1);
+    await fireEvent.click(screen.getByLabelText('Next image'));
+    expect(scaleOf(container.querySelector('img') as HTMLElement)).toBe(1);
+  });
+
+  it('drops the zoom when the keyboard moves to the previous image', async () => {
+    const { img } = open();
+    await pinch(img, 100, 300);
+    await fireEvent.keyDown(document, { key: 'ArrowLeft' });
+    expect(scaleOf(img)).toBe(1);
+  });
+});
+
+describe('keyboard', () => {
+  it('zooms in and out on the zoom keys', async () => {
+    const { img } = open();
+    await fireEvent.keyDown(document, { key: '+' });
+    const zoomedIn = scaleOf(img);
+    expect(zoomedIn).toBeGreaterThan(1);
+
+    await fireEvent.keyDown(document, { key: '+' });
+    expect(scaleOf(img)).toBeGreaterThan(zoomedIn);
+
+    await fireEvent.keyDown(document, { key: '-' });
+    expect(scaleOf(img)).toBeCloseTo(zoomedIn, 5);
+  });
+
+  it('goes back to the fit scale on 0', async () => {
+    const { img } = open();
+    await fireEvent.keyDown(document, { key: '+' });
+    await fireEvent.keyDown(document, { key: '0' });
+    expect(scaleOf(img)).toBe(1);
+  });
+
+  it('still closes on Escape while zoomed', async () => {
+    const { onClose, img } = open();
+    await pinch(img, 100, 300);
+    await fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('trackpad and mouse wheel', () => {
+  it('zooms on a pinch-to-zoom wheel event', async () => {
+    const { img } = open();
+    img.dispatchEvent(
+      new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 }),
+    );
+    await tick();
+    expect(scaleOf(img)).toBeGreaterThan(1);
+  });
+
+  it('leaves a plain scroll alone', async () => {
+    const { img } = open();
+    img.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100 }));
+    await tick();
+    expect(scaleOf(img)).toBe(1);
+  });
+});
