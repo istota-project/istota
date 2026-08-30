@@ -525,3 +525,56 @@ describe('offline cache — when there is no database', () => {
     expect(await db.readTranscript('alice', 't')).toBeNull();
   });
 });
+
+/**
+ * The settings row's escape hatch (ISSUE-202): everything, for everyone on this
+ * profile, in one transaction.
+ */
+describe('offline cache — clearing it', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('empties every store, across every user', async () => {
+    const db = await freshDb();
+    await db.writeTranscript('alice', { roomId: 1, roomToken: 't1', messages: [row(1)] });
+    await db.writeTranscript('bob', { roomId: 2, roomToken: 't2', messages: [row(2)] });
+    await db.writeRooms('alice', [roomRecord('t1')]);
+    await db.writeConfig('alice', { max_prompt_chars: 100 } as never);
+    await db.putBlob('b1', new TextEncoder().encode('held').buffer as ArrayBuffer, {
+      name: 'memo.m4a',
+      mimeType: 'audio/mp4',
+      size: 4,
+    });
+
+    await db.clearOffline();
+
+    expect(await db.readTranscript('alice', 't1')).toBeNull();
+    // The other user's share goes too: someone asking for the offline data to
+    // be cleared is not asking for another account's to be kept.
+    expect(await db.readTranscript('bob', 't2')).toBeNull();
+    expect(await db.readRooms('alice')).toBeNull();
+    expect(await db.readConfig('alice')).toBeNull();
+    expect(await db.listBlobIds()).toEqual([]);
+  });
+
+  it('leaves the database usable rather than deleting it', async () => {
+    // The reason it clears stores instead of `deleteDatabase`: the module holds
+    // an open connection, so a delete would block behind it — and the page
+    // goes on writing immediately, since the caller reloads over the top.
+    const db = await freshDb();
+    await db.writeTranscript('alice', { roomId: 1, roomToken: 't1', messages: [row(1)] });
+    await db.clearOffline();
+
+    await db.writeTranscript('alice', { roomId: 1, roomToken: 't1', messages: [row(9)] });
+    expect((await db.readTranscript('alice', 't1'))?.messages[0].msg_id).toBe(9);
+  });
+
+  it('resolves rather than throwing when there is no database', async () => {
+    vi.stubGlobal('indexedDB', undefined);
+    vi.resetModules();
+    const db = await import('./db');
+    await expect(db.clearOffline()).resolves.toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+});

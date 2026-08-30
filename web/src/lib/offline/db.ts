@@ -976,3 +976,36 @@ export async function pruneOffline(
     undefined,
   );
 }
+
+/**
+ * Empty every store, for every user on this profile.
+ *
+ * One caller, and it is the settings row "Clear offline data" (ISSUE-202),
+ * which unregisters the service worker and drops its caches alongside this. It
+ * is the escape hatch for storage that has gone wrong in a way nothing else
+ * explains — a document that will not update, a transcript that will not
+ * reconcile — so it clears the whole database rather than this user's share of
+ * it. On the shell those are the same thing; on a shared profile, someone
+ * asking for the offline data to be cleared is not asking for another
+ * account's to be kept.
+ *
+ * `clear()` per store rather than `deleteDatabase`: this module memoizes an
+ * open connection, and a delete would sit blocked behind it (and behind any
+ * other tab's) instead of failing — the button would do nothing while the
+ * caller reloaded over it. An emptied store reads exactly as a missing one
+ * everywhere above.
+ *
+ * One transaction across all four, so this cannot half-succeed and leave the
+ * held bytes of a queue entry behind without the transcript they belong to.
+ */
+export async function clearOffline(): Promise<void> {
+  const stores = [STORE_TRANSCRIPTS, STORE_ROOMS, STORE_CONFIG, STORE_BLOBS];
+  await withTx<void>(
+    stores,
+    'readwrite',
+    (tx) => {
+      for (const name of stores) tx.objectStore(name).clear();
+    },
+    undefined,
+  );
+}
