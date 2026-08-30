@@ -80,6 +80,34 @@ export const DOUBLE_TAP_SLOP = 40;
 /** Movement past this ends a tap and makes the gesture a drag. */
 export const TAP_SLOP = 8;
 
+/**
+ * How long after an overlay closes the click of the tap that closed it may
+ * still arrive.
+ *
+ * A tap delivers its pointer events at once and its `click` afterwards — on a
+ * touch screen tens to hundreds of milliseconds afterwards, hit-tested where
+ * the finger was rather than against whatever the pointer events reached. The
+ * window covers that gap, and is measured from the close rather than from the
+ * tap because until then the overlay is still there to absorb its own click.
+ *
+ * The claim is spent by the first click to arrive, so this length only bounds
+ * a claim that no click ever came for. The cost of it is a deliberate tap at
+ * the same spot inside the window, which is swallowed with the ghost.
+ */
+export const GHOST_CLICK_MS = 400;
+
+/**
+ * How far that click may land from the pointer's release and still be
+ * recognized as belonging to it.
+ *
+ * Deliberately not `TAP_SLOP`, which bounds a different thing: how far a
+ * finger may travel and still have been a tap. A browser may position the
+ * click at either end of that travel, so this has to cover the whole of it
+ * with room left for rounding — a click landing outside takes the claim with
+ * it and reaches the page underneath.
+ */
+export const GHOST_CLICK_SLOP = 24;
+
 export function distance(a: Point, b: Point): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
 }

@@ -6,6 +6,8 @@
     DOUBLE_TAP_SCALE,
     DOUBLE_TAP_SLOP,
     FIT,
+    GHOST_CLICK_MS,
+    GHOST_CLICK_SLOP,
     KEY_ZOOM_STEP,
     TAP_SLOP,
     WHEEL_IDLE_MS,
@@ -54,6 +56,36 @@
   /** Where the gesture began, which is what decides what a tap ending it means. */
   let tapTarget: 'image' | 'backdrop' = 'backdrop';
   let lastTap: { at: number; point: Point } | null = null;
+  /**
+   * How a tap ended: where the pointer came up, and whether the browser will
+   * follow it with a click of its own.
+   *
+   * The point is the release rather than the last position in `pointers`,
+   * because that is where a synthesized click is put — and the two are not the
+   * same, since nothing records the `pointerup` coordinates into that map.
+   *
+   * `synthesized` is false for a mouse, whose click is targeted from the press
+   * and the release, both of which landed on this overlay; it can therefore
+   * never be delivered to what the overlay was covering, however fast the
+   * overlay goes. Measured in Chrome: closing on `pointerup` with a mouse
+   * dispatches no click at all. So there is nothing to claim on that path, and
+   * claiming anyway would only leave a claim behind that no click ever spends.
+   */
+  interface Release {
+    point: Point;
+    synthesized: boolean;
+  }
+
+  /**
+   * The click of the tap that dismissed the overlay, before it has arrived.
+   *
+   * Deliberately **not** cleared by `resetGestures`, unlike everything above
+   * it: this belongs to the input device's own timeline rather than to the
+   * image on screen, and the close it follows runs `resetGestures` before the
+   * click lands. Clearing it there would hand the click straight back to
+   * whatever the overlay was covering, which is the whole defect.
+   */
+  let claimedTap: { at: number; point: Point } | null = null;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
   let wheelGesture: { state: ZoomState; anchor: Point; factor: number } | null = null;
   let wheelIdleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -145,10 +177,47 @@
     );
   }
 
+  /**
+   * Eat the `click` of the tap that dismissed the overlay.
+   *
+   * A tap on the backdrop closes at once, so by the time the browser dispatches
+   * that tap's `click` the overlay is gone and the click is hit-tested against
+   * whatever it was covering: the feed card behind opens, or the reader
+   * underneath closes, from a tap aimed at a darkened area precisely because
+   * there was nothing there to hit. A tap on the image escapes this only
+   * because the double-tap wait keeps the overlay mounted long enough to
+   * absorb its own click, which is why only one half of the gesture ever
+   * misbehaved.
+   *
+   * Bounded by time and by distance rather than swallowing the next click
+   * outright, so the only one it can take is the one belonging to the tap that
+   * claimed it — a deliberate tap elsewhere, or a later one, goes through.
+   * Both halves are needed: `stopPropagation` covers what a handler would do
+   * with the click, `preventDefault` covers what the browser would do with it
+   * on its own, such as following a link.
+   *
+   * It covers the `click` alone. A touch also synthesizes `mousedown` and
+   * `mouseup` at the same point, so anything underneath that acts on those —
+   * nothing on this route today — still hears them, and a button underneath
+   * can still take focus.
+   */
+  function swallowClaimedClick(e: MouseEvent) {
+    if (claimedTap === null) return;
+    const { at, point } = claimedTap;
+    claimedTap = null;
+    if (Date.now() - at > GHOST_CLICK_MS) return;
+    if (distance(point, { x: e.clientX, y: e.clientY }) > GHOST_CLICK_SLOP) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   onMount(() => {
     document.addEventListener('keydown', handleKeydown);
+    // Capture, so it runs before the handlers on whatever is underneath.
+    document.addEventListener('click', swallowClaimedClick, true);
     return () => {
       document.removeEventListener('keydown', handleKeydown);
+      document.removeEventListener('click', swallowClaimedClick, true);
       cancelPendingClose();
       endWheelGesture();
     };
@@ -271,7 +340,10 @@
     }
     gestureStart = null;
     if (e.type === 'pointercancel' || dragged || !lifted) return;
-    handleTap(lifted);
+    handleTap(lifted, {
+      point: { x: e.clientX, y: e.clientY },
+      synthesized: e.pointerType !== 'mouse',
+    });
   }
 
   /**
@@ -282,9 +354,9 @@
    * second tap either arrives or does not — the backdrop carries no double-tap
    * meaning, so it needs no such wait.
    */
-  function handleTap(point: Point) {
+  function handleTap(point: Point, release: Release) {
     if (tapTarget === 'backdrop') {
-      onClose();
+      dismiss(release);
       return;
     }
 
@@ -304,8 +376,27 @@
     if (isZoomed(zoom)) return;
     closeTimer = setTimeout(() => {
       closeTimer = null;
-      onClose();
+      dismiss(release);
     }, DOUBLE_TAP_MS);
+  }
+
+  /**
+   * Go, and claim the click the tap that dismissed us is about to leave behind.
+   *
+   * The claim is stamped here rather than where the tap landed, because the
+   * window it opens is measured from the moment the overlay stops being able
+   * to absorb its own click — which on the deferred path above is a whole
+   * `DOUBLE_TAP_MS` after the finger lifted.
+   *
+   * Only the two paths that actually dismiss claim anything. A tap that leaves
+   * the overlay up strands no click: that one lands on the overlay itself and
+   * dies there, and claiming it would only mean the overlay swallowing its own
+   * clicks — which would make any future handler on the image or the backdrop
+   * dead on the tap path alone.
+   */
+  function dismiss(release: Release) {
+    claimedTap = release.synthesized ? { at: Date.now(), point: release.point } : null;
+    onClose();
   }
 
   function toggleZoom(point: Point) {
