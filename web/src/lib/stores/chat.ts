@@ -936,6 +936,25 @@ function createSession(): ChatSession {
     return null;
   }
 
+  /**
+   * Take a queued entry out of the queue, leaving its row where it is.
+   *
+   * The drain's half of `takeQueued`. A drained entry's row is not going
+   * anywhere — it is the turn now, settled or failed — so only the entry is
+   * removed, and storage is mirrored as after any other mutation.
+   *
+   * A no-op for a cid that names no entry, which is every ordinary send and
+   * every retry: the send path calls this on each terminal outcome rather than
+   * asking first whether this message came out of the queue.
+   */
+  function dropQueuedEntry(cid: number): void {
+    const found = findQueued(cid);
+    if (!found) return;
+    found.entries.splice(found.idx, 1);
+    if (!found.entries.length) sendQueue.delete(found.token);
+    persistRoomQueue(found.token);
+  }
+
   /** Take a queued entry out of the queue and its row off the transcript. */
   function takeQueued(cid: number): { token: string; entry: QueuedSend } | null {
     const found = findQueued(cid);
@@ -3224,22 +3243,30 @@ function createSession(): ChatSession {
   /**
    * Send the head of a room's queue, if it may go.
    *
-   * One entry per drain: the next one goes when *this* turn settles. The entry
-   * is shifted off before the POST, so a failure leaves a failed row with its
-   * own Retry rather than a row the queue would try again.
+   * One entry per drain: the next one goes when *this* turn settles.
+   *
+   * **The entry stays in the queue until the POST resolves** (ISSUE-202), and
+   * the resolution is what removes it: the ack through `settleSend`, a refusal
+   * through `failSend`, a dead citation through `returnSend`. This reverses
+   * the order ISSUE-238 shipped, where the entry was shifted off first so that
+   * a reload could not restore a message that had already gone. That trade was
+   * right when the POST was not idempotent and is not now: every entry carries
+   * the `idempotencyKey` it was minted with, so a second POST of the same
+   * message is answered with the first task rather than creating a second one
+   * (`beginSend`, and `transport/ingest.py`'s replay resolution). What the
+   * early shift cost instead was real — a force-quit between the shift and the
+   * ack lost the message client-side while the server may well have taken it,
+   * which is the one outcome an outbox exists to prevent.
+   *
+   * Draining the same head twice is impossible either way: `canDrain` refuses
+   * while any row is `sendState: 'sending'`, which `beginSend` sets
+   * synchronously before it awaits.
    */
   async function drainSendQueue(roomId: number) {
     if (!canDrain(roomId)) return;
     const token = roomTokenOf(roomId);
-    const entries = token ? sendQueue.get(token) : undefined;
-    const entry = entries?.shift();
+    const entry = token ? sendQueue.get(token)?.[0] : undefined;
     if (!token || !entry) return;
-    if (!entries?.length) sendQueue.delete(token);
-    // Before the POST, not after: the entry is in flight now, and a reload
-    // taking the tab with it must not restore a message that has already gone.
-    // A send that then fails leaves a failed row with its own Retry, which is
-    // where that message's recovery lives from here.
-    persistRoomQueue(token);
     await beginSend(roomId, entry.cid, {
       text: entry.text,
       attachments: entry.attachments,
@@ -3438,6 +3465,12 @@ function createSession(): ChatSession {
       m.retryable = retryable;
       m.showSending = undefined;
     });
+    // A drained entry is resolved by its POST, and this is one of the three
+    // resolutions (see `drainSendQueue`). The server refused this message, so
+    // re-POSTing it unchanged is not the recovery — the failed row's own Retry
+    // is. Ahead of the hold below, or the entry that has just failed would be
+    // marked held and kept alongside the ones that are genuinely waiting.
+    dropQueuedEntry(userCid);
     // Only when this turn's room is still the one on screen. Switching rooms
     // isn't gated on `busy`, so a send failing after the switch would report
     // 'idle' about a room that may have a task streaming in it — unlocking the
@@ -3474,6 +3507,11 @@ function createSession(): ChatSession {
     attachments: ChatAttachment[],
   ) {
     messages.update((arr) => arr.filter((m) => m.cid !== userCid && m.cid !== phCid));
+    // The third resolution of a drained entry (see `drainSendQueue`). The row
+    // is gone and the text is going back to the composer, so an entry left
+    // behind would be a queued message with nothing on screen — and would come
+    // back after a reload as a second copy of what the user is now editing.
+    dropQueuedEntry(userCid);
     const token = get(rooms).find((r) => r.id === roomId)?.token ?? null;
     // The room travels with the counter for the same reason it does on
     // `sendSettled`: two sends can be open at once, and the composer must not
@@ -3506,6 +3544,13 @@ function createSession(): ChatSession {
 
   function settleSend(userCid: number, roomId: number) {
     settleSendRow(userCid);
+    // The ack is what takes a drained entry out of the queue (see
+    // `drainSendQueue`). Here rather than back in the drain, and *before* the
+    // inline-command branch below re-enters `drainSendQueue`: a `!command`
+    // answers inside the request, so that branch runs while this call is still
+    // on the stack, and an entry still at the head then would be drained a
+    // second time.
+    dropQueuedEntry(userCid);
     // The composer has been holding this message as a draft since it was
     // submitted — the stored draft is the only copy that survives a reload, so
     // it is dropped on the ack rather than on submit. This is the ack, and it
