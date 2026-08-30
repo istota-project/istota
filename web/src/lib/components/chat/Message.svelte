@@ -7,7 +7,7 @@
   import type { OutboundDraft } from '$lib/api';
   import { messageCopyText, renderGroups } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Button, IconButton } from '$lib/components/ui';
+  import { Avatar, Button, IconButton } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
@@ -20,7 +20,10 @@
     message,
     continuation = false,
     userName = 'You',
+    userId,
+    userAvatar = null,
     botName = 'Istota',
+    botAvatar = null,
     onConfirm,
     onReject,
     onToggleStar,
@@ -46,7 +49,17 @@
     // avatar + author/time header is collapsed (Discord/Slack grouping).
     continuation?: boolean;
     userName?: string;
+    // The viewer's own istota user id, which is what the avatar endpoint keys
+    // on — not `userName`, which is a display handle. Absent while the server
+    // has not confirmed the identity, and the row then falls back to the chip.
+    userId?: string;
+    // Content hashes for the two identities `/me` names, passed straight
+    // through to `Avatar`: a string builds an immutable URL, `null` says there
+    // is no picture and suppresses the request. `null` by default, so a caller
+    // that knows nothing about avatars renders what it rendered before.
+    userAvatar?: string | null;
     botName?: string;
+    botAvatar?: string | null;
     onConfirm: (cid: number, taskId: number) => void;
     onReject: (cid: number, taskId: number) => void;
     // Star toggle for durable messages (rows carrying msgId). Absent → no
@@ -126,7 +139,12 @@
   // whoever sent it. The server names them when it can; `userName` is the
   // fallback, and stays right for everything the viewer typed here.
   const author = $derived(isUser ? (message.author ?? userName) : botName);
-  const initial = $derived((author.trim()[0] ?? '?').toUpperCase());
+  // A user row the *viewer* wrote. `message.author` is set only when the server
+  // named somebody else — another room member, or the sender of a mirrored
+  // email — so its absence on a user row is what identifies the viewer's own
+  // words. Nothing on the row carries a co-member's user id yet, so their turns
+  // keep the initial chip until `author_id` arrives.
+  const ownTurn = $derived(isUser && !message.author);
 
   // System (!command) output goes through the safe markdown renderer; user text
   // is shown verbatim and the assistant body is rendered below.
@@ -552,7 +570,12 @@
   >
     <div class="gutter">
       {#if !continuation}
-        <div class="avatar" class:bot={!isUser}>{initial}</div>
+        <Avatar
+          kind={isUser ? 'user' : 'bot'}
+          userId={ownTurn ? userId : undefined}
+          version={isUser ? (ownTurn ? userAvatar : null) : botAvatar}
+          label={author}
+        />
       {:else if revealed}
         <time class="hover-time">{time}</time>
       {/if}
@@ -1166,43 +1189,19 @@
     display: flex;
     justify-content: center;
     padding-top: 0.1rem;
-  }
-  .avatar {
-    width: var(--chat-avatar);
-    height: var(--chat-avatar);
-    border-radius: var(--radius-md);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.85rem;
-    font-weight: 600;
-    /* design-lint-allow-begin: fixed surface — an avatar fill is an identity
-       chip, not a themed surface, so it holds one value in both themes. */
-    color: #fff;
-    background: #4a4a52;
-    /* design-lint-allow-end */
-    user-select: none;
-  }
-  .avatar.bot {
-    background: var(--accent-amber-fill);
-    color: var(--accent-amber-fill-fg);
+    /* The gutter is the wrapper an `Avatar` is rendered into, so this is where
+       its size is chosen. The box and the chip's fill live in the primitive;
+       what belongs to the transcript is which of the chat metrics it takes,
+       and this one shrinks at the breakpoint with the column around it. */
+    --avatar-size: var(--chat-avatar);
   }
 
-  /* The mobile avatar is a good deal smaller (it is what buys the shared text
-	   inset — see app.css), so the initial and the corner both have to come down
-	   with it: the desktop values leave a 600-weight glyph crowding the box, and
-	   a 0.5rem radius on a 1.25rem square is a pill rather than a rounded square. */
   @media (max-width: 768px) {
     /* The avatar is narrower than its column here (the column's width is fixed
 		   by the shared text inset, the avatar's by the sigil it lines up with), so
 		   it hugs the leading edge instead of centring in the leftover. */
     .gutter {
       justify-content: flex-start;
-    }
-
-    .avatar {
-      font-size: var(--text-xs);
-      border-radius: var(--radius-sm);
     }
 
     /* The continuation-row stamp shares that column, and a `06:25 PM` does not

@@ -113,6 +113,13 @@
   const identity = getCurrentUser();
   const userName = $derived(identity.user.display_name || 'You');
   const botName = $derived(identity.user.bot_name || 'Istota');
+  /* The two content hashes `/me` carries, for the two identities every
+     transcript renders. `?? null` rather than left undefined: a backend that
+     predates the field, or a cached record from one, then reads as "there is no
+     picture" and asks for nothing, where undefined would mean "unknown" and put
+     a bare request behind every row. */
+  const userAvatar = $derived(identity.user.avatars?.user ?? null);
+  const botAvatar = $derived(identity.user.avatars?.bot ?? null);
   /* Who is logged in, for the composer's draft key — and **only while the
      server has confirmed it**. `username` is the istota user id, the same value
      the server keys admin checks and workspace paths on, not a display handle.
@@ -982,7 +989,10 @@
               {message}
               continuation={isContinuation(i)}
               {userName}
+              userId={userId ?? undefined}
+              {userAvatar}
               {botName}
+              {botAvatar}
               onConfirm={session.confirm}
               onReject={session.reject}
               onToggleStar={session.toggleStar}

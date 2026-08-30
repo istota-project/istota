@@ -460,7 +460,15 @@ describe('system rows share the turn geometry', () => {
     });
 
     expect(container.querySelector('.gutter .sys-mark')).not.toBeNull();
-    expect(container.querySelector('.avatar')).toBeNull();
+    // Re-pointed at what the `Avatar` primitive renders, and scoped to the
+    // gutter. The old `.avatar` selector named a class `Message.svelte` used to
+    // own and no longer writes anywhere; an assertion phrased against the class
+    // a component *used* to render is the repo's own no-op-probe class, and
+    // this one has to stay able to fail. Both of the primitive's states are
+    // named because they are alternatives — an `<img>` when there is a picture,
+    // `.fallback` when there is not — so naming one leaves the other free.
+    expect(container.querySelector('.gutter img')).toBeNull();
+    expect(container.querySelector('.gutter .fallback')).toBeNull();
     expect(container.querySelector('.meta')).toBeNull();
     expect(container.querySelector('.author')).toBeNull();
     expect(container.querySelector('.stamp')).toBeNull();
