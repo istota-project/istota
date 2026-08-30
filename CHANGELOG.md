@@ -78,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **You can type and send in web chat while the bot is still working on a reply.** The message is queued instead of refused: it appears in the transcript straight away, dimmed and marked "Waiting to send", and goes out as the next turn when the current one finishes. Nothing reaches the server until then, so a queued message is still yours to edit back into the box or remove. Turns here run for minutes, and holding your next thought for the whole of one was the cost this removes.
+- **You can type and send in web chat while the bot is still working on a reply.** The message is queued instead of refused: it appears in the transcript straight away, dimmed and marked "Waiting to send", and goes out as the next turn when the current one finishes and you are still in the room. Your message is not sent until then, so a queued one is still yours to edit back into the box or remove. Turns here run for minutes, and holding your next thought for the whole of one was the cost this removes.
 
 - Stop is now its own button, to the left of a Send button that is always Send. One control that changed meaning as a turn started could be tapped for the meaning it no longer had — a tap aimed at Send arriving as a cancel — and two buttons cannot do that. Stop appearing and disappearing never moves Send, so a tap lands where it was aimed whatever the turn does mid-gesture.
 
