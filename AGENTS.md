@@ -167,12 +167,14 @@ There is no single entry point. Run the checks directly, and run only the half t
 Python:
 
 ```bash
-ruff check --output-format concise src tests testbed docker/devbox
+ruff check --output-format concise src tests testbed docker/devbox scripts
 scripts/qt                       # the edit loop: only the tests your change affects
 scripts/qtest uv run pytest      # the full run before a commit; deselects every marker below
 ```
 
 **Use `scripts/qt` while iterating and `scripts/qtest uv run pytest` once before the commit.** Do not hand-pick a subset instead — see below for why that does not work here. Both are cheap on a machine of this size, which is what makes the full run the right close: the suite is about 110 seconds here, not the 70-odd minutes it costs on a small deployment host. That gap is the whole reason the `developer` skill's own default is narrower than this file's, and why it now yields to `USER.md` rather than ordering either one.
+
+`scripts/` is in it because it was in no documented command at all and a whole-repo `ruff check .` was therefore red on three pre-existing files there, handing back noise unrelated to whatever it was checking. Naming the directory does **not** reopen the `extend-include` question below: `scripts/qtest` has no `.py` suffix, so ruff still walks past it, and pulling it in is a separate decision with its own argument.
 
 `docker/devbox/` is in that first command because three of the Python programs the devbox image ships carry no `.py` suffix — they are on the container's `PATH` and invoked by name — so ruff, which discovers by extension, walked past the exec server, the credential helper and the policy seeder and reported the directory clean. `[tool.ruff] extend-include` names those three one by one; a `scripts/*` glob would hand ruff the supervisor beside them, which is `/bin/sh`. That list is hand-maintained, so `tests/test_lint_scope.py` walks the directory for a Python shebang without a `.py` suffix and requires each hit to be named — otherwise a fourth program added later is unlinted and the command still says everything passed. `scripts/qtest` is the same shape and is deliberately outside this scope.
 

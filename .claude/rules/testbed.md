@@ -133,13 +133,13 @@ What this gives up, stated so it can be revisited: nothing asserts that a *boote
 
 ## Prompt goldens
 
-`tests/test_prompt_golden.py` runs in the default suite with no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple, behind a `[DRY RUN] Would execute with prompt:` line the test strips, and twelve cases snapshot it into `tests/golden/prompts/`. A diff is a failure; an intentional change is a reviewed golden update:
+`tests/test_prompt_golden.py` runs in the default suite with no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple, behind a `[DRY RUN] Would execute with prompt:` line the test strips, and thirteen cases snapshot it into `tests/golden/prompts/`. A diff is a failure; an intentional change is a reviewed golden update:
 
 ```bash
 uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0
 ```
 
-`env` goes *inside* the `uv run`, not in front of it as a shell assignment. `uv` is in `DEFAULT_SHIM_COMMANDS`, so on a deployment with a devbox it is a shim that hands the argv to the exec server in the container, and `devbox_exec_protocol` carries no `env` field — deliberately, and pinned by a test — so nothing set in the calling shell arrives. The run then compares instead of rewriting and reports thirteen failures that read as a prompt regression. In the argv the assignment survives the trip, and on a host with no devbox the two forms are identical. This is the second layer to eat this variable: `tests/support/env_isolation.py` scrubbed it in-process until it was named in the keep-list, with the same symptom.
+`env` goes *inside* the `uv run`, not in front of it as a shell assignment. `uv` is in `DEFAULT_SHIM_COMMANDS`, so on a deployment with a devbox it is a shim that hands the argv to the exec server in the container, and `devbox_exec_protocol` carries no `env` field — deliberately, and pinned by a test — so nothing set in the calling shell arrives. The run then compares instead of rewriting, and every golden the change touched reads as a prompt regression. In the argv the assignment survives the trip, and on a host with no devbox the two forms are identical. This is the second layer to eat this variable: `tests/support/env_isolation.py` scrubbed it in-process until it was named in the keep-list, with the same symptom.
 
 `-n0` matters: the orphan check has no ordering relationship with the writers under xdist, so a regeneration that adds a case reports missing goldens from the run that was supposed to create it. The variable is parsed by an `updating()` helper taking the same affirmative and negative sets as `PRECOMMIT_SCANS_REQUIRED` and raising on anything else, because a bare truthiness read would let `ISTOTA_UPDATE_GOLDEN=0` left exported in a shell turn every golden into a rubber stamp.
 
