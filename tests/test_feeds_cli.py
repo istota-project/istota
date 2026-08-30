@@ -343,6 +343,71 @@ class TestPoll:
         assert out["errors"] == 1
         assert r.exit_code == 0
 
+    def test_run_scheduled_caps_its_burst_by_default(self, ctx, monkeypatch):
+        """The default cap lives in the command, so it has to be tested there.
+
+        Calling `poll_due_feeds(limit=...)` directly asserts nothing about
+        `cmd_run_scheduled` — reverting the command to `_poll_due(ctx, limit)`
+        leaves such a test green.
+        """
+        from istota.feeds.models import DEFAULT_SCHEDULED_POLL_LIMIT
+
+        over = DEFAULT_SCHEDULED_POLL_LIMIT + 5
+        _seed_db(ctx, feeds=[
+            {"url": f"https://h{i}.test/feed"} for i in range(over)
+        ])
+        monkeypatch.setattr(
+            "istota.feeds.poller._poll_rss",
+            lambda feed, **kw: __import__(
+                "istota.feeds.models", fromlist=["FetchResult"],
+            ).FetchResult(feed_url=feed.url),
+        )
+        r = _invoke(ctx, ["run-scheduled"])
+        assert json.loads(r.output)["polled"] == DEFAULT_SCHEDULED_POLL_LIMIT
+
+    def test_run_scheduled_limit_overrides_the_default_in_both_directions(
+        self, ctx, monkeypatch,
+    ):
+        _seed_db(ctx, feeds=[{"url": f"https://h{i}.test/feed"} for i in range(60)])
+        monkeypatch.setattr(
+            "istota.feeds.poller._poll_rss",
+            lambda feed, **kw: __import__(
+                "istota.feeds.models", fromlist=["FetchResult"],
+            ).FetchResult(feed_url=feed.url),
+        )
+        assert json.loads(_invoke(ctx, ["run-scheduled", "--limit", "3"]).output)["polled"] == 3
+        with feeds_db.connect(ctx.db_path) as conn:
+            conn.execute("UPDATE feeds SET next_poll_at = NULL")
+            conn.commit()
+        assert json.loads(_invoke(ctx, ["run-scheduled", "--limit", "60"]).output)["polled"] == 60
+
+    def test_a_wholly_throttled_run_is_reported_as_a_failure(self, ctx, monkeypatch):
+        """A 429 is not a feed error, but a run turned away everywhere is not ok.
+
+        Without the throttled counter this run reported `status: ok`,
+        `errors: 0` and nothing else — indistinguishable from a clean poll that
+        found no new entries.
+        """
+        _seed_db(ctx, feeds=[{"url": "https://throttled.test/feed"}])
+
+        class _Resp:
+            status_code = 429
+            headers = {"Retry-After": "120"}
+
+        import httpx
+        monkeypatch.setattr(httpx, "get", lambda *a, **kw: _Resp())
+
+        runner = CliRunner()
+        r = runner.invoke(cli, ["poll"], obj=ctx, standalone_mode=False)
+        out = json.loads(r.output)
+        assert r.exit_code == 1
+        assert out["status"] == "error"
+        assert out["throttled"] == 1
+        assert out["errors"] == 0
+        assert "rate-limited" in out["error"]
+        assert out["feeds"][0]["rate_limited"] is True
+        assert out["feeds"][0]["retry_after_seconds"] == 120
+
     def test_error_when_all_feeds_fail(self, ctx, monkeypatch):
         _seed_db(ctx, feeds=[{"url": "https://bad.test/feed"}])
 

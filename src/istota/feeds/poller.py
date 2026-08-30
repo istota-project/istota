@@ -8,24 +8,55 @@ Public surface:
 
 Conditional GET (etag / last-modified) is honoured for RSS feeds. Errors
 back off by doubling ``poll_interval_minutes`` up to ``backoff_max_minutes``.
+
+Rate limiting (ISSUE-347) is four separate things, and they are only useful
+together:
+
+* **Pacing.** :func:`poll_due_feeds` holds a minimum gap between two requests
+  to the same host. It lives here rather than in a provider so one rule covers
+  Are.na, Tumblr and whatever comes next; the key is the host, so RSS pays
+  nothing for it.
+* **``Retry-After``.** A 429 is answered on the server's own terms instead of
+  the generic doubling, clamped at both ends.
+* **A 429 is not an error.** It neither increments ``error_count`` nor writes
+  ``last_error``, so a throttled channel stops reading as a broken one.
+* **Jitter.** Every ``next_poll_at`` is spread, so a set that burst together
+  disperses instead of re-forming one doubling later.
+
+**Known gap: this budget does not span users.** The poll runs as a per-user
+skill subprocess (``_module.feeds.run_scheduled``, one job per user), so on a
+multi-user deployment two users' polls are two processes reaching one host from
+one IP with no shared budget. Within-process pacing is still the large win —
+the observed bursts are one user's channel set — but nothing here bounds the
+cross-user case, and a limiter that did would need to live outside the process.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from istota.feeds import db as feeds_db
 from istota.feeds.models import (
     DEFAULT_BACKOFF_MAX_MINUTES,
+    DEFAULT_HOST_GAP_SECONDS,
+    DEFAULT_JITTER_FRACTION,
+    DEFAULT_MAX_PACING_SECONDS,
     DEFAULT_POLL_INTERVAL_MINUTES,
+    DEFAULT_RATE_LIMIT_BACKOFF_MINUTES,
+    MAX_RATE_LIMIT_BACKOFF_MINUTES,
     EntryRecord,
+    FeedRateLimited,
     FeedRecord,
     FetchedItem,
     FetchResult,
     detect_source_type,
+    poll_host,
+    retry_after_from_headers,
     provider_identifier,
 )
 from istota.feeds.providers import arena as arena_provider
@@ -67,6 +98,19 @@ def poll_feed(
             items = arena_provider.fetch(ident)
             return FetchResult(feed_url=feed.url, items=items)
         return _poll_rss(feed, http_get=http_get)
+    except FeedRateLimited as exc:
+        # Ahead of the generic handler below, and deliberately not folded into
+        # it: a throttle is not a failure of the feed, so it carries no
+        # ``error`` and the persist step leaves the error record alone.
+        logger.info(
+            "poll_feed rate_limited url=%s host=%s retry_after=%s",
+            feed.url, exc.host, exc.retry_after,
+        )
+        return FetchResult(
+            feed_url=feed.url,
+            rate_limited=True,
+            retry_after_seconds=exc.retry_after,
+        )
     except Exception as exc:  # noqa: BLE001 — captured into FetchResult
         logger.warning("poll_feed failed url=%s err=%s", feed.url, exc)
         return FetchResult(feed_url=feed.url, error=str(exc))
@@ -90,6 +134,14 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
     status = getattr(resp, "status_code", 0)
     if status == 304:
         return FetchResult(feed_url=feed.url, not_modified=True)
+    if status == 429:
+        # Raised rather than returned so the 429 shape is built in exactly one
+        # place, shared with the two providers that raise it out of their own
+        # HTTP client.
+        raise FeedRateLimited(
+            retry_after_from_headers(getattr(resp, "headers", {}) or {}),
+            host=poll_host(feed.url, feed.source_type or ""),
+        )
     if status >= 400:
         return FetchResult(
             feed_url=feed.url,
@@ -227,22 +279,64 @@ def poll_due_feeds(
     now: datetime | None = None,
     http_get: Callable | None = None,
     limit: int | None = None,
+    host_gap_seconds: float = DEFAULT_HOST_GAP_SECONDS,
+    max_pacing_seconds: float = DEFAULT_MAX_PACING_SECONDS,
+    jitter_fraction: float = DEFAULT_JITTER_FRACTION,
+    rng: random.Random | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> list[tuple[FeedRecord, FetchResult, int]]:
     """Poll every feed whose ``next_poll_at`` is in the past.
 
     Returns a list of ``(feed, result, new_entry_count)`` tuples for callers
     who want to log or surface progress.
+
+    ``host_gap_seconds`` is the minimum spacing between two requests to one
+    host; ``0`` disables pacing. ``max_pacing_seconds`` bounds the total time
+    one run may spend asleep — when it is exhausted the run *stops*, leaving
+    the feeds it did not reach still due for the next tick, rather than
+    carrying on unpaced. ``sleep`` and ``rng`` are injection points for the
+    tests — a pacing test that really slept would be the slowest thing in the
+    suite and would prove less than asserting on the gaps requested.
     """
     now = now or datetime.now(timezone.utc)
+    sleep = sleep or time.sleep
+    rng = rng or random.Random()
     feeds = feeds_db.feeds_due_for_poll(conn, now=now)
     if limit is not None:
         feeds = feeds[:limit]
 
+    started = time.monotonic()
+    last_request_at: dict[str, float] = {}
+    paced_seconds = 0.0
+
     out: list[tuple[FeedRecord, FetchResult, int]] = []
     for feed in feeds:
+        host = poll_host(feed.url, feed.source_type or "")
+        if host_gap_seconds > 0:
+            previous = last_request_at.get(host)
+            if previous is not None:
+                wait = host_gap_seconds - (time.monotonic() - previous)
+                if wait > 0:
+                    if paced_seconds + wait > max_pacing_seconds:
+                        logger.info(
+                            "poll_due_feeds pacing budget spent after %d feed(s); "
+                            "%d left due for the next run",
+                            len(out), len(feeds) - len(out),
+                        )
+                        break
+                    paced_seconds += wait
+                    sleep(wait)
+        last_request_at[host] = time.monotonic()
+
         result = poll_feed(feed, tumblr_api_key=tumblr_api_key, http_get=http_get)
-        new_count = _persist_poll(conn, feed, result, now=now,
-                                  backoff_max_minutes=backoff_max_minutes)
+        # Pacing means the loop can run for minutes, so the schedule is
+        # computed against the clock as it is now rather than against the
+        # instant the batch started — otherwise the tail of a paced run is
+        # scheduled from a base already well in the past.
+        poll_now = now + timedelta(seconds=time.monotonic() - started)
+        new_count = _persist_poll(conn, feed, result, now=poll_now,
+                                  backoff_max_minutes=backoff_max_minutes,
+                                  jitter_fraction=jitter_fraction, rng=rng)
         out.append((feed, result, new_count))
     return out
 
@@ -254,16 +348,51 @@ def _persist_poll(
     *,
     now: datetime,
     backoff_max_minutes: int,
+    jitter_fraction: float = DEFAULT_JITTER_FRACTION,
+    rng: random.Random | None = None,
 ) -> int:
     """Write fetched entries and update fetch state for one poll outcome."""
+    rng = rng or random.Random()
     fetched_iso = now.isoformat()
     new_count = 0
+
+    if result.rate_limited:
+        # A throttled feed is healthy, so `error_count` and `last_error` are
+        # written back **unchanged** rather than cleared: the 429 says nothing
+        # about whether a previous real failure is fixed. Not incrementing is
+        # also what stops a throttle carrying a doubled interval forward once
+        # it clears — the doubling reads `error_count`, which never moved.
+        next_interval = _rate_limit_interval(
+            feed.poll_interval_minutes, result.retry_after_seconds,
+        )
+        next_poll = _schedule(now, next_interval, jitter_fraction, rng)
+        feeds_db.update_feed_fetch_state(
+            conn, feed.id,
+            etag=feed.etag,
+            last_modified=feed.last_modified,
+            # `last_fetched_at` is written back unchanged too, for the same
+            # reason as the three above it: nothing was fetched. Advancing it
+            # would have the feed assert a successful fetch that did not
+            # happen, which is the failure this branch exists to avoid, merely
+            # pointed the other way.
+            last_fetched_at=feed.last_fetched_at,
+            last_error=feed.last_error,
+            error_count=feed.error_count,
+            next_poll_at=next_poll,
+            # The one place a throttle is recorded. `last_error` deliberately
+            # does not carry it — a throttled channel is healthy — but that
+            # left it recorded nowhere, so a run turned away on every feed
+            # reported a clean poll that happened to find nothing.
+            last_throttled_at=fetched_iso,
+        )
+        conn.commit()
+        return 0
 
     if result.error:
         next_interval = _backoff_interval(
             feed.poll_interval_minutes, feed.error_count + 1, backoff_max_minutes,
         )
-        next_poll = (now + timedelta(minutes=next_interval)).isoformat()
+        next_poll = _schedule(now, next_interval, jitter_fraction, rng)
         feeds_db.update_feed_fetch_state(
             conn, feed.id,
             etag=feed.etag,
@@ -272,6 +401,9 @@ def _persist_poll(
             last_error=result.error,
             error_count=feed.error_count + 1,
             next_poll_at=next_poll,
+            # Preserved: an error says nothing about whether the throttle that
+            # preceded it has cleared.
+            last_throttled_at=feed.last_throttled_at,
         )
         conn.commit()
         return 0
@@ -300,7 +432,7 @@ def _persist_poll(
         new_count = feeds_db.insert_entries(conn, feed.id, records)
 
     interval = max(feed.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES)
-    next_poll = (now + timedelta(minutes=interval)).isoformat()
+    next_poll = _schedule(now, interval, jitter_fraction, rng)
     feeds_db.update_feed_fetch_state(
         conn, feed.id,
         etag=result.etag if not result.not_modified else feed.etag,
@@ -311,6 +443,9 @@ def _persist_poll(
         next_poll_at=next_poll,
         discovered_title=result.discovered_title,
         discovered_site_url=result.discovered_site_url,
+        # Cleared: a fetch that got through is the throttle having lifted, so
+        # the column means "throttled now" rather than "throttled once".
+        last_throttled_at=None,
     )
     conn.commit()
     return new_count
@@ -321,3 +456,57 @@ def _backoff_interval(base_minutes: int, error_count: int, cap_minutes: int) -> 
     base = max(base_minutes, 1)
     interval = base * (2 ** max(error_count - 1, 0))
     return min(interval, cap_minutes)
+
+
+def _rate_limit_interval(base_minutes: int, retry_after_seconds: int | None) -> float:
+    """How long to stand off after a 429, in minutes.
+
+    Clamped at both ends, for different reasons.
+
+    The floor is **the same quantity the success path uses**, and that identity
+    is the point rather than a coincidence: the success path schedules
+    ``max(poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES)``, so a floor of
+    the raw ``poll_interval_minutes`` would let a 429 come back *sooner* than a
+    successful poll on any feed configured under 30 minutes — increasing
+    pressure on the host that just turned us away, which is the opposite of
+    what this function is for. `DEFAULT_RATE_LIMIT_BACKOFF_MINUTES` is folded in
+    on top so being throttled costs at least as much as an ordinary cadence and
+    usually more. The invariant, stated so a future edit can be checked against
+    it: a 429 never schedules earlier than a success would.
+
+    The ceiling stops one unverified header taking a channel off the air for a
+    week.
+
+    ``None`` means the server named no time, which is why it is a separate
+    branch from a small number rather than being defaulted earlier.
+    """
+    floor = float(max(
+        base_minutes,
+        DEFAULT_POLL_INTERVAL_MINUTES,
+        DEFAULT_RATE_LIMIT_BACKOFF_MINUTES,
+    ))
+    if retry_after_seconds is None:
+        return floor
+    named = retry_after_seconds / 60.0
+    return min(max(named, floor), float(MAX_RATE_LIMIT_BACKOFF_MINUTES))
+
+
+def _schedule(
+    now: datetime, minutes: float, jitter_fraction: float, rng: random.Random,
+) -> str:
+    """``now`` plus ``minutes``, spread by ``jitter_fraction``, as ISO 8601.
+
+    Applied on the success path as well as the two failure paths: a set that is
+    synchronised for any reason drifts apart from the next poll onwards rather
+    than staying in lockstep for good. ``0`` is exact, which is what the tests
+    asserting a particular interval depend on.
+    """
+    # Clamped below 1.0: at or above it the low end of the range is zero or
+    # negative, so `next_poll_at` lands at or before `now` and the feed is
+    # permanently due on every tick. Production only ever passes the 0.1
+    # constant, but the parameter is public and documented as an override.
+    fraction = min(max(jitter_fraction, 0.0), 0.99)
+    spread = 1.0
+    if fraction > 0:
+        spread = rng.uniform(1.0 - fraction, 1.0 + fraction)
+    return (now + timedelta(minutes=minutes * spread)).isoformat()

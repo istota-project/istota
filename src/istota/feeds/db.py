@@ -28,7 +28,7 @@ from istota.feeds.sanitize import image_identity
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 SCHEMA_SQL = """
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS feeds (
     etag TEXT,
     last_modified TEXT,
     last_fetched_at TEXT,
+    last_throttled_at TEXT,
     last_error TEXT,
     error_count INTEGER NOT NULL DEFAULT 0,
     poll_interval_minutes INTEGER NOT NULL DEFAULT 30,
@@ -194,11 +195,27 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE feed_entries ADD COLUMN file_url TEXT")
 
 
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Add ``feeds.last_throttled_at`` (ISSUE-347).
+
+    Additive, same shape as the two above. A 429 stopped being recorded as a
+    feed error — a throttled channel is healthy — but that left it recorded
+    nowhere at all, so a run that was turned away for every feed reported a
+    clean poll that happened to find nothing. This column is where a throttle
+    is visible now that ``last_error`` no longer carries it. Existing rows keep
+    NULL, which reads as "never throttled".
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
+    if "last_throttled_at" not in cols:
+        conn.execute("ALTER TABLE feeds ADD COLUMN last_throttled_at TEXT")
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
     (4, _migrate_v3_to_v4),
     (5, _migrate_v4_to_v5),
+    (6, _migrate_v5_to_v6),
 ]
 
 
@@ -414,12 +431,16 @@ def update_feed_fetch_state(
     *,
     etag: str | None,
     last_modified: str | None,
-    last_fetched_at: str,
+    # `str | None` because the rate-limited path writes the feed's existing
+    # value straight back, which is NULL on a feed that has never been fetched
+    # — nothing was fetched, so the column must not start asserting otherwise.
+    last_fetched_at: str | None,
     last_error: str | None,
     error_count: int,
     next_poll_at: str,
     discovered_title: str | None = None,
     discovered_site_url: str | None = None,
+    last_throttled_at: str | None = None,
 ) -> None:
     """Persist the outcome of a single poll attempt."""
     conn.execute(
@@ -432,13 +453,14 @@ def update_feed_fetch_state(
             error_count = ?,
             next_poll_at = ?,
             title = COALESCE(?, title),
-            site_url = COALESCE(?, site_url)
+            site_url = COALESCE(?, site_url),
+            last_throttled_at = ?
         WHERE id = ?
         """,
         (
             etag, last_modified, last_fetched_at, last_error,
             error_count, next_poll_at, discovered_title,
-            discovered_site_url, feed_id,
+            discovered_site_url, last_throttled_at, feed_id,
         ),
     )
 
@@ -956,6 +978,11 @@ def _row_to_feed(row: sqlite3.Row) -> FeedRecord:
         error_count=row["error_count"],
         poll_interval_minutes=row["poll_interval_minutes"],
         next_poll_at=row["next_poll_at"],
+        # `.keys()` rather than a bare subscript: this mapper also runs against
+        # a row read before the v6 migration in a mixed-version test.
+        last_throttled_at=(
+            row["last_throttled_at"] if "last_throttled_at" in row.keys() else None
+        ),
     )
 
 

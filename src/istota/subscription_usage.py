@@ -50,6 +50,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
+from istota.retry_after import parse_retry_after as _parse_retry_after
+from istota.retry_after import retry_after_from_headers as _retry_after_from_headers
+
 from . import __version__
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -734,80 +737,14 @@ def _build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
-def parse_retry_after(value: Any, *, now_ts: float) -> float | None:
-    """``Retry-After`` as seconds from ``now_ts``, or ``None`` if unusable.
-
-    RFC 9110 gives the header two spellings and the endpoint is free to use
-    either, so both are read: ``delta-seconds`` (``Retry-After: 2327``) and an
-    HTTP-date (``Retry-After: Sat, 22 Aug 2026 23:42:17 GMT``). A date already
-    in the past floors at 0 rather than going negative — clock skew between a
-    host and Anthropic is ordinary, and a negative backoff would read as "retry
-    before now" to arithmetic that never expects one.
-
-    ``None`` for anything else: absent, blank, a float (``delta-seconds`` is an
-    integer, and a server sending ``1.5`` is not one this should guess for), a
-    negative integer, a non-finite value, or a date that will not parse. The
-    caller then falls back to its own interval, which is the pre-existing
-    behaviour — an unreadable hint costs nothing.
-
-    Never raises. This runs on the failure path of a diagnostic fetch, where an
-    exception would turn a rate-limit response into a crash.
-    """
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        text = str(value).strip()
-    except Exception:  # noqa: BLE001 — a __str__ that raises is still just unusable
-        return None
-    if not text:
-        return None
-
-    # delta-seconds first: it is the common spelling and the cheap parse.
-    if re.fullmatch(r"\d+", text):
-        try:
-            seconds = float(int(text))
-        except (ValueError, OverflowError):
-            # A digit string long enough to overflow a float is not a delay.
-            return None
-        return seconds if math.isfinite(seconds) else None
-
-    try:
-        from email.utils import parsedate_to_datetime
-
-        when = parsedate_to_datetime(text)
-    except Exception:  # noqa: BLE001 — a malformed date is a missing hint
-        return None
-    if when is None:
-        return None
-    try:
-        if when.tzinfo is None:
-            # RFC 9110 dates are GMT; a naive one means the sender omitted the
-            # zone, not that it meant local time on *this* host.
-            when = when.replace(tzinfo=timezone.utc)
-        delta = when.timestamp() - now_ts
-    except (ValueError, OverflowError, OSError):
-        return None
-    if not math.isfinite(delta):
-        return None
-    return max(0.0, delta)
-
-
-def _retry_after_from(headers: Mapping[str, str] | None, *, now_ts: float) -> float | None:
-    """``Retry-After`` out of a response's headers, case-insensitively.
-
-    Header names are case-insensitive per RFC 9110 and a stub transport in a
-    test is under no obligation to match urllib's capitalization, so the lookup
-    folds case rather than trusting either.
-    """
-    if not headers:
-        return None
-    try:
-        for name, value in headers.items():
-            if str(name).strip().lower() == "retry-after":
-                return parse_retry_after(value, now_ts=now_ts)
-    except Exception:  # noqa: BLE001 — a mapping that will not iterate has no hint in it
-        return None
-    return None
+# `parse_retry_after` and `_retry_after_from` used to live here, and this
+# module paid for their hardening. They moved to `istota.retry_after` when the
+# feeds poller became a second caller (ISSUE-347) — a stdlib-only leaf, so a
+# caller with a light import graph need not pull in this module's. Re-exported
+# under both names because this module's tests and its own call sites address
+# them here.
+parse_retry_after = _parse_retry_after
+_retry_after_from = _retry_after_from_headers
 
 
 def _urllib_transport(

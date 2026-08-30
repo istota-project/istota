@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from istota.feeds.models import FetchedItem
+from istota.feeds.models import FeedRateLimited, FetchedItem, retry_after_from_headers
 from istota.feeds.sanitize import html_to_text, sanitize_html
 
 
@@ -33,7 +33,8 @@ logger = logging.getLogger("istota.feeds.providers.arena")
 
 
 PROVIDER_NAME = "arena"
-ARENA_API_BASE = "https://api.are.na/v3/channels"
+ARENA_HOST = "api.are.na"
+ARENA_API_BASE = f"https://{ARENA_HOST}/v3/channels"
 ARENA_BLOCK_URL = "https://www.are.na/block/{id}"
 ARENA_CHANNEL_URL = "https://www.are.na/channel/{slug}"
 
@@ -63,6 +64,21 @@ def fetch(identifier: str, *, limit: int = 50) -> list[FetchedItem]:
         headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
         timeout=30.0,
     )
+    # 429 before raise_for_status: the generic HTTPStatusError keeps the
+    # message text and drops the headers, so the server's own answer to "when
+    # may I come back" was being thrown away and the channel took the ordinary
+    # error doubling instead (ISSUE-347).
+    # Both reads are `getattr`, matching how `_poll_rss` reads the same
+    # response: the object is whatever the injected client returns, and a stub
+    # standing in for one need only carry what the mapping below reads.
+    # `retry_after_from_headers` folds header case — `httpx` and `requests` both
+    # hand back a case-insensitive mapping, a plain dict does not, and a lookup
+    # that quietly missed would put the feed back on the generic doubling.
+    if getattr(resp, "status_code", 0) == 429:
+        raise FeedRateLimited(
+            retry_after_from_headers(getattr(resp, "headers", {}) or {}),
+            host=ARENA_HOST,
+        )
     resp.raise_for_status()
     payload = resp.json()
 

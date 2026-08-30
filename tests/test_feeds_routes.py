@@ -444,6 +444,55 @@ class TestConfigEndpoint:
         urls = [f["url"] for f in body["config"]["feeds"]]
         assert urls == ["https://example.com/feed.xml"]
 
+    def test_put_clearing_a_category_title_resets_it_to_the_slug(self, ctx, client):
+        """A cleared title used to be silently discarded (found reviewing ISSUE-346).
+
+        The settings payload is the page's whole document, so it is
+        authoritative about a title where it carries the key — a blank one
+        included. The blank branch took ``ensure_category``, which exists for
+        callers that only know a slug and deliberately does not stomp a title
+        set elsewhere, so the save came back 200 with the old title still in
+        place. It resets to the slug rather than storing empty because the
+        column is NOT NULL and the reader files a falsy title under
+        "uncategorized".
+        """
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.upsert_category(conn, "blogs", "Blogs")
+            conn.commit()
+
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {"categories": [{"slug": "blogs", "title": ""}], "feeds": []}},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT title FROM feed_categories WHERE slug = ?", ("blogs",),
+            ).fetchone()
+        assert row["title"] == "blogs"
+
+    def test_put_without_a_title_key_leaves_an_existing_title_alone(self, ctx, client):
+        """The other half of the same branch, and why it is keyed on the key.
+
+        A payload that never mentions a title is not asserting one — that is
+        the CLI / OPML shape ``ensure_category`` was written for — so it must
+        keep what is on file rather than resetting it to the slug.
+        """
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.upsert_category(conn, "blogs", "Blogs")
+            conn.commit()
+
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {"categories": [{"slug": "blogs"}], "feeds": []}},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT title FROM feed_categories WHERE slug = ?", ("blogs",),
+            ).fetchone()
+        assert row["title"] == "Blogs"
+
     def test_put_rejects_malformed_body(self, client):
         resp = client.put("/istota/api/feeds/config", json={"oops": "no"})
         assert resp.status_code == 400

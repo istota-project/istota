@@ -459,6 +459,10 @@ async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
             "total_entries": total_entries,
             "unread_entries": unread,
             "error_feeds": sum(1 for f in feeds if f.error_count > 0),
+            # Distinct from error_feeds on purpose: a throttled channel is
+            # healthy, but it is not fetching either, and before this it showed
+            # on no surface at all (ISSUE-347).
+            "throttled_feeds": sum(1 for f in feeds if f.last_throttled_at),
             "last_poll_at": max(
                 (f.last_fetched_at for f in feeds if f.last_fetched_at),
                 default=None,
@@ -470,6 +474,7 @@ async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
                 "last_fetched_at": f.last_fetched_at,
                 "last_error": f.last_error,
                 "error_count": f.error_count,
+                "last_throttled_at": f.last_throttled_at,
             }
             for f in feeds
         ]
@@ -665,8 +670,20 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
             raw_title = str(c.get("title") or "").strip()
             payload_slugs.add(slug)
             existing = feeds_db.get_category_by_slug(conn, slug)
+            # This payload is the settings page's whole document, so it is
+            # authoritative about the title where it carries the key at all —
+            # including when the user cleared the field. `ensure_category` is
+            # for the callers that only know a slug (the CLI's `--category`, an
+            # OPML import with no title) and deliberately does not stomp a
+            # title set elsewhere; taking that branch on a blank value made
+            # clearing a title in the table a silent no-op, which read as the
+            # save having been lost. A cleared title resets to the slug rather
+            # than storing empty: the column is NOT NULL and the reader's
+            # sidebar files a falsy title under "uncategorized".
             if raw_title:
                 cat_id = feeds_db.upsert_category(conn, slug, raw_title)
+            elif "title" in c:
+                cat_id = feeds_db.upsert_category(conn, slug, slug)
             else:
                 cat_id = feeds_db.ensure_category(conn, slug)
             slug_to_id[slug] = cat_id

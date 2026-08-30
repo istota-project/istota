@@ -62,6 +62,10 @@
   };
   let editing: { idx: number; draft: FeedDraft } | null = $state(null);
   let adding: FeedDraft | null = $state(null);
+  // A category is two fields, so it gets a modal like a subscription rather
+  // than the browser prompt it used to open — which could ask one question,
+  // and reported a duplicate slug only after closing and dropping the draft.
+  let addingCategory: { slug: string; title: string } | null = $state(null);
   let modalError = $state('');
   let confirmDelete: { kind: 'feed' | 'category'; idx: number; label: string } | null =
     $state(null);
@@ -181,6 +185,7 @@
   function cancelModal() {
     editing = null;
     adding = null;
+    addingCategory = null;
     modalError = '';
   }
 
@@ -265,16 +270,34 @@
     confirmDelete = null;
   }
 
-  function addCategory() {
-    const slug = prompt('New category slug (e.g. "blogs"):');
-    if (!slug) return;
-    const trimmed = slug.trim();
-    if (!trimmed) return;
-    if (config.categories.some((c) => c.slug === trimmed)) {
-      error = `Category "${trimmed}" already exists.`;
+  function startAddCategory() {
+    modalError = '';
+    addingCategory = { slug: '', title: '' };
+  }
+
+  function saveAddCategory() {
+    if (!addingCategory) return;
+    const slug = addingCategory.slug.trim();
+    if (!slug) {
+      modalError = 'Slug is required';
       return;
     }
-    config.categories = [...config.categories, { slug: trimmed, title: trimmed }];
+    if (config.categories.some((c) => c.slug === slug)) {
+      modalError = `Category "${slug}" already exists.`;
+      return;
+    }
+    // A blank title still mirrors the slug, and that is the server's rule
+    // rather than a leftover from the prompt: `feed_categories.title` is NOT
+    // NULL, and the reader's sidebar reads a falsy title as "uncategorized"
+    // (`routes/feeds/+layout.svelte`), so a genuinely blank title would file a
+    // real category under the uncategorized heading. Mirroring here rather
+    // than letting `_apply_config_to_db` do it keeps the table showing what a
+    // reload will show. What the modal changes is that you can now set the
+    // title *while* creating the category, instead of creating it under the
+    // slug and correcting it afterwards.
+    const title = addingCategory.title.trim();
+    config.categories = [...config.categories, { slug, title: title || slug }];
+    addingCategory = null;
   }
 
   function moveCategory(idx: number, delta: number) {
@@ -428,7 +451,7 @@
 
     <SettingsCard title="Categories ({config.categories.length})">
       {#snippet actions()}
-        <Button variant="pill" size="sm" onclick={addCategory}>+ Add category</Button>
+        <Button variant="pill" size="sm" onclick={startAddCategory}>+ Add category</Button>
       {/snippet}
       {#if config.categories.length === 0}
         <p class="empty">No categories yet. Categories group feeds in the sidebar.</p>
@@ -625,6 +648,32 @@
     {#snippet footer()}
       <Button variant="ghost" onclick={cancelModal}>Cancel</Button>
       <Button variant="primary" onclick={saveAdd}>Add</Button>
+    {/snippet}
+  </Modal>
+{/if}
+
+{#if addingCategory}
+  <Modal
+    open={true}
+    title="Add category"
+    onOpenChange={(o) => {
+      if (!o) cancelModal();
+    }}
+  >
+    <div class="modal-body">
+      <SettingsField label="Slug">
+        <input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
+      </SettingsField>
+      <SettingsField label="Title (optional)">
+        <input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
+      </SettingsField>
+      {#if modalError}
+        <div class="banner error">{modalError}</div>
+      {/if}
+    </div>
+    {#snippet footer()}
+      <Button variant="ghost" onclick={cancelModal}>Cancel</Button>
+      <Button variant="primary" onclick={saveAddCategory}>Add</Button>
     {/snippet}
   </Modal>
 {/if}

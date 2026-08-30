@@ -15,12 +15,13 @@ from datetime import datetime, timezone
 
 import requests
 
-from istota.feeds.models import FetchedItem
+from istota.feeds.models import FeedRateLimited, FetchedItem, retry_after_from_headers
 from istota.feeds.sanitize import dedupe_image_variants
 
 
 PROVIDER_NAME = "tumblr"
-TUMBLR_API_BASE = "https://api.tumblr.com/v2/blog"
+TUMBLR_HOST = "api.tumblr.com"
+TUMBLR_API_BASE = f"https://{TUMBLR_HOST}/v2/blog"
 
 
 def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[FetchedItem]:
@@ -40,6 +41,20 @@ def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[Fetche
     params = {"api_key": key, "limit": limit, "npf": "true"}
 
     resp = requests.get(url, params=params, timeout=30.0)
+    # Same treatment as Are.na: a 429 carries the server's own answer in a
+    # header that raise_for_status discards (ISSUE-347). Tumblr's limit is
+    # per-key as well as per-IP, so it is the same failure by another route.
+    # Both reads are `getattr`, matching how `_poll_rss` reads the same
+    # response: the object is whatever the injected client returns, and a stub
+    # standing in for one need only carry what the mapping below reads.
+    # `retry_after_from_headers` folds header case — `httpx` and `requests` both
+    # hand back a case-insensitive mapping, a plain dict does not, and a lookup
+    # that quietly missed would put the feed back on the generic doubling.
+    if getattr(resp, "status_code", 0) == 429:
+        raise FeedRateLimited(
+            retry_after_from_headers(getattr(resp, "headers", {}) or {}),
+            host=TUMBLR_HOST,
+        )
     resp.raise_for_status()
     data = resp.json()
 
