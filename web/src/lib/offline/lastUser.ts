@@ -52,17 +52,32 @@ export function forgetLastUserId(): void {
 }
 
 /**
+ * Whether this surface can boot from the cache at all.
+ *
+ * False in a browser, always: off the shell there is no cold launch to rescue
+ * and the namespace is guarding something real. False in a shell older than the
+ * one that runs a service worker, too — without a worker there is no boot with
+ * no connection for a guess to be needed on, so the same gate the registration
+ * uses keeps the guess out of every session that cannot benefit from it.
+ *
+ * Exported so a *writer* can ask the same question with one spelling. The
+ * pointer below is written everywhere because it costs one string and carries
+ * nothing personal; the cached `User` in `offline/db.ts` is neither, and a
+ * record no surface can read is a record that should not have been stored —
+ * the more so since "Clear offline data" is behind this same gate, so a browser
+ * has no way to remove one.
+ */
+export function canReadCachedUser(): boolean {
+  return shellAtLeast('0.10.0');
+}
+
+/**
  * The id to read the cache by before the server has said, or null.
  *
- * Null in a browser, always: off the shell there is no cold launch to rescue
- * and the namespace is guarding something real. Null in a shell older than the
- * one that runs a service worker, too — without a worker there is no boot with
- * no connection for the guess to be needed on, so the same gate the
- * registration uses keeps the guess out of every session that cannot benefit
- * from it.
+ * Null wherever `canReadCachedUser` is false, and null when nothing is stored.
  */
 export function seedUserId(): string | null {
-  if (!shellAtLeast('0.10.0')) return null;
+  if (!canReadCachedUser()) return null;
   const raw = loadSetting<unknown>(LAST_USER_KEY, null);
   return typeof raw === 'string' && raw ? raw : null;
 }

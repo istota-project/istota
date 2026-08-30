@@ -7,6 +7,14 @@ import { defineConfig } from 'vitest/config';
 // need no DOM but run fine here too. The Svelte plugin compiles components.
 export default defineConfig({
   plugins: [svelte({ hot: false })],
+  // The two build stamps `vite.config.ts` substitutes. They are bare
+  // identifiers in the source, so a component that logs one — the root layout
+  // does, on its first line — dies with a `ReferenceError` under a config that
+  // does not define them, before any of its own code runs.
+  define: {
+    __APP_VERSION__: JSON.stringify('0.0.0-test'),
+    __APP_BUILT_AT__: JSON.stringify('1970-01-01T00:00:00Z'),
+  },
   resolve: {
     alias: {
       $lib: resolve(__dirname, 'src/lib'),

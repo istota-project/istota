@@ -39,7 +39,7 @@
  * stores are split at all: the queue must be readable synchronously during
  * `init()`, and a Blob must not be.
  */
-import type { ChatConfig, ChatHistoryMessage, ChatRoom } from '$lib/api';
+import type { ChatConfig, ChatHistoryMessage, ChatRoom, User } from '$lib/api';
 
 export const DB_NAME = 'istota-offline';
 export const DB_VERSION = 1;
@@ -165,8 +165,34 @@ interface CachedConfig {
   savedAt: number;
 }
 
+interface CachedUser {
+  user: User;
+  savedAt: number;
+}
+
 const KEY_INFIX = ':room:';
 const transcriptKey = (userId: string, roomToken: string) => `${userId}${KEY_INFIX}${roomToken}`;
+
+/**
+ * The `config` store's second key shape, for the signed-in user (ISSUE-354).
+ *
+ * A suffix rather than a store of its own: `DB_VERSION` is 1 and all four
+ * stores were created at once precisely so no later stage needs a bump, which
+ * is the one IndexedDB operation another open tab can block. `config` is a
+ * key-value store and holds a second shape for nothing.
+ *
+ * Two key shapes in one store can be spelled by each other, and the guard is
+ * the shape check rather than the key: a user literally named `alice:me` keys
+ * its *config* where user `alice`'s cached identity goes. Neither reader can be
+ * fooled by that — `readConfig` refuses a record with no `config` and `readUser`
+ * one with no `user` — so a collision degrades to a null and can never produce
+ * a cross-user identity read. What it does cost is that user's config cache,
+ * silently overwritten. That is a narrower assumption than the transcript key
+ * above, which needs a `:room:` inside the id rather than a `:me` at the end of
+ * it, and it is the reason the shape checks are not optional here.
+ */
+const KEY_ME_SUFFIX = ':me';
+const userKey = (userId: string) => `${userId}${KEY_ME_SUFFIX}`;
 
 // ---- The database ---------------------------------------------------------
 
@@ -744,6 +770,65 @@ export async function writeConfig(
     'readwrite',
     (tx) => {
       tx.objectStore(STORE_CONFIG).put(value, userId);
+    },
+    undefined,
+  );
+}
+
+/**
+ * The signed-in user, or null.
+ *
+ * The one cached value the *root layout* reads (ISSUE-354). Everything else in
+ * this file is read by the chat store, under a page the layout renders only
+ * once `getMe()` has answered — so with no connection none of it was reachable,
+ * and the whole offline feature failed one layer above itself.
+ *
+ * What is stored decides what the UI shows and grants nothing: every
+ * authorization check is server-side, and a request made against a stale
+ * identity still 401s. The failure mode of a wrong answer here is a wrong name
+ * in a header offline, not access.
+ *
+ * **Validated to the depth the layout dereferences**, the way `readRow` is and
+ * for the same reason — a record written by a build whose shape has since
+ * changed. `features` is the field that matters: the nav reads six of its
+ * members, and a record without it throws inside the template rather than in
+ * this file's caller, so the layout renders *nothing* instead of the error
+ * page this whole change exists to remove, on every launch until the TTL runs
+ * out. A record that cannot be rendered has to read as an empty cache.
+ */
+export async function readUser(userId: string | null, now = Date.now()): Promise<User | null> {
+  if (!userId) return null;
+  return withTx<User | null>(
+    [STORE_CONFIG],
+    'readonly',
+    (tx, done) => {
+      const req = tx.objectStore(STORE_CONFIG).get(userKey(userId));
+      req.onsuccess = () => {
+        const value = req.result as Partial<CachedUser> | undefined;
+        if (!value || !value.user || typeof value.user !== 'object') return;
+        const cached = value.user as Partial<User>;
+        if (typeof cached.username !== 'string' || !cached.username) return;
+        if (!cached.features || typeof cached.features !== 'object') return;
+        if (typeof value.savedAt !== 'number' || now - value.savedAt >= CACHE_TTL_MS) return;
+        done(value.user as User);
+      };
+    },
+    null,
+  );
+}
+
+export async function writeUser(
+  userId: string | null,
+  user: User,
+  now = Date.now(),
+): Promise<void> {
+  if (!userId) return;
+  const value: CachedUser = { user, savedAt: now };
+  await withTx<void>(
+    [STORE_CONFIG],
+    'readwrite',
+    (tx) => {
+      tx.objectStore(STORE_CONFIG).put(value, userKey(userId));
     },
     undefined,
   );

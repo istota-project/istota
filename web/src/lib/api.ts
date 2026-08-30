@@ -524,8 +524,25 @@ export interface FeedsResponse {
   total: number;
 }
 
-export async function getMe(): Promise<User> {
-  return apiFetch<User>('/me');
+/**
+ * How long `/me` may run before it counts as a gap.
+ *
+ * Bounded, unlike most reads here, because the root layout gates the whole app
+ * on this one and then asks the connectivity store which kind of failure it
+ * was (ISSUE-354). Unbounded, a stalled request outlives the store's own 5s
+ * probe: the probe finds the connection back and sets the store online, the
+ * stalled `/me` rejects minutes later, and the layout reads "online" for a
+ * request that plainly was not — which is the error page again, on a device
+ * that is working. The bound is what keeps the answer close to the failure.
+ *
+ * Generous rather than probe-sized: this is the request the app is waiting on,
+ * not one we will repeat in five seconds, and failing a slow-but-working
+ * connection would cost more than it saves.
+ */
+export const ME_TIMEOUT_MS = 20_000;
+
+export async function getMe(timeoutMs = ME_TIMEOUT_MS): Promise<User> {
+  return apiFetch<User>('/me', undefined, timeoutMs);
 }
 
 export async function getFeeds(params?: Record<string, string>): Promise<FeedsResponse> {
