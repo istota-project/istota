@@ -17,6 +17,7 @@ first import — the ones with no row — are exactly the ones excluded.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 import sqlite3
@@ -46,8 +47,33 @@ def _response(status: int, *, content: bytes = b"", headers: dict | None = None)
     A `MagicMock` with a plain dict for `headers` would pass a lookup that
     matched the spelling in the test and fail against the one Nextcloud sends,
     which is the single fact this file exists to pin down.
+
+    `body_reads` counts calls to `iter_bytes`, which is how the cases below
+    assert that a body was *not* downloaded — the generated placeholder is
+    decided from the header alone and pulling it down would be one wasted
+    round trip per user per tick, forever.
     """
-    return httpx.Response(status, content=content, headers=headers or {})
+    resp = httpx.Response(status, content=content, headers=headers or {})
+    resp.body_reads = 0
+    original = resp.iter_bytes
+
+    def _counted(*args, **kwargs):
+        resp.body_reads += 1
+        return original(*args, **kwargs)
+
+    resp.iter_bytes = _counted
+    return resp
+
+
+def _streaming(status: int, chunks, headers: dict | None = None):
+    """A response whose body is a live iterator, so a partial read is visible.
+
+    `httpx.Response(content=<iterator>)` is a streaming response: `.content`
+    raises on it and `iter_bytes()` pulls from the iterator. That is what makes
+    "refused without buffering the whole thing" an assertion rather than a
+    claim about code nobody exercised.
+    """
+    return httpx.Response(status, content=chunks, headers=headers or {})
 
 
 CUSTOM = {nc_avatars.CUSTOM_AVATAR_HEADER: "1", "ETag": '"abc"'}
@@ -75,29 +101,43 @@ def _reset_absent_header_log():
 
 
 class _Recorder:
-    """Stands in for `httpx.get`, recording what was asked and answering a script."""
+    """Stands in for `httpx.stream`, recording the request and scripting the answer.
+
+    `stream` rather than `get`, because the module streams: a generated avatar
+    is decided from the response header and its body never read at all, and an
+    oversized one is abandoned partway. Neither is observable through a call
+    that hands back a fully buffered response.
+    """
 
     def __init__(self, *answers):
         self.answers = list(answers)
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[str, str, dict]] = []
 
-    def __call__(self, url, **kwargs):
-        self.calls.append((url, kwargs))
+    def __call__(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         if isinstance(answer, Exception):
             raise answer
-        return answer
+        return contextlib.nullcontext(answer)
+
+    @property
+    def url(self) -> str:
+        return self.calls[-1][1]
 
     @property
     def headers(self) -> dict:
-        return self.calls[-1][1].get("headers") or {}
+        return self.calls[-1][2].get("headers") or {}
+
+    @property
+    def kwargs(self) -> dict:
+        return self.calls[-1][2]
 
 
 @pytest.fixture
 def http(monkeypatch):
     def _install(*answers):
         recorder = _Recorder(*answers)
-        monkeypatch.setattr(nc_avatars.httpx, "get", recorder)
+        monkeypatch.setattr(nc_avatars.httpx, "stream", recorder)
         return recorder
 
     return _install
@@ -209,7 +249,7 @@ class TestFetchAvatar:
     ):
         recorder = http(_response(200, content=_png(), headers=CUSTOM))
         nc_avatars.fetch_avatar(nc_config, "a b/c", size=192)
-        url = recorder.calls[0][0]
+        url = recorder.url
         assert url == "https://cloud.example.com/index.php/avatar/a%20b%2Fc/192"
 
     def test_a_truthy_header_with_an_empty_body_is_a_failure_not_a_negative(
@@ -248,19 +288,136 @@ def import_config(tmp_path, db_path):
     return _make
 
 
-def _fetches(monkeypatch, answers):
-    """Route `fetch_avatar` through a per-user script, recording the etags seen."""
-    calls: list[tuple[str, str]] = []
+class _Calls(list):
+    """A list of `(uid, etag)` that also carries the full keyword record.
 
-    def _fake(config, uid, *, size=192, etag="", timeout=10.0):
+    A list subclass rather than a second return value, so the many call sites
+    that read this as a plain list keep working.
+    """
+
+    asked: list[dict]
+
+
+def _fetches(monkeypatch, answers):
+    """Route `fetch_avatar` through a per-user script, recording what it was asked.
+
+    `max_bytes` is recorded as well as the etag. The scheduler passing it is the
+    whole of this job's half of D15 — the ceiling enforced on the stream rather
+    than on `len()` afterwards — and a fake with a default for it swallows the
+    omission silently: deleting `max_bytes=max_bytes` from the call site leaves
+    every test here green while every deployment falls back to the module's own
+    4 MB regardless of what the operator configured. Measured, not supposed.
+    """
+    calls = _Calls()
+    asked: list[dict] = []
+
+    def _fake(config, uid, *, size=192, etag="", timeout=10.0, max_bytes=None):
         calls.append((uid, etag))
+        asked.append({"uid": uid, "etag": etag, "max_bytes": max_bytes})
         answer = answers[uid] if isinstance(answers, dict) else answers
         if isinstance(answer, Exception):
             raise answer
         return answer
 
     monkeypatch.setattr(scheduler.nc_avatars, "fetch_avatar", _fake)
+    calls.asked = asked
     return calls
+
+
+class TestTheBounds:
+    """What stops one answer from Nextcloud costing the daemon its memory.
+
+    `fetch_avatar` streams rather than reading `resp.content`, and the two
+    bounds it streams under are the reason. Both are reachable only through a
+    body that is never fully buffered, so a fixture handing back a finished
+    response cannot exercise either.
+    """
+
+    def test_a_generated_avatar_body_is_never_downloaded(self, nc_config, http):
+        """The placeholder is decided from the header alone.
+
+        Pulling it down would be one wasted round trip per configured user per
+        tick, forever, for bytes that are thrown away either way.
+        """
+        resp = _response(200, content=_png(), headers=GENERATED)
+        http(resp)
+
+        got = nc_avatars.fetch_avatar(nc_config, "alice")
+
+        assert isinstance(got, nc_avatars.NoCustomAvatar)
+        assert resp.body_reads == 0
+
+    def test_a_custom_avatar_body_is_downloaded(self, nc_config, http):
+        """The control for the case above: it must be able to tell them apart."""
+        resp = _response(200, content=_png(), headers=CUSTOM)
+        http(resp)
+
+        assert isinstance(
+            nc_avatars.fetch_avatar(nc_config, "alice"), nc_avatars.RemoteAvatar
+        )
+        assert resp.body_reads == 1
+
+    def test_an_image_past_the_ceiling_is_refused_rather_than_truncated(
+        self, nc_config, http
+    ):
+        """A prefix of a JPEG is not a smaller picture, it is a corrupt one.
+
+        Storing it would put a broken image in the table under a hash that
+        claims to identify it, which nothing downstream could detect.
+        """
+        http(_response(200, content=b"x" * 5000, headers=CUSTOM))
+
+        with pytest.raises(OcsError) as excinfo:
+            nc_avatars.fetch_avatar(nc_config, "alice", max_bytes=1000)
+
+        assert "1000" in str(excinfo.value)
+
+    def test_an_image_inside_the_ceiling_is_kept_whole(self, nc_config, http):
+        """The control: the ceiling must not be refusing everything."""
+        body = _png()
+        http(_response(200, content=body, headers=CUSTOM))
+
+        got = nc_avatars.fetch_avatar(nc_config, "alice", max_bytes=len(body) + 1)
+
+        assert got.image == body
+
+    def test_a_body_that_outlasts_the_deadline_is_abandoned(
+        self, nc_config, http, monkeypatch
+    ):
+        """A peer dripping one byte inside every socket timeout would otherwise
+        hold this call open for the life of the process.
+
+        `_spawn_background_check` refuses to start a second run while the first
+        is alive, so a hung fetch is not a slow tick — it is no more ticks. Time
+        is faked rather than waited out: a test that waits is a test nobody
+        runs.
+        """
+        clock = iter([0.0, 1e9, 1e9, 1e9])
+        monkeypatch.setattr(nc_avatars.time, "monotonic", lambda: next(clock))
+        http(_response(200, content=_png(), headers=CUSTOM))
+
+        with pytest.raises(OcsError) as excinfo:
+            nc_avatars.fetch_avatar(nc_config, "alice")
+
+        assert "too long" in str(excinfo.value)
+
+    def test_an_oversized_error_body_is_truncated_not_raised_about(
+        self, nc_config, http
+    ):
+        """An error body is context for a message, not the subject.
+
+        Refusing it on size would replace the server's actual complaint with a
+        complaint about the size of the complaint.
+        """
+        http(_response(500, content=b"boom " * 4000))
+
+        with pytest.raises(OcsError) as excinfo:
+            nc_avatars.fetch_avatar(nc_config, "alice")
+
+        message = str(excinfo.value)
+        assert "HTTP 500" in message
+        assert "boom" in message
+        assert "ceiling" not in message
 
 
 class TestTheUserSet:
@@ -426,6 +583,71 @@ class TestTheNegativeResult:
             assert avatars.get_user_avatar(conn, "alice") is not None
 
 
+class TestTheByteCeiling:
+    """That the operator's ceiling reaches the fetch, and that 0 is not one.
+
+    Both of these are invisible to every other case in this file: the fake has
+    a default for `max_bytes`, so a scheduler that never passes it leaves all of
+    them green while the ceiling silently reverts to the module's own 4 MB.
+    """
+
+    def test_the_configured_ceiling_is_what_the_fetch_is_given(
+        self, import_config, db_path, monkeypatch
+    ):
+        config = import_config(web=WebConfig(
+            enabled=True, avatar_import_from_nextcloud=True, max_avatar_kb=64,
+        ))
+        calls = _fetches(monkeypatch, nc_avatars.NoCustomAvatar(etag='"g"'))
+
+        scheduler.check_avatar_import(config)
+
+        assert calls.asked, "no fetch was attempted"
+        assert calls.asked[0]["max_bytes"] == 64 * 1024
+
+    def test_a_zero_upload_cap_is_not_read_as_a_byte_ceiling(
+        self, import_config, db_path, monkeypatch
+    ):
+        """`max_avatar_kb = 0` turns *uploads* off. Reading it as a ceiling here
+        would refuse every import on a deployment that only meant to stop users
+        uploading their own picture — a different switch, on purpose."""
+        config = import_config(web=WebConfig(
+            enabled=True, avatar_import_from_nextcloud=True, max_avatar_kb=0,
+        ))
+        calls = _fetches(monkeypatch, nc_avatars.NoCustomAvatar(etag='"g"'))
+
+        scheduler.check_avatar_import(config)
+
+        assert calls.asked, "the zero cap stopped the import entirely"
+        assert calls.asked[0]["max_bytes"] == (
+            scheduler._AVATAR_IMPORT_FALLBACK_KB * 1024
+        )
+
+
+class TestAnUnimportablePicture:
+    """A picture `normalize` will never accept is parked, not retried forever."""
+
+    def test_the_etag_is_recorded_so_the_next_tick_takes_a_304(
+        self, import_config, db_path, monkeypatch
+    ):
+        """Without this the next tick sends no `If-None-Match`, pulls the whole
+        body down again and logs another traceback — every interval, forever,
+        for a refusal that cannot change until the user changes their Nextcloud
+        picture."""
+        config = import_config()
+        _fetches(
+            monkeypatch,
+            nc_avatars.RemoteAvatar(image=b"not-an-image", etag='"bad"'),
+        )
+
+        outcomes = scheduler.check_avatar_import(config)
+
+        assert [o.action for o in outcomes] == [scheduler.AVATAR_IMPORT_FAILED]
+        with db.get_db(db_path) as conn:
+            assert avatars.import_probe_state(conn).get("alice") == '"bad"'
+            # Parked, not stored: nothing decodable ever reached the store.
+            assert avatars.get_user_avatar(conn, "alice") is None
+
+
 class TestTheGates:
     def test_a_local_storage_backend_is_a_no_op(
         self, import_config, monkeypatch
@@ -530,7 +752,7 @@ class TestNoTransactionAcrossAFetch:
         config = import_config(users=("alice", "bob"))
         observed: list[str] = []
 
-        def _fake(cfg, uid, *, size=192, etag="", timeout=10.0):
+        def _fake(cfg, uid, *, size=192, etag="", timeout=10.0, max_bytes=None):
             with db.get_db(db_path, busy_timeout_ms=2000) as other:
                 other.execute(
                     "INSERT OR REPLACE INTO shared_kv "
@@ -602,6 +824,57 @@ class TestTheRecordedState:
             state = avatars.read_import_state(conn)
         assert state is not None
         assert state["header"] == avatars.HEADER_ABSENT
+
+    def test_a_missing_header_is_still_reported_on_the_tick_after(
+        self, import_config, db_path, monkeypatch
+    ):
+        """The verdict used to erase itself, six hours after it was written.
+
+        Storing the ETag from a response nothing could classify made the next
+        tick send `If-None-Match`; the server answers 304, which is `None`,
+        which is `unchanged`, which records `unobserved` — and `unobserved` is
+        an OK. So the one finding this whole record exists to carry survived
+        exactly one interval, on the only deployment it was built to diagnose,
+        and a restart did not help because the tick after a restart takes the
+        same 304 path. Both reviewers found it independently.
+
+        The fix is not to remember harder. An ETag is a validator for a body we
+        recognised, and a response carrying no custom-avatar header is one we
+        did not: it buys the next tick nothing except the ability to stop
+        looking. So none is stored, the next tick asks unconditionally, and the
+        answer keeps being observed for as long as it keeps being true.
+        """
+        config = import_config()
+        absent = nc_avatars.NoCustomAvatar(etag='"g"', header_seen=False)
+
+        _fetches(monkeypatch, absent)
+        scheduler.check_avatar_import(config)
+
+        calls = _fetches(monkeypatch, absent)
+        scheduler.check_avatar_import(config)
+
+        assert calls == [("alice", "")], (
+            "the second tick revalidated against an ETag it could not have "
+            "learned anything from"
+        )
+        with db.get_db(db_path) as conn:
+            state = avatars.read_import_state(conn)
+        assert state is not None
+        assert state["header"] == avatars.HEADER_ABSENT
+
+    def test_no_validator_is_stored_for_a_response_nothing_could_classify(
+        self, import_config, db_path, monkeypatch
+    ):
+        config = import_config()
+        _fetches(
+            monkeypatch,
+            nc_avatars.NoCustomAvatar(etag='"g"', header_seen=False),
+        )
+
+        scheduler.check_avatar_import(config)
+
+        with db.get_db(db_path) as conn:
+            assert avatars.import_probe_state(conn) == {"alice": ""}
 
     def test_the_state_lives_in_a_namespace_the_model_may_not_touch(self):
         from istota.kv_namespaces import is_reserved_namespace

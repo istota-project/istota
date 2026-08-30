@@ -3088,6 +3088,14 @@ class TestClassifyUnknownOverlay:
         )
 
 
+
+def _now_iso() -> str:
+    """A timestamp the staleness bound reads as fresh."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 class TestAvatarImport:
     """`web.avatar_import` — configuration and recorded state, and no socket.
 
@@ -3150,6 +3158,92 @@ class TestAvatarImport:
         assert r.status == OK
         assert "no import tick" in r.detail.lower()
 
+    def test_a_tick_every_user_failed_is_not_an_ok(self, make_config, db_path):
+        """`failed` used to be rendered and gate nothing, so a deployment whose
+        every fetch raised — wrong username, expired app password, uids that
+        match no Nextcloud account — printed its failure count inside a green
+        line. Reading the row and ignoring the one column that says it is not
+        working gives up the only thing this socket-free check has."""
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(
+                conn,
+                {"at": _now_iso(), "users": 5, "imported": 0, "no_custom": 0,
+                 "unchanged": 0, "failed": 5,
+                 "header": avatars.HEADER_UNOBSERVED},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert r.status == WARN
+        assert "every user" in r.detail
+        assert r.remedy
+
+    def test_a_tick_with_failures_but_progress_is_still_ok(
+        self, make_config, db_path
+    ):
+        """The control: one unreachable account among many must not warn, or
+        the check cries wolf on every deployment with a stale user in [users]."""
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(
+                conn,
+                {"at": _now_iso(), "users": 5, "imported": 2, "no_custom": 2,
+                 "unchanged": 0, "failed": 1, "header": avatars.HEADER_SEEN},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert r.status == OK
+
+    def test_a_tick_that_has_not_run_in_days_is_not_an_ok(
+        self, make_config, db_path
+    ):
+        """Two documented paths stop this job silently and leave the last good
+        row standing: a wedged fetch means `_spawn_background_check` never
+        starts another run, and an unreadable probe state returns without
+        recording anything."""
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(
+                conn,
+                {"at": "2019-01-01T00:00:00Z", "users": 2, "imported": 1,
+                 "no_custom": 1, "unchanged": 0, "failed": 0,
+                 "header": avatars.HEADER_SEEN},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert r.status == WARN
+        assert "may have stopped" in r.detail
+
+    def test_an_unreadable_timestamp_is_not_reported_as_stale(
+        self, make_config, db_path
+    ):
+        """A check never raises, and it does not invent a fault either. `at` is
+        a JSON value out of a KV table; a shape change must not turn a healthy
+        import into a warning."""
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(
+                conn,
+                {"at": "not-a-timestamp", "users": 1, "imported": 1,
+                 "no_custom": 0, "unchanged": 0, "failed": 0,
+                 "header": avatars.HEADER_SEEN},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert r.status == OK
+
     def test_reports_the_recorded_state(self, make_config, db_path):
         from istota import avatars
         from istota import db as db_module
@@ -3163,14 +3257,23 @@ class TestAvatarImport:
             avatars.touch_import_probe(conn, "bob", remote_etag='"g"')
             avatars.write_import_state(
                 conn,
-                {"at": "2026-08-30T09:00:00Z", "users": 2, "imported": 1,
-                 "no_custom": 1, "failed": 0, "header": avatars.HEADER_SEEN},
+                {"at": "2026-08-30T09:00:00Z", "users": 5, "imported": 1,
+                 "no_custom": 1, "unchanged": 3, "failed": 0,
+                 "header": avatars.HEADER_SEEN},
             )
 
         r = self._run(self._config(make_config, db_path))
 
         assert r.status == OK
         assert "2026-08-30T09:00:00Z" in r.detail
+        # Every counter the tick records is rendered. `unchanged` is the steady
+        # state, so omitting it made a healthy deployment report numbers that
+        # did not add up to the user count printed beside them.
+        assert "5 users" in r.detail
+        assert "1 imported" in r.detail
+        assert "1 with no custom avatar" in r.detail
+        assert "3 unchanged" in r.detail
+        assert "0 failed" in r.detail
         assert "1 imported" in r.detail
         assert "1 with no custom" in r.detail
 
@@ -3217,7 +3320,10 @@ class TestAvatarImport:
     ):
         missing = tmp_path / "nothing" / "istota.db"
         r = self._run(self._config(make_config, missing))
-        assert r.status in (WARN, SKIP)
+        # WARN specifically, not "WARN or SKIP": with this fixture's config
+        # every SKIP branch in the check is unreachable, so accepting SKIP
+        # would pass a future regression in the gates.
+        assert r.status == WARN
 
     def test_it_opens_no_socket(self, make_config, db_path, monkeypatch):
         """`doctor` runs on the daemon's boot path and behind the admin Health

@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Collection, Iterable
+from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1479,6 +1480,11 @@ def check_avatar_import(config: "Config", probe: bool) -> CheckResult:
         f"last tick at {ran} over {state.get('users', 0)} users "
         f"({state.get('imported', 0)} imported, "
         f"{state.get('no_custom', 0)} with no custom avatar, "
+        # `unchanged` is the steady state — every user answering 304 — so
+        # leaving it out made a healthy deployment print four zeroes that do
+        # not add up to the user count beside them, which reads as a tick that
+        # did nothing rather than one with nothing to do.
+        f"{state.get('unchanged', 0)} unchanged, "
         f"{state.get('failed', 0)} failed); {stored}"
     )
 
@@ -1497,9 +1503,79 @@ def check_avatar_import(config: "Config", probe: bool) -> CheckResult:
             scope=DEPLOYMENT,
         )
 
+    # **A tick every user failed is not an OK**, and it used to be: `failed` was
+    # rendered into the detail and gated nothing, so the only non-OK this check
+    # could produce was the absent header. A deployment whose every fetch raised
+    # — a wrong `nextcloud.username`, an expired app password, a uid mapping
+    # that matches no Nextcloud account — printed `5 failed` inside a green
+    # line. The whole reason this row is written down is that doctor cannot open
+    # a socket to find out; reading it and then ignoring the one column that
+    # says "this is not working" gives that up for nothing.
+    failed = state.get("failed", 0)
+    progressed = state.get("imported", 0) + state.get("no_custom", 0)
+    if failed and not progressed:
+        return CheckResult(
+            name, WARN,
+            f"{detail}; every user the last tick tried failed",
+            remedy=(
+                "Check `nextcloud.username` and the app password, and that the "
+                "ids in [users] are the Nextcloud uids. The daemon log carries "
+                "the per-user reason at WARNING, tagged avatar_import_failed."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    # **A tick that has not run in days is not an OK either.** Two documented
+    # paths stop this job silently and leave the last good row standing as the
+    # current answer: `_spawn_background_check` will not start a second run
+    # while the first is alive, so one wedged fetch means no further ticks
+    # ever, and `check_avatar_import` returns early on an unreadable probe
+    # state without recording anything at all.
+    stale = _avatar_tick_is_stale(
+        state.get("at"), config.scheduler.avatar_import_interval
+    )
+    if stale:
+        return CheckResult(
+            name, WARN,
+            f"{detail}; that is more than {stale} — the import may have stopped",
+            remedy=(
+                "Check the daemon log for avatar-import errors. A tick that "
+                "never finishes blocks every later one, since a second run is "
+                "not started while the first thread is alive."
+            ),
+            scope=DEPLOYMENT,
+        )
+
     if header == avatars.HEADER_UNOBSERVED:
         detail += "; nothing changed, so the custom-avatar header was not read"
     return CheckResult(name, OK, detail, scope=DEPLOYMENT)
+
+
+def _avatar_tick_is_stale(at: object, interval: int) -> str | None:
+    """How overdue the last tick is, or None if it is not.
+
+    Returns a human phrase rather than a bool so the caller can say how late it
+    is. Parses defensively and answers None on anything it cannot read: `at` is
+    a JSON value out of a KV table, and a check never raises — reporting a
+    healthy import as broken because a timestamp changed shape would be worse
+    than the staleness it is looking for.
+    """
+    if not isinstance(at, str) or not at.strip() or interval <= 0:
+        return None
+    text = at.strip().replace("Z", "+00:00")
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    # Three intervals, not one: a tick runs on a cadence and a single missed
+    # one is a restart or a slow fetch, not a fault worth paging about.
+    limit = interval * 3
+    age = (datetime.now(timezone.utc) - when).total_seconds()
+    if age <= limit:
+        return None
+    return f"{limit // 3600}h" if limit >= 3600 else f"{limit}s"
 
 
 def check_web_static(config: "Config", probe: bool) -> CheckResult:

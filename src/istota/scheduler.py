@@ -97,6 +97,7 @@ from .executor import (
 )
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud import avatars as nc_avatars
+from .nextcloud._http import nc_configured
 from .nextcloud_api import hydrate_user_configs
 from .modules import MODULE_NAMES
 from .notification_resolvers import confirmation as confirmation_source
@@ -4657,7 +4658,11 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
 
     Each returned image runs through the same `avatars.normalize` an upload
     takes: an image from Nextcloud is not more trusted than one from a browser.
-    Every user is wrapped, so one unreachable account does not end the tick.
+    The byte ceiling goes to `fetch_avatar` as well as to `normalize`, so it is
+    enforced on the stream before the body exists in memory rather than on
+    `len()` after — the rule the spec states as D15 for the upload route, which
+    nothing about the sender being Nextcloud changes. Every user is wrapped, so
+    one unreachable account does not end the tick.
 
     Re-checks its own gates rather than trusting the loop's, matching the
     reaper and the cache sweep: the loop's gate exists to skip the thread spawn
@@ -4679,6 +4684,16 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
         and config.web.avatar_import_from_nextcloud
         and config.scheduler.avatar_import_interval
     ):
+        return []
+
+    # `storage_is_nextcloud` is `bool(url)` and `nc_configured` is
+    # `bool(url and username)`, so a config carrying a URL and no username
+    # passes every gate above and then raises "Nextcloud is not configured" for
+    # every user, once per tick, forever. Refusing here makes that one skip
+    # rather than N failures, and leaves the failure counter meaning what it
+    # says: a credential the server rejected, not one nobody supplied.
+    if not nc_configured(config):
+        logger.debug("avatar_import_skipped reason=nextcloud_not_configured")
         return []
 
     users = sorted(config.users)
@@ -4706,6 +4721,7 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
         try:
             answer = nc_avatars.fetch_avatar(
                 config, user_id, etag=etags.get(user_id, ""),
+                max_bytes=max_bytes,
             )
             if answer is None:
                 # A 304, or a user Nextcloud does not know. Nothing was learned,
@@ -4718,11 +4734,26 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
             if isinstance(answer, nc_avatars.NoCustomAvatar):
                 if answer.header_seen:
                     header_seen = True
+                    probe_etag = answer.etag
                 else:
                     header_absent = True
+                    # **No validator for an answer nothing could classify**, and
+                    # this line is the whole of a defect both reviewers found
+                    # independently. An ETag lets the next tick skip a body it
+                    # has already seen; storing one here made the next tick send
+                    # `If-None-Match`, take a 304, record `unobserved` — and
+                    # `unobserved` is an OK. So the `absent` verdict, the single
+                    # finding the recorded state exists to carry, erased itself
+                    # one interval after it was written, on the only deployment
+                    # it was built for, and a restart did not help because the
+                    # first tick after one takes the same 304 path. Asking
+                    # unconditionally costs one GET per user per tick on a
+                    # deployment that can import nothing anyway, and it is what
+                    # keeps the answer observable for as long as it is true.
+                    probe_etag = ""
                 with db.get_db(config.db_path) as conn:
                     avatars.touch_import_probe(
-                        conn, user_id, remote_etag=answer.etag,
+                        conn, user_id, remote_etag=probe_etag,
                     )
                 outcomes.append(
                     AvatarImportOutcome(user_id, AVATAR_IMPORT_NO_CUSTOM)
@@ -4742,6 +4773,35 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
                     remote_etag=answer.etag,
                 )
             outcomes.append(AvatarImportOutcome(user_id, AVATAR_IMPORT_IMPORTED))
+        except avatars.AvatarError as exc:
+            # **A picture this deployment will never accept, parked rather than
+            # retried.** `normalize` refuses an image over `AVATAR_MAX_PIXELS`
+            # or in a format not on the list, and both are reachable from a
+            # Nextcloud avatar well inside the byte ceiling the fetch already
+            # enforced — so the ceiling cannot prevent them and the refusal is
+            # permanent for as long as that user keeps that picture. Falling
+            # into the generic branch below stored no ETag, which meant the next
+            # tick sent no `If-None-Match`, pulled the whole body down again and
+            # logged another traceback, every interval, forever. Recording the
+            # validator turns that into a 304. INFO, not WARNING with a
+            # traceback: nothing here is broken, and a user can fix it by
+            # changing their Nextcloud picture.
+            logger.info(
+                "avatar_import_unusable user=%s err=%s", user_id, exc,
+            )
+            try:
+                with db.get_db(config.db_path) as conn:
+                    avatars.touch_import_probe(
+                        conn, user_id, remote_etag=getattr(answer, "etag", ""),
+                    )
+            except Exception as write_exc:  # noqa: BLE001 - best effort
+                logger.warning(
+                    "avatar_import_probe_write_failed user=%s err=%s",
+                    user_id, write_exc,
+                )
+            outcomes.append(
+                AvatarImportOutcome(user_id, AVATAR_IMPORT_FAILED, str(exc))
+            )
         except Exception as exc:  # noqa: BLE001 - one account must not end the tick
             logger.warning(
                 "avatar_import_failed user=%s err=%s", user_id, exc, exc_info=True,
