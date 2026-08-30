@@ -13,11 +13,22 @@
  */
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatHistoryMessage } from '$lib/api';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatHistoryMessage, ChatRoom } from '$lib/api';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
+
+function roomRecord(token: string): ChatRoom {
+  return {
+    id: 1,
+    token,
+    name: 'General',
+    archived: false,
+    created_at: '',
+    updated_at: '',
+  };
+}
 
 function row(n: number, text = `m${n}`): ChatHistoryMessage {
   return {
@@ -179,16 +190,7 @@ describe('offline cache — streamed rows', () => {
 describe('offline cache — rooms, config and pruning', () => {
   it('round-trips the room list and the config', async () => {
     const db = await freshDb();
-    const rooms = [
-      {
-        id: 1,
-        token: 't1',
-        name: 'General',
-        archived: false,
-        created_at: '',
-        updated_at: '',
-      },
-    ];
+    const rooms = [roomRecord('t1')];
     await db.writeRooms('alice', rooms);
     await db.writeConfig('alice', {
       max_prompt_chars: 10,
@@ -209,7 +211,9 @@ describe('offline cache — rooms, config and pruning', () => {
     const fresh = old + 29 * DAY;
     await db.writeTranscript('alice', { roomId: 1, roomToken: 'old', messages: [row(1)] }, old);
     await db.writeTranscript('alice', { roomId: 2, roomToken: 'new', messages: [row(2)] }, fresh);
-    await db.writeRooms('alice', [], old);
+    // A non-empty list, because `readRooms` refuses an empty one on its own —
+    // asserting on `[]` would pass with the prune deleted entirely.
+    await db.writeRooms('alice', [roomRecord('t1')], old);
     await db.writeConfig(
       'alice',
       {
@@ -230,9 +234,67 @@ describe('offline cache — rooms, config and pruning', () => {
     expect(await db.readRooms('alice', old)).toBeNull();
     expect(await db.readConfig('alice', fresh)).not.toBeNull();
   });
+
+  it('collects a record whose stamp the index cannot see, and evicts nothing for it', async () => {
+    const db = await freshDb();
+    // Written behind the module's back, the way a build with a different value
+    // shape would have left it: no usable `savedAt`, so it has no entry in the
+    // `savedAt` index and no read will ever return it.
+    const handle = await db.openOfflineDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = handle!.transaction([db.STORE_TRANSCRIPTS], 'readwrite');
+      tx.objectStore(db.STORE_TRANSCRIPTS).put(
+        { roomId: 1, roomToken: 'stamped-wrong', messages: [row(1)] },
+        'alice:stamped-wrong',
+      );
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+
+    // It must not count against the room cap: filling the cache to the cap
+    // alongside it evicts nothing, where a store-wide count would have thrown
+    // out a live room to make room for a dead record.
+    for (let i = 0; i < db.MAX_CACHED_ROOMS; i++) {
+      await db.writeTranscript(
+        'alice',
+        { roomId: i, roomToken: `t${i}`, messages: [row(i + 1)] },
+        2000 + i,
+      );
+    }
+    expect(await db.readTranscript('alice', 't0', 2000)).not.toBeNull();
+
+    await db.pruneOffline(9_000_000);
+    const survivors = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      const tx = handle!.transaction([db.STORE_TRANSCRIPTS], 'readonly');
+      const req = tx.objectStore(db.STORE_TRANSCRIPTS).getAllKeys();
+      req.onsuccess = () => resolve(req.result);
+      tx.onerror = () => reject(tx.error);
+    });
+    expect(survivors).not.toContain('alice:stamped-wrong');
+  });
+
+  it('does not let one user id run into another across the key separator', async () => {
+    const db = await freshDb();
+    // `${userId}:${roomToken}` has no infix, so `a` + `b:tok` and `a:b` + `tok`
+    // spell the same key. A deletion for `a` must not reach into `a:b`'s room.
+    await db.writeTranscript('a', { roomId: 1, roomToken: 'b:tok', messages: [row(1)] });
+    await db.writeTranscript('a:b', { roomId: 2, roomToken: 'tok', messages: [row(1)] });
+
+    await db.removeCachedMessages('a', [1]);
+
+    expect(await db.readTranscript('a', 'b:tok')).toBeNull();
+    expect((await db.readTranscript('a:b', 'tok'))?.messages.map((m) => m.msg_id)).toEqual([1]);
+  });
 });
 
 describe('offline cache — when there is no database', () => {
+  afterEach(() => {
+    // A test that trips its own budget never reaches its cleanup, and a fake
+    // clock left running takes every later file's timers with it.
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
   it('reads empty and writes nothing when opening throws', async () => {
     vi.stubGlobal('indexedDB', {
       open: () => {
@@ -273,6 +335,44 @@ describe('offline cache — when there is no database', () => {
 
     await expect(db.readTranscript('alice', 't')).resolves.toBeNull();
     vi.unstubAllGlobals();
+  });
+
+  it('reads empty when the open request never fires an event at all', async () => {
+    // The failure the swallow-everything discipline does not otherwise cover,
+    // and the one WebKit actually produces: no error, no success, nothing. An
+    // unbounded wait here hangs `init()`'s awaited cache read and leaves the
+    // chat page on its loading state for the life of the session.
+    vi.useFakeTimers();
+    vi.stubGlobal('indexedDB', { open: () => ({}) });
+    vi.resetModules();
+    const db = await import('./db');
+
+    const reading = db.readTranscript('alice', 't');
+    await vi.advanceTimersByTimeAsync(db.OFFLINE_DB_TIMEOUT_MS + 1);
+    await expect(reading).resolves.toBeNull();
+
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('reads empty when a transaction never completes', async () => {
+    const db = await freshDb();
+    await db.writeTranscript('alice', { roomId: 1, roomToken: 't', messages: [row(1)] });
+    // Fake timers only from here: `fake-indexeddb` schedules its own callbacks
+    // on the timer queue, so a real write cannot complete under them.
+    vi.useFakeTimers();
+    // A live connection whose transactions go nowhere — storage wedged under
+    // pressure, rather than refusing outright.
+    const handle = (await db.openOfflineDb())!;
+    handle.transaction = (() => ({
+      objectStore: () => ({ get: () => ({}), put: () => ({}), delete: () => ({}) }),
+    })) as unknown as IDBDatabase['transaction'];
+
+    const reading = db.readTranscript('alice', 't');
+    await vi.advanceTimersByTimeAsync(db.OFFLINE_DB_TIMEOUT_MS + 1);
+    await expect(reading).resolves.toBeNull();
+
+    vi.useRealTimers();
   });
 
   it('reads empty when the origin has no IndexedDB at all', async () => {

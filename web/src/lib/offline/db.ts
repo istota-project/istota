@@ -25,7 +25,12 @@
  * reasons `drafts.ts` and `sendQueue.ts` give: `web_chat_rooms.id` is an
  * `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite hands a freed rowid
  * straight back out, and a shared Talk room has one token across every member
- * of a browser profile.
+ * of a browser profile. The key carries the same `:room:` infix those two use,
+ * and for the reason they have it: `<user>:<token>` lets one pair spell
+ * another's key — user `a` in room `b:tok` and user `a:b` in room `tok` are
+ * one entry — which is a cross-user read on a profile two people share. The
+ * infix narrows that to a user id containing `:room:`, which a username cannot;
+ * both sibling stores rest on the same assumption.
  *
  * The database is created at version 1 with all four stores, `blobs` included.
  * Nothing here reads or writes blobs yet — the offline outbox's attachments are
@@ -61,10 +66,14 @@ export const MAX_CACHED_ROOMS = 20;
  *
  * Tool segments on a long agent turn are not small, and one pathological room
  * must not eat a budget the whole origin shares — `localStorage`, IndexedDB and
- * the Cache API are evicted together. Counted in UTF-16 code units rather than
- * bytes, as `sendQueue.ts` counts its own map: it under-reads a transcript full
- * of non-ASCII, which makes the bound conservative in the direction that
- * matters (it trims sooner, never later).
+ * the Cache API are evicted together.
+ *
+ * Measured in UTF-16 code units, as `sendQueue.ts` measures its own map, so the
+ * number is approximate rather than a byte count: `JSON.stringify` leaves
+ * non-ASCII unescaped, so a CJK or emoji-heavy transcript costs more bytes than
+ * this counts and is let a little past the line. Approximate is enough for what
+ * this is for — stopping one room spending the whole budget — and the exact
+ * measure would mean encoding every row to count it, on every write.
  */
 export const MAX_ROOM_CACHE_BYTES = 512 * 1024;
 
@@ -97,11 +106,33 @@ interface CachedConfig {
   savedAt: number;
 }
 
-const transcriptKey = (userId: string, roomToken: string) => `${userId}:${roomToken}`;
+const KEY_INFIX = ':room:';
+const transcriptKey = (userId: string, roomToken: string) => `${userId}${KEY_INFIX}${roomToken}`;
 
 // ---- The database ---------------------------------------------------------
 
+/**
+ * How long any one storage operation may take before it counts as no cache.
+ *
+ * The one thing the swallow-everything discipline below does not cover on its
+ * own: an IndexedDB request that fires no event at all. WebKit does that — a
+ * page restored from the back/forward cache, a connection left behind by an
+ * abnormal close, storage under pressure — and this ships inside a WKWebView,
+ * which is the environment the whole feature is for. Without a bound, one such
+ * request would hang `init()`'s awaited cache read and leave the chat page on
+ * its loading state for the life of the session, which is a worse failure than
+ * the one the cache exists to prevent.
+ *
+ * Three seconds because this is a local read racing a network request that has
+ * already been issued: past that the cache has lost its only job, which is
+ * being the thing that answers first.
+ */
+export const OFFLINE_DB_TIMEOUT_MS = 3000;
+
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+// The connection the memo currently holds, so a lifecycle event fired by a
+// *previous* connection cannot drop the live one's memo and leave two open.
+let openDb: IDBDatabase | null = null;
 
 /**
  * The open database, or null when this origin has no usable one.
@@ -118,11 +149,32 @@ let dbPromise: Promise<IDBDatabase | null> | null = null;
  */
 export function openOfflineDb(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
-  dbPromise = new Promise<IDBDatabase | null>((resolve) => {
+  let opening: Promise<IDBDatabase | null>;
+  opening = new Promise<IDBDatabase | null>((resolve) => {
     if (typeof indexedDB === 'undefined' || indexedDB === null) {
       resolve(null);
       return;
     }
+    // One settle, whichever of the four paths gets there first, and a handle
+    // arriving after we have given up is closed rather than leaked — an
+    // abandoned connection would go on blocking the next version change.
+    let settled = false;
+    const finish = (db: IDBDatabase | null) => {
+      if (settled) {
+        db?.close();
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      openDb = db;
+      resolve(db);
+    };
+    const timer = setTimeout(() => {
+      // Dropped from the memo as well as given up on, so a later call gets a
+      // fresh attempt rather than a permanently dead cache.
+      if (dbPromise === opening) dbPromise = null;
+      finish(null);
+    }, OFFLINE_DB_TIMEOUT_MS);
     let req: IDBOpenDBRequest;
     try {
       // Throws outright in a few real configurations — a Safari private window
@@ -130,7 +182,7 @@ export function openOfflineDb(): Promise<IDBDatabase | null> {
       // `onerror`.
       req = indexedDB.open(DB_NAME, DB_VERSION);
     } catch {
-      resolve(null);
+      finish(null);
       return;
     }
     req.onupgradeneeded = () => {
@@ -154,21 +206,33 @@ export function openOfflineDb(): Promise<IDBDatabase | null> {
     };
     req.onsuccess = () => {
       const db = req.result;
+      // Both guarded on this still being the connection the memo holds: a
+      // handler belonging to a connection we have already replaced would
+      // otherwise drop the live memo and leave two connections open.
       db.onversionchange = () => {
         db.close();
-        dbPromise = null;
+        if (openDb === db) {
+          openDb = null;
+          dbPromise = null;
+        }
       };
       db.onclose = () => {
-        dbPromise = null;
+        if (openDb === db) {
+          openDb = null;
+          dbPromise = null;
+        }
       };
-      resolve(db);
+      finish(db);
     };
-    req.onerror = () => resolve(null);
+    req.onerror = () => finish(null);
     // Another tab holding an older version open. Waiting could be forever, so
-    // this session goes without a cache rather than hanging every read on it.
-    req.onblocked = () => resolve(null);
+    // this session goes without a cache rather than hanging every read on it;
+    // if the block clears later, `finish` closes the handle nobody is waiting
+    // for any more.
+    req.onblocked = () => finish(null);
   });
-  return dbPromise;
+  dbPromise = opening;
+  return opening;
 }
 
 /**
@@ -194,18 +258,29 @@ async function withTx<T>(
   if (!db) return fallback;
   return new Promise<T>((resolve) => {
     let value = fallback;
+    // Bounded for the same reason the open is: a transaction that never
+    // completes and never errors would hang whoever awaited it, and nothing
+    // above has an error path to take.
+    let settled = false;
+    const finish = (v: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => finish(fallback), OFFLINE_DB_TIMEOUT_MS);
     let tx: IDBTransaction;
     try {
       tx = db.transaction(stores, mode);
     } catch {
       // A store missing (a database from a build that predates it) or the
       // connection already closing.
-      resolve(fallback);
+      finish(fallback);
       return;
     }
-    tx.oncomplete = () => resolve(value);
-    tx.onerror = () => resolve(fallback);
-    tx.onabort = () => resolve(fallback);
+    tx.oncomplete = () => finish(value);
+    tx.onerror = () => finish(fallback);
+    tx.onabort = () => finish(fallback);
     try {
       work(tx, (v) => {
         value = v;
@@ -216,7 +291,7 @@ async function withTx<T>(
       } catch {
         /* already gone */
       }
-      resolve(fallback);
+      finish(fallback);
     }
   });
 }
@@ -269,22 +344,43 @@ function sameRow(a: ChatHistoryMessage, b: ChatHistoryMessage): boolean {
  * room to see, so the count bound keeps the end of the array and the byte bound
  * eats into it from the front. A single row over the whole budget leaves
  * nothing, which is the honest answer — an empty cache is a state the reader
- * already handles, and half a turn is not.
+ * already handles, and half a turn is not. `writeTranscript` turns that into a
+ * delete rather than an empty record.
+ *
+ * Measured once per row, accumulating from the newest backwards, rather than
+ * re-serializing the whole array on each trim. The naive loop is quadratic in
+ * rows that can each carry a full execution trace, and it runs on the main
+ * thread inside an open transaction on every debounced flush of every room —
+ * including rooms nobody is looking at.
  */
 function boundRows(rows: ChatHistoryMessage[]): ChatHistoryMessage[] {
-  let kept = rows.slice(-CACHE_MESSAGES_PER_ROOM);
-  while (kept.length && JSON.stringify(kept).length > MAX_ROOM_CACHE_BYTES) kept = kept.slice(1);
-  return kept;
+  const tail = rows.slice(-CACHE_MESSAGES_PER_ROOM);
+  const kept: ChatHistoryMessage[] = [];
+  let total = 0;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    // Plus the separator the row costs inside the serialized array, so the
+    // accumulated figure stays comparable with the whole-array measure the
+    // bound is written against.
+    const cost = JSON.stringify(tail[i]).length + 1;
+    if (total + cost > MAX_ROOM_CACHE_BYTES) break;
+    total += cost;
+    kept.push(tail[i]);
+  }
+  return kept.reverse();
 }
 
 /** Drop the least recently saved transcripts until `MAX_CACHED_ROOMS` remain. */
 function evictOldestTranscripts(tx: IDBTransaction): void {
-  const store = tx.objectStore(STORE_TRANSCRIPTS);
-  const counting = store.count();
+  const index = tx.objectStore(STORE_TRANSCRIPTS).index('savedAt');
+  // Counted on the index rather than the store, because the index is what the
+  // cursor below can delete from: a record with no usable `savedAt` has no
+  // index entry, so counting it would evict a *valid* transcript in its place.
+  // Such a record is collected by `pruneOffline`, which walks the store itself.
+  const counting = index.count();
   counting.onsuccess = () => {
     let over = counting.result - MAX_CACHED_ROOMS;
     if (over <= 0) return;
-    const cursoring = store.index('savedAt').openCursor();
+    const cursoring = index.openCursor();
     cursoring.onsuccess = () => {
       const cursor = cursoring.result;
       if (!cursor || over <= 0) return;
@@ -364,7 +460,16 @@ export async function writeTranscript(
     [STORE_TRANSCRIPTS],
     'readwrite',
     (tx) => {
-      tx.objectStore(STORE_TRANSCRIPTS).put(value, transcriptKey(userId, entry.roomToken));
+      const store = tx.objectStore(STORE_TRANSCRIPTS);
+      const key = transcriptKey(userId, entry.roomToken);
+      // Nothing fitting the bounds is a delete rather than an empty record:
+      // every read refuses an empty one anyway, so storing it would hold an
+      // eviction slot for a room that cannot be painted.
+      if (!value.messages.length) {
+        store.delete(key);
+        return;
+      }
+      store.put(value, key);
       evictOldestTranscripts(tx);
     },
     undefined,
@@ -414,10 +519,15 @@ export async function appendTranscriptRows(
           if (at === -1) merged.push(row);
           else merged[at] = row;
         }
+        const bounded = boundRows(merged);
+        if (!bounded.length) {
+          store.delete(key);
+          return;
+        }
         // `savedAt` moves, which is what keeps a busy room out of the eviction
         // order and out of the TTL: it stamps how fresh the stored rows are,
         // and these rows are from a moment ago.
-        store.put({ ...value, messages: boundRows(merged), savedAt: now }, key);
+        store.put({ ...value, messages: bounded, savedAt: now }, key);
         evictOldestTranscripts(tx);
       };
     },
@@ -452,7 +562,7 @@ export async function deleteTranscript(
 export async function removeCachedMessages(userId: string | null, msgIds: number[]): Promise<void> {
   if (!userId || !msgIds.length) return;
   const gone = new Set(msgIds);
-  const prefix = `${userId}:`;
+  const prefix = `${userId}${KEY_INFIX}`;
   await withTx<void>(
     [STORE_TRANSCRIPTS],
     'readwrite',
@@ -463,7 +573,16 @@ export async function removeCachedMessages(userId: string | null, msgIds: number
         if (!cursor) return;
         const key = String(cursor.key);
         const value = cursor.value as CachedTranscript | undefined;
-        if (key.startsWith(prefix) && value && Array.isArray(value.messages)) {
+        // The key is rebuilt from the record's own token rather than merely
+        // prefix-matched. The infix already makes a collision unreachable for
+        // any real user id, so this is the belt to its braces — and it costs a
+        // string compare on a walk that runs only when something is deleted.
+        if (
+          value &&
+          typeof value.roomToken === 'string' &&
+          key === `${prefix}${value.roomToken}` &&
+          Array.isArray(value.messages)
+        ) {
           const kept = value.messages.filter(
             (m) => typeof m.msg_id !== 'number' || !gone.has(m.msg_id),
           );
@@ -587,29 +706,17 @@ export async function writeConfig(
  */
 export async function pruneOffline(now = Date.now()): Promise<void> {
   const cutoff = now - CACHE_TTL_MS;
-  await withTx<void>(
-    [STORE_TRANSCRIPTS],
-    'readwrite',
-    (tx) => {
-      const cursoring = tx
-        .objectStore(STORE_TRANSCRIPTS)
-        .index('savedAt')
-        .openCursor(IDBKeyRange.upperBound(cutoff));
-      cursoring.onsuccess = () => {
-        const cursor = cursoring.result;
-        if (!cursor) return;
-        cursor.delete();
-        cursor.continue();
-      };
-    },
-    undefined,
-  );
-  for (const name of [STORE_ROOMS, STORE_CONFIG]) {
+  for (const name of [STORE_TRANSCRIPTS, STORE_ROOMS, STORE_CONFIG]) {
     await withTx<void>(
       [name],
       'readwrite',
       (tx) => {
         const store = tx.objectStore(name);
+        // The store rather than the `savedAt` index, though the transcripts
+        // store has one: a record whose stamp is missing or not a number has
+        // no index entry at all, and it is exactly the record worth collecting
+        // — every read already refuses it, so it is dead storage holding one
+        // of `MAX_CACHED_ROOMS` slots.
         const cursoring = store.openCursor();
         cursoring.onsuccess = () => {
           const cursor = cursoring.result;

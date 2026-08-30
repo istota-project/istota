@@ -325,6 +325,44 @@ describe('chat store — the offline read cache', () => {
     s.teardown();
   });
 
+  it('restores the transcript and rethrows when the server answers with a failure', async () => {
+    // The cached paint must not survive a real failure: left up, it is a
+    // 50-row tail with paging disabled and nothing saying the load broke,
+    // which reads as a complete conversation.
+    db.readTranscript.mockResolvedValue({
+      roomId: 2,
+      roomToken: 't2',
+      messages: [row(1, 'cached')],
+      oldestCursor: null,
+      savedAt: Date.now(),
+    });
+    const s = await freshSession();
+    await s.init();
+    const before = get(s.messages);
+
+    api.getRoomMessages.mockRejectedValue(new Error('API error: 500'));
+    await expect(s.selectRoom(2)).rejects.toThrow('API error: 500');
+    expect(get(s.messages)).toEqual(before);
+    expect(get(s.offlineTranscript)).toBe(false);
+    s.teardown();
+  });
+
+  it('stores a running turn without the status that would keep it spinning', async () => {
+    api.getRoomMessages.mockResolvedValue(
+      history([row(1, 'ask'), { ...row(2, 'partial'), task_id: 5, status: 'running' } as Row]),
+    );
+    const s = await freshSession();
+    await s.init();
+
+    const stored = db.writeTranscript.mock.calls[0][1].messages;
+    expect(stored[1].status).toBeUndefined();
+    // Everything else about the row is kept — it is a real turn, only not a
+    // live one any more.
+    expect(stored[1].text).toBe('partial');
+    expect(stored[0]).toEqual(row(1, 'ask'));
+    s.teardown();
+  });
+
   it('prunes expired entries on init', async () => {
     const s = await freshSession();
     await s.init();
@@ -435,6 +473,81 @@ describe('chat store — cache write-through from the room stream', () => {
     expect(db.appendTranscriptRows).toHaveBeenCalledWith('alice', 't1', [
       row(30, 'last thing said'),
     ]);
+  });
+
+  it('seeds the cursor before streaming when init could not reach the server', async () => {
+    // `since_id: 0` is not a neutral cursor — the server answers it with every
+    // message the user can see, so an unseeded stream replays the whole
+    // history into the transcript and every background room's badge.
+    vi.useFakeTimers();
+    conn.setOnline(false);
+    db.readRooms.mockResolvedValue([room(1), room(2)]);
+    api.getChatRooms.mockRejectedValue(new Error('Failed to fetch'));
+    api.getRoomMessages.mockRejectedValue(new Error('Failed to fetch'));
+    api.getRoomEvents.mockRejectedValue(new Error('Failed to fetch'));
+
+    const s = await freshSession();
+    await s.init();
+    await vi.advanceTimersByTimeAsync(1600);
+
+    // Every call so far is the limit-1 gate, never a tail read from zero.
+    for (const call of api.getRoomEvents.mock.calls) expect(call.slice(0, 2)).toEqual([0, 1]);
+
+    // The connection comes back; the next tick buys a cursor rather than a
+    // backlog, and only then does the tail start from it.
+    conn.setOnline(true);
+    api.getRoomEvents.mockResolvedValue({
+      events: [],
+      cursor: 900,
+      gap: false,
+      deletion_cursor: 7,
+    });
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomMessages.mockResolvedValue(emptyHistory);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(api.getRoomEvents).toHaveBeenCalledWith(0, 1);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(api.getRoomEvents).toHaveBeenCalledWith(900, 0, 0, 7);
+    s.teardown();
+  });
+
+  it('does not advance the stream cursor over a recovery whose reload never landed', async () => {
+    // `recoverStream` moves `roomCursor` to what it scanned, on the premise
+    // that the reload it just did covers everything up to there. A bounded
+    // reload that times out reports a gap, so `loadHistory` now paints the
+    // cache and returns instead of throwing — and the rows between the two
+    // cursors would be skipped, never fetched and never streamed.
+    vi.useFakeTimers();
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 100, gap: false });
+    const s = await freshSession();
+    await s.init();
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(api.getRoomEvents).toHaveBeenCalledWith(100, 0, 0, 0);
+
+    // The recovery's seed (limit=1) answers with a cursor well ahead; the
+    // ordinary tail read keeps reporting where the client actually is, so an
+    // advance to 500 can only have come from the recovery.
+    api.getRoomEvents.mockImplementation(async (_cursor: number, limit: number) =>
+      limit === 1
+        ? { events: [], cursor: 500, gap: false }
+        : { events: [], cursor: 100, gap: false },
+    );
+    // The room reload stalls past its bound, which the connectivity store
+    // reads as a gap rather than as an answer.
+    api.getRoomMessages.mockRejectedValue(new Error('The operation was aborted'));
+    conn.setOnline(false);
+
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(90_000);
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    // Still asking from where it actually got to.
+    expect(api.getRoomEvents).toHaveBeenCalledWith(100, 0, 0, 0);
+    expect(api.getRoomEvents).not.toHaveBeenCalledWith(500, 0, 0, 0);
+    s.teardown();
   });
 
   it('drops a room cache when the room goes away', async () => {
