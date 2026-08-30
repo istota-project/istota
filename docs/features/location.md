@@ -79,6 +79,15 @@ Places have an optional `notes` text field for free-form annotations.
 
 Place detection uses hysteresis (2 consecutive pings required) to avoid flapping at geofence boundaries. Pings with horizontal accuracy above `accuracy_threshold_m` (default 100 m) are stored but skipped for place matching. A periodic reconciler re-derives closed visits from stored pings so historical visits recover from state-machine drift. Updating a place's location or radius triggers automatic ping reassignment.
 
+### Silence is not departure
+
+A stationary tracker stops reporting. That is what a phone does when it has been on a desk for four hours, and it is the single most common thing to get wrong when reading a track back into visits — twice, in two different places, and both are now fixed:
+
+- **A gap between two pings at the same place no longer splits the visit.** The live state machine already required an observed ping somewhere else before closing one; the reconciler did not, and split on `reconcile_grace_minutes` alone, so an afternoon at home came back as four visits with the quiet stretches between them missing. Same-place pings are now one segment however long the gap. The grace period still applies to an *unassigned* ping, which is evidence of being somewhere else (ISSUE-329).
+- **A day summary's stops end at the first later observation elsewhere, not at the last ping inside.** Same reasoning one layer up, in the stop clustering the day summary renders: the last ping at a stop is where you were last *seen*. Departure is inferred from the first fix somewhere else, minus its estimated travel time — from the ping's recorded speed, or 30 mph where it has none — capped at six hours of inferred extension, so an overnight outage is not assigned to a stop. Both paths that build a day summary (`istota-skill location day-summary` and the web today view) look past the end of the requested day for that closing observation, and deliberately do not count it as one of the day's own (ISSUE-332).
+
+The first fix's rolling cleanup also replaces closed rows that a reconstructed segment now spans, so an upgrade does not leave the old fragment overlapping the merged visit.
+
 ## Database
 
 Location data lives in per-user SQLite files at `{workspace}/location/data/location.db`, not in the framework `istota.db`. The module package at `src/istota/location/` provides `resolve_for_user(user_id, config)` following the same pattern as `feeds` and `money`.

@@ -366,6 +366,9 @@ class UserWorker(threading.Thread):
 | Pressure check | `_check_host_pressure()` → `pool.update_pressure` + `snapshot_trigger` → `host_pressure_snapshot` + operator alert | `host_pressure_sample_interval_seconds` | — (logs + operator alerts) |
 | Shared files | `discover_and_organize_shared_files()` (shared_file_organizer.py) | `shared_file_check_interval` | `user_resources` |
 | Skill overlays | `check_skill_overlay_reindex()` → `memory/search.reindex_skill_overlays` per configured user, off-thread via `_spawn_background_check` | `skill_overlay_reindex_interval` | — (`memory_chunks`, `source_type='skill_overlay'`) |
+| Runtime self-check | `check_doctor()` → `doctor.run_checks`, off-thread (`runtime.model_cli` and the forge checks each spawn a `--version`) | `doctor_check_interval` (3600s) | — (logs + operator alert) |
+| Worktree reap | `check_worktree_reap()` → `worktree_reaper`, off-thread (fetches each bare clone, walks each candidate checkout). Also gated on `developer.enabled`, `developer.repos_dir`, `developer.worktree_reap_enabled` | `worktree_reap_interval` (21600s) | — (logs only) |
+| Package caches | `check_sandbox_cache_sweep()` → `sandbox_cache_sweeper`, off-thread (walks every cache tree, shells to `uv` / `npm`). Also gated on `security.sandbox_cache_sweep_enabled` and on `sandbox_cache_sweep_root(config)` resolving; passes in every user with a `locked` or `running` task so a live writer's cache is skipped whole | `sandbox_cache_sweep_interval` (21600s) | — (logs only) |
 | Briefings | `check_briefings()` | `briefing_check_interval` | `briefing_state` |
 | Scheduled jobs | `check_scheduled_jobs()` | `briefing_check_interval` | `scheduled_jobs` |
 | Sleep cycle | `check_sleep_cycles()` (memory/sleep_cycle.py), via off-thread `_run_sleep_cycles` | `briefing_check_interval` (poll cadence; own cron gates the work) | `sleep_cycle_state` |

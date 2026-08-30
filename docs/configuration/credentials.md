@@ -71,8 +71,11 @@ Gated by module enablement. Appear on per-module settings pages.
 | money | Monarch Money | `session_id`, `csrftoken` | `money` skill (transaction sync via cookie auth) |
 | feeds | Tumblr | `tumblr_api_key`\* | `feeds` skill (Tumblr feed ingestion) |
 | location | Overland | `ingest_token` | `location` skill (GPS ingestion webhook) |
+| location | CARTO basemap | `api_key`\* | The map surfaces, via `GET /api/map/basemap` |
 
 \* = optional
+
+CARTO is its own service rather than a second field on Overland: a different credential with a different lifecycle, and adding it there would flip that card to "Partial" for every user who has an ingest token and no basemap key. **It is the one credential in the schema that is meant to reach the browser** — MapLibre puts it in the tile URL, so it ships to every client that loads a map, and CARTO issues these free for exactly that. It lives in the store for the encryption at rest, the per-user scoping and the input UI, not because it is confidential; nothing reads it back as a value, so the store stays write-only to the browser where that means something. Setting one **selects CARTO as that user's basemap**, overriding the operator's [`[web.map] provider`](reference.md#webmap); leaving it empty uses the deployment default.
 
 ### Google OAuth tokens
 
