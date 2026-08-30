@@ -680,38 +680,75 @@ def test_a_skill_overlay_adds_a_block_and_changes_nothing_else(tmp_path, monkeyp
     assert "\n## Notes rules" not in overlaid
 
 
-def test_the_failure_rule_is_identical_in_both_rules_blocks(tmp_path, monkeypatch):
-    """`## Important rules` is assembled twice, and the goldens cannot see the gap.
+def _rules_by_label(prompt: str) -> dict[str, str]:
+    """The `## Important rules` list, as {label: text}.
 
-    `executor` builds one rules block for an admin and a separate one for a
-    standard user, and the two lists renumber independently — the admin block
-    carries a rule the other does not. A rule added to one copy and not the
-    other therefore reaches half the deployment with nothing to say so: both
-    goldens still match, each having been regenerated from whatever its own
-    block holds.
+    A rule starts at a line labelled `1.` or `3a.` and runs until the next such
+    line, because rule 2 is a label line plus three indented bullets. Anything
+    after the blank line that ends the section is not a rule.
+    """
+    lines = prompt.split("\n## Important rules\n\n", 1)[1].split("\n")
+    rules: dict[str, str] = {}
+    label = None
+    for line in lines:
+        if not line.strip() and label is not None:
+            break
+        head = line.split(" ", 1)[0]
+        if re.fullmatch(r"\d+[a-z]?\.", head):
+            label = head
+            rules[label] = line[len(head) + 1:]
+        elif label is not None:
+            rules[label] += "\n" + line
+    return rules
 
-    The failure-visibility rule (ISSUE-345) is the witness rather than the
-    subject. It is asserted by identity, not by substring, because the way this
-    drifts is a reworded copy rather than a missing one.
+
+def test_the_two_rules_blocks_differ_only_where_privilege_requires(tmp_path, monkeypatch):
+    """One list, and this is what says so.
+
+    `## Important rules` used to be two f-strings that renumbered
+    independently, so a rule added to one copy reached half the deployment with
+    nothing anywhere to say so — and the goldens could not see it, each being
+    regenerated from whatever its own block held. `build_rules_section` is now
+    one list with three privilege-conditional entries and one admin-only rule;
+    this pins that set closed.
+
+    `nonadmin` is `Case("nonadmin", admin=False)` and differs from
+    `base_nextcloud` in nothing else, so every difference below is a difference
+    in the code rather than in the fixture.
+
+    A widening is meant to be a reviewed edit here, not a silent one: adding a
+    fourth conditional rule fails on the `differ` set, and giving an admin a
+    second extra rule fails on `admin_only`.
     """
     prompts = {
         "admin": assemble(CASES_BY_NAME["base_nextcloud"], tmp_path / "admin", monkeypatch),
         "standard user": assemble(CASES_BY_NAME["nonadmin"], tmp_path / "standard", monkeypatch),
     }
 
-    # Non-degeneracy, before the identity check: the two assemblies have to be
-    # two. A shared cache or a leaked monkeypatch that handed back the admin
-    # prompt twice would satisfy every assertion below while checking nothing.
+    # Non-degeneracy, before anything else: the two assemblies have to be two.
+    # A shared cache or a leaked monkeypatch handing back the admin prompt
+    # twice would satisfy every assertion below while checking nothing.
     assert prompts["admin"] != prompts["standard user"]
 
-    rules = {}
-    for who, prompt in prompts.items():
-        found = [line for line in prompt.splitlines() if line.startswith("3c. ")]
-        assert len(found) == 1, f"{who}: expected one rule 3c, found {len(found)}"
-        rules[who] = found[0]
+    admin = _rules_by_label(prompts["admin"])
+    user = _rules_by_label(prompts["standard user"])
 
-    assert rules["admin"] == rules["standard user"]
-    assert "goes in the deliverable" in rules["admin"]
+    # The walk found a list at all, and found the whole of it — an empty dict
+    # or a truncated one passes every set comparison below.
+    assert set(user) == {"1.", "2.", "3.", "3a.", "3b.", "3c.", "4.", "5.", "6.",
+                         "7.", "8.", "9.", "10."}, sorted(user)
+    assert user["2."].count("\n") == 3, "rule 2 lost its bullets"
+
+    admin_only = set(admin) - set(user)
+    assert admin_only == {"6a."}, admin_only
+    assert not set(user) - set(admin), sorted(set(user) - set(admin))
+
+    differ = {label for label in user if user[label] != admin[label]}
+    assert differ == {"1.", "3.", "3a."}, sorted(differ)
+
+    # The rule ISSUE-345 added, named rather than left to the set comparison:
+    # it is the one whose absence from a copy started all of this.
+    assert "goes in the deliverable" in user["3c."]
 
 
 def test_every_golden_file_belongs_to_a_case():
