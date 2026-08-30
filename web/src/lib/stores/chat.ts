@@ -1995,7 +1995,15 @@ function createSession(): ChatSession {
           createdAt: new Date().toISOString(),
         };
         messages.update((arr) => {
-          arr.push(ph);
+          // In front of whatever client-only rows are sitting at the tail, not
+          // after them. A queued message was typed *behind* the turn this
+          // placeholder stands for, so it belongs below it — but the carry and
+          // the queued-row rebuild both ran above, so a plain push would put
+          // the running turn under the message waiting on it. A stranded failed
+          // row reads the same way round, and is covered by the same walk.
+          let at = arr.length;
+          while (at > 0 && isClientOnly(arr[at - 1])) at--;
+          arr.splice(at, 0, ph);
           return arr;
         });
         cid = ph.cid;

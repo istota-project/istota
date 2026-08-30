@@ -599,6 +599,35 @@ describe('chat store — the send queue', () => {
       expect(queued[0].text).toBe('and another thing');
     });
 
+    it('puts the restored row below the turn it is waiting on, not above it', async () => {
+      // The queued message was typed *behind* the running turn, so its bubble
+      // belongs under that turn's placeholder. `loadHistory` rebuilds the
+      // client-only rows before it resumes the room's live tasks, so a
+      // placeholder appended at the tail would sort under the message waiting
+      // on it and read as though the answer came first.
+      const s = await streaming();
+      await s.send('and another thing');
+      api.getRoomMessages.mockImplementation(async (roomId: number) =>
+        roomId === 1
+          ? {
+              messages: [],
+              active_task: { id: 42, status: 'running' },
+              active_tasks: [{ id: 42, status: 'running' }],
+            }
+          : { messages: [], active_task: null, active_tasks: [] },
+      );
+
+      await s.selectRoom(2);
+      await s.selectRoom(1);
+      await flush();
+
+      const rows = get(s.messages);
+      const placeholder = rows.findIndex((m) => m.role === 'assistant' && m.taskId === 42);
+      const queued = rows.findIndex((m) => m.sendState === 'queued');
+      expect(placeholder).toBeGreaterThanOrEqual(0);
+      expect(queued).toBeGreaterThan(placeholder);
+    });
+
     it('drains on returning to a room whose turn finished while away', async () => {
       const s = await streaming();
       await s.send('and another thing');
