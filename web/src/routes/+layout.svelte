@@ -45,6 +45,28 @@
   // window events and the probe schedule.
   onMount(() => startConnectivity());
 
+  // Ask for the origin's storage to be exempt from eviction, once.
+  //
+  // The offline cache and the outbox being built on top of this live in
+  // storage iOS may reclaim: Intelligent Tracking Prevention removes a site's
+  // script-writable storage after a period without interaction, it is on in
+  // every WKWebView, and there is no way to opt an origin out — `persist()`
+  // grants only to origins already on WebKit's exemption list, which this one
+  // does not join. So a `false` here is the expected answer on the phone and
+  // not a fault. The point of asking is to have observed it rather than
+  // assumed it: the answer is what decides whether the outbox eventually has
+  // to move into native storage. Logged rather than surfaced, because there is
+  // nothing the user could do about it and nothing here fails if it is no.
+  onMount(() => {
+    if (typeof navigator === 'undefined' || typeof navigator.storage?.persist !== 'function') {
+      return;
+    }
+    navigator.storage
+      .persist()
+      .then((granted) => console.log(`[istota] storage.persist() → ${granted}`))
+      .catch(() => console.log('[istota] storage.persist() → refused'));
+  });
+
   // Stale-build prompt. `kit.version.pollInterval` flips `updated.current` when
   // a new build ships, but SvelteKit only acts on it at the *next navigation* —
   // and a chat tab left open for days never navigates. Worse on the iOS
