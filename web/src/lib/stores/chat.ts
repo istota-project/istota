@@ -60,6 +60,7 @@ import {
   type ConfirmationAnsweredData,
   type SteerRecordedData,
   type MessageReply,
+  type SendPayload,
 } from '$lib/stores/segments';
 
 // The message / segment model lives in the pure reducer module so it can be
@@ -207,6 +208,15 @@ const STREAM_KINDS = [
 ];
 
 /**
+ * How a task's stream ended.
+ *
+ * Only `done` is a normal finish. The distinction is the send queue's (a turn
+ * that errored or was stopped holds the messages typed behind it); the stream
+ * queue advances on all three alike, since either way the task is over.
+ */
+type StreamTerminal = 'done' | 'error' | 'cancelled';
+
+/**
  * A send handed back to the composer, with the room it was typed in.
  *
  * Only `reply_target_gone` produces one — see `returnSend`. The attachments
@@ -288,6 +298,16 @@ export interface ChatSession {
   // than appending a new one, so the canonical echo folds into it. No-op for a
   // row that didn't fail, or one whose failure a retry can't resolve.
   retrySend: (cid: number) => Promise<void>;
+  // The three verbs on a queued message (ISSUE-238), all no-ops on a cid that
+  // is not one. Nothing here has been POSTed, which is what makes them
+  // possible at all.
+  //
+  // `removeQueued` drops it; `editQueued` drops it and hands the text and
+  // attachments back to the composer through `sendReturned`; `releaseQueued`
+  // clears the hold Stop (or a failure) put on it and tries to send.
+  removeQueued: (cid: number) => void;
+  editQueued: (cid: number) => void;
+  releaseQueued: (cid: number) => Promise<void>;
   cancel: () => Promise<void>;
   confirm: (cid: number, taskId: number) => Promise<void>;
   reject: (cid: number, taskId: number) => Promise<void>;
@@ -450,11 +470,16 @@ function createSession(): ChatSession {
 
   // Client-only without ambiguity: a server row always carries a `msgId`.
   const isStranded = (m: ChatMessage) => m.sendState === 'failed' && m.msgId === undefined;
+  // A message typed into a busy room: written, committed to, never POSTed.
+  const isQueued = (m: ChatMessage) => m.sendState === 'queued';
+  // The two rows the server has no copy of, and so the two a rebuild has to
+  // carry rather than drop.
+  const isClientOnly = (m: ChatMessage) => isStranded(m) || isQueued(m);
 
   /** Move whatever client-only rows are on screen into the holding map. */
   function stashStrandedSends() {
     for (const m of get(messages)) {
-      if (!isStranded(m) || !m.roomToken) continue;
+      if (!isClientOnly(m) || !m.roomToken) continue;
       const held = strandedSends.get(m.roomToken) ?? [];
       if (!held.some((x) => x.cid === m.cid)) held.push(m);
       strandedSends.set(m.roomToken, held);
@@ -471,6 +496,13 @@ function createSession(): ChatSession {
    * `token` names the room being rebuilt, or null for the All view, which
    * spans every room. Held rows are taken *out* of the map — they are back on
    * screen, and `stashStrandedSends` puts them away again on the way out.
+   *
+   * A *queued* row is carried for a named room only. An aggregate view is a
+   * read-only reading surface with no composer, and a row whose Send / Edit /
+   * Remove act on a room you are not in does not belong in it — so those rows
+   * stay in the holding map on the way past rather than being rendered or
+   * dropped. A failed row keeps its existing behaviour in that branch: its
+   * Retry is the only way back to a message the server never took.
    */
   function carryClientOnlyRows(
     prev: ChatMessage[],
@@ -480,7 +512,8 @@ function createSession(): ChatSession {
     const carried: ChatMessage[] = [];
     const seen = new Set(next.map((m) => m.cid));
     const take = (m: ChatMessage) => {
-      if (!isStranded(m) || seen.has(m.cid)) return;
+      if (!isClientOnly(m) || seen.has(m.cid)) return;
+      if (token === null && isQueued(m)) return;
       if (token !== null && m.roomToken !== token) return;
       seen.add(m.cid);
       carried.push(m);
@@ -489,13 +522,120 @@ function createSession(): ChatSession {
     if (token === null) {
       for (const [key, held] of strandedSends) {
         held.forEach(take);
-        strandedSends.delete(key);
+        // Whatever `take` refused above is still the only copy of itself.
+        const kept = held.filter((m) => !seen.has(m.cid));
+        if (kept.length) strandedSends.set(key, kept);
+        else strandedSends.delete(key);
       }
     } else {
       (strandedSends.get(token) ?? []).forEach(take);
       strandedSends.delete(token);
     }
     return carried.length ? [...next, ...carried] : next;
+  }
+
+  // ---- The send queue (ISSUE-238) -------------------------------------------
+  //
+  // Messages typed into a room whose turn is still running. Not to be confused
+  // with `streamQueue` above, which holds assistant placeholders waiting for
+  // the *stream* of a task the server already has. Nothing in here has been
+  // POSTed, which is what makes Edit and Remove possible and what makes Stop a
+  // decision about the queue rather than about a set of server-side tasks.
+  //
+  // Keyed by room *token*, not room id, for the reason `drafts.ts` gives:
+  // `web_chat_rooms.id` is an `INTEGER PRIMARY KEY` without `AUTOINCREMENT`,
+  // so SQLite hands a freed rowid straight back out and a deleted room's queue
+  // would be inherited by whichever room takes its id next.
+  //
+  // The entry is the source of truth for what will be sent. The transcript row
+  // it names (`cid`) is a mirror for display and can be absent — a room switch
+  // takes it off screen — so nothing on the drain path may read the payload
+  // back off the row.
+  interface QueuedSend {
+    cid: number;
+    text: string;
+    attachments: ChatAttachment[];
+    // For the optimistic quote on the bubble.
+    replyTo?: MessageReply;
+    // What the POST carries.
+    replyToMsgId?: number;
+    // Minted at enqueue rather than at drain, so it is stable across a
+    // persistence round trip: two drains of the same restored entry are then
+    // answered with one task.
+    idempotencyKey?: string;
+    // True = will not drain on its own; the user has to release it.
+    held: boolean;
+    queuedAt: number;
+  }
+  const sendQueue = new Map<string, QueuedSend[]>();
+
+  const roomTokenOf = (roomId: number) => get(rooms).find((r) => r.id === roomId)?.token;
+
+  /**
+   * Stop every entry in a room's queue from draining on its own.
+   *
+   * The rule the whole queue turns on: it drains when the turn it was written
+   * against finished normally, and holds otherwise. Holding rather than
+   * discarding — the follow-ups were written against work that has just been
+   * abandoned or has just failed, so they must not fire, but destroying the
+   * text to say so is a worse trade than one tap to release it.
+   */
+  function holdRoomQueue(token: string | null | undefined) {
+    if (!token) return;
+    const entries = sendQueue.get(token);
+    if (!entries?.length) return;
+    for (const entry of entries) {
+      entry.held = true;
+      updateMsg(entry.cid, (m) => {
+        m.queueHeld = true;
+      });
+    }
+    // The rows are only in `messages` while the room is on screen; a send that
+    // fails after a room switch has to reach the stashed copies too, or they
+    // come back reading "Waiting to send" for something that never will.
+    for (const m of strandedSends.get(token) ?? []) {
+      if (isQueued(m)) m.queueHeld = true;
+    }
+  }
+
+  /** Where a queued entry lives, or null if `cid` names no queued message. */
+  function findQueued(cid: number): { token: string; entries: QueuedSend[]; idx: number } | null {
+    for (const [token, entries] of sendQueue) {
+      const idx = entries.findIndex((e) => e.cid === cid);
+      if (idx !== -1) return { token, entries, idx };
+    }
+    return null;
+  }
+
+  /** Take a queued entry out of the queue and its row off the transcript. */
+  function takeQueued(cid: number): { token: string; entry: QueuedSend } | null {
+    const found = findQueued(cid);
+    if (!found) return null;
+    const [entry] = found.entries.splice(found.idx, 1);
+    if (!found.entries.length) sendQueue.delete(found.token);
+    messages.update((arr) => arr.filter((m) => m.cid !== cid));
+    // And out of the holding map, or a later room switch would re-append a row
+    // with no entry behind it.
+    const stashed = (strandedSends.get(found.token) ?? []).filter((m) => m.cid !== cid);
+    if (stashed.length) strandedSends.set(found.token, stashed);
+    else strandedSends.delete(found.token);
+    return { token: found.token, entry };
+  }
+
+  /**
+   * Drop a room's whole queue — entries, stashed rows and rendered rows.
+   *
+   * For a room that no longer exists. Deliberately not called on an archive:
+   * an archived room can come back, and the text in its queue was committed to
+   * by the user, so it is kept where a deleted room's cannot be.
+   */
+  function dropRoomQueue(token: string | null | undefined) {
+    if (!token) return;
+    sendQueue.delete(token);
+    const stashed = (strandedSends.get(token) ?? []).filter((m) => !isQueued(m));
+    if (stashed.length) strandedSends.set(token, stashed);
+    else strandedSends.delete(token);
+    messages.update((arr) => arr.filter((m) => !(isQueued(m) && m.roomToken === token)));
   }
 
   // Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
@@ -567,10 +707,13 @@ function createSession(): ChatSession {
 
     // Natural terminal: halt, then let the session advance to the next queued
     // task (or go idle) — unless we paused for a confirmation.
-    const settle = () => {
+    //
+    // The terminal kind travels because the *send* queue distinguishes them:
+    // only a turn that finished normally releases the messages typed behind it.
+    const settle = (terminal: StreamTerminal) => {
       if (finished) return;
       halt();
-      onStreamSettled(paused);
+      onStreamSettled(paused, terminal);
     };
 
     const handle = (kind: string, dataStr: string, seq: number) => {
@@ -600,7 +743,7 @@ function createSession(): ChatSession {
       // `done` is the normal terminal; settle on `error`/`cancelled` too so a
       // failure that arrives without a trailing `done` (older paths, dropped
       // connection) can't leave the room stuck on "Working…".
-      if (kind === 'done' || kind === 'cancelled' || kind === 'error') settle();
+      if (kind === 'done' || kind === 'cancelled' || kind === 'error') settle(kind);
     };
 
     const poll = async () => {
@@ -680,7 +823,7 @@ function createSession(): ChatSession {
   // The active stream reached a terminal state. If it paused for a
   // confirmation, hold the queue (the user must confirm/reject first).
   // Otherwise advance to the next queued task, or go idle.
-  function onStreamSettled(paused: boolean) {
+  function onStreamSettled(paused: boolean, terminal: StreamTerminal) {
     activeStream = null;
     if (!paused) {
       const next = streamQueue.shift();
@@ -694,7 +837,15 @@ function createSession(): ChatSession {
     // A turn finished in the open room — its reply is now on screen, so mark
     // the room read (visibility-gated) before the user switches away.
     const rid = get(activeRoomId);
-    if (rid != null) markActiveRead(rid);
+    if (rid == null) return;
+    markActiveRead(rid);
+    // The send queue's one rule: a turn that finished normally releases the
+    // messages typed behind it, and anything else holds them. A paused turn
+    // holds for the sharper reason that the room is idle only because it is
+    // waiting on the user — firing past an unanswered question is the surprise
+    // the queue exists to avoid.
+    if (paused || terminal !== 'done') holdRoomQueue(roomTokenOf(rid));
+    else void drainSendQueue(rid);
   }
 
   // Halt the active stream and drop the queue without advancing — for room
@@ -714,6 +865,9 @@ function createSession(): ChatSession {
     // rows that exist only on the client have to be put away here or they are
     // gone before the rebuild that would carry them ever runs.
     stashStrandedSends();
+    // `sendQueue` is deliberately NOT cleared here. It is keyed by room and
+    // survives a switch, an unmount and a Stop: nothing in it has been sent,
+    // so there is nothing to abandon — the rows come back with the room.
     // The echo buffer belongs to the turn that opened it, and this call has
     // just released the gates (`status` back to 'idle') that were supposed to
     // keep another turn from draining it. Abandoned rather than drained: those
@@ -1982,6 +2136,12 @@ function createSession(): ChatSession {
     markRoomRead(id).catch(() => {
       /* non-fatal; refresh/poll will retry */
     });
+    // A room whose turn finished while the user was elsewhere sends its queue
+    // now: `loadHistory` has re-appended the queued rows and resumed whatever
+    // task was still running, so `canDrain` can see the room's real state.
+    // Not awaited, for the reason `markRoomRead` is not — a room switch must
+    // not wait on a POST.
+    void drainSendQueue(id);
   }
 
   async function newRoom(name: string) {
@@ -2048,6 +2208,9 @@ function createSession(): ChatSession {
   }
 
   async function deleteRoom(id: number) {
+    // Read before the delete: the room has to still be in `$rooms` for its
+    // token to be resolvable, and a refused delete must keep the queue.
+    const token = roomTokenOf(id);
     try {
       await deleteChatRoom(id);
     } catch (e) {
@@ -2061,6 +2224,7 @@ function createSession(): ChatSession {
     // On success (or a 404 already-gone) drop it from the list, mirroring
     // archiveRoom's fall-through when the active room disappears.
     forgetRoom(id);
+    dropRoomQueue(token);
     rooms.update((r) => r.filter((x) => x.id !== id));
     if (get(activeRoomId) === id) {
       const remaining = get(rooms);
@@ -2164,9 +2328,11 @@ function createSession(): ChatSession {
     // flag all belong to the turn that is running.
     //
     // Anything else here would be a second `runTurn` in a room that already
-    // has one. The composer's mode gate refuses those (ISSUE-300); this is the
-    // same rule at the seam that owns the invariant, rather than a check the
-    // caller can forget. An attachment belongs to a task either way.
+    // has one, so it is queued (ISSUE-238) and drains into the same single
+    // entry point when the running turn settles. `runTurn`'s invariant is
+    // unchanged; the queue feeds the `status === 'idle'` guards rather than
+    // becoming an exception to them. An attachment belongs to a task either
+    // way, which is why an attachment never takes the inline path.
     //
     // "No task id" is a statement about this response, not about the server:
     // `!retry`, `!resume` and `!confirm` all leave a task queued and still
@@ -2174,8 +2340,11 @@ function createSession(): ChatSession {
     // by `pickUpStreamedTask` like any turn started elsewhere, which is why
     // they are none of this path's business.
     if (get(status) !== 'idle') {
-      if (attachments.length > 0 || !isKnownCommand(trimmed)) return;
-      await sendInlineCommand(roomId, trimmed);
+      if (attachments.length === 0 && isKnownCommand(trimmed)) {
+        await sendInlineCommand(roomId, trimmed);
+        return;
+      }
+      enqueueSend(roomId, trimmed, attachments, replyTo);
       return;
     }
 
@@ -2235,6 +2404,56 @@ function createSession(): ChatSession {
     }
   }
 
+  /**
+   * Take a message typed into a busy room, to be sent as the next turn.
+   *
+   * Appends the same user row `send()` would have appended — same cid, room
+   * token, attachments, timestamp, optimistic reply quote — but marked
+   * 'queued' and carrying no `sendPayload`, because the queue entry holds it.
+   * Nothing here touches `status`, `cancelRequested` or `pendingSend`: those
+   * belong to the turn that is running.
+   */
+  function enqueueSend(
+    roomId: number,
+    trimmed: string,
+    attachments: ChatAttachment[],
+    replyTo?: MessageReply,
+  ) {
+    const roomToken = roomTokenOf(roomId);
+    // The queue is keyed by token, so a room we cannot name has nowhere to
+    // file this. Refusing beats a row on screen with no entry behind it.
+    if (!roomToken) return;
+    const cid = nextCid();
+    messages.update((a) => [
+      ...a,
+      {
+        cid,
+        role: 'user',
+        text: trimmed,
+        segments: [],
+        streaming: false,
+        roomToken,
+        attachments: attachments.map((x) => x.name),
+        attachmentPaths: attachments.map((x) => x.workspace_path ?? null),
+        createdAt: new Date().toISOString(),
+        replyTo,
+        sendState: 'queued',
+      },
+    ]);
+    const entries = sendQueue.get(roomToken) ?? [];
+    entries.push({
+      cid,
+      text: trimmed,
+      attachments,
+      replyTo,
+      replyToMsgId: replyTo?.msgId,
+      idempotencyKey: newIdempotencyKey(),
+      held: false,
+      queuedAt: Date.now(),
+    });
+    sendQueue.set(roomToken, entries);
+  }
+
   async function retrySend(cid: number) {
     // Retry is the first entry into `runTurn` that isn't gated by the
     // composer's `busy`, and `runTurn` is still not re-entrant: it drains the
@@ -2248,19 +2467,35 @@ function createSession(): ChatSession {
     if (!m || m.sendState !== 'failed' || m.retryable === false || !m.sendPayload) return;
     const roomId = get(activeRoomId);
     if (!roomId) return;
-    const payload = m.sendPayload;
-    updateMsg(cid, (mm) => {
-      mm.sendState = 'sending';
-      mm.sendError = undefined;
-      mm.retryable = undefined;
+    await beginSend(roomId, cid, m.sendPayload);
+  }
+
+  /**
+   * Put an existing user row back into flight: a retry, or a queued message
+   * whose turn has come.
+   *
+   * Both re-enter `runTurn` with the *same* cid deliberately — see `runTurn`.
+   * The rendered row's `attachmentPaths` still carry the workspace paths, so
+   * the chips stay live across it; only the POST needs the host ones.
+   *
+   * `sendPayload` is stamped rather than assumed: for a retry it is already
+   * there, and for a drain the row was carrying none (the queue entry held it)
+   * and needs one now, so a failure has its Retry.
+   *
+   * The payload's *original* idempotency key rides along rather than a fresh
+   * one, which is the whole point of it. A send the server accepted and then
+   * failed to report (a client timeout, a dropped socket, a second tab
+   * draining the same restored entry) is recognised and answered with the
+   * first task, so no second task and no second bubble exist to reconcile.
+   */
+  async function beginSend(roomId: number, cid: number, payload: SendPayload) {
+    updateMsg(cid, (m) => {
+      m.sendState = 'sending';
+      m.sendError = undefined;
+      m.retryable = undefined;
+      m.queueHeld = undefined;
+      m.sendPayload = payload;
     });
-    // The rendered row's `attachmentPaths` still carry the workspace paths, so
-    // the chips stay live across the retry; only the POST needs the host ones.
-    //
-    // The *original* key rides along rather than a fresh one: that is the whole
-    // point of it. A send the server accepted and then failed to report (a
-    // client timeout, a dropped socket) is recognised and answered with the
-    // first task, so no second task and no second bubble exist to reconcile.
     await runTurn(
       roomId,
       cid,
@@ -2269,6 +2504,97 @@ function createSession(): ChatSession {
       payload.idempotencyKey,
       payload.replyToMsgId,
     );
+  }
+
+  /**
+   * Whether the head of `roomId`'s send queue may go out right now.
+   *
+   * Every trigger re-tests this rather than trusting the state it was called
+   * from; a drain that is not allowed is a silent no-op, not an error.
+   */
+  function canDrain(roomId: number): boolean {
+    // An aggregate view has no composer and is not a room. A background room's
+    // queue waits for the user to come back: the client has no stream for a
+    // task it is not watching, and firing a message into a room nobody is
+    // looking at is worse than waiting.
+    if (get(view) !== 'room' || get(activeRoomId) !== roomId) return false;
+    // The three ways the room can still be busy. `status` alone is not enough:
+    // it is set idle while a stream is being handed on, and a send that is
+    // mid-POST has not claimed it yet.
+    if (get(status) !== 'idle' || activeStream !== null || streamQueue.length > 0) return false;
+    if (get(messages).some((m) => m.sendState === 'sending')) return false;
+    const token = roomTokenOf(roomId);
+    if (!token) return false;
+    const head = sendQueue.get(token)?.[0];
+    return !!head && !head.held;
+  }
+
+  /**
+   * Send the head of a room's queue, if it may go.
+   *
+   * One entry per drain: the next one goes when *this* turn settles. The entry
+   * is shifted off before the POST, so a failure leaves a failed row with its
+   * own Retry rather than a row the queue would try again.
+   */
+  async function drainSendQueue(roomId: number) {
+    if (!canDrain(roomId)) return;
+    const token = roomTokenOf(roomId);
+    const entries = token ? sendQueue.get(token) : undefined;
+    const entry = entries?.shift();
+    if (!token || !entry) return;
+    if (!entries?.length) sendQueue.delete(token);
+    await beginSend(roomId, entry.cid, {
+      text: entry.text,
+      attachments: entry.attachments,
+      idempotencyKey: entry.idempotencyKey,
+      replyToMsgId: entry.replyToMsgId,
+    });
+  }
+
+  /**
+   * Take a queued message back out of the queue.
+   *
+   * Its uploaded attachments are left orphaned server-side — the same
+   * already-tolerated outcome as closing the tab mid-compose.
+   */
+  function removeQueued(cid: number) {
+    takeQueued(cid);
+  }
+
+  /**
+   * Put a queued message back in the composer to be edited.
+   *
+   * Edit is remove-plus-restore rather than an in-place editor on the bubble:
+   * `sendReturned` already carries text and uploaded attachments back to the
+   * composer, and the page already guards that restore on the room token,
+   * which is exactly the guard this needs.
+   */
+  function editQueued(cid: number) {
+    const taken = takeQueued(cid);
+    if (!taken) return;
+    sendReturned.update((s) => ({
+      n: s.n + 1,
+      token: taken.token,
+      text: taken.entry.text,
+      attachments: taken.entry.attachments,
+    }));
+  }
+
+  /**
+   * Clear the hold on one entry and try to send.
+   *
+   * Only the head can actually go, so releasing an entry behind a held one
+   * marks it ready and sends nothing until its turn comes round.
+   */
+  async function releaseQueued(cid: number) {
+    const found = findQueued(cid);
+    if (!found) return;
+    found.entries[found.idx].held = false;
+    updateMsg(cid, (m) => {
+      m.queueHeld = undefined;
+    });
+    const roomId = get(activeRoomId);
+    if (roomId != null) await drainSendQueue(roomId);
   }
 
   /**
@@ -2403,6 +2729,11 @@ function createSession(): ChatSession {
     // per-channel gate. The row updates above no-op on their own (the failed
     // row left with its room).
     if (settleStatus && get(activeRoomId) === roomId) status.set('idle');
+    // Whatever was typed behind this send was written on the assumption that
+    // it would go out; it did not, so the rest of the queue holds. Unguarded
+    // by the room on purpose — the queue belongs to `roomId` whether or not
+    // that room is the one on screen.
+    holdRoomQueue(roomTokenOf(roomId));
   }
 
   /**
@@ -2427,6 +2758,9 @@ function createSession(): ChatSession {
     sendReturned.update((s) => ({ n: s.n + 1, token, text, attachments }));
     notifyWarning('That message is no longer available to reply to.');
     if (get(activeRoomId) === roomId) status.set('idle');
+    // `failSend`'s sibling path, and it holds for the same reason: this send
+    // did not go out, and the composer now has its text back.
+    holdRoomQueue(token);
   }
 
   /**
@@ -2847,9 +3181,12 @@ function createSession(): ChatSession {
           ? (m.segments[m.segments.length - 1] as Extract<Segment, { kind: 'text' }>).text
           : '';
     });
-    // The parked confirmation was holding the queue; release it so the next
-    // queued message (if any) starts.
-    onStreamSettled(false);
+    // The parked confirmation was holding the stream queue; release it so the
+    // next queued *task* (if any) starts. `cancelled` rather than `done`
+    // because that is what this is: the send queue stays held, so a message
+    // typed behind a turn the user has just declined does not go out on its
+    // own.
+    onStreamSettled(false, 'cancelled');
   }
 
   // Stop the active SSE / poll loop without cancelling the task. The route
@@ -2900,6 +3237,9 @@ function createSession(): ChatSession {
     sendReturned,
     send,
     retrySend,
+    removeQueued,
+    editQueued,
+    releaseQueued,
     cancel,
     confirm,
     reject,
