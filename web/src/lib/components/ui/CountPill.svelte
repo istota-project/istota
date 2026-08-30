@@ -65,7 +65,7 @@
     line-height: 1;
   }
   /* Same pill, stated rather than announced: the badge fill drops to the
-	   surface every other quiet chip uses and the digits to muted text. */
+     surface every other quiet chip uses and the digits to muted text. */
   .count-pill.muted {
     background: var(--surface-badge);
     color: var(--text-muted);

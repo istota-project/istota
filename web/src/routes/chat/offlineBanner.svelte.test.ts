@@ -123,26 +123,43 @@ describe('the room-list queued badge', () => {
     unread_count: 0,
   });
 
-  function seedRooms(counts: Record<string, number>) {
+  function seedRooms(counts: Record<string, number>, activeId: number | null = null) {
+    // The mocked session is module-lived, so every field a test sets has to be
+    // set by every test — otherwise the room left open by one decides what the
+    // next one renders.
     const session = getChatSession() as unknown as {
       rooms: { set: (v: unknown) => void };
       queuedCounts: { set: (v: unknown) => void };
+      activeRoomId: { set: (v: unknown) => void };
     };
     session.rooms.set([room(1), room(2)]);
     session.queuedCounts.set(counts);
+    session.activeRoomId.set(activeId);
   }
+
+  /** The sidebar's entry for a room, which is not the only place its name is. */
+  const roomRow = (name: string) => screen.getAllByText(name)[0];
 
   it('counts what is waiting in a room the user is not looking at', async () => {
     seedRooms({ t2: 3 });
     render(Page);
-    await waitFor(() => expect(screen.getByTitle('3 waiting to send')).toBeInTheDocument());
-    expect(screen.getByTitle('3 waiting to send').textContent).toBe('3');
+    await waitFor(() => expect(screen.getByTitle('3 not sent yet')).toBeInTheDocument());
+    expect(screen.getByTitle('3 not sent yet').textContent).toBe('3');
+  });
+
+  it('draws no badge for the room on screen, whose rows are the count', async () => {
+    // The same rule the unread pill above it follows: a count of what you are
+    // already looking at is noise.
+    seedRooms({ t1: 2 }, 1);
+    render(Page);
+    await waitFor(() => expect(roomRow('Room 1')).toBeInTheDocument());
+    expect(screen.queryByTitle(/not sent yet/)).toBeNull();
   });
 
   it('shows nothing for a room with nothing waiting', async () => {
     seedRooms({});
     render(Page);
-    await waitFor(() => expect(screen.getByText('Room 1')).toBeInTheDocument());
-    expect(screen.queryByTitle(/waiting to send/)).toBeNull();
+    await waitFor(() => expect(roomRow('Room 1')).toBeInTheDocument());
+    expect(screen.queryByTitle(/not sent yet/)).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 /**
- * Messages typed into a busy room and waiting to be sent, kept per room in the
- * browser (ISSUE-238).
+ * Messages that cannot be sent yet and are waiting to be, kept per room in the
+ * browser: typed into a busy room (ISSUE-238), or written with no connection
+ * (ISSUE-202).
  *
  * Deliberately shaped like `drafts.ts`, and for the same reasons: one
  * `localStorage` map under a single key, so pruning is a local decision rather
@@ -16,9 +17,13 @@
  * reload is worse. It persists at enqueue rather than on unload, so nothing
  * depends on catching a departure event.
  *
- * Nothing here decides whether an entry may go out. A restored entry is always
- * re-held by the caller — the turn it was written against is over and
- * unobserved, and a page load must never send anything by surprise.
+ * What this module decides about sending is one thing and one only: how old an
+ * entry queued with no connection may be and still go out by itself on a page
+ * load (`OFFLINE_AUTO_SEND_MAX_AGE_MS`). Everything else — whether the room is
+ * ready, whether the head is held, when a drain runs — is the chat store's,
+ * and the rule it applies is that a restored entry sends itself only when it
+ * was written against a *connection* rather than against a turn, and only
+ * while it is young enough to still be what the user meant.
  *
  * **Two tabs are last-writer-wins, and that is settled rather than overlooked.**
  * Each tab holds its own in-memory queue and writes a room's whole list here,
@@ -52,12 +57,12 @@ export const QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * How many messages one room may have waiting.
  *
  * A cap the UI can honestly report: past it the send is refused with a visible
- * reason rather than accepted and silently dropped. `chat.ts`'s `enqueueSend`
- * is what enforces that, so the in-memory queue can never outgrow what is
- * stored — the trim in `prune` below keeps the FIFO *head*, which would
- * otherwise discard the message the user typed most recently while leaving it
- * on screen. The composer gains its own refusal on top, which keeps the text in
- * the field rather than in a notice.
+ * reason rather than accepted and silently dropped. `chat.ts` enforces it on
+ * both ways into the queue — `enqueueSend` and `parkSend` — so the in-memory
+ * queue can never outgrow what is stored; the trim in `prune` below keeps the
+ * FIFO *head*, which would otherwise discard the message the user typed most
+ * recently while leaving it on screen. The composer gains its own refusal on
+ * top, which keeps the text in the field rather than in a notice.
  */
 export const MAX_QUEUED_PER_ROOM = 10;
 
@@ -115,8 +120,8 @@ export const MAX_QUEUE_TOTAL_CHARS = 256 * 1024;
  * Why a message is in the queue.
  *
  * The two are told apart on the way back in and nowhere else: a `busy` entry
- * restores held, an `offline` one young enough restores ready to go (see
- * `OFFLINE_AUTO_SEND_MAX_AGE_MS`). Storing the reason rather than deriving it
+ * restores held, an `offline` one young enough and not already held restores
+ * ready to go (see `OFFLINE_AUTO_SEND_MAX_AGE_MS`). Storing the reason rather than deriving it
  * is what makes that possible at all — a reload cannot tell whether the room
  * was busy or the network was gone when the text was written.
  */
@@ -125,10 +130,10 @@ export type QueueReason = 'busy' | 'offline';
 /**
  * One queued message as it is stored.
  *
- * The same fields the in-memory entry carries. `held`, `queuedAt` and `reason`
- * are what the restore reads: the first says whether the entry may go on its
- * own, the second is what the TTL measures and what the restored row's
- * timestamp is rebuilt from, and the third decides the first.
+ * The same fields the in-memory entry carries, and three of them are what a
+ * restore reads. `held` is a hold the last session applied and is never
+ * cleared by the read. `reason` and `queuedAt` decide whether an entry that
+ * carries no such hold may go out on its own.
  */
 export interface StoredQueuedSend {
   cid: number;

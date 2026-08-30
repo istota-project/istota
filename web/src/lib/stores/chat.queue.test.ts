@@ -1256,9 +1256,15 @@ describe('chat store — the send queue', () => {
       // The force-quit-mid-POST case end to end. The entry outlived the POST,
       // so the relaunch drains it again carrying the idempotency key it was
       // minted with; the server resolves the replay to the task it already ran
-      // rather than starting a second one. That task's stream is over, so the
-      // terminal event arrives from the events snapshot — one turn, not zero
-      // and not two.
+      // rather than starting a second one, and the row settles on that task's
+      // terminal event — one turn, not zero and not two.
+      //
+      // That event arrives from `/chat/tasks/{id}/events`, which is the right
+      // endpoint for a task whose stream is over, but the harness is not what
+      // proves it: jsdom has no `EventSource`, so every turn in this file
+      // settles through the same poll. What this test does hold down is the
+      // shift point and the key — a run against the old shift-before-POST
+      // order has nothing left in storage to re-POST at all.
       seedQueues({ t1: [storedEntry('the one that was mid-flight', { idempotencyKey: 'k-1' })] });
       const s = await freshSession();
       await s.init();

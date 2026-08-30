@@ -815,7 +815,7 @@
         {@const isTalk = room.origin === 'talk' || !!room.talk_token}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
-        {@const waiting = $queuedCounts[room.token] ?? 0}
+        {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
         <div class="list-row room-row" class:active={room.id === $activeRoomId}>
           <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
             {#if isTalk}
@@ -837,14 +837,18 @@
                 {#if unread}
                   <CountPill count={unreadCount} title={`${unreadCount} unread`} />
                 {/if}
-                <!-- What is waiting to go out of this room (ISSUE-202). The
+                <!-- What has not gone out of this room yet (ISSUE-202). The
 								     drain runs for the room on screen only, so for every other
 								     room this badge is the whole of the affordance: it says
-								     which one to open for the message to send itself. Muted,
-								     because nothing has arrived and nothing has gone wrong —
-								     it is a state the user put there. -->
+								     which one to open for what is in it to go. Not drawn for
+								     the open room, like the unread pill above it, where the
+								     rows themselves are the count. Held entries are in it —
+								     they also need this room opened — which is why the title
+								     says "not sent yet" rather than promising they will send
+								     on their own. Muted, because nothing has arrived and
+								     nothing has gone wrong: it is a state the user put there. -->
                 {#if waiting > 0}
-                  <CountPill count={waiting} tone="muted" title={`${waiting} waiting to send`} />
+                  <CountPill count={waiting} tone="muted" title={`${waiting} not sent yet`} />
                 {/if}
               </span>
             </span>

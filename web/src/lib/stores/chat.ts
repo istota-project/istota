@@ -613,10 +613,23 @@ function createSession(): ChatSession {
   ): ChatMessage[] {
     const carried: ChatMessage[] = [];
     const seen = new Set(next.map((m) => m.cid));
+    // The bodies the rebuild is already carrying for this room. A send parked
+    // after it reached the wire (see `parkedAfterPost`) may be one of them —
+    // the server took it and the reload is where that first becomes visible —
+    // and carrying the queued mirror on top would show the same message twice
+    // and then send it again when the entry drained. Same body match, and the
+    // same fallback, as the stream's own adoption in `appendStreamedRow`.
+    const rebuilt = new Set(next.filter((m) => m.role === 'user').map((m) => m.text));
     const take = (m: ChatMessage) => {
       if (!isClientOnly(m) || seen.has(m.cid)) return;
       if (token === null && isQueued(m)) return;
       if (token !== null && m.roomToken !== token) return;
+      if (parkedAfterPost.has(m.cid) && rebuilt.has(m.text)) {
+        // The entry goes with the row, or the drain would POST a message the
+        // server has already answered.
+        dropQueuedEntry(m.cid);
+        return;
+      }
       seen.add(m.cid);
       carried.push(m);
     };
@@ -788,6 +801,13 @@ function createSession(): ChatSession {
    * has moved on while the user is looking at something else.
    */
   function holdOnRestore(entry: StoredQueuedSend, now: number): boolean {
+    // A hold the last session applied is kept, whatever the reason says. Stop,
+    // an error and a parked confirmation mark *every* entry in the room
+    // through `holdRoomQueue`, offline ones included — so without this, three
+    // messages queued in a lift and then held by a Stop would come back unheld
+    // and fire into the turn the user had just abandoned. The age rule can
+    // only ever keep a hold; it cannot clear one.
+    if (entry.held) return true;
     if (entry.reason !== 'offline') return true;
     return now - entry.queuedAt >= OFFLINE_AUTO_SEND_MAX_AGE_MS;
   }
@@ -806,13 +826,14 @@ function createSession(): ChatSession {
    * this map's mirror — so re-reading it over a live queue would duplicate
    * every entry.
    *
-   * This is the one mutation of `sendQueue` that does *not* write back, and
-   * the exception is deliberate: it would rewrite the whole map on every page
-   * load, for rooms nobody has touched, which is the pointless write
-   * `drafts.ts` goes out of its way to avoid. Nothing depends on it, because
-   * every restore re-mints the cid and re-holds whatever it reads — so the two
-   * copies can disagree about those two fields and still produce the same
-   * result next time.
+   * This is one of the two mutations of `sendQueue` that do *not* write back
+   * (`forgetRoom` is the other), and the exception is deliberate: it would
+   * rewrite the whole map on every page load, for rooms nobody has touched,
+   * which is the pointless write `drafts.ts` goes out of its way to avoid.
+   * Nothing depends on it, because the two fields the restore decides — the
+   * cid, re-minted, and `held`, derived by `holdOnRestore` — are derived the
+   * same way every time from what is stored, so the two copies can disagree
+   * about them and still produce the same result on the next load.
    */
   function restoreQueues() {
     if (!storageUserId) return;
@@ -1039,7 +1060,21 @@ function createSession(): ChatSession {
     if (!found) return;
     found.entries.splice(found.idx, 1);
     if (!found.entries.length) sendQueue.delete(found.token);
+    forgetStrandedRow(found.token, cid);
     persistRoomQueue(found.token);
+  }
+
+  /**
+   * Drop one off-screen row from the holding map.
+   *
+   * Shared by both ways an entry leaves the queue: a row left behind there
+   * comes back on the next room switch with no entry behind it, rendering as
+   * something that is going to send and never will.
+   */
+  function forgetStrandedRow(token: string, cid: number): void {
+    const stashed = (strandedSends.get(token) ?? []).filter((m) => m.cid !== cid);
+    if (stashed.length) strandedSends.set(token, stashed);
+    else strandedSends.delete(token);
   }
 
   /** Take a queued entry out of the queue and its row off the transcript. */
@@ -1052,9 +1087,7 @@ function createSession(): ChatSession {
     messages.update((arr) => arr.filter((m) => m.cid !== cid));
     // And out of the holding map, or a later room switch would re-append a row
     // with no entry behind it.
-    const stashed = (strandedSends.get(found.token) ?? []).filter((m) => m.cid !== cid);
-    if (stashed.length) strandedSends.set(found.token, stashed);
-    else strandedSends.delete(found.token);
+    forgetStrandedRow(found.token, cid);
     persistRoomQueue(found.token);
     return { token: found.token, entry };
   }
@@ -2220,7 +2253,20 @@ function createSession(): ChatSession {
    * the room-list badge is what says so.
    */
   async function onBackOnline() {
+    // Not while the first load is still running. `init()` is rebuilding the
+    // same transcript this would rebuild, and two `messages.set` passes racing
+    // each other is a scrambled room; the drain at the foot of `init` is what
+    // covers a connection that returned during it.
+    if (!get(loaded)) return;
     await recoverStream(null);
+    // `recoverStream` returns at once when one is already running, so the
+    // await above is not always the reconcile it reads as. Draining into a
+    // rebuild that is still in flight is worse than not draining at all: that
+    // rebuild carries client-only rows, and `beginSend` stamps 'sending' on
+    // the row it drains, which is exactly what stops it being one — the POST
+    // would be left with no bubble on screen. The recovery's own load drains
+    // at its foot anyway.
+    if (recovering) return;
     const rid = get(activeRoomId);
     if (rid != null) await drainSendQueue(rid);
   }
@@ -2752,6 +2798,11 @@ function createSession(): ChatSession {
     // recognised and the message queues — so failing quietly loses nothing
     // that was not already lost.
     void loadCommandNames().catch(() => {});
+    // Before the first await, and before anything that can throw. The watch is
+    // a subscription and needs nothing from the config, while an `init` that
+    // gives up — offline with no cached room list — would otherwise leave the
+    // session with no way to hear the connection come back at all.
+    watchConnectivity();
     // `onMount` does not await this and `onDestroy` calls teardown regardless,
     // so a navigation away mid-load would otherwise let the rest of init run
     // *after* teardown — starting a stream, a timer and a visibility listener
@@ -2880,9 +2931,14 @@ function createSession(): ChatSession {
       // holds `readwrite` on the store the cached paint is about to read.
       void pruneOffline();
       startRoomStream();
-      // After the stream, so a connection that comes back finds the machinery
-      // it is going to reconcile through already running.
-      watchConnectivity();
+      // A load that finished offline returned before the drain trigger at its
+      // own foot, and a connection that came back while `init` was running
+      // produced no transition for the watch to act on — it was installed
+      // before either could happen, but `onBackOnline` stands aside until the
+      // first load is done. One attempt here covers both, and `canDrain` is
+      // the gate here as everywhere else.
+      const rid = get(activeRoomId);
+      if (rid != null) void drainSendQueue(rid);
       // Slow metadata reconciler (see ROOMS_REFRESH_MS) — the stream is the
       // live path.
       startRoomsRefresh();
@@ -2994,6 +3050,7 @@ function createSession(): ChatSession {
     const token = get(rooms).find((r) => r.id === id)?.token;
     if (!token) return;
     strandedSends.delete(token);
+    for (const entry of sendQueue.get(token) ?? []) parkedAfterPost.delete(entry.cid);
     sendQueue.delete(token);
     // The other mutation that does not write back — the stored copy stays on
     // purpose, see below — so the badge is squared here too.
@@ -3165,6 +3222,35 @@ function createSession(): ChatSession {
     const roomId = get(activeRoomId);
     const trimmed = text.trim();
     if (!roomId || (!trimmed && attachments.length === 0)) return;
+    // Any `!word`, not only a catalogued one, and matching `sendTurn`'s own
+    // test rather than `isKnownCommand`: what the two rules below turn on is
+    // that the *endpoint* may answer this inside the request, and the client's
+    // catalogue is not the authority on that. An attachment disqualifies it
+    // either way, since a file belongs to a task.
+    const isCommandBody = attachments.length === 0 && trimmed.startsWith('!');
+
+    // Known offline, so the POST cannot land and there is nothing to learn by
+    // making it: the message is queued and the drain sends it when the
+    // connection is back (ISSUE-202). Ahead of the busy branch below on
+    // purpose. A room can be both busy and offline, and of the two facts it is
+    // the connection that says what happens next — an entry queued because a
+    // turn was running is held on the next page load, where one queued because
+    // the phone was in a lift is exactly what should go out on its own.
+    //
+    // A `!command` takes this path too, and has to: the endpoint answers it
+    // inside the request, so with nothing to reach it cannot be answered at
+    // all, and the alternative is a 30s timeout ending in a failed row.
+    if (!get(online)) {
+      // Queued as a *busy* entry when it is a command, so a page load does not
+      // fire it. Same reasoning `sendTurn` withholds Retry and the park on:
+      // the endpoint answers a command inside the request, `!steer` appends a
+      // note per call and `!retry` creates a task per call, and by the time a
+      // restored one went out the turn it named would be long over. It still
+      // goes on its own if the connection returns in this session, which is as
+      // close to "now" as there is with nothing to send it to.
+      enqueueSend(roomId, trimmed, attachments, replyTo, isCommandBody ? 'busy' : 'offline');
+      return;
+    }
 
     // A turn is already running. The one message that may still go out is a
     // `!command`: the endpoint answers it inside the request and returns no
@@ -3184,22 +3270,6 @@ function createSession(): ChatSession {
     // answer inline. Those turns arrive over the room stream and are picked up
     // by `pickUpStreamedTask` like any turn started elsewhere, which is why
     // they are none of this path's business.
-    // Known offline, so the POST cannot land and there is nothing to learn by
-    // making it: the message is queued and the drain sends it when the
-    // connection is back (ISSUE-202). Ahead of the busy branch below on
-    // purpose. A room can be both busy and offline, and of the two facts it is
-    // the connection that says what happens next — an entry queued because a
-    // turn was running is held on the next page load, where one queued because
-    // the phone was in a lift is exactly what should go out on its own.
-    //
-    // A `!command` takes this path too, and has to: the endpoint answers it
-    // inside the request, so with nothing to reach it cannot be answered at
-    // all, and the alternative is a 30s timeout ending in a failed row.
-    if (!get(online)) {
-      enqueueSend(roomId, trimmed, attachments, replyTo, 'offline');
-      return;
-    }
-
     if (get(status) !== 'idle') {
       if (attachments.length === 0 && isKnownCommand(trimmed)) {
         await sendInlineCommand(roomId, trimmed);
@@ -3660,6 +3730,13 @@ function createSession(): ChatSession {
     const row = get(messages).find((m) => m.cid === userCid);
     const payload = row?.sendPayload;
     if (!found && !payload) return false;
+    // The same cap `enqueueSend` enforces, and for the same reason: `prune`
+    // keeps a room's first `MAX_QUEUED_PER_ROOM` entries, so an eleventh
+    // accepted into memory would sit on screen as a queued row whose stored
+    // copy was the one silently dropped. A room already at the cap is a room
+    // with nowhere to hold this, so it takes the ordinary failed row and its
+    // Retry — which is the recovery, since nothing here is lost.
+    if (!found && (sendQueue.get(token)?.length ?? 0) >= MAX_QUEUED_PER_ROOM) return false;
     if (found) {
       found.entries[found.idx].reason = 'offline';
       found.entries[found.idx].held = false;
@@ -4286,6 +4363,9 @@ function createSession(): ChatSession {
     // can't install a stream / timer / listener behind us.
     initGeneration += 1;
     stopConnectivityWatch();
+    // Nothing in the next session can be the same send, and a membership left
+    // here would let a body-matched echo claim a row that session re-minted.
+    parkedAfterPost.clear();
     // Write out what the debounce is still holding, rather than dropping it:
     // a navigation away is exactly the moment the last two seconds of frames
     // are worth keeping, and leaving the timers armed would fire them into a

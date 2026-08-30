@@ -6,6 +6,7 @@
   import type { ChatMessage } from '$lib/stores/chat';
   import type { OutboundDraft } from '$lib/api';
   import { messageCopyText, renderGroups } from '$lib/stores/segments';
+  import { online } from '$lib/stores/connectivity';
   import { Button } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
@@ -300,10 +301,16 @@
   // difference between the two waits (ISSUE-202): a turn that will finish on
   // its own, or a connection that may not come back for a while. A held row
   // reads the same either way — what it is waiting for is the user.
+  //
+  // Both halves are needed and neither is enough. The reason is why the entry
+  // is here; `online` is whether that is still what it is waiting on — once
+  // the connection is back, the second and third of an offline batch are
+  // waiting on the turn ahead of them, and pointing at a banner that is no
+  // longer on screen would be the one reading the row cannot recover from.
   const queueWaitText = $derived(
     queueHeld
       ? 'Held — not sent'
-      : message.queueReason === 'offline'
+      : message.queueReason === 'offline' && !$online
         ? 'Waiting for a connection'
         : 'Waiting to send',
   );

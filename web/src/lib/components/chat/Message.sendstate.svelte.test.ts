@@ -8,9 +8,15 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import type { ChatMessage } from '$lib/stores/segments';
+import { noteTransport } from '$lib/stores/connectivity';
 import Message from './Message.svelte';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // The connectivity store is module-lived and one queued row's wording reads
+  // it, so a test that put it offline must not decide what the next one says.
+  noteTransport(true);
+});
 
 const noop = () => {};
 
@@ -179,15 +185,29 @@ describe('user row queued state', () => {
     // The one string the offline outbox adds (ISSUE-202). "Waiting to send" is
     // true but reads as a queue that is about to move; an entry queued with no
     // connection is waiting on something the user can see the banner for.
+    noteTransport(false, 'unreachable');
     const { container } = mountQueued({ queueReason: 'offline' }, handlers);
     expect(container.querySelector('.send-queued')?.textContent).toContain(
       'Waiting for a connection',
     );
   });
 
+  it('goes back to waiting to send once the connection is back', () => {
+    // Second and third of an offline batch: the connection returned, the head
+    // is draining, and these are waiting on the turn ahead of them. Pointing
+    // at a banner that is no longer on screen is the one reading the row could
+    // not be talked out of.
+    noteTransport(true);
+    const { container } = mountQueued({ queueReason: 'offline' }, handlers);
+    const text = container.querySelector('.send-queued')?.textContent ?? '';
+    expect(text).toContain('Waiting to send');
+    expect(text).not.toContain('connection');
+  });
+
   it('says a held offline entry is held, not that it is waiting for anything', () => {
     // Past its auto-send age a restored offline entry is held like any other,
     // and what it waits for then is the user rather than the network.
+    noteTransport(false, 'unreachable');
     const { container } = mountQueued({ queueReason: 'offline', queueHeld: true }, handlers);
     const text = container.querySelector('.send-queued')?.textContent ?? '';
     expect(text).toContain('Held — not sent');

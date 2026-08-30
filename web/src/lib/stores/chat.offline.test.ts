@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import type { ChatHistory, ChatRoom } from '$lib/api';
 import type { ChatSession } from './chat';
-import { SEND_QUEUE_STORAGE_KEY } from './sendQueue';
+import { MAX_QUEUED_PER_ROOM, SEND_QUEUE_STORAGE_KEY } from './sendQueue';
 
 const api = vi.hoisted(() => ({
   getChatConfig: vi.fn(),
@@ -736,6 +736,53 @@ describe('chat store — the text outbox', () => {
       s.teardown();
     });
 
+    it('fails a send outright rather than parking past the per-room cap', async () => {
+      // Ten entries restored and held: the room is idle and online, so nothing
+      // stops the eleventh being sent. Parking it would put 11 in memory while
+      // storage keeps the first 10 — a queued row on screen whose stored copy
+      // was the one dropped, which is the hazard `enqueueSend` refuses at the
+      // same cap to avoid.
+      seedQueue(
+        't1',
+        Array.from({ length: MAX_QUEUED_PER_ROOM }, (_, i) =>
+          storedEntry(`held ${i}`, { cid: i + 1 }),
+        ),
+      );
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue(gap);
+
+      await s.send('the eleventh');
+
+      const row = queuedRow(s, 'the eleventh');
+      expect(row?.sendState).toBe('failed');
+      expect(row?.retryable).toBe(true);
+      expect(storedQueue('t1')).toHaveLength(MAX_QUEUED_PER_ROOM);
+      expect(storedQueue('t1').some((e) => e.text === 'the eleventh')).toBe(false);
+      s.teardown();
+    });
+
+    it('names the failure honestly on the path where parking is refused', async () => {
+      // The two sentences for the gap failures are still live code, and this
+      // is the only path that reaches them. A timeout is the one that has to
+      // stay distinguishable: "no answer" is not "no server".
+      const s = await freshSession();
+      await s.init();
+      let release: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          release = r;
+        }),
+      );
+      const sending = s.send('into the void');
+      s.rooms.set([]);
+      release({ ok: false, status: 0, failure: 'timeout' });
+      await sending;
+
+      expect(queuedRow(s, 'into the void')?.sendError).toMatch(/didn’t respond/);
+      s.teardown();
+    });
+
     it('fails a send outright when there is nowhere to park it', async () => {
       // The room left `$rooms` while the POST was open — another device's
       // delete, or a room list that came back short. There is no queue to hold
@@ -838,6 +885,60 @@ describe('chat store — the text outbox', () => {
       s.teardown();
     });
 
+    it('folds the echo of a parked send into its row instead of sending it again', async () => {
+      // The ambiguous timeout, resolved: the server did have the message, and
+      // its canonical row arrives over the room stream. Without the adoption
+      // the transcript would show the message twice and the queue would POST
+      // it again.
+      vi.useFakeTimers();
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
+      await s.send('did that arrive?');
+      expect(storedQueue('t1')).toHaveLength(1);
+
+      api.getRoomEvents.mockResolvedValueOnce({
+        events: [row(50, 'did that arrive?', { role: 'user', task_id: 7 })],
+        cursor: 50,
+        gap: false,
+      });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      const mine = get(s.messages).filter((m) => m.role === 'user');
+      expect(mine).toHaveLength(1);
+      expect(mine[0].sendState).toBeUndefined();
+      expect(mine[0].taskId).toBe(7);
+      expect(storedQueue('t1')).toEqual([]);
+      s.teardown();
+    });
+
+    it('drops a parked row the reconnect finds in the server’s own history', async () => {
+      // The same case, arriving the other way. `onBackOnline` reconciles first,
+      // and a rebuild carries client-only rows back on top of whatever it
+      // painted — so the queued mirror of a message the server already has
+      // would sit under the server's copy of it, and then be POSTed again.
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
+      await s.send('did that arrive?');
+
+      api.getRoomMessages.mockResolvedValue(
+        history([row(50, 'did that arrive?', { role: 'user', task_id: 7 })]),
+      );
+      conn.setOnline(false);
+      conn.setOnline(true);
+
+      // Waiting on the *server's* row, not on a count: the parked row alone
+      // already satisfies a count of one, so a count would pass before the
+      // rebuild it is meant to observe.
+      await vi.waitFor(() => expect(get(s.messages).some((m) => m.msgId === 50)).toBe(true));
+      expect(get(s.messages).filter((m) => m.role === 'user')).toHaveLength(1);
+      expect(storedQueue('t1')).toEqual([]);
+      // One POST in the whole test: the parked one. Nothing re-sent it.
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      s.teardown();
+    });
+
     it('counts what is waiting in each room for the room list', async () => {
       const s = await twoQueuedOffline();
       await s.selectRoom(2);
@@ -886,6 +987,49 @@ describe('chat store — the text outbox', () => {
       expect(api.sendChatMessage).not.toHaveBeenCalled();
       expect(queuedRow(s, 'written on Tuesday')?.queueHeld).toBe(true);
       s.teardown();
+    });
+
+    it('keeps a hold the last session applied to an offline entry', async () => {
+      // `holdRoomQueue` marks every entry in a room, offline ones included, so
+      // a Stop on the turn ahead of them is stored as `held`. The age rule may
+      // keep a hold; it must never clear one, or three messages queued in a
+      // lift and then deliberately held would fire on the next page load.
+      seedQueue('t1', [
+        storedEntry('held by a Stop', {
+          reason: 'offline',
+          queuedAt: Date.now() - HOUR,
+          held: true,
+        }),
+      ]);
+      api.sendChatMessage.mockResolvedValue(ok);
+      const s = await freshSession();
+
+      await s.init();
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(queuedRow(s, 'held by a Stop')?.queueHeld).toBe(true);
+      s.teardown();
+    });
+
+    it('holds a command queued offline, however recently', async () => {
+      // A command is answered inside the request, so re-sending one later is
+      // not a repeat of the same message — `!steer` is a second note against a
+      // turn that is over by then. `send()` files it as a busy entry for that
+      // reason, and this is what that buys.
+      const s = await freshSession();
+      await s.init();
+      conn.setOnline(false);
+      await s.send('!steer check the other repo too');
+      expect(storedQueue('t1')[0].reason).toBe('busy');
+      s.teardown();
+
+      const relaunched = await freshSession();
+      api.sendChatMessage.mockResolvedValue(ok);
+      await relaunched.init();
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(queuedRow(relaunched, '!steer check the other repo too')?.queueHeld).toBe(true);
+      relaunched.teardown();
     });
 
     it('holds a busy entry however recent it is', async () => {
