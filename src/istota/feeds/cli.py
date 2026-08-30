@@ -438,16 +438,25 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
     summary = []
     new_total = 0
     error_total = 0
+    throttled_total = 0
     for feed, result, new_count in outcomes:
         new_total += new_count
         if result.error:
             error_total += 1
+        # Counted separately from errors, and reported: a 429 is not a feed
+        # failure, but a run that was turned away everywhere is not a clean run
+        # either. Without this it was byte-identical to a successful poll that
+        # found nothing (ISSUE-347).
+        if result.rate_limited:
+            throttled_total += 1
         summary.append({
             "feed_id": feed.id,
             "url": feed.url,
             "new_entries": new_count,
             "not_modified": result.not_modified,
             "error": result.error,
+            "rate_limited": result.rate_limited,
+            "retry_after_seconds": result.retry_after_seconds,
         })
 
     # Roll up per-source errors to the outer envelope so the scheduler's
@@ -461,6 +470,20 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
             polled=polled,
             new_entries=new_total,
             errors=error_total,
+            throttled=throttled_total,
+            feeds=summary,
+        ))
+        return
+    # A wholly throttled run is a hard failure too. It is not a *feed* failure,
+    # so it does not go through `error_total`, but reporting it as a success
+    # that found nothing is the silence this counter exists to break.
+    if polled and throttled_total == polled:
+        _output(_err(
+            f"all {polled} feed poll(s) were rate-limited",
+            polled=polled,
+            new_entries=new_total,
+            errors=error_total,
+            throttled=throttled_total,
             feeds=summary,
         ))
         return
@@ -468,6 +491,7 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
         polled=polled,
         new_entries=new_total,
         errors=error_total,
+        throttled=throttled_total,
         feeds=summary,
     )
     if error_total:
@@ -487,8 +511,18 @@ def cmd_poll(ctx: FeedsContext, limit) -> None:
 @click.option("--limit", type=int, help="Cap how many feeds to poll this run")
 @pass_ctx
 def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
-    """Periodic entry point used by the scheduler module-job."""
-    _poll_due(ctx, limit)
+    """Periodic entry point used by the scheduler module-job.
+
+    Unlike ``poll``, this one caps its burst by default. It runs unattended
+    every five minutes, and the two paths that make every feed due at once —
+    "Refresh now" in the web UI and an OPML import — both hand it the whole
+    subscription list. The due list is ordered oldest-first, so a backlog
+    larger than the cap drains over consecutive ticks rather than being
+    dropped. ``--limit`` still overrides, in both directions.
+    """
+    from istota.feeds.models import DEFAULT_SCHEDULED_POLL_LIMIT
+
+    _poll_due(ctx, DEFAULT_SCHEDULED_POLL_LIMIT if limit is None else limit)
 
 
 # ---------------------------------------------------------------------------

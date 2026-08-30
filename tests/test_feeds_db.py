@@ -182,6 +182,53 @@ class TestInitDb:
         # The v4 column and its data must survive the v5 migration.
         assert entries[0].embed_url == "https://youtu.be/keep"
 
+    def test_v5_to_v6_adds_last_throttled_at_preserving_feeds(self, tmp_path):
+        """A v5 DB gains ``feeds.last_throttled_at`` without losing rows.
+
+        The column is where a 429 is recorded now that it is no longer written
+        as a feed error (ISSUE-347). Existing rows keep NULL, which reads as
+        "never throttled" and renders exactly as before.
+        """
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="arena:c", title="C", site_url="https://are.na/c",
+                source_type="arena", category_id=None,
+                poll_interval_minutes=60,
+            )
+            conn.execute(
+                "UPDATE feeds SET last_error = ?, error_count = 2",
+                ("HTTP 500 fetching feed",),
+            )
+            conn.commit()
+
+        # Rewind to v5: drop the column and the recorded version.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feeds DROP COLUMN last_throttled_at")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','5')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
+            feeds = feeds_db.list_feeds(conn)
+        assert "last_throttled_at" in cols
+        assert [f.url for f in feeds] == ["arena:c"]
+        assert feeds[0].last_throttled_at is None
+        # The v5 state must survive the v6 migration.
+        assert feeds[0].last_error == "HTTP 500 fetching feed"
+        assert feeds[0].error_count == 2
+        assert feeds[0].site_url == "https://are.na/c"
+
     def test_v2_to_v3_backfills_the_image_key_index(self, tmp_path):
         """A v2 DB gains ``entry_images``, backfilled from stored entries."""
         import json

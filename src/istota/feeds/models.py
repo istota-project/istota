@@ -9,8 +9,12 @@ and operates on it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from istota.retry_after import parse_retry_after as _parse_retry_after
+from istota.retry_after import retry_after_from_headers as _retry_after_from_headers
 
 
 # URL-scheme prefixes that bypass the RSS poller and route to native API
@@ -36,6 +40,135 @@ _SOURCE_TYPE_POLL_DEFAULTS: dict[str, int] = {
 def default_poll_interval_for(source_type: str) -> int:
     """Return the default ``poll_interval_minutes`` for a feed source type."""
     return _SOURCE_TYPE_POLL_DEFAULTS.get(source_type, DEFAULT_POLL_INTERVAL_MINUTES)
+
+
+# -- rate limiting (ISSUE-347) ------------------------------------------------
+#
+# The cadence above is per *feed*, and the limits it defends against are per
+# key and per IP. Those are different quantities: a cadence says nothing about
+# how many requests reach one host at once, which is what a per-IP limit
+# counts. Every Are.na channel a user has is one request to `api.are.na`, so a
+# due list of N channels was N requests as fast as the process could issue
+# them. The four constants below are the parts of the answer that are policy
+# rather than mechanism; the poller takes each as a parameter so a caller can
+# override one without reaching in here.
+
+# Minimum seconds between two requests to the *same host*. Keyed on the host
+# rather than the source type, so it covers Are.na and Tumblr (one host each,
+# every feed sharing it) with one rule, and costs RSS nothing (dozens of
+# distinct origins). Two feeds that genuinely share an RSS origin are paced
+# too, which is correct for the same reason.
+DEFAULT_HOST_GAP_SECONDS = 2.0
+
+# Floor for a 429 standoff, and the whole standoff where the server named no
+# time. Above `DEFAULT_POLL_INTERVAL_MINUTES` on purpose: being turned away has
+# to cost *more* than an ordinary cadence, or a throttled feed comes back on
+# the same schedule as a healthy one and the standoff means nothing.
+DEFAULT_RATE_LIMIT_BACKOFF_MINUTES = 60
+
+# Ceiling on a server-named `Retry-After`. A header naming a week would
+# otherwise take a channel off the air for a week on one unverified value.
+MAX_RATE_LIMIT_BACKOFF_MINUTES = 6 * 60
+
+# Fractional spread applied to every `next_poll_at`. A set of feeds that was
+# due together, burst together and failed together otherwise reschedules to the
+# same instant and bursts again one doubling later — the herd re-forms every
+# round instead of dispersing.
+DEFAULT_JITTER_FRACTION = 0.1
+
+# Burst cap for the periodic job. The due list is ordered oldest-first, so a
+# larger backlog drains over consecutive ticks rather than being dropped.
+DEFAULT_SCHEDULED_POLL_LIMIT = 50
+
+# Ceiling on how long one run may spend *asleep* pacing itself, in seconds.
+# Bounds a cost the feed cap alone does not: the poll is a background skill
+# task, `user_max_background_workers` defaults to 1, and 50 same-host channels
+# at a 2s gap would hold that one slot for ~98s of every 5-minute tick with
+# every other background job for that user queued behind it. On exhaustion the
+# run stops rather than un-pacing itself — the feeds it did not reach are still
+# due, and the next tick takes them, which is the same draining behaviour the
+# feed cap relies on.
+DEFAULT_MAX_PACING_SECONDS = 60.0
+
+
+# The single host each native provider talks to. Kept beside the schemes above
+# rather than imported from the provider modules, which would make the poller's
+# pacing depend on importing every provider it might pace.
+_PROVIDER_HOSTS: dict[str, str] = {
+    "tumblr": "api.tumblr.com",
+    "arena": "api.are.na",
+}
+
+
+class FeedRateLimited(Exception):
+    """Raised by a provider when the API answers HTTP 429.
+
+    Carries the ``Retry-After`` the server named, in seconds, so the poller can
+    schedule against the server's own answer instead of the generic error
+    doubling. Same shape as :class:`istota.health.garmin.GarminRateLimited`,
+    deliberately — that is the in-repo precedent and a second spelling of one
+    idea is what makes the next one a third.
+
+    ``retry_after`` is ``None`` when the server named no time, which is a
+    different fact from naming zero and is why it is not defaulted to a number
+    here.
+    """
+
+    def __init__(self, retry_after: int | None = None, *, host: str = "") -> None:
+        super().__init__(f"rate-limited by {host or 'the server'} (retry_after={retry_after})")
+        self.retry_after = retry_after
+        self.host = host
+
+
+def poll_host(url: str, source_type: str = "") -> str:
+    """The pacing key for a feed: the host its poll actually reaches.
+
+    Never raises. A feed with an unparseable URL is about to fail in the fetch,
+    and failing here instead would take the whole batch down with it — so an
+    unusable URL still yields a stable key of its own, derived from the URL.
+    Two differently-broken feeds therefore get two keys and are not paced
+    against each other, which is the right way round: pacing them together
+    would be a claim about a shared host that nothing here established.
+    """
+    source = source_type or detect_source_type(url)
+    known = _PROVIDER_HOSTS.get(source)
+    if known:
+        return known
+    try:
+        from urllib.parse import urlsplit
+
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    return host or f"?{url.lower()}"
+
+
+def parse_retry_after(raw: object, *, now: "datetime | None" = None) -> int | None:
+    """``Retry-After`` in whole seconds, or ``None`` when the header is unusable.
+
+    A thin adapter over :func:`istota.retry_after.parse_retry_after`, which is
+    the one implementation and holds every judgement about malformed input.
+    This exists only to speak the feeds module's own vocabulary: a ``datetime``
+    base rather than a POSIX timestamp, and whole seconds rather than a float,
+    which is what the scheduling arithmetic downstream wants.
+    """
+    base = now or datetime.now(timezone.utc)
+    seconds = _parse_retry_after(raw, now_ts=base.timestamp())
+    return None if seconds is None else int(seconds)
+
+
+def retry_after_from_headers(headers: object, *, now: "datetime | None" = None) -> int | None:
+    """The same, read off a response's headers case-insensitively.
+
+    Every one of the three 429 sites reads the header through this rather than
+    a direct ``headers.get("Retry-After")``: `httpx` and `requests` both hand
+    back a case-insensitive mapping, but a plain ``dict`` standing in for one
+    does not, and a lookup that quietly missed would put the feed back on the
+    generic doubling this issue removed.
+    """
+    base = now or datetime.now(timezone.utc)
+    seconds = _retry_after_from_headers(headers, now_ts=base.timestamp())
+    return None if seconds is None else int(seconds)
 
 
 @dataclass
@@ -82,6 +215,10 @@ class FeedRecord:
     error_count: int
     poll_interval_minutes: int
     next_poll_at: str | None
+    # When this feed was last turned away with a 429. Distinct from
+    # `last_error`, which a throttle deliberately does not write: a throttled
+    # channel is healthy, but it is not silent either (ISSUE-347).
+    last_throttled_at: str | None = None
 
 
 @dataclass
@@ -148,6 +285,12 @@ class FetchResult:
     error: str | None = None
     discovered_title: str | None = None
     discovered_site_url: str | None = None
+    # A 429. Deliberately not folded into ``error``: a throttled feed is
+    # healthy, and recording it as an error is what made a transient throttle
+    # and a dead feed read identically in diagnostics. ``retry_after_seconds``
+    # is what the server named, or None when it named nothing.
+    rate_limited: bool = False
+    retry_after_seconds: int | None = None
 
 
 def detect_source_type(url: str) -> str:
