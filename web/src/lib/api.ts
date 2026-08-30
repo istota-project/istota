@@ -106,6 +106,11 @@ export interface User {
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
+  // Content hashes for the two identities every page renders, so the client
+  // can build an immutable URL for each without a round trip. Null means no
+  // picture is stored — render the fallback and issue no request. Absent on a
+  // server that predates the field.
+  avatars?: { user: string | null; bot: string | null };
 }
 
 export async function disconnectNextcloudToken(): Promise<{ ok: boolean; was_connected: boolean }> {
@@ -3137,6 +3142,78 @@ export class UploadUnreachableError extends Error {
  */
 export function chatFileUrl(path: string): string {
   return `${base}/api/chat/files?path=${encodeURIComponent(path)}`;
+}
+
+/**
+ * What the file picker offers for a profile picture.
+ *
+ * Mirrors `avatars.ACCEPT_ATTRIBUTE` in `src/istota/avatars.py`, and is
+ * deliberately narrower than `image/*` — that matches TIFF, BMP, AVIF and SVG,
+ * all of which the server refuses, and the user would find out only after
+ * choosing one.
+ */
+export const AVATAR_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif';
+
+/**
+ * Where one identity's picture is served from.
+ *
+ * A plain cookie-authenticated URL to drop into `src`, exactly like
+ * `chatFileUrl`. `version` is a content hash: with it the server answers
+ * `immutable` for the caller's own picture and the bot icon, so every later
+ * render in a transcript is a cache hit with no request. Without it the
+ * answer is `no-cache` plus an `ETag`, which is what a third party's picture
+ * gets — one conditional request per author per session.
+ */
+export function avatarUrl(kind: 'user' | 'bot', userId?: string, version?: string | null): string {
+  const path =
+    kind === 'bot' ? '/api/avatars/bot' : `/api/avatars/user/${encodeURIComponent(userId ?? '')}`;
+  const query = version ? `?v=${encodeURIComponent(version)}` : '';
+  return `${base}${path}${query}`;
+}
+
+export interface AvatarUpload {
+  /** sha256 of the *normalized* bytes — what `?v` and the ETag carry. */
+  hash: string;
+  mime: string;
+  bytes: number;
+}
+
+/**
+ * Replace the caller's own profile picture.
+ *
+ * Shaped like `uploadChatAttachment` rather than routed through `apiFetch`,
+ * because every refusal here is one the user has to read: the server sends
+ * `{error}` with a 413 for a file over the cap and a 415 for a format it will
+ * not decode, and `apiFetch` would collapse both into `API error: 413`.
+ */
+export async function uploadAvatar(file: File): Promise<AvatarUpload> {
+  const form = new FormData();
+  form.append('file', file);
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/settings/avatar`, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      body: form,
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new UploadUnreachableError();
+  }
+  noteTransport(true);
+  if (resp.status === 401) throw new AuthError();
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || `upload failed (${resp.status})`);
+  return data as AvatarUpload;
+}
+
+/**
+ * Remove the caller's uploaded picture, revealing any imported one.
+ *
+ * `{deleted: false}` when there was none — idempotent, not a 404.
+ */
+export async function deleteAvatar(): Promise<{ deleted: boolean }> {
+  return apiFetch('/settings/avatar', { method: 'DELETE' });
 }
 
 const CHAT_ATTACHMENT_PATH = '/chat/attachments';

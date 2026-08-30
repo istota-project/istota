@@ -117,6 +117,10 @@ const user = {
     connected: true,
     expires_at: new Date(Date.now() + 3600_000).toISOString(),
   } as { connected: boolean; expires_at: string | null } | null,
+  // Content hashes for the two identities the client renders. Both start null,
+  // so the dev server draws the fallback chips until an upload lands; the bot
+  // one stays null until the admin routes exist.
+  avatars: { user: null, bot: null } as { user: string | null; bot: string | null },
   features: {
     chat: true,
     briefings: true,
@@ -3052,8 +3056,70 @@ const notificationsHandler: MockHandler = ({ url, method, body }) => {
   return undefined;
 };
 
+// ---- Avatars ----
+//
+// The dev server can neither decode nor re-encode an upload, so it holds one
+// canned 192x192 WebP and hashes that. What the mock reproduces is the shape
+// the client codes against: an upload answers with a hash, `/me` then carries
+// it, and the GET serves bytes under the same cache headers the real endpoint
+// sends — including the rule that a co-member is never `immutable`, which
+// nothing here can exercise but which the dev server should not contradict.
+const MOCK_AVATAR_WEBP = Buffer.from(
+  'UklGRrgCAABXRUJQVlA4IKwCAACQGACdASrAAMAAPxGIvFYsKiajp9ioAYAiCWdu4XKQz7OZBSdhspOI8yEVWLb1/Hb3cXsf' +
+    'vnSffOk+sZWdYTsT70xCm4z1AqDx+4ErpPy8VAksHNZTKjVaEDdSZknYlOSIt4oFVgsHswSBENhbYTbW+IjP7uX6pEtO2ApW' +
+    'uZuR9lIsniIjThXCAMAWg8JY8zcttdDR/+D3zZSwatEHRMgivULMTkoa+f4SswMdxTNqyV6KhgfeF2VnpDn6Yo9lblSU3TXY' +
+    'rWnJhwVzqOyAAP75r7hN2Hfqxqxw8QbWCGTc/fzal5RooTkbgbiOHL6Ow+hQ9tu1Qr3Gb5p65wG0OAn9D6gZFOpFU+W+XRYe' +
+    '3cIRN1/+4pUBiA4AWNdx5G/zTfrw6A/HpFF60f6sLQvxHqUPeZmcSh6vHvkCE2H3fAahVyuUWx6uy7rwuRA41e3C2JxKrpzz' +
+    'qTb2FUNTW8pVZ3hVvGZYZatKY4/54QYWQiEJRw+zsPMO0ACzlgkiSQTI5kqIiyT8UfCOOmJORtBnLUDyx02mWRSXgA5N5ly4' +
+    'Pq5vwv95zOcMWDDbthXBRoIT3+wz1wR8tKwox7cnvAQ5wKYDD14BygruMtJZAZhdGcxGInJ+ovDW77RCecAn0KrCpU/o/my9' +
+    'ZnG0ff2dFStBuHrgdiHpAsaQRSrRJkPva8CvlFp5apoB6Pa037iAsQg3bNfH+3rCr3r5aSTAJRLY5Qa1Ww+lEqf77L5y5Szz' +
+    'g6YW2ZANdRI0cHLBMaC8u6ggKFuup0Av1bjI9MgcjF1xxyAEF8b5xI7kQy/3ErioVfxOICjOBnueDkkHv0NpZiF3nDg3UVch' +
+    'HSYlQYLpuFdnJaVlO5cYNTkm9U/bjzmJ+LeOPvRU3WKC0rNHqIJUCGXZWcJ6Q0b210e343QAAAA=',
+  'base64',
+);
+const MOCK_AVATAR_HASH = createHash('sha256').update(MOCK_AVATAR_WEBP).digest('hex');
+
+const avatarsHandler: MockHandler = ({ url, method }) => {
+  const path = url.split('?')[0];
+  if (path === '/istota/api/settings/avatar' && method === 'PUT') {
+    user.avatars.user = MOCK_AVATAR_HASH;
+    return { hash: MOCK_AVATAR_HASH, mime: 'image/webp', bytes: MOCK_AVATAR_WEBP.length };
+  }
+  if (path === '/istota/api/settings/avatar' && method === 'DELETE') {
+    const deleted = user.avatars.user !== null;
+    user.avatars.user = null;
+    return { deleted };
+  }
+  const prefix = '/istota/api/avatars/user/';
+  if (path.startsWith(prefix) && method === 'GET') {
+    const subject = decodeURIComponent(path.slice(prefix.length));
+    // Every refusal is the same 404 the server sends: not visible, no such
+    // user and no picture are one answer there, and a mock that answered them
+    // apart would teach the client a distinction it must not depend on.
+    if (subject !== user.username || !user.avatars.user) {
+      return { __status: 404, error: 'not found' };
+    }
+    const version = new URLSearchParams(url.split('?')[1] ?? '').get('v');
+    return {
+      __raw: MOCK_AVATAR_WEBP,
+      __contentType: 'image/webp',
+      // Never `attachment`: this renders in an `<img>`.
+      __disposition: 'inline',
+      __headers: {
+        'Cache-Control':
+          version === user.avatars.user
+            ? 'private, max-age=31536000, immutable'
+            : 'private, no-cache',
+        ETag: `"${user.avatars.user}"`,
+      },
+    };
+  }
+  return undefined;
+};
+
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
+  avatarsHandler,
   chatHandler,
   notificationsHandler,
 
@@ -8908,10 +8974,16 @@ export function mockApi(): Plugin {
           // `__raw` + `__contentType`. Needed so the health document routes
           // can hand the dev browser something it will actually open.
           if (body && typeof body === 'object' && '__raw' in (body as any)) {
-            const { __raw, __contentType } = body as any;
+            const { __raw, __contentType, __disposition, __headers } = body as any;
             res.setHeader('Content-Type', __contentType || 'application/octet-stream');
-            res.setHeader('Content-Disposition', 'attachment');
+            // `attachment` unless the handler says otherwise: the health
+            // document routes want the browser to save the file, an avatar
+            // has to render in an `<img>`.
+            res.setHeader('Content-Disposition', __disposition || 'attachment');
             res.setHeader('X-Content-Type-Options', 'nosniff');
+            for (const [k, v] of Object.entries((__headers ?? {}) as Record<string, string>)) {
+              res.setHeader(k, v);
+            }
             res.statusCode = 200;
             res.end(__raw);
             return;
