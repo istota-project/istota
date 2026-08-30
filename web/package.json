@@ -24,6 +24,7 @@
     "@testing-library/svelte": "^5.3.1",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^25.6.0",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "prettier": "^3.9.6",
     "prettier-plugin-svelte": "^3.5.2",
