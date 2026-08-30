@@ -532,11 +532,24 @@ export function messageCopyText(m: ChatMessage): string {
 
 /** Apply one `task_event` to an assistant message, mutating it in place.
  *
- * `task_started` is NOT handled here — its ack-verb seeding lives in chat.ts
+ * `task_started`'s ack-verb seeding is NOT handled here — it lives in chat.ts
  * (it's message state, not a segment, and competes with the client-side seed).
- * Unknown kinds are ignored. Missing payload fields coerce to defaults. */
+ * Its segment half is below. Unknown kinds are ignored. Missing payload fields
+ * coerce to defaults. */
 export function applyEvent(m: ChatMessage, kind: string, payload: Record<string, unknown>): void {
   switch (kind) {
+    case 'task_started':
+      // ISSUE-361: a retry runs under the same message. A retry-eligible
+      // failure emits no terminal frame — only a `progress_text`, which
+      // settles nothing — so without this the next attempt's text continues
+      // the block the failed one left open, and two attempts read as one
+      // paragraph. The `brain_fallback` notice used to settle it as a side
+      // effect, which stopped once that notice became once-per-turn; a retry
+      // is the boundary either way, whether or not it also failed over.
+      // A no-op on the first attempt, where nothing is open.
+      settleOpenBlock(m);
+      break;
+
     case 'progress_text':
       m.progress = String(payload.text ?? '');
       break;

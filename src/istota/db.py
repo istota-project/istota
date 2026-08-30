@@ -2923,6 +2923,25 @@ def get_max_task_event_seq(conn: sqlite3.Connection, task_id: int) -> int:
     return (row[0] or 0) if row else 0
 
 
+def has_task_event_kind(conn: sqlite3.Connection, task_id: int, kind: str) -> bool:
+    """Whether a task's log already holds an event of this kind.
+
+    The log spans every attempt — nothing wipes it between retries, which is why
+    ``EventWriter`` resumes its ``seq`` rather than restarting at 1 — so this
+    answers "did an earlier attempt already say this". That is what keeps a
+    once-per-turn notice from being repeated by the retry ladder (ISSUE-361).
+
+    Meaningless for a kind something prunes (``text_delta``, ``thinking``,
+    ``confirmation``, ``done`` — see ``delete_task_events_by_kind``): a pruned
+    row reads as never emitted.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
+        (task_id, kind),
+    ).fetchone()
+    return row is not None
+
+
 def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
     """Delete all events for a task. Returns the row count.
 

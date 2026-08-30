@@ -657,3 +657,44 @@ describe('brain_fallback notice (ISSUE-278)', () => {
     expect(messageCopyText(m)).toBe('the answer');
   });
 });
+
+describe('a retry is a stream boundary (ISSUE-361)', () => {
+  // The retry ladder re-runs the same task under the same message: a
+  // retry-eligible failure emits no terminal frame, only a `progress_text`,
+  // so the next attempt's deltas land in the block the previous one left
+  // open. The `brain_fallback` notice was the only thing settling it, and
+  // once that notice became once-per-turn nothing was.
+  it('settles the previous attempt open text block', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['text_delta', { text: 'first attempt got this far' }],
+      ['progress_text', { text: 'Attempt failed — retrying in 1 min…' }],
+      ['task_started', { text: 'On it...' }],
+      ['text_delta', { text: 'second attempt' }],
+    ]);
+    expect(texts(m)).toHaveLength(2);
+    expect(texts(m)[0].text).toBe('first attempt got this far');
+    expect(texts(m)[0].settled).toBe(true);
+    expect(texts(m)[1].text).toBe('second attempt');
+  });
+
+  it('is a no-op on the first attempt', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['task_started', { text: 'On it...' }],
+      ['text_delta', { text: 'the answer' }],
+    ]);
+    expect(m.segments).toHaveLength(1);
+    expect(texts(m)[0].settled).toBe(false);
+  });
+
+  it('settles an open thinking block too, rather than reopening it', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['thinking', { text: 'reasoning from attempt one' }],
+      ['task_started', { text: 'On it...' }],
+      ['thinking', { text: 'reasoning from attempt two' }],
+    ]);
+    expect(m.segments.filter((s) => s.kind === 'thinking')).toHaveLength(2);
+  });
+});

@@ -243,6 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A chat turn that switches to the backup brain now says so once, rather than once per retry. A failing turn is retried a few times under the same message, and each retry repeated the notice — so one thing you asked could come back with the banner stacked three deep, the first naming the real cause and the two behind it repeating that the primary was cooling down. The first one is kept, since it is the one that knows why.
+
 - Stop now interrupts a Native-brain task even when the model endpoint has not produced another token. Both the web chat Stop button and `!stop` already recorded the request, but the Native loop only read it between streamed model events, so a slow or stalled endpoint could leave the task running indefinitely. Returning to a room also restores the active task's existing progress at once, from its stored event log, instead of showing an empty reply until the next event arrives.
 
 - The admin dashboard now reports a primary brain that is running through its fallback as degraded on a server install. The scheduler and web interface are separate services there, so the web process could not see the scheduler's in-memory cooldown and said Healthy after Claude Code hit a usage limit. The scheduler now publishes that state for the web process until the cooldown ends or a successful primary probe clears it.

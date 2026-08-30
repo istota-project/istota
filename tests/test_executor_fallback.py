@@ -703,3 +703,102 @@ class TestFallbackNoticeText:
     def test_unknown_reason_passes_through(self):
         text = fallback_notice_text("claude_code", "weird_new_reason", "native", "", None)
         assert "weird_new_reason" in text
+
+
+class TestOneNoticePerTurn:
+    """ISSUE-361: one notice per user message, not one per failover attempt.
+
+    A failing task is retried by the scheduler under the *same* task id, and the
+    event log spans every attempt (nothing wipes it between retries — that is
+    what `EventWriter` resumes its seq from). Each attempt emitted its own
+    notice, so one user message showed the banner stacked three deep: the first
+    naming the real cause, the two behind it repeating "cooling down" with
+    nothing new in them.
+
+    The reroute itself is unchanged — every attempt still runs on the fallback.
+    Only the sentence about it is said once.
+    """
+
+    def _run_attempts(self, tmp_path, task_ids, *, recorder=None):
+        """Run one execution per entry in `task_ids`, in order, as the retry
+        ladder does: the same task id repeated is a retry, a fresh EventWriter
+        each time, and DB writes ON so the log persists across attempts the way
+        it does in the daemon. One shared database throughout, so a dedup that
+        forgot to scope by task would be caught here rather than pass.
+
+        Returns ``({task_id: [brain_fallback rows]}, primary, fallback)``.
+        """
+        from istota import db as _db
+        from istota.events import EventWriter
+
+        config = _make_config(tmp_path)
+        _db.init_db(config.db_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native",
+                                   fallback_cooldown_seconds=900)
+        config.security.sandbox_enabled = False
+        primary = _FakeBrain(
+            "claude_code",
+            BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        fb = _FakeBrain(
+            "native",
+            BrainResult(True, "fallback answer", stop_reason="completed",
+                        model_used="fb-model"),
+        )
+        patches = _patch_executor() + [
+            patch(
+                "istota.executor.make_brain",
+                side_effect=lambda bc: (
+                    primary if getattr(bc, "kind", "") == "claude_code" else fb
+                ),
+            ),
+            patch("istota.executor._native_with_user_key",
+                  side_effect=lambda nc, *a, **k: nc),
+            patch("istota.notifications.send_notification",
+                  side_effect=lambda *a, **k: None),
+        ]
+        seen = {}
+        with contextmanager_chain(patches):
+            for task_id in task_ids:
+                task = _make_task(id=task_id, source_type="cli",
+                                  attempt_count=seen.get(task_id, 0))
+                seen[task_id] = seen.get(task_id, 0) + 1
+                writer = EventWriter(task.id, str(config.db_path))
+                if recorder is not None:
+                    writer.subscribe(recorder)
+                execute_task(task, config, [], event_writer=writer)
+        notices = {}
+        with _db.get_db(config.db_path) as conn:
+            for task_id in set(task_ids):
+                notices[task_id] = [
+                    r for r in _db.get_task_events(conn, task_id)
+                    if r["kind"] == "brain_fallback"
+                ]
+        return notices, primary, fb
+
+    def test_three_attempts_of_one_task_log_one_notice(self, tmp_path):
+        notices, _primary, fb = self._run_attempts(tmp_path, [1, 1, 1])
+        assert fb.calls == 3, "every attempt still reroutes"
+        assert len(notices[1]) == 1
+
+    def test_the_notice_kept_is_the_one_naming_the_real_cause(self, tmp_path):
+        """First-notice-wins, not last: attempt 1 knows *why* the primary went
+        away, and the attempts behind it only know that it is cooling down."""
+        notices, _primary, _fb = self._run_attempts(tmp_path, [1, 1, 1])
+        assert [n["payload"]["reason"] for n in notices[1]] == ["usage_limit"]
+
+    def test_subscribers_are_told_once_too(self, tmp_path):
+        """The suppression is at the emit, so an in-process surface (the REPL)
+        sees one event as well — not a persisted row that hides three."""
+        rec = _RecordingSubscriber()
+        self._run_attempts(tmp_path, [1, 1, 1], recorder=rec)
+        assert len([e for e in rec.events if e.kind == "brain_fallback"]) == 1
+
+    def test_a_different_task_gets_its_own_notice(self, tmp_path):
+        """The dedup is per turn. The next user message is a different task and
+        is owed its own explanation, cooldown window or not — even though both
+        tasks' events share one table."""
+        notices, _primary, _fb = self._run_attempts(tmp_path, [1, 1, 2])
+        assert len(notices[1]) == 1
+        assert len(notices[2]) == 1
+        assert notices[2][0]["payload"]["reason"] == "cooldown"

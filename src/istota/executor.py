@@ -5861,10 +5861,20 @@ def execute_task(
                 # of the fallback's answer — one paragraph, under a notice
                 # saying the primary failed — and the fallback's own narration
                 # gate starts pre-credited with the primary's characters.
+                # The settle runs whether or not the notice does, because it is
+                # about the daemon's own buffers rather than the sentence: a
+                # retry that called the primary and watched it fail again has a
+                # tail held here that must not open the fallback's answer.
                 if is_stream_surface:
                     _flush_thinking()
                     _settle_deltas_at_tool_boundary()
-                event_writer.emit("brain_fallback", {
+                # ISSUE-361: once per turn, not once per failover attempt. The
+                # retry ladder re-runs this same task id, and every attempt
+                # after the breaker opens takes the cooldown path, so the
+                # per-attempt emit stacked the banner three deep under one user
+                # message. The first is what survives; `emit_once` is where the
+                # cases that costs something are written down.
+                event_writer.emit_once("brain_fallback", {
                     "primary": _primary_kind,
                     "reason": reason,
                     "fallback": _fallback_kind,

@@ -1,6 +1,10 @@
 """Tests for the task-event-streaming infrastructure (events.py + db helpers)."""
 
 
+import logging
+import sqlite3
+from unittest.mock import patch
+
 import pytest
 
 from istota import db
@@ -63,6 +67,99 @@ class TestEventWriterSeq:
     def test_elapsed_is_nonnegative(self, db_path):
         w = EventWriter(1, str(db_path))
         assert w.elapsed_seconds() >= 0
+
+
+class TestEmitOnce:
+    """ISSUE-361: a notice that belongs to the turn, not to the attempt.
+
+    A failing task is retried under the same id and the event log spans every
+    attempt, so a per-attempt emit stacks the same sentence up in the
+    transcript. `emit_once` looks back over the whole log, not just this
+    writer's own emissions, because each attempt builds a fresh writer.
+    """
+
+    def test_first_call_emits(self, db_path):
+        w = EventWriter(1, str(db_path))
+        event = w.emit_once("brain_fallback", {"text": "switched"})
+        assert event is not None and event.kind == "brain_fallback"
+
+    def test_second_call_on_the_same_writer_is_suppressed(self, db_path):
+        w = EventWriter(1, str(db_path))
+        w.emit_once("brain_fallback", {"text": "switched"})
+        assert w.emit_once("brain_fallback", {"text": "again"}) is None
+        with db.get_db(db_path) as conn:
+            rows = db.get_task_events(conn, 1)
+        assert [r["kind"] for r in rows] == ["brain_fallback"]
+
+    def test_a_later_attempts_writer_is_suppressed_too(self, db_path):
+        """The retry case, and the whole point: a fresh writer over the same
+        task finds the earlier attempt's row and says nothing."""
+        EventWriter(1, str(db_path)).emit_once("brain_fallback", {"text": "one"})
+        retry = EventWriter(1, str(db_path))
+        assert retry.emit_once("brain_fallback", {"text": "two"}) is None
+        with db.get_db(db_path) as conn:
+            rows = db.get_task_events(conn, 1)
+        assert [r["payload"]["text"] for r in rows] == ["one"]
+
+    def test_a_plain_emit_by_an_earlier_attempt_still_counts(self, db_path):
+        """The lookback is over the log, not over how the row got there."""
+        EventWriter(1, str(db_path)).emit("brain_fallback", {"text": "one"})
+        assert EventWriter(1, str(db_path)).emit_once("brain_fallback") is None
+
+    def test_another_task_is_unaffected(self, db_path):
+        EventWriter(1, str(db_path)).emit_once("brain_fallback", {"text": "one"})
+        assert EventWriter(2, str(db_path)).emit_once("brain_fallback") is not None
+
+    def test_a_different_payload_does_not_reopen_the_gate(self, db_path):
+        """The dedup is on the kind and deliberately not on the reason, so a
+        later attempt naming a different cause is dropped with the rest. The
+        invariant asked for was one notice per message whatever failed, and the
+        reported bug was one `usage_limit` followed by two `cooldown`s — which
+        a reason-keyed dedup renders as two, not one."""
+        w = EventWriter(1, str(db_path))
+        w.emit_once("brain_fallback", {"reason": "cooldown"})
+        assert w.emit_once("brain_fallback", {"reason": "usage_limit"}) is None
+
+    def test_another_kind_is_unaffected(self, db_path):
+        w = EventWriter(1, str(db_path))
+        w.emit_once("brain_fallback", {"text": "one"})
+        assert w.emit_once("context_management", {"text": "compacted"}) is not None
+
+    def test_the_seq_is_not_spent_on_a_suppressed_emit(self, db_path):
+        w = EventWriter(1, str(db_path))
+        w.emit_once("brain_fallback", {"text": "one"})
+        w.emit_once("brain_fallback", {"text": "two"})
+        assert w.emit("done", {"stop_reason": "completed"}).seq == 2
+
+    def test_subscribers_are_not_notified_of_a_suppressed_emit(self, db_path):
+        rec = _Recorder()
+        w = EventWriter(1, str(db_path))
+        w.subscribe(rec)
+        w.emit_once("brain_fallback", {"text": "one"})
+        w.emit_once("brain_fallback", {"text": "two"})
+        assert len(rec.events) == 1
+
+    def test_with_the_log_off_the_dedup_narrows_to_this_writer(self, db_path):
+        """`event_log_enabled = false` leaves nothing to look back at. Within
+        one attempt the suppression still holds, which is the whole stream a
+        surface gets in that configuration anyway."""
+        w = EventWriter(1, str(db_path), enabled=False)
+        assert w.emit_once("brain_fallback", {"text": "one"}) is not None
+        assert w.emit_once("brain_fallback", {"text": "two"}) is None
+        assert EventWriter(1, str(db_path), enabled=False).emit_once(
+            "brain_fallback", {"text": "three"},
+        ) is not None
+
+    def test_an_unreadable_log_emits_rather_than_swallows(self, db_path, caplog):
+        """Best-effort: a lookback that raises costs a repeated notice, never a
+        missing one. The row is already there, so without the guard this would
+        suppress — which is what tells the guard apart from an empty log."""
+        EventWriter(1, str(db_path)).emit("brain_fallback", {"text": "one"})
+        w = EventWriter(1, str(db_path))
+        with patch.object(db, "has_task_event_kind", side_effect=sqlite3.Error("boom")):
+            with caplog.at_level(logging.DEBUG, logger="istota.events"):
+                assert w.emit_once("brain_fallback", {"text": "two"}) is not None
+        assert "emit_once lookback failed" in caplog.text
 
 
 class TestPayloadTruncation:
