@@ -6,6 +6,12 @@ vi.mock('$lib/api', () => ({
   uploadChatAttachment: vi.fn(),
   fetchChatCommands: vi.fn(),
   chatConfigOnce: vi.fn(),
+  // Not used by any test here, and it has to be on the mock all the same:
+  // `upload()`'s catch reads `e instanceof UploadUnreachableError` on every
+  // failed upload, and vitest throws on a missing export from a factory mock
+  // rather than answering undefined. That throw escapes into an unhandled
+  // rejection, which fails the run without failing a test.
+  UploadUnreachableError: class extends Error {},
 }));
 
 // The pickers have their own unit tests (nativePicker.test.ts). Here the seam
