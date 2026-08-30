@@ -32,6 +32,7 @@ function entry(text: string, over: Partial<StoredQueuedSend> = {}): StoredQueued
     attachments: [],
     held: false,
     queuedAt: Date.now(),
+    reason: 'busy',
     ...over,
   };
 }
@@ -84,6 +85,30 @@ describe('sendQueue', () => {
     expect(back.idempotencyKey).toBe('abc-123');
     expect(back.held).toBe(true);
     expect(back.queuedAt).toBe(Date.now() - 1000);
+  });
+
+  it('reads an entry written before the reason existed as a busy one', () => {
+    // Defaulting the other way would take every entry stored by the build
+    // before this one and send it unasked on the next load (ISSUE-202).
+    seed({
+      'u:room:t1': [
+        { cid: 1, text: 'from the old build', attachments: [], held: false, queuedAt: Date.now() },
+        {
+          cid: 2,
+          text: 'nonsense reason',
+          attachments: [],
+          held: false,
+          queuedAt: Date.now(),
+          reason: 'whenever',
+        },
+      ],
+    });
+    expect(readQueue('u:room:t1').map((e) => e.reason)).toEqual(['busy', 'busy']);
+  });
+
+  it('round-trips an offline entry as one', () => {
+    writeQueue('u:room:t1', [entry('written in a lift', { reason: 'offline' })]);
+    expect(readQueue('u:room:t1')[0].reason).toBe('offline');
   });
 
   it('keeps each room separate', () => {

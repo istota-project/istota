@@ -141,8 +141,9 @@ describe('chat store — reply to a message', () => {
     api.getRoomMessages.mockResolvedValue(page([]));
     api.sendChatMessage.mockResolvedValueOnce({
       ok: false,
-      status: 0,
-      failure: 'unreachable',
+      status: 500,
+      failure: 'rejected',
+      error: 'boom',
     });
     const s = await freshSession();
     await s.init();
@@ -202,7 +203,12 @@ describe('chat store — reply to a message', () => {
   it('an ordinary send failure still leaves its failed row', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomMessages.mockResolvedValue(page([]));
-    api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+    api.sendChatMessage.mockResolvedValue({
+      ok: false,
+      status: 500,
+      failure: 'rejected',
+      error: 'boom',
+    });
     const s = await freshSession();
     await s.init();
 

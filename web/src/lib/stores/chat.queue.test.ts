@@ -1044,7 +1044,15 @@ describe('chat store — the send queue', () => {
       // belongs with the queued rows at the bottom.
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      // A refusal rather than a gap: since ISSUE-202 the two gap failures park
+      // the message in the queue instead of stranding a failed row, and it is
+      // the stranded row this is about.
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('never left');
       await flush();
       const stranded = get(s.messages).find((m) => m.text === 'never left');
@@ -1075,7 +1083,15 @@ describe('chat store — the send queue', () => {
       // site needs the stranded half rather than being exempt from the rule.
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      // A refusal rather than a gap: since ISSUE-202 the two gap failures park
+      // the message in the queue instead of stranding a failed row, and it is
+      // the stranded row this is about.
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('never left');
       await flush();
 
@@ -1225,7 +1241,9 @@ describe('chat store — the send queue', () => {
 
       await emit('done');
 
-      expect(get(s.messages).find((m) => m.text === 'and another thing')?.sendState).toBe('sending');
+      expect(get(s.messages).find((m) => m.text === 'and another thing')?.sendState).toBe(
+        'sending',
+      );
       expect(storedQueue('t1').map((e) => e.text)).toEqual(['and another thing']);
 
       release({ ok: true, status: 200, task_id: 43 });

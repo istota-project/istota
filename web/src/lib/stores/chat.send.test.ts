@@ -149,7 +149,12 @@ describe('chat store — send lifecycle', () => {
       expect(get(s.messages)[0].sendError).toContain('90');
     });
 
-    it('names the server unreachable rather than blaming the reply', async () => {
+    it('parks a send that never reached the server instead of failing it', async () => {
+      // The two gap failures stopped being failures with the offline outbox
+      // (ISSUE-202): the server was not reached, so nothing was refused, and
+      // the message waits in the queue rather than reporting a verdict nobody
+      // gave. `chat.offline.test.ts` covers what happens to it from there;
+      // this is the taxonomy's own note that four of the six still fail.
       const s = await freshSession();
       await s.init();
       api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
@@ -157,9 +162,8 @@ describe('chat store — send lifecycle', () => {
       await s.send('hello');
 
       const m = get(s.messages)[0];
-      expect(m.sendState).toBe('failed');
-      expect(m.sendError).toMatch(/unreachable/i);
-      expect(m.retryable).toBe(true);
+      expect(m.sendState).toBe('queued');
+      expect(m.sendError).toBeUndefined();
     });
 
     it('offers no retry for a verdict on the request itself', async () => {
@@ -186,17 +190,6 @@ describe('chat store — send lifecycle', () => {
 
       await s.send('hello');
 
-      expect(get(s.messages)[0].retryable).toBe(true);
-    });
-
-    it('names a timeout as an unanswered server, not an unreachable one', async () => {
-      const s = await freshSession();
-      await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
-
-      await s.send('hello');
-
-      expect(get(s.messages)[0].sendError).toMatch(/didn’t respond/);
       expect(get(s.messages)[0].retryable).toBe(true);
     });
 
@@ -345,7 +338,12 @@ describe('chat store — send lifecycle', () => {
       const s = await freshSession();
       await s.init();
       const att = attachment();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('hello', [att]);
 
       const failed = get(s.messages)[0];
@@ -375,7 +373,12 @@ describe('chat store — send lifecycle', () => {
     it('re-sends the original key rather than minting a new one', async () => {
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('hello');
       const firstKey = api.sendChatMessage.mock.calls[0][5];
       expect(firstKey).toEqual(expect.any(String));
@@ -392,7 +395,12 @@ describe('chat store — send lifecycle', () => {
       const s = await freshSession();
       await s.init();
       const att = attachment();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('hello', [att]);
 
       // `size: 0` used to be fabricated here, putting a value through the
@@ -419,7 +427,12 @@ describe('chat store — send lifecycle', () => {
     it('restores the assistant placeholder the failure removed', async () => {
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('hello');
 
       api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 8 });
@@ -434,7 +447,12 @@ describe('chat store — send lifecycle', () => {
     it('is refused while another turn is in flight', async () => {
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('first');
       const failedCid = get(s.messages)[0].cid;
 
@@ -483,7 +501,12 @@ describe('chat store — send lifecycle', () => {
     async function failedSend() {
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('the message that never left');
       return s;
     }
@@ -562,7 +585,12 @@ describe('chat store — send lifecycle', () => {
     it('fires on the ack and not on a failure', async () => {
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('nope');
       expect(get(s.sendSettled).n).toBe(0);
 
@@ -611,16 +639,23 @@ describe('chat store — send lifecycle', () => {
       const m = get(s.messages)[0];
       expect(m.sendState).toBe('failed');
       expect(m.retryable).toBe(false);
+      // And not parked either: re-sending it later is a second `!steer` note
+      // against a turn that is over, not a repeat of the same message.
+      expect(m.sendState).not.toBe('queued');
     });
 
-    it('still offers a Retry for an ordinary message that timed out', async () => {
+    it('parks an ordinary message that timed out rather than refusing it', async () => {
+      // The other side of the rule above, and what makes the command carve-out
+      // a carve-out: an ordinary message carries an idempotency key the server
+      // resolves a replay against, so an ambiguous timeout is safe to hold and
+      // send again (ISSUE-202).
       const s = await freshSession();
       await s.init();
       api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
 
       await s.send('an ordinary message');
 
-      expect(get(s.messages)[0].retryable).toBe(true);
+      expect(get(s.messages)[0].sendState).toBe('queued');
     });
   });
 });

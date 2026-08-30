@@ -242,8 +242,15 @@ export interface ChatMessage {
   // Only meaningful on a 'queued' row: the entry will not drain on its own.
   // Set when the turn the message was written against ended abnormally
   // (Stop, an error, a parked confirmation, a failed send), and on every entry
-  // restored from storage. Cleared by releasing the entry.
+  // restored from storage past its auto-send age. Cleared by releasing the
+  // entry.
   queueHeld?: boolean;
+  // Why the row is queued, mirrored off its queue entry (ISSUE-202). The row
+  // says which of the two waits it is in — for a running turn, or for a
+  // connection — and that is the whole of what it is read for here; the
+  // decision it drives (whether a restored entry may send itself) is made
+  // against the stored entry rather than against this.
+  queueReason?: 'busy' | 'offline';
   // Render gate for the pending mark, opened by a grace timer rather than by
   // `sendState` itself. The state is true from the moment the row exists; the
   // mark only earns the screen once the send is slow enough to be worth

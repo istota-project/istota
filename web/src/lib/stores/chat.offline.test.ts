@@ -1,5 +1,6 @@
 /**
- * The chat store against the offline read cache (ISSUE-202, stage 2).
+ * The chat store with no connection (ISSUE-202): the read cache, and the
+ * outbox that holds what is written while it is gone.
  *
  * Covers what `offline/db.test.ts` cannot: when the cache is read, when it is
  * written, and what the transcript does when a fetch comes back with nothing
@@ -14,6 +15,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import type { ChatHistory, ChatRoom } from '$lib/api';
+import type { ChatSession } from './chat';
+import { SEND_QUEUE_STORAGE_KEY } from './sendQueue';
 
 const api = vi.hoisted(() => ({
   getChatConfig: vi.fn(),
@@ -77,10 +80,31 @@ const conn = vi.hoisted(() => {
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/offline/db', () => db);
 vi.mock('$lib/stores/connectivity', () => conn);
-vi.mock('$lib/stores/persisted', () => ({
-  loadSetting: vi.fn(() => null),
-  saveSetting: vi.fn(),
+// A real backing map rather than a stub, because the outbox tests below turn
+// on what a *previous session* left in storage and on what this one writes
+// back. Hoisted so both survive `vi.resetModules()`, and round-tripped through
+// JSON exactly as the real `localStorage` pair is.
+const persisted = vi.hoisted(() => {
+  const store = new Map<string, string>();
+  return {
+    store,
+    loadSetting: vi.fn((key: string, fallback: unknown) =>
+      store.has(key) ? JSON.parse(store.get(key) as string) : fallback,
+    ),
+    saveSetting: vi.fn((key: string, value: unknown) => {
+      store.set(key, JSON.stringify(value));
+    }),
+  };
+});
+vi.mock('$lib/stores/persisted', () => persisted);
+
+const notices = vi.hoisted(() => ({
+  notify: vi.fn(),
+  notifyError: vi.fn(),
+  notifySuccess: vi.fn(),
+  notifyWarning: vi.fn(),
 }));
+vi.mock('$lib/stores/notices', () => notices);
 
 function room(id: number, name = `Room ${id}`): ChatRoom {
   return {
@@ -139,6 +163,8 @@ describe('chat store — the offline read cache', () => {
       });
     }
     conn.setOnline(true);
+    persisted.store.clear();
+    Object.values(notices).forEach((v) => v.mockReset());
     api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500, user_id: 'alice' });
     api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
     api.getRoomMessages.mockResolvedValue(emptyHistory);
@@ -379,6 +405,8 @@ describe('chat store — cache write-through from the room stream', () => {
       });
     }
     conn.setOnline(true);
+    persisted.store.clear();
+    Object.values(notices).forEach((v) => v.mockReset());
     api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500, user_id: 'alice' });
     api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
     api.getRoomMessages.mockResolvedValue(emptyHistory);
@@ -557,5 +585,321 @@ describe('chat store — cache write-through from the room stream', () => {
     await s.archiveRoom(2);
     expect(db.deleteTranscript).toHaveBeenCalledWith('alice', 't2');
     s.teardown();
+  });
+});
+
+/**
+ * The outbox: what happens to a message written with no connection.
+ *
+ * `connectivity` is the hand-rolled store above, so these tests say what the
+ * app believes rather than driving a probe schedule to make it believe it —
+ * which is also why `noteTransport` is a spy here and a failed POST does not
+ * flip the store by itself. The `localStorage` half is real (`persisted`
+ * above), because "the entry is still there" is most of what an outbox
+ * promises.
+ */
+describe('chat store — the text outbox', () => {
+  beforeEach(() => {
+    for (const bag of [api, db]) {
+      Object.values(bag).forEach((v) => {
+        if (typeof v === 'function' && 'mockReset' in v) (v as any).mockReset();
+      });
+    }
+    conn.setOnline(true);
+    persisted.store.clear();
+    Object.values(notices).forEach((v) => v.mockReset());
+    api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500, user_id: 'alice' });
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomMessages.mockResolvedValue(emptyHistory);
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.markRoomRead.mockResolvedValue({ ok: true, last_read_message_id: 0 });
+    api.getTaskEvents.mockResolvedValue({ events: [] });
+    db.readTranscript.mockResolvedValue(null);
+    db.readRooms.mockResolvedValue(null);
+    db.readConfig.mockResolvedValue(null);
+    (globalThis as any).EventSource = undefined;
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** What is stored for a room right now. */
+  function storedQueue(token: string): Record<string, unknown>[] {
+    const raw = persisted.store.get(SEND_QUEUE_STORAGE_KEY);
+    return raw ? (JSON.parse(raw)[`alice:room:${token}`] ?? []) : [];
+  }
+
+  /** Seed the stored map, as a previous session would have left it. */
+  function seedQueue(token: string, entries: Record<string, unknown>[]) {
+    persisted.store.set(
+      SEND_QUEUE_STORAGE_KEY,
+      JSON.stringify({ [`alice:room:${token}`]: entries }),
+    );
+  }
+
+  function storedEntry(text: string, over: Record<string, unknown> = {}) {
+    return {
+      cid: 1,
+      text,
+      attachments: [],
+      held: false,
+      queuedAt: Date.now(),
+      reason: 'busy',
+      ...over,
+    };
+  }
+
+  const queuedRow = (s: ChatSession, text: string) => get(s.messages).find((m) => m.text === text);
+
+  const ok = { ok: true, status: 200, task_id: 43 };
+  const gap = { ok: false, status: 0, failure: 'unreachable' };
+
+  describe('entering the queue', () => {
+    it('queues a send made offline without attempting a POST', async () => {
+      const s = await freshSession();
+      await s.init();
+      conn.setOnline(false);
+
+      await s.send('written in a lift');
+
+      // No POST at all: the app already knows the answer, and asking again
+      // costs a 30s timeout to be told it.
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      const row = queuedRow(s, 'written in a lift');
+      expect(row?.sendState).toBe('queued');
+      expect(row?.queueReason).toBe('offline');
+      expect(row?.queueHeld).toBeUndefined();
+      expect(storedQueue('t1')).toMatchObject([
+        { text: 'written in a lift', reason: 'offline', held: false },
+      ]);
+      s.teardown();
+    });
+
+    it('parks a send that discovered the gap at the head of the queue', async () => {
+      // Restored held from a previous session, so it sits behind whatever is
+      // written now: this message was typed first and has to go first.
+      seedQueue('t1', [storedEntry('queued earlier')]);
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue(gap);
+
+      await s.send('typed just now');
+
+      const row = queuedRow(s, 'typed just now');
+      expect(row?.sendState).toBe('queued');
+      expect(row?.queueReason).toBe('offline');
+      expect(storedQueue('t1').map((e) => e.text)).toEqual(['typed just now', 'queued earlier']);
+      // The entry behind it is untouched: nothing failed, so the hold rule has
+      // nothing to say here.
+      expect(storedQueue('t1')[1].held).toBe(true);
+      s.teardown();
+    });
+
+    it('holds a timed-out send and re-POSTs it with the key it was minted with', async () => {
+      // A timeout is ambiguous — the task may exist — which is exactly what
+      // the idempotency key is for: the replay resolves to the first task
+      // rather than creating a second one.
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
+
+      await s.send('did that arrive?');
+
+      const key = api.sendChatMessage.mock.calls[0][5];
+      expect(key).toEqual(expect.any(String));
+      expect(queuedRow(s, 'did that arrive?')?.sendState).toBe('queued');
+      expect(storedQueue('t1')[0].idempotencyKey).toBe(key);
+
+      api.sendChatMessage.mockResolvedValue(ok);
+      conn.setOnline(false);
+      conn.setOnline(true);
+      await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(2));
+      expect(api.sendChatMessage.mock.calls[1][5]).toBe(key);
+      s.teardown();
+    });
+
+    it('signals the composer that the queue holds the durable copy now', async () => {
+      // The composer keeps the submitted text as a draft until the ack, since
+      // for an ordinary send that draft is the only copy that survives a
+      // reload. Parked, it is not — and two copies of one message is how it
+      // gets sent twice.
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue(gap);
+
+      await s.send('into the gap');
+
+      expect(get(s.sendSettled).n).toBe(1);
+      expect(get(s.sendSettled).token).toBe('t1');
+      s.teardown();
+    });
+
+    it('fails a send outright when there is nowhere to park it', async () => {
+      // The room left `$rooms` while the POST was open — another device's
+      // delete, or a room list that came back short. There is no queue to hold
+      // the message in, so the failed row and its Retry are what is left.
+      const s = await freshSession();
+      await s.init();
+      let release: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          release = r;
+        }),
+      );
+      const sending = s.send('into the void');
+      s.rooms.set([]);
+      release(gap);
+      await sending;
+
+      const row = queuedRow(s, 'into the void');
+      expect(row?.sendState).toBe('failed');
+      expect(row?.sendError).toMatch(/unreachable/i);
+      expect(row?.retryable).toBe(true);
+      s.teardown();
+    });
+  });
+
+  describe('leaving the queue', () => {
+    async function twoQueuedOffline() {
+      const s = await freshSession();
+      await s.init();
+      conn.setOnline(false);
+      await s.send('first');
+      await s.send('second');
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      return s;
+    }
+
+    it('sends nothing while offline, however ready the room is', async () => {
+      const s = await twoQueuedOffline();
+      api.sendChatMessage.mockResolvedValue(ok);
+      const cid = queuedRow(s, 'first')!.cid;
+
+      // Release is the most direct route to a drain: an idle room, an unheld
+      // head, nothing streaming. Only `online` is missing.
+      await s.releaseQueued(cid);
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(storedQueue('t1')).toHaveLength(2);
+      s.teardown();
+    });
+
+    it('reconciles the transcript before it drains, and drains one entry', async () => {
+      const s = await twoQueuedOffline();
+      const order: string[] = [];
+      api.getRoomMessages.mockImplementation(async () => {
+        order.push('history');
+        return emptyHistory;
+      });
+      api.sendChatMessage.mockImplementation(async () => {
+        order.push('send');
+        return ok;
+      });
+
+      conn.setOnline(true);
+
+      await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+      // A queued message going out into a transcript this client has not
+      // caught up on would answer something that was already answered.
+      expect(order[0]).toBe('history');
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('first');
+      // One entry per drain: the next goes when this turn settles.
+      expect(storedQueue('t1').map((e) => e.text)).toEqual(['second']);
+      s.teardown();
+    });
+
+    it('leaves a drained entry where it is when the gap is still there', async () => {
+      const s = await twoQueuedOffline();
+      // The real `sendChatMessage` reports every completion to the
+      // connectivity store on its way out, so by the time the store sees this
+      // failure it is offline again — which is what stops the reconnect
+      // draining a second time into the same gap. Mocked out, that has to be
+      // said here or the test would be asserting against a store no
+      // production run ever holds.
+      api.sendChatMessage.mockImplementation(async () => {
+        conn.setOnline(false);
+        return gap;
+      });
+
+      conn.setOnline(true);
+      await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+
+      const row = queuedRow(s, 'first');
+      expect(row?.sendState).toBe('queued');
+      expect(row?.queueReason).toBe('offline');
+      expect(row?.queueHeld).toBeUndefined();
+      // Order preserved by doing nothing, which is the point of leaving the
+      // entry in place rather than unshifting it back.
+      expect(storedQueue('t1').map((e) => e.text)).toEqual(['first', 'second']);
+      // And nothing is held: a gap is not a turn that ended badly.
+      expect(storedQueue('t1').every((e) => e.held === false)).toBe(true);
+      s.teardown();
+    });
+
+    it('counts what is waiting in each room for the room list', async () => {
+      const s = await twoQueuedOffline();
+      await s.selectRoom(2);
+      await s.send('for the other room');
+
+      expect(get(s.queuedCounts)).toEqual({ t1: 2, t2: 1 });
+
+      // And it follows the queue back down.
+      s.removeQueued(queuedRow(s, 'for the other room')!.cid);
+      expect(get(s.queuedCounts)).toEqual({ t1: 2 });
+      s.teardown();
+    });
+  });
+
+  describe('restoring across a relaunch', () => {
+    const HOUR = 60 * 60 * 1000;
+
+    it('sends a recent offline entry on its own', async () => {
+      // The whole point of storing the reason: this message was written to a
+      // server that could not be reached, and a relaunch is exactly when it
+      // should go.
+      seedQueue('t1', [
+        storedEntry('written in a lift', { reason: 'offline', queuedAt: Date.now() - HOUR }),
+      ]);
+      api.sendChatMessage.mockResolvedValue(ok);
+      const s = await freshSession();
+
+      await s.init();
+      await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('written in a lift');
+      s.teardown();
+    });
+
+    it('holds an offline entry older than a day', async () => {
+      // Firing into a conversation that has moved on, while the user is
+      // looking at something else, is the surprise the hold exists to prevent.
+      seedQueue('t1', [
+        storedEntry('written on Tuesday', { reason: 'offline', queuedAt: Date.now() - 25 * HOUR }),
+      ]);
+      api.sendChatMessage.mockResolvedValue(ok);
+      const s = await freshSession();
+
+      await s.init();
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(queuedRow(s, 'written on Tuesday')?.queueHeld).toBe(true);
+      s.teardown();
+    });
+
+    it('holds a busy entry however recent it is', async () => {
+      // The turn it was written against is over and unobserved. Unchanged by
+      // any of this (ISSUE-238).
+      seedQueue('t1', [storedEntry('typed behind a turn', { queuedAt: Date.now() - 60_000 })]);
+      api.sendChatMessage.mockResolvedValue(ok);
+      const s = await freshSession();
+
+      await s.init();
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(queuedRow(s, 'typed behind a turn')?.queueHeld).toBe(true);
+      s.teardown();
+    });
   });
 });

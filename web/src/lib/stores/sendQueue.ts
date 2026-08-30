@@ -65,6 +65,22 @@ export const MAX_QUEUED_PER_ROOM = 10;
 export const MAX_QUEUE_ROOMS = 20;
 
 /**
+ * How old an entry queued *offline* may be and still send itself on a restore.
+ *
+ * A restored entry is normally held: the turn it was written against is over
+ * and unobserved, and a page load must never send by surprise. An entry queued
+ * because there was no connection is the opposite case — going out on its own
+ * is the whole of what it is for — so the hold would be the surprise instead.
+ *
+ * The bound splits two hazards rather than picking one. A message written five
+ * minutes ago in a lift is one the user still means. A message written four
+ * days ago, firing into a conversation that has moved on while the user is
+ * looking at something else, is exactly what the hold exists to prevent. Well
+ * inside `QUEUE_TTL_MS`, which is when the text stops being kept at all.
+ */
+export const OFFLINE_AUTO_SEND_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * How much of one queued message is kept.
  *
  * The same ceiling a draft gets, and imported rather than restated so the two
@@ -96,12 +112,23 @@ export const MAX_QUEUE_CHARS = MAX_DRAFT_CHARS;
 export const MAX_QUEUE_TOTAL_CHARS = 256 * 1024;
 
 /**
+ * Why a message is in the queue.
+ *
+ * The two are told apart on the way back in and nowhere else: a `busy` entry
+ * restores held, an `offline` one young enough restores ready to go (see
+ * `OFFLINE_AUTO_SEND_MAX_AGE_MS`). Storing the reason rather than deriving it
+ * is what makes that possible at all — a reload cannot tell whether the room
+ * was busy or the network was gone when the text was written.
+ */
+export type QueueReason = 'busy' | 'offline';
+
+/**
  * One queued message as it is stored.
  *
- * The same fields the in-memory entry carries. `held` and `queuedAt` are what
- * the restore reads: the first is forced true on the way back in by the chat
- * store, the second is what the TTL measures and what the restored row's
- * timestamp is rebuilt from.
+ * The same fields the in-memory entry carries. `held`, `queuedAt` and `reason`
+ * are what the restore reads: the first says whether the entry may go on its
+ * own, the second is what the TTL measures and what the restored row's
+ * timestamp is rebuilt from, and the third decides the first.
  */
 export interface StoredQueuedSend {
   cid: number;
@@ -112,6 +139,7 @@ export interface StoredQueuedSend {
   idempotencyKey?: string;
   held: boolean;
   queuedAt: number;
+  reason: QueueReason;
 }
 
 type QueueMap = Record<string, StoredQueuedSend[]>;
@@ -224,6 +252,11 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
     ...(replyToMsgId ? { replyToMsgId } : {}),
     ...(typeof e.idempotencyKey === 'string' ? { idempotencyKey: e.idempotencyKey } : {}),
     held: e.held === true,
+    // Anything that is not the word `offline` is a busy entry, which is what
+    // an entry written before this field existed is: the queue only had the
+    // one reason then. Defaulting the other way would take every stored entry
+    // on an upgraded build and send it unasked on the next load.
+    reason: e.reason === 'offline' ? 'offline' : 'busy',
     // Never in the future. A stamp ahead of the clock outlives the TTL by
     // construction (`now - queuedAt` stays negative) and sorts its room to the
     // front of the eviction order for as long as it is stored — immortal, and
