@@ -24,6 +24,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 vi.mock('$lib/stores/chat', async () => {
   const { writable } = await import('svelte/store');
@@ -279,5 +282,26 @@ describe('an empty transcript with nothing cached', () => {
     render(Page);
     await waitFor(() => expect(screen.getByText(/Ask Istota anything/)).toBeInTheDocument());
     expect(screen.queryByText(NOTHING_SAVED)).toBeNull();
+  });
+
+  /**
+   * Read out of the source rather than off a computed style: jsdom applies no
+   * stylesheet, so `getComputedStyle` would report an empty padding whether or
+   * not the rule is there, and the assertion would pass on a page with the
+   * inset removed. Same reasoning as `Composer.sendButton.svelte.test.ts`.
+   *
+   * A message row takes its inset from `Message`, so an empty state — which
+   * has no row — needs one of its own or it runs edge to edge. The offline
+   * notice is where that showed: it is the only empty state whose hint wraps
+   * to two lines, so on a phone both lines touched both sides.
+   */
+  it('insets the empty state from both edges', () => {
+    const source = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '+page.svelte'),
+      'utf8',
+    );
+    const rule = source.match(/\n {2}\.chat-empty \{([\s\S]*?)\n {2}\}/);
+    expect(rule, '.chat-empty rule not found in +page.svelte').not.toBeNull();
+    expect(rule![1]).toMatch(/padding-inline:\s*var\(--space-\d\)/);
   });
 });

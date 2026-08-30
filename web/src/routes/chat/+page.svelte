@@ -1277,6 +1277,10 @@
 		   stick-to-bottom pin to act on — the reason the notice used to read high
 		   by the same measure. 0 in an aggregate view, which has no dock. */
     padding-bottom: var(--composer-h, 0px);
+    /* Message rows get their inset from Message; an empty state has no row, so
+		   without this the notice runs edge to edge — most visibly the offline
+		   one, whose two-line hint then touches both sides of a phone. */
+    padding-inline: var(--space-6);
     display: flex;
     flex-direction: column;
     align-items: center;
