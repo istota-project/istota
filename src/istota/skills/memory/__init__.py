@@ -22,6 +22,14 @@ Each write subcommand can target the channel memory file by passing
 when set, to refuse cross-channel writes from a runtime task that's
 been scoped to a different conversation.
 
+Both documents live under a directory `build_bwrap_cmd` binds **read-write**
+into a sandbox, while this CLI runs host-side and unsandboxed with the daemon's
+filesystem view. So neither the path nor the file at the end of it is trusted
+(ISSUE-339): the directory is resolved and checked against the user's own root
+(or `{mount}/Channels`) before use, and the read refuses a symlink, a FIFO or an
+oversized file rather than following it. `_user_md_path` and `_read_text` carry
+the reasoning.
+
 Per-skill overlays are **not** written here (ISSUE-343). An overlay is skill
 configuration the user authors as an ordinary file, not memory the model
 accumulates one bullet at a time, and the bullet-op vocabulary reached about a
@@ -63,11 +71,27 @@ from istota.memory.curation.parser import (
     parse_sectioned_doc,
     serialize_sectioned_doc,
 )
+from istota.skills._loader import (
+    OVERLAY_NOT_UTF8,
+    contained_overlay_dir,
+    read_overlay_bytes,
+)
 
 #: Target kinds. `_resolve_target` used to answer a bool; two destinations
 #: with different audit rules is one answer too many for one.
 _USER = "user"
 _CHANNEL = "channel"
+
+#: Ceiling on what this CLI will read back before editing, matching the
+#: daemon's own `storage.USER_CONFIG_READ_CAP_BYTES`.
+#:
+#: Restated rather than imported: this CLI is spawned per write and
+#: deliberately avoids importing `istota.storage`, which pulls in subprocess,
+#: shutil and the rclone paths for a process that runs in hundreds of
+#: milliseconds. `tests/test_skill_memory_cli.py` holds the two equal — they
+#: must be, or the daemon reads a file this CLI cannot edit, or this CLI writes
+#: one the daemon will not load.
+_MAX_USER_MD_READ_BYTES = 16 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +153,42 @@ def _bot_dir() -> str:
     sys.exit(1)
 
 
+def _user_config_dir() -> Path:
+    return _mount_path() / "Users" / _user_id() / _bot_dir() / "config"
+
+
 def _user_md_path() -> Path:
-    return _mount_path() / "Users" / _user_id() / _bot_dir() / "config" / "USER.md"
+    """USER.md under a `config/` proven to be inside the user's own tree.
+
+    `config` is an ordinary entry under `{mount}/Users/{user_id}`, which
+    `build_bwrap_cmd` binds **read-write** into that user's sandbox, so `mv
+    config config.real && ln -s /anywhere config` is two commands from inside
+    it. This CLI runs host-side and unsandboxed, and the link's target is a
+    string it resolves in the daemon's own filesystem view — so it need not
+    exist in the namespace at all (ISSUE-339).
+
+    The write half is the serious one. `_atomic_write` calls
+    `mkdir(parents=True)` and `os.replace`, which between them create the
+    missing directory at the far end of the link and put model-chosen content
+    in it, as the daemon user. The read half leaks the other way: `show`
+    returns whatever is at `<link>/USER.md`.
+
+    Refusing rather than degrading, because a write must not silently land
+    somewhere else and a `show` must not answer with a file the user did not
+    name. A link that stays *inside* the user's own tree passes: it leads
+    nowhere they could not already reach, and refusing it would break someone
+    who reorganised their own workspace.
+
+    The **resolved** path comes back so a caller cannot re-walk by the
+    unresolved name — the check and the write are separated by a lock
+    acquisition and a read.
+    """
+    d = _user_config_dir()
+    resolved = contained_overlay_dir(d, _mount_path() / "Users" / _user_id())
+    if resolved is None:
+        _err("user_md_outside_user_tree", path=_mount_relative(d))
+        sys.exit(1)
+    return resolved / "USER.md"
 
 
 def _channel_md_path(token: str) -> Path:
@@ -150,7 +208,28 @@ def _channel_md_path(token: str) -> Path:
             given=token, expected=env_token,
         )
         sys.exit(1)
-    return _mount_path() / "Channels" / token / "CHANNEL.md"
+    # The token checks above bound the *name*; they say nothing about where the
+    # directory it names resolves to, and `{mount}/Channels/{token}` is bound
+    # read-write into the sandbox of every task in that room. So containment is
+    # checked as well as the token (ISSUE-339) — otherwise `mv` the directory
+    # aside, drop a link in its place, and `_atomic_write`'s
+    # `mkdir(parents=True)` builds the far end.
+    #
+    # **Equality, not "under the root"**, which is where this differs from
+    # `_user_md_path`. The looser rule there exists so a user who reorganised
+    # their own workspace still works, and it is safe because everything under
+    # their root is theirs anyway. `Channels/` is bot-managed and holds every
+    # room, so "under the root" would let a link at `Channels/{token}` point at
+    # *another room's* directory — landing the write on that room's CHANNEL.md
+    # and defeating the token equality check six lines above, which exists for
+    # exactly that. Nobody has a reason to reorganise this tree.
+    channels = _mount_path() / "Channels"
+    d = channels / token
+    resolved = contained_overlay_dir(d, channels)
+    if resolved is None or resolved != Path(os.path.realpath(channels)) / token:
+        _err("channel_dir_outside_channel_root", path=_mount_relative(d))
+        sys.exit(1)
+    return resolved / "CHANNEL.md"
 
 
 class Target(NamedTuple):
@@ -190,12 +269,39 @@ def _config_for_audit():
 
 
 def _read_text(path: Path) -> str:
+    """Read USER.md or CHANNEL.md, refusing anything that is not a plain file.
+
+    Through `_loader.read_overlay_bytes`, which is where this hardening already
+    lives for the surfaces that read the same tree (ISSUE-339). Both documents
+    sit under a directory `build_bwrap_cmd` binds **read-write** into a
+    sandbox, while this CLI runs host-side with the daemon's filesystem view,
+    so a plain `read_text()` here is an arbitrary daemon-side file read:
+
+    - `O_NOFOLLOW`, because a symlink planted at USER.md otherwise hands back a
+      file of the daemon's choosing — which `show` prints, and which the op
+      that follows then writes back over.
+    - `S_ISREG` behind `O_NONBLOCK`, because a FIFO left at that name blocks
+      `open(2)` until someone writes to it, wedging this CLI until the skill
+      proxy's timeout kills it.
+    - the size checked on the fd before the read, so a multi-gigabyte file
+      planted at the path cannot be pulled into memory.
+
+    A missing file is still `""`, because that is how a first write learns to
+    create one; it must not read as a refusal.
+
+    The refusal codes are `_loader`'s published `overlay_*` vocabulary, reused
+    verbatim rather than forked — the `path` on the envelope is what says which
+    document was refused.
+    """
+    raw, reason, _size = read_overlay_bytes(path, max_bytes=_MAX_USER_MD_READ_BYTES)
+    if reason is not None:
+        _err(reason, path=_mount_relative(path))
+        sys.exit(1)
+    assert raw is not None
     try:
-        return path.read_text()
-    except FileNotFoundError:
-        return ""
-    except OSError as e:
-        _err(f"failed to read {path}: {e}")
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _err(OVERLAY_NOT_UTF8, path=_mount_relative(path))
         sys.exit(1)
 
 
@@ -257,11 +363,28 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
         return
     config = _config_for_audit()
     user_id = _user_id()
-    user_md_path = _user_md_path()
     size = None
     extra = None
-    if user_md_path.exists():
-        size = len(user_md_path.read_text().encode("utf-8"))
+    # `target.path` **is** the USER.md path, already resolved once by
+    # `_resolve_target`. Calling `_user_md_path()` again here would re-walk
+    # `config/` after the write has landed and after `_update_last_seen`
+    # fingerprinted it — and it exits on a refusal, so a link swapped into that
+    # window made a successful, recorded append report an error and exit 1,
+    # which the model reads as a failure and retries. It is also a redundant
+    # realpath walk on every single write (ISSUE-339).
+    #
+    # The read goes through the hardened reader like everything else here. A
+    # refusal is recorded *as such* rather than silently leaving `size` None,
+    # which is what a missing file records — the audit trail feeds
+    # `detect_bypass_write`, so "absent" and "unreadable" must not collapse into
+    # one value on exactly the files that were tampered with.
+    raw, reason, _size = read_overlay_bytes(
+        target.path, max_bytes=_MAX_USER_MD_READ_BYTES
+    )
+    if reason is not None:
+        extra = {"user_md_read_refused": reason}
+    elif raw:
+        size = len(raw)
     entries = [{"op": op, "outcome": outcome_or_reason}] if applied else []
     rejects = [] if applied else [{"op": op, "reason": outcome_or_reason}]
     write_audit_log(
@@ -326,6 +449,19 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
             outcome = entry.get("outcome", "applied")
             if outcome == "applied":
                 new_text = serialize_sectioned_doc(new_doc)
+                # Refused *before* the write: past the read cap this CLI can no
+                # longer read the file back, so the write would leave a document
+                # that `show`, `append` and `remove` all refuse — recoverable
+                # only from a host shell. Reachable by one oversized `--line` or
+                # by enough ordinary appends (ISSUE-339).
+                size = len(new_text.encode("utf-8"))
+                if size > _MAX_USER_MD_READ_BYTES:
+                    _audit_for(args, op_dict, "would_exceed_read_cap",
+                               target=target, applied=False)
+                    return _err(
+                        "would_exceed_read_cap",
+                        bytes=size, cap=_MAX_USER_MD_READ_BYTES,
+                    )
                 _atomic_write(path, new_text)
                 _update_last_seen(path, new_text, target)
             _audit_for(args, op_dict, outcome, target=target, applied=True)

@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timedelta
@@ -389,6 +390,317 @@ def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | No
     )
     user_root = _get_mount_path(config, f"Users/{user_id}")
     return contained_overlay_dir(overlay_dir, user_root)
+
+
+def _contained_channel_dir(
+    config: "Config", conversation_token: str
+) -> Path | None:
+    """``{mount}/Channels/{token}`` resolved, or None if it leads outside.
+
+    The channel counterpart to ``resolve_user_config_dir``. That directory is
+    bound read-write into the sandbox of every task in the room, so the token
+    passing ``validate_conversation_token`` says nothing about where the
+    directory it names actually resolves to.
+
+    **Equality, not "under the root"**, which is where this differs from the
+    user-tree rule. The looser rule there exists so a user who reorganised their
+    own workspace still works, and it is safe because everything under their
+    root is theirs. ``Channels/`` is bot-managed and holds every room, so "under
+    the root" would let a link at ``Channels/{token}`` resolve into *another
+    room's* directory and put that room's CHANNEL.md into this room's prompt.
+    Nobody has a reason to reorganise this tree.
+    """
+    from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - import cycle
+
+    channels = _get_mount_path(config, "Channels")
+    resolved = contained_overlay_dir(
+        _get_mount_path(config, get_channel_base_path(conversation_token)),
+        channels,
+    )
+    if resolved is None:
+        return None
+    try:
+        expected = Path(os.path.realpath(channels)) / conversation_token
+    except OSError:
+        return None
+    return resolved if resolved == expected else None
+
+
+def _contained_under_user_root(
+    config: "Config", user_id: str, path: Path
+) -> Path | None:
+    """``path`` resolved, or None if it leads outside ``{mount}/Users/{uid}``.
+
+    The generic form of ``resolve_user_config_dir``, for the seeding path, which
+    has to check several directories under one root. Same rule, same function
+    behind it; a missing directory resolves fine and is the caller's to create.
+    """
+    from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - import cycle
+
+    return contained_overlay_dir(path, _get_mount_path(config, f"Users/{user_id}"))
+
+
+def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
+    """The user's ``{bot_dir}/config`` directory, resolved, or None.
+
+    One level up from ``resolve_user_skill_overlays_dir`` and for the same
+    reason (ISSUE-339). ``config/`` holds USER.md, PERSONA.md and the seeded
+    TASKS/CRON/HEARTBEAT files, and it is an ordinary entry under
+    ``{mount}/Users/{user_id}``, which ``build_bwrap_cmd`` binds **read-write**
+    into that user's own sandbox — so ``mv config config.real && ln -s
+    /anywhere config`` is two commands from inside it. The daemon then reads
+    those files host-side, in a filesystem view that includes its own home,
+    ``/etc/istota/`` and other users' trees, and what it reads becomes prompt
+    text on the next task.
+
+    Containment is the same equality-under-a-known-root rule
+    ``contained_overlay_dir`` states, and it is that function rather than a
+    fifth copy of it. A link that stays *inside* the user's own tree passes:
+    it leads nowhere they could not already reach, and refusing it would break
+    someone who reorganised their own workspace.
+
+    The **resolved** path comes back and callers must use it, since the check
+    and the reads that follow are separated by at least one ``open(2)``.
+
+    None without a mount — an rclone-remote deployment has no such directory,
+    the condition ``load_persona`` already applies to a per-user PERSONA.md.
+    """
+    if not config.use_mount:
+        return None
+    return _contained_under_user_root(
+        config,
+        user_id,
+        _get_mount_path(config, get_user_config_path(user_id, config.bot_dir_name)),
+    )
+
+
+#: Ceiling on any single file read out of a user's ``config/`` directory.
+#:
+#: Same purpose as ``OVERLAY_READ_CAP_BYTES`` — stop a multi-gigabyte file
+#: planted at a fixed name from being pulled into the daemon — and deliberately
+#: not the same number. An overlay over its cap is refused and the skill loses
+#: a customization; USER.md over its cap is a person's whole memory, and it is a
+#: file the *product* grows, one curated bullet at a time. 1 MiB was close
+#: enough to a real one to be reachable by padding, which turned a refusal into
+#: an erasure once the curator saw it (the curator now refuses to write on an
+#: unreadable read, so this is depth rather than the guard).
+#:
+#: Not silent: every refusal logs, and ``read_user_memory_v2`` returning None
+#: here means the prompt loses the user's memory, which is a condition an
+#: operator has to be able to see.
+USER_CONFIG_READ_CAP_BYTES = 16 * 1024 * 1024
+
+
+def read_user_config_file(
+    config: "Config", user_id: str, filename: str
+) -> str | None:
+    """Text of ``{bot_dir}/config/{filename}``, or None where there is none.
+
+    The hardened read for every host-side reader of that directory. Containment
+    on the directory, then ``read_overlay_bytes`` on the leaf — ``O_NOFOLLOW``
+    so a symlink planted at the filename cannot put another file's bytes into
+    the prompt, ``S_ISREG`` behind ``O_NONBLOCK`` so a FIFO left there is
+    refused rather than blocking ``open(2)`` forever, and the size checked on
+    the fd before the read.
+
+    The FIFO half is the one with no timeout behind it: prompt assembly runs
+    *before* the ``BrainRequest`` exists, so one ``mkfifo`` would wedge every
+    later task for that user, silently and for good.
+
+    ``None`` means *could not read it* — refused, outside the tree, or not
+    UTF-8. A file that is simply not there comes back as ``""``, following
+    ``read_overlay_bytes``' own contract. The two are worth keeping apart even
+    though the prompt-assembly callers treat them alike: the nightly curator
+    re-reads USER.md after the LLM call and aborts on a sha mismatch, so
+    folding an emptied file into "unchanged" would let it clobber a runtime
+    write that had just truncated the file.
+
+    A refusal is logged rather than raised. Two callers run somewhere an
+    exception has no home — prompt assembly, and the daemon's workspace
+    seeding — and the never-raises contract is what lets both degrade to "no
+    such file" instead of failing a task.
+    """
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        if config.use_mount:
+            logger.warning(
+                "user_config_dir_outside_user_tree user=%s file=%s", user_id, filename,
+            )
+        return None
+    text, reason = read_regular_file(config_dir / filename)
+    if reason is not None:
+        logger.warning(
+            "user_config_read_refused user=%s file=%s reason=%s",
+            user_id, filename, reason,
+        )
+    return text
+
+
+def read_regular_file(
+    path: Path, *, max_bytes: int = USER_CONFIG_READ_CAP_BYTES
+) -> tuple[str | None, str | None]:
+    """``read_user_config_file`` for a caller that already holds a safe path.
+
+    Returns ``(text, refusal_reason)``; exactly one is set, and a missing file
+    is ``("", None)``. This is the leaf half on its own, and it exists because
+    re-deriving a path is not a free way to re-read one: ``resolve_user_config_
+    dir`` returns a resolved path precisely so a caller stops walking the
+    unresolved name, and the nightly curator resolves once, holds the path
+    across a whole LLM call, and then has to read the *same* file back to
+    compare fingerprints. Going through ``read_user_config_file`` there would
+    re-resolve ``config/`` from scratch, so the guard would compare whatever the
+    directory points at now against a write going to the path resolved minutes
+    earlier — an in-tree link swap during the brain call, which is permitted and
+    which the model can perform, would make the anti-clobber check read a stale
+    copy, pass, and let the curator overwrite the runtime write it exists to
+    protect.
+
+    Containment of the *ancestors* is the caller's, exactly as for
+    ``write_regular_file``. What this covers is the last component.
+    """
+    # noqa: PLC0415 - import cycle
+    from .skills._loader import OVERLAY_NOT_UTF8, read_overlay_bytes
+
+    data, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
+    if reason is not None:
+        return None, reason
+    assert data is not None
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError:
+        # `_loader`'s published vocabulary, like every other reason this
+        # returns. The prefix is wider than its name now that four surfaces
+        # report these codes about USER.md, PERSONA.md and CHANNEL.md as well as
+        # overlays — but one word for one condition is worth more than a name
+        # that reads well in isolation, and a second spelling here would make
+        # this the only surface saying something different about the same file.
+        return None, OVERLAY_NOT_UTF8
+
+
+def create_file_if_absent(path: Path, text: str) -> bool:
+    """Create ``path`` holding ``text``, or leave whatever is already there.
+
+    The seeding counterpart to ``read_user_config_file``, and it replaces the
+    ``if not path.exists(): path.write_text(...)`` pattern rather than
+    supplementing it: ``exists()`` *follows* a link, so a **dangling** symlink
+    planted at one of the seeded names reads as absent and the write then lands
+    at the far end of it — a file of the daemon's making, at a path of the
+    model's choosing. ``O_CREAT | O_EXCL | O_NOFOLLOW`` answers both halves in
+    one syscall, and closes the gap between the check and the write as well.
+
+    False when something was already there (link included) or the write failed;
+    True only when this call created the file. A refusal is **logged** — the
+    "already there" case is the ordinary one on every call after the first, but
+    an existing *non-regular* inode at a seeded name is a planted one, and
+    ``O_EXCL | O_NOFOLLOW`` reports a symlink as ``EEXIST`` rather than
+    ``ELOOP``, so without the ``lstat`` the hostile inode is refused correctly
+    and reported by nothing, forever.
+
+    Never raises. The callers are workspace seeding paths that must degrade
+    rather than abort a start-up, so ``ValueError`` is caught beside ``OSError``
+    — a lone surrogate in ``text`` raises ``UnicodeEncodeError``, which is not
+    an ``OSError`` and would otherwise escape the contract.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except FileExistsError:
+        _warn_if_not_regular(path)
+        return False
+    except OSError as e:
+        logger.warning("seed_file_refused path=%s errno=%s", path.name, e.errno)
+        return False
+    owned = False
+    try:
+        owned = True
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return True
+    except (OSError, ValueError) as e:
+        logger.warning("seed_file_failed path=%s error=%s", path.name, type(e).__name__)
+        return False
+    finally:
+        if not owned:
+            os.close(fd)
+
+
+def _warn_if_not_regular(path: Path) -> None:
+    """Report a planted inode at a seeded name. Never raises."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            logger.warning(
+                "seed_file_refused path=%s reason=not_a_regular_file", path.name,
+            )
+    except OSError:
+        pass
+
+
+def write_regular_file(path: Path, text: str) -> bool:
+    """Replace ``path``'s contents, refusing anything that is not a plain file.
+
+    For the writers that legitimately overwrite — ``init_user_memory_v2``, the
+    ``examples/`` refresh and the nightly curator. ``O_NOFOLLOW`` refuses a
+    symlink at the last component; the ``S_ISREG`` check on the fd refuses a
+    FIFO or a device, and ``O_NONBLOCK`` keeps the open from blocking while it
+    decides. Ancestor containment is the caller's, through
+    ``resolve_user_config_dir``.
+
+    **The probe and the write are separate files.** Truncating the target and
+    writing into it means an ``OSError`` partway — ENOSPC, EDQUOT, or a FUSE
+    fault on the mount this runs on — returns False with the file now zero
+    bytes, and every caller reads False as "nothing was written". For the
+    curator that is USER.md destroyed and reported as a no-op. So the target is
+    opened only to *check* it, the content goes to a staging file in the same
+    directory, and ``os.replace`` publishes it atomically — the pattern the
+    memory CLI's ``_atomic_write`` already uses. ``os.replace`` does not follow
+    a symlink at the destination, so the probe is what keeps a planted link from
+    being quietly replaced with a real file rather than being the thing that
+    stops the write landing elsewhere.
+
+    False on refusal or failure, never an exception: the curator runs
+    unattended and its caller treats False as "nothing was written tonight".
+    """
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o644,
+        )
+    except OSError as e:
+        logger.warning("write_refused path=%s errno=%s", path.name, e.errno)
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            logger.warning("write_refused path=%s reason=not_a_regular_file", path.name)
+            return False
+    except OSError as e:
+        logger.warning("write_refused path=%s errno=%s", path.name, e.errno)
+        return False
+    finally:
+        os.close(fd)
+
+    tmp = None
+    try:
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            # mkstemp is 0600 and this becomes a file the user reads over
+            # Nextcloud. On the descriptor, not the name: the directory is
+            # model-writable, so a link swapped in between the close and a
+            # `chmod` would take the 0644 to whatever it names.
+            os.fchmod(fh.fileno(), 0o644)
+            fh.write(text)
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError) as e:
+        logger.warning("write_failed path=%s error=%s", path.name, type(e).__name__)
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
 
 
 CRON_TEMPLATE = """\
@@ -854,6 +1166,38 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
     if config.use_mount:
         base = _get_mount_path(config, get_user_base_path(user_id))
 
+        # Containment runs **first**, before the migrations (ISSUE-339).
+        #
+        # The leaf-level `O_NOFOLLOW` in the seed writers below covers the last
+        # path component only, so a symlink at `{bot_dir}/` or at `config/` sent
+        # every seeded file out of the tree — measured, four files written into
+        # a directory outside the mount as the daemon user — and
+        # `mkdir(exist_ok=True)` follows such a link quite happily.
+        #
+        # The ordering is the part that is easy to get wrong and was: the check
+        # sat after the migrations, and `_migrate_workspace_to_bot_dir` derives
+        # `base / bot_dir / "config"` itself, `mkdir`s it and `shutil.move`s
+        # into it. So a redirected `{bot_dir}/` was still followed — the
+        # refusal fired, returned False, and a `config/` directory had already
+        # appeared outside the tree. Nothing may touch these paths before they
+        # are known to be contained.
+        bot_dir_path = _contained_under_user_root(config, user_id, base / bot_dir)
+        if bot_dir_path is None:
+            logger.warning(
+                "ensure_user_directories_refused user=%s reason=bot_dir_outside_user_tree",
+                user_id,
+            )
+            return False
+        config_dir = _contained_under_user_root(
+            config, user_id, bot_dir_path / "config"
+        )
+        if config_dir is None:
+            logger.warning(
+                "ensure_user_directories_refused user=%s reason=config_dir_outside_user_tree",
+                user_id,
+            )
+            return False
+
         # Run migrations before creating directories
         _migrate_old_layout(base)
         _migrate_notes_to_workspace(base)
@@ -866,9 +1210,6 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             path.mkdir(parents=True, exist_ok=True)
         logger.debug("Ensured user directories for %s via mount", user_id)
 
-        # Ensure bot dir subdirectories
-        bot_dir_path = base / bot_dir
-        config_dir = bot_dir_path / "config"
         config_dir.mkdir(exist_ok=True)
         exports_dir = bot_dir_path / "exports"
         exports_dir.mkdir(exist_ok=True)
@@ -895,16 +1236,17 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
                     shutil.move(str(item), str(dst))
                     logger.info("Migrated %s → %s", item, dst)
 
-        # Seed bot dir with README
+        # Every seed below goes through `create_file_if_absent` rather than
+        # `if not exists(): write_text(...)`. `exists()` follows a link, so a
+        # dangling symlink planted at one of these names read as absent and the
+        # seed landed wherever it pointed, written by the daemon (ISSUE-339).
         readme = bot_dir_path / "README.md"
-        if not readme.exists():
-            readme.write_text(WORKSPACE_README)
+        if create_file_if_absent(readme, WORKSPACE_README):
             logger.debug("Created %s README for %s", bot_dir, user_id)
 
         # Seed config/ with default files
         tasks_file = config_dir / "TASKS.md"
-        if not tasks_file.exists():
-            tasks_file.write_text(TASKS_FILE_TEMPLATE)
+        if create_file_if_absent(tasks_file, TASKS_FILE_TEMPLATE):
             logger.debug("Created %s/config/TASKS.md for %s", bot_dir, user_id)
 
         # No BRIEFINGS.md is seeded. The file is retired as an input — briefings
@@ -913,37 +1255,64 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         # deleted (it is the user's file), and `examples/BRIEFINGS.md` says so.
 
         heartbeat_file = config_dir / "HEARTBEAT.md"
-        if not heartbeat_file.exists():
-            heartbeat_file.write_text(_build_heartbeat_seed(config, user_id))
+        if create_file_if_absent(
+            heartbeat_file, _build_heartbeat_seed(config, user_id)
+        ):
             logger.debug("Created %s/config/HEARTBEAT.md for %s", bot_dir, user_id)
 
         cron_file = config_dir / "CRON.md"
-        if not cron_file.exists():
-            cron_file.write_text(_build_cron_seed(config, user_id))
+        if create_file_if_absent(cron_file, _build_cron_seed(config, user_id)):
             logger.debug("Created %s/config/CRON.md for %s", bot_dir, user_id)
 
-        # Seed PERSONA.md from global persona file
+        # Seed PERSONA.md from the global persona file. Read lazily, inside the
+        # absence check: this function runs on every task, every scheduler pass
+        # and every inbound email, and hoisting the read out of the guard made
+        # an undecodable operator persona raise on all of them rather than once
+        # at first seed. `encoding` is pinned because the seed is written UTF-8.
         persona_file = config_dir / "PERSONA.md"
         if not persona_file.exists():
             global_persona = config.skills_dir.parent / "persona.md"
             if global_persona.exists():
-                persona_file.write_text(global_persona.read_text())
-                logger.debug("Created %s/config/PERSONA.md for %s", bot_dir, user_id)
+                try:
+                    seed = global_persona.read_text(encoding="utf-8")
+                except (OSError, ValueError) as e:
+                    logger.warning(
+                        "persona_seed_unreadable user=%s error=%s",
+                        user_id, type(e).__name__,
+                    )
+                    seed = None
+                if seed is not None and create_file_if_absent(persona_file, seed):
+                    logger.debug(
+                        "Created %s/config/PERSONA.md for %s", bot_dir, user_id,
+                    )
 
-        # Write example files (always overwrite to stay current)
-        examples_dir = bot_dir_path / "examples"
-        examples_dir.mkdir(exist_ok=True)
-        examples = {
-            "README.md": WORKSPACE_README_EXAMPLE,
-            "TASKS.md": TASKS_FILE_EXAMPLE,
-            "BRIEFINGS.md": BRIEFINGS_EXAMPLE,
-            "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
-            "CRON.md": CRON_EXAMPLE,
-            "WORKFLOW.md": WORKFLOW_EXAMPLE,
-        }
-        for filename, content in examples.items():
-            (examples_dir / filename).write_text(content)
-        logger.debug("Updated %s examples for %s", bot_dir, user_id)
+        # Write example files (always overwrite to stay current). These are the
+        # one place an overwrite is intended, and they were the last unhardened
+        # write in this function: a plain `write_text` follows a link, so a
+        # symlink planted at `examples/CRON.md` had the template written over a
+        # victim of the model's choosing on *every* call — and a FIFO there
+        # blocked prompt assembly, which is the wedge this whole issue is about
+        # (measured both, ISSUE-339).
+        examples_dir = _contained_under_user_root(
+            config, user_id, bot_dir_path / "examples"
+        )
+        if examples_dir is None:
+            logger.warning(
+                "examples_refresh_refused user=%s reason=outside_user_tree", user_id,
+            )
+        else:
+            examples_dir.mkdir(exist_ok=True)
+            examples = {
+                "README.md": WORKSPACE_README_EXAMPLE,
+                "TASKS.md": TASKS_FILE_EXAMPLE,
+                "BRIEFINGS.md": BRIEFINGS_EXAMPLE,
+                "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
+                "CRON.md": CRON_EXAMPLE,
+                "WORKFLOW.md": WORKFLOW_EXAMPLE,
+            }
+            for filename, content in examples.items():
+                write_regular_file(examples_dir / filename, content)
+            logger.debug("Updated %s examples for %s", bot_dir, user_id)
 
         # Auto-share bot dir back to the user (OCS). Skipped entirely when
         # Nextcloud is unconfigured (local install) — the OCS call is a no-op
@@ -986,13 +1355,14 @@ def read_user_memory_v2(config: "Config", user_id: str) -> str | None:
     Read the user's memory file (mount-aware).
 
     Returns the content of the memory file, or None if it doesn't exist or is empty.
+
+    USER.md reaches every task's prompt, and it lives in a directory bound
+    read-write into that user's sandbox, so the read is hardened rather than a
+    plain ``read_text`` — see ``read_user_config_file`` (ISSUE-339).
     """
     if config.use_mount:
-        memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
-        if not memory_path.exists():
-            return None
-        content = memory_path.read_text()
-        if not content.strip():
+        content = read_user_config_file(config, user_id, "USER.md")
+        if content is None or not content.strip():
             return None
         return content
     else:
@@ -1004,12 +1374,19 @@ def init_user_memory_v2(config: "Config", user_id: str) -> bool:
     Initialize the user's memory file with a template (mount-aware).
 
     Returns True on success.
+
+    The directory is resolved under the user's own tree and the write refuses
+    to follow a link at ``USER.md`` itself. Both halves are needed: the caller
+    reaches here precisely when the file reads as absent, and a *dangling*
+    symlink is what that looks like (ISSUE-339).
     """
     if config.use_mount:
-        memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_path.write_text(MEMORY_TEMPLATE)
-        return True
+        config_dir = resolve_user_config_dir(config, user_id)
+        if config_dir is None:
+            logger.warning("init_user_memory_refused user=%s reason=config_dir", user_id)
+            return False
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return write_regular_file(config_dir / "USER.md", MEMORY_TEMPLATE)
     else:
         return init_user_memory(config.rclone_remote, user_id, config.bot_dir_name)
 
@@ -1117,13 +1494,24 @@ def read_dated_memories(
     cutoff = datetime.now(user_tz) - timedelta(days=max_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
-    # Find matching files
+    # Find matching files. `is_file()` follows a link, so a symlink at
+    # `memories/2026-08-29.md` used to put up to `max_chars` of any
+    # daemon-readable file into the prompt — `memories/` is under the same
+    # read-write sandbox bind as `config/` (ISSUE-339). `lstat` here and
+    # `read_regular_file` below are the two halves; the FIFO case was already
+    # closed by accident, since `is_file()` is False for one.
     dated_files = []
     for path in context_dir.iterdir():
-        if path.is_file() and _DATED_MEMORY_PATTERN.match(path.name):
-            date_str = path.stem  # e.g. "2026-01-28"
-            if date_str >= cutoff_str:
-                dated_files.append((date_str, path))
+        if not _DATED_MEMORY_PATTERN.match(path.name):
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+        except OSError:
+            continue
+        date_str = path.stem  # e.g. "2026-01-28"
+        if date_str >= cutoff_str:
+            dated_files.append((date_str, path))
 
     if not dated_files:
         return None
@@ -1135,7 +1523,14 @@ def read_dated_memories(
     parts = []
     total = 0
     for date_str, path in dated_files:
-        content = path.read_text().strip()
+        text, reason = read_regular_file(path)
+        if reason is not None:
+            logger.warning(
+                "dated_memory_read_refused user=%s file=%s reason=%s",
+                user_id, path.name, reason,
+            )
+            continue
+        content = (text or "").strip()
         if not content:
             continue
         entry = f"### {date_str}\n\n{content}\n"
@@ -1229,16 +1624,38 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
     Read the channel's memory file (mount-aware).
 
     Returns the content of the memory file, or None if it doesn't exist or is empty.
+
+    Hardened on the same terms as USER.md, and for the same reason: CHANNEL.md
+    goes into every prompt for a conversation, and ``{mount}/Channels/{token}``
+    is bound read-write into the sandbox of every task in that room. That makes
+    it the same vector byte for byte — a symlink puts another file's bytes in
+    the prompt, and a FIFO blocks prompt assembly where no task timeout reaches
+    it (ISSUE-339). Containment is under ``{mount}/Channels`` rather than a user
+    root, since a room is not owned by one user; ``validate_conversation_token``
+    bounds the *name*, which is not the same question as where it resolves to.
+
+    ``read_regular_file`` decodes as UTF-8 explicitly, which the previous
+    ``read_text(encoding="utf-8")`` also did deliberately: the web save hashes
+    the content as UTF-8 to build its revision tag, so a locale-dependent decode
+    here would make the same bytes hash two ways and every save read as a
+    conflict.
     """
     if config.use_mount:
-        memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
-        if not memory_path.exists():
+        channel_dir = _contained_channel_dir(config, conversation_token)
+        if channel_dir is None:
+            logger.warning(
+                "channel_memory_read_refused token=%s reason=outside_channel_root",
+                conversation_token,
+            )
             return None
-        # Explicit UTF-8 both ways: the web save hashes the content as UTF-8 to
-        # build its revision tag, so a locale-dependent decode here would make
-        # the same bytes hash two ways and every save read as a conflict.
-        content = memory_path.read_text(encoding="utf-8")
-        if not content.strip():
+        content, reason = read_regular_file(channel_dir / "CHANNEL.md")
+        if reason is not None:
+            logger.warning(
+                "channel_memory_read_refused token=%s reason=%s",
+                conversation_token, reason,
+            )
+            return None
+        if not content or not content.strip():
             return None
         return content
     else:

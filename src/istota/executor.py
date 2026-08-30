@@ -33,11 +33,11 @@ from .context import (
 from .storage import (
     ensure_channel_directories,
     ensure_user_directories_v2,
-    get_user_persona_path,
     get_user_scripts_path,
     resolve_user_skill_overlays_dir,
     read_channel_memory,
     read_dated_memories,
+    read_user_config_file,
     read_user_memory_v2,
 )
 from .brain import (
@@ -3702,15 +3702,20 @@ def load_persona(config: Config, user_id: str | None = None) -> str | None:
 
     User workspace PERSONA.md (in their Nextcloud config dir) takes precedence
     over the global config/istota.md file.
+
+    The user's copy is read through ``read_user_config_file``, not a plain
+    ``read_text``: it sits in a directory bound read-write into that user's own
+    sandbox, this runs host-side with the daemon's filesystem view, and what it
+    returns becomes prompt text on the next task (ISSUE-339). A refused read
+    falls through to the global persona, which is the same outcome as having no
+    per-user file — and the global one lives in ``config/``, which is bound
+    into no sandbox at any path.
     """
     # Try user workspace persona first
     if user_id and config.use_mount:
-        from .storage import _get_mount_path
-        user_persona_path = _get_mount_path(config, get_user_persona_path(user_id, config.bot_dir_name))
-        if user_persona_path.exists():
-            content = user_persona_path.read_text().strip()
-            if content:
-                return _apply_bot_name(content, config)
+        content = read_user_config_file(config, user_id, "PERSONA.md")
+        if content and content.strip():
+            return _apply_bot_name(content.strip(), config)
 
     # Fall back to global persona
     config_dir = config.skills_dir.parent

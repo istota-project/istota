@@ -1,5 +1,7 @@
 """Configuration loading for istota.storage module."""
 
+import logging
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -35,6 +37,8 @@ from istota.storage import (
     upload_file_to_inbox,
     upload_file_to_inbox_v2,
     user_directories_exist_v2,
+    create_file_if_absent,
+    write_regular_file,
     MEMORY_TEMPLATE,
     CHANNEL_MEMORY_TEMPLATE,
     _rclone_mkdir,
@@ -55,6 +59,7 @@ from istota.storage import (
     BRIEFINGS_EXAMPLE,
     HEARTBEAT_EXAMPLE,
     WORKFLOW_EXAMPLE,
+    CRON_EXAMPLE,
 )
 from istota.config import Config, NextcloudConfig
 
@@ -1061,3 +1066,352 @@ class TestMigrateWorkspaceToBotDir:
         ensure_user_directories_v2(config, "alice")
 
         assert (base / "istota" / "exports" / "report.pdf").read_text() == "pdf content"
+
+
+# ---------------------------------------------------------------------------
+# TestUserConfigPlantedPaths (ISSUE-339)
+# ---------------------------------------------------------------------------
+
+
+class TestUserConfigPlantedPaths:
+    """`{mount}/Users/{user_id}` is bound read-write into that user's own
+    sandbox, so every component under it — `config/` included — is
+    model-writable. The daemon reads and seeds files there host-side, with the
+    daemon's filesystem view, which is strictly larger than the sandbox's."""
+
+    @pytest.fixture
+    def mount_config(self, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        return Config(nextcloud_mount_path=mount)
+
+    def _config_dir(self, config, user_id="alice"):
+        return (
+            config.nextcloud_mount_path / "Users" / user_id / "istota" / "config"
+        )
+
+    def test_a_symlink_at_user_md_is_not_followed(self, mount_config, tmp_path):
+        secret = tmp_path / "credentials.json"
+        secret.write_text("TOP SECRET TOKEN")
+        config_dir = self._config_dir(mount_config)
+        config_dir.mkdir(parents=True)
+        (config_dir / "USER.md").symlink_to(secret)
+
+        assert read_user_memory_v2(mount_config, "alice") is None
+
+    def test_a_fifo_at_user_md_is_refused_without_blocking(self, mount_config):
+        # Prompt assembly runs before the BrainRequest exists, so no task
+        # timeout covers a blocking open(2) here: one mkfifo would otherwise
+        # wedge every later task for this user, silently.
+        from .support.blocking import fails_if_it_blocks
+
+        config_dir = self._config_dir(mount_config)
+        config_dir.mkdir(parents=True)
+        os.mkfifo(config_dir / "USER.md")
+
+        with fails_if_it_blocks(what="read_user_memory_v2"):
+            assert read_user_memory_v2(mount_config, "alice") is None
+
+    def test_a_symlinked_config_dir_cannot_redirect_the_read(
+        self, mount_config, tmp_path
+    ):
+        # O_NOFOLLOW covers the last component only. The file at the far end of
+        # a redirected directory is an ordinary regular file and passes every
+        # leaf-level guard.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "USER.md").write_text("TOP SECRET TOKEN")
+        bot_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "config").symlink_to(elsewhere, target_is_directory=True)
+
+        assert read_user_memory_v2(mount_config, "alice") is None
+
+    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(
+        self, mount_config
+    ):
+        # Containment, not "no symlinks": a link that stays inside the user's
+        # own tree leads nowhere they could not already reach, and refusing it
+        # would break someone who reorganised their own workspace.
+        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        real = base / "istota" / "real_config"
+        real.mkdir(parents=True)
+        (real / "USER.md").write_text("Remember: likes coffee")
+        (base / "istota" / "config").symlink_to(real, target_is_directory=True)
+
+        assert read_user_memory_v2(mount_config, "alice") == "Remember: likes coffee"
+
+    def test_init_memory_refuses_to_write_through_a_dangling_symlink(
+        self, mount_config, tmp_path
+    ):
+        # A dangling link reads as "no memory yet", which is exactly the
+        # condition that sends the daemon down the seeding path.
+        victim = tmp_path / "victim.md"
+        config_dir = self._config_dir(mount_config)
+        config_dir.mkdir(parents=True)
+        (config_dir / "USER.md").symlink_to(victim)
+
+        init_user_memory_v2(mount_config, "alice")
+        assert not victim.exists()
+
+    def test_seeding_refuses_to_write_through_a_dangling_symlink(
+        self, mount_config, tmp_path
+    ):
+        victim = tmp_path / "victim.md"
+        config_dir = self._config_dir(mount_config)
+        config_dir.mkdir(parents=True)
+        (config_dir / "CRON.md").symlink_to(victim)
+
+        ensure_user_directories_v2(mount_config, "alice")
+        assert not victim.exists()
+
+    def test_seeding_still_creates_the_defaults_on_a_clean_tree(
+        self, mount_config
+    ):
+        # The control for the two refusals above: a plain tree still gets the
+        # whole seeded set, so a refusal cannot pass by seeding nothing.
+        ensure_user_directories_v2(mount_config, "alice")
+        config_dir = self._config_dir(mount_config)
+        for name in ("TASKS.md", "HEARTBEAT.md", "CRON.md"):
+            assert (config_dir / name).is_file()
+
+
+class TestUserConfigWriters:
+    """`create_file_if_absent` and `write_regular_file` directly. Nothing
+    exercised their refusal branches through a caller, so a guard that stopped
+    guarding would have gone unnoticed."""
+
+    def test_write_replaces_a_shorter_body_without_a_tail(self, tmp_path):
+        p = tmp_path / "a.md"
+        p.write_text("X" * 200)
+        assert write_regular_file(p, "abc") is True
+        assert p.read_text() == "abc"
+
+    def test_write_refuses_a_symlink_and_leaves_the_victim(self, tmp_path):
+        victim = tmp_path / "victim"
+        victim.write_text("untouched")
+        link = tmp_path / "link.md"
+        link.symlink_to(victim)
+        assert write_regular_file(link, "planted") is False
+        assert victim.read_text() == "untouched"
+        # The link itself survives too: `os.replace` would have silently
+        # swapped a real file in for it, which is a different wrong answer.
+        assert link.is_symlink()
+
+    def test_write_refuses_a_fifo_without_blocking(self, tmp_path):
+        from .support.blocking import fails_if_it_blocks
+
+        f = tmp_path / "f.md"
+        os.mkfifo(f)
+        with fails_if_it_blocks(what="write_regular_file"):
+            assert write_regular_file(f, "x") is False
+
+    def test_write_leaves_no_staging_file_behind(self, tmp_path):
+        p = tmp_path / "a.md"
+        assert write_regular_file(p, "body") is True
+        assert [q.name for q in tmp_path.iterdir()] == ["a.md"]
+
+    def test_a_failed_write_does_not_truncate_the_target(self, tmp_path):
+        # The reason the content goes to a staging file rather than into the
+        # truncated target: ENOSPC/EDQUOT/a FUSE fault mid-write would
+        # otherwise return False — read by every caller as "nothing was
+        # written" — with the file already emptied.
+        p = tmp_path / "a.md"
+        p.write_text("important memory")
+        # A lone surrogate cannot be encoded, so the write fails after the
+        # target has been probed and the staging file opened.
+        assert write_regular_file(p, "ok \ud800 bad") is False
+        assert p.read_text() == "important memory"
+        assert [q.name for q in tmp_path.iterdir()] == ["a.md"]
+
+    def test_create_if_absent_creates_then_leaves_alone(self, tmp_path):
+        p = tmp_path / "a.md"
+        assert create_file_if_absent(p, "seed") is True
+        assert create_file_if_absent(p, "different") is False
+        assert p.read_text() == "seed"
+
+    def test_create_if_absent_refuses_a_dangling_symlink(self, tmp_path):
+        victim = tmp_path / "nope.md"
+        link = tmp_path / "link.md"
+        link.symlink_to(victim)
+        assert create_file_if_absent(link, "seed") is False
+        assert not victim.exists()
+
+    def test_create_if_absent_reports_a_planted_inode(self, tmp_path, caplog):
+        # `O_EXCL | O_NOFOLLOW` reports a symlink as EEXIST, not ELOOP, so
+        # without the lstat a planted inode is refused correctly and reported
+        # by nothing — indistinguishable from the ordinary "already seeded".
+        link = tmp_path / "link.md"
+        link.symlink_to(tmp_path / "nope.md")
+        with caplog.at_level(logging.WARNING, logger="istota.storage"):
+            create_file_if_absent(link, "seed")
+        assert "not_a_regular_file" in caplog.text
+
+    def test_create_if_absent_is_quiet_about_an_ordinary_reseed(
+        self, tmp_path, caplog
+    ):
+        p = tmp_path / "a.md"
+        p.write_text("seed")
+        with caplog.at_level(logging.WARNING, logger="istota.storage"):
+            create_file_if_absent(p, "seed")
+        assert caplog.text == ""
+
+    def test_neither_writer_raises_on_an_unencodable_body(self, tmp_path):
+        assert create_file_if_absent(tmp_path / "a.md", "\ud800") is False
+        assert write_regular_file(tmp_path / "b.md", "\ud800") is False
+
+
+class TestSeedingContainment:
+    """The seed writers guard the last path component; these cover the
+    ancestors, which is where both reviewers measured a live escape."""
+
+    @pytest.fixture
+    def mount_config(self, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        return Config(nextcloud_mount_path=mount)
+
+    def test_a_symlinked_config_dir_redirects_nothing(self, mount_config, tmp_path):
+        # Measured before the fix: CRON.md, HEARTBEAT.md, PERSONA.md and
+        # TASKS.md were all written into the far end, as the daemon user.
+        # `mkdir(exist_ok=True)` follows the link, and the leaf-level
+        # O_NOFOLLOW never sees an ancestor.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        bot_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "config").symlink_to(outside, target_is_directory=True)
+
+        assert ensure_user_directories_v2(mount_config, "alice") is False
+        assert list(outside.iterdir()) == []
+
+    def test_a_symlinked_bot_dir_redirects_nothing(self, mount_config, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base.mkdir(parents=True)
+        (base / "istota").symlink_to(outside, target_is_directory=True)
+
+        assert ensure_user_directories_v2(mount_config, "alice") is False
+        assert list(outside.iterdir()) == []
+
+    def test_the_examples_refresh_does_not_follow_a_symlink(
+        self, mount_config, tmp_path
+    ):
+        # `examples/` is rewritten on *every* call — every task, every
+        # scheduler pass — so a link here was a repeating arbitrary clobber.
+        victim = tmp_path / "victim.md"
+        victim.write_text("untouched")
+        examples = (
+            mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+        )
+        examples.mkdir(parents=True)
+        (examples / "CRON.md").symlink_to(victim)
+
+        ensure_user_directories_v2(mount_config, "alice")
+        assert victim.read_text() == "untouched"
+
+    def test_a_fifo_in_examples_does_not_block_prompt_assembly(
+        self, mount_config
+    ):
+        # `ensure_user_directories_v2` runs during prompt assembly
+        # (executor.py), before the BrainRequest exists — so nothing times this
+        # out. Measured blocking past a SIGALRM before the fix.
+        from .support.blocking import fails_if_it_blocks
+
+        examples = (
+            mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+        )
+        examples.mkdir(parents=True)
+        os.mkfifo(examples / "CRON.md")
+
+        with fails_if_it_blocks(what="ensure_user_directories_v2"):
+            ensure_user_directories_v2(mount_config, "alice")
+
+    def test_the_examples_are_still_refreshed_on_a_clean_tree(self, mount_config):
+        # Control for the three refusals above: the refresh still happens, so
+        # a guard that refused everything could not pass this class.
+        ensure_user_directories_v2(mount_config, "alice")
+        examples = (
+            mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+        )
+        assert (examples / "CRON.md").read_text() == CRON_EXAMPLE
+        # And it overwrites on the next call, which is the point of the block.
+        (examples / "CRON.md").write_text("stale")
+        ensure_user_directories_v2(mount_config, "alice")
+        assert (examples / "CRON.md").read_text() == CRON_EXAMPLE
+
+
+class TestChannelAndDatedMemoryReads:
+    """CHANNEL.md and the dated memory files are the same vector as USER.md:
+    prompt-assembly readers of a directory bound read-write into a sandbox."""
+
+    @pytest.fixture
+    def mount_config(self, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        return Config(nextcloud_mount_path=mount)
+
+    def test_a_symlink_at_channel_md_is_not_followed(self, mount_config, tmp_path):
+        secret = tmp_path / "secret"
+        secret.write_text("TOP SECRET TOKEN")
+        d = mount_config.nextcloud_mount_path / "Channels" / "room1"
+        d.mkdir(parents=True)
+        (d / "CHANNEL.md").symlink_to(secret)
+        assert read_channel_memory(mount_config, "room1") is None
+
+    def test_a_fifo_at_channel_md_does_not_block(self, mount_config):
+        from .support.blocking import fails_if_it_blocks
+
+        d = mount_config.nextcloud_mount_path / "Channels" / "room1"
+        d.mkdir(parents=True)
+        os.mkfifo(d / "CHANNEL.md")
+        with fails_if_it_blocks(what="read_channel_memory"):
+            assert read_channel_memory(mount_config, "room1") is None
+
+    def test_a_symlinked_channel_dir_is_refused(self, mount_config, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "CHANNEL.md").write_text("TOP SECRET TOKEN")
+        channels = mount_config.nextcloud_mount_path / "Channels"
+        channels.mkdir(parents=True)
+        (channels / "room1").symlink_to(outside, target_is_directory=True)
+        assert read_channel_memory(mount_config, "room1") is None
+
+    def test_a_link_to_another_room_is_refused(self, mount_config):
+        """The channel ceiling is an equality, not "under `Channels/`".
+
+        `Channels/` is bot-managed and holds every room, so the looser
+        under-the-root rule used for a user's own tree would accept a link at
+        `Channels/{token}` pointing at another room and put that room's
+        CHANNEL.md into this room's prompt.
+        """
+        channels = mount_config.nextcloud_mount_path / "Channels"
+        other = channels / "room2"
+        other.mkdir(parents=True)
+        (other / "CHANNEL.md").write_text("other room's business")
+        (channels / "room1").symlink_to(other, target_is_directory=True)
+
+        assert read_channel_memory(mount_config, "room1") is None
+
+    def test_an_ordinary_channel_memory_still_reads(self, mount_config):
+        d = mount_config.nextcloud_mount_path / "Channels" / "room1"
+        d.mkdir(parents=True)
+        (d / "CHANNEL.md").write_text("room notes")
+        assert read_channel_memory(mount_config, "room1") == "room notes"
+
+    def test_a_symlinked_dated_memory_is_skipped(self, mount_config, tmp_path):
+        secret = tmp_path / "secret"
+        secret.write_text("TOP SECRET TOKEN")
+        memories = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories / f"{today}.md").symlink_to(secret)
+        assert read_dated_memories(mount_config, "alice") is None
+
+    def test_an_ordinary_dated_memory_still_reads(self, mount_config):
+        memories = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories.mkdir(parents=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        (memories / f"{today}.md").write_text("- had coffee")
+        assert "- had coffee" in read_dated_memories(mount_config, "alice")

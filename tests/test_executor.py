@@ -1,5 +1,6 @@
 """Configuration loading for istota.executor module."""
 
+import os
 import sys
 from unittest.mock import patch, MagicMock
 
@@ -1948,6 +1949,69 @@ class TestLoadPersona:
 
         result = load_persona(config, user_id="alice")
         assert result == "You are Jarvis, a helpful bot."
+
+
+class TestLoadPersonaPlantedPaths(TestLoadPersona):
+    """PERSONA.md sits in a directory bound read-write into the user's own
+    sandbox, and `load_persona` reads it host-side, in the daemon's filesystem
+    view. Whatever it returns becomes prompt text on the next task (ISSUE-339).
+
+    Subclasses `TestLoadPersona` so the ten cases above run again against the
+    hardened reader: the refusals below are only worth anything if the ordinary
+    paths still work, and a guard that rejects everything would otherwise pass
+    every test in this class.
+    """
+
+    def _plant_global(self, tmp_path):
+        (tmp_path / "config" / "persona.md").write_text("Global persona")
+
+    def test_a_symlink_at_persona_is_not_followed(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_global(tmp_path)
+        secret = tmp_path / "credentials.json"
+        secret.write_text("TOP SECRET TOKEN")
+        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        user_dir.mkdir(parents=True)
+        (user_dir / "PERSONA.md").symlink_to(secret)
+
+        assert load_persona(config, user_id="alice") == "Global persona"
+
+    def test_a_fifo_at_persona_is_refused_without_blocking(self, tmp_path):
+        # Prompt assembly runs before the BrainRequest exists, so nothing
+        # times this out: one mkfifo wedges every later task for this user.
+        from .support.blocking import fails_if_it_blocks
+
+        config = self._make_config(tmp_path)
+        self._plant_global(tmp_path)
+        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        user_dir.mkdir(parents=True)
+        os.mkfifo(user_dir / "PERSONA.md")
+
+        with fails_if_it_blocks(what="load_persona"):
+            assert load_persona(config, user_id="alice") == "Global persona"
+
+    def test_a_symlinked_config_dir_cannot_redirect_persona(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_global(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "PERSONA.md").write_text("TOP SECRET TOKEN")
+        bot_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "config").symlink_to(elsewhere, target_is_directory=True)
+
+        assert load_persona(config, user_id="alice") == "Global persona"
+
+    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(self, tmp_path):
+        config = self._make_config(tmp_path)
+        self._plant_global(tmp_path)
+        base = config.nextcloud_mount_path / "Users" / "alice"
+        real = base / "istota" / "real_config"
+        real.mkdir(parents=True)
+        (real / "PERSONA.md").write_text("Custom persona for Alice")
+        (base / "istota" / "config").symlink_to(real, target_is_directory=True)
+
+        assert load_persona(config, user_id="alice") == "Custom persona for Alice"
 
     def test_bot_name_substituted_in_global_persona(self, tmp_path):
         config = self._make_config(tmp_path)

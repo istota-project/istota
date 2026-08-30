@@ -17,15 +17,17 @@ from ..config import Config
 from ..usage import SYSTEM_USER_ID
 from ..storage import (
     _get_mount_path,
+    resolve_user_config_dir,
     resolve_user_skill_overlays_dir,
     get_user_memories_path,
-    get_user_memory_path,
     get_user_playbooks_path,
     get_channel_memories_path,
     get_channel_memory_path,
+    read_regular_file,
     read_user_memory_v2,
     read_dated_memories,
     read_channel_memory,
+    write_regular_file,
     _DATED_MEMORY_PATTERN,
 )
 
@@ -1342,13 +1344,47 @@ def curate_user_memory(
         prepend_agents_header_if_missing,
     )
 
-    current = read_user_memory_v2(config, user_id) or ""
-    dated = read_dated_memories(config, user_id, max_days=3, max_chars=8000)
-    if not dated:
-        return False
-
     if not config.use_mount:
         logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
+        return False
+
+    # `config/` is resolved **once**, here, and every later read and write in
+    # this function goes through the path derived from it (ISSUE-339). Resolving
+    # again after the LLM call would re-walk `config/` from scratch, so the
+    # anti-clobber sha guard would compare whatever the directory points at now
+    # against a write going to the path resolved minutes earlier — and an
+    # in-tree link swap during the brain call is permitted and model-reachable.
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        logger.warning(
+            "memory_curation_aborted user=%s reason=config_dir_outside_user_tree",
+            user_id,
+        )
+        return False
+    memory_path = config_dir / "USER.md"
+
+    # The tri-state matters here and nowhere else, so the curator reads the leaf
+    # directly rather than through `read_user_memory_v2`, which folds every
+    # refusal into None for callers that only want "is there memory".
+    #
+    # `... or ""` on a refusal is how this function came to destroy the file it
+    # curates: an unreadable USER.md became an *empty* document, the post-LLM
+    # sha guard compared a refusal against a refusal and matched by
+    # construction, and the ops were then serialized over a healthy file. A
+    # 1.26 MB USER.md was reduced to 456 bytes that way, with the run reporting
+    # success. Refusing to curate what it cannot read is the fix; raising the
+    # read cap, which made it reachable by padding, is depth behind it.
+    current, read_reason = read_regular_file(memory_path)
+    if read_reason is not None:
+        logger.warning(
+            "memory_curation_aborted user=%s reason=user_md_unreadable detail=%s",
+            user_id, read_reason,
+        )
+        return False
+    current = current or ""
+
+    dated = read_dated_memories(config, user_id, max_days=3, max_chars=8000)
+    if not dated:
         return False
 
     # Bypass-write detection runs once per nightly pass, before the LLM
@@ -1442,8 +1478,10 @@ def curate_user_memory(
         )
         return False
 
-    memory_path = _get_mount_path(config, get_user_memory_path(user_id, config.bot_dir_name))
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    # `config_dir` and `memory_path` come from the single resolve at the top of
+    # this function. Not re-resolved here: that is the whole point of holding
+    # the resolved path across the brain call.
+    config_dir.mkdir(parents=True, exist_ok=True)
 
     header_added = False
     # Anchor under the user's deferred dir so the lock is the same inode the
@@ -1455,10 +1493,20 @@ def curate_user_memory(
             # during the brain's wall time (a runtime CLI write landed
             # between read and write), abort tonight's curation rather
             # than clobber the runtime write.
-            try:
-                latest = memory_path.read_text()
-            except OSError:
-                latest = current
+            #
+            # Off `memory_path`, not by re-deriving the path from the config —
+            # the guard has to read the same file the write is about to go to.
+            # A refusal aborts: falling back to `current` would compare a
+            # refusal against itself, match, and license the write, which is
+            # exactly the shape that destroyed the file above.
+            latest, latest_reason = read_regular_file(memory_path)
+            if latest_reason is not None:
+                logger.warning(
+                    "memory_curation_aborted user=%s reason=user_md_unreadable_on_recheck detail=%s",
+                    user_id, latest_reason,
+                )
+                return False
+            latest = latest or ""
             latest_sha = hashlib.sha256(latest.encode("utf-8")).hexdigest()
             if latest_sha != initial_sha:
                 logger.warning(
@@ -1511,7 +1559,17 @@ def curate_user_memory(
             new_text = serialize_sectioned_doc(new_doc)
             # One-shot agents-header migration. Idempotent.
             new_text, header_added = prepend_agents_header_if_missing(new_text)
-            memory_path.write_text(new_text)
+            # False covers both a refusal (a planted inode at USER.md) and a
+            # failed write; `write_regular_file` logs which, and stages through
+            # `os.replace` so neither leaves a truncated file behind. The reason
+            # here stays generic rather than naming one of the two, since this
+            # branch cannot tell them apart.
+            if not write_regular_file(memory_path, new_text):
+                logger.warning(
+                    "memory_curation_aborted user=%s reason=user_md_not_written",
+                    user_id,
+                )
+                return False
     except MemoryMdLocked:
         logger.warning(
             "memory_curation_aborted user=%s reason=lock_timeout", user_id,

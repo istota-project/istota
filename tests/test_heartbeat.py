@@ -1,5 +1,6 @@
 """Configuration loading for istota.heartbeat module."""
 
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
@@ -1304,3 +1305,41 @@ class TestCheckSelf:
 
         assert result.healthy
 
+
+
+class TestHeartbeatPlantedPaths:
+    """HEARTBEAT.md and TASKS.md live in the same read-write sandbox bind as
+    USER.md, and both are read on the scheduler's own tick (ISSUE-339)."""
+
+    def _config_dir(self, tmp_path):
+        mount = tmp_path / "mount"
+        d = mount / "Users" / "alice" / "istota" / "config"
+        d.mkdir(parents=True)
+        return mount, d
+
+    def test_a_symlink_at_heartbeat_md_is_not_followed(self, tmp_path):
+        mount, d = self._config_dir(tmp_path)
+        secret = tmp_path / "secret.md"
+        secret.write_text('```toml\n[[checks]]\nname = "planted"\ntype = "url-health"\nurl = "http://x"\n```\n')
+        (d / "HEARTBEAT.md").symlink_to(secret)
+
+        assert load_heartbeat_config(Config(nextcloud_mount_path=mount), "alice") is None
+
+    def test_a_fifo_at_heartbeat_md_does_not_block_the_scheduler(self, tmp_path):
+        from .support.blocking import fails_if_it_blocks
+
+        mount, d = self._config_dir(tmp_path)
+        os.mkfifo(d / "HEARTBEAT.md")
+        config = Config(nextcloud_mount_path=mount)
+        with fails_if_it_blocks(what="load_heartbeat_config"):
+            assert load_heartbeat_config(config, "alice") is None
+
+    def test_an_ordinary_heartbeat_md_still_parses(self, tmp_path):
+        mount, d = self._config_dir(tmp_path)
+        (d / "HEARTBEAT.md").write_text(
+            '```toml\n[[checks]]\nname = "site"\ntype = "url-health"\nurl = "http://x"\n```\n'
+        )
+        result = load_heartbeat_config(Config(nextcloud_mount_path=mount), "alice")
+        assert result is not None
+        _settings, checks = result
+        assert [c.name for c in checks] == ["site"]

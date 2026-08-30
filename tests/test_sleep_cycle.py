@@ -1,5 +1,6 @@
 """Configuration loading for istota.sleep_cycle module."""
 
+import logging
 from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -8,6 +9,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, SleepCycleConfig, UserConfig
+from istota.memory import sleep_cycle as sleep_cycle_module
 from istota.memory.sleep_cycle import (
     _excerpt,
     _parse_structured_extraction,
@@ -1067,6 +1069,100 @@ class TestCurateUserMemory:
         result = curate_user_memory(mount_config, "alice")
         assert result is True
         assert "- New thing" in (config_dir / "USER.md").read_text()
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_symlink_at_user_md_is_not_written_through(
+        self, mock_run, mount_config, tmp_path, caplog
+    ):
+        """ISSUE-339. The curator runs unattended at night with the daemon's
+        filesystem view, and it is the one writer of USER.md that no user is
+        watching. A link planted from inside the sandbox turned tonight's
+        serialized document into a write to a path of the model's choosing.
+
+        The victim carries the heading the op targets, because without that the
+        op is rejected as `heading_missing` and nothing is written either way —
+        the test would then pass against the unfixed code. The log assertion is
+        what pins *which* guard stopped it: the hardened read refuses first, so
+        an assertion on the victim's bytes alone cannot tell this apart from
+        the op simply not applying.
+        """
+        mount_config.sleep_cycle.curate_user_memory = True
+        victim = tmp_path / "victim.md"
+        original = "## Preferences\n- Likes vim\n"
+        victim.write_text(original)
+        config_dir, _ = _setup_curation_fixture(mount_config)
+        (config_dir / "USER.md").symlink_to(victim)
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "Preferences", "line": "- planted"}]}')
+
+        with caplog.at_level(logging.WARNING, logger="istota.sleep_cycle"):
+            assert curate_user_memory(mount_config, "alice") is False
+        assert "user_md_unreadable" in caplog.text
+        assert "overlay_is_a_symlink" in caplog.text
+        assert victim.read_text() == original
+        # The brain is never asked: the refusal precedes the LLM call, so a
+        # planted link costs nothing rather than costing a curation round.
+        mock_run.assert_not_called()
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_an_unreadable_user_md_is_never_curated_over(
+        self, mock_run, mount_config, caplog
+    ):
+        """The must-fix ISSUE-339's review turned up, reproduced.
+
+        `current = read_user_memory_v2(...) or ""` collapsed *refused* into
+        *empty*. The post-LLM sha guard then compared a refusal against a
+        refusal — equal by construction — and the ops were serialized over a
+        healthy file: a 1.26 MB USER.md came back as 456 bytes with the run
+        reporting success. Over the cap is the reachable trigger, because the
+        directory is bound read-write into the user's own sandbox, so a task
+        can pad its own USER.md and the unattended curator erases it that night.
+        """
+        from istota.storage import USER_CONFIG_READ_CAP_BYTES
+
+        mount_config.sleep_cycle.curate_user_memory = True
+        config_dir, _ = _setup_curation_fixture(mount_config)
+        body = "## Preferences\n- Likes vim\n" + ("x" * USER_CONFIG_READ_CAP_BYTES)
+        (config_dir / "USER.md").write_text(body)
+        mock_run.return_value = (True, '{"ops": [{"op": "add_heading", "heading": "New", "lines": ["- planted"]}]}')
+
+        with caplog.at_level(logging.WARNING, logger="istota.sleep_cycle"):
+            assert curate_user_memory(mount_config, "alice") is False
+        assert "user_md_unreadable" in caplog.text
+        assert (config_dir / "USER.md").read_text() == body
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_the_write_is_refused_when_user_md_is_swapped_under_the_lock(
+        self, mock_run, mount_config, tmp_path, caplog
+    ):
+        """Reaches `write_regular_file`'s refusal, which no other test does.
+
+        The read succeeds, the brain answers, and the inode is replaced only
+        once the curator is past both reads — which is the one ordering that
+        exercises the writer's own guard rather than the reader's.
+        """
+        mount_config.sleep_cycle.curate_user_memory = True
+        victim = tmp_path / "victim.md"
+        victim.write_text("untouched")
+        config_dir, _ = _setup_curation_fixture(
+            mount_config, existing_user_md="## Preferences\n- Likes vim\n"
+        )
+        user_md = config_dir / "USER.md"
+
+        real_write = sleep_cycle_module.write_regular_file
+
+        def swap_then_write(path, text):
+            if path == user_md and user_md.exists() and not user_md.is_symlink():
+                user_md.unlink()
+                user_md.symlink_to(victim)
+            return real_write(path, text)
+
+        mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "Preferences", "line": "- new fact"}]}')
+        with patch.object(sleep_cycle_module, "write_regular_file", swap_then_write):
+            with caplog.at_level(logging.WARNING, logger="istota.sleep_cycle"):
+                assert curate_user_memory(mount_config, "alice") is False
+
+        assert "user_md_not_written" in caplog.text
+        assert victim.read_text() == "untouched"
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_subprocess_timeout_returns_false(self, mock_run, mount_config):
