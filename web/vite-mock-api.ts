@@ -972,6 +972,24 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         { name: 'untrust', help: 'Remove a trusted email sender: `!untrust sender@example.com`' },
         { name: 'usage', help: 'Show token usage, and plan limits on a subscription' },
       ],
+      // The hidden alias table, mirroring `commands._COMMAND_ALIASES` in full.
+      // Without it a mid-turn `!inject` queues on a dev server and answers
+      // inline in the deployed app, which is the divergence ISSUE-350 was
+      // about — and a partial list reproduces that divergence for the names it
+      // leaves out, in the environment the frontend is developed in. Nothing
+      // pins this to the server table, so a new alias has to be added here by
+      // hand; an honest empty list beats a stale subset.
+      command_aliases: [
+        { alias: 'approve', target: 'confirm' },
+        { alias: 'decline', target: 'confirm' },
+        { alias: 'inject', target: 'steer' },
+        { alias: 'limits', target: 'usage' },
+        { alias: 'n', target: 'confirm' },
+        { alias: 'no', target: 'confirm' },
+        { alias: 'reject', target: 'confirm' },
+        { alias: 'y', target: 'confirm' },
+        { alias: 'yes', target: 'confirm' },
+      ],
       model_aliases: [
         { alias: 'fast', target: 'claude-haiku-4-5', effort: null },
         { alias: 'general', target: 'claude-sonnet-4-6', effort: null },

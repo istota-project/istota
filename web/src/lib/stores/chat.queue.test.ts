@@ -97,6 +97,7 @@ const CATALOGUE = {
     { name: 'status', help: 'What is running' },
   ],
   model_aliases: [],
+  command_aliases: [{ alias: 'inject', target: 'steer' }],
 };
 
 /**
@@ -855,6 +856,22 @@ describe('chat store — the send queue', () => {
       expect(queued.map((m) => m.text)).toEqual(['and another thing']);
       expect(queued[0].queueHeld).toBeUndefined();
       // And the running turn still owns the room.
+      expect(get(s.status)).toBe('streaming');
+    });
+
+    it('answers a hidden alias inline rather than queueing it (ISSUE-350)', async () => {
+      // `!inject` is `!steer`'s alias. `dispatch` resolves it, but it is absent
+      // from `commands` because the alias table is hidden from autocomplete —
+      // so the client used to queue it, and it reached `cmd_steer` a turn late,
+      // by which point the room was idle and the steer was refused.
+      const s = await streaming();
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: null });
+
+      await s.send('!inject look at the tests instead');
+
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('!inject look at the tests instead');
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
       expect(get(s.status)).toBe('streaming');
     });
 

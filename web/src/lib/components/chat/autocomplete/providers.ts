@@ -20,7 +20,18 @@ let cataloguePromise: Promise<ChatCommands> | null = null;
  */
 let commandNames: ReadonlySet<string> = new Set();
 
-/** The registered command names, lowercased.
+/** Bumped by every `loadCatalogue` and by `resetCommandCatalogue`, so a fetch
+ *  that resolves after its session ended does not publish its names. */
+let catalogueGeneration = 0;
+
+/** Every name `dispatch` will resolve to a command, lowercased: the registered
+ *  names plus the hidden aliases (`inject` → `steer`, `yes` → `confirm`, …).
+ *
+ *  The aliases are here and *not* in the suggestion providers, which read
+ *  `catalogue.commands` directly. That split is the whole point — the alias
+ *  table is kept out of `!help` and autocomplete on purpose, but a name the
+ *  server dispatches is still a command for routing, and conflating the two
+ *  questions is what sent a mid-turn `!inject` into the send queue (ISSUE-350).
  *
  *  Model aliases are deliberately *not* excluded. The prefix the endpoint
  *  resolves ahead of command dispatch is the literal `!model <alias>`
@@ -28,9 +39,24 @@ let commandNames: ReadonlySet<string> = new Set();
  *  nothing, and filtering on it would only refuse a genuine command that
  *  happened to share a name with a role alias (`fast`, `smart`). `!model …`
  *  itself is refused by this set on its own terms: no command is registered
- *  under `model`. */
+ *  under `model`, and that refusal is load-bearing rather than incidental —
+ *  `!model opus <prompt>` creates a task, so it has to keep taking the turn
+ *  path rather than being answered inline. */
 function commandNamesOf(c: ChatCommands): ReadonlySet<string> {
-  return new Set(c.commands.map((x) => x.name.toLowerCase()));
+  // Defensive about the payload's shape rather than trusting the type: this
+  // runs inside `loadCatalogue`'s `.then`, which sits *after* its `.catch`, so
+  // a throw here rejects the cached promise for the life of the session — and
+  // `getSuggestions` and `getModelAliases` both await it bare. `command_aliases`
+  // is the likeliest field to arrive misshapen, being the optional one a
+  // mismatched server or proxy may omit or mangle.
+  const names = new Set<string>();
+  for (const x of Array.isArray(c.commands) ? c.commands : []) {
+    if (typeof x?.name === 'string') names.add(x.name.toLowerCase());
+  }
+  for (const x of Array.isArray(c.command_aliases) ? c.command_aliases : []) {
+    if (typeof x?.alias === 'string') names.add(x.alias.toLowerCase());
+  }
+  return names;
 }
 
 /** Fetch the command/alias catalogue once per session; a failure degrades to an
@@ -38,13 +64,18 @@ function commandNamesOf(c: ChatCommands): ReadonlySet<string> {
  *  hammer a down endpoint on every keystroke. */
 function loadCatalogue(): Promise<ChatCommands> {
   if (!cataloguePromise) {
+    // Which fetch this is. `resetCommandCatalogue` bumps it, so an in-flight
+    // fetch started before a teardown cannot assign over the names a fetch
+    // started after it already published — which would leave the routing set
+    // empty for the session and queue every command, `!stop` included.
+    const gen = ++catalogueGeneration;
     cataloguePromise = fetchChatCommands()
       .catch((e) => {
         console.warn('command autocomplete: catalogue fetch failed', e);
         return EMPTY;
       })
       .then((c) => {
-        commandNames = commandNamesOf(c);
+        if (gen === catalogueGeneration) commandNames = commandNamesOf(c);
         return c;
       });
   }
@@ -55,6 +86,7 @@ function loadCatalogue(): Promise<ChatCommands> {
 export function resetCommandCatalogue(): void {
   cataloguePromise = null;
   commandNames = new Set();
+  catalogueGeneration++;
 }
 
 /** The command names, once the catalogue has landed — for a caller that holds
@@ -76,11 +108,18 @@ export async function loadCommandNames(): Promise<ReadonlySet<string>> {
  *
  * The catalogue is the only evidence available client-side, which is the real
  * reason an unregistered `!word` is refused while a turn runs — not that the
- * server would make a task of it. It would answer that one inline as well.
+ * server would make a task of it. It would answer that one inline as well, so
+ * what the refusal costs is latency: the message queues and is answered a turn
+ * later. Since ISSUE-350 the catalogue carries the hidden aliases too, so that
+ * gap is now only genuinely unknown names, and closing it would mean
+ * reproducing the `!model <alias> <prompt>` grammar here — a second copy of a
+ * server rule, which is the shape of the bug this set was widened to fix.
  *
  * `names` defaults to the module snapshot, which is what a synchronous caller
- * outside a reactive scope wants; the composer passes its own copy so the
- * derivation reruns when the catalogue arrives.
+ * outside a reactive scope wants — and today that is the only use: `send()` is
+ * the one non-test caller and passes no set of its own. The parameter is kept
+ * for a caller holding a reactive copy; the composer used to be one, through
+ * `isInlineCommand`, which went with the mode gate (ISSUE-238).
  */
 export function isKnownCommand(text: string, names: ReadonlySet<string> = commandNames): boolean {
   const m = /^!(\w+)/.exec(text.trim());

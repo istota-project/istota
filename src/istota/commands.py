@@ -95,6 +95,10 @@ COMMANDS: dict[str, tuple[CommandHandler, str]] = {}
 
 # Hidden command aliases: alias -> canonical command name. Resolved in
 # `dispatch` but omitted from `!help` / autocomplete (which read `COMMANDS`).
+# Read by name outside this module: `GET /chat/commands` serializes it as
+# `command_aliases` so the web client can tell that `!inject` is a command
+# without it reaching the popover (ISSUE-350). Renaming this needs that
+# endpoint and `tests/test_web_chat_commands.py` changed with it.
 _COMMAND_ALIASES: dict[str, str] = {
     "inject": "steer",
     # Answering a held task. `!confirm` is the documented spelling; these are

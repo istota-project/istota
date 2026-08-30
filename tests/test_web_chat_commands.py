@@ -107,6 +107,36 @@ class TestChatCommandsApi:
         first = aliases[0]
         assert set(first) == {"alias", "target", "effort"}
 
+    async def test_includes_command_aliases(self, chat_client):
+        """The hidden alias table is published, so a client can tell that
+        `!inject` is a command without learning the table itself (ISSUE-350).
+        """
+        from istota import commands
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
+        assert resp.status_code == 200
+        aliases = resp.json()["command_aliases"]
+        assert {a["alias"] for a in aliases} == set(commands._COMMAND_ALIASES)
+        by_alias = {a["alias"]: a["target"] for a in aliases}
+        assert by_alias["inject"] == "steer"
+        assert by_alias["yes"] == "confirm"
+        # Every target is a real command, so a client that resolves through
+        # this table lands somewhere `dispatch` will also land.
+        assert set(by_alias.values()) <= set(commands.COMMANDS)
+        assert all(set(a) == {"alias", "target"} for a in aliases)
+        assert [a["alias"] for a in aliases] == sorted(by_alias)
+
+    async def test_aliases_stay_out_of_the_command_list(self, chat_client):
+        """`commands` feeds autocomplete and `!help`, which are exactly what
+        the alias table is meant to stay out of. Publishing it must not leak.
+        """
+        from istota import commands
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
+        names = {c["name"] for c in resp.json()["commands"]}
+        assert names == set(commands.COMMANDS)
+        assert names.isdisjoint(set(commands._COMMAND_ALIASES))
+
     async def test_degrades_when_aliases_fail(self, chat_client, monkeypatch):
         import istota.web_app as mod
         cookies = await _login(chat_client, "alice")

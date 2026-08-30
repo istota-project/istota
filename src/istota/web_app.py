@@ -5754,17 +5754,35 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
 
 @api_router.get("/chat/commands")
 async def chat_commands(user: dict = Depends(_require_api_auth)):
-    """Command + model-alias catalogue that powers the composer autocomplete.
+    """Command, command-alias and model-alias catalogue for the web client.
 
-    Derived at request time from the in-memory command registry and the active
-    brain's alias table — no storage. Model aliases degrade to an empty list if
-    the brain can't resolve them, so the primary (command) feature still works.
+    Derived at request time from the in-memory command registry, the hidden
+    command-alias table and the active brain's alias table — no storage. Model
+    aliases degrade to an empty list if the brain can't resolve them, so the
+    primary (command) feature still works. Command aliases come from a module
+    constant and cannot fail independently.
     """
     from . import commands
 
     cmds = [
         {"name": name, "help": help_text}
         for name, (_handler, help_text) in sorted(commands.COMMANDS.items())
+    ]
+    # The hidden alias table, published separately from `commands` and never
+    # merged into it (ISSUE-350). `dispatch` resolves an alias one line before
+    # it checks `COMMANDS`, so a client that only sees `commands` cannot tell
+    # that `!inject` is a command at all — on web chat that meant a mid-turn
+    # `!inject` was queued as an ordinary message and reached `cmd_steer` a
+    # turn late, with the room idle and the steer refused. Separate rather than
+    # folded in because `commands` is what feeds `!help` and the composer
+    # autocomplete, which is exactly what these names are kept out of.
+    # `target` has no client reader today — routing needs the alias name alone.
+    # It is published because the pair is what makes the entry self-describing
+    # (a later "short for `!steer`" affordance needs it) and because a table of
+    # bare names would invite a client to guess the mapping.
+    cmd_aliases = [
+        {"alias": alias, "target": target}
+        for alias, target in sorted(commands._COMMAND_ALIASES.items())
     ]
     aliases: list[dict] = []
     try:
@@ -5774,7 +5792,7 @@ async def chat_commands(user: dict = Depends(_require_api_auth)):
         ]
     except Exception as e:  # noqa: BLE001 — aliases degrade independently
         logger.warning("chat_commands: model aliases unavailable: %s", e)
-    return {"commands": cmds, "model_aliases": aliases}
+    return {"commands": cmds, "command_aliases": cmd_aliases, "model_aliases": aliases}
 
 
 @api_router.get("/chat/rooms")
