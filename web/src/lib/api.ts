@@ -3075,13 +3075,40 @@ export function chatRoomStreamUrl(sinceId: number, sinceDeletionId = 0): string 
 }
 
 export interface ChatAttachment {
-  path: string;
+  // The host path the brain reads, or **null for a chip whose bytes are still
+  // in this browser** — a file attached with no connection, waiting for the
+  // outbox to upload it (ISSUE-202). A null path never reaches the wire: the
+  // drain resolves every pending chip to a real path before it POSTs.
+  path: string | null;
   name: string;
   size: number;
   // Where the same file is reachable through `chatFileUrl`, or null when it
   // isn't (a deployment with no local workspace). Distinct from `path`, which
   // is the host path the brain reads and the download endpoint won't take.
   workspace_path?: string | null;
+  // Key into the offline `blobs` object store, set on a pending chip and on no
+  // other. Its presence is what `path: null` means.
+  pendingBlobId?: string;
+  // The picked file's type, carried only on a pending chip so the queue entry
+  // that records it has one. A file already uploaded has no use for it — the
+  // server holds the file and the client only ever names it.
+  mimeType?: string;
+}
+
+/**
+ * An attachment upload that never reached the server.
+ *
+ * Distinguished from every other upload failure for the reason the send path
+ * distinguishes `unreachable` from `rejected`: nothing has been refused, so a
+ * queued message keeps its bytes and waits rather than failing (ISSUE-202).
+ * Everything the server actually answered — a 413, a disallowed extension —
+ * throws a plain `Error` carrying its message.
+ */
+export class UploadUnreachableError extends Error {
+  constructor(message = 'Couldn’t upload — the server is unreachable.') {
+    super(message);
+    this.name = 'UploadUnreachableError';
+  }
 }
 
 /**
@@ -3117,11 +3144,22 @@ export async function uploadChatAttachment(item: File | Picked): Promise<ChatAtt
   if (!file) throw new Error('Nothing to upload.');
   const form = new FormData();
   form.append('file', file);
-  const resp = await fetch(`${base}/api${CHAT_ATTACHMENT_PATH}`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: form,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api${CHAT_ATTACHMENT_PATH}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form,
+    });
+  } catch {
+    // The one failure that says nothing about the file. Reported to the
+    // connectivity store for the same reason every other transport completion
+    // is: an upload is the request that discovers the gap when it is the first
+    // thing the user does after losing signal.
+    noteTransport(false, 'unreachable');
+    throw new UploadUnreachableError();
+  }
+  noteTransport(true);
   if (resp.status === 401) throw new AuthError();
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || `upload failed (${resp.status})`);
@@ -3137,7 +3175,17 @@ export async function uploadChatAttachment(item: File | Picked): Promise<ChatAtt
  */
 async function uploadFromShell(item: Picked): Promise<ChatAttachment> {
   const url = new URL(`${base}/api${CHAT_ATTACHMENT_PATH}`, location.origin).toString();
-  const { status, body } = await uploadFromPath(item, url);
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await uploadFromPath(item, url));
+  } catch {
+    // `uploadFromPath` returns any HTTP answer as a status, so a throw here is
+    // URLSession failing to get one — the same gap the fetch above reports.
+    noteTransport(false, 'unreachable');
+    throw new UploadUnreachableError();
+  }
+  noteTransport(true);
   if (status === 401) throw new AuthError();
   let data: { error?: string } & Partial<ChatAttachment> = {};
   try {

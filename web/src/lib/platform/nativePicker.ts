@@ -217,6 +217,22 @@ async function pickedFromPath(
 }
 
 /**
+ * The bytes behind a pick, wherever they currently are.
+ *
+ * Normally nobody wants these — the whole point of a native pick is that the
+ * file goes from the picker to the server without passing through the WebView.
+ * The exception is the offline outbox (ISSUE-202), which has to *hold* the file
+ * until there is a connection, and can only hold what it can see. Reading the
+ * path back consumes the picker's temp copy, which is the same thing an upload
+ * from it would have done.
+ */
+export async function fileFromPicked(picked: Picked): Promise<File | null> {
+  if (picked.blob) return picked.blob;
+  if (!picked.nativePath) return null;
+  return fileFromPath(picked.nativePath, picked.name, picked.type);
+}
+
+/**
  * Hand a file on disk to the shell to post.
  *
  * The response comes back as a status and a body rather than as a thrown

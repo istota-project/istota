@@ -106,10 +106,21 @@ export interface SteerRecordedData {
  * `$app/paths`.
  */
 export interface SendAttachment {
-  path: string;
+  /**
+   * Null while the bytes are still in this browser, waiting for a connection
+   * (ISSUE-202). A payload can hold one because a queued message's payload is
+   * built before its files exist server-side; `beginSend` resolves every one of
+   * them to a real path before the POST, and `sendTurn` drops any that is
+   * somehow still null rather than asking the server to read a missing file.
+   */
+  path: string | null;
   name: string;
   size: number;
   workspace_path?: string | null;
+  /** Key into the offline `blobs` store, on a pending chip and nowhere else. */
+  pendingBlobId?: string;
+  /** The picked file's type, carried only while the file is still held here. */
+  mimeType?: string;
 }
 
 export interface SendPayload {

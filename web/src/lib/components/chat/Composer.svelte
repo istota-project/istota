@@ -39,10 +39,14 @@
     pickPhotos,
     pickDocuments,
     pickedFromFile,
+    fileFromPicked,
     type Picked,
   } from '$lib/platform/nativePicker';
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
   import type { MessageReply } from '$lib/stores/segments';
+  import { online } from '$lib/stores/connectivity';
+  import { putBlob, deleteBlob, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
+  import { get } from 'svelte/store';
 
   let {
     onSend,
@@ -620,7 +624,26 @@
    * leaves it null for good. That is deliberate — an unreachable /chat/config
    * must not become a client-side refusal of files the server would have taken.
    */
+  /**
+   * The one sentence every offline refusal reads.
+   *
+   * Four bounds produce it — the per-file cap, the shared total, the origin's
+   * remaining headroom, and a browser that will not give us IndexedDB — and
+   * they are one fact to the person holding the phone: this file cannot be kept
+   * until there is a connection. Naming which bound would ask them to reason
+   * about a storage budget they cannot see.
+   */
+  const OFFLINE_TOO_LARGE = 'Too large to hold offline — attach it when you’re back online.';
+
   function refusalReason(file: Picked): string | null {
+    // The offline bound is checked whatever the server said, and before it: the
+    // server's limits arrive over the network, so with no connection `limits`
+    // is routinely null — the one case where deferring to the server would
+    // mean deferring to nobody. What this bound is about is different anyway.
+    // It is what is safe to *hold*: eviction is whole-origin, so a 4K video
+    // parked in IndexedDB takes the text queue and the transcript cache with it
+    // when the quota is reached.
+    if (!get(online) && file.size > MAX_PENDING_BLOB_BYTES) return OFFLINE_TOO_LARGE;
     if (!limits) return null;
     if (file.size > limits.maxBytes) {
       return `${file.name} is larger than ${limits.maxMb} MB.`;
@@ -633,12 +656,74 @@
   }
 
   /**
+   * Hold a file's bytes in this browser instead of uploading them.
+   *
+   * The offline half of `upload` below, and the whole of the voice-note story:
+   * `useRecorder` hands its memo to `upload([file])` exactly as a picker does,
+   * so a recording made with no connection takes this branch without the
+   * recorder knowing anything about connectivity.
+   *
+   * Returns the chip to stage, or null when the bytes were refused — over the
+   * per-file bound, over the shared total, past the origin's headroom, or an
+   * IndexedDB this browser will not give us. One sentence covers all four,
+   * because from the composer they are one fact: this file cannot be held.
+   *
+   * A file the shell picked is on disk rather than in the page, and offline the
+   * shell cannot post it either — so it is read back through the picker's own
+   * fallback, which produces the same `File` a browser would have handed over.
+   */
+  async function holdOffline(file: Picked): Promise<ChatAttachment | null> {
+    const bytes = file.blob ?? (file.nativePath ? await fileFromPicked(file) : null);
+    if (!bytes) return null;
+    const mimeType = file.type || bytes.type || 'application/octet-stream';
+    const blobId = newBlobId();
+    if (!blobId) return null;
+    // Refused before the file is read into memory, so an oversized pick costs
+    // the check and nothing else. `refusalReason` already turned away anything
+    // over the per-file bound; this is the shared total and the origin's own
+    // headroom, which only the store can answer.
+    if (bytes.size > MAX_PENDING_BLOB_BYTES) return null;
+    const stored = await putBlob(blobId, await bytes.arrayBuffer(), {
+      name: file.name,
+      mimeType,
+      size: bytes.size,
+    });
+    if (!stored) return null;
+    return {
+      // The two fields that say "not on the server yet". Everything downstream
+      // — the queue entry, the drain, the rendered chip — branches on them.
+      path: null,
+      pendingBlobId: blobId,
+      name: file.name,
+      size: bytes.size,
+      mimeType,
+    };
+  }
+
+  /** An id for one held file, or null when the browser cannot mint one. */
+  function newBlobId(): string | null {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      // `crypto.randomUUID` is a secure-context API, and a page that is not one
+      // has no business holding files either. Refusing reads as the same
+      // sentence every other refusal does.
+      return null;
+    }
+  }
+
+  /**
    * The one sink every attachment goes through.
    *
    * A pick from the native menu arrives as a path the shell will post itself; a
    * paste, drop, file input or voice memo arrives as bytes already in the page.
    * Both become a `Picked` here so the size check, the error handling and the
    * chip list have one shape to deal with.
+   *
+   * With no connection there is nothing to POST to, so the bytes are held in
+   * IndexedDB and the chip is staged unresolved — see `holdOffline`. The rest
+   * of the composer is unchanged either way: the chip renders, the send stages
+   * it, and the outbox does the upload when there is a connection to do it on.
    */
   async function upload(files: FileList | File[] | Picked[]) {
     // The room this batch belongs to. Every write below is guarded on it still
@@ -659,6 +744,19 @@
       }
       uploading++;
       try {
+        if (!get(online)) {
+          const held = await holdOffline(file);
+          if (!held) {
+            if (!stale()) uploadError = OFFLINE_TOO_LARGE;
+            continue;
+          }
+          // Same room guard as the upload below, and the same reasoning —
+          // except that here the bytes are ours to take back, so a chip that
+          // would have landed in the wrong room drops its blob with it.
+          if (stale()) void deleteBlob(held.pendingBlobId as string);
+          else attachments = [...attachments, held];
+          continue;
+        }
         const att = await uploadChatAttachment(file);
         // The file did reach the server and is now orphaned there — the same
         // outcome as closing the tab mid-upload, which the inbox already
@@ -672,8 +770,21 @@
     }
   }
 
-  function removeAttachment(path: string) {
-    attachments = attachments.filter((a) => a.path !== path);
+  /**
+   * What identifies one staged chip.
+   *
+   * The host path used to be it, and a pending chip has none — so the key is
+   * the blob id where there is one. Both are unique per file: a path carries
+   * the server's collision suffix, a blob id is a uuid.
+   */
+  const attachKey = (a: ChatAttachment) => a.pendingBlobId ?? a.path ?? a.name;
+
+  function removeAttachment(key: string) {
+    const going = attachments.find((a) => attachKey(a) === key);
+    attachments = attachments.filter((a) => attachKey(a) !== key);
+    // An uploaded file is left orphaned server-side, as it always has been; a
+    // held one is ours, and nothing else names it once its chip is gone.
+    if (going?.pendingBlobId) void deleteBlob(going.pendingBlobId);
   }
 
   function submit() {
@@ -1002,13 +1113,16 @@
   {/if}
   {#if attachments.length || uploading}
     <div class="attach-row">
-      {#each attachments as att (att.path)}
-        <span class="attach-chip">
+      <!-- A chip with no path is holding its bytes here rather than on the
+           server, so it is muted the way a queued row is: the file is staged,
+           it is just not anywhere yet. -->
+      {#each attachments as att (attachKey(att))}
+        <span class="attach-chip" class:pending={!!att.pendingBlobId}>
           {isAudio(att.name) ? '🎤' : '📎'}
           {att.name}
           <button
             class="attach-x"
-            onclick={() => removeAttachment(att.path)}
+            onclick={() => removeAttachment(attachKey(att))}
             type="button"
             aria-label="Remove {att.name}"
           >
@@ -1508,7 +1622,11 @@
     border-radius: var(--radius-pill);
     padding: 0.15rem var(--space-2);
   }
-  .attach-chip.uploading {
+  /* Both the in-flight chip and the held-offline one are the same statement —
+	   this file is not on the server — so they read the same. Muted, not
+	   coloured: nothing has gone wrong. */
+  .attach-chip.uploading,
+  .attach-chip.pending {
     color: var(--text-muted);
   }
   .attach-x {
