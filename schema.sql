@@ -1198,7 +1198,9 @@ CREATE INDEX IF NOT EXISTS idx_notifications_object
 -- so a file-backed avatar would be unavailable on exactly the deployments with
 -- no other place to put it.
 --
--- No indexes: the primary key covers every read, and each one names the user.
+-- No indexes. The primary key covers every per-user read, and all but one read
+-- names a user; the exception is the import job's ETag lookup, which filters on
+-- `source` alone and so scans, once per import tick, bounded by the user count.
 CREATE TABLE IF NOT EXISTS user_avatars (
     user_id      TEXT NOT NULL,
     source       TEXT NOT NULL,                        -- 'upload' | 'nextcloud'

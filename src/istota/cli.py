@@ -1279,7 +1279,7 @@ def cmd_user_show(args):
 
 
 def cmd_user_remove(args):
-    """Remove a user_profiles row. Does not touch resources or other tables."""
+    """Remove a user_profiles row and the user's avatars. Nothing else."""
     from . import user_profiles
 
     config = load_config(Path(args.config) if args.config else None)
@@ -2275,8 +2275,10 @@ def main():
     user_show_parser = user_subparsers.add_parser("show", help="Show stored profile row as JSON")
     user_show_parser.add_argument("--name", required=True, help="User ID")
 
-    # user remove  (Phase 6: delete a user_profiles row; does not touch other tables)
-    user_remove_parser = user_subparsers.add_parser("remove", help="Remove a user_profiles row")
+    # user remove  (Phase 6: delete a user_profiles row, plus that user's avatar rows)
+    user_remove_parser = user_subparsers.add_parser(
+        "remove", help="Remove a user's profile row and avatars"
+    )
     user_remove_parser.add_argument("--name", required=True, help="User ID")
 
     # calendar (with subparsers)

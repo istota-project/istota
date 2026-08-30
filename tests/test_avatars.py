@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import sqlite3
 import zlib
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageFile, JpegImagePlugin
@@ -243,6 +244,19 @@ class TestNormalizeRefusals:
         assert excinfo.value.status == 413
         assert calls == [], "the image was decoded before the ceiling was checked"
 
+    @pytest.mark.parametrize("edge", [4000, 20000, 30000])
+    def test_a_huge_declared_image_is_413_at_every_size(self, edge):
+        # Pillow's own decompression-bomb check fires inside `Image.open` above
+        # ~179 MP, well past our ceiling. Swept into the blanket handler it came
+        # back 415 "could not read that image", so the bigger the input the less
+        # accurate the answer — and the sender of a large scan was told their
+        # file was corrupt rather than too big.
+        with pytest.raises(AvatarError) as excinfo:
+            avatars.normalize(
+                _png_declaring(edge, edge), declared_format=None, max_bytes=BIG
+            )
+        assert excinfo.value.status == 413, f"{edge}x{edge}"
+
     def test_a_format_outside_the_accept_list_is_415(self):
         buf = io.BytesIO()
         Image.new("RGB", (300, 300), (10, 20, 30)).save(buf, "BMP")
@@ -269,7 +283,7 @@ class TestNormalizeModes:
         # A fully transparent upload flattens onto white, which is what was sent.
         assert result.convert("RGB").getpixel((96, 96)) == (255, 255, 255)
 
-    def test_animated_gif_yields_one_frame(self):
+    def test_animated_gif_yields_the_first_frame(self):
         frames = [Image.new("RGB", (300, 300), c) for c in [(255, 0, 0), (0, 255, 0)]]
         buf = io.BytesIO()
         frames[0].save(buf, "GIF", save_all=True, append_images=frames[1:], duration=100)
@@ -279,6 +293,32 @@ class TestNormalizeModes:
         result = _open(out)
         assert getattr(result, "n_frames", 1) == 1
         assert not getattr(result, "is_animated", False)
+        # Which frame, not just how many: saving without `save_all` yields a
+        # single frame whichever one the pipeline happened to be sitting on, so
+        # the count alone passes against an implementation that seeks to the
+        # last frame. Red is frame 0.
+        r, g, b = result.convert("RGB").getpixel((96, 96))
+        assert r > 150 and g < 110, f"expected the first (red) frame, got {(r, g, b)}"
+
+    def test_a_palette_image_is_resampled_not_point_sampled(self):
+        # `Image.resize` silently swaps the filter for NEAREST on modes "P" and
+        # "1", so a palette image that reaches the resize before its mode is
+        # normalized is downscaled by point sampling. A one-pixel checkerboard
+        # is the sharpest case: filtered it averages to mid grey, point-sampled
+        # it comes back as a solid block of whichever phase was hit. GIF is
+        # always "P" and is an accepted format, so this is a normal upload.
+        checker = Image.new("L", (768, 768))
+        for y in range(768):
+            for x in range(768):
+                checker.putpixel((x, y), 255 if (x + y) % 2 == 0 else 0)
+        buf = io.BytesIO()
+        checker.convert("P").save(buf, "PNG")
+        assert Image.open(io.BytesIO(buf.getvalue())).mode == "P"
+
+        out, _ = avatars.normalize(buf.getvalue(), declared_format=None, max_bytes=BIG)
+        pixels = list(_open(out).convert("L").tobytes())
+        mean = sum(pixels) / len(pixels)
+        assert 100 < mean < 156, f"palette image was point-sampled: mean {mean}"
 
     def test_greyscale_input_is_accepted(self):
         out, _ = avatars.normalize(
@@ -393,6 +433,84 @@ class TestUserAvatarStore:
         assert avatars.user_avatar_hash(db_conn, "alice") == alice_hash
         assert avatars.get_user_avatar(db_conn, "bob").content_hash != alice_hash
 
+    def test_the_two_readers_agree_on_what_counts_as_a_picture(self, db_conn):
+        """A row one reader accepts and the other rejects is worse than none.
+
+        `get_user_avatar` serves the bytes and `user_avatar_hash` supplies the
+        ETag and the `?v` for the same row, so a disagreement renders as an
+        avatar with no version, or as `/me` reporting nothing while the image
+        endpoint serves something. Neither state is reachable from `normalize`,
+        which is exactly why nothing else would catch it.
+        """
+        real, digest = avatars.normalize(
+            _png(size=(400, 400)), declared_format=None, max_bytes=BIG
+        )
+        cases = [
+            ("empty blob", b"", digest),
+            ("no hash", real, ""),
+            ("both", b"", ""),
+            ("well formed", real, digest),
+        ]
+        for label, image, content_hash in cases:
+            avatars.delete_all_user_avatars(db_conn, "alice")
+            avatars.put_user_avatar(
+                db_conn, "alice", source=avatars.SOURCE_UPLOAD,
+                image=image, content_hash=content_hash,
+            )
+            got = avatars.get_user_avatar(db_conn, "alice")
+            hashed = avatars.user_avatar_hash(db_conn, "alice")
+            assert (got is None) == (hashed is None), label
+            if label == "well formed":
+                assert got is not None and hashed == digest
+            else:
+                assert got is None, label
+
+    def test_the_two_bot_readers_agree_too(self, db_conn):
+        db_conn.execute(
+            "INSERT INTO bot_avatar (id, content_hash, image) VALUES (1, '', X'')"
+        )
+        assert avatars.get_bot_avatar(db_conn) is None
+        assert avatars.bot_avatar_hash(db_conn) is None
+
+    def test_a_write_without_an_etag_does_not_wipe_the_stored_one(self, db_conn):
+        """`remote_etag=None` means "I did not look", not "there is none".
+
+        The one call in the import job that stores an actual image is also the
+        one most likely to be written without threading the ETag through. With
+        a plain `""` default that call clears the validator, and that user
+        re-downloads unconditionally every tick from then on, silently.
+        """
+        avatars.touch_import_probe(db_conn, "alice", remote_etag='W/"keepme"')
+        image, digest = avatars.normalize(
+            _png(size=(400, 400)), declared_format=None, max_bytes=BIG
+        )
+        avatars.put_user_avatar(
+            db_conn, "alice", source=avatars.SOURCE_NEXTCLOUD,
+            image=image, content_hash=digest,
+        )
+        assert avatars.import_probe_state(db_conn)["alice"] == 'W/"keepme"'
+
+    def test_an_explicit_empty_etag_does_clear_it(self, db_conn):
+        # The other half: "the remote named no ETag" is a real statement and
+        # has to be expressible, or the column goes stale instead of empty.
+        avatars.touch_import_probe(db_conn, "alice", remote_etag='W/"old"')
+        image, digest = avatars.normalize(
+            _png(size=(400, 400)), declared_format=None, max_bytes=BIG
+        )
+        avatars.put_user_avatar(
+            db_conn, "alice", source=avatars.SOURCE_NEXTCLOUD,
+            image=image, content_hash=digest, remote_etag="",
+        )
+        assert avatars.import_probe_state(db_conn)["alice"] == ""
+
+    def test_a_first_write_with_no_etag_stores_an_empty_string(self, db_conn):
+        # The column is NOT NULL, so the None default must not reach it.
+        _store(db_conn, "alice", avatars.SOURCE_UPLOAD)
+        row = db_conn.execute(
+            "SELECT remote_etag FROM user_avatars WHERE user_id = ?", ("alice",)
+        ).fetchone()
+        assert row["remote_etag"] == ""
+
     def test_delete_all_returns_the_row_count(self, db_conn):
         _store(db_conn, "alice", avatars.SOURCE_UPLOAD)
         _store(db_conn, "alice", avatars.SOURCE_NEXTCLOUD)
@@ -425,9 +543,12 @@ class TestImportProbe:
     def test_import_probe_state_includes_probe_rows(self, db_conn):
         avatars.touch_import_probe(db_conn, "alice", remote_etag='W/"alice"')
         _store(db_conn, "bob", avatars.SOURCE_NEXTCLOUD)
+        image, digest = avatars.normalize(
+            _png(size=(400, 400)), declared_format=None, max_bytes=BIG
+        )
         avatars.put_user_avatar(
             db_conn, "carol", source=avatars.SOURCE_NEXTCLOUD,
-            image=b"", content_hash="x", remote_etag='W/"carol"',
+            image=image, content_hash=digest, remote_etag='W/"carol"',
         )
         state = avatars.import_probe_state(db_conn)
         assert state["alice"] == 'W/"alice"'
@@ -513,8 +634,31 @@ class TestBotAvatarStore:
 # --- schema -----------------------------------------------------------------
 
 
+def _table_info(db_file, table) -> list[tuple]:
+    conn = sqlite3.connect(db_file)
+    try:
+        return [tuple(r) for r in conn.execute(f"PRAGMA table_info({table})")]
+    finally:
+        conn.close()
+
+
+def _schema_sql_for(table: str) -> str:
+    """The `CREATE TABLE` block for one table, lifted out of `schema.sql`.
+
+    Executed on its own rather than running the whole file: `schema.sql` is
+    applied by `init_db` *after* the migrations and has statements that depend
+    on columns those add, so an empty-DB `executescript` of the whole thing is
+    not a supported path.
+    """
+    text = (Path(__file__).parent.parent / "schema.sql").read_text()
+    marker = f"CREATE TABLE IF NOT EXISTS {table} ("
+    start = text.index(marker)
+    end = text.index("\n);", start) + len("\n);")
+    return text[start:end]
+
+
 class TestSchema:
-    def test_both_tables_exist_on_a_fresh_install(self, db_path):
+    def test_both_tables_exist_after_init_db(self, db_path):
         with sqlite3.connect(db_path) as conn:
             names = {
                 r[0] for r in conn.execute(
@@ -522,6 +666,42 @@ class TestSchema:
                 )
             }
         assert {"user_avatars", "bot_avatar"} <= names
+
+    @pytest.mark.parametrize("table", ["user_avatars", "bot_avatar"])
+    def test_the_schema_and_migration_copies_agree(self, table, tmp_path):
+        """The two definitions are held equal, column for column.
+
+        `init_db` runs `_run_migrations` *before* `executescript(schema.sql)`,
+        so on a fresh install the migration copy wins the race and `schema.sql`'s
+        `CREATE TABLE IF NOT EXISTS` is a guaranteed no-op. Deleting the
+        `schema.sql` block entirely leaves every other test in this class green,
+        and a column added to one copy and not the other would be invisible
+        everywhere. This is the assertion that notices.
+        """
+        from istota import db as db_module
+
+        migrated = tmp_path / "migrated.db"
+        conn = sqlite3.connect(migrated)
+        conn.row_factory = sqlite3.Row
+        try:
+            db_module._run_migrations(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        declared = tmp_path / "declared.db"
+        conn = sqlite3.connect(declared)
+        try:
+            conn.executescript(_schema_sql_for(table))
+            conn.commit()
+        finally:
+            conn.close()
+
+        from_migration = _table_info(migrated, table)
+        from_schema = _table_info(declared, table)
+        assert from_migration, f"{table} missing from the migration copy"
+        assert from_schema, f"{table} missing from schema.sql"
+        assert from_migration == from_schema
 
     def test_migrations_alone_create_both_tables(self, tmp_path):
         # An existing deployment never re-runs a fresh `schema.sql` against an
