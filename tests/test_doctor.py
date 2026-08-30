@@ -3087,3 +3087,159 @@ class TestClassifyUnknownOverlay:
             False, "unknown_skill, a copy of developer.md"
         )
 
+
+class TestAvatarImport:
+    """`web.avatar_import` — configuration and recorded state, and no socket.
+
+    Stage 4 of the profile-icons spec. The check runs on the daemon's start-up
+    path, on a scheduler interval, from `istota doctor` and from the admin
+    dashboard's Health pane, so a live Nextcloud call here would hang the admin
+    page behind a remote timeout. That is the same reasoning that keeps
+    `web.basemap` from making a request, and it gets an assertion rather than a
+    docstring.
+    """
+
+    @staticmethod
+    def _config(make_config, db_path, **overrides):
+        from istota.config import NextcloudConfig, SchedulerConfig, WebConfig
+
+        settings = {
+            "db_path": db_path,
+            "nextcloud": NextcloudConfig(url="https://cloud.example"),
+            "web": WebConfig(enabled=True, avatar_import_from_nextcloud=True),
+            "scheduler": SchedulerConfig(avatar_import_interval=21600),
+        }
+        settings.update(overrides)
+        return make_config(**settings)
+
+    @staticmethod
+    def _run(config):
+        return run_checks(config, only=("web.avatar_import",))[0]
+
+    def test_skips_on_a_local_storage_backend(self, make_config, db_path):
+        from istota.config import NextcloudConfig
+
+        r = self._run(self._config(make_config, db_path,
+                                   nextcloud=NextcloudConfig(url="")))
+        assert r.status == SKIP
+        assert "nextcloud" in r.detail.lower()
+
+    def test_skips_when_the_import_is_switched_off(self, make_config, db_path):
+        from istota.config import WebConfig
+
+        r = self._run(self._config(
+            make_config, db_path,
+            web=WebConfig(enabled=True, avatar_import_from_nextcloud=False),
+        ))
+        assert r.status == SKIP
+
+    def test_skips_when_the_interval_is_zero(self, make_config, db_path):
+        from istota.config import SchedulerConfig
+
+        r = self._run(self._config(
+            make_config, db_path, scheduler=SchedulerConfig(avatar_import_interval=0),
+        ))
+        assert r.status == SKIP
+
+    def test_reports_that_no_tick_has_run_yet_without_paging_anyone(
+        self, make_config, db_path
+    ):
+        """The daemon runs the first tick seconds after boot, and doctor's own
+        boot run comes before it. A WARN here would fire on every restart."""
+        r = self._run(self._config(make_config, db_path))
+        assert r.status == OK
+        assert "no import tick" in r.detail.lower()
+
+    def test_reports_the_recorded_state(self, make_config, db_path):
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.put_user_avatar(
+                conn, "alice", source=avatars.SOURCE_NEXTCLOUD,
+                image=b"not-really-an-image", content_hash="deadbeef",
+                remote_etag='"e1"',
+            )
+            avatars.touch_import_probe(conn, "bob", remote_etag='"g"')
+            avatars.write_import_state(
+                conn,
+                {"at": "2026-08-30T09:00:00Z", "users": 2, "imported": 1,
+                 "no_custom": 1, "failed": 0, "header": avatars.HEADER_SEEN},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert r.status == OK
+        assert "2026-08-30T09:00:00Z" in r.detail
+        assert "1 imported" in r.detail
+        assert "1 with no custom" in r.detail
+
+    def test_a_missing_custom_avatar_header_warns_with_a_remedy(
+        self, make_config, db_path
+    ):
+        """The one finding here that is worth an operator's attention: the
+        header is how a user-set picture is told from the coloured letter
+        Nextcloud generates, so without it nothing will ever be imported."""
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(
+                conn,
+                {"at": "2026-08-30T09:00:00Z", "users": 2, "imported": 0,
+                 "no_custom": 2, "failed": 0, "header": avatars.HEADER_ABSENT},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert r.status == WARN
+        assert r.remedy
+        assert "avatar_import_from_nextcloud" in r.remedy
+
+    def test_a_tick_that_observed_nothing_is_not_reported_as_a_missing_header(
+        self, make_config, db_path
+    ):
+        from istota import avatars
+        from istota import db as db_module
+
+        with db_module.get_db(db_path) as conn:
+            avatars.write_import_state(
+                conn,
+                {"at": "2026-08-30T09:00:00Z", "users": 1, "imported": 0,
+                 "no_custom": 0, "failed": 0, "header": avatars.HEADER_UNOBSERVED},
+            )
+
+        r = self._run(self._config(make_config, db_path))
+        assert r.status == OK
+
+    def test_an_unreadable_database_is_reported_rather_than_raised(
+        self, make_config, tmp_path
+    ):
+        missing = tmp_path / "nothing" / "istota.db"
+        r = self._run(self._config(make_config, missing))
+        assert r.status in (WARN, SKIP)
+
+    def test_it_opens_no_socket(self, make_config, db_path, monkeypatch):
+        """`doctor` runs on the daemon's boot path and behind the admin Health
+        pane. A remote call here hangs both."""
+        import socket
+
+        attempts: list[str] = []
+
+        def _refuse(target):
+            def _fn(*args, **kwargs):
+                attempts.append(target)
+                raise OSError(f"network blocked: {target}")
+
+            return _fn
+
+        monkeypatch.setattr(socket.socket, "connect", _refuse("connect"))
+        monkeypatch.setattr(socket.socket, "connect_ex", _refuse("connect_ex"))
+        monkeypatch.setattr(socket, "create_connection", _refuse("create_connection"))
+        monkeypatch.setattr(socket, "getaddrinfo", _refuse("getaddrinfo"))
+
+        r = self._run(self._config(make_config, db_path))
+
+        assert not attempts, f"web.avatar_import reached the network: {attempts}"
+        assert r.status in (OK, SKIP, WARN)
+

@@ -1405,6 +1405,103 @@ def check_basemap(config: "Config", probe: bool) -> CheckResult:
 _UNVERIFIABLE_KEY_PROVIDERS = frozenset({"carto"})
 
 
+def check_avatar_import(config: "Config", probe: bool) -> CheckResult:
+    """Whether Nextcloud profile pictures are being imported, and what happened.
+
+    **This check opens no socket, and that is deliberate rather than lazy.**
+    Doctor runs on the daemon's start-up path, on a scheduler interval, from
+    `istota doctor` and from the admin dashboard's Health pane. A live Nextcloud
+    call here would put a remote timeout in front of all four, and the Health
+    pane is a page a person is waiting on. Same reasoning as `web.basemap`.
+
+    So it reports configuration and recorded state: the two switches, the counts
+    in `user_avatars`, and what the last tick wrote down. That last part is the
+    only way to answer the question that actually matters here — whether
+    Nextcloud sends the custom-avatar header at all. Without it nothing can ever
+    be imported, and no count of stored rows distinguishes that from a
+    deployment where nobody has set a Nextcloud avatar. `probe` is accepted to
+    satisfy the `Check` protocol and is unused.
+    """
+    from . import avatars, db
+    from .nextcloud.avatars import CUSTOM_AVATAR_HEADER
+
+    name = "web.avatar_import"
+
+    web = getattr(config, "web", None)
+    if not web or not web.enabled:
+        return CheckResult(name, SKIP, "web interface disabled", scope=DEPLOYMENT)
+    if not config.storage_is_nextcloud:
+        return CheckResult(
+            name, SKIP,
+            "storage backend is local; there is no Nextcloud to import from",
+            scope=DEPLOYMENT,
+        )
+    if not getattr(web, "avatar_import_from_nextcloud", False):
+        return CheckResult(
+            name, SKIP, "[web] avatar_import_from_nextcloud is false",
+            scope=DEPLOYMENT,
+        )
+    if not getattr(config.scheduler, "avatar_import_interval", 0):
+        return CheckResult(
+            name, SKIP, "[scheduler] avatar_import_interval is 0", scope=DEPLOYMENT,
+        )
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            counts = avatars.import_counts(conn)
+            state = avatars.read_import_state(conn)
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, WARN, f"could not read the avatar tables: {exc}",
+            remedy=(
+                "Check `runtime.framework_db`, which reports on the database "
+                "itself; this check reads it and nothing else."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    stored = (
+        f"{counts['imported']} imported, "
+        f"{counts['probes']} with no custom Nextcloud avatar"
+    )
+
+    if state is None:
+        return CheckResult(
+            name, OK,
+            f"enabled every {config.scheduler.avatar_import_interval}s; "
+            f"no import tick has been recorded yet; {stored}",
+            scope=DEPLOYMENT,
+        )
+
+    header = state.get("header")
+    ran = state.get("at") or "an unrecorded time"
+    detail = (
+        f"last tick at {ran} over {state.get('users', 0)} users "
+        f"({state.get('imported', 0)} imported, "
+        f"{state.get('no_custom', 0)} with no custom avatar, "
+        f"{state.get('failed', 0)} failed); {stored}"
+    )
+
+    if header == avatars.HEADER_ABSENT:
+        return CheckResult(
+            name, WARN,
+            f"{detail}; Nextcloud sent no {CUSTOM_AVATAR_HEADER} "
+            "header, so a user-set picture cannot be told from the coloured "
+            "letter it generates and nothing will be imported",
+            remedy=(
+                "Nothing here is broken and nothing is being imported. Either "
+                "upgrade Nextcloud to a version that sends the header, or set "
+                "[web] avatar_import_from_nextcloud = false to stop asking. "
+                "Users can still upload their own picture in Settings."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    if header == avatars.HEADER_UNOBSERVED:
+        detail += "; nothing changed, so the custom-avatar header was not read"
+    return CheckResult(name, OK, detail, scope=DEPLOYMENT)
+
+
 def check_web_static(config: "Config", probe: bool) -> CheckResult:
     """The SvelteKit build the web surface serves actually exists.
 
@@ -3367,6 +3464,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.container", check_developer_container),
     ("web.static", check_web_static),
     ("web.basemap", check_basemap),
+    ("web.avatar_import", check_avatar_import),
     ("config.skill_overlays", check_skill_overlays),
     ("sandbox.masks", check_sandbox_masks),
 )
@@ -3410,6 +3508,10 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment, not image: it reads the rendered config and reaches the
     # network. A bare `docker run` can answer neither.
     "web.basemap": DEPLOYMENT,
+    # Deployment: every fact it reports is in the framework database or the
+    # rendered config — the counts in `user_avatars` and what the last import
+    # tick wrote down. A bare `docker run` has neither.
+    "web.avatar_import": DEPLOYMENT,
     # Deployment: it walks the workspace mount, which a bare `docker run` has
     # none of.
     "config.skill_overlays": DEPLOYMENT,
