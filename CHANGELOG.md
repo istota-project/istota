@@ -215,6 +215,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Adding a feed category now opens the same panel the rest of the feeds settings page uses, instead of the browser's own input box. That box was the last one left in the web interface, it ignored your light or dark theme, and it could only ask one question — so the category's name always started as a copy of its short code, to be corrected afterwards in the table. You can now give it a name as you create it. It also closed before telling you the short code was already taken, throwing away what you had typed; the panel says so beside the field and keeps your draft.
+
+- Clearing a feed category's name now works. The save reported success and kept the old name, because a blank name was read as "no name supplied" — which is right when the name comes from an import or the command line, and wrong when it comes from a field you just emptied. Clearing it now puts the name back to the category's short code.
+
 - A per-skill customization that has grown too large to be used is no longer left searchable. Writing past the size at which the file stops being read is allowed with a warning, but until now the search index was refreshed from it anyway, so `!search` answered with a rule that had quietly stopped reaching anything. Such a write now drops the file from the index, as the nightly rebuild already did.
 
 - A file in that folder whose name is not a skill is no longer opened at all — the verdict comes from the name. The name is picked by whoever wrote the file and the folder is writable from inside the sandbox, so a directory of large junk files had the startup health check read up to a megabyte each to decide something it already knew. One visible consequence: `istota-skill memory skills` no longer reports a size or a first line for such a file, because nothing read it. A file named for a real skill that takes no customization is still read and still described.

@@ -4,7 +4,8 @@
 //   raw-color          a color literal outside app.css (the token home) — hex or
 //                      any rgb()/rgba()/hsl()/hsla() notation
 //   theme-override     a hand-written :root[data-theme='light'] rule outside app.css
-//   native-dialog      window.confirm / window.alert instead of ConfirmDialog
+//   native-dialog      confirm / alert / prompt, bare or on window, instead of
+//                      Modal or ConfirmDialog
 //   deep-import        a ui primitive imported by file path instead of the barrel
 //   stray-money-global a .money-* shell class defined outside routes/money/+layout.svelte
 //   undefined-token    a bare var(--x) naming a property nothing defines

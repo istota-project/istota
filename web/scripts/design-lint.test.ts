@@ -182,6 +182,39 @@ describe('native-dialog', () => {
   it('allows a method named confirm', () => {
     expect(rules('await api.confirm(taskId);')).not.toContain('native-dialog');
   });
+
+  // `prompt` was outside the rule for as long as the rule existed, which is how
+  // the feeds category control kept a native input dialog while the lint stayed
+  // green over that file. It is the awkward one of the three: `confirm` and
+  // `alert` are only ever the dialog here, where `prompt` is also an ordinary
+  // identifier a Svelte snippet can carry.
+  it('flags window.prompt', () => {
+    expect(rules('const slug = window.prompt("slug?");')).toContain('native-dialog');
+  });
+
+  it('flags a bare prompt call', () => {
+    expect(rules('const slug = prompt("New category slug:");')).toContain('native-dialog');
+  });
+
+  it('allows a local function named prompt', () => {
+    expect(rules('function prompt() { open = true; }')).not.toContain('native-dialog');
+  });
+
+  it('allows a snippet declaration named prompt', () => {
+    expect(rules('{#snippet prompt()}')).not.toContain('native-dialog');
+  });
+
+  it('allows rendering a snippet named prompt', () => {
+    expect(rules('{@render prompt()}')).not.toContain('native-dialog');
+  });
+
+  // The discriminating case for how the snippet markers are excluded. A
+  // whole-line `unless` would clear the line entirely and let the real dialog
+  // through with it; blanking only the marker and the name it declares leaves
+  // the dialog reportable.
+  it('still flags a real prompt sharing a line with a snippet render', () => {
+    expect(rules('{@render prompt()}{prompt("slug?")}')).toContain('native-dialog');
+  });
 });
 
 describe('deep-import', () => {

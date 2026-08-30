@@ -46,8 +46,21 @@ const THEME_OVERRIDE = /\[data-theme=/;
 // Bare `confirm(` is the native dialog, but this codebase also declares local
 // functions named `confirm`. The lookbehind rejects `.confirm(` (a method) and
 // `javascript:alert(` (XSS test fixtures); `unless` rejects the declaration.
-const NATIVE_DIALOG = /\bwindow\.(?:confirm|alert)\s*\(|(?<![.:\w$])(?:confirm|alert)\s*\(/;
-const NATIVE_DIALOG_DECL = /\bfunction\s+(?:confirm|alert)\b/;
+//
+// `prompt` was missing here for as long as the rule existed, which is how the
+// feeds category control kept a native input dialog with the lint green over
+// that file. It is the awkward member of the three: `confirm` and `alert` are
+// only ever the dialog in this tree, where `prompt` is also an ordinary
+// identifier — a Svelte snippet is named that on the portfolio import page.
+// So the snippet's two markers are *stripped* rather than matched by `unless`,
+// which is whole-line and would clear a real dialog written beside one.
+const NATIVE_DIALOG =
+  /\bwindow\.(?:confirm|alert|prompt)\s*\(|(?<![.:\w$])(?:confirm|alert|prompt)\s*\(/;
+const NATIVE_DIALOG_DECL = /\bfunction\s+(?:confirm|alert|prompt)\b/;
+// `{#snippet prompt()}` declares one and `{@render prompt()}` calls it. Blank
+// the marker together with the name it carries, and the `()` left behind has no
+// identifier in front of it for the rule to match.
+const SNIPPET_NAME = /\{(?:#snippet|@render)\s+[\w$]+/g;
 // Default-import only. A *named* import from a component file (getShellScrollRoot
 // from AppShell.svelte) is by definition something the barrel does not re-export.
 const DEEP_IMPORT = /^\s*import\s+[A-Za-z]\w*\s+from '\$lib\/components\/ui\/[A-Za-z]+\.svelte'/;
@@ -151,8 +164,9 @@ export const RULES = [
   {
     id: 'native-dialog',
     test: NATIVE_DIALOG,
+    strip: SNIPPET_NAME,
     unless: NATIVE_DIALOG_DECL,
-    hint: 'use ConfirmDialog from $lib/components/ui',
+    hint: 'use Modal or ConfirmDialog from $lib/components/ui',
   },
   {
     id: 'deep-import',
