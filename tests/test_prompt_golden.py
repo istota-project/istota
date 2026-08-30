@@ -663,6 +663,35 @@ def test_a_skill_overlay_adds_a_block_and_changes_nothing_else(tmp_path, monkeyp
     assert "\n## Notes rules" not in overlaid
 
 
+def test_the_failure_rule_is_identical_in_both_rules_blocks(tmp_path, monkeypatch):
+    """`## Important rules` is assembled twice, and the goldens cannot see the gap.
+
+    `executor` builds one rules block for an admin and a separate one for a
+    standard user, and the two lists renumber independently — the admin block
+    carries a rule the other does not. A rule added to one copy and not the
+    other therefore reaches half the deployment with nothing to say so: both
+    goldens still match, each having been regenerated from whatever its own
+    block holds.
+
+    The failure-visibility rule (ISSUE-345) is the witness rather than the
+    subject. It is asserted by identity, not by substring, because the way this
+    drifts is a reworded copy rather than a missing one.
+    """
+    prompts = {
+        "admin": assemble(CASES_BY_NAME["base_nextcloud"], tmp_path / "admin", monkeypatch),
+        "standard user": assemble(CASES_BY_NAME["nonadmin"], tmp_path / "standard", monkeypatch),
+    }
+
+    rules = {}
+    for who, prompt in prompts.items():
+        found = [line for line in prompt.splitlines() if line.startswith("3c. ")]
+        assert len(found) == 1, f"{who}: expected one rule 3c, found {len(found)}"
+        rules[who] = found[0]
+
+    assert rules["admin"] == rules["standard user"]
+    assert "goes in the deliverable" in rules["admin"]
+
+
 def test_every_golden_file_belongs_to_a_case():
     """A renamed case must not leave a stale file behind.
 
