@@ -260,11 +260,33 @@ def load_native_points(
 ) -> list[tuple[float, float, float]]:
     """Native (source != 'garmin') pings in [t0 - band, t1 + band] as
     (epoch, lat, lon). Over-select and filter by parsed epoch — timestamps
-    are string-heterogeneous, so a plain BETWEEN on strings is unsafe."""
+    are string-heterogeneous, so a plain BETWEEN on strings is unsafe.
+
+    ``wifi_zone`` rows are excluded, and that exclusion is the difference
+    between shadowing a watch track with coverage and shadowing it with an
+    assertion. A wifi-zone row is a coordinate the phone *declares* while it
+    is on the configured home SSID, not a fix it took (ISSUE-229, which added
+    the column so a declared point stays identifiable). It records where the
+    phone claims to be, which says nothing about whether that position was
+    observed — so it cannot stand in for a watch fix there.
+
+    Left in, it does not merely fail to help, it deletes: a run that starts
+    and ends at the door passes within ``guard_radius`` of the parked phone
+    twice, so the phone shadows the first and last stretch of every activity
+    while covering neither (ISSUE-348). Measured on a 22-minute run, all 32
+    shadowing pings were declared points and the track lost its first 151 m
+    and its last 171 m.
+
+    A phone that is genuinely stationary and taking *real* fixes is a
+    narrower version of the same trap and is deliberately not handled here;
+    those rows are at least measurements, and nothing has been observed
+    hitting it.
+    """
     lo_epoch = parse_ts(t0) - band_sec
     hi_epoch = parse_ts(t1) + band_sec
     rows = conn.execute(
-        "SELECT timestamp, lat, lon FROM location_pings WHERE source != 'garmin'"
+        "SELECT timestamp, lat, lon FROM location_pings "
+        "WHERE source != 'garmin' AND wifi_zone = 0"
     ).fetchall()
     out: list[tuple[float, float, float]] = []
     for r in rows:

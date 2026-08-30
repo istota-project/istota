@@ -240,6 +240,61 @@ class TestDbGlue:
         assert len(native) == 1
         assert native[0][1] == 34.0
 
+    def test_load_native_excludes_declared_wifi_zone_points(self, loc_db):
+        """A wifi-zone row is a coordinate the phone declares, not a fix it
+        took, so it is not coverage and must not shadow a watch track
+        (ISSUE-348)."""
+        with location_db.connect(loc_db) as conn:
+            location_db.insert_ping(conn, "2026-07-08T10:00:00Z", 34.0, -118.0,
+                                    accuracy=1.0, speed=0.0, source="overland",
+                                    wifi_zone=True)             # declared
+            location_db.insert_ping(conn, "2026-07-08T10:00:20Z", 34.0, -118.0,
+                                    accuracy=8.0, source="overland")  # measured
+            conn.commit()
+            native = igt.load_native_points(
+                conn, "2026-07-08T10:00:00Z", "2026-07-08T10:01:00Z", 300.0,
+            )
+        assert [n[0] for n in native] == [igt.parse_ts("2026-07-08T10:00:20Z")]
+
+    def test_a_parked_phone_no_longer_clips_the_ends_of_a_run(self, loc_db):
+        """The ISSUE-348 shape end to end: the phone sits at home emitting
+        declared points for the whole activity, and the run starts and
+        finishes at that same spot. Every point must survive."""
+        home = (34.05000, -118.25000)
+        # Out and back along one line, passing within metres of home at both
+        # ends — well inside the 150 m guard radius.
+        pts = [
+            _tp("2026-07-08T10:00:00Z", home[0], home[1]),
+            _tp("2026-07-08T10:05:00Z", home[0] + 0.02, home[1]),
+            _tp("2026-07-08T10:10:00Z", home[0], home[1]),
+        ]
+        span = ("2026-07-08T10:00:00Z", "2026-07-08T10:10:00Z")
+        with location_db.connect(loc_db) as conn:
+            for i in range(11):
+                location_db.insert_ping(
+                    conn, f"2026-07-08T10:{i:02d}:00Z", home[0], home[1],
+                    accuracy=1.0, speed=0.0, source="overland", wifi_zone=True,
+                )
+            conn.commit()
+            native = igt.load_native_points(conn, *span, 300.0)
+        assert native == []
+        assert igt.filter_shadowed(pts, native, 300.0, 150.0) == pts
+
+    def test_a_moving_phone_still_shadows_the_watch(self, loc_db):
+        """The control for the two above: a real fix at the same coordinate
+        shadows exactly as it did before, so the exclusion is about the
+        marker and not about the position."""
+        home = (34.05000, -118.25000)
+        pts = [_tp("2026-07-08T10:00:00Z", home[0], home[1])]
+        span = ("2026-07-08T10:00:00Z", "2026-07-08T10:00:00Z")
+        with location_db.connect(loc_db) as conn:
+            location_db.insert_ping(conn, "2026-07-08T10:00:05Z", home[0], home[1],
+                                    accuracy=8.0, source="overland")
+            conn.commit()
+            native = igt.load_native_points(conn, *span, 300.0)
+        assert len(native) == 1
+        assert igt.filter_shadowed(pts, native, 300.0, 150.0) == []
+
     def test_insert_points_are_placeless_garmin_with_received_at(self, loc_db):
         pts = [_tp("2026-07-08T10:00:00Z", 34.0, -118.0)]
         with location_db.connect(loc_db) as conn:
