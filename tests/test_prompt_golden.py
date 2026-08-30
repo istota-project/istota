@@ -682,6 +682,11 @@ def test_the_failure_rule_is_identical_in_both_rules_blocks(tmp_path, monkeypatc
         "standard user": assemble(CASES_BY_NAME["nonadmin"], tmp_path / "standard", monkeypatch),
     }
 
+    # Non-degeneracy, before the identity check: the two assemblies have to be
+    # two. A shared cache or a leaked monkeypatch that handed back the admin
+    # prompt twice would satisfy every assertion below while checking nothing.
+    assert prompts["admin"] != prompts["standard user"]
+
     rules = {}
     for who, prompt in prompts.items():
         found = [line for line in prompt.splitlines() if line.startswith("3c. ")]
