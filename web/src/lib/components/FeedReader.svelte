@@ -3,7 +3,7 @@
   import { ChevronLeft, ChevronRight, FileText, Play, Star, X, ExternalLink } from 'lucide-svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
-  import { fileKind, playerUrl, providerLabel } from '$lib/feeds/embed';
+  import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';
   import { notifyError } from '$lib/stores/notices';
 
   let {
@@ -58,7 +58,24 @@
   const player = $derived(entry ? playerUrl(entry.embed_url) : null);
   const providerName = $derived(entry ? providerLabel(entry.embed_url) : '');
   const playLabel = $derived(`Play video${providerName ? ` on ${providerName}` : ''}`);
-  const documentUrl = $derived(!player && entry?.file_url ? entry.file_url : '');
+  // A media file we play ourselves — same reasoning as FeedCard, one click
+  // further in. `inlineMedia` re-parses the URL and returns null for anything
+  // it can't put in a src, so this degrades to the ordinary hero rather than
+  // guessing an element around an unknown URL (ISSUE-356).
+  const media = $derived(player ? null : inlineMedia(entry?.media_url, entry?.media_type));
+  // A lone still that came with the clip is its poster, not a hero beside it.
+  // Several are a gallery and stay one — consuming the first would drop the
+  // rest, and the reader is the one place a picture could still be recovered.
+  // A still that is itself playable is refused, so a pre-v7 binary's re-filed
+  // mp4 cannot come back as a poster.
+  const mediaPoster = $derived(
+    media && entry?.images.length === 1 && !inlineMedia(entry.images[0])
+      ? entry.images[0]
+      : undefined,
+  );
+  // Images the player did not consume, rendered under it as ordinary heroes.
+  const mediaImages = $derived(media && !mediaPoster && entry ? entry.images : []);
+  const documentUrl = $derived(!player && !media && entry?.file_url ? entry.file_url : '');
   const documentKind = $derived(fileKind(documentUrl));
 
   // Keyed on the entry rather than a bare boolean, so paging to the next post
@@ -250,6 +267,37 @@
               </button>
             {/if}
           </div>
+        {:else if media}
+          <!-- A media file we serve ourselves. The element is the player, so
+               there is no poster-then-swap step; sized by the stylesheet, as
+               every other piece of media in the reader is. -->
+          <div class="reader-hero">
+            <div class="reader-media" class:audio={media.kind === 'audio'}>
+              {#if media.kind === 'video'}
+                <!-- svelte-ignore a11y_media_has_caption -->
+                <video src={media.url} poster={mediaPoster} controls playsinline preload="metadata"
+                ></video>
+              {:else}
+                <audio src={media.url} controls preload="metadata"></audio>
+              {/if}
+            </div>
+          </div>
+          {#if mediaImages.length > 0}
+            <!-- Stills the player did not take as its poster. The reader is the
+                 last place these could be seen, so they are drawn rather than
+                 dropped. -->
+            <div class="reader-hero" class:multi={mediaImages.length > 1}>
+              {#each mediaImages as img, i}
+                <button
+                  type="button"
+                  class="hero-img"
+                  onclick={() => onImageClick?.(mediaImages, i)}
+                >
+                  <img src={img} alt={entry.title || ''} loading="lazy" />
+                </button>
+              {/each}
+            </div>
+          {/if}
         {:else if documentUrl}
           <div class="reader-hero">
             <!-- A real <a>, so middle-click and copy-link keep working. -->
@@ -442,6 +490,41 @@
     display: block;
     width: 100%;
     height: auto;
+  }
+
+  /* A media file we play ourselves (ISSUE-356). Same letterbox as the heroes
+	   below, and bounded the same way the reader's inline <video> is: the clip
+	   keeps its own aspect ratio and the stylesheet caps it. No fixed 16/9 box
+	   — that is for the iframe player, which has no intrinsic size. */
+  .reader-media {
+    display: flex;
+    justify-content: center;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the clip reads as the
+       lit surface. */
+    background: #0e0e0e;
+    border-radius: var(--radius-card);
+    overflow: hidden;
+  }
+
+  .reader-media video {
+    display: block;
+    max-width: 100%;
+    /* The reader panel scrolls, so cap against the viewport rather than a
+		   fixed pixel height: a portrait clip otherwise fills the whole pane and
+		   pushes the body copy off the bottom. */
+    max-height: 70vh;
+    height: auto;
+  }
+
+  /* Audio draws nothing to letterbox, so it sits on the panel's own surface. */
+  .reader-media.audio {
+    background: none;
+  }
+
+  .reader-media audio {
+    display: block;
+    width: 100%;
   }
 
   /* Media heroes. Same visual language as the grid's .card-video /

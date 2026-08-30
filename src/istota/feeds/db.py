@@ -20,6 +20,8 @@ from istota.feeds.models import (
     CategoryRecord,
     EntryRecord,
     FeedRecord,
+    is_http_url,
+    media_type_for_url,
     parse_image_urls,
 )
 from istota.feeds.sanitize import image_identity
@@ -28,7 +30,7 @@ from istota.feeds.sanitize import image_identity
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 SCHEMA_SQL = """
@@ -75,6 +77,13 @@ CREATE TABLE IF NOT EXISTS feed_entries (
     -- rather than played, and its presence is what stops the reader
     -- treating a PDF's cover page as an ordinary gallery image.
     file_url TEXT,
+    -- A media file played inline with a native <video>/<audio> — a Mastodon
+    -- attachment, a podcast enclosure. Neither of the two above: embed_url
+    -- is a provider page we rebuild a player for, file_url is opened
+    -- elsewhere. Before ISSUE-356 a direct media URL had nowhere to go and
+    -- was stored in image_urls, which the reader painted as a broken <img>.
+    media_url TEXT,
+    media_type TEXT,
     published_at TEXT,
     fetched_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'unread',
@@ -210,12 +219,102 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE feeds ADD COLUMN last_throttled_at TEXT")
 
 
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Add the ``feed_entries`` media columns and lift stored videos into
+    them (ISSUE-356).
+
+    Additive like the three above, but with a data pass, because additive
+    alone would fix nothing an existing reader can see. The poller filed
+    every ``media:content`` URL as an image, so a Mastodon video attachment
+    is sitting in ``image_urls`` right now and the reader paints it into an
+    ``<img src>`` that never decodes. Re-polling does not clear it:
+    ``insert_entries`` matches on ``(feed_id, guid)`` and its refresh path
+    holds ``image_urls`` with ``COALESCE(?, image_urls)``, so a now-empty
+    image list leaves the broken URL exactly where it is.
+
+    The stored MIME type is gone by now — it was never written anywhere — so
+    the extension is the only evidence, which is precisely what
+    ``media_type_for_url`` is for. A URL is only promoted if it also passes
+    ``is_http_url``: these rows were written before anything checked a scheme,
+    and ``media_type_for_url`` reads the path, so ``javascript:x.mp4`` parses
+    as a video. The poller refuses that on the way in and nothing downstream
+    re-checks it, so the migration has to apply the same bar rather than
+    inherit a value from a laxer era. One that fails stays an image, where it
+    was already being rendered harmlessly by an ``<img>`` that never loaded.
+
+    An entry whose images are untouched is left alone entirely, and
+    ``entry_images`` is rebuilt for the ones that changed: it is derived from
+    ``image_urls``, and a lifted video that stayed in the index would go on
+    suppressing later posts through the image dedupe. The other side of that
+    is deliberate and worth stating — a clip is now outside the repeat-image
+    suppression entirely, so a boost wave of one video renders a player per
+    entry where it used to render a broken ``<img>`` per entry minus the
+    suppressed ones. Suppression exists to stop the same *picture* filling a
+    screen; a player the reader has to press is not that.
+
+    Only the first playable URL becomes the attachment, matching the poller.
+    Any beyond it leave ``image_urls`` and are stored nowhere, so they are
+    counted and logged rather than dropped in silence.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+    if "media_url" not in cols:
+        conn.execute("ALTER TABLE feed_entries ADD COLUMN media_url TEXT")
+    if "media_type" not in cols:
+        conn.execute("ALTER TABLE feed_entries ADD COLUMN media_type TEXT")
+
+    rows = conn.execute(
+        "SELECT id, image_urls, media_url, published_at, fetched_at "
+        "FROM feed_entries WHERE image_urls IS NOT NULL AND image_urls != ''"
+    ).fetchall()
+    lifted = 0
+    discarded = 0
+    for row in rows:
+        urls = parse_image_urls(row["image_urls"])
+        kept: list[str] = []
+        media: list[tuple[str, str]] = []
+        for url in urls:
+            mime = media_type_for_url(url) if is_http_url(url) else None
+            if mime:
+                media.append((url, mime))
+            else:
+                kept.append(url)
+        if not media:
+            continue
+        # An entry that already carries media keeps it; only the image list
+        # is corrected. Nothing here should overwrite a real stored value.
+        media_url, media_type = media[0]
+        if row["media_url"]:
+            media_url, media_type = row["media_url"], None
+        discarded += len(media) - 1
+        conn.execute(
+            "UPDATE feed_entries SET image_urls = ?, media_url = ?, "
+            "media_type = COALESCE(?, media_type) WHERE id = ?",
+            (json.dumps(kept) if kept else None, media_url, media_type, row["id"]),
+        )
+        conn.execute("DELETE FROM entry_images WHERE entry_id = ?", (row["id"],))
+        _index_entry_images(
+            conn,
+            entry_id=row["id"],
+            image_urls=kept,
+            published_at=row["published_at"],
+            fetched_at=row["fetched_at"],
+        )
+        lifted += 1
+
+    if lifted:
+        logger.info(
+            "feeds_db_media_lifted_from_images entries=%d extra_media_discarded=%d",
+            lifted, discarded,
+        )
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
     (4, _migrate_v3_to_v4),
     (5, _migrate_v4_to_v5),
     (6, _migrate_v5_to_v6),
+    (7, _migrate_v6_to_v7),
 ]
 
 
@@ -588,9 +687,9 @@ def insert_entries(
                 INSERT OR IGNORE INTO feed_entries(
                     feed_id, guid, title, url, author, content_html,
                     content_text, image_urls, embed_url, file_url,
-                    published_at, fetched_at, status
+                    media_url, media_type, published_at, fetched_at, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feed_id,
@@ -603,6 +702,8 @@ def insert_entries(
                     image_json,
                     item.embed_url,
                     item.file_url,
+                    item.media_url,
+                    item.media_type,
                     item.published_at,
                     item.fetched_at,
                     item.status,
@@ -636,6 +737,8 @@ def insert_entries(
                 image_urls   = COALESCE(?, image_urls),
                 embed_url    = COALESCE(NULLIF(?, ''), embed_url),
                 file_url     = COALESCE(NULLIF(?, ''), file_url),
+                media_url    = COALESCE(NULLIF(?, ''), media_url),
+                media_type   = COALESCE(NULLIF(?, ''), media_type),
                 published_at = COALESCE(NULLIF(?, ''), published_at)
             WHERE id = ?
             """,
@@ -648,6 +751,8 @@ def insert_entries(
                 image_json,
                 item.embed_url,
                 item.file_url,
+                item.media_url,
+                item.media_type,
                 item.published_at,
                 existing["id"],
             ),
@@ -999,6 +1104,8 @@ def _row_to_entry(row: sqlite3.Row) -> EntryRecord:
         image_urls=parse_image_urls(row["image_urls"]),
         embed_url=row["embed_url"] if "embed_url" in row.keys() else None,
         file_url=row["file_url"] if "file_url" in row.keys() else None,
+        media_url=row["media_url"] if "media_url" in row.keys() else None,
+        media_type=row["media_type"] if "media_type" in row.keys() else None,
         published_at=row["published_at"],
         fetched_at=row["fetched_at"],
         status=row["status"],

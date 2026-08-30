@@ -128,11 +128,50 @@ class TestGetFeeds:
         entry = body["entries"][0]
         expected = {
             "id", "title", "url", "content", "images", "duplicate_image_count",
-            "embed_url", "file_url", "feed", "status", "starred", "starred_at",
-            "published_at", "created_at",
+            "embed_url", "file_url", "media_url", "media_type", "feed",
+            "status", "starred", "starred_at", "published_at", "created_at",
         }
         assert set(entry.keys()) == expected
         assert set(entry["feed"].keys()) == {"id", "title", "site_url", "category"}
+
+    def test_a_video_attachment_is_served_as_media_not_as_an_image(
+        self, ctx, client,
+    ):
+        """ISSUE-356. The reader decides between ``<img>`` and ``<video>`` on
+        these two fields, so a video that arrives in ``images`` is a broken
+        hero no amount of frontend work can fix."""
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.get_feed_by_url(
+                conn, "https://example.com/feed.xml",
+            ).id
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="rss-vid", title="Clip",
+                    url="https://example.com/post/2", author=None,
+                    content_html="<p>a clip</p>", content_text="a clip",
+                    image_urls=[],
+                    media_url="https://assets.example.com/clip.mp4",
+                    media_type="video/mp4",
+                    published_at="2026-05-03T08:00:00+00:00",
+                    fetched_at="2026-05-03T09:00:00+00:00",
+                    status="unread",
+                ),
+            ])
+            conn.commit()
+
+        body = client.get("/istota/api/feeds").json()
+        entry = next(e for e in body["entries"] if e["title"] == "Clip")
+        assert entry["media_url"] == "https://assets.example.com/clip.mp4"
+        assert entry["media_type"] == "video/mp4"
+        assert entry["images"] == []
+
+    def test_an_entry_without_media_serves_empty_strings(self, ctx, client):
+        _seed(ctx)
+        body = client.get("/istota/api/feeds").json()
+        entry = next(e for e in body["entries"] if e["title"] == "Post One")
+        assert entry["media_url"] == ""
+        assert entry["media_type"] == ""
 
     def test_status_filter(self, ctx, client):
         _seed(ctx)

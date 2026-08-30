@@ -186,6 +186,11 @@ def cmd_entries(
             "url": e.url,
             "author": e.author,
             "image_urls": e.image_urls,
+            # An mp4 attachment used to appear here as an image_url. Naming it
+            # for what it is keeps the model's view of an entry honest, and it
+            # is the only place a video shows at all now (ISSUE-356).
+            "media_url": e.media_url,
+            "media_type": e.media_type,
             "published_at": e.published_at,
             "fetched_at": e.fetched_at,
             "status": e.status,

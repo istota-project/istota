@@ -9,7 +9,7 @@
  * recognised as a known provider must return null.
  */
 import { describe, it, expect } from 'vitest';
-import { playerUrl, providerLabel } from './embed';
+import { inlineMedia, playerUrl, providerLabel } from './embed';
 
 describe('playerUrl — YouTube', () => {
   it('builds a nocookie embed from a watch URL', () => {
@@ -113,5 +113,83 @@ describe('providerLabel', () => {
 
   it('is null-safe', () => {
     expect(providerLabel('')).toBe('');
+  });
+});
+
+describe('inlineMedia', () => {
+  it('reads the kind off the stored MIME type', () => {
+    expect(inlineMedia('https://a.example/clip.mp4', 'video/mp4')).toEqual({
+      url: 'https://a.example/clip.mp4',
+      kind: 'video',
+    });
+    expect(inlineMedia('https://a.example/12.mp3', 'audio/mpeg')?.kind).toBe('audio');
+  });
+
+  it('returns the kind and nothing else', () => {
+    // `kind` is the whole question — <video> or <audio>. A `type` hint would
+    // have no consumer: the elements are single-source and take their format
+    // from the response's Content-Type. A field nothing reads is one that
+    // drifts, so it is not returned at all.
+    expect(Object.keys(inlineMedia('https://a.example/clip.mp4', 'video/mp4')!).sort()).toEqual([
+      'kind',
+      'url',
+    ]);
+  });
+
+  it('believes the type over the extension', () => {
+    // A server that names its own format is better evidence than a filename,
+    // and a mislabelled extension is common on media CDNs.
+    expect(inlineMedia('https://a.example/thing.mp3', 'video/mp4')?.kind).toBe('video');
+  });
+
+  it('plays a wildcard type the poller wrote for a bare medium', () => {
+    // `video/*` is what the poller writes for a `medium` with no type.
+    expect(inlineMedia('https://a.example/clip.mp4', 'video/*')?.kind).toBe('video');
+  });
+
+  it('falls back to the extension when the feed sent no type', () => {
+    expect(inlineMedia('https://a.example/clip.webm', '')?.kind).toBe('video');
+    expect(inlineMedia('https://a.example/ep.flac')?.kind).toBe('audio');
+  });
+
+  it('ignores the query string when reading an extension', () => {
+    expect(inlineMedia('https://a.example/photo.jpg?p=clip.mp4')).toBeNull();
+  });
+
+  it.each([
+    ['a javascript URL', 'javascript:alert(1)', 'video/mp4'],
+    ['a data URL', 'data:video/mp4;base64,AAAA', 'video/mp4'],
+    ['a relative path', '/media/clip.mp4', 'video/mp4'],
+    ['an unplayable type', 'https://a.example/paper.pdf', 'application/pdf'],
+    ['an image', 'https://a.example/photo.jpg', 'image/jpeg'],
+    ['an unknown extension with no type', 'https://a.example/thing.xyz', ''],
+    ['no extension and no type', 'https://a.example/thing', ''],
+    // `.ogg` is a container, not a format: guessing audio would silently drop
+    // a Theora video's picture. Absent from both language's tables.
+    ['an ambiguous .ogg with no type', 'https://a.example/clip.ogg', ''],
+  ])('returns null for %s', (_label, url, type) => {
+    expect(inlineMedia(url, type)).toBeNull();
+  });
+
+  it.each([
+    // The extension fallback must answer exactly as `media_type_for_url`
+    // does — see tests/test_feeds_media_parity.py for the table itself.
+    ['a leading-dot filename', 'https://a.example/.mp4'],
+    ['a trailing slash after the name', 'https://a.example/clip.mp4/'],
+    ['a path segment after the name', 'https://a.example/clip.mp4/thumb'],
+    ['a name ending in a dot', 'https://a.example/clip.'],
+  ])('agrees with the Python parser that %s is not media', (_label, url) => {
+    expect(inlineMedia(url)).toBeNull();
+  });
+
+  it('strips url path parameters before reading the extension', () => {
+    // `;v=1` is part of the path, not of the filename. Both parsers drop it.
+    expect(inlineMedia('https://a.example/x.mp4;v=1')?.kind).toBe('video');
+  });
+
+  it('is null-safe', () => {
+    expect(inlineMedia(null)).toBeNull();
+    expect(inlineMedia(undefined)).toBeNull();
+    expect(inlineMedia('')).toBeNull();
   });
 });

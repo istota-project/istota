@@ -577,6 +577,46 @@
     display: block;
   }
 
+  /* A media file we play ourselves (a Mastodon attachment, a podcast
+	   enclosure — ISSUE-356). Same letterbox as .card-image, and bounded the
+	   same way: the element keeps its own aspect ratio and the stylesheet caps
+	   it, so a portrait phone clip is not stretched into 16/9 and a 1080p one
+	   does not run off the side. No aspect-ratio box like .card-player — that
+	   exists because an iframe has no intrinsic size to work from, and a
+	   <video> does. */
+  .feed-grid :global(.card-media) {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the clip reads as the
+       lit surface. */
+    background: #0e0e0e;
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+    overflow: hidden;
+  }
+
+  .feed-grid :global(.card-media video) {
+    display: block;
+    /* max-width, not width: a clip narrower than the card keeps its own size
+		   rather than being upscaled into a blur. */
+    max-width: 100%;
+    max-height: 360px; /* matches .card-image img */
+    height: auto;
+  }
+
+  /* An audio player has no picture to letterbox, so it sits on the card's own
+	   surface at full width rather than in a dark box. */
+  .feed-grid :global(.card-media.audio) {
+    background: none;
+    padding: var(--space-3);
+  }
+
+  .feed-grid :global(.card-media audio) {
+    display: block;
+    width: 100%;
+  }
+
   /* Attached documents (Are.na Attachment blocks). The cover page links to
 	   the file, so it takes a pointer rather than .card-image's zoom-in. */
   .feed-grid :global(.card-document) {
@@ -761,7 +801,11 @@
 	   a phone gets a control that does nothing, or loses one that does. */
   @media (min-width: 769px) {
     .feed-grid.hide-images :global(.card-image),
-    .feed-grid.hide-images :global(.card-gallery) {
+    .feed-grid.hide-images :global(.card-gallery),
+    /* A video hero goes with the pictures for the same reason an inline clip
+		   does, below: leaving it drawn makes the chip mean "some of the media".
+		   The audio player stays — it draws nothing. */
+    .feed-grid.hide-images :global(.card-media:not(.audio)) {
       display: none;
     }
 
