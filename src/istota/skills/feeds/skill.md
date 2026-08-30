@@ -22,7 +22,7 @@ istota-skill feeds add --url URL [--title T] [--category SLUG] [--poll-interval-
 istota-skill feeds remove --url URL                      # or --id N
 istota-skill feeds refresh [--id N]                      # Clear next_poll_at to mark feeds due now
 istota-skill feeds poll [--limit N]                      # Poll every feed whose next_poll_at is past
-istota-skill feeds run-scheduled [--limit N]             # Wrapper used by the scheduler module-job
+istota-skill feeds run-scheduled [--limit N]             # Scheduler module-job entry point; caps its burst at 50 by default
 istota-skill feeds import-opml PATH                      # Import OPML; rewrites bridger URLs
 istota-skill feeds export-opml [--output PATH]           # Export as OPML 2.0
 ```
@@ -45,4 +45,5 @@ OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provide
 ## Notes
 
 - The per-user SQLite is the only source of truth. `add` / `remove` mutate it directly. Don't read or write `feeds.toml` — any pre-existing file gets imported once on first touch then stops being read.
-- `run-scheduled` runs every 15 minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has a `[[resources]] type = "feeds"` entry.
+- `run-scheduled` runs every 5 minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has a `[[resources]] type = "feeds"` entry. It polls at most `DEFAULT_SCHEDULED_POLL_LIMIT` (50) feeds per run unless `--limit` says otherwise; the due list is oldest-first, so a backlog drains over consecutive runs.
+- Requests are paced per host (2 s minimum gap), so a set of Are.na or Tumblr feeds does not go out as one burst. An HTTP 429 is reported as a throttle, not a feed error: the run's JSON carries `throttled` beside `errors`, each feed carries `rate_limited` and `retry_after_seconds`, and a run that was rate-limited on every feed exits non-zero. Don't read `status: ok, errors: 0` as "everything fetched" without looking at `throttled`.

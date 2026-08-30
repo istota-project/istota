@@ -34,13 +34,25 @@ istota-skill feeds import-opml PATH
 istota-skill feeds export-opml
 ```
 
-`run-scheduled` is the scheduler's entry point, not something to run by hand.
+`run-scheduled` is the scheduler's entry point, not something to run by hand. It runs every five minutes and, unlike `poll`, caps its burst at 50 feeds by default; the due list is oldest-first, so a larger backlog drains over consecutive ticks rather than being dropped. `--limit` overrides in both directions.
+
+## Polling and rate limits
+
+Requests are paced **per host**, not per feed. A feed's poll interval says nothing about how many requests reach one host at once, and every Are.na channel you have is one request to `api.are.na` (every Tumblr blog one to `api.tumblr.com`), so a due list of twenty channels used to go out as twenty back-to-back requests and the tail of it was reliably turned away. A minimum gap of 2 s now separates two requests to the same host. RSS pays nothing for it — dozens of distinct origins — and two RSS feeds that genuinely share an origin are paced together, which is correct for the same reason. A second cap bounds the sleeping itself at 60 s per run: the poll is a background task holding one worker slot, and on exhaustion the run stops rather than un-pacing itself, leaving the rest due for the next tick.
+
+**HTTP 429 is a throttle, not a feed error.** It does not write `last_error`, does not increment `error_count` and does not carry a doubled interval forward once it clears — being turned away for asking too often says nothing about whether the feed is broken. It is recorded in its own right instead: `feeds.last_throttled_at` (schema v6), cleared by the next successful fetch so the column means "throttled now" rather than "throttled once". `GET /api/feeds/config` reports it as a `throttled_feeds` count beside `error_feeds`, and per feed as `last_throttled_at`; the settings page does not render either yet. `last_fetched_at` is written back unchanged, because nothing was fetched.
+
+The standoff never schedules a throttled feed sooner than a healthy one would poll: it floors at the largest of the feed's own interval, the 30-minute default and a 60-minute rate-limit backoff, and a server-named `Retry-After` is taken only where it is longer than that floor, capped at 6 hours. Every `next_poll_at` — success and failure alike — is multiplied by a random factor within ±10%, so a group of feeds refreshed together drifts apart instead of bursting, failing and rescheduling in lockstep forever.
+
+A poll run reports `throttled` alongside `errors`, and per feed `rate_limited` and `retry_after_seconds`; a run that was turned away for every feed exits non-zero rather than reading as a clean poll that found nothing.
+
+The known gap is that none of this spans users: a poll is a per-user subprocess, so two users reach one host from one IP with no shared budget.
 
 Are.na runs on the v3 API. Six block types have typed builders (`Text`, `Image`, `Link`, `Embed`, `Attachment`, `Channel`) over a generic fallback, so a type Are.na adds later still renders rather than breaking the poll.
 
 ## Storage
 
-Per-user `feeds.db` at `Config.module_db_path(user_id, "feeds")`, with tables `feed_categories`, `feeds`, `feed_entries`, `entry_images`, and `schema_meta`. Settings live as rows keyed under `feeds_settings.*` — `default_poll_interval_minutes` and `image_dedupe_window_days`.
+Per-user `feeds.db` at `Config.module_db_path(user_id, "feeds")`, with tables `feed_categories`, `feeds`, `feed_entries`, `entry_images`, and `schema_meta` (schema v6). Settings live as rows keyed under `feeds_settings.*` — `default_poll_interval_minutes` and `image_dedupe_window_days`.
 
 A poll **refreshes** an entry it already holds rather than discarding it, so a provider-side fix reaches entries already on file. User state (read status, starred, starred timestamp) is never overwritten, and a field is only replaced by a non-empty value, so a sparser re-fetch cannot blank a title you already have. The "N new" count still counts only genuinely new inserts.
 
