@@ -145,6 +145,34 @@ describe('gapKind — crossing a place boundary', () => {
     const b = ping({ timestamp: '2026-07-30T09:00:30Z', place: null, speed: 40 });
     expect(gapKind(a, b, 30_000, 30)).toBe('flight');
   });
+
+  it('does not read a near-simultaneous cross-source jump as a flight', () => {
+    // ISSUE-348: a watch track's last point and the phone's next ping, one
+    // second and 171 m apart. The ratio is 171 m/s, which cleared the speed
+    // threshold and drew a coral great-circle arc across a suburb. Two pings a
+    // second apart are near-simultaneous observations of two sources that
+    // disagree, not evidence of travel.
+    const watch = ping({ timestamp: '2026-07-30T09:00:00Z', place: null, speed: 0 });
+    const phone = ping({ timestamp: '2026-07-30T09:00:01Z', place: 'Home', speed: 0 });
+    expect(gapKind(watch, phone, 171, 1)).not.toBe('flight');
+  });
+
+  it('keeps calling a real unsampled leg a flight', () => {
+    // The control for the rule above. A genuine flight gap is minutes to
+    // hours, so the duration floor never reaches it.
+    const a = ping({ timestamp: '2026-07-30T09:00:00Z', place: 'LAX', speed: 0 });
+    const b = ping({ timestamp: '2026-07-30T14:00:00Z', place: 'JFK', speed: 0 });
+    expect(gapKind(a, b, 3_970_000, 18_000)).toBe('flight');
+  });
+
+  it('trusts the ratio from the moment the gap is a gap', () => {
+    // The floor is a boundary, so it is pinned from both sides: the same edge
+    // one second under it is not a flight, and at it is.
+    const a = ping({ timestamp: '2026-07-30T09:00:00Z', place: 'LAX', speed: 40 });
+    const b = ping({ timestamp: '2026-07-30T09:00:29Z', place: null, speed: 40 });
+    expect(gapKind(a, b, 30_000, 29)).not.toBe('flight');
+    expect(gapKind(a, b, 30_000, 30)).toBe('flight');
+  });
 });
 
 describe('the LAX fly-through', () => {

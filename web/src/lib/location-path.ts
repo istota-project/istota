@@ -114,6 +114,7 @@ export function greatCircleArc(
 //     render as solid coloured straight lines cutting across blocks. The
 //     motion test is what keeps a pass-through out of the rule: see below.
 const GAP_SPEED_MAX_MS = 140; // ~500 km/h — above any ground transport (Shinkansen ~300), below any flight
+const FLIGHT_MIN_GAP_S = 30; // below this the implied speed is a ratio with a denominator too small to mean anything — see gapKind
 const FLIGHT_DIST_MIN_M = 300_000; // 300 km — a single un-sampled edge of this length is flight-shaped even when airport dwell drags the implied speed below cruise
 const FLIGHT_DIST_SPEED_MS = 28; // ~100 km/h — paired with FLIGHT_DIST_MIN_M, keeps slow-and-long edges (overnight ferries, very long parked stretches) in the sparse bucket
 const ENDPOINT_REST_MS = 5; // ~18 km/h — below this, OS-reported endpoint speed counts as "at rest"; tolerates walk-to-gate noise. Read by the flight rule and the place-crossing rule both, so it is not named for either
@@ -181,7 +182,23 @@ export function gapKind(
   const speed = dist / timeDeltaS;
   // Unambiguous teleport — fast enough that no ground transport could
   // have covered the edge even at cruise speed.
-  if (speed > GAP_SPEED_MAX_MS) return 'flight';
+  //
+  // The duration floor is what makes the ratio worth reading. Two pings a
+  // second apart are near-simultaneous observations, and when they come from
+  // different sources at different places that is the sources disagreeing, not
+  // travel — the implied speed is dominated by the offset between two clocks
+  // and two sampling cadences. ISSUE-348 hit exactly that: a watch track's
+  // last point and the phone's next ping, 1 s and 171 m apart, read as
+  // 171 m/s and rendered a coral great-circle flight arc across a suburb.
+  // A genuine unsampled flight leg is minutes to hours, so nothing real is
+  // lost by requiring the gap to be a gap.
+  //
+  // What this does not cover, stated rather than implied: two sources
+  // kilometres apart with a real time gap between their samples still reads as
+  // a teleport, because on position and time alone it is indistinguishable
+  // from one. That case needs provenance, which the ping payload does not
+  // carry — `/api/location/pings` returns no `source` field.
+  if (timeDeltaS >= FLIGHT_MIN_GAP_S && speed > GAP_SPEED_MAX_MS) return 'flight';
   // Long jump with airport dwell on either side: a 700 km gap at 35 m/s
   // (driving + airport) is still a flight in user terms. The speed floor
   // keeps very-slow long edges (parked-overnight + moved-far-next-day)
