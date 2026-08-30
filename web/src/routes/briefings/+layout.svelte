@@ -12,6 +12,7 @@
     selectedBriefingId,
     briefingFilterName,
     briefingArchiveCount,
+    briefingArchiveError,
     briefingsRefreshNonce,
   } from '$lib/stores/briefings';
   import {
@@ -68,15 +69,26 @@
       total = resp.total;
       names = resp.briefing_names;
       briefingArchiveCount.set(items.length);
+      briefingArchiveError.set(null);
       // Seed a selection so the reader has something to show.
       if (reset) {
         const stillPresent = items.some((i) => i.id === $selectedBriefingId);
         if (!stillPresent) selectedBriefingId.set(items[0]?.id ?? null);
       }
     } catch {
-      // The reader page surfaces its own load errors; the sidebar just
-      // stays empty rather than throwing.
+      // Published rather than swallowed. This used to read "the reader page
+      // surfaces its own load errors", which is false for the only case that
+      // reaches here: the reader fetches the *selected* briefing, a failed list
+      // fetch leaves nothing selected, and its effect returns before its catch.
+      // So the count below — zero items, indistinguishable from an empty
+      // archive — was the only thing the reader had to go on, and it rendered
+      // "No briefings yet" at a user who was offline with briefings configured.
+      //
+      // A fixed string rather than the thrown message, matching feeds, location
+      // and money: offline throws `TypeError: Failed to fetch`, and putting that
+      // on the pane is worse than saying plainly what did not happen.
       briefingArchiveCount.set(items.length);
+      briefingArchiveError.set('Failed to load briefings');
     } finally {
       loadingMore = false;
     }
@@ -208,7 +220,9 @@
         {#if deleteError}
           <p class="sidebar-error">{deleteError}</p>
         {/if}
-        {#if items.length === 0}
+        {#if items.length === 0 && $briefingArchiveError}
+          <p class="sidebar-error">{$briefingArchiveError}</p>
+        {:else if items.length === 0}
           <p class="sidebar-empty">No briefings yet.</p>
         {:else}
           {#each items as item (item.id)}

@@ -2,7 +2,11 @@
   import { base } from '$app/paths';
   import { renderMarkdown } from '$lib/markdown';
   import { getBriefingArchiveItem, type BriefingArchiveItem } from '$lib/api';
-  import { selectedBriefingId, briefingArchiveCount } from '$lib/stores/briefings';
+  import {
+    selectedBriefingId,
+    briefingArchiveCount,
+    briefingArchiveError,
+  } from '$lib/stores/briefings';
 
   let current = $state<BriefingArchiveItem | null>(null);
   let loading = $state(false);
@@ -74,6 +78,11 @@
     </article>
   {:else if loading || $briefingArchiveCount === null}
     <p class="center-msg">Loading…</p>
+  {:else if $briefingArchiveError}
+    <!-- Ahead of the empty state and behind everything else: a briefing already
+         on screen stays readable through a failed refresh, but an archive that
+         could not be fetched must not read as an archive with nothing in it. -->
+    <p class="center-msg error">{$briefingArchiveError}</p>
   {:else}
     <div class="empty-state">
       <h1>No briefings yet</h1>
