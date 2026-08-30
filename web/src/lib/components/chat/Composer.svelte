@@ -915,6 +915,11 @@
    * appearing and disappearing at turn start and settle shifts only what is to
    * its own left, so a tap aimed at Send lands on Send whatever the turn does
    * mid-gesture.
+   *
+   * It also takes the mic's slot rather than a slot of its own, which is what
+   * keeps `.tools` the same width in both states — see the markup, and
+   * `singleRowWidth`, which subtracts that width to decide where the text
+   * wraps.
    */
   const showStop = $derived(busy && !!onCancel);
 
@@ -1284,7 +1289,18 @@
           <Check />
         </button>
       {:else}
-        {#if recorder.supported}
+        <!-- Hidden while Stop is up, so `.tools` holds the same two buttons in
+             both states. Not a view about the mic: the row's width is what the
+             wrap measurement subtracts (see singleRowWidth), so a third button
+             appearing mid-turn narrows the field by one slot and the text
+             starts wrapping ~2.7em earlier — which flips the whole composer
+             into its two-row layout for the length of the turn. Trading the
+             mic for Stop keeps that width fixed, and a typed message can still
+             be queued from every device. A tap aimed at the mic as a turn
+             starts lands on Stop, which is what it already did: Stop used to
+             mount *between* mic and Send and displaced the mic by exactly this
+             slot. -->
+        {#if recorder.supported && !showStop}
           <button
             class="icon-btn"
             onmousedown={keepFocus}
@@ -1305,8 +1321,9 @@
              tap aimed at Send as a tap on Stop. That is a task cancelled the
              instant it started, visible only on a second client rendering the
              room stream, because the sending client had already moved on.
-             Stop is therefore rendered *before* Send: what appears grows the
-             row leftwards and leaves Send where the thumb left it. -->
+             Stop is therefore rendered *before* Send, in the slot the mic
+             vacates above: Send is the last child of the row in both states,
+             so it neither moves nor changes meaning mid-gesture. -->
         {#if showStop}
           <button
             class="icon-btn stop"
