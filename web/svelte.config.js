@@ -21,6 +21,15 @@ const config = {
     paths: {
       base: '/istota',
     },
+    serviceWorker: {
+      // Kit registers `src/service-worker.ts` for every visitor by default,
+      // which is the one thing this must not do (ISSUE-202). The worker is for
+      // the iOS shell's cold launch with no connection; a service worker is
+      // also the one client artifact that can pin a continuously deployed app
+      // to a stale build, so `routes/+layout.svelte` registers it behind
+      // `isNativeShell()` and the desktop keeps exactly what it has today.
+      register: false,
+    },
     version: {
       // Poll `_app/version.json` so a long-lived session learns a new build
       // shipped. SvelteKit only reloads on the *next navigation*, which a chat

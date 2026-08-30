@@ -39,6 +39,7 @@ import {
   updateChatRoom,
   promoteChatRoom,
   type ChatAttachment,
+  type ChatConfig,
   type ChatRoom,
   type ChatHistory,
   type ChatView,
@@ -74,6 +75,7 @@ import {
   writeRooms,
   writeTranscript,
 } from '$lib/offline/db';
+import { rememberLastUserId, seedUserId } from '$lib/offline/lastUser';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
@@ -757,6 +759,18 @@ function createSession(): ChatSession {
   // profile two people take turns using, exactly as one person's queued
   // message must not be restored into the other's room.
   let storageUserId: string | null = null;
+  /**
+   * Whether `storageUserId` is a guess rather than something the server said.
+   *
+   * True only on the path Stage 5 exists for: a cold launch with no connection,
+   * where the service worker serves the app but `GET /chat/config` never
+   * answers, so the id every cache key is namespaced by comes from the
+   * `chat.lastUserId` pointer instead (`offline/lastUser.ts`, and read only
+   * inside the shell). Everything painted while this is true came out of a
+   * namespace nothing has confirmed, which is what `settleSeededUser` below is
+   * for.
+   */
+  let userIdFromPointer = false;
   // The connectivity subscription's teardown, or null while nothing is
   // watching. Session-lived like the room stream, and dropped by `teardown`
   // for the same reason: a reconcile-and-drain fired at a page the user has
@@ -873,6 +887,43 @@ function createSession(): ChatSession {
     // `restoreQueues` is one of the two mutations that deliberately do not
     // write back, so the sync `persistRoomQueue` would have done is here.
     syncQueuedCounts();
+  }
+
+  /**
+   * Settle a session that booted from the last-user pointer against the id the
+   * server actually reports (ISSUE-202).
+   *
+   * A cold launch with no connection has to read the cache by *some* id, and
+   * the only one available is the pointer `init()` wrote on the last
+   * successful config read. That is a guess, and this is the net underneath
+   * it: the first config that answers either confirms the guess — the ordinary
+   * case, one device, one person — or says it was wrong, in which case
+   * everything painted from the other namespace goes.
+   *
+   * "Everything" is three things, and each of them would otherwise outlive the
+   * correction. The transcript and the room list are the visible half. The
+   * restored **send queue** is the half that matters: its entries were read out
+   * of another user's `chat.sendQueue` keys, and leaving them in memory would
+   * let this session persist them back under the right key and then send them.
+   *
+   * The caller repaints — `init()` by carrying on into its own room-list and
+   * history reads, `onBackOnline` through `recoverStream`. Returns whether the
+   * guess was wrong, because the caller's repaint differs in the two cases.
+   */
+  function settleSeededUser(live: ChatConfig): boolean {
+    if (!userIdFromPointer) return false;
+    userIdFromPointer = false;
+    const real = live.user_id ?? null;
+    const guess = storageUserId;
+    storageUserId = real;
+    rememberLastUserId(real);
+    if (real === guess) return false;
+    sendQueue.clear();
+    syncQueuedCounts();
+    messages.set([]);
+    rooms.set([]);
+    externalTurnDisplay.set(normalizeExternalTurnDisplay(live.external_turn_display));
+    return true;
   }
 
   /**
@@ -2297,7 +2348,27 @@ function createSession(): ChatSession {
     // each other is a scrambled room; the drain at the foot of `init` is what
     // covers a connection that returned during it.
     if (!get(loaded)) return;
+    // Ahead of the reconcile, and only for a session that booted from the
+    // pointer (ISSUE-202): this is the first moment the server can say who
+    // this device belongs to, and if the guess was wrong the transcript being
+    // reconciled and the queue about to drain are the wrong user's. Skipped
+    // entirely otherwise — `settleSeededUser` returns at once and no request
+    // is made.
+    let repainted = false;
+    if (userIdFromPointer) {
+      const live = await getChatConfig().catch(() => null);
+      if (live) repainted = settleSeededUser(live);
+    }
     await recoverStream(null);
+    if (repainted) {
+      // The room list the recovery just fetched is what the queue is keyed
+      // against, so the restore has to come after it — and the rows for what
+      // it restored have to be put back, since the history load that would
+      // normally append them ran while the queue was empty.
+      restoreQueues();
+      const token = roomTokenOf(get(activeRoomId) ?? -1);
+      if (token) appendQueuedRows(token);
+    }
     // `recoverStream` returns at once when one is already running, so the
     // await above is not always the reconcile it reads as. Draining into a
     // rebuild that is still in flight is worse than not draining at all: that
@@ -2851,8 +2922,25 @@ function createSession(): ChatSession {
     const gen = ++initGeneration;
     const superseded = () => gen !== initGeneration;
     try {
+      // Who to read the cache by before anything has said (ISSUE-202). A cold
+      // launch with no connection gets no config at all, so without this seed
+      // it has no key and boots to an empty cache — the one outcome the
+      // service worker exists to prevent. Null off the shell and null once the
+      // session already knows: `seedUserId` reads the pointer only inside the
+      // app, and a remount has the real id already.
+      if (!storageUserId) {
+        const seeded = seedUserId();
+        if (seeded) {
+          storageUserId = seeded;
+          userIdFromPointer = true;
+        }
+      }
       const live = await getChatConfig().catch(() => null);
       if (superseded()) return;
+      // Before the cached reads below, so a wrong guess is corrected while
+      // nothing has been painted from it *this* time round — what it drops is
+      // what an earlier offline load left in memory.
+      if (live) settleSeededUser(live);
       // The cached config stands in for a fetch that did not answer, which is
       // only reachable on a remount: the id it is keyed by comes from a config
       // read, so a session that has never had one has nothing to look this up
@@ -2874,6 +2962,12 @@ function createSession(): ChatSession {
       // persistence would go quietly off, leaving a drained message stored and
       // restored later as a bubble for something already sent.
       if (cfg) storageUserId = cfg.user_id ?? null;
+      // The pointer the *next* cold launch reads the cache by, written on
+      // every successful config read rather than once — a device that changes
+      // hands re-points before anything is read by the old id. Only from a
+      // live read: writing back what the cache just answered with would make
+      // the pointer self-confirming.
+      if (live) rememberLastUserId(storageUserId);
       // After the id is known, or it would be stored under nothing. Only a
       // live read is worth writing back — re-storing what was just read would
       // push its own expiry out forever.

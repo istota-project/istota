@@ -14,6 +14,8 @@
   import { startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
+  import { isNativeShell } from '$lib/platform/native';
+  import { forgetLastUserId } from '$lib/offline/lastUser';
   import '../app.css';
 
   let { children } = $props();
@@ -67,6 +69,34 @@
       .catch(() => console.log('[istota] storage.persist() → refused'));
   });
 
+  // The offline app shell, in the native app only (ISSUE-202).
+  //
+  // Without a worker, a cold launch with no connection never gets a document —
+  // the WebView is pointed at the deployment, so WebKit paints its own
+  // unreachable-server page and none of the offline cache below ever runs.
+  // With one, the navigation resolves from cache and the app boots into the
+  // banner, the cached transcript and a composer that queues.
+  //
+  // Gated on the shell for blast radius rather than for taste: this app
+  // deploys continuously, and a service worker is the one client artifact that
+  // can pin a client to a build the server has deleted. The phone is where the
+  // cold launch happens and is also the surface with a native escape hatch, so
+  // it is the only place this runs. Kit's own automatic registration is off
+  // (`svelte.config.js`) so that this gate is the only way in.
+  //
+  // Fire-and-forget: a registration that fails leaves the app exactly as it is
+  // without one, which is what every other surface already runs.
+  onMount(() => {
+    if (!isNativeShell()) return;
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    navigator.serviceWorker
+      // Kit bundles the worker as a classic script for the build and serves it
+      // as an ES module in dev, and registering with the wrong type fails
+      // outright.
+      .register(`${base}/service-worker.js`, { type: import.meta.env.DEV ? 'module' : 'classic' })
+      .catch((e) => console.log(`[istota] service worker not registered: ${e}`));
+  });
+
   // Stale-build prompt. `kit.version.pollInterval` flips `updated.current` when
   // a new build ships, but SvelteKit only acts on it at the *next navigation* —
   // and a chat tab left open for days never navigates. Worse on the iOS
@@ -103,6 +133,12 @@
       startNotificationPoll();
     } catch (e) {
       if (e instanceof AuthError) {
+        // The session is over, so the pointer that says whose cache to read
+        // before the next one resolves goes with it (ISSUE-202). Whoever signs
+        // in next writes their own on the first config read; until then a cold
+        // launch with no connection reads nothing, which is the right answer
+        // when nobody is signed in.
+        forgetLastUserId();
         window.location.href = `${base}/login`;
         return;
       }
