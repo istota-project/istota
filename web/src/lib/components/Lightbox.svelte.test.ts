@@ -10,11 +10,14 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { DOUBLE_TAP_MS } from '$lib/imageZoom';
+import { DOUBLE_TAP_MS, GHOST_CLICK_MS, GHOST_CLICK_SLOP } from '$lib/imageZoom';
 
 import Lightbox from './Lightbox.svelte';
 
 const IMAGES = ['https://example.com/a.jpg', 'https://example.com/b.jpg'];
+
+/** Whatever the overlay is covering, planted by `pageBeneath`. */
+const planted: HTMLElement[] = [];
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -22,16 +25,23 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  planted.splice(0).forEach((el) => el.remove());
   cleanup();
 });
 
 function open(onClose = vi.fn()) {
-  const { container } = render(Lightbox, { images: IMAGES, index: 0, onClose });
+  const { container, rerender } = render(Lightbox, { images: IMAGES, index: 0, onClose });
   return {
     onClose,
     container,
     img: container.querySelector('img') as HTMLImageElement,
     backdrop: container.querySelector('.lightbox') as HTMLElement,
+    /**
+     * What the only caller does when `onClose` fires: the index goes null and
+     * the overlay stops rendering. Whatever it was covering is then what a
+     * click at that point is hit-tested against.
+     */
+    close: () => rerender({ images: IMAGES, index: null, onClose }),
   };
 }
 
@@ -40,10 +50,16 @@ function open(onClose = vi.fn()) {
  * (`platform/input.test.ts`) drive pointer handlers with a MouseEvent. Pinch
  * needs the pointer id as well, which no MouseEvent init carries.
  */
-function pointer(type: string, id: number, x: number, y: number): MouseEvent {
+function pointer(
+  type: string,
+  id: number,
+  x: number,
+  y: number,
+  pointerType = 'touch',
+): MouseEvent {
   const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
   Object.defineProperty(e, 'pointerId', { value: id });
-  Object.defineProperty(e, 'pointerType', { value: 'touch' });
+  Object.defineProperty(e, 'pointerType', { value: pointerType });
   return e;
 }
 
@@ -70,10 +86,39 @@ function scaleOf(img: HTMLElement): number {
   return match ? Number(match[1]) : 1;
 }
 
-async function tap(el: Element, x = 500, y = 400, id = 1): Promise<void> {
-  el.dispatchEvent(pointer('pointerdown', id, x, y));
-  el.dispatchEvent(pointer('pointerup', id, x, y));
+async function tap(el: Element, x = 500, y = 400, id = 1, pointerType = 'touch'): Promise<void> {
+  el.dispatchEvent(pointer('pointerdown', id, x, y, pointerType));
+  el.dispatchEvent(pointer('pointerup', id, x, y, pointerType));
   await tick();
+}
+
+/**
+ * A page the overlay is covering, with one thing on it that can be activated.
+ *
+ * A `<button>` rather than a bare div: what the lightbox actually covers is a
+ * feed card and a reader backdrop, both of which act on a click.
+ */
+function pageBeneath(): { el: HTMLElement; activated: ReturnType<typeof vi.fn> } {
+  const el = document.createElement('button');
+  const activated = vi.fn();
+  el.addEventListener('click', activated);
+  document.body.appendChild(el);
+  planted.push(el);
+  return { el, activated };
+}
+
+/**
+ * The `click` a tap leaves behind.
+ *
+ * jsdom synthesizes none from pointer events, so the second half of what a
+ * browser does with a tap is written out: a `click` at the point the finger
+ * lifted from, dispatched once the overlay has had its chance to close and be
+ * removed. Its target is therefore whatever was underneath.
+ */
+function clickAt(el: Element, x: number, y: number): void {
+  el.dispatchEvent(
+    new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }),
+  );
 }
 
 describe('pinch to zoom', () => {
@@ -227,6 +272,109 @@ describe('tapping', () => {
 
     expect(scaleOf(img)).toBe(held);
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('the click a tap leaves behind', () => {
+  it('does not reach the page under a backdrop tap that dismissed the overlay', async () => {
+    const { el, activated } = pageBeneath();
+    const { onClose, backdrop, container, close } = open();
+
+    await tap(backdrop, 500, 400);
+    expect(onClose).toHaveBeenCalledOnce();
+    await close();
+    // The condition the defect needs: the overlay is gone by the time the
+    // click is dispatched, so nothing of it is left to absorb the click.
+    expect(container.querySelector('.lightbox')).toBeNull();
+
+    clickAt(el, 500, 400);
+    expect(activated).not.toHaveBeenCalled();
+  });
+
+  it('does not reach it after a tap on the image either', async () => {
+    // That tap dismisses on the double-tap timer, so its click can arrive
+    // after the overlay has gone too — just later than the backdrop's.
+    const { el, activated } = pageBeneath();
+    const { img, close } = open();
+
+    await tap(img, 500, 400);
+    vi.advanceTimersByTime(DOUBLE_TAP_MS);
+    await close();
+
+    clickAt(el, 500, 400);
+    expect(activated).not.toHaveBeenCalled();
+  });
+
+  it('is still claimed after the overlay has dropped its gesture state', async () => {
+    // Closing runs `resetGestures` — through the caller's index going null,
+    // and through the nav path used here — before the click lands. A claim
+    // cleared there would hand the click straight back to what was covered.
+    const { el, activated } = pageBeneath();
+    const { backdrop } = open();
+
+    await tap(backdrop, 500, 400);
+    await fireEvent.keyDown(document, { key: 'ArrowRight' });
+
+    clickAt(el, 500, 400);
+    expect(activated).not.toHaveBeenCalled();
+  });
+
+  it('claims nothing for a mouse, whose click cannot be handed on', async () => {
+    // A mouse click is targeted from the press and the release, both of which
+    // landed on the overlay, so it never reaches what the overlay covered.
+    // Claiming there would leave behind a claim no click ever spends.
+    const { el, activated } = pageBeneath();
+    const { onClose, backdrop, close } = open();
+
+    await tap(backdrop, 500, 400, 1, 'mouse');
+    expect(onClose).toHaveBeenCalledOnce();
+    await close();
+
+    clickAt(el, 500, 400);
+    expect(activated).toHaveBeenCalledOnce();
+  });
+
+  it('takes one that lands within the slop of the release', async () => {
+    const { el, activated } = pageBeneath();
+    const { backdrop, close } = open();
+
+    await tap(backdrop, 500, 400);
+    await close();
+
+    clickAt(el, 500 + GHOST_CLICK_SLOP, 400);
+    expect(activated).not.toHaveBeenCalled();
+  });
+
+  it('leaves one that lands past the slop alone', async () => {
+    const { el, activated } = pageBeneath();
+    const { backdrop, close } = open();
+
+    await tap(backdrop, 500, 400);
+    await close();
+
+    clickAt(el, 500 + GHOST_CLICK_SLOP + 1, 400);
+    expect(activated).toHaveBeenCalledOnce();
+  });
+
+  it('leaves one that arrives too late alone', async () => {
+    const { el, activated } = pageBeneath();
+    const { backdrop, close } = open();
+
+    await tap(backdrop, 500, 400);
+    await close();
+    vi.advanceTimersByTime(GHOST_CLICK_MS + 1);
+
+    clickAt(el, 500, 400);
+    expect(activated).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the nav buttons working while a claim is outstanding', async () => {
+    const { backdrop, container } = open();
+
+    await tap(backdrop, 500, 400);
+    await fireEvent.click(screen.getByLabelText('Next image'));
+
+    expect((container.querySelector('img') as HTMLImageElement).src).toBe(IMAGES[1]);
   });
 });
 
