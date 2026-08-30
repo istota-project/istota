@@ -401,13 +401,29 @@ def _contained_channel_dir(
     bound read-write into the sandbox of every task in the room, so the token
     passing ``validate_conversation_token`` says nothing about where the
     directory it names actually resolves to.
+
+    **Equality, not "under the root"**, which is where this differs from the
+    user-tree rule. The looser rule there exists so a user who reorganised their
+    own workspace still works, and it is safe because everything under their
+    root is theirs. ``Channels/`` is bot-managed and holds every room, so "under
+    the root" would let a link at ``Channels/{token}`` resolve into *another
+    room's* directory and put that room's CHANNEL.md into this room's prompt.
+    Nobody has a reason to reorganise this tree.
     """
     from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - import cycle
 
-    return contained_overlay_dir(
+    channels = _get_mount_path(config, "Channels")
+    resolved = contained_overlay_dir(
         _get_mount_path(config, get_channel_base_path(conversation_token)),
-        _get_mount_path(config, "Channels"),
+        channels,
     )
+    if resolved is None:
+        return None
+    try:
+        expected = Path(os.path.realpath(channels)) / conversation_token
+    except OSError:
+        return None
+    return resolved if resolved == expected else None
 
 
 def _contained_under_user_root(
@@ -542,7 +558,8 @@ def read_regular_file(
     Containment of the *ancestors* is the caller's, exactly as for
     ``write_regular_file``. What this covers is the last component.
     """
-    from .skills._loader import read_overlay_bytes  # noqa: PLC0415 - import cycle
+    # noqa: PLC0415 - import cycle
+    from .skills._loader import OVERLAY_NOT_UTF8, read_overlay_bytes
 
     data, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
     if reason is not None:
@@ -551,7 +568,13 @@ def read_regular_file(
     try:
         return data.decode("utf-8"), None
     except UnicodeDecodeError:
-        return None, "not_utf8"
+        # `_loader`'s published vocabulary, like every other reason this
+        # returns. The prefix is wider than its name now that four surfaces
+        # report these codes about USER.md, PERSONA.md and CHANNEL.md as well as
+        # overlays — but one word for one condition is worth more than a name
+        # that reads well in isolation, and a second spelling here would make
+        # this the only surface saying something different about the same file.
+        return None, OVERLAY_NOT_UTF8
 
 
 def create_file_if_absent(path: Path, text: str) -> bool:
@@ -780,8 +803,8 @@ workflow of three lines is a perfectly good one.
 
 - **config/skills/developer.md** — the usual home. It is read only when the
   `developer` skill loads, which is exactly when a workflow decision applies,
-  and it costs nothing on the tasks that will never write code. Write it with
-  `istota-skill memory append --skill developer --line "..."`.
+  and it costs nothing on the tasks that will never write code. Edit it as a
+  file, then run `istota-skill skills overlays` and check it says `binds: true`.
 - **config/USER.md** — applies to every task, coding or not. The right home for
   a rule that would still be wrong to ignore on a task where the `developer`
   skill did not load. Anything about what this machine can afford belongs here:

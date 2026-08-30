@@ -1378,6 +1378,22 @@ class TestChannelAndDatedMemoryReads:
         (channels / "room1").symlink_to(outside, target_is_directory=True)
         assert read_channel_memory(mount_config, "room1") is None
 
+    def test_a_link_to_another_room_is_refused(self, mount_config):
+        """The channel ceiling is an equality, not "under `Channels/`".
+
+        `Channels/` is bot-managed and holds every room, so the looser
+        under-the-root rule used for a user's own tree would accept a link at
+        `Channels/{token}` pointing at another room and put that room's
+        CHANNEL.md into this room's prompt.
+        """
+        channels = mount_config.nextcloud_mount_path / "Channels"
+        other = channels / "room2"
+        other.mkdir(parents=True)
+        (other / "CHANNEL.md").write_text("other room's business")
+        (channels / "room1").symlink_to(other, target_is_directory=True)
+
+        assert read_channel_memory(mount_config, "room1") is None
+
     def test_an_ordinary_channel_memory_still_reads(self, mount_config):
         d = mount_config.nextcloud_mount_path / "Channels" / "room1"
         d.mkdir(parents=True)

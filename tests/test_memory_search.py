@@ -1458,6 +1458,68 @@ class TestReindexSkillOverlays:
         ).fetchone()[0] == 0
         conn.close()
 
+    def test_the_directory_cannot_be_swapped_after_the_containment_check(
+        self, tmp_path, monkeypatch
+    ):
+        """The check and the walk were separated by a listing and an `open(2)`
+        per file, all resolved by path — so a `skills` entry replaced with a
+        link in that window sent the walk somewhere the check never approved.
+        `O_NOFOLLOW` covers the leaf and no component above it (ISSUE-341 item
+        3). This wins the race deterministically by swapping at the instant the
+        check returns."""
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        overlays = self._overlays(config)
+        (overlays / "developer.md").write_text("- an honest rule\n")
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "developer.md").write_text("- SWAPPED SECRET TEXT\n")
+
+        from istota.skills._loader import contained_overlay_dir as _real_contained
+
+        def swapping(overlay_dir, user_root):
+            answer = _real_contained(overlay_dir, user_root)
+            # The attacker's two commands, landing between check and use.
+            import shutil
+
+            shutil.rmtree(overlays)
+            overlays.symlink_to(elsewhere, target_is_directory=True)
+            return answer
+
+        monkeypatch.setattr(
+            "istota.skills._loader.contained_overlay_dir", swapping
+        )
+
+        self._reindex(conn, config)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE content LIKE '%SWAPPED SECRET%'"
+        ).fetchone()[0] == 0
+        conn.close()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permission bits")
+    def test_a_file_this_pass_could_not_read_keeps_its_rows(self, tmp_path):
+        """An `EACCES` is a fact about the pass, not about the file. Reaping on
+        one deletes rules the user can still see on disk, and nothing indexes
+        them again because the file is never rewritten."""
+        conn = _init_db(tmp_path / "test.db")
+        config = self._config(tmp_path)
+        path = self._overlays(config) / "developer.md"
+        path.write_text("- a rule worth keeping\n")
+        assert self._reindex(conn, config)["skill_overlays"] == 1
+
+        path.chmod(0o000)
+        try:
+            self._reindex(conn, config)
+            rows = conn.execute(
+                "SELECT content FROM memory_chunks WHERE source_type = 'skill_overlay'"
+            ).fetchall()
+            assert len(rows) == 1
+            assert "worth keeping" in rows[0][0]
+        finally:
+            path.chmod(0o644)
+        conn.close()
+
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
     def test_a_fifo_does_not_hang_the_reindex(self, tmp_path):
         """A FIFO with no writer blocks `open(2)`."""

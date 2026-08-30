@@ -6,6 +6,7 @@ Gracefully degrades to BM25-only if sqlite-vec or sentence-transformers is unava
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import struct
@@ -504,7 +505,7 @@ def index_file(
     )
 
 
-def _reindex_skill_overlays(
+def reindex_skill_overlays(
     conn: sqlite3.Connection, config, user_id: str
 ) -> tuple[int, int]:
     """Reindex a user's per-skill overlays. Returns `(files, chunks)`.
@@ -528,20 +529,30 @@ def _reindex_skill_overlays(
     rule the loader and the memory CLI apply, and the resolved path is what is
     walked.
 
-    **Only what binds is indexed — here.** A file named for a skill that does
-    not exist, one for a denylisted skill, or one past the loading cap reaches
-    no prompt at all, so indexing it would have search return a rule that is
-    not in any prompt — the failure the delete-on-empty path exists to prevent,
-    arrived at from the other side. `doctor`'s `config.skill_overlays` is what
-    reports such a file; search declines to pretend it is live.
+    **Only what binds is indexed — with one deliberate exception.** A file
+    named for a skill that does not exist, one for a denylisted skill, or one
+    past the loading cap reaches no prompt at all, so indexing it would have
+    search return a rule that is not in any prompt — the failure the
+    delete-on-empty path exists to prevent, arrived at from the other side.
+    `doctor`'s `config.skill_overlays` is what reports such a file; search
+    declines to pretend it is live.
 
-    The memory CLI's per-write re-index (`skills/memory._reindex_overlay`) does
-    **not** apply this gate, and the asymmetry is worth knowing rather than
-    assuming away: a write past `OVERLAY_MAX_BYTES` is permitted with a warning
-    rather than refused (only the 1 MiB read cap refuses one), and a write
-    against a *disabled* skill is permitted outright, since the write path
-    checks index membership and the denylist but not `effective_disabled_skills`.
-    Either is searchable until this pass next runs and reaps it below.
+    The exception is `effective_disabled_skills`, which is **not** passed to
+    `inspect_overlay` here, so an overlay for a skill the operator or the user
+    switched off stays indexed while `skills overlays` reports it
+    `binds: false, reason: skill_disabled`. That is ISSUE-341 item 1 and it is
+    left standing on purpose: a disabled skill is a reversible state, and a
+    user who asks "why does the bot always do X" about a rule they wrote should
+    find it rather than be told nothing exists. The three gates above are
+    permanent properties of the file; this one is a setting.
+
+    **This is the only automatic indexing an overlay gets** (ISSUE-343). The
+    memory CLI used to re-index on each of its own writes, and that seam went
+    with the write verbs — it never covered the authoring mode the file is
+    actually for, since a user editing `config/skills/<name>.md` in a text
+    editor called no CLI. A full directory pass covers both by construction,
+    which is why the two callers are `reindex_all` and the nightly sleep cycle
+    rather than anything on a write path.
 
     **Rows for a vanished file go.** Unlike USER.md, an overlay is a file the
     workflow deletes — the memory CLI removes one whose last bullet goes, and a
@@ -555,12 +566,21 @@ def _reindex_skill_overlays(
     """
     from istota.skills._loader import (
         OVERLAY_MAX_BYTES,
+        OVERLAY_UNREADABLE,
         contained_overlay_dir,
         inspect_overlay,
         load_skill_index,
+        open_overlay_dir,
         read_overlay_bytes,
     )
 
+    # `use_mount` before the join, not after: `nextcloud_mount_path` is None on
+    # an rclone-remote deployment and `None / "Users/…"` is a TypeError. This
+    # was survivable while the only caller was a hand-run `memory_search
+    # reindex`; it is now on a scheduler cadence, where the raise would be
+    # swallowed by the caller's own `except Exception` and reported nowhere.
+    if not getattr(config, "use_mount", False):
+        return 0, 0
     bot_dir = getattr(config, "bot_dir_name", "")
     if not bot_dir:
         return 0, 0
@@ -579,26 +599,79 @@ def _reindex_skill_overlays(
         logger.warning("skill overlay reindex skipped, no skill index: %s", e)
         return 0, 0
 
+    # The containment answer above is a comparison of resolved paths, and it
+    # stops being true the moment anything moves. Everything from here reads
+    # through an fd instead, so the directory that passed is the directory that
+    # is walked (ISSUE-341 item 3). `overlay_dir` stays in use below and is no
+    # longer the security gate: it is the *path spelling* the index keys on.
+    # It is the `realpath`. There is no per-write path left to agree with —
+    # ISSUE-343 retired the overlay write verbs and this pass is now the only
+    # writer of `skill_overlay` rows — but the spelling still matters across
+    # runs of this function, since a row keyed on the raw configured path
+    # would be reaped as stale by the next pass on a symlinked mount.
+    dir_fd = open_overlay_dir(user_root, bot_dir, "config", "skills")
+    if dir_fd is None:
+        # `contained_overlay_dir` just passed and this did not, so the two
+        # disagree — which they can, deliberately: it resolves symlinks and
+        # accepts one landing inside the user root, while the fd walk refuses a
+        # symlink at any component. The prompt loader takes the permissive
+        # answer, so on that layout an overlay reaches every prompt for its
+        # skill and is invisible to `!search` for good, and the reap below is
+        # skipped so old rows persist too. Say so once rather than going quiet.
+        logger.warning(
+            "skill overlay reindex skipped for %s: the overlay directory passed "
+            "containment but could not be opened without following a symlink",
+            user_id,
+        )
+        return 0, 0
+
     files = chunks = 0
     live: set[str] = set()
-    for path in sorted(overlay_dir.glob("*.md")):
-        found = inspect_overlay(
-            path, known_skills=known, max_read_bytes=OVERLAY_MAX_BYTES
-        )
-        if not found.binds:
-            continue
-        raw, refusal, _size = read_overlay_bytes(path, max_bytes=OVERLAY_MAX_BYTES)
-        if refusal is not None or not raw:
-            continue
+    try:
         try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        live.add(str(path))
-        n = index_file(conn, user_id, str(path), content, "skill_overlay")
-        if n > 0:
-            files += 1
-            chunks += n
+            # No dotfile filter: `Path.glob("*.md")`, which this replaced and
+            # which `doctor` and `skills overlays` still use, matches them, and
+            # three listings of one directory disagreeing is the drift this
+            # module keeps being bitten by. A dotfile cannot bind anyway
+            # (`.developer.md` is the skill `.developer`), so it changes
+            # nothing beyond keeping the three the same.
+            with os.scandir(dir_fd) as entries:
+                names = sorted(e.name for e in entries if e.name.endswith(".md"))
+        except OSError:
+            return 0, 0
+        for name in names:
+            path = overlay_dir / name
+            found = inspect_overlay(
+                path, known_skills=known, max_read_bytes=OVERLAY_MAX_BYTES,
+                dir_fd=dir_fd,
+            )
+            if found.reason == OVERLAY_UNREADABLE:
+                # "This pass could not read it", which is not "it is gone".
+                # An EACCES or an EIO here would otherwise drop the file out
+                # of `live` and have the reap below delete rules the user can
+                # still see on disk, permanently — the file is not rewritten,
+                # so nothing indexes it again. Held rather than reindexed:
+                # there are no bytes to index either.
+                live.add(str(path))
+                continue
+            if not found.binds:
+                continue
+            raw, refusal, _size = read_overlay_bytes(
+                path, max_bytes=OVERLAY_MAX_BYTES, dir_fd=dir_fd
+            )
+            if refusal is not None or not raw:
+                continue
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            live.add(str(path))
+            n = index_file(conn, user_id, str(path), content, "skill_overlay")
+            if n > 0:
+                files += 1
+                chunks += n
+    finally:
+        os.close(dir_fd)
 
     for stale in _stale_overlay_sources(conn, user_id, live):
         _delete_source_chunks(conn, user_id, "skill_overlay", stale)
@@ -612,10 +685,16 @@ def _stale_overlay_sources(
 
     Scoped by ``source_type`` and ``user_id`` and compared against the set just
     walked, so a row is dropped only when this pass positively established that
-    its file is gone from the one directory that can produce one. A pass that
-    walked nothing — no mount, no directory, an unreadable skill index —
-    returns before reaching here rather than arriving with an empty ``live``
-    set, which would read as "every overlay was deleted".
+    its file is gone, or is there and reaches no prompt. A pass that walked
+    nothing — no mount, no directory, an unreadable skill index — returns
+    before reaching here rather than arriving with an empty ``live`` set, which
+    would read as "every overlay was deleted".
+
+    "Positively established" is doing real work and the caller keeps its half:
+    a file whose *read* failed this pass is added to ``live`` anyway, because
+    an ``EACCES`` or an ``EIO`` is a fact about the pass and not about the
+    file, and reaping on one deletes rules the user can still see on disk with
+    nothing left to index them again.
     """
     rows = conn.execute(
         "SELECT DISTINCT source_id FROM memory_chunks "
@@ -677,7 +756,7 @@ def reindex_all(
                 if n > 0:
                     stats["chunks"] += n
 
-        n_files, n_chunks = _reindex_skill_overlays(conn, config, user_id)
+        n_files, n_chunks = reindex_skill_overlays(conn, config, user_id)
         stats["skill_overlays"] = n_files
         stats["chunks"] += n_chunks
 

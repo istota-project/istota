@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -2577,10 +2578,116 @@ class TestFormatCliSkills:
 
 
 
+class TestOpenOverlayDir:
+    """The containment gate the search reindex now walks through.
+
+    `contained_overlay_dir` answers by comparing resolved paths, which stops
+    being true the moment anything moves; this answers by holding the directory
+    open, so there is nothing left to re-resolve. Every property below was
+    stated in its docstring and held by nothing before these tests.
+    """
+
+    @staticmethod
+    def _lowest_free_fd():
+        fd = os.open(os.devnull, os.O_RDONLY)
+        os.close(fd)
+        return fd
+
+    @staticmethod
+    def _tree(tmp_path):
+        d = tmp_path / "root" / "bot" / "config" / "skills"
+        d.mkdir(parents=True)
+        (d / "developer.md").write_text("- a rule\n")
+        return tmp_path / "root"
+
+    def test_it_opens_the_directory_that_is_there(self, tmp_path):
+        from istota.skills._loader import open_overlay_dir
+
+        root = self._tree(tmp_path)
+        fd = open_overlay_dir(root, "bot", "config", "skills")
+        assert fd is not None
+        try:
+            assert sorted(e.name for e in os.scandir(fd)) == ["developer.md"]
+        finally:
+            os.close(fd)
+
+    @pytest.mark.parametrize("depth", ["bot", "config", "skills"])
+    def test_a_symlink_at_any_component_is_refused(self, tmp_path, depth):
+        """`O_NOFOLLOW` covers the last component of one `open`, so the walk
+        has to take one component at a time or an ancestor link is followed."""
+        from istota.skills._loader import open_overlay_dir
+
+        root = self._tree(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / "config" / "skills").mkdir(parents=True)
+        victim = {"bot": root / "bot",
+                  "config": root / "bot" / "config",
+                  "skills": root / "bot" / "config" / "skills"}[depth]
+        target = {"bot": elsewhere,
+                  "config": elsewhere / "config",
+                  "skills": elsewhere / "config" / "skills"}[depth]
+        shutil.rmtree(victim)
+        victim.symlink_to(target, target_is_directory=True)
+
+        assert open_overlay_dir(root, "bot", "config", "skills") is None
+
+    def test_the_root_itself_may_be_a_symlink(self, tmp_path):
+        """Deliberate: the root is composed by the daemon out of its own
+        config, and the mount is reached through a link on some hosts."""
+        from istota.skills._loader import open_overlay_dir
+
+        root = self._tree(tmp_path)
+        link = tmp_path / "link-root"
+        link.symlink_to(root, target_is_directory=True)
+        fd = open_overlay_dir(link, "bot", "config", "skills")
+        assert fd is not None
+        os.close(fd)
+
+    def test_a_missing_or_non_directory_component_is_refused(self, tmp_path):
+        from istota.skills._loader import open_overlay_dir
+
+        root = self._tree(tmp_path)
+        assert open_overlay_dir(root, "bot", "nope", "skills") is None
+        assert open_overlay_dir(tmp_path / "gone", "bot") is None
+        (root / "bot" / "file").write_text("x")
+        assert open_overlay_dir(root, "bot", "file") is None
+
+    @pytest.mark.parametrize("part", ["a/b", "a\0b", ".", "..", ""])
+    def test_a_component_that_is_not_one_plain_name_is_refused(
+        self, tmp_path, part
+    ):
+        """A `/` would have its interior walked by a single `open`, where
+        `O_NOFOLLOW` reaches only the last component; `.`/`..` climb; and a NUL
+        makes `os.open` raise `ValueError`, which is not an `OSError` and so
+        escaped the guard carrying an fd with it."""
+        from istota.skills._loader import open_overlay_dir
+
+        root = self._tree(tmp_path)
+        assert open_overlay_dir(root, part) is None
+
+    def test_no_path_leaks_a_descriptor(self, tmp_path):
+        """It runs in a long-lived daemon, once per user per reindex."""
+        from istota.skills._loader import open_overlay_dir
+
+        root = self._tree(tmp_path)
+        cases = [
+            ("bot", "config", "skills"),
+            ("bot", "nope", "skills"),
+            ("a/b",), ("a\0b",), ("..",),
+        ]
+        before = self._lowest_free_fd()
+        for _ in range(50):
+            for parts in cases:
+                fd = open_overlay_dir(root, *parts)
+                if fd is not None:
+                    os.close(fd)
+        assert self._lowest_free_fd() == before
+
+
 class TestInspectOverlay:
     """The one predicate two reporting surfaces share.
 
-    `memory skills` and `doctor config.skill_overlays` ask the same question of
+    `skills overlays` and `doctor config.skill_overlays` ask the same question of
     the same directory, and the failure this guards is that they drift: one
     says a file binds while the prompt does not contain it. Every gate below is
     the loader's own, so a change to what loads changes both answers at once.
@@ -2611,6 +2718,35 @@ class TestInspectOverlay:
         found = inspect_overlay(p, known_skills=self.KNOWN)
         assert found.binds is False
         assert found.reason == "unknown_skill"
+
+    def test_an_unknown_name_is_never_opened(self, tmp_path, monkeypatch):
+        """The name is caller-supplied and the directory is model-writable, so
+        a file the gate has already rejected must not also be read to the cap.
+        `doctor` walks every user's directory on the daemon's start-up path
+        with a 1 MiB ceiling per file (ISSUE-341 item 2)."""
+        from istota.skills import _loader
+
+        calls = []
+        real = _loader.read_overlay_bytes
+        monkeypatch.setattr(
+            _loader, "read_overlay_bytes",
+            lambda path, **kw: (calls.append(path), real(path, **kw))[1],
+        )
+
+        rejected = self._write(tmp_path, "develper.md", "- a rule\n")
+        found = inspect_overlay(rejected, known_skills=self.KNOWN)
+        assert found.reason == "unknown_skill"
+        assert calls == []
+        # Nothing was read, so nothing may be described.
+        assert found.size is None
+        assert found.lines is None
+        assert found.first_line is None
+        assert found.warnings == ()
+
+        # Control: a name the gate accepts is still read.
+        accepted = self._write(tmp_path, "developer.md", "- a rule\n")
+        assert inspect_overlay(accepted, known_skills=self.KNOWN).binds
+        assert calls == [accepted]
 
     def test_a_denylisted_skill_does_not_bind(self, tmp_path):
         p = self._write(tmp_path, "sensitive_actions.md", "- a rule\n")
@@ -2724,8 +2860,8 @@ class TestInspectOverlay:
         assert found.reason == "overlay_not_utf8"
 
     def test_an_absent_file_reads_as_empty_rather_than_as_a_refusal(self, tmp_path):
-        """`memory append --skill` learns from absence that it must create the
-        file, so a missing path must not come back as a read failure."""
+        """A reporting surface learns from absence that there is no overlay,
+        so a missing path must not come back as a read failure."""
         d = tmp_path / "skills"
         d.mkdir()
         found = inspect_overlay(d / "developer.md", known_skills=self.KNOWN)

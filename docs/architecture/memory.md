@@ -210,7 +210,7 @@ istota-skill memory_search delete-fact ID
 
 `index file` is scoped: it will only read paths inside your own workspace, the channel directory the task is running in, and the task's scratch directory. Anything indexed can be read back out through `search`, so an unscoped read would have been a way to reach files a task is not meant to see.
 
-Runtime memory *writes* go through a separate skill — `istota-skill memory append|add-heading|remove|replace|remove-heading|show|headings|skills` — which takes a file lock and writes an audit record. Never append to `USER.md` with shell redirection. `--channel TOKEN` retargets a write to that room's `CHANNEL.md`; `--skill NAME` retargets it to that skill's per-user overlay (`config/skills/<name>.md`), and `skills` inventories the overlay directory.
+Runtime memory *writes* go through a separate skill — `istota-skill memory append|add-heading|remove|replace|remove-heading|remove-subheading|show|headings` — which takes a file lock and writes an audit record. Never append to `USER.md` with shell redirection. `--channel TOKEN` retargets a write to that room's `CHANNEL.md`. Per-skill overlays are not written here: they are user-authored files, read through `istota-skill skills overlay <name>` and inventoried by `istota-skill skills overlays`.
 
 ## Related pages
 

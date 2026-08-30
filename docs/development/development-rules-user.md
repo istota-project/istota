@@ -10,10 +10,10 @@ Deployment mechanics did not move. The forge boundary and its refused verbs, the
 
 ## Restoring the pre-337 routine
 
-The usual home is the `developer` skill's per-user overlay, `config/skills/developer.md`, which is read only when that skill loads — exactly when a workflow decision applies, and at no cost on the tasks that will never write code. Write it a line at a time:
+The usual home is the `developer` skill's per-user overlay, `config/skills/developer.md`, which is read only when that skill loads — exactly when a workflow decision applies, and at no cost on the tasks that will never write code. Write it as a file — paste the whole block in, prose and code blocks included — and then check it took:
 
 ```bash
-istota-skill memory append --skill developer --line "Worktree per task, always, however small the change."
+istota-skill skills overlays    # the file should show binds: true
 ```
 
 Or paste the block into `config/USER.md` to have it on every task, or into a project room's `CHANNEL.md` to scope it to that project. Where `USER.md` and a room's `CHANNEL.md` disagree, `CHANNEL.md` wins for a task from that room. The overlay's own label says it outranks the skill's defaults and claims nothing about the other two files, so write each decision in one place rather than in two expecting a defined winner.
