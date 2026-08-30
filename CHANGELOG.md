@@ -78,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **You can give yourself a profile picture in the web UI.** Settings → Identity takes one — drop it, paste it or pick a file — and it replaces the lettered square beside your messages in chat. It is saved as soon as you choose it, with no Save step, and Remove puts the letter back. The picture is resized and re-encoded on the way in, so what is stored carries none of the camera and location data a photo arrives with. It is separate from your Nextcloud picture: setting one here does not change what Nextcloud shows.
+
 - **You can pinch to zoom an image opened full screen, in the app and in a browser.** Drag to pan once it is zoomed in, double-tap to jump in and back out, and on a laptop pinch the trackpad or hold Ctrl and scroll. A screenshot or a chart in a feed post used to open at whatever size fitted the screen with no way to magnify it, which on a phone is the case where opening it full screen was the point. Tapping the image still closes it, and the keyboard now zooms too: `+`, `-` and `0`.
 
 - **You can type and send in web chat while the bot is still working on a reply.** The message is queued instead of refused: it appears in the transcript straight away, dimmed and marked "Waiting to send", and goes out as the next turn when the current one finishes and you are still in the room. Your message is not sent until then, so a queued one is still yours to edit back into the box or remove. Turns here run for minutes, and holding your next thought for the whole of one was the cost this removes.

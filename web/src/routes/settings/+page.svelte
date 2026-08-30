@@ -7,6 +7,9 @@
     getProfile,
     updateProfile,
     disconnectNextcloudToken,
+    uploadAvatar,
+    deleteAvatar,
+    AVATAR_ACCEPT,
     type ServiceCard as ServiceCardData,
     type UserProfile,
     type NextcloudTokenStatus,
@@ -16,9 +19,11 @@
   import {
     AppShell,
     ShellHeader,
+    Avatar,
     Button,
     ConfirmDialog,
     Field,
+    FileDropZone,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
@@ -89,6 +94,79 @@
      of its own (ISSUE-355). The same one request as before, moved rather than
      removed, and now the nav and the offline cache see the new record too. */
   const identity = getCurrentUser();
+
+  /* The profile picture is deliberately outside `profile` and outside
+     `profileDirty`. It commits on pick through its own multipart call, so
+     letting it into the JSON patch would light the header Save button for a
+     change that has already landed and then PUT an empty patch. */
+  let avatarFile: File | null = $state(null);
+  let avatarBusy = $state(false);
+  let avatarError = $state('');
+  let avatarNote = $state('');
+  /* What the *server* last told this page the caller's picture is. `undefined`
+     means it has said nothing since the page loaded, in which case the identity
+     the layout resolved is the answer. It is only ever set from an upload's own
+     response, which is authoritative, and is dropped again as soon as a
+     `reload()` puts the same hash on the shared record. */
+  let uploadedHash: string | null | undefined = $state(undefined);
+  const avatarVersion = $derived(
+    uploadedHash === undefined ? (identity.user.avatars?.user ?? null) : uploadedHash,
+  );
+
+  /* The dropzone is a picker here rather than a staging area — there is no
+     Save step for this control — so a picked file is taken, the zone is put
+     back to its prompt, and the upload runs. Clearing `avatarFile` re-runs this
+     effect once against `null`, which does nothing. */
+  $effect(() => {
+    if (!avatarFile) return;
+    const picked = avatarFile;
+    avatarFile = null;
+    void uploadPicture(picked);
+  });
+
+  async function uploadPicture(file: File) {
+    avatarBusy = true;
+    avatarError = '';
+    avatarNote = '';
+    try {
+      const stored = await uploadAvatar(file);
+      // Adopted before the reload, because the browser holds the old `?v` URL
+      // as `immutable` and would keep painting the old face until the new hash
+      // reaches the `src`. Dropped again once the shared record carries it, so
+      // a change made in another tab is not pinned by this one.
+      uploadedHash = stored.hash;
+      if (await identity.reload()) uploadedHash = undefined;
+      else avatarNote = 'Picture saved. Your account details could not be refreshed.';
+    } catch (e) {
+      avatarError = (e as Error).message || 'Could not save that picture.';
+    } finally {
+      avatarBusy = false;
+    }
+  }
+
+  async function removePicture() {
+    avatarBusy = true;
+    avatarError = '';
+    avatarNote = '';
+    try {
+      const { deleted } = await deleteAvatar();
+      // Nothing in the response says what is showing now — removing an upload
+      // reveals whatever was imported behind it — so the shared record is the
+      // only source for the next version, and this page holds no guess of its
+      // own past this point.
+      const confirmed = await identity.reload();
+      uploadedHash = undefined;
+      if (!confirmed)
+        avatarNote = 'Removed. Your account details could not be refreshed — reload to see it.';
+      else if (!deleted)
+        avatarNote =
+          'There was nothing of yours to remove; the picture showing came from Nextcloud.';
+    } catch (e) {
+      avatarError = (e as Error).message || 'Could not remove that picture.';
+    } finally {
+      avatarBusy = false;
+    }
+  }
 
   async function refresh() {
     loading = true;
@@ -403,6 +481,33 @@
           How Istota addresses you. User ID: <code>{profile.user_id}</code>
         </p>
 
+        <SettingsField label="Profile picture" labelled={false} wide error={avatarError}>
+          <div class="picture">
+            <span class="picture-preview">
+              <Avatar
+                kind="user"
+                userId={profile.user_id}
+                version={avatarVersion}
+                label={profile.display_name || profile.user_id}
+              />
+            </span>
+            <div class="picture-pick">
+              <FileDropZone bind:file={avatarFile} accept={AVATAR_ACCEPT}>
+                <span>Drop a picture here, paste one, or choose a file.</span>
+              </FileDropZone>
+              {#if avatarVersion}
+                <Button variant="secondary" size="sm" disabled={avatarBusy} onclick={removePicture}>
+                  Remove
+                </Button>
+              {/if}
+            </div>
+          </div>
+          <p class="hint">
+            Removing an uploaded picture falls back to the one imported from Nextcloud, if there is
+            one. Changing it here does not change the picture Nextcloud shows.
+          </p>
+          {#if avatarNote}<p class="hint">{avatarNote}</p>{/if}
+        </SettingsField>
         <SettingsField label="Display name">
           <input type="text" bind:value={profile.display_name} />
         </SettingsField>
@@ -689,6 +794,39 @@
   /* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
 	   web/src/lib/styles/settings.css (imported by app.css). Only page-specific
 	   layout (module toggles, connected-service rows) stays here. */
+
+  /* The profile picture: the preview beside the picker, dropping to a column
+     on a narrow pane where the dropzone has no room to sit beside anything. */
+  .picture {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  /* The size goes on the wrapper rather than on the primitive, which reads it
+     and holds no opinion about how big an identity is. */
+  .picture-preview {
+    flex: 0 0 auto;
+    --avatar-size: 4rem;
+  }
+
+  .picture-pick {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  @media (max-width: 640px) {
+    .picture {
+      flex-direction: column;
+    }
+    .picture-pick {
+      align-self: stretch;
+    }
+  }
 
   /* The Nextcloud card's Disconnect row. */
   .oauth-actions {
