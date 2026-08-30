@@ -23,6 +23,7 @@
     seedUserId,
   } from '$lib/offline/lastUser';
   import { readUser, writeUser } from '$lib/offline/db';
+  import { setCurrentUser } from '$lib/userContext';
   import '../app.css';
 
   let { children } = $props();
@@ -184,13 +185,20 @@
    * the identity it last confirmed. Anything else — a server that answered and
    * refused, or nothing cached to fall back on — is still the error page, which
    * on a first launch is the honest outcome.
+   *
+   * Returns whether the *server* answered this run. A page that reaches this
+   * through the context's `reload()` needs that answer (ISSUE-355): it is the
+   * difference between a record it can trust to be current and one the cache
+   * supplied, and only the caller knows which of the two its own screen needs.
    */
-  async function loadUser(): Promise<void> {
+  async function loadUser(): Promise<boolean> {
     const mine = ++loadGeneration;
     const current = () => mine === loadGeneration;
     try {
       const fresh = await getMe();
-      if (!current()) return;
+      // Reported as an answer even when a newer load owns the paint: the
+      // caller asked whether the server could confirm the account, and it did.
+      if (!current()) return true;
       user = fresh;
       live = true;
       // A retry that succeeds clears the message its own first attempt left.
@@ -214,6 +222,7 @@
       // authenticated endpoint fails, backs off, and is then indistinguishable
       // from a real outage at the next login.
       startNotificationPoll();
+      return true;
     } catch (e) {
       if (e instanceof AuthError) {
         // The session is over, so the pointer that says whose cache to read
@@ -227,27 +236,68 @@
         // and must stay different, and a 401 is authoritative whoever asked.
         forgetLastUserId();
         window.location.href = `${base}/login`;
-        return;
+        return false;
       }
-      if (!current()) return;
+      if (!current()) return false;
       const cached = await cachedIdentity();
-      if (!current()) return;
+      if (!current()) return false;
       if (cached) {
-        user = cached;
+        // **The cache never paints over an identity already on screen**, and
+        // that guard belongs here rather than at the callers. It stops two
+        // different things. A `reload()` from a page (ISSUE-355) can now reach
+        // this branch while a live record is up: without the guard a single
+        // failed refresh would swap it for a stale one and leave `live` true,
+        // which is what both retries below are gated on — the app would hold
+        // the stale record for the life of the page with nothing left to
+        // correct it. And a retry that fails while the cached record is
+        // *already* what is shown would otherwise re-assign an equal record
+        // from a fresh read, re-running everything derived from it: the
+        // dashboard's greeting re-rolls on every backgrounding of an offline
+        // app, with nothing having changed.
+        if (!user) user = cached;
         // Deliberately no `startNotificationPoll()` and no write back. The poll
         // would fail against the connection that just failed and back off into
         // something indistinguishable from a real outage; re-storing what the
         // cache just answered with would push its own expiry out forever and
         // make the pointer self-confirming. Both happen on the retry below.
-        return;
+        return false;
       }
       // A retry already has an app on screen, and replacing one with an error
       // message is the failure this branch exists to stop.
       if (!user) error = 'Failed to load user info';
+      return false;
     } finally {
       if (current()) loading = false;
     }
   }
+
+  /**
+   * Published to every route under this one, so a page reads the identity this
+   * gate resolved rather than asking the same question again (ISSUE-355). Set
+   * at init, which is before any child exists.
+   *
+   * A getter, not a snapshot: `loadUser` reassigns `user` when a cached
+   * identity is upgraded to a live one, and every reader has to see that.
+   */
+  setCurrentUser({
+    // Non-null by construction. `{@render children()}` sits inside the
+    // `{:else if user}` branch below, so nothing able to call this exists until
+    // the gate has an identity — which is what lets a page read it with no null
+    // handling and no wait.
+    //
+    // A throw rather than a cast, though it is unreachable from every reader
+    // today: the context is set at init, when `user` is still null, so a future
+    // reader placed above the gate would be handed an `undefined` typed as a
+    // `User` and would fail somewhere inside its own template instead of here.
+    get user(): User {
+      if (!user) throw new Error('current user read before the layout resolved one');
+      return user;
+    },
+    get live(): boolean {
+      return live;
+    },
+    reload: loadUser,
+  });
 
   onMount(() => {
     console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);

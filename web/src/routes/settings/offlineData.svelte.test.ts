@@ -30,7 +30,6 @@ const api = vi.hoisted(() => ({
       delivery_surfaces: ['talk'],
     },
   })),
-  getMe: vi.fn(async () => ({ nextcloud_token: null })),
   updateProfile: vi.fn(async () => ({})),
   disconnectNextcloudToken: vi.fn(async () => ({})),
 }));
@@ -50,8 +49,33 @@ const offline = vi.hoisted(() => ({
 vi.mock('$lib/offline/clear', () => offline);
 
 import Page from './+page.svelte';
+import Harness from '$lib/currentUserHarness.test.svelte';
+import type { User } from '$lib/api';
 
 const ROW = /Clear offline data/;
+
+// The page reads the identity the root layout resolved rather than fetching one
+// (ISSUE-355), so the harness stands in for that layout. Nothing here turns on
+// what is in the record.
+const person: User = {
+  username: 'alice',
+  display_name: 'Alice',
+  bot_name: 'Istota',
+  is_admin: false,
+  features: {
+    chat: true,
+    feeds: false,
+    location: false,
+    money: false,
+    health: false,
+    briefings: false,
+    google_workspace: false,
+    google_workspace_enabled: false,
+    admin: false,
+  },
+};
+
+const renderPage = () => render(Harness, { component: Page, user: person });
 
 beforeEach(() => {
   native.shellAtLeast.mockReturnValue(true);
@@ -64,14 +88,14 @@ afterEach(() => {
 
 describe('the "Clear offline data" row', () => {
   it('is offered by a shell new enough to have a worker to clear', async () => {
-    render(Page);
+    renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: ROW })).toBeInTheDocument());
     expect(native.shellAtLeast).toHaveBeenCalledWith('0.10.0');
   });
 
   it('is absent in a browser and in an older app', async () => {
     native.shellAtLeast.mockReturnValue(false);
-    render(Page);
+    renderPage();
     // Waited on something that does render, so this is an absence after the
     // page settled rather than before it started.
     await waitFor(() => expect(screen.getByText('Appearance')).toBeInTheDocument());
@@ -79,7 +103,7 @@ describe('the "Clear offline data" row', () => {
   });
 
   it('asks before it clears anything', async () => {
-    render(Page);
+    renderPage();
     const button = await screen.findByRole('button', { name: ROW });
     button.click();
 
@@ -100,7 +124,7 @@ describe('the "Clear offline data" row', () => {
       configurable: true,
     });
 
-    render(Page);
+    renderPage();
     (await screen.findByRole('button', { name: ROW })).click();
     (await screen.findByRole('button', { name: 'Clear' })).click();
 

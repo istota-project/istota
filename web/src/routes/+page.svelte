@@ -1,34 +1,45 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { getMe, getProfile, type User } from '$lib/api';
+  import { getProfile } from '$lib/api';
   import { onMount } from 'svelte';
   import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from 'lucide-svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
   import { AppShell, ShellHeader } from '$lib/components/ui';
+  import { getCurrentUser } from '$lib/userContext';
 
-  let user: User | null = $state(null);
-  let welcome: Greeting | null = $state(null);
+  /* The identity the root layout resolved, not a second `/me` of this page's
+     own (ISSUE-355). Nothing here is network data: every tile is a static link
+     gated on `user.features` and the welcome card needs `bot_name` and
+     `contact`, so with the fetch here the page had nothing to draw whenever it
+     failed — which offline is always, and which is why a cold launch in
+     airplane mode landed on a header with an empty frame under it. */
+  const identity = getCurrentUser();
+  const user = $derived(identity.user);
 
+  /* `null` until the timezone question has been answered, including answered
+     with '' — which is what an unreachable `/profile` yields. Kept distinct
+     from '' so the card and the tiles land in the same paint rather than the
+     greeting being drawn once from the browser clock and again a request
+     later. */
+  let timeZone = $state<string | null>(null);
   onMount(async () => {
-    // In parallel, so the card and the tiles land in the same paint rather than
-    // the greeting popping in a request later.
-    const [me, timeZone] = await Promise.all([
-      getMe().catch(() => null), // layout handles the auth redirect
-      userTimezone(),
-    ]);
-    if (!me) return;
-    user = me;
-    // The greeting is drawn here rather than at component init so it re-rolls
-    // on every load and never differs between the prerendered HTML and the
-    // hydrated page.
-    welcome = buildGreeting(me.bot_name, {
+    timeZone = await userTimezone();
+  });
+
+  /* Derived rather than built once at mount: the layout swaps a cached identity
+     for the live one when the connection returns (ISSUE-354), and a greeting
+     pinned at mount would go on speaking as whoever the cache remembered. It
+     re-rolls when that happens, which is what it already did on every load. */
+  const welcome: Greeting | null = $derived.by(() => {
+    if (timeZone === null) return null;
+    return buildGreeting(user.bot_name, {
       timeZone,
       // Tips are only shown when they're true of this deployment, so they are
       // gated on the same payload the tiles below are.
       tips: {
-        email: me.contact?.email,
-        talk: me.contact?.talk,
-        features: me.features,
+        email: user.contact?.email,
+        talk: user.contact?.talk,
+        features: user.features,
       },
     });
   });
@@ -53,68 +64,66 @@
   {/snippet}
 
   <div class="dashboard">
-    {#if user}
-      <!-- One grid, so the tiles flow around the welcome card: it takes the first
-         three tracks and whatever fits beside it fills out the row. -->
-      <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
-        {#if welcome}
-          <section class="welcome-card">
-            <img
-              class="welcome-sigil"
-              src="{base}/octopus-sigil.webp"
-              alt=""
-              width="19"
-              height="20"
-            />
-            <div class="welcome-text">
-              <p class="welcome-greeting">{welcome.greeting}</p>
-              <!-- Rendered segment by segment rather than as one string, so the
-                 address is a real mailto link. Kept on one line (and off
-                 prettier) because a break between the tags would put a space
-                 either side of the link, inside a sentence. -->
-              <!-- prettier-ignore -->
-              <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
-            </div>
-          </section>
-        {/if}
-        {#if user.features.chat}
-          <a href="{base}/chat" class="feature-card">
-            <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
-            <div class="feature-desc">Talk to Istota in the app</div>
-          </a>
-        {/if}
-        {#if user.features.briefings}
-          <a href="{base}/briefings" class="feature-card">
-            <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
-            <div class="feature-desc">Your generated briefings and archive</div>
-          </a>
-        {/if}
-        {#if user.features.feeds}
-          <a href="{base}/feeds" class="feature-card">
-            <div class="feature-title"><Rss aria-hidden="true" />Feeds</div>
-            <div class="feature-desc">RSS feed reader</div>
-          </a>
-        {/if}
-        {#if user.features.location}
-          <a href="{base}/location" class="feature-card">
-            <div class="feature-title"><MapPin aria-hidden="true" />Location</div>
-            <div class="feature-desc">GPS tracking and map</div>
-          </a>
-        {/if}
-        {#if user.features.money}
-          <a href="{base}/money" class="feature-card">
-            <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
-            <div class="feature-desc">Accounts, transactions, and reports</div>
-          </a>
-        {/if}
-        {#if user.features.health}
-          <a href="{base}/health" class="feature-card">
-            <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
-            <div class="feature-desc">Body stats, bloodwork, and biomarker trends</div>
-          </a>
-        {/if}
-      </div>
-    {/if}
+    <!-- One grid, so the tiles flow around the welcome card: it takes the first
+       three tracks and whatever fits beside it fills out the row. -->
+    <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
+      {#if welcome}
+        <section class="welcome-card">
+          <img
+            class="welcome-sigil"
+            src="{base}/octopus-sigil.webp"
+            alt=""
+            width="19"
+            height="20"
+          />
+          <div class="welcome-text">
+            <p class="welcome-greeting">{welcome.greeting}</p>
+            <!-- Rendered segment by segment rather than as one string, so the
+               address is a real mailto link. Kept on one line (and off
+               prettier) because a break between the tags would put a space
+               either side of the link, inside a sentence. -->
+            <!-- prettier-ignore -->
+            <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
+          </div>
+        </section>
+      {/if}
+      {#if user.features.chat}
+        <a href="{base}/chat" class="feature-card">
+          <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
+          <div class="feature-desc">Talk to Istota in the app</div>
+        </a>
+      {/if}
+      {#if user.features.briefings}
+        <a href="{base}/briefings" class="feature-card">
+          <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
+          <div class="feature-desc">Your generated briefings and archive</div>
+        </a>
+      {/if}
+      {#if user.features.feeds}
+        <a href="{base}/feeds" class="feature-card">
+          <div class="feature-title"><Rss aria-hidden="true" />Feeds</div>
+          <div class="feature-desc">RSS feed reader</div>
+        </a>
+      {/if}
+      {#if user.features.location}
+        <a href="{base}/location" class="feature-card">
+          <div class="feature-title"><MapPin aria-hidden="true" />Location</div>
+          <div class="feature-desc">GPS tracking and map</div>
+        </a>
+      {/if}
+      {#if user.features.money}
+        <a href="{base}/money" class="feature-card">
+          <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
+          <div class="feature-desc">Accounts, transactions, and reports</div>
+        </a>
+      {/if}
+      {#if user.features.health}
+        <a href="{base}/health" class="feature-card">
+          <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
+          <div class="feature-desc">Body stats, bloodwork, and biomarker trends</div>
+        </a>
+      {/if}
+    </div>
   </div>
 </AppShell>
 

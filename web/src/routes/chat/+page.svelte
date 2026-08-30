@@ -30,7 +30,8 @@
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
-  import { getMe, type ChatAttachment, type ChatRoom, type ChatView } from '$lib/api';
+  import type { ChatAttachment, ChatRoom, ChatView } from '$lib/api';
+  import { getCurrentUser } from '$lib/userContext';
 
   const session = getChatSession();
   const {
@@ -105,13 +106,28 @@
   let memoryRoom = $state<ChatRoom | null>(null);
 
   let sidebarOpen = $state(false);
-  // Author labels for message headers; fall back to generic labels until /me
-  // resolves (or if it fails).
-  let userName = $state('You');
-  let botName = $state('Istota');
-  // Who is logged in, for the composer's draft key. Null until /me resolves,
-  // which only delays a draft being restored — see draftKey below.
-  let userId = $state<string | null>(null);
+  /* The identity the root layout resolved, rather than a `/me` of this page's
+     own (ISSUE-355). Derived rather than read once, because the layout swaps a
+     cached identity for the live one when the connection returns. The generic
+     labels are still the fallback for a record that carries neither. */
+  const identity = getCurrentUser();
+  const userName = $derived(identity.user.display_name || 'You');
+  const botName = $derived(identity.user.bot_name || 'Istota');
+  /* Who is logged in, for the composer's draft key — and **only while the
+     server has confirmed it**. `username` is the istota user id, the same value
+     the server keys admin checks and workspace paths on, not a display handle.
+
+     The `live` gate is what keeps this from writing into someone else's drawer.
+     Offline the layout's record can be the last-user pointer's guess
+     (ISSUE-354), and a draft key is a per-user storage key like any other: the
+     chat store already refuses to write its cache or drain its queue under a
+     guess, and `settleSeededUser` repairs the queue when a guess turns out
+     wrong but knows nothing about drafts. Without the gate an offline draft
+     would persist under the guessed id with nothing to collect it, and that
+     person's next session would restore it into their own composer. Null until
+     then, exactly as it was while this page fetched `/me` itself, and it turns
+     non-null by itself the moment a retry reaches the server. */
+  const userId = $derived(identity.live ? identity.user.username || null : null);
   let creatingRoom = $state(false);
   let newRoomName = $state('');
   let listEl: HTMLDivElement | undefined = $state();
@@ -340,15 +356,6 @@
         else session.selectRoomByToken(token);
       } else if (v === 'all' || v === 'unread' || v === 'starred') session.selectView(v);
     });
-    getMe()
-      .then((me) => {
-        if (me.display_name) userName = me.display_name;
-        if (me.bot_name) botName = me.bot_name;
-        // `username` is the istota user id — the same value the server keys
-        // admin checks and workspace paths on, not a display handle.
-        userId = me.username || null;
-      })
-      .catch(() => {});
   });
 
   // Being offline, said once, in the notice band.

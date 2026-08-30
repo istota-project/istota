@@ -45,11 +45,6 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json();
 }
 
-export interface User {
-  username: string;
-  display_name: string;
-}
-
 export interface AccountRow {
   account: string;
   'sum(position)': string;
@@ -77,10 +72,6 @@ export interface TransactionsResponse {
   total: number;
   page: number;
   per_page: number;
-}
-
-export async function getMe(): Promise<User> {
-  return apiFetch<User>('/me');
 }
 
 export async function getAccounts(opts?: {

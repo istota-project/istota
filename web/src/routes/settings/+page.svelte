@@ -6,7 +6,6 @@
     getModules,
     getProfile,
     updateProfile,
-    getMe,
     disconnectNextcloudToken,
     type ServiceCard as ServiceCardData,
     type UserProfile,
@@ -25,6 +24,7 @@
   } from '$lib/components/ui';
   import { shellAtLeast } from '$lib/platform/native';
   import { clearOfflineData } from '$lib/offline/clear';
+  import { getCurrentUser } from '$lib/userContext';
   import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
@@ -83,17 +83,31 @@
   let initialProfileJson = $state('');
   let profileDirty = $derived(profile ? JSON.stringify(profile) !== initialProfileJson : false);
 
+  /* This page needs the identity *fresh* rather than merely current — a
+     Nextcloud connect made elsewhere changes `nextcloud_token` while it is open
+     — so it asks the layout to re-resolve rather than fetching a second `/me`
+     of its own (ISSUE-355). The same one request as before, moved rather than
+     removed, and now the nav and the offline cache see the new record too. */
+  const identity = getCurrentUser();
+
   async function refresh() {
     loading = true;
     try {
-      const [svcResp, profResp, modResp, meResp] = await Promise.all([
+      const [svcResp, profResp, modResp, confirmed] = await Promise.all([
         getSettingsServices(),
         getProfile(),
         getModules(),
-        getMe(),
+        identity.reload(),
       ]);
+      // `reload()` never rejects — the layout owns the 401 redirect and the
+      // offline fallback — so the failure the other three would have raised has
+      // to be raised here instead. Without it a `/me` that fails on its own
+      // (its timeout is its own, and a 500 is not a connectivity failure) would
+      // leave this page showing whatever connection state the layout last
+      // resolved, silently, where it used to say the settings could not load.
+      if (!confirmed) throw new Error('Could not confirm your account details.');
       services = svcResp.services;
-      ncToken = meResp.nextcloud_token ?? null;
+      ncToken = identity.user.nextcloud_token ?? null;
       profile = profResp.profile;
       if (profile) {
         // Normalize optional routing fields so the bindings are safe.
