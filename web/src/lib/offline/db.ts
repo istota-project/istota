@@ -32,10 +32,12 @@
  * infix narrows that to a user id containing `:room:`, which a username cannot;
  * both sibling stores rest on the same assumption.
  *
- * The database is created at version 1 with all four stores, `blobs` included.
- * Nothing here reads or writes blobs yet — the offline outbox's attachments are
- * a later stage — but an object store cannot be added without a version bump,
- * and a bump is the one operation another open tab can block. One shape, once.
+ * The database is created at version 1 with all four stores. The `blobs` store
+ * holds the bytes of an attachment written with no connection — a voice note,
+ * a photo — until the outbox can upload it; the send queue in `localStorage`
+ * holds the reference. Bytes here, references there, for the reason the two
+ * stores are split at all: the queue must be readable synchronously during
+ * `init()`, and a Blob must not be.
  */
 import type { ChatConfig, ChatHistoryMessage, ChatRoom } from '$lib/api';
 
@@ -87,6 +89,43 @@ export const MAX_ROOM_CACHE_BYTES = 512 * 1024;
  */
 export const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * The largest single file the outbox will hold offline.
+ *
+ * A voice note is seconds of Opus or AAC and is nowhere near this; a 4K video
+ * is well past it. Refusing that one with a sentence beats filling the origin's
+ * quota with it — eviction is whole-origin, so a video that fills the budget
+ * takes the text queue and the transcript cache down with it.
+ *
+ * The server's own `max_attachment_mb` still applies and the smaller of the two
+ * wins: this bound is about what is safe to *hold*, not about what the server
+ * would take.
+ */
+export const MAX_PENDING_BLOB_BYTES = 10 * 1024 * 1024;
+
+/** The same budget across every blob held at once. */
+export const MAX_PENDING_BLOB_TOTAL = 50 * 1024 * 1024;
+
+/**
+ * How much of the origin's quota may be in use before a blob write is refused.
+ *
+ * WebKit's storage policy gives a non-browser app up to 15% of disk from iOS 17,
+ * which is generous, but the number is not fixed and asking is one line. What
+ * this buys is that the *last* write before the quota is reached is refused
+ * with a sentence rather than throwing somewhere the user cannot see.
+ */
+export const STORAGE_HEADROOM_FRACTION = 0.8;
+
+/**
+ * How old an unreferenced blob has to be before it is collected.
+ *
+ * The floor is what keeps the collection from racing a compose: a file staged
+ * in the composer and not yet sent is referenced by nothing at all, because
+ * the reference is written when the message is queued. An hour is far longer
+ * than any compose and far shorter than the queue's own TTL.
+ */
+export const BLOB_GC_MIN_AGE_MS = 60 * 60 * 1000;
+
 /** One room's cached tail. */
 export interface CachedTranscript {
   roomId: number;
@@ -94,6 +133,26 @@ export interface CachedTranscript {
   messages: ChatHistoryMessage[];
   oldestCursor: { ts: string; id: number } | null;
   savedAt: number;
+}
+
+/**
+ * One attachment's bytes, waiting for a connection to carry them.
+ *
+ * Held as an `ArrayBuffer` rather than as the `Blob` the composer starts with.
+ * WebKit would store a `Blob` as a reference to a file on disk, which is the
+ * cheaper shape and the one to prefer if this were the only consideration — but
+ * it is not testable: `fake-indexeddb`'s structured clone flattens a jsdom
+ * `Blob` to an empty object, so a stored `Blob` cannot be read back in the
+ * suite and every assertion about `getBlob` would be vacuous. A buffer clones
+ * faithfully everywhere, and `MAX_PENDING_BLOB_BYTES` is what bounds the heap
+ * cost of materializing one. The `File` is rebuilt at the point of upload.
+ */
+export interface StoredBlob {
+  bytes: ArrayBuffer;
+  name: string;
+  mimeType: string;
+  size: number;
+  createdAt: number;
 }
 
 interface CachedRooms {
@@ -690,6 +749,158 @@ export async function writeConfig(
   );
 }
 
+// ---- Attachment bytes -----------------------------------------------------
+
+/**
+ * Whether `extraBytes` would still leave the origin room to breathe.
+ *
+ * Asked before a blob write, and answered `true` when there is nothing to ask:
+ * a browser with no `navigator.storage.estimate`, or one that reports figures
+ * that make no sense, must not become a client-side refusal of a file that
+ * would have been stored perfectly well. Same discipline as the composer's
+ * server-limit check, which lets the server decide when `/chat/config` never
+ * answered.
+ *
+ * The estimate is the whole origin's, not this database's, so it counts the
+ * send queue and the transcript cache too — which is the right budget, because
+ * eviction takes all three together.
+ */
+export async function hasHeadroom(extraBytes: number): Promise<boolean> {
+  try {
+    const storage = typeof navigator === 'undefined' ? undefined : navigator.storage;
+    if (!storage?.estimate) return true;
+    const { usage, quota } = await storage.estimate();
+    if (typeof usage !== 'number' || typeof quota !== 'number' || quota <= 0) return true;
+    return usage + extraBytes <= quota * STORAGE_HEADROOM_FRACTION;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Hold one file's bytes under `blobId`, or refuse.
+ *
+ * Returns whether the bytes are stored, and `false` is the composer's cue to
+ * say so: past any of the three bounds the file is refused with a sentence and
+ * nothing is written. A `false` from an unusable database reads the same way,
+ * which is the point — a caller has one question to ask and one answer to
+ * handle.
+ *
+ * The running total is summed inside the same transaction as the write, so two
+ * files picked at once cannot both read a total that leaves room and then both
+ * store. It walks every blob rather than a per-user subtotal because the bound
+ * is on the origin's storage, which is what the origin is evicted for.
+ */
+export async function putBlob(
+  blobId: string,
+  bytes: ArrayBuffer,
+  meta: { name: string; mimeType: string; size: number },
+  now = Date.now(),
+): Promise<boolean> {
+  if (!blobId) return false;
+  if (meta.size > MAX_PENDING_BLOB_BYTES) return false;
+  if (!(await hasHeadroom(meta.size))) return false;
+  return withTx<boolean>(
+    [STORE_BLOBS],
+    'readwrite',
+    (tx, done) => {
+      const store = tx.objectStore(STORE_BLOBS);
+      const cursoring = store.openCursor();
+      let total = 0;
+      cursoring.onsuccess = () => {
+        const cursor = cursoring.result;
+        if (cursor) {
+          const value = cursor.value as Partial<StoredBlob> | undefined;
+          // A record whose size is unreadable is counted at nothing rather
+          // than skipping the bound entirely; `pruneOffline` collects it.
+          if (typeof value?.size === 'number') total += value.size;
+          cursor.continue();
+          return;
+        }
+        // Over the shared bound: nothing is written and the transaction is
+        // left to complete, so `value` stays `false` and the caller is told.
+        if (total + meta.size > MAX_PENDING_BLOB_TOTAL) return;
+        const record: StoredBlob = {
+          bytes,
+          name: meta.name,
+          mimeType: meta.mimeType,
+          size: meta.size,
+          createdAt: now,
+        };
+        store.put(record, blobId);
+        done(true);
+      };
+    },
+    false,
+  );
+}
+
+/**
+ * Whether a value read back out of storage is really a buffer of bytes.
+ *
+ * Branded rather than `instanceof`, because a structured clone can hand back a
+ * buffer belonging to a different realm — which `fake-indexeddb` does — and an
+ * `instanceof` against the wrong realm's constructor rejects a perfectly good
+ * one. The brand is what the value *is*; a plain object left by a build whose
+ * shape has since changed reads `[object Object]` and is still refused.
+ */
+function isBytes(value: unknown): value is ArrayBuffer {
+  return Object.prototype.toString.call(value) === '[object ArrayBuffer]';
+}
+
+/** One held file, or null when it is gone or was never buffer-shaped. */
+export async function getBlob(blobId: string): Promise<StoredBlob | null> {
+  if (!blobId) return null;
+  return withTx<StoredBlob | null>(
+    [STORE_BLOBS],
+    'readonly',
+    (tx, done) => {
+      const req = tx.objectStore(STORE_BLOBS).get(blobId);
+      req.onsuccess = () => {
+        const value = req.result as Partial<StoredBlob> | undefined;
+        // Type-checked rather than truthiness-checked: this is handed straight
+        // to an upload, and a record left half-written by a build whose shape
+        // has since changed would be POSTed as `[object Object]`.
+        if (!value || !isBytes(value.bytes)) return;
+        done({
+          bytes: value.bytes,
+          name: typeof value.name === 'string' ? value.name : 'attachment',
+          mimeType: typeof value.mimeType === 'string' ? value.mimeType : '',
+          size: typeof value.size === 'number' ? value.size : value.bytes.byteLength,
+          createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
+        });
+      };
+    },
+    null,
+  );
+}
+
+/** Forget one held file. Called as soon as its upload has landed. */
+export async function deleteBlob(blobId: string): Promise<void> {
+  if (!blobId) return;
+  await withTx<void>(
+    [STORE_BLOBS],
+    'readwrite',
+    (tx) => {
+      tx.objectStore(STORE_BLOBS).delete(blobId);
+    },
+    undefined,
+  );
+}
+
+/** Every held file's id, for a caller reconciling them against its own list. */
+export async function listBlobIds(): Promise<string[]> {
+  return withTx<string[]>(
+    [STORE_BLOBS],
+    'readonly',
+    (tx, done) => {
+      const req = tx.objectStore(STORE_BLOBS).getAllKeys();
+      req.onsuccess = () => done(req.result.map((k) => String(k)));
+    },
+    [],
+  );
+}
+
 // ---- Housekeeping ---------------------------------------------------------
 
 /**
@@ -700,11 +911,17 @@ export async function writeConfig(
  * it when the app opens is soon enough, and it is the one moment where doing
  * work nobody is waiting on is free.
  *
- * Blobs are deliberately not collected here. Theirs is a different rule — an
- * unreferenced blob, not an old one — and the reference it is checked against
- * is the send queue, which belongs to the stage that fills it.
+ * Blobs are collected by a different rule and only when the caller can state
+ * it: `referencedBlobIds` is every blob some live queue entry still names, and
+ * anything outside it *and* older than `BLOB_GC_MIN_AGE_MS` is dead storage.
+ * Omit the argument and no blob is touched — a caller that cannot enumerate
+ * the references must not be able to delete bytes it cannot account for, and
+ * an empty set is a legitimate answer that means something else entirely.
  */
-export async function pruneOffline(now = Date.now()): Promise<void> {
+export async function pruneOffline(
+  now = Date.now(),
+  referencedBlobIds?: ReadonlySet<string> | null,
+): Promise<void> {
   const cutoff = now - CACHE_TTL_MS;
   for (const name of [STORE_TRANSCRIPTS, STORE_ROOMS, STORE_CONFIG]) {
     await withTx<void>(
@@ -729,4 +946,24 @@ export async function pruneOffline(now = Date.now()): Promise<void> {
       undefined,
     );
   }
+  if (!referencedBlobIds) return;
+  const blobCutoff = now - BLOB_GC_MIN_AGE_MS;
+  await withTx<void>(
+    [STORE_BLOBS],
+    'readwrite',
+    (tx) => {
+      const cursoring = tx.objectStore(STORE_BLOBS).openCursor();
+      cursoring.onsuccess = () => {
+        const cursor = cursoring.result;
+        if (!cursor) return;
+        const value = cursor.value as Partial<StoredBlob> | undefined;
+        // No usable stamp reads as ancient, which is what a record nothing
+        // references and nothing can date actually is.
+        const createdAt = typeof value?.createdAt === 'number' ? value.createdAt : 0;
+        if (!referencedBlobIds.has(String(cursor.key)) && createdAt <= blobCutoff) cursor.delete();
+        cursor.continue();
+      };
+    },
+    undefined,
+  );
 }

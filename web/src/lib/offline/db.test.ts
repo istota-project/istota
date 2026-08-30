@@ -287,6 +287,130 @@ describe('offline cache — rooms, config and pruning', () => {
   });
 });
 
+describe('offline cache — held attachment bytes', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Bytes, and separately the size a caller claims for them. */
+  const buf = (text: string) => new TextEncoder().encode(text).buffer as ArrayBuffer;
+
+  const meta = (name: string, size: number) => ({ name, mimeType: 'audio/mp4', size });
+
+  it('round-trips one held file', async () => {
+    const dbm = await freshDb();
+    expect(await dbm.putBlob('b1', buf('hello'), meta('memo.m4a', 5), 1000)).toBe(true);
+
+    const back = await dbm.getBlob('b1');
+    expect(back?.name).toBe('memo.m4a');
+    expect(back?.mimeType).toBe('audio/mp4');
+    expect(back?.size).toBe(5);
+    expect(back?.createdAt).toBe(1000);
+    expect(new TextDecoder().decode(back?.bytes)).toBe('hello');
+    expect(await dbm.listBlobIds()).toEqual(['b1']);
+
+    await dbm.deleteBlob('b1');
+    expect(await dbm.getBlob('b1')).toBeNull();
+    expect(await dbm.listBlobIds()).toEqual([]);
+  });
+
+  it('refuses a file over the per-file bound, writing nothing', async () => {
+    const dbm = await freshDb();
+    const size = dbm.MAX_PENDING_BLOB_BYTES + 1;
+    expect(await dbm.putBlob('big', buf('x'), meta('clip.mov', size))).toBe(false);
+    expect(await dbm.listBlobIds()).toEqual([]);
+  });
+
+  it('refuses a file that would take the store past the shared total', async () => {
+    const dbm = await freshDb();
+    // Six at ten mebibytes: five fit inside the fifty-mebibyte total, the sixth
+    // does not, and the refusal must not evict any of the five.
+    const each = dbm.MAX_PENDING_BLOB_BYTES;
+    const fits = Math.floor(dbm.MAX_PENDING_BLOB_TOTAL / each);
+    for (let i = 0; i < fits; i++) {
+      expect(await dbm.putBlob(`b${i}`, buf('x'), meta(`f${i}.m4a`, each))).toBe(true);
+    }
+    expect(await dbm.putBlob('over', buf('x'), meta('over.m4a', each))).toBe(false);
+    expect((await dbm.listBlobIds()).sort()).toEqual(
+      Array.from({ length: fits }, (_, i) => `b${i}`).sort(),
+    );
+  });
+
+  it('refuses a write that would take the origin past its headroom', async () => {
+    const dbm = await freshDb();
+    // 79% used, and the file would carry it past the 80% line.
+    vi.stubGlobal('navigator', {
+      storage: { estimate: async () => ({ usage: 790, quota: 1000 }) },
+    });
+    expect(await dbm.hasHeadroom(100)).toBe(false);
+    expect(await dbm.putBlob('b1', buf('x'), meta('memo.m4a', 100))).toBe(false);
+    expect(await dbm.listBlobIds()).toEqual([]);
+  });
+
+  it('holds the file when there is nothing to ask about headroom', async () => {
+    // The regression guard on the refusal above: a browser with no estimate,
+    // or figures that make no sense, must not become a refusal of a file that
+    // would have been stored perfectly well.
+    const dbm = await freshDb();
+    vi.stubGlobal('navigator', {});
+    expect(await dbm.hasHeadroom(1_000_000)).toBe(true);
+    vi.stubGlobal('navigator', { storage: { estimate: async () => ({ quota: 0 }) } });
+    expect(await dbm.hasHeadroom(1_000_000)).toBe(true);
+    vi.stubGlobal('navigator', {
+      storage: {
+        estimate: async () => {
+          throw new Error('nope');
+        },
+      },
+    });
+    expect(await dbm.hasHeadroom(1_000_000)).toBe(true);
+    expect(await dbm.putBlob('b1', buf('x'), meta('memo.m4a', 1))).toBe(true);
+  });
+
+  it('collects a blob nothing references once it is old enough', async () => {
+    const dbm = await freshDb();
+    const now = 10 * 60 * 60 * 1000;
+    const old = now - dbm.BLOB_GC_MIN_AGE_MS - 1;
+    const recent = now - 1000;
+    await dbm.putBlob('kept-referenced', buf('a'), meta('a.m4a', 1), old);
+    await dbm.putBlob('kept-young', buf('b'), meta('b.m4a', 1), recent);
+    await dbm.putBlob('collected', buf('c'), meta('c.m4a', 1), old);
+
+    await dbm.pruneOffline(now, new Set(['kept-referenced']));
+
+    expect((await dbm.listBlobIds()).sort()).toEqual(['kept-referenced', 'kept-young']);
+  });
+
+  it('touches no blob when the caller cannot say which are referenced', async () => {
+    // The control on the collection above, and the reason the argument is
+    // optional rather than defaulted to an empty set: a caller with no list
+    // must not be able to delete bytes it cannot account for.
+    const dbm = await freshDb();
+    await dbm.putBlob('orphan', buf('a'), meta('a.m4a', 1), 0);
+
+    await dbm.pruneOffline(10 * 60 * 60 * 1000);
+
+    expect(await dbm.listBlobIds()).toEqual(['orphan']);
+  });
+
+  it('refuses a record that is not blob-shaped rather than handing it to an upload', async () => {
+    const dbm = await freshDb();
+    const handle = (await dbm.openOfflineDb())!;
+    await new Promise<void>((resolve, reject) => {
+      const tx = handle.transaction([dbm.STORE_BLOBS], 'readwrite');
+      // What a build with a different value shape would have left behind.
+      tx.objectStore(dbm.STORE_BLOBS).put({ bytes: { not: 'a buffer' }, name: 'x' }, 'wrong');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+
+    expect(await dbm.getBlob('wrong')).toBeNull();
+  });
+});
+
 describe('offline cache — when there is no database', () => {
   afterEach(() => {
     // A test that trips its own budget never reaches its cleanup, and a fake
@@ -316,6 +440,14 @@ describe('offline cache — when there is no database', () => {
     await expect(db.writeRooms('alice', [])).resolves.toBeUndefined();
     await expect(db.readConfig('alice')).resolves.toBeNull();
     await expect(db.pruneOffline()).resolves.toBeUndefined();
+    // The blob half reads the same way, so an offline attachment is refused
+    // with a sentence rather than throwing somewhere nobody handles it.
+    await expect(
+      db.putBlob('b1', new ArrayBuffer(1), { name: 'a.m4a', mimeType: 'audio/mp4', size: 1 }),
+    ).resolves.toBe(false);
+    await expect(db.getBlob('b1')).resolves.toBeNull();
+    await expect(db.deleteBlob('b1')).resolves.toBeUndefined();
+    await expect(db.listBlobIds()).resolves.toEqual([]);
 
     vi.unstubAllGlobals();
   });

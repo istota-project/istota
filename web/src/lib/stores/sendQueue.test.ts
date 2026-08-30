@@ -20,6 +20,7 @@ import {
   MAX_QUEUE_ROOMS,
   MAX_QUEUE_CHARS,
   MAX_QUEUE_TOTAL_CHARS,
+  type PendingAttachment,
   type StoredQueuedSend,
 } from './sendQueue';
 
@@ -39,6 +40,16 @@ function entry(text: string, over: Partial<StoredQueuedSend> = {}): StoredQueued
 
 function attachment(name = 'spec.pdf'): ChatAttachment {
   return { path: `/host/inbox/${name}`, name, size: 12, workspace_path: `/Users/u/inbox/${name}` };
+}
+
+/** A chip whose bytes are still in this browser, waiting for a connection. */
+function pendingChip(blobId: string, name = 'memo.m4a'): ChatAttachment {
+  return { path: null, pendingBlobId: blobId, name, size: 4096, mimeType: 'audio/mp4' };
+}
+
+/** The record that names the blob behind such a chip. */
+function pendingRecord(blobId: string, name = 'memo.m4a'): PendingAttachment {
+  return { blobId, name, mimeType: 'audio/mp4', size: 4096 };
 }
 
 function stored(): Record<string, StoredQueuedSend[]> {
@@ -283,6 +294,76 @@ describe('sendQueue — malformed storage', () => {
     // prompt, so an empty `text` is an ordinary queued message here.
     seed({ 'u:room:t1': [entry('', { attachments: [attachment()] })] });
     expect(readQueue('u:room:t1')).toHaveLength(1);
+  });
+
+  it('keeps a voice note held offline, which has no text and no path either', () => {
+    // The queued shape a recording made with no connection produces: an empty
+    // body, one chip with no host path, and the blob reference behind it.
+    seed({
+      'u:room:t1': [
+        entry('', {
+          attachments: [pendingChip('b1')],
+          pendingAttachments: [pendingRecord('b1')],
+          reason: 'offline',
+        }),
+      ],
+    });
+    const [back] = readQueue('u:room:t1');
+    expect(back.attachments[0]).toMatchObject({ path: null, pendingBlobId: 'b1' });
+    expect(back.pendingAttachments).toEqual([pendingRecord('b1')]);
+  });
+
+  it('discards an entry whose chip names a blob nothing records', () => {
+    // A null path with no record behind it would be POSTed as a file reference
+    // the server cannot resolve.
+    seed({
+      'u:room:t1': [
+        entry('about the memo', { attachments: [pendingChip('b1')] }),
+        entry('plain text', { cid: 2 }),
+      ],
+    });
+    expect(readQueue('u:room:t1').map((e) => e.text)).toEqual(['plain text']);
+  });
+
+  it('discards an entry recording a blob no chip names', () => {
+    // The other direction: the drain would upload a file nothing references.
+    seed({
+      'u:room:t1': [
+        entry('about the memo', { pendingAttachments: [pendingRecord('b1')] }),
+        entry('plain text', { cid: 2 }),
+      ],
+    });
+    expect(readQueue('u:room:t1').map((e) => e.text)).toEqual(['plain text']);
+  });
+
+  it('keeps a half-resolved entry, which is what an interrupted drain leaves', () => {
+    // The regression guard on the two above: the drain resolves one file at a
+    // time and persists between them, so a chip with a path beside a chip
+    // without one is an ordinary stored state rather than a broken one.
+    seed({
+      'u:room:t1': [
+        entry('two files', {
+          attachments: [attachment('one.m4a'), pendingChip('b2')],
+          pendingAttachments: [pendingRecord('b2')],
+        }),
+      ],
+    });
+    const [back] = readQueue('u:room:t1');
+    expect(back.attachments.map((a) => a.path)).toEqual(['/host/inbox/one.m4a', null]);
+    expect(back.pendingAttachments).toHaveLength(1);
+  });
+
+  it('discards an entry whose blob reference is not reference-shaped', () => {
+    seed({
+      'u:room:t1': [
+        entry('about the memo', {
+          attachments: [pendingChip('b1')],
+          pendingAttachments: [{ name: 'memo.m4a' }] as never,
+        }),
+        entry('plain text', { cid: 2 }),
+      ],
+    });
+    expect(readQueue('u:room:t1').map((e) => e.text)).toEqual(['plain text']);
   });
 
   it('recovers the citation when only the quote survived', () => {
