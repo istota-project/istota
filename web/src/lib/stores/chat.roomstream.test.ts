@@ -517,6 +517,10 @@ describe('chat store — live room stream', () => {
     // row marked failed while the task really is running. Its echo used to
     // append as a second bubble — the same message shown twice, once reported
     // as unsent and once being answered.
+    //
+    // Since ISSUE-202 the row is *parked* rather than failed — the outbox will
+    // send it again — which is what makes the adoption matter more, not less:
+    // without it the queue would also POST a message the server already has.
     vi.useFakeTimers();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
@@ -525,7 +529,7 @@ describe('chat store — live room stream', () => {
 
     api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
     await s.send('hello');
-    expect(get(s.messages)[0].sendState).toBe('failed');
+    expect(get(s.messages)[0].sendState).toBe('queued');
 
     queueEvents(
       [row(10, 't1', { role: 'user', text: 'hello', task_id: 7, status: 'running' })],
@@ -540,6 +544,8 @@ describe('chat store — live room stream', () => {
     expect(mine.sendError).toBeUndefined();
     expect(mine.taskId).toBe(7);
     expect(mine.msgId).toBe(10);
+    // And the entry went with it, or the drain would POST it a second time.
+    expect(mine.sendState).toBeUndefined();
     s.teardown();
   });
 
@@ -553,7 +559,12 @@ describe('chat store — live room stream', () => {
     const s = await freshSession();
     await s.init();
 
-    api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+    api.sendChatMessage.mockResolvedValue({
+      ok: false,
+      status: 500,
+      failure: 'rejected',
+      error: 'boom',
+    });
     await s.send('hello');
     const cid = get(s.messages)[0].cid;
 

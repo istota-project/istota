@@ -106,10 +106,21 @@ export interface SteerRecordedData {
  * `$app/paths`.
  */
 export interface SendAttachment {
-  path: string;
+  /**
+   * Null while the bytes are still in this browser, waiting for a connection
+   * (ISSUE-202). A payload can hold one because a queued message's payload is
+   * built before its files exist server-side; `beginSend` resolves every one of
+   * them to a real path before the POST, and `sendTurn` drops any that is
+   * somehow still null rather than asking the server to read a missing file.
+   */
+  path: string | null;
   name: string;
   size: number;
   workspace_path?: string | null;
+  /** Key into the offline `blobs` store, on a pending chip and nowhere else. */
+  pendingBlobId?: string;
+  /** The picked file's type, carried only while the file is still held here. */
+  mimeType?: string;
 }
 
 export interface SendPayload {
@@ -242,8 +253,15 @@ export interface ChatMessage {
   // Only meaningful on a 'queued' row: the entry will not drain on its own.
   // Set when the turn the message was written against ended abnormally
   // (Stop, an error, a parked confirmation, a failed send), and on every entry
-  // restored from storage. Cleared by releasing the entry.
+  // restored from storage past its auto-send age. Cleared by releasing the
+  // entry.
   queueHeld?: boolean;
+  // Why the row is queued, mirrored off its queue entry (ISSUE-202). The row
+  // says which of the two waits it is in — for a running turn, or for a
+  // connection — and that is the whole of what it is read for here; the
+  // decision it drives (whether a restored entry may send itself) is made
+  // against the stored entry rather than against this.
+  queueReason?: 'busy' | 'offline';
   // Render gate for the pending mark, opened by a grace timer rather than by
   // `sendState` itself. The state is true from the moment the row exists; the
   // mark only earns the screen once the send is slow enough to be worth

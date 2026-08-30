@@ -2,6 +2,7 @@
   import { base } from '$app/paths';
   import { LogOut } from 'lucide-svelte';
   import { ConfirmDialog } from '$lib/components/ui';
+  import { forgetLastUserId } from '$lib/offline/lastUser';
 
   interface Props {
     /**
@@ -25,6 +26,13 @@
 
   function logout() {
     confirming = false;
+    // The offline cache's last-user pointer goes with the session (ISSUE-202).
+    // It is what a cold launch with no connection reads the cache by, so
+    // leaving it behind would paint the departed user's rooms and transcripts
+    // for whoever signs in next — and the expired-session path clears it for
+    // exactly this reason. Signing out is the deliberate version of the same
+    // event, and the more likely one on a device that changes hands.
+    forgetLastUserId();
     navigate(`${base}/logout`);
   }
 </script>

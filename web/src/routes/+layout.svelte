@@ -11,8 +11,11 @@
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
+  import { startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
+  import { shellAtLeast } from '$lib/platform/native';
+  import { forgetLastUserId } from '$lib/offline/lastUser';
   import '../app.css';
 
   let { children } = $props();
@@ -36,6 +39,71 @@
   // Same reasoning, same scope: every section has something to type into, and
   // on a touch device the keyboard outstays its welcome in all of them.
   onMount(() => installKeyboardDismiss());
+
+  // One connectivity fact for the whole app (ISSUE-202), anchored here for the
+  // same reason the notification poll is: it is read on routes that render no
+  // `AppShell`, and the interface listeners must outlive any one page. The
+  // requests each page makes are what keep it current; this only adds the
+  // window events and the probe schedule.
+  onMount(() => startConnectivity());
+
+  // Ask for the origin's storage to be exempt from eviction, once.
+  //
+  // The offline cache and the outbox being built on top of this live in
+  // storage iOS may reclaim: Intelligent Tracking Prevention removes a site's
+  // script-writable storage after a period without interaction, it is on in
+  // every WKWebView, and there is no way to opt an origin out — `persist()`
+  // grants only to origins already on WebKit's exemption list, which this one
+  // does not join. So a `false` here is the expected answer on the phone and
+  // not a fault. The point of asking is to have observed it rather than
+  // assumed it: the answer is what decides whether the outbox eventually has
+  // to move into native storage. Logged rather than surfaced, because there is
+  // nothing the user could do about it and nothing here fails if it is no.
+  onMount(() => {
+    if (typeof navigator === 'undefined' || typeof navigator.storage?.persist !== 'function') {
+      return;
+    }
+    navigator.storage
+      .persist()
+      .then((granted) => console.log(`[istota] storage.persist() → ${granted}`))
+      .catch(() => console.log('[istota] storage.persist() → refused'));
+  });
+
+  // The offline app shell, in the native app only (ISSUE-202).
+  //
+  // Without a worker, a cold launch with no connection never gets a document —
+  // the WebView is pointed at the deployment, so WebKit paints its own
+  // unreachable-server page and none of the offline cache below ever runs.
+  // With one, the navigation resolves from cache and the app boots into the
+  // banner, the cached transcript and a composer that queues.
+  //
+  // Gated on the shell for blast radius rather than for taste: this app
+  // deploys continuously, and a service worker is the one client artifact that
+  // can pin a client to a build the server has deleted. The phone is where the
+  // cold launch happens and is also the surface with a native escape hatch, so
+  // it is the only place this runs. Kit's own automatic registration is off
+  // (`svelte.config.js`) so that this gate is the only way in.
+  //
+  // On the *version* rather than on the shell alone, per the facade's rule
+  // that a shell-dependent capability is gated on the version that introduced
+  // it: 0.10.0 is the build that declares the app-bound domains WebKit needs
+  // before it will run a worker here at all, and it is also the build whose
+  // settings row can unregister one. An older app is expected to have no
+  // `navigator.serviceWorker` to register with — but if that expectation is
+  // ever wrong, it would install a worker it has no way to remove.
+  //
+  // Fire-and-forget: a registration that fails leaves the app exactly as it is
+  // without one, which is what every other surface already runs.
+  onMount(() => {
+    if (!shellAtLeast('0.10.0')) return;
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    navigator.serviceWorker
+      // Kit bundles the worker as a classic script for the build and serves it
+      // as an ES module in dev, and registering with the wrong type fails
+      // outright.
+      .register(`${base}/service-worker.js`, { type: import.meta.env.DEV ? 'module' : 'classic' })
+      .catch((e) => console.log(`[istota] service worker not registered: ${e}`));
+  });
 
   // Stale-build prompt. `kit.version.pollInterval` flips `updated.current` when
   // a new build ships, but SvelteKit only acts on it at the *next navigation* —
@@ -73,6 +141,12 @@
       startNotificationPoll();
     } catch (e) {
       if (e instanceof AuthError) {
+        // The session is over, so the pointer that says whose cache to read
+        // before the next one resolves goes with it (ISSUE-202). Whoever signs
+        // in next writes their own on the first config read; until then a cold
+        // launch with no connection reads nothing, which is the right answer
+        // when nobody is signed in.
+        forgetLastUserId();
         window.location.href = `${base}/login`;
         return;
       }

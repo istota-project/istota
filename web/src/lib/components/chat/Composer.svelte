@@ -27,7 +27,12 @@
     Reply,
   } from 'lucide-svelte';
   import { IconButton } from '$lib/components/ui';
-  import { uploadChatAttachment, chatConfigOnce, type ChatAttachment } from '$lib/api';
+  import {
+    uploadChatAttachment,
+    chatConfigOnce,
+    UploadUnreachableError,
+    type ChatAttachment,
+  } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
@@ -39,10 +44,14 @@
     pickPhotos,
     pickDocuments,
     pickedFromFile,
+    fileFromPicked,
     type Picked,
   } from '$lib/platform/nativePicker';
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
   import type { MessageReply } from '$lib/stores/segments';
+  import { online } from '$lib/stores/connectivity';
+  import { putBlob, deleteBlob, hasHeadroom, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
+  import { get } from 'svelte/store';
 
   let {
     onSend,
@@ -333,6 +342,14 @@
     // room's business.
     if (leavingRoom) {
       uploadEpoch++;
+      // A chip whose bytes are held here is the only copy of them, and the
+      // clear is the last thing that knows which blobs those were: the queue
+      // is what the collector reconciles against, and this file was never
+      // queued. Left behind they would sit against the shared total until the
+      // next `init()`, which in an installed app can be days. An upload still
+      // in flight cleans up after itself — it compares the epoch on the way
+      // out and drops its own blob — so the two cannot both delete one.
+      for (const a of attachments) if (a.pendingBlobId) void deleteBlob(a.pendingBlobId);
       attachments = [];
       uploading = 0;
       uploadError = '';
@@ -620,7 +637,29 @@
    * leaves it null for good. That is deliberate — an unreachable /chat/config
    * must not become a client-side refusal of files the server would have taken.
    */
+  /**
+   * The one sentence every offline refusal reads.
+   *
+   * Four bounds produce it — the per-file cap, the shared total, the origin's
+   * remaining headroom, and a browser that will not give us IndexedDB — and
+   * they are one fact to the person holding the phone: this file cannot be kept
+   * until there is a connection. Naming which bound would ask them to reason
+   * about a storage budget they cannot see.
+   */
+  const OFFLINE_TOO_LARGE = 'Too large to hold offline — attach it when you’re back online.';
+
+  /** Why the last hold was refused. Set by `holdOffline`, read by `stage`. */
+  let holdRefusal = OFFLINE_TOO_LARGE;
+
   function refusalReason(file: Picked): string | null {
+    // The offline bound is checked whatever the server said, and before it: the
+    // server's limits arrive over the network, so with no connection `limits`
+    // is routinely null — the one case where deferring to the server would
+    // mean deferring to nobody. What this bound is about is different anyway.
+    // It is what is safe to *hold*: eviction is whole-origin, so a 4K video
+    // parked in IndexedDB takes the text queue and the transcript cache with it
+    // when the quota is reached.
+    if (!get(online) && file.size > MAX_PENDING_BLOB_BYTES) return OFFLINE_TOO_LARGE;
     if (!limits) return null;
     if (file.size > limits.maxBytes) {
       return `${file.name} is larger than ${limits.maxMb} MB.`;
@@ -633,12 +672,80 @@
   }
 
   /**
+   * Hold a file's bytes in this browser instead of uploading them.
+   *
+   * The offline half of `upload` below, and the whole of the voice-note story:
+   * `useRecorder` hands its memo to `upload([file])` exactly as a picker does,
+   * so a recording made with no connection takes this branch without the
+   * recorder knowing anything about connectivity.
+   *
+   * Returns the chip to stage, or null having set `holdRefusal` to the sentence
+   * that says why. Three of the four refusals are about space and read as one
+   * fact from here — the file cannot be kept — so they share a sentence; a file
+   * whose bytes could not be read at all is a different thing to be told.
+   *
+   * A file the shell picked is on disk rather than in the page, and offline the
+   * shell cannot post it either — so it is read back through the picker's own
+   * fallback, which produces the same `File` a browser would have handed over.
+   */
+  async function holdOffline(file: Picked): Promise<ChatAttachment | null> {
+    holdRefusal = OFFLINE_TOO_LARGE;
+    const bytes = file.blob ?? (file.nativePath ? await fileFromPicked(file) : null);
+    if (!bytes) {
+      holdRefusal = `Couldn’t read ${file.name}.`;
+      return null;
+    }
+    const mimeType = file.type || bytes.type || 'application/octet-stream';
+    const blobId = newBlobId();
+    if (!blobId) return null;
+    // Both bounds that can be answered without the bytes are asked first, so a
+    // file that cannot be kept costs the questions and not a read of itself.
+    // `refusalReason` has already applied the per-file one; this is the
+    // origin's own headroom. The shared total needs the store and is asked
+    // inside `putBlob`, which is the one refusal that still costs the read.
+    if (bytes.size > MAX_PENDING_BLOB_BYTES) return null;
+    if (!(await hasHeadroom(bytes.size))) return null;
+    const stored = await putBlob(blobId, await bytes.arrayBuffer(), {
+      name: file.name,
+      mimeType,
+      size: bytes.size,
+    });
+    if (!stored) return null;
+    return {
+      // The two fields that say "not on the server yet". Everything downstream
+      // — the queue entry, the drain, the rendered chip — branches on them.
+      path: null,
+      pendingBlobId: blobId,
+      name: file.name,
+      size: bytes.size,
+      mimeType,
+    };
+  }
+
+  /** An id for one held file, or null when the browser cannot mint one. */
+  function newBlobId(): string | null {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      // `crypto.randomUUID` is a secure-context API, and a page that is not one
+      // has no business holding files either. Refusing reads as the same
+      // sentence every other refusal does.
+      return null;
+    }
+  }
+
+  /**
    * The one sink every attachment goes through.
    *
    * A pick from the native menu arrives as a path the shell will post itself; a
    * paste, drop, file input or voice memo arrives as bytes already in the page.
    * Both become a `Picked` here so the size check, the error handling and the
    * chip list have one shape to deal with.
+   *
+   * With no connection there is nothing to POST to, so the bytes are held in
+   * IndexedDB and the chip is staged unresolved — see `holdOffline`. The rest
+   * of the composer is unchanged either way: the chip renders, the send stages
+   * it, and the outbox does the upload when there is a connection to do it on.
    */
   async function upload(files: FileList | File[] | Picked[]) {
     // The room this batch belongs to. Every write below is guarded on it still
@@ -659,21 +766,64 @@
       }
       uploading++;
       try {
+        if (!get(online)) {
+          await stage(file, stale);
+          continue;
+        }
         const att = await uploadChatAttachment(file);
         // The file did reach the server and is now orphaned there — the same
         // outcome as closing the tab mid-upload, which the inbox already
         // tolerates. Better than a chip in a room the file was not picked in.
         if (!stale()) attachments = [...attachments, att];
       } catch (e) {
-        if (!stale()) uploadError = e instanceof Error ? e.message : 'upload failed';
+        // The upload is what *discovered* the gap. `online` is only believed
+        // false once something has observed one, so the first file attached
+        // after the signal dies takes the branch above as though it were still
+        // connected — and for a voice memo the argument to `upload()` is the
+        // only copy of the recording there is. Holding it here is what makes
+        // "recorded in a lift" work on the first try rather than the second.
+        if (e instanceof UploadUnreachableError) await stage(file, stale);
+        else if (!stale()) uploadError = e instanceof Error ? e.message : 'upload failed';
       } finally {
         if (!stale()) uploading--;
       }
     }
   }
 
-  function removeAttachment(path: string) {
-    attachments = attachments.filter((a) => a.path !== path);
+  /**
+   * Hold a file's bytes and stage its chip, or say why we could not.
+   *
+   * `stale` is `upload`'s own room guard, passed in rather than recomputed:
+   * the epoch it closes over is the one captured when *this batch* started.
+   */
+  async function stage(file: Picked, stale: () => boolean) {
+    const held = await holdOffline(file);
+    if (!held) {
+      if (!stale()) uploadError = holdRefusal;
+      return;
+    }
+    // The same room guard the upload path uses, and the same reasoning —
+    // except that here the bytes are ours to take back, so a chip that would
+    // have landed in the wrong room drops its blob with it.
+    if (stale()) void deleteBlob(held.pendingBlobId as string);
+    else attachments = [...attachments, held];
+  }
+
+  /**
+   * What identifies one staged chip.
+   *
+   * The host path used to be it, and a pending chip has none — so the key is
+   * the blob id where there is one. Both are unique per file: a path carries
+   * the server's collision suffix, a blob id is a uuid.
+   */
+  const attachKey = (a: ChatAttachment) => a.pendingBlobId ?? a.path ?? a.name;
+
+  function removeAttachment(key: string) {
+    const going = attachments.find((a) => attachKey(a) === key);
+    attachments = attachments.filter((a) => attachKey(a) !== key);
+    // An uploaded file is left orphaned server-side, as it always has been; a
+    // held one is ours, and nothing else names it once its chip is gone.
+    if (going?.pendingBlobId) void deleteBlob(going.pendingBlobId);
   }
 
   function submit() {
@@ -1002,13 +1152,16 @@
   {/if}
   {#if attachments.length || uploading}
     <div class="attach-row">
-      {#each attachments as att (att.path)}
-        <span class="attach-chip">
+      <!-- A chip with no path is holding its bytes here rather than on the
+           server, so it is muted the way a queued row is: the file is staged,
+           it is just not anywhere yet. -->
+      {#each attachments as att (attachKey(att))}
+        <span class="attach-chip" class:pending={!!att.pendingBlobId}>
           {isAudio(att.name) ? '🎤' : '📎'}
           {att.name}
           <button
             class="attach-x"
-            onclick={() => removeAttachment(att.path)}
+            onclick={() => removeAttachment(attachKey(att))}
             type="button"
             aria-label="Remove {att.name}"
           >
@@ -1508,7 +1661,11 @@
     border-radius: var(--radius-pill);
     padding: 0.15rem var(--space-2);
   }
-  .attach-chip.uploading {
+  /* Both the in-flight chip and the held-offline one are the same statement —
+	   this file is not on the server — so they read the same. Muted, not
+	   coloured: nothing has gone wrong. */
+  .attach-chip.uploading,
+  .attach-chip.pending {
     color: var(--text-muted);
   }
   .attach-x {

@@ -1,5 +1,6 @@
 import { base } from '$app/paths';
-import { uploadFromPath, type Picked } from '$lib/platform/nativePicker';
+import { uploadFromPath, nativeUploadAvailable, type Picked } from '$lib/platform/nativePicker';
+import { noteTransport } from '$lib/stores/connectivity';
 import type { BasemapSpec } from '$lib/basemap';
 
 class AuthError extends Error {
@@ -18,19 +19,56 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
   // clobber whatever replaced it in the meantime.
   let controller: AbortController | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
   if (timeoutMs > 0 && !init?.signal) {
     controller = new AbortController();
-    timer = setTimeout(() => controller?.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller?.abort();
+    }, timeoutMs);
   }
   try {
-    const resp = await fetch(`${base}/api${path}`, {
-      ...init,
-      credentials: 'same-origin',
-      ...(controller ? { signal: controller.signal } : {}),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(`${base}/api${path}`, {
+        ...init,
+        credentials: 'same-origin',
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (e) {
+      // Every request in the app comes through here, which makes this the one
+      // place that sees what the network is actually doing (ISSUE-202). A
+      // `fetch` rejection is a transport failure or an abort, and only the
+      // first is evidence about the server: a caller that cancelled its own
+      // request has said nothing about the connection, so it must not raise
+      // the offline banner. No caller passes a signal today — the same
+      // condition the timeout guard above is written against — and the check
+      // is here so the first one to do so cannot introduce that quietly.
+      if (!init?.signal?.aborted) noteTransport(false, timedOut ? 'timeout' : 'unreachable');
+      throw e;
+    }
+    // Whatever it says, something answered. A 401 or a 500 is a server, and
+    // the connectivity store's whole job is to keep that apart from silence.
+    // Reported before the status branches, since a status is an answer.
+    noteTransport(true);
     if (resp.status === 401) throw new AuthError();
     if (!resp.ok) throw new Error(`API error: ${resp.status}`);
-    return resp.json();
+    try {
+      // **Awaited**, so the read happens inside this `try` and ahead of the
+      // `finally` below. `return resp.json()` cleared the timer on the headers
+      // alone and left the body unbounded — a proxy that flushes headers and
+      // then stalls is the same hang the bound exists for, which is what
+      // `sendChatMessage` has always said about its own body read. It also
+      // reported that stall to the connectivity store as a reachable server,
+      // which is worse than saying nothing: the probe rides on this call, so a
+      // half-delivered answer would have cleared the offline banner.
+      return await resp.json();
+    } catch (e) {
+      // Only our own abort. A body that is not JSON is an error page, which
+      // the status already described, and says nothing about the connection.
+      if (timedOut) noteTransport(false, 'timeout');
+      throw e;
+    }
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -2376,8 +2414,16 @@ export interface TaskEventDTO {
   created_at: string;
 }
 
-export function getChatConfig(): Promise<ChatConfig> {
-  return apiFetch<ChatConfig>('/chat/config');
+/**
+ * The server's chat limits.
+ *
+ * `timeoutMs` is for the connectivity probe (`stores/connectivity.ts`), which
+ * uses this call as its "is the server there" question and cannot afford to
+ * wait out a stall — a probe with no bound would leave the app believing it is
+ * offline for as long as the OS takes to give up on the socket.
+ */
+export function getChatConfig(timeoutMs = 0): Promise<ChatConfig> {
+  return apiFetch<ChatConfig>('/chat/config', undefined, timeoutMs);
 }
 
 /**
@@ -2733,6 +2779,11 @@ export async function sendChatMessage(
       signal: controller.signal,
     });
 
+    // Something answered, whatever it went on to say (ISSUE-202). Reported
+    // before the status branches below, since a 401 and a 429 are as much
+    // evidence of a reachable server as a 200 is.
+    noteTransport(true);
+
     // Also returned rather than thrown as `AuthError`: only `getMe` in the root
     // layout catches that, so from here it took the silent path below.
     if (resp.status === 401) return { ok: false, status: 401, failure: 'auth' };
@@ -2794,7 +2845,12 @@ export async function sendChatMessage(
     // the same shape as a rejection the server did answer — and a throw from
     // here is what used to escape an un-awaited caller and leave the composer
     // locked with nothing on screen (ISSUE-200).
-    return { ok: false, status: 0, failure: timedOut ? 'timeout' : 'unreachable' };
+    //
+    // The same distinction the offline outbox turns on, so the connectivity
+    // store hears it here rather than re-deriving it from the returned shape.
+    const failure: SendFailure = timedOut ? 'timeout' : 'unreachable';
+    noteTransport(false, failure);
+    return { ok: false, status: 0, failure };
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -3019,13 +3075,40 @@ export function chatRoomStreamUrl(sinceId: number, sinceDeletionId = 0): string 
 }
 
 export interface ChatAttachment {
-  path: string;
+  // The host path the brain reads, or **null for a chip whose bytes are still
+  // in this browser** — a file attached with no connection, waiting for the
+  // outbox to upload it (ISSUE-202). A null path never reaches the wire: the
+  // drain resolves every pending chip to a real path before it POSTs.
+  path: string | null;
   name: string;
   size: number;
   // Where the same file is reachable through `chatFileUrl`, or null when it
   // isn't (a deployment with no local workspace). Distinct from `path`, which
   // is the host path the brain reads and the download endpoint won't take.
   workspace_path?: string | null;
+  // Key into the offline `blobs` object store, set on a pending chip and on no
+  // other. Its presence is what `path: null` means.
+  pendingBlobId?: string;
+  // The picked file's type, carried only on a pending chip so the queue entry
+  // that records it has one. A file already uploaded has no use for it — the
+  // server holds the file and the client only ever names it.
+  mimeType?: string;
+}
+
+/**
+ * An attachment upload that never reached the server.
+ *
+ * Distinguished from every other upload failure for the reason the send path
+ * distinguishes `unreachable` from `rejected`: nothing has been refused, so a
+ * queued message keeps its bytes and waits rather than failing (ISSUE-202).
+ * Everything the server actually answered — a 413, a disallowed extension —
+ * throws a plain `Error` carrying its message.
+ */
+export class UploadUnreachableError extends Error {
+  constructor(message = 'Couldn’t upload — the server is unreachable.') {
+    super(message);
+    this.name = 'UploadUnreachableError';
+  }
 }
 
 /**
@@ -3061,11 +3144,22 @@ export async function uploadChatAttachment(item: File | Picked): Promise<ChatAtt
   if (!file) throw new Error('Nothing to upload.');
   const form = new FormData();
   form.append('file', file);
-  const resp = await fetch(`${base}/api${CHAT_ATTACHMENT_PATH}`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: form,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api${CHAT_ATTACHMENT_PATH}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form,
+    });
+  } catch {
+    // The one failure that says nothing about the file. Reported to the
+    // connectivity store for the same reason every other transport completion
+    // is: an upload is the request that discovers the gap when it is the first
+    // thing the user does after losing signal.
+    noteTransport(false, 'unreachable');
+    throw new UploadUnreachableError();
+  }
+  noteTransport(true);
   if (resp.status === 401) throw new AuthError();
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || `upload failed (${resp.status})`);
@@ -3081,7 +3175,23 @@ export async function uploadChatAttachment(item: File | Picked): Promise<ChatAtt
  */
 async function uploadFromShell(item: Picked): Promise<ChatAttachment> {
   const url = new URL(`${base}/api${CHAT_ATTACHMENT_PATH}`, location.origin).toString();
-  const { status, body } = await uploadFromPath(item, url);
+  // Asked here rather than left to `uploadFromPath` to throw, so that the
+  // catch below is only ever the uploader's own rejection. A missing plugin is
+  // a fact about this build, not about the network, and reporting it as a gap
+  // would raise the offline banner and stop every room's queue draining over
+  // something no request observed.
+  if (!nativeUploadAvailable()) throw new Error('No native uploader.');
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await uploadFromPath(item, url));
+  } catch {
+    // `uploadFromPath` returns any HTTP answer as a status, so a throw here is
+    // URLSession failing to get one — the same gap the fetch above reports.
+    noteTransport(false, 'unreachable');
+    throw new UploadUnreachableError();
+  }
+  noteTransport(true);
   if (status === 401) throw new AuthError();
   let data: { error?: string } & Partial<ChatAttachment> = {};
   try {

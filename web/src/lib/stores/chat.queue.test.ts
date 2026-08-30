@@ -1044,7 +1044,15 @@ describe('chat store — the send queue', () => {
       // belongs with the queued rows at the bottom.
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      // A refusal rather than a gap: since ISSUE-202 the two gap failures park
+      // the message in the queue instead of stranding a failed row, and it is
+      // the stranded row this is about.
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('never left');
       await flush();
       const stranded = get(s.messages).find((m) => m.text === 'never left');
@@ -1075,7 +1083,15 @@ describe('chat store — the send queue', () => {
       // site needs the stranded half rather than being exempt from the rule.
       const s = await freshSession();
       await s.init();
-      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      // A refusal rather than a gap: since ISSUE-202 the two gap failures park
+      // the message in the queue instead of stranding a failed row, and it is
+      // the stranded row this is about.
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
       await s.send('never left');
       await flush();
 
@@ -1207,6 +1223,102 @@ describe('chat store — the send queue', () => {
 
       expect(storedQueue('t1').map((e) => e.text)).toEqual(['second']);
       expect(queuedRows(get(s.messages))).toHaveLength(1);
+    });
+
+    it('keeps a draining entry in storage until the server acks it', async () => {
+      // The shift happens on the ack, not before the POST (ISSUE-202). A
+      // force-quit in this window is the case: the entry is the only copy the
+      // client has, and the server may or may not have taken the message —
+      // so it stays until the answer says which.
+      const s = await streaming();
+      await s.send('and another thing');
+      let release: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          release = r;
+        }),
+      );
+
+      await emit('done');
+
+      expect(get(s.messages).find((m) => m.text === 'and another thing')?.sendState).toBe(
+        'sending',
+      );
+      expect(storedQueue('t1').map((e) => e.text)).toEqual(['and another thing']);
+
+      release({ ok: true, status: 200, task_id: 43 });
+      await flush();
+
+      expect(storedQueue('t1')).toEqual([]);
+    });
+
+    it('settles a re-POSTed entry from the task snapshot when its task has finished', async () => {
+      // The force-quit-mid-POST case end to end. The entry outlived the POST,
+      // so the relaunch drains it again carrying the idempotency key it was
+      // minted with; the server resolves the replay to the task it already ran
+      // rather than starting a second one, and the row settles on that task's
+      // terminal event — one turn, not zero and not two.
+      //
+      // That event arrives from `/chat/tasks/{id}/events`, which is the right
+      // endpoint for a task whose stream is over, but the harness is not what
+      // proves it: jsdom has no `EventSource`, so every turn in this file
+      // settles through the same poll. What this test does hold down is the
+      // shift point and the key — a run against the old shift-before-POST
+      // order has nothing left in storage to re-POST at all.
+      seedQueues({ t1: [storedEntry('the one that was mid-flight', { idempotencyKey: 'k-1' })] });
+      const s = await freshSession();
+      await s.init();
+      await flush();
+      const cid = queuedRows(get(s.messages))[0].cid;
+      let release: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          release = r;
+        }),
+      );
+
+      const releasing = s.releaseQueued(cid);
+      await flush();
+
+      // Still stored while the second POST is open, for the same reason as
+      // above: this relaunch could be interrupted too.
+      expect(storedQueue('t1')).toHaveLength(1);
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendChatMessage.mock.calls[0][5]).toBe('k-1');
+
+      release({ ok: true, status: 200, task_id: 99 });
+      await releasing;
+
+      expect(storedQueue('t1')).toEqual([]);
+      await emit('done');
+
+      const mine = get(s.messages).filter((m) => m.text === 'the one that was mid-flight');
+      expect(mine).toHaveLength(1);
+      expect(mine[0].sendState).toBeUndefined();
+      expect(mine[0].taskId).toBe(99);
+      expect(get(s.status)).toBe('idle');
+    });
+
+    it('takes a drained entry out of storage when the server refuses it', async () => {
+      // The other half of shift-on-ack, and the guard on it: a rejection is
+      // the server's verdict on this message, so the entry goes and the row
+      // becomes a failed one with its own Retry. Left in the queue it would be
+      // re-POSTed forever.
+      const s = await streaming();
+      await s.send('and another thing');
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
+
+      await emit('done');
+
+      expect(storedQueue('t1')).toEqual([]);
+      const row = get(s.messages).find((m) => m.text === 'and another thing');
+      expect(row?.sendState).toBe('failed');
+      expect(row?.retryable).toBe(true);
     });
 
     it('records the hold a Stop applied', async () => {

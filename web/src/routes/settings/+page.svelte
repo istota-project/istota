@@ -18,10 +18,13 @@
     AppShell,
     ShellHeader,
     Button,
+    ConfirmDialog,
     Field,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
+  import { shellAtLeast } from '$lib/platform/native';
+  import { clearOfflineData } from '$lib/offline/clear';
   import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
@@ -214,6 +217,44 @@
     } finally {
       ncTokenBusy = false;
     }
+  }
+
+  // Offline storage (ISSUE-202). Shown only in a shell that installs a service
+  // worker, which is what makes this more than a cache-clearing button: a
+  // worker can serve a document from a build the server has deleted, and there
+  // is no reload out of that. `shellAtLeast('0.10.0')` is the version that
+  // declares the app-bound domains WebKit needs before it will run one at all,
+  // so an older app is offered nothing it could act on. In a browser there is
+  // no worker and the page reload the user already knows is the whole remedy.
+  const offlineDataClearable = shellAtLeast('0.10.0');
+  let confirmingClearOffline = $state(false);
+  let clearingOffline = $state(false);
+
+  // A full reload rather than a refetch, and it is the point of the action
+  // rather than a flourish: the running page was served by the worker being
+  // unregistered, and its module graph is the one being cleared. Reloading is
+  // what makes the next document come from the network.
+  //
+  // Withheld when the stored data is still there. The row exists to escape a
+  // state the user can see, so reloading over a clear that did nothing would
+  // present the failure as the fix — and a reload takes the report away with
+  // it. The other two steps are counted rather than reported: a worker that
+  // was never registered and an origin with no caches are the ordinary case,
+  // not a failure.
+  async function clearOfflineStorage() {
+    confirmingClearOffline = false;
+    clearingOffline = true;
+    let cleared = false;
+    try {
+      cleared = (await clearOfflineData()).database;
+    } finally {
+      clearingOffline = false;
+    }
+    if (!cleared) {
+      error = 'Could not clear the offline data. Close the app’s other tabs and try again.';
+      return;
+    }
+    window.location.reload();
   }
 
   function profileListString(values: string[]): string {
@@ -535,6 +576,33 @@
       </SettingsCard>
     {/if}
 
+    <!-- Outside the `{#if profile}` block above, deliberately: the profile
+         fetch is the first thing that fails when the app cannot reach the
+         server, and a cache gone wrong is a reason it might not. A row that
+         disappears exactly when it is needed is not an escape hatch. -->
+    {#if offlineDataClearable}
+      <SettingsCard
+        title="Offline data"
+        description="What this app keeps on the device so it opens and reads without a connection: the app itself, your room list, and the recent messages of the rooms you have opened."
+      >
+        <p class="hint">
+          Clearing it takes the app back to a first install: it is downloaded again the next time
+          you open it, and each room's messages are fetched again when you open the room. Messages
+          waiting to send are kept, but a file held with one is not.
+        </p>
+        <div class="oauth-actions">
+          <Button
+            variant="secondary"
+            size="sm"
+            onclick={() => (confirmingClearOffline = true)}
+            disabled={clearingOffline}
+          >
+            {clearingOffline ? 'Clearing…' : 'Clear offline data'}
+          </Button>
+        </div>
+      </SettingsCard>
+    {/if}
+
     {#if activeServices.length > 0 || ncToken}
       <div class="subsection-heading">
         <h2>Connected services</h2>
@@ -582,6 +650,14 @@
         {/if}
       </SettingsCard>
     {/if}
+
+    <ConfirmDialog
+      bind:open={confirmingClearOffline}
+      title="Clear offline data"
+      message="Are you sure? The app and its saved messages are downloaded again the next time you open each room, which needs a connection. Messages waiting to send are kept — a file held with one is not."
+      confirmLabel="Clear"
+      onConfirm={clearOfflineStorage}
+    />
 
     {#each activeServices as svc (svc.service)}
       {#if svc.custom_ui && svc.service === 'garmin'}

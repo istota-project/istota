@@ -1,6 +1,7 @@
 /**
- * Messages typed into a busy room and waiting to be sent, kept per room in the
- * browser (ISSUE-238).
+ * Messages that cannot be sent yet and are waiting to be, kept per room in the
+ * browser: typed into a busy room (ISSUE-238), or written with no connection
+ * (ISSUE-202).
  *
  * Deliberately shaped like `drafts.ts`, and for the same reasons: one
  * `localStorage` map under a single key, so pruning is a local decision rather
@@ -16,9 +17,18 @@
  * reload is worse. It persists at enqueue rather than on unload, so nothing
  * depends on catching a departure event.
  *
- * Nothing here decides whether an entry may go out. A restored entry is always
- * re-held by the caller — the turn it was written against is over and
- * unobserved, and a page load must never send anything by surprise.
+ * An entry's *bytes* are the one thing kept elsewhere: a voice note recorded
+ * with no connection lives in the `blobs` object store in IndexedDB and the
+ * entry carries a `PendingAttachment` naming it. See that type for why the
+ * split is where it is.
+ *
+ * What this module decides about sending is one thing and one only: how old an
+ * entry queued with no connection may be and still go out by itself on a page
+ * load (`OFFLINE_AUTO_SEND_MAX_AGE_MS`). Everything else — whether the room is
+ * ready, whether the head is held, when a drain runs — is the chat store's,
+ * and the rule it applies is that a restored entry sends itself only when it
+ * was written against a *connection* rather than against a turn, and only
+ * while it is young enough to still be what the user meant.
  *
  * **Two tabs are last-writer-wins, and that is settled rather than overlooked.**
  * Each tab holds its own in-memory queue and writes a room's whole list here,
@@ -52,17 +62,33 @@ export const QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * How many messages one room may have waiting.
  *
  * A cap the UI can honestly report: past it the send is refused with a visible
- * reason rather than accepted and silently dropped. `chat.ts`'s `enqueueSend`
- * is what enforces that, so the in-memory queue can never outgrow what is
- * stored — the trim in `prune` below keeps the FIFO *head*, which would
- * otherwise discard the message the user typed most recently while leaving it
- * on screen. The composer gains its own refusal on top, which keeps the text in
- * the field rather than in a notice.
+ * reason rather than accepted and silently dropped. `chat.ts` enforces it on
+ * both ways into the queue — `enqueueSend` and `parkSend` — so the in-memory
+ * queue can never outgrow what is stored; the trim in `prune` below keeps the
+ * FIFO *head*, which would otherwise discard the message the user typed most
+ * recently while leaving it on screen. The composer gains its own refusal on
+ * top, which keeps the text in the field rather than in a notice.
  */
 export const MAX_QUEUED_PER_ROOM = 10;
 
 /** Second bound, on rooms rather than entries, evicted oldest-first. */
 export const MAX_QUEUE_ROOMS = 20;
+
+/**
+ * How old an entry queued *offline* may be and still send itself on a restore.
+ *
+ * A restored entry is normally held: the turn it was written against is over
+ * and unobserved, and a page load must never send by surprise. An entry queued
+ * because there was no connection is the opposite case — going out on its own
+ * is the whole of what it is for — so the hold would be the surprise instead.
+ *
+ * The bound splits two hazards rather than picking one. A message written five
+ * minutes ago in a lift is one the user still means. A message written four
+ * days ago, firing into a conversation that has moved on while the user is
+ * looking at something else, is exactly what the hold exists to prevent. Well
+ * inside `QUEUE_TTL_MS`, which is when the text stops being kept at all.
+ */
+export const OFFLINE_AUTO_SEND_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * How much of one queued message is kept.
@@ -88,6 +114,10 @@ export const MAX_QUEUE_CHARS = MAX_DRAFT_CHARS;
  * charges for is the serialized map. Counting the text alone would leave every
  * one of those unbounded against a budget written to bound them.
  *
+ * A held attachment costs its `PendingAttachment` record and nothing more: the
+ * bytes are in IndexedDB, under bounds of their own, and putting them here
+ * would put a voice note through `localStorage` as base64.
+ *
  * Must stay at or above `MAX_QUEUE_CHARS`, or the head of the room being
  * written could not fit and the newest-always-kept guarantee would not hold.
  * Note that one *room* at its own cap can exceed this, which is why the whole
@@ -96,22 +126,68 @@ export const MAX_QUEUE_CHARS = MAX_DRAFT_CHARS;
 export const MAX_QUEUE_TOTAL_CHARS = 256 * 1024;
 
 /**
+ * Why a message is in the queue.
+ *
+ * The two are told apart on the way back in and nowhere else: a `busy` entry
+ * restores held, an `offline` one young enough and not already held restores
+ * ready to go (see `OFFLINE_AUTO_SEND_MAX_AGE_MS`). Storing the reason rather than deriving it
+ * is what makes that possible at all — a reload cannot tell whether the room
+ * was busy or the network was gone when the text was written.
+ */
+export type QueueReason = 'busy' | 'offline';
+
+/**
+ * One attachment whose bytes are still in this browser.
+ *
+ * An attachment is a two-step send — the file is POSTed first and the message
+ * references the host path that comes back — so with no connection there is no
+ * path to reference. The bytes go into the `blobs` object store in IndexedDB
+ * and this is what names them: the drain reads the blob, uploads it, replaces
+ * the entry's pending chip with the real `ChatAttachment`, and deletes the
+ * blob.
+ *
+ * Bytes are deliberately *not* here. This map is `localStorage` and is read
+ * synchronously during `init()`; a voice note in it would blow the whole-map
+ * bound on its own and would have to be base64 to fit at all. What the bound
+ * below charges for is this record — four small fields — which is the right
+ * accounting, because the bytes have bounds of their own where they live
+ * (`MAX_PENDING_BLOB_BYTES`, `MAX_PENDING_BLOB_TOTAL`).
+ */
+export interface PendingAttachment {
+  /** Key into the `blobs` object store. */
+  blobId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
+/**
  * One queued message as it is stored.
  *
- * The same fields the in-memory entry carries. `held` and `queuedAt` are what
- * the restore reads: the first is forced true on the way back in by the chat
- * store, the second is what the TTL measures and what the restored row's
- * timestamp is rebuilt from.
+ * The same fields the in-memory entry carries, and three of them are what a
+ * restore reads. `held` is a hold the last session applied and is never
+ * cleared by the read. `reason` and `queuedAt` decide whether an entry that
+ * carries no such hold may go out on its own.
+ *
+ * `attachments` and `pendingAttachments` are two views of one list and are
+ * kept in step: every chip whose `path` is null carries a `pendingBlobId`, and
+ * that id has exactly one record in `pendingAttachments`. The drain resolves
+ * them one at a time — a chip gets its real path, its record leaves the list —
+ * so a half-resolved entry is an ordinary state and `readEntry` below refuses
+ * one where the two halves disagree.
  */
 export interface StoredQueuedSend {
   cid: number;
   text: string;
   attachments: ChatAttachment[];
+  /** The unresolved half of `attachments`, in the order it will be uploaded. */
+  pendingAttachments?: PendingAttachment[];
   replyTo?: MessageReply;
   replyToMsgId?: number;
   idempotencyKey?: string;
   held: boolean;
   queuedAt: number;
+  reason: QueueReason;
 }
 
 type QueueMap = Record<string, StoredQueuedSend[]>;
@@ -135,17 +211,38 @@ function clampText(text: string): string {
  * One stored attachment, or null when it is not attachment-shaped.
  *
  * `path` is the host path the POST carries, so an attachment missing it would
- * be sent as a file reference the server cannot resolve.
+ * be sent as a file reference the server cannot resolve — unless it carries a
+ * `pendingBlobId` instead, which says the bytes are still in this browser and
+ * the path is what the drain is going to fetch. Those are the only two shapes;
+ * anything else fails the entry.
  */
 function readAttachment(value: unknown): ChatAttachment | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const a = value as Partial<ChatAttachment>;
-  if (typeof a.path !== 'string' || typeof a.name !== 'string') return null;
+  if (typeof a.name !== 'string') return null;
+  const blobId = typeof a.pendingBlobId === 'string' && a.pendingBlobId ? a.pendingBlobId : null;
+  if (typeof a.path !== 'string' && !blobId) return null;
   return {
-    path: a.path,
+    path: typeof a.path === 'string' ? a.path : null,
     name: a.name,
     size: Number.isFinite(a.size) ? (a.size as number) : 0,
+    ...(blobId ? { pendingBlobId: blobId } : {}),
+    ...(typeof a.mimeType === 'string' ? { mimeType: a.mimeType } : {}),
     ...(typeof a.workspace_path === 'string' ? { workspace_path: a.workspace_path } : {}),
+  };
+}
+
+/** One stored blob reference, or null when it is not reference-shaped. */
+function readPendingAttachment(value: unknown): PendingAttachment | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const p = value as Partial<PendingAttachment>;
+  if (typeof p.blobId !== 'string' || !p.blobId) return null;
+  if (typeof p.name !== 'string' || !p.name) return null;
+  return {
+    blobId: p.blobId,
+    name: p.name,
+    mimeType: typeof p.mimeType === 'string' ? p.mimeType : '',
+    size: Number.isFinite(p.size) ? (p.size as number) : 0,
   };
 }
 
@@ -182,6 +279,16 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
   // the eviction order forever.
   if (!Number.isFinite(e.cid) || typeof e.text !== 'string') return null;
   if (!Array.isArray(e.attachments)) return null;
+  if (e.pendingAttachments !== undefined && !Array.isArray(e.pendingAttachments)) return null;
+  const pendingAttachments: PendingAttachment[] = [];
+  for (const raw of e.pendingAttachments ?? []) {
+    const p = readPendingAttachment(raw);
+    // Fails the entry rather than being dropped out of it, exactly as a
+    // malformed attachment does: the message was written about the file, and
+    // sending it without one is worse than making the user record it again.
+    if (!p) return null;
+    pendingAttachments.push(p);
+  }
   // Blank text with nothing attached is not a message. `send()` trims and the
   // composer refuses an empty field, so this can only arrive hand-edited —
   // and restoring it would put a bubble on screen whose Send posts nothing,
@@ -189,7 +296,9 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
   // *not* required on its own: a send carrying only attachments is accepted
   // by the endpoint, which describes it in the prompt, so an attachment-only
   // entry is an ordinary queued message.
-  if (e.text.trim() === '' && e.attachments.length === 0) return null;
+  if (e.text.trim() === '' && e.attachments.length === 0 && pendingAttachments.length === 0) {
+    return null;
+  }
   // Finite *and* inside the range `Date` can represent: `queuedRow` builds the
   // row's timestamp with `new Date(queuedAt).toISOString()`, which throws
   // RangeError past ±8.64e15 — and it throws inside the transcript rebuild, so
@@ -202,6 +311,14 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
     if (!a) return null;
     attachments.push(a);
   }
+  // The two halves have to name each other exactly. A chip with no path and no
+  // record behind it would be POSTed as a null path the server cannot resolve;
+  // a record with no chip would upload a file nothing references. Both are the
+  // shape a half-written or hand-edited map has, and both cost the entry.
+  const chipIds = attachments.map((a) => a.pendingBlobId).filter((id): id is string => !!id);
+  const recordIds = pendingAttachments.map((p) => p.blobId);
+  if (chipIds.length !== recordIds.length) return null;
+  if (chipIds.some((id) => !recordIds.includes(id))) return null;
   const replyTo = readReplyTo(e.replyTo);
   // The two citation fields are one fact — `enqueueSend` writes
   // `replyToMsgId: replyTo?.msgId` — so they are recovered as a pair rather
@@ -220,10 +337,16 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
     // before the cap existed cannot be read back at full size and re-stored.
     text: clampText(e.text),
     attachments,
+    ...(pendingAttachments.length ? { pendingAttachments } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(replyToMsgId ? { replyToMsgId } : {}),
     ...(typeof e.idempotencyKey === 'string' ? { idempotencyKey: e.idempotencyKey } : {}),
     held: e.held === true,
+    // Anything that is not the word `offline` is a busy entry, which is what
+    // an entry written before this field existed is: the queue only had the
+    // one reason then. Defaulting the other way would take every stored entry
+    // on an upgraded build and send it unasked on the next load.
+    reason: e.reason === 'offline' ? 'offline' : 'busy',
     // Never in the future. A stamp ahead of the clock outlives the TTL by
     // construction (`now - queuedAt` stays negative) and sorts its room to the
     // front of the eviction order for as long as it is stored — immortal, and

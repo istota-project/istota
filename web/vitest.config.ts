@@ -16,6 +16,9 @@ export default defineConfig({
       '$app/navigation': resolve(__dirname, 'vitest-stubs/app-navigation.ts'),
       '$app/paths': resolve(__dirname, 'vitest-stubs/app-paths.ts'),
       '$app/state': resolve(__dirname, 'vitest-stubs/app-state.ts'),
+      // Same reasoning for `$service-worker`, which Kit generates per build
+      // and resolves only inside the worker bundle.
+      '$service-worker': resolve(__dirname, 'vitest-stubs/service-worker.ts'),
     },
     // Use the browser entry for Svelte so runtime imports resolve under vitest.
     conditions: ['browser'],
