@@ -19,6 +19,18 @@
  * Nothing here decides whether an entry may go out. A restored entry is always
  * re-held by the caller — the turn it was written against is over and
  * unobserved, and a page load must never send anything by surprise.
+ *
+ * **Two tabs are last-writer-wins, and that is settled rather than overlooked.**
+ * Each tab holds its own in-memory queue and writes a room's whole list here,
+ * so a write from one replaces what the other stored for that room; nothing
+ * listens for the `storage` event and the map carries no version. The failure
+ * that buys is a lost or duplicated *restore* across a reload, not a duplicated
+ * send — `idempotencyKey` is minted at enqueue and rides the round trip, so the
+ * server answers a second POST of the same entry with the first task. Multi-tab
+ * chat is not synchronized anywhere else either, and `drafts.ts` has the same
+ * shape. Note the distinction from the user in the key above: that separates
+ * two *people* sharing a profile, which is a correctness boundary; this is one
+ * person with two tabs, which is not.
  */
 import { loadSetting, saveSetting } from './persisted';
 import { MAX_DRAFT_CHARS } from './drafts';
@@ -39,8 +51,13 @@ export const QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * How many messages one room may have waiting.
  *
- * A cap the UI can honestly report: past it the composer refuses with a
- * visible reason rather than accepting the text and silently dropping it.
+ * A cap the UI can honestly report: past it the send is refused with a visible
+ * reason rather than accepted and silently dropped. `chat.ts`'s `enqueueSend`
+ * is what enforces that, so the in-memory queue can never outgrow what is
+ * stored — the trim in `prune` below keeps the FIFO *head*, which would
+ * otherwise discard the message the user typed most recently while leaving it
+ * on screen. The composer gains its own refusal on top, which keeps the text in
+ * the field rather than in a notice.
  */
 export const MAX_QUEUED_PER_ROOM = 10;
 
@@ -63,10 +80,13 @@ export const MAX_QUEUE_CHARS = MAX_DRAFT_CHARS;
  *
  * The per-entry cap does not bound the map on its own — `MAX_QUEUE_ROOMS`
  * rooms of `MAX_QUEUED_PER_ROOM` full-size entries would add up far past a
- * browser's quota, which is shared with everything else on the origin. Counted
- * in characters of message text rather than in the code units the serialized
- * payload costs; JSON escaping inflates that by a small constant factor and
- * the headroom below ~5 MB absorbs it.
+ * browser's quota, which is shared with everything else on the origin.
+ *
+ * Counted over the **serialized entry**, not over its text. `drafts.ts` counts
+ * text because a draft is text; an entry here also carries attachment records,
+ * a citation excerpt and an idempotency key, and the thing the quota actually
+ * charges for is the serialized map. Counting the text alone would leave every
+ * one of those unbounded against a budget written to bound them.
  *
  * Must stay at or above `MAX_QUEUE_CHARS`, or the head of the room being
  * written could not fit and the newest-always-kept guarantee would not hold.
@@ -153,7 +173,7 @@ function readReplyTo(value: unknown): MessageReply | undefined {
  * of it — a message that goes out without the file it was written about is a
  * worse outcome than one the user has to retype.
  */
-function readEntry(value: unknown): StoredQueuedSend | null {
+function readEntry(value: unknown, now: number): StoredQueuedSend | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const e = value as Partial<StoredQueuedSend>;
   // `Number.isFinite` rather than `typeof === 'number'`, as in `drafts.ts`:
@@ -161,7 +181,21 @@ function readEntry(value: unknown): StoredQueuedSend | null {
   // yet never expire, and an infinite `queuedAt` would sort to the front of
   // the eviction order forever.
   if (!Number.isFinite(e.cid) || typeof e.text !== 'string') return null;
-  if (!Number.isFinite(e.queuedAt) || !Array.isArray(e.attachments)) return null;
+  if (!Array.isArray(e.attachments)) return null;
+  // Blank text with nothing attached is not a message. `send()` trims and the
+  // composer refuses an empty field, so this can only arrive hand-edited —
+  // and restoring it would put a bubble on screen whose Send posts nothing,
+  // the same call `writeDraft` makes about a whitespace-only draft. Text is
+  // *not* required on its own: a send carrying only attachments is accepted
+  // by the endpoint, which describes it in the prompt, so an attachment-only
+  // entry is an ordinary queued message.
+  if (e.text.trim() === '' && e.attachments.length === 0) return null;
+  // Finite *and* inside the range `Date` can represent: `queuedRow` builds the
+  // row's timestamp with `new Date(queuedAt).toISOString()`, which throws
+  // RangeError past ±8.64e15 — and it throws inside the transcript rebuild, so
+  // one hand-edited number would cost the whole room's history load rather
+  // than its own entry.
+  if (!Number.isFinite(e.queuedAt) || Math.abs(e.queuedAt as number) > 8.64e15) return null;
   const attachments: ChatAttachment[] = [];
   for (const raw of e.attachments) {
     const a = readAttachment(raw);
@@ -169,6 +203,17 @@ function readEntry(value: unknown): StoredQueuedSend | null {
     attachments.push(a);
   }
   const replyTo = readReplyTo(e.replyTo);
+  // The two citation fields are one fact — `enqueueSend` writes
+  // `replyToMsgId: replyTo?.msgId` — so they are recovered as a pair rather
+  // than independently. Validated apart, a half-surviving pair either sends a
+  // reply stripped of the parent it was written against (the failure
+  // `editQueued` exists to prevent) or renders a quote the POST does not
+  // carry. Where only one survives, the other is derived from it, so the
+  // citation is kept in both directions.
+  const replyToMsgId =
+    Number.isFinite(e.replyToMsgId) && (e.replyToMsgId as number) > 0
+      ? (e.replyToMsgId as number)
+      : replyTo?.msgId;
   return {
     cid: e.cid as number,
     // Clamped on the way in as well as on the way out, so an entry written
@@ -176,12 +221,16 @@ function readEntry(value: unknown): StoredQueuedSend | null {
     text: clampText(e.text),
     attachments,
     ...(replyTo ? { replyTo } : {}),
-    ...(Number.isFinite(e.replyToMsgId) && (e.replyToMsgId as number) > 0
-      ? { replyToMsgId: e.replyToMsgId as number }
-      : {}),
+    ...(replyToMsgId ? { replyToMsgId } : {}),
     ...(typeof e.idempotencyKey === 'string' ? { idempotencyKey: e.idempotencyKey } : {}),
     held: e.held === true,
-    queuedAt: e.queuedAt as number,
+    // Never in the future. A stamp ahead of the clock outlives the TTL by
+    // construction (`now - queuedAt` stays negative) and sorts its room to the
+    // front of the eviction order for as long as it is stored — immortal, and
+    // ahead of every real message. A wrong clock at write time, later
+    // corrected, reaches this without anyone hand-editing anything, so it is
+    // clamped rather than refused: the entry ages from now instead of never.
+    queuedAt: Math.min(e.queuedAt as number, now),
   };
 }
 
@@ -201,13 +250,24 @@ function readAll(now = Date.now()): QueueMap {
     if (!Array.isArray(value)) continue;
     const entries: StoredQueuedSend[] = [];
     for (const item of value) {
-      const entry = readEntry(item);
+      const entry = readEntry(item, now);
       if (!entry || now - entry.queuedAt >= QUEUE_TTL_MS) continue;
       entries.push(entry);
     }
     if (entries.length) out[key] = entries;
   }
   return out;
+}
+
+/**
+ * What one entry costs the whole-map budget: its serialized length.
+ *
+ * The map is what the quota charges for, and an entry is more than its text —
+ * attachment records, a citation excerpt, an idempotency key. Text-only
+ * accounting would leave all of those outside a bound written to hold them.
+ */
+function entryCost(entry: StoredQueuedSend): number {
+  return JSON.stringify(entry).length;
 }
 
 /** A room's age for eviction: when anything was last queued into it. */
@@ -252,11 +312,11 @@ function prune(map: QueueMap, now: number, keep?: string): QueueMap {
       // Stop rather than skip, as in `drafts.ts`: rooms are already in
       // eviction order, so passing over one that does not fit to reach a
       // smaller, older one would keep the wrong messages.
-      if (total + entry.text.length > MAX_QUEUE_TOTAL_CHARS) {
+      if (total + entryCost(entry) > MAX_QUEUE_TOTAL_CHARS) {
         full = true;
         break;
       }
-      total += entry.text.length;
+      total += entryCost(entry);
       kept.push(entry);
     }
     if (kept.length) out[key] = kept;

@@ -245,6 +245,63 @@ describe('sendQueue — malformed storage', () => {
     expect(back.replyToMsgId).toBeUndefined();
   });
 
+  it('discards an entry with no text and nothing attached', () => {
+    // Restoring it would put a bubble on screen whose Send posts nothing.
+    seed({
+      'u:room:t1': [entry('   \n '), entry('real text', { cid: 2 })],
+    });
+    expect(readQueue('u:room:t1').map((e) => e.text)).toEqual(['real text']);
+  });
+
+  it('keeps an attachment-only entry, which has no text by design', () => {
+    // The endpoint accepts a send carrying only files and describes it in the
+    // prompt, so an empty `text` is an ordinary queued message here.
+    seed({ 'u:room:t1': [entry('', { attachments: [attachment()] })] });
+    expect(readQueue('u:room:t1')).toHaveLength(1);
+  });
+
+  it('recovers the citation when only the quote survived', () => {
+    // The two fields are one fact. Split, the POST goes out without the parent
+    // the message was written against.
+    seed({
+      'u:room:t1': [entry('as I said', { replyTo: { msgId: 7, role: 'assistant' } })],
+    });
+    expect(readQueue('u:room:t1')[0].replyToMsgId).toBe(7);
+  });
+
+  it('keeps the citation the POST carries when only the id survived', () => {
+    // The other direction: no optimistic quote to render, but the reply still
+    // goes out as a reply.
+    seed({ 'u:room:t1': [entry('as I said', { replyTo: 'nonsense' as never, replyToMsgId: 7 })] });
+    const [back] = readQueue('u:room:t1');
+    expect(back.replyTo).toBeUndefined();
+    expect(back.replyToMsgId).toBe(7);
+  });
+
+  it('clamps a timestamp written in the future rather than letting it never expire', () => {
+    // `now - queuedAt` stays negative for a future stamp, so it outlives the
+    // TTL by construction and sorts its room ahead of every real message for
+    // as long as it is stored. A clock that was wrong at write time reaches
+    // this without anyone hand-editing anything.
+    seed({ 'u:room:t1': [entry('from tomorrow', { queuedAt: Date.now() + 5 * DAY })] });
+    expect(readQueue('u:room:t1')[0].queuedAt).toBe(Date.now());
+    // The clamp is durable: any later write re-stores what the read produced,
+    // so the entry ages from the moment it was first read back.
+    writeQueue('u:room:t2', [entry('somewhere else')]);
+    expect(stored()['u:room:t1'][0].queuedAt).toBe(Date.now());
+    vi.setSystemTime(Date.now() + QUEUE_TTL_MS + 1);
+    expect(readQueue('u:room:t1')).toEqual([]);
+  });
+
+  it('discards a timestamp outside the range a Date can hold', () => {
+    // `new Date(1e20).toISOString()` throws RangeError, and the chat store
+    // builds the restored row's timestamp that way — inside the transcript
+    // rebuild, so one hand-edited number would cost the whole room's history
+    // load rather than its own entry.
+    seed({ 'u:room:t1': [entry('too far ahead', { queuedAt: 1e20 })] });
+    expect(readQueue('u:room:t1')).toEqual([]);
+  });
+
   it('reads a missing hold flag as unheld rather than as a hold', () => {
     seed({ 'u:room:t1': [{ cid: 1, text: 'x', attachments: [], queuedAt: Date.now() }] });
     expect(readQueue('u:room:t1')[0].held).toBe(false);

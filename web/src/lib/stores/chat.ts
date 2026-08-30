@@ -46,7 +46,12 @@ import {
   type SendResult,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
-import { readAllQueues, writeQueue } from '$lib/stores/sendQueue';
+import {
+  dropQueue as dropStoredQueue,
+  readAllQueues,
+  writeQueue,
+  MAX_QUEUED_PER_ROOM,
+} from '$lib/stores/sendQueue';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
@@ -635,6 +640,14 @@ function createSession(): ChatSession {
    * on every remount of the page while the session outlives it, and storage is
    * this map's mirror — so re-reading it over a live queue would duplicate
    * every entry.
+   *
+   * This is the one mutation of `sendQueue` that does *not* write back, and
+   * the exception is deliberate: it would rewrite the whole map on every page
+   * load, for rooms nobody has touched, which is the pointless write
+   * `drafts.ts` goes out of its way to avoid. Nothing depends on it, because
+   * every restore re-mints the cid and re-holds whatever it reads — so the two
+   * copies can disagree about those two fields and still produce the same
+   * result next time.
    */
   function restoreQueues() {
     if (!queueUserId) return;
@@ -2183,7 +2196,13 @@ function createSession(): ChatSession {
       // `getMe()`: that resolves after this, so a queue keyed on it would have
       // an ordering hazard exactly where the restore below happens. An older
       // backend sends no `user_id`, and the queue is then in memory only.
-      queueUserId = cfg?.user_id ?? null;
+      //
+      // Guarded on the config having resolved at all, not merged with the
+      // line above: the session outlives the page, so a transient failure on a
+      // remount would otherwise clear an id this session already knew — and
+      // persistence would go quietly off, leaving a drained message stored and
+      // restored later as a bubble for something already sent.
+      if (cfg) queueUserId = cfg.user_id ?? null;
       // Normalized rather than adopted: the column takes any string a hand
       // edit puts in it, and an unrecognized value must read as the default
       // instead of leaving the transcript with no branch to take.
@@ -2351,14 +2370,30 @@ function createSession(): ChatSession {
     if (!token) return;
     strandedSends.delete(token);
     sendQueue.delete(token);
-    // The stored copy goes with it, or a room that comes back — unarchived, or
-    // re-added by another device — inherits a queue written against a
-    // conversation the user has since left. The page drops the same key again
-    // after a delete resolves, which is not redundant: a room already gone from
-    // `$rooms` by then leaves this function nothing to look up, and the page
-    // captured the token before the delete.
-    persistRoomQueue(token);
+    // The *stored* copy deliberately stays. Two of this function's three
+    // callers are recoverable — an archive is undone by unarchiving, and a
+    // `remove` frame can be another device's edit — and dropping the key here
+    // would make either of them destroy text the user committed to sending,
+    // silently and for good. Nothing can fire it in the meantime: a room
+    // missing from `$rooms` is not restored at all, and a restore always
+    // re-holds. `deleteRoom` drops the key on its own, because that one is not
+    // recoverable; the TTL collects whatever else is left.
     messages.update((arr) => arr.filter((m) => !(isClientOnly(m) && m.roomToken === token)));
+  }
+
+  /**
+   * Drop a room's *stored* queue, for a room that is not coming back.
+   *
+   * Separate from `persistRoomQueue` because the intent differs: this is the
+   * room being destroyed, not its queue changing. Called from `deleteRoom`,
+   * and again by the page after the same delete resolves — which is not
+   * redundant, since a room already gone from `$rooms` leaves the store
+   * nothing to look up while the page captured the token beforehand.
+   */
+  function dropRoomQueue(token: string | null | undefined) {
+    if (!token) return;
+    const key = queueKeyFor(token);
+    if (key) dropStoredQueue(key);
   }
 
   async function archiveRoom(id: number) {
@@ -2388,7 +2423,13 @@ function createSession(): ChatSession {
     }
     // On success (or a 404 already-gone) drop it from the list, mirroring
     // archiveRoom's fall-through when the active room disappears.
+    // Read before `forgetRoom`, which is the last point at which the room is
+    // still in `$rooms` to be looked up by id.
+    const goneToken = roomTokenOf(id);
     forgetRoom(id);
+    // A deleted room cannot come back, so its queue is the one case where the
+    // stored copy goes too. Archive and a `remove` frame deliberately keep it.
+    dropRoomQueue(goneToken);
     rooms.update((r) => r.filter((x) => x.id !== id));
     if (get(activeRoomId) === id) {
       const remaining = get(rooms);
@@ -2591,6 +2632,18 @@ function createSession(): ChatSession {
     // swallowed. A row on screen with no entry behind it would be worse.
     if (!roomToken) {
       notifyError('Couldn’t queue that message — the room is no longer available.');
+      return;
+    }
+    // The per-room cap is enforced here, not only where the queue is stored.
+    // `writeQueue` trims a room to its first `MAX_QUEUED_PER_ROOM` entries —
+    // the FIFO head, since that is what drains next — so an eleventh message
+    // accepted into memory would sit on screen looking queued while the copy
+    // that survives a reload was the one silently dropped. Refusing keeps the
+    // two in step. The composer gains its own refusal on top, which is the
+    // better one because it keeps the text in the field rather than in a
+    // notice; this is the backstop under it.
+    if ((sendQueue.get(roomToken)?.length ?? 0) >= MAX_QUEUED_PER_ROOM) {
+      notifyError('Too many messages waiting to send in this room.');
       return;
     }
     const cid = nextCid();

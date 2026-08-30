@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import type { ChatRoom, ChatAttachment } from '$lib/api';
 import type { ChatMessage } from './segments';
+import { MAX_QUEUED_PER_ROOM, SEND_QUEUE_STORAGE_KEY } from './sendQueue';
 
 const api = vi.hoisted(() => ({
   getChatConfig: vi.fn(),
@@ -148,7 +149,10 @@ async function streaming(taskId = 42) {
 
 const queuedRows = (msgs: ChatMessage[]) => msgs.filter((m) => m.sendState === 'queued');
 
-const QUEUE_KEY = 'chat.sendQueue';
+// Imported rather than restated: the "nothing was written" assertion below is
+// vacuous against a key nothing writes, so a literal that drifted from the
+// module's own constant would pass whatever the code did.
+const QUEUE_KEY = SEND_QUEUE_STORAGE_KEY;
 
 /** One entry as a previous session would have left it in storage. */
 function storedEntry(text: string, over: Record<string, unknown> = {}) {
@@ -224,6 +228,24 @@ describe('chat store — the send queue', () => {
 
       expect(api.sendChatMessage).not.toHaveBeenCalled();
       expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual(['first', 'second']);
+    });
+
+    it('refuses a message past the per-room cap rather than dropping it later', async () => {
+      // `writeQueue` trims a room to its FIFO head, so an eleventh message
+      // accepted into memory would sit on screen looking queued while the copy
+      // that survives a reload was the one silently dropped.
+      const s = await streaming();
+      for (let i = 0; i < MAX_QUEUED_PER_ROOM; i++) await s.send(`message ${i}`);
+      expect(queuedRows(get(s.messages))).toHaveLength(MAX_QUEUED_PER_ROOM);
+
+      await s.send('one too many');
+
+      expect(queuedRows(get(s.messages))).toHaveLength(MAX_QUEUED_PER_ROOM);
+      expect(queuedRows(get(s.messages)).some((m) => m.text === 'one too many')).toBe(false);
+      expect(notices.notifyError).toHaveBeenCalled();
+      // Memory and storage agree, which is the point of refusing at all.
+      expect(storedQueue('t1')).toHaveLength(MAX_QUEUED_PER_ROOM);
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
     });
 
     it('carries the attachments and the optimistic quote onto the queued row', async () => {
@@ -922,6 +944,22 @@ describe('chat store — the send queue', () => {
       expect(storedQueue('t1')).toEqual([]);
     });
 
+    it('keeps the stored copy when the room is only archived', async () => {
+      // Archive is recoverable and a `remove` frame can be another device's
+      // edit, so neither may destroy text the user committed to sending. The
+      // in-memory queue still goes — nothing can fire it in the meantime, and
+      // a restore always re-holds.
+      const s = await streaming();
+      await s.send('and another thing');
+      api.updateChatRoom.mockResolvedValue({ ...room(1), archived: true });
+
+      await s.archiveRoom(1);
+      await flush();
+
+      expect(storedQueue('t1')).toHaveLength(1);
+      expect(storedQueue('t1')[0].text).toBe('and another thing');
+    });
+
     it('drops the stored copy when a queued message is removed', async () => {
       const s = await streaming();
       await s.send('and another thing');
@@ -1022,7 +1060,14 @@ describe('chat store — the send queue', () => {
       // A shared Talk room has one token across every member, which is why the
       // key carries the user: without it one person's unsent message would be
       // restored into the other's transcript.
-      seedQueues({ t1: [storedEntry('typed by somebody else')] }, 'bob');
+      //
+      // `bobby` rather than `bob` so the test can actually fail. The restore
+      // takes the token by cutting this user's own prefix off the key, and
+      // `'bobby:room:t1'` is exactly as long as `'alice:room:'` plus a token —
+      // so with the prefix check dropped the cut lands on `t1`, a room this
+      // user really is in, and the message is restored. A shorter name cuts to
+      // rubbish and is refused by the room check for the wrong reason.
+      seedQueues({ t1: [storedEntry('typed by somebody else')] }, 'bobby');
       const s = await freshSession();
 
       await s.init();
