@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from . import avatars
+
 logger = logging.getLogger(__name__)
 
 # How an external-origin turn's body renders in web chat. Lives here rather than
@@ -518,8 +520,20 @@ def update_profile(
 
 
 def delete_profile(db_path: Path, user_id: str) -> bool:
-    """Remove a profile row. Returns True if a row was removed."""
+    """Remove a profile row and the user's avatars. True if a profile row went.
+
+    The avatar delete rides this function's own connection, inside the same
+    transaction. A *second* connection opened here would wait out the 30s busy
+    timeout on the write lock this one is already holding and then raise — the
+    hazard AGENTS.md documents for `notification_store` — which is why
+    `avatars.delete_all_user_avatars` takes a connection rather than a path.
+
+    The avatar rows go whether or not a profile row existed: they are keyed on
+    the user id, not on the profile, so a user removed twice still leaves none
+    behind. The return value stays a statement about the profile row.
+    """
     with _connect(db_path) as conn:
+        avatars.delete_all_user_avatars(conn, user_id)
         cur = conn.execute(
             "DELETE FROM user_profiles WHERE user_id = ?", (user_id,),
         )

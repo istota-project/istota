@@ -939,6 +939,37 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Profile pictures. Created here for existing DBs; schema.sql also has both
+    # (with the full commentary) for fresh installs. Deliberately outside the
+    # try/except above: that block swallows OperationalError, and a swallowed
+    # failure here is a daemon that 500s on /me rather than one that says so.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_avatars (
+            user_id      TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            mime         TEXT NOT NULL DEFAULT 'image/webp',
+            content_hash TEXT NOT NULL DEFAULT '',
+            image        BLOB,
+            remote_etag  TEXT NOT NULL DEFAULT '',
+            checked_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, source)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_avatar (
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            mime         TEXT NOT NULL DEFAULT 'image/webp',
+            content_hash TEXT NOT NULL,
+            image        BLOB NOT NULL,
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
     _migrate_processed_emails_uidvalidity(conn)
     _migrate_unified_rooms(conn)
     _migrate_scheduled_transcript_cleanup(conn)
