@@ -4038,6 +4038,24 @@ def _db_rule(*, is_admin: bool, db_masked: bool) -> str:
     )
 
 
+def _one_line(value: str) -> str:
+    """No interpolated value may contain a line break.
+
+    The whole block's structure is carried by line prefixes — the joiner puts
+    one rule per line and the label at the front of it — so a value carrying
+    `\n1. ` forges a rule in the model-facing prompt. Rules 1 and 2 interpolate
+    a user id, a filesystem path and stored email addresses, none of which is
+    validated for this anywhere upstream. The exposure predates the merge (the
+    two f-strings had it identically); it is closed here because this is now the
+    one place that knows the structure depends on it.
+
+    Collapsed to a space rather than refused: this runs on the prompt-assembly
+    path, where raising means no task at all, and a mangled user id in a rule is
+    a far better failure than a forged rule or a dead deployment.
+    """
+    return value.replace("\r", " ").replace("\n", " ")
+
+
 def build_rules_section(
     *,
     is_admin: bool,
@@ -4052,7 +4070,13 @@ def build_rules_section(
     blocks used to disagree about what the rule even means: an admin is told
     whose resources are theirs, a standard user is told which directory is.
     """
-    addresses = ", ".join(user_email_addresses) if user_email_addresses else "none configured"
+    user_id = _one_line(user_id)
+    scoped_path = _one_line(scoped_path)
+    addresses = (
+        ", ".join(_one_line(a) for a in user_email_addresses)
+        if user_email_addresses
+        else "none configured"
+    )
 
     rules: list[tuple[str, str]] = [
         (
