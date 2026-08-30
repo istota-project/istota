@@ -149,6 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A scheduled job whose script has broken now says so, instead of quietly producing the usual result anyway.** The bot was told both to be resourceful and to surface what failed, and the first was winning: when a step died it rebuilt that step's work by hand and delivered the expected artifact, so a job broken for a week arrived looking healthy every morning. Reporting the failure in what you actually read is now a flat rule, and on unattended work standing in for a broken script by hand is out — where you asked for the result in the moment the bot may still fill the gap, but it has to say what broke and what it substituted.
+
 - **Your own additions to a skill's instructions are now edited as files, not through a command.** Those files are yours to write, and one of them is a twelve-step coding workflow with paragraphs and code blocks in it — which the old commands could not write at all, since they only added, removed or reworded a single bullet. Ask the bot to change one, or open it in Nextcloud.
 
 - Two read-only commands remain and have moved: `istota-skill skills overlay <name>` prints one, and `istota-skill skills overlays` lists what you have customized and whether each file actually loads. Run the second after an edit — a file that does not load is otherwise completely silent, and it says which of the four reasons applies.

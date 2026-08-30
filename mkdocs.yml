@@ -108,6 +108,7 @@ nav:
     - development/testing.md
     - development/adding-skills.md
     - development/secret-scanning.md
+    - development/development-rules-user.md
   - Reference:
     - reference/cli.md
     - reference/commands.md

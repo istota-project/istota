@@ -108,7 +108,7 @@ def test_site_links(name, url, article_filter, min_articles=5, origin=None,
         return
 
     links = r.get("links", [])
-    articles = [l for l in links if article_filter(l)]
+    articles = [link for link in links if article_filter(link)]
     check(f"{name} has >={min_articles} articles", len(articles) >= min_articles, f"got {len(articles)}")
 
     if articles:
@@ -174,22 +174,22 @@ def main():
     # Sites with articles in links array
     test_site_links(
         "AP News", "https://apnews.com/hub/world-news",
-        lambda l: "/article/" in l.get("href", "") and len(l.get("text", "").strip()) > 15,
+        lambda link: "/article/" in link.get("href", "") and len(link.get("text", "").strip()) > 15,
         origin="https://apnews.com",
     )
     test_site_links(
         "BBC", "https://www.bbc.com/news/world",
-        lambda l: "/news/articles/" in l.get("href", "") and len(l.get("text", "").strip()) > 15,
+        lambda link: "/news/articles/" in link.get("href", "") and len(link.get("text", "").strip()) > 15,
         origin="https://www.bbc.com",
     )
     test_site_links(
         "Al Jazeera", "https://www.aljazeera.com/news",
-        lambda l: "/news/" in l.get("href", "") and "/202" in l.get("href", "") and len(l.get("text", "").strip()) > 15,
+        lambda link: "/news/" in link.get("href", "") and "/202" in link.get("href", "") and len(link.get("text", "").strip()) > 15,
         origin="https://www.aljazeera.com",
     )
     test_site_links(
         "NYTimes", "https://www.nytimes.com/section/world",
-        lambda l: "/202" in l.get("href", "") and len(l.get("text", "").strip()) > 15,
+        lambda link: "/202" in link.get("href", "") and len(link.get("text", "").strip()) > 15,
         origin="https://www.nytimes.com",
         min_articles=5,
         check_content=False,  # Paywalled — article text is minimal

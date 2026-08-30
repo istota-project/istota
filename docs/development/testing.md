@@ -43,7 +43,7 @@ scripts/qt --full              # the whole suite, refreshing testmon's data
 scripts/qt tests/test_db.py    # scoped, still incrementally
 ```
 
-The full suite is ~16,700 tests in ~110s, and it is **throughput-bound across every core** — roughly 740s of CPU over 110s of wall, with no long pole (the slowest single test is 5s). Measured consequences: xdist's `worksteal`, `loadfile` and `loadscope` are all *slower* than the default `load`; gating the twenty slowest infrastructure files removes 1,179 tests and 4% of the wall time; and making individual tests cheaper backfires if it trades CPU for I/O. There is no version of "make the suite faster" that pays. The only lever is running fewer tests.
+The full suite is ~17,350 tests in ~125s (2026-08-30; it was ~16,700 in ~110s when the profiling below was done, so read these as the shape rather than as thresholds), and it is **throughput-bound across every core** — roughly 740s of CPU over 110s of wall at that measurement, with no long pole (the slowest single test is 5s). Measured consequences: xdist's `worksteal`, `loadfile` and `loadscope` are all *slower* than the default `load`; gating the twenty slowest infrastructure files removes 1,179 tests and 4% of the wall time; and making individual tests cheaper backfires if it trades CPU for I/O. There is no version of "make the suite faster" that pays. The only lever is running fewer tests.
 
 `scripts/qt` is that lever. pytest-testmon records which tests executed which source lines, so an ordinary Python change reruns a handful of tests in under a second, and a change that affects nothing exits immediately.
 
@@ -321,13 +321,15 @@ Every session prints two diagnostic lines of its own: how many `docker compose e
 
 ### Prompt goldens
 
-`tests/test_prompt_golden.py` runs in the default suite against no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple, behind a `[DRY RUN] Would execute with prompt:` line the test strips — emissaries, persona, channel guidelines, the storage vocabulary, eager skill bodies, the on-demand menu, conversation context, memory, the rules block — and twelve cases snapshot it into `tests/golden/prompts/`. The point is the failure substring assertions decay away from: a layer that silently stops being included.
+`tests/test_prompt_golden.py` runs in the default suite against no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple, behind a `[DRY RUN] Would execute with prompt:` line the test strips — emissaries, persona, channel guidelines, the storage vocabulary, eager skill bodies, the on-demand menu, conversation context, memory, the rules block — and thirteen cases snapshot it into `tests/golden/prompts/`. The point is the failure substring assertions decay away from: a layer that silently stops being included.
 
 A diff is a failure. An intentional change is a reviewed golden update:
 
 ```bash
-ISTOTA_UPDATE_GOLDEN=1 uv run pytest tests/test_prompt_golden.py -n0
+uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0
 ```
+
+`env` goes *inside* the `uv run` rather than in front of it as a shell assignment, and on a deployment with a devbox that is the difference between rewriting and not. `uv` is in `DEFAULT_SHIM_COMMANDS`, so there it is a shim handing the argv to the exec server in the container, and `devbox_exec_protocol` carries no `env` field — deliberately, and pinned by a test — so nothing set in the calling shell arrives. The run compares instead of rewriting, and every golden the change touched comes back red with nothing to say the switch was never seen. In the argv the assignment survives, and on a host with no devbox the two forms are the same command. `tests/support/env_isolation.py` ate this same variable in-process until it was named in the keep-list, with the same symptom.
 
 Commit the resulting diff and review it like any other change. `-n0` is not optional: the orphan check has no ordering relationship with the writers under xdist, so a regeneration that adds or renames a case reports missing goldens from the run that was supposed to create them. The variable is parsed by an `updating()` helper that takes the same affirmative and negative words as `PRECOMMIT_SCANS_REQUIRED` and raises on anything else, so a stale `ISTOTA_UPDATE_GOLDEN=0` in a shell cannot quietly turn every golden into a rubber stamp.
 
@@ -408,5 +410,5 @@ For new features:
 3. Run tests to confirm they fail
 4. Implement the feature
 5. Run tests and iterate until all pass
-6. Run `ruff check --output-format concise src tests testbed docker/devbox`, plus the `web/` checks above if the change touched the frontend
+6. Run `ruff check --output-format concise src tests testbed docker/devbox scripts`, plus the `web/` checks above if the change touched the frontend
 7. Commit
