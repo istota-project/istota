@@ -214,6 +214,22 @@ describe('user row queued state', () => {
     expect(text).not.toContain('connection');
   });
 
+  it('renders a chip for a file it is still holding, with nothing to download', () => {
+    // A voice note queued offline (ISSUE-202). Its bytes are in this browser,
+    // so there is no host path and no `/chat/files` URL that could serve it —
+    // and the chip is exactly the inert label a co-member's upload already
+    // gets. The muting is `.msg.queued`'s, which covers the whole body.
+    const { container } = mountQueued(
+      { attachments: ['memo.m4a'], attachmentPaths: [null] },
+      handlers,
+    );
+    const chip = container.querySelector('.attachments .attachment');
+    expect(chip?.textContent).toContain('memo.m4a');
+    expect(chip?.tagName).toBe('SPAN');
+    expect(container.querySelector('.attachments a')).toBeNull();
+    expect(container.querySelector('.msg.queued .attachments')).not.toBeNull();
+  });
+
   it('says it is held and offers Send once the turn ended abnormally', () => {
     const { container } = mountQueued({ queueHeld: true }, handlers);
     expect(container.querySelector('.send-queued')?.textContent).toContain('Held — not sent');

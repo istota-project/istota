@@ -45,6 +45,8 @@ import {
   type ExternalTurnDisplay,
   type SendResult,
   type SendFailure,
+  uploadChatAttachment,
+  UploadUnreachableError,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import {
@@ -53,13 +55,16 @@ import {
   writeQueue,
   MAX_QUEUED_PER_ROOM,
   OFFLINE_AUTO_SEND_MAX_AGE_MS,
+  type PendingAttachment,
   type QueueReason,
   type StoredQueuedSend,
 } from '$lib/stores/sendQueue';
 import { online, noteTransport } from '$lib/stores/connectivity';
 import {
   appendTranscriptRows,
+  deleteBlob,
   deleteTranscript,
+  getBlob,
   pruneOffline,
   readConfig,
   readRooms,
@@ -670,6 +675,11 @@ function createSession(): ChatSession {
     cid: number;
     text: string;
     attachments: ChatAttachment[];
+    // The unresolved half of `attachments`, in upload order: one record per
+    // chip whose `path` is null, naming the blob holding its bytes. The drain
+    // resolves them a pair at a time, so a half-resolved entry is an ordinary
+    // state — see `resolvePendingAttachments`.
+    pendingAttachments?: PendingAttachment[];
     // For the optimistic quote on the bubble.
     replyTo?: MessageReply;
     // What the POST carries.
@@ -863,6 +873,35 @@ function createSession(): ChatSession {
     // `restoreQueues` is one of the two mutations that deliberately do not
     // write back, so the sync `persistRoomQueue` would have done is here.
     syncQueuedCounts();
+  }
+
+  /**
+   * Every blob some queue entry still names, anywhere on this profile.
+   *
+   * Read from **storage** as well as from memory, and both halves are needed.
+   * Memory holds entries queued this session, including a session with no user
+   * id where nothing is written at all. Storage holds what `restoreQueues`
+   * deliberately did not restore — another user's queue on a shared profile,
+   * and a key naming a room this user no longer has, both of which it leaves
+   * alone rather than dropping. Collecting from memory alone would delete the
+   * bytes out from under either.
+   *
+   * A file staged in the composer and not yet sent is named by nothing here,
+   * which is what `BLOB_GC_MIN_AGE_MS` is for.
+   */
+  function referencedBlobIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const entries of sendQueue.values()) {
+      for (const entry of entries) {
+        for (const p of entry.pendingAttachments ?? []) ids.add(p.blobId);
+      }
+    }
+    for (const entries of Object.values(readAllQueues())) {
+      for (const entry of entries) {
+        for (const p of entry.pendingAttachments ?? []) ids.add(p.blobId);
+      }
+    }
+    return ids;
   }
 
   // ---- The offline read cache (ISSUE-202) ------------------------------
@@ -2929,7 +2968,11 @@ function createSession(): ChatSession {
       // it. An expired entry costs storage and not correctness — every read
       // refuses one anyway — so this is work nobody is waiting on, and it
       // holds `readwrite` on the store the cached paint is about to read.
-      void pruneOffline();
+      //
+      // After `restoreQueues`, because the blob half of the collection is
+      // "unreferenced by any live queue entry" and the queue is what says which
+      // those are.
+      void pruneOffline(Date.now(), referencedBlobIds());
       startRoomStream();
       // A load that finished offline returned before the drain trigger at its
       // own foot, and a connection that came back while `init` was running
@@ -3252,6 +3295,25 @@ function createSession(): ChatSession {
       return;
     }
 
+    // Online, but carrying bytes that are still in this browser — a voice note
+    // recorded in a lift, with the signal back by the time Send was tapped. The
+    // two-step resolution that turns those into host paths lives in the drain
+    // and nowhere else, so the message goes through the queue and is drained
+    // immediately rather than taking the direct path and POSTing a file
+    // reference the server cannot resolve.
+    if (attachments.some((a) => !!a.pendingBlobId)) {
+      // 'offline' even though the connection is back: the bytes were held
+      // because there was none, and if this drain does not land the entry
+      // should still go out by itself later. A busy room is the exception —
+      // there the wait is the turn, which is what `busy` means.
+      const idle = get(status) === 'idle';
+      enqueueSend(roomId, trimmed, attachments, replyTo, idle ? 'offline' : 'busy');
+      // `canDrain` is the gate here as everywhere else, so a busy room queues
+      // and waits for the running turn to settle.
+      await drainSendQueue(roomId);
+      return;
+    }
+
     // A turn is already running. The one message that may still go out is a
     // `!command`: the endpoint answers it inside the request and returns no
     // task id, so it does not need the turn machinery below — and must not take
@@ -3350,6 +3412,29 @@ function createSession(): ChatSession {
    * was no connection (ISSUE-202). Both wait for the same drain; they part
    * company on a restore, where only the second may send itself.
    */
+  /**
+   * The blob references behind a staged list's unresolved chips, in order.
+   *
+   * The two live side by side on a queue entry and name each other: a chip with
+   * no `path` carries the `pendingBlobId` of exactly one of these, and the
+   * drain resolves them a pair at a time. Derived here rather than passed in,
+   * so the composer hands `send()` one list and the split happens in the one
+   * place that knows what a queue entry looks like.
+   */
+  function pendingOf(attachments: ChatAttachment[]): PendingAttachment[] {
+    const out: PendingAttachment[] = [];
+    for (const a of attachments) {
+      if (!a.pendingBlobId) continue;
+      out.push({
+        blobId: a.pendingBlobId,
+        name: a.name,
+        mimeType: a.mimeType ?? '',
+        size: a.size,
+      });
+    }
+    return out;
+  }
+
   function enqueueSend(
     roomId: number,
     trimmed: string,
@@ -3402,6 +3487,7 @@ function createSession(): ChatSession {
       cid,
       text: trimmed,
       attachments,
+      ...(pendingOf(attachments).length ? { pendingAttachments: pendingOf(attachments) } : {}),
       replyTo,
       replyToMsgId: replyTo?.msgId,
       idempotencyKey: newIdempotencyKey(),
@@ -3457,14 +3543,194 @@ function createSession(): ChatSession {
       m.queueHeld = undefined;
       m.sendPayload = payload;
     });
+    const resolved = await resolvePendingAttachments(roomId, cid, payload);
+    // The resolution reported the outcome itself — parked, failed, or the
+    // entry left under it — so there is nothing left for this send to do.
+    if (!resolved) return;
+    if (resolved !== payload) {
+      // A retry after this point has to POST the paths, not the chips that no
+      // longer name anything.
+      updateMsg(cid, (m) => {
+        m.sendPayload = resolved;
+      });
+    }
     await runTurn(
       roomId,
       cid,
-      payload.text,
-      payload.attachments,
-      payload.idempotencyKey,
-      payload.replyToMsgId,
+      resolved.text,
+      resolved.attachments,
+      resolved.idempotencyKey,
+      resolved.replyToMsgId,
     );
+  }
+
+  /**
+   * The cid a placeholder would have had, for a send that never opened a turn.
+   *
+   * `parkSend` and `failSend` both take the assistant placeholder's cid so they
+   * can remove it; a resolution that fails before `runTurn` has minted one has
+   * none to remove, and no row can hold this value.
+   */
+  const NO_PLACEHOLDER = -1;
+
+  /**
+   * Turn an entry's held bytes into host paths, one file at a time.
+   *
+   * The first step of a two-step send (ISSUE-202). An attachment written with
+   * no connection has no path, because the path is what the upload returns —
+   * so the queue entry carries the bytes and this is where they become a file
+   * the message can reference.
+   *
+   * **The entry is persisted after each upload lands**, before the next one
+   * starts and before the blob is deleted. A drain interrupted between two
+   * files — a force-quit, a signal lost again — resumes at the file that has
+   * not been uploaded rather than re-uploading one the server already has.
+   * That is the whole reason the resolved chip and its pending record are two
+   * fields kept in step rather than one list rewritten at the end.
+   *
+   * Returns the payload to POST, or null when it has already reported the
+   * outcome. The failures split exactly as a send's do: a gap leaves the entry
+   * and its bytes where they are, and a refusal — a 413, an extension the
+   * server does not take, a `max_attachment_mb` lowered since — fails the whole
+   * row and drops its bytes, because a retry cannot fix a file the server will
+   * not accept and holding it forever is the wrong answer.
+   */
+  async function resolvePendingAttachments(
+    roomId: number,
+    cid: number,
+    payload: SendPayload,
+  ): Promise<SendPayload | null> {
+    const start = findQueued(cid);
+    if (!start?.entries[start.idx].pendingAttachments?.length) {
+      // A payload carrying chips with no entry to resolve them from cannot be
+      // sent: `sendTurn` would drop them and the message would go without the
+      // file it was written about. Only reachable for a row whose entry was
+      // taken while its retry was in flight.
+      if (payload.attachments.some((a) => !a.path)) {
+        failSend(cid, NO_PLACEHOLDER, MISSING_BYTES_REASON, false, roomId);
+        return null;
+      }
+      return payload;
+    }
+    // Claim the room for the length of the uploads, as `runTurn` does for the
+    // POST. Without it the composer reads the room as idle for however long a
+    // voice note takes to go up, and a message typed in that window would start
+    // a second turn in a room that already has one — the invariant `runTurn`
+    // rests on. Stop stays live: `cancel` latches the intent while the status
+    // is 'sending', and the loop honours it below.
+    const owned = get(activeRoomId) === roomId;
+    if (owned) status.set('sending');
+    for (;;) {
+      const found = findQueued(cid);
+      if (!found) {
+        // Removed or edited while a file was uploading. The row went with the
+        // entry, so there is nothing to report and nothing to send.
+        if (owned && get(activeRoomId) === roomId) status.set('idle');
+        return null;
+      }
+      const entry = found.entries[found.idx];
+      const item = entry.pendingAttachments?.[0];
+      if (!item) break;
+      if (cancelRequested) {
+        // Stop, tapped while the file was going up. The message has not been
+        // sent, so it goes back to waiting — held, like every other queue the
+        // user has abandoned work in front of.
+        requeueRow(cid);
+        holdRoomQueue(found.token);
+        if (owned && get(activeRoomId) === roomId) status.set('idle');
+        return null;
+      }
+      const record = await getBlob(item.blobId);
+      if (!record) {
+        // The bytes are gone — evicted with the origin's storage, or collected
+        // after the entry that named them was somehow lost. Sending the message
+        // without them would be a different message.
+        dropHeldBytes(entry);
+        failSend(cid, NO_PLACEHOLDER, MISSING_BYTES_REASON, false, roomId);
+        return null;
+      }
+      try {
+        const att = await uploadChatAttachment(
+          new File([record.bytes], item.name, { type: record.mimeType }),
+        );
+        // Re-found rather than reused: the awaits above are exactly where the
+        // entry can have been taken out from under this.
+        const after = findQueued(cid);
+        if (!after) {
+          void deleteBlob(item.blobId);
+          if (owned && get(activeRoomId) === roomId) status.set('idle');
+          return null;
+        }
+        const live = after.entries[after.idx];
+        live.attachments = live.attachments.map((a) => (a.pendingBlobId === item.blobId ? att : a));
+        const rest = (live.pendingAttachments ?? []).filter((p) => p.blobId !== item.blobId);
+        if (rest.length) live.pendingAttachments = rest;
+        else delete live.pendingAttachments;
+        // Before the blob is deleted, so the two can never both be gone.
+        persistRoomQueue(after.token);
+        await deleteBlob(item.blobId);
+        // The chip is a working link the moment its file exists, as it is for
+        // a file uploaded from the composer.
+        updateMsg(cid, (m) => {
+          m.attachmentPaths = live.attachments.map((x) => x.workspace_path ?? null);
+        });
+      } catch (e) {
+        if (e instanceof UploadUnreachableError) {
+          // Nothing was decided about this message. It goes back to waiting
+          // with its bytes intact, and the next drain resumes where this one
+          // stopped.
+          if (!parkSend(cid, NO_PLACEHOLDER, roomId, true, { reachedWire: false })) {
+            failSend(
+              cid,
+              NO_PLACEHOLDER,
+              'Couldn’t send — the server is unreachable.',
+              true,
+              roomId,
+            );
+          }
+          return null;
+        }
+        dropHeldBytes(findQueued(cid)?.entries[findQueued(cid)!.idx] ?? entry);
+        failSend(cid, NO_PLACEHOLDER, uploadRefusalReason(e), false, roomId);
+        return null;
+      }
+    }
+    const done = findQueued(cid);
+    return {
+      ...payload,
+      attachments: done ? done.entries[done.idx].attachments : payload.attachments,
+    };
+  }
+
+  /** The sentence for a message whose file cannot be found to send. */
+  const MISSING_BYTES_REASON = 'Couldn’t send — the attached file is no longer available.';
+
+  /** The sentence for a file the server itself turned away. */
+  function uploadRefusalReason(e: unknown): string {
+    // `AuthError` is not exported from `api.ts`, so it is recognised by the
+    // name it sets on itself — the same fact, without widening that module's
+    // surface for one comparison.
+    if (e instanceof Error && e.name === 'AuthError') {
+      return 'Your session expired. Reload to sign in again.';
+    }
+    const message = e instanceof Error ? e.message : '';
+    return message ? `Couldn’t send — ${message}.` : 'Couldn’t send — the file was refused.';
+  }
+
+  /** Drop every blob an entry still holds. Its message is not going out. */
+  function dropHeldBytes(entry: QueuedSend | undefined): void {
+    for (const p of entry?.pendingAttachments ?? []) void deleteBlob(p.blobId);
+  }
+
+  /** Put a row that was mid-send back to the queued state its entry is in. */
+  function requeueRow(cid: number): void {
+    updateMsg(cid, (m) => {
+      m.sendState = 'queued';
+      m.sendError = undefined;
+      m.retryable = undefined;
+      m.showSending = undefined;
+      m.sendPayload = undefined;
+    });
   }
 
   /**
@@ -3533,10 +3799,15 @@ function createSession(): ChatSession {
    * Take a queued message back out of the queue.
    *
    * Its uploaded attachments are left orphaned server-side — the same
-   * already-tolerated outcome as closing the tab mid-compose.
+   * already-tolerated outcome as closing the tab mid-compose. Bytes it was
+   * still *holding* are a different case and are deleted: they are ours, they
+   * are on this device, and nothing else names them once the entry is gone.
+   * `editQueued` deliberately does not do this — there the chip goes back to
+   * the composer and its bytes are the only copy left.
    */
   function removeQueued(cid: number) {
-    takeQueued(cid);
+    const taken = takeQueued(cid);
+    dropHeldBytes(taken?.entry);
   }
 
   /**
@@ -3723,6 +3994,13 @@ function createSession(): ChatSession {
     phCid: number,
     roomId: number,
     settleStatus: boolean,
+    {
+      // False when the *message* POST was never made — an attachment upload
+      // that found no server, ahead of it. No echo can be coming for a message
+      // the server was never asked to take, so the row must not join the set
+      // that a body match may adopt a server row into.
+      reachedWire = true,
+    }: { reachedWire?: boolean } = {},
   ): boolean {
     const token = roomTokenOf(roomId);
     if (!token) return false;
@@ -3773,7 +4051,7 @@ function createSession(): ChatSession {
     });
     persistRoomQueue(token);
     // This attempt reached the wire, so an echo for it may be on its way.
-    parkedAfterPost.add(userCid);
+    if (reachedWire) parkedAfterPost.add(userCid);
     if (settleStatus && get(activeRoomId) === roomId) status.set('idle');
     // The rest of the queue is deliberately *not* held. A hold says the turn
     // these messages were written against ended badly; nothing ended here, and
@@ -3974,15 +4252,21 @@ function createSession(): ChatSession {
     idempotencyKey?: string,
     replyToMsgId?: number,
   ) {
-    const res = await sendChatMessage(
-      roomId,
-      trimmed,
-      attachments.map((x) => x.path),
-      attachments.map((x) => x.name),
-      undefined,
-      idempotencyKey,
-      { replyToMsgId },
-    );
+    // Only the chips the server can resolve, and the two lists stay positional
+    // against each other. A chip with no path is one whose bytes are still in
+    // this browser — `beginSend` uploads those and replaces them before the
+    // POST, so reaching here with one means that step did not run, and sending
+    // a null path would ask the server to read a file that does not exist.
+    const paths: string[] = [];
+    const names: string[] = [];
+    for (const a of attachments) {
+      if (typeof a.path !== 'string') continue;
+      paths.push(a.path);
+      names.push(a.name);
+    }
+    const res = await sendChatMessage(roomId, trimmed, paths, names, undefined, idempotencyKey, {
+      replyToMsgId,
+    });
     if (!res.ok) {
       // The one failure whose recovery is not Retry: the server rejected the
       // *citation*, so re-POSTing the same dead parent id fails identically.
