@@ -16,6 +16,11 @@
  * is read exactly where the hazard it would otherwise create cannot arise, and
  * nowhere else.
  *
+ * The read is also *only* a read. Until the server confirms the id, the store
+ * writes nothing under it and drains nothing from it (`cacheUserId` and
+ * `canDrain` in `stores/chat.ts`) — a guess may decide what is painted, and
+ * may not decide what is stored or what is sent.
+ *
  * The net underneath it is in `stores/chat.ts`: when the real config arrives
  * and disagrees with the pointer, everything painted from the guessed
  * namespace is dropped and repainted from the right one. A wrong guess is a
@@ -26,7 +31,7 @@
  * the cold-launch paint rather than the load.
  */
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
-import { isNativeShell } from '$lib/platform/native';
+import { shellAtLeast } from '$lib/platform/native';
 
 export const LAST_USER_KEY = 'chat.lastUserId';
 
@@ -50,10 +55,14 @@ export function forgetLastUserId(): void {
  * The id to read the cache by before the server has said, or null.
  *
  * Null in a browser, always: off the shell there is no cold launch to rescue
- * and the namespace is guarding something real.
+ * and the namespace is guarding something real. Null in a shell older than the
+ * one that runs a service worker, too — without a worker there is no boot with
+ * no connection for the guess to be needed on, so the same gate the
+ * registration uses keeps the guess out of every session that cannot benefit
+ * from it.
  */
 export function seedUserId(): string | null {
-  if (!isNativeShell()) return null;
+  if (!shellAtLeast('0.10.0')) return null;
   const raw = loadSetting<unknown>(LAST_USER_KEY, null);
   return typeof raw === 'string' && raw ? raw : null;
 }

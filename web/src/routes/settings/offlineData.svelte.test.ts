@@ -44,7 +44,9 @@ const native = vi.hoisted(() => ({
 }));
 vi.mock('$lib/platform/native', () => native);
 
-const offline = vi.hoisted(() => ({ clearOfflineData: vi.fn(async () => ({})) }));
+const offline = vi.hoisted(() => ({
+  clearOfflineData: vi.fn(async () => ({ workers: 1, caches: 1, database: true })),
+}));
 vi.mock('$lib/offline/clear', () => offline);
 
 import Page from './+page.svelte';
@@ -85,5 +87,24 @@ describe('the "Clear offline data" row', () => {
     // The confirm gate is the whole point of the dialog: a mistap must not
     // take the app offline-unusable and reload the page under the user.
     expect(offline.clearOfflineData).not.toHaveBeenCalled();
+  });
+
+  it('says so, and does not reload, when the data is still there', async () => {
+    // The row exists to escape a state the user can see. Reloading over a
+    // clear that did nothing would present the failure as the fix, and take
+    // the report away with it.
+    offline.clearOfflineData.mockResolvedValueOnce({ workers: 0, caches: 0, database: false });
+    const reload = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, reload },
+      configurable: true,
+    });
+
+    render(Page);
+    (await screen.findByRole('button', { name: ROW })).click();
+    (await screen.findByRole('button', { name: 'Clear' })).click();
+
+    await waitFor(() => expect(screen.getByText(/Could not clear the offline data/)).toBeVisible());
+    expect(reload).not.toHaveBeenCalled();
   });
 });

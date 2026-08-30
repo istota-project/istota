@@ -10,6 +10,7 @@
   import { onMount } from 'svelte';
   import { Collapsible } from 'bits-ui';
   import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
+  import { forgetLastUserId } from '$lib/offline/lastUser';
   import { selectedLedger, availableLedgers } from '$lib/money/stores/ledger';
   import {
     AppShell,
@@ -45,6 +46,9 @@
       }
     } catch (e) {
       if (e instanceof AuthError) {
+        // Same as the root layout's own 401 branch: the session is over, so
+        // the offline cache's last-user pointer goes with it (ISSUE-202).
+        forgetLastUserId();
         window.location.href = `${base}/login`;
         return;
       }

@@ -151,7 +151,10 @@ export function routeFor(request: RoutableRequest, origin: string): Strategy {
   if (PRECACHED.has(url.pathname)) return 'cache-first';
 
   // Everything else, `version.json` included, is asked of the network and
-  // fails as it would with no worker at all.
+  // never answered from storage. A failure comes back as a synthetic 503
+  // rather than as a rejected `fetch`, which is the one way this is not
+  // transparent — a caller telling "the request failed" from "the server said
+  // no" sees the second where with no worker it saw the first.
   return 'network-only';
 }
 
@@ -164,10 +167,22 @@ export function routeFor(request: RoutableRequest, origin: string): Strategy {
  */
 export const NAVIGATION_TIMEOUT_MS = 3000;
 
-function withTimeout(promise: Promise<Response>, ms: number): Promise<Response> {
+/**
+ * `fetch`, given up on after `ms` — and actually cancelled, not just ignored.
+ *
+ * The abort matters on a navigation the app makes to a server route it is
+ * leaving the page for: a logout or an OAuth start that completes after we
+ * have already answered from cache would set cookies for a navigation nobody
+ * is waiting on any more.
+ */
+function fetchWithin(request: Request, ms: number): Promise<Response> {
+  const controller = new AbortController();
   return new Promise<Response>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timeout')), ms);
-    promise.then(
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('timeout'));
+    }, ms);
+    fetch(request, { signal: controller.signal }).then(
       (value) => {
         clearTimeout(timer);
         resolve(value);
@@ -201,40 +216,60 @@ async function cacheFirst(request: Request): Promise<Response> {
  * `prerendered` names each document with one (`/istota/chat/`), which is what
  * the install caches it under, while every link in the app points at the same
  * route without one (`/istota/chat`) — so matching the request's path alone
- * misses every document in the cache and a cold launch offline falls all the
- * way through to the root. Both spellings are tried, in that order.
+ * misses every document in the cache and a cold launch offline finds nothing
+ * for the route it is on. Both spellings are tried, in that order.
  *
  * `${base}/index.html` is the spec's named fallback and is kept for a
  * deployment that serves it; the entry that actually exists here is the
- * prerendered root, so that is last.
+ * prerendered document for the same path.
+ *
+ * **The app's root is deliberately not in this list.** Falling back to it for
+ * any path at all would answer the server-rendered routes the app navigates
+ * out to — `${base}/login`, `${base}/logout`, `${base}/reconnect`, the OAuth
+ * starts — with a 200 carrying the app shell, so a slow sign-in would paint
+ * the app at `/login` and a slow logout would paint it over an unknown session
+ * state. A route this build does not carry has no cached document, and saying
+ * so is the honest answer.
  */
 export function documentCacheKeys(pathname: string): string[] {
   const withSlash = pathname.endsWith('/') ? pathname : `${pathname}/`;
   const withoutSlash = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
-  const keys = [pathname, withSlash, withoutSlash, `${base}/index.html`, `${base}/`];
+  const keys = [pathname, withSlash, withoutSlash, `${base}/index.html`];
   return [...new Set(keys.filter(Boolean))];
 }
 
 /**
- * The document: the network, then this build's cached copy of that route, then
- * the app's root document.
+ * The document: the network, then this build's cached copy of that route.
  *
- * The cached document is copied into a fresh `Response` before it is handed
- * back. A response the install fetched through a redirect is marked as such,
- * and answering a *navigation* with one throws in the page ("a redirected
- * response was used for a request whose redirect mode is not follow") — which
- * would turn the one case this exists for into a blank screen. Copying costs a
- * few kilobytes and removes the mark.
+ * **The clock only runs where there is something to fall back to.** A route
+ * this build carries can be cut off at three seconds because the cache can
+ * answer it; a route it does not — every server-rendered auth route the app
+ * navigates out to — is the network's alone, and failing it at three seconds
+ * would break a slow sign-in that was about to succeed.
+ *
+ * The cached document is copied into a fresh `Response`, with its content type
+ * and nothing else. A response the install fetched through a redirect is
+ * marked as such, and answering a *navigation* with one throws in the page ("a
+ * redirected response was used for a request whose redirect mode is not
+ * follow") — which would turn the one case this exists for into a blank
+ * screen. Copying removes the mark; carrying only the content type keeps a
+ * stored `content-encoding` or `content-length` off a body the Cache API has
+ * already handed back decoded.
  */
 async function navigationFirst(request: Request): Promise<Response> {
   const cache = await caches.open(CACHE);
+  const url = new URL(request.url);
+  let cached: Response | undefined;
+  for (const key of documentCacheKeys(url.pathname)) {
+    cached = await cache.match(key);
+    if (cached) break;
+  }
   try {
-    return await withTimeout(fetch(request), NAVIGATION_TIMEOUT_MS);
+    return cached ? await fetchWithin(request, NAVIGATION_TIMEOUT_MS) : await fetch(request);
   } catch {
-    const url = new URL(request.url);
-    for (const key of documentCacheKeys(url.pathname)) {
-      const hit = await cache.match(key);
-      if (hit) return new Response(hit.body, { status: 200, headers: hit.headers });
+    if (cached) {
+      const type = cached.headers.get('content-type') ?? 'text/html; charset=utf-8';
+      return new Response(cached.body, { status: 200, headers: { 'content-type': type } });
     }
     return new Response('Offline, and this page is not saved on this device.', {
       status: 503,

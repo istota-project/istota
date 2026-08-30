@@ -547,7 +547,7 @@ describe('offline cache — clearing it', () => {
       size: 4,
     });
 
-    await db.clearOffline();
+    expect(await db.clearOffline()).toBe(true);
 
     expect(await db.readTranscript('alice', 't1')).toBeNull();
     // The other user's share goes too: someone asking for the offline data to
@@ -570,11 +570,33 @@ describe('offline cache — clearing it', () => {
     expect((await db.readTranscript('alice', 't1'))?.messages[0].msg_id).toBe(9);
   });
 
-  it('resolves rather than throwing when there is no database', async () => {
+  it('reports nothing to clear rather than a failure when there is no database', async () => {
+    // The caller reloads on a success and reports a failure, so "this origin
+    // has no cache at all" has to read as done rather than as broken.
     vi.stubGlobal('indexedDB', undefined);
     vi.resetModules();
     const db = await import('./db');
-    await expect(db.clearOffline()).resolves.toBeUndefined();
+    await expect(db.clearOffline()).resolves.toBe(true);
     vi.unstubAllGlobals();
+  });
+
+  it('reports a transaction that never completes', async () => {
+    const db = await freshDb();
+    const handle = (await db.openOfflineDb())!;
+    // Fake timers only from here: `fake-indexeddb` schedules its own callbacks
+    // on the timer queue, so the open above cannot complete under them.
+    vi.useFakeTimers();
+    handle.transaction = (() => ({
+      objectStore: () => ({ clear: () => ({}) }),
+    })) as unknown as IDBDatabase['transaction'];
+
+    const clearing = db.clearOffline();
+    // Two steps: `clearOffline` asks for the connection before it opens the
+    // transaction, so the memoized open has to settle before there is a timer
+    // to advance at all.
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(db.OFFLINE_DB_TIMEOUT_MS + 1);
+    await expect(clearing).resolves.toBe(false);
+    vi.useRealTimers();
   });
 });

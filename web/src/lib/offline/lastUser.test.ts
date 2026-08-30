@@ -43,6 +43,16 @@ describe('the last-user pointer', () => {
     expect(seedUserId()).toBeNull();
   });
 
+  it('reads as nothing in a shell too old to run a service worker', () => {
+    // The same gate the registration uses. Without a worker there is no boot
+    // with no connection for a guess to be needed on, so a shell that cannot
+    // have one never takes the guess — and never takes the hazards that come
+    // with an unconfirmed id.
+    rememberLastUserId('alice');
+    useAgent(SHELL_UA.replace('IstotaApp/0.10.0', 'IstotaApp/0.9.0'));
+    expect(seedUserId()).toBeNull();
+  });
+
   it('is cleared by forgetting it, which is the 401 path', () => {
     rememberLastUserId('alice');
     forgetLastUserId();

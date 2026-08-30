@@ -15,12 +15,21 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const db = vi.hoisted(() => ({ clearOffline: vi.fn(async () => {}) }));
+const db = vi.hoisted(() => ({ clearOffline: vi.fn(async () => true) }));
 vi.mock('./db', () => db);
+// The real base path rather than the suite's empty stub: the scope filter is
+// the whole of one assertion below, and at `base === ''` every registration on
+// the origin matches it.
+vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
 
 import { clearOfflineData } from './clear';
 
-function stubWorkers(registrations: { unregister: () => Promise<boolean> }[]) {
+/** A registration under this app's own base path. */
+function ours(unregister: () => Promise<boolean> = async () => true) {
+  return { scope: 'https://example.test/istota/', unregister };
+}
+
+function stubWorkers(registrations: { scope: string; unregister: () => Promise<boolean> }[]) {
   vi.stubGlobal('navigator', {
     serviceWorker: { getRegistrations: async () => registrations },
   });
@@ -45,14 +54,13 @@ afterEach(() => {
 });
 
 describe('clearing the offline data', () => {
-  it('unregisters every worker, deletes this app’s caches, and empties the database', async () => {
+  it('unregisters this app’s workers, deletes its caches, and empties the database', async () => {
     const unregistered: boolean[] = [];
-    const register = () => ({
-      unregister: async () => {
+    const register = () =>
+      ours(async () => {
         unregistered.push(true);
         return true;
-      },
-    });
+      });
     stubWorkers([register(), register()]);
     const deleted: string[] = [];
     stubCaches(['istota-v1', 'istota-v2', 'something-else'], deleted);
@@ -100,10 +108,31 @@ describe('clearing the offline data', () => {
 
   it('counts an unregister that refused rather than reporting it as done', async () => {
     stubWorkers([
-      { unregister: async () => true },
+      ours(),
+      ours(async () => {
+        throw new Error('refused');
+      }),
+    ]);
+    stubCaches([], []);
+
+    const result = await clearOfflineData();
+
+    expect(result.workers).toBe(1);
+  });
+
+  it('leaves a worker belonging to something else on the origin alone', async () => {
+    // The same rule the worker's own activate step follows for caches: this
+    // app is served under a base path on a host that may carry other things,
+    // and a row offering to clear this app's data is not offering to
+    // unregister a neighbour's worker.
+    let neighbour = false;
+    stubWorkers([
+      ours(),
       {
+        scope: 'https://example.test/nextcloud/',
         unregister: async () => {
-          throw new Error('refused');
+          neighbour = true;
+          return true;
         },
       },
     ]);
@@ -112,5 +141,16 @@ describe('clearing the offline data', () => {
     const result = await clearOfflineData();
 
     expect(result.workers).toBe(1);
+    expect(neighbour).toBe(false);
+  });
+
+  it('reports a database that did not clear rather than counting it as done', async () => {
+    // The caller reloads on a success, so the one step whose failure leaves
+    // the app exactly as it was has to be able to say so.
+    db.clearOffline.mockResolvedValueOnce(false);
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('caches', undefined);
+
+    expect((await clearOfflineData()).database).toBe(false);
   });
 });

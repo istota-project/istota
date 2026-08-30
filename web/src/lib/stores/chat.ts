@@ -771,6 +771,30 @@ function createSession(): ChatSession {
    * for.
    */
   let userIdFromPointer = false;
+  /**
+   * The id to **write** the cache under, or null while it is only a guess.
+   *
+   * Reading by the guess is the point of the pointer; writing by it is the
+   * hazard, and the two are separated here rather than at each call site. A
+   * session that seeded from the pointer and then reaches the server — the
+   * config read failed but the room list succeeded, which is the ordinary
+   * "launched in a lift, signal returned" sequence — would otherwise write the
+   * real session's rooms and transcripts into the guessed user's namespace,
+   * where the next session under that id would read them back as its own.
+   * That is exactly the cross-user read the namespace exists to prevent, so
+   * nothing is written until the server has confirmed who this is. Every
+   * helper in `offline/db.ts` treats a null id as "no cache" and no-ops.
+   */
+  const cacheUserId = () => (userIdFromPointer ? null : storageUserId);
+  /**
+   * Cids the restore brought in, as against the ones this session minted.
+   *
+   * Only read on the wrong-guess path, where the two have to be told apart:
+   * entries the restore read out of the guessed user's storage are theirs and
+   * are left alone, while entries this session wrote are the real user's words
+   * sitting in the wrong drawer and have to be taken out of it.
+   */
+  const restoredCids = new Set<number>();
   // The connectivity subscription's teardown, or null while nothing is
   // watching. Session-lived like the room stream, and dropped by `teardown`
   // for the same reason: a reconcile-and-drain fired at a page the user has
@@ -873,15 +897,18 @@ function createSession(): ChatSession {
       if (!token || !known.has(token) || sendQueue.has(token)) continue;
       sendQueue.set(
         token,
-        entries.map((entry) => ({
-          ...entry,
+        entries.map((entry) => {
           // The stored cid belongs to the session that wrote it. `cidCounter`
           // starts fresh on every load, so carrying it over would collide with
           // a row this session is about to mint. The cid is a client-local
           // display key, not durable identity.
-          cid: nextCid(),
-          held: holdOnRestore(entry, now),
-        })),
+          const cid = nextCid();
+          // Noted as restored, which only the wrong-guess path in
+          // `settleSeededUser` reads: it is what tells an entry belonging to
+          // whoever the storage key names from one this session typed.
+          restoredCids.add(cid);
+          return { ...entry, cid, held: holdOnRestore(entry, now) };
+        }),
       );
     }
     // `restoreQueues` is one of the two mutations that deliberately do not
@@ -900,11 +927,23 @@ function createSession(): ChatSession {
    * case, one device, one person — or says it was wrong, in which case
    * everything painted from the other namespace goes.
    *
-   * "Everything" is three things, and each of them would otherwise outlive the
-   * correction. The transcript and the room list are the visible half. The
-   * restored **send queue** is the half that matters: its entries were read out
-   * of another user's `chat.sendQueue` keys, and leaving them in memory would
-   * let this session persist them back under the right key and then send them.
+   * "Everything" is four things, and each of them would otherwise outlive the
+   * correction. The transcript, the room list and the selected room are the
+   * visible half. The **send queue** is the half that matters, and it has two
+   * sides. Entries the restore read out of the guessed id's storage belong to
+   * whoever that is: they go out of memory, and are deliberately left in
+   * storage, where that person's own next session restores and sends them as
+   * themselves. Entries *this* session typed are the real user's words written
+   * into the wrong drawer by `persistRoomQueue`, which keyed them by the guess
+   * — those are taken back out of the guessed id's storage, or they would be
+   * restored and auto-sent under that identity later.
+   *
+   * They are dropped rather than re-keyed onto the right id. They were written
+   * into rooms read out of another namespace, against a transcript this is
+   * about to throw away, so carrying them forward would move a message into a
+   * conversation it was not written in. What matters is that they cannot go
+   * out as someone else, and nothing was sent while the guess stood: `canDrain`
+   * refuses for the whole of it.
    *
    * The caller repaints — `init()` by carrying on into its own room-list and
    * history reads, `onBackOnline` through `recoverStream`. Returns whether the
@@ -918,10 +957,23 @@ function createSession(): ChatSession {
     storageUserId = real;
     rememberLastUserId(real);
     if (real === guess) return false;
+    if (guess) {
+      for (const [token, entries] of sendQueue) {
+        const theirs = entries.filter((entry) => restoredCids.has(entry.cid));
+        if (theirs.length === entries.length) continue;
+        writeQueue(`${guess}${QUEUE_KEY_INFIX}${token}`, theirs);
+      }
+    }
     sendQueue.clear();
+    restoredCids.clear();
     syncQueuedCounts();
     messages.set([]);
     rooms.set([]);
+    // The selection is an id out of the other namespace, and room ids are
+    // per-user rowids — left standing, the reload below would fetch whichever
+    // room happens to share the number. The caller picks one from the room
+    // list it refetches.
+    activeRoomId.set(null);
     externalTurnDisplay.set(normalizeExternalTurnDisplay(live.external_turn_display));
     return true;
   }
@@ -992,7 +1044,7 @@ function createSession(): ChatSession {
     if (!pending) return;
     pendingCacheRows.delete(token);
     clearTimeout(pending.timer);
-    void appendTranscriptRows(storageUserId, token, pending.rows);
+    void appendTranscriptRows(cacheUserId(), token, pending.rows);
   }
 
   function flushCachedRooms() {
@@ -1047,7 +1099,7 @@ function createSession(): ChatSession {
         (r) => typeof r.msg_id !== 'number' || !gone.has(r.msg_id),
       );
     }
-    void removeCachedMessages(storageUserId, msgIds);
+    void removeCachedMessages(cacheUserId(), msgIds);
   }
 
   /**
@@ -1499,7 +1551,7 @@ function createSession(): ChatSession {
     // created or renamed since then would otherwise be missing from the cached
     // sidebar — and a room missing from it has no cached token, which is what
     // its transcript cache is keyed by, so it could not be painted at all.
-    void writeRooms(storageUserId, get(rooms));
+    void writeRooms(cacheUserId(), get(rooms));
   }
 
   // ---- Held outbound drafts ----
@@ -2348,25 +2400,46 @@ function createSession(): ChatSession {
     // each other is a scrambled room; the drain at the foot of `init` is what
     // covers a connection that returned during it.
     if (!get(loaded)) return;
+    // Everything below runs after an await, and `teardown` cannot recall a
+    // call already suspended in one — so the same generation counter `init`
+    // checks is captured here. Without it a page left mid-reconnect still gets
+    // a settle (which rewrites `messages`, `rooms` and the queue) and a stream
+    // recovery, on a session nothing is rendering.
+    const gen = initGeneration;
+    const superseded = () => gen !== initGeneration;
     // Ahead of the reconcile, and only for a session that booted from the
     // pointer (ISSUE-202): this is the first moment the server can say who
     // this device belongs to, and if the guess was wrong the transcript being
     // reconciled and the queue about to drain are the wrong user's. Skipped
     // entirely otherwise — `settleSeededUser` returns at once and no request
-    // is made.
+    // is made. Consulted for the id alone: `pollIntervalMs` and the
+    // external-turn setting were taken from this user's own cached config at
+    // boot and are the same values, and re-storing the config here would push
+    // its expiry out on a read nobody asked for.
     let repainted = false;
     if (userIdFromPointer) {
       const live = await getChatConfig().catch(() => null);
+      if (superseded()) return;
       if (live) repainted = settleSeededUser(live);
     }
     await recoverStream(null);
+    if (superseded()) return;
     if (repainted) {
       // The room list the recovery just fetched is what the queue is keyed
       // against, so the restore has to come after it — and the rows for what
       // it restored have to be put back, since the history load that would
       // normally append them ran while the queue was empty.
       restoreQueues();
-      const token = roomTokenOf(get(activeRoomId) ?? -1);
+      // `settleSeededUser` dropped the selection with the rest of the wrong
+      // namespace, so a room is picked out of the list that just arrived, the
+      // way `init` picks one.
+      if (get(activeRoomId) == null) {
+        const first = get(rooms)[0];
+        if (first) await selectRoom(first.id);
+        if (superseded()) return;
+      }
+      const rid = get(activeRoomId);
+      const token = rid == null ? undefined : roomTokenOf(rid);
       if (token) appendQueuedRows(token);
     }
     // `recoverStream` returns at once when one is already running, so the
@@ -2648,14 +2721,14 @@ function createSession(): ChatSession {
       // storing an empty one: the entry would read as no cache on the way back
       // out anyway, while still holding one of `MAX_CACHED_ROOMS` slots.
       if (hist.messages.length) {
-        void writeTranscript(storageUserId, {
+        void writeTranscript(cacheUserId(), {
           roomId,
           roomToken,
           messages: hist.messages.map(cacheableRow),
           oldestCursor: hist.oldest_cursor ?? null,
         });
       } else {
-        void deleteTranscript(storageUserId, roomToken);
+        void deleteTranscript(cacheUserId(), roomToken);
       }
     }
     // Seed paging state from the first-load response.
@@ -2961,7 +3034,16 @@ function createSession(): ChatSession {
       // remount would otherwise clear an id this session already knew — and
       // persistence would go quietly off, leaving a drained message stored and
       // restored later as a bubble for something already sent.
-      if (cfg) storageUserId = cfg.user_id ?? null;
+      //
+      // Split by where the config came from, since Stage 5's pointer gave
+      // `storageUserId` a third possible source. A *live* config is the
+      // authority and its absent `user_id` (an older backend) really does mean
+      // "no id, queue in memory only". A *cached* one carrying no id says
+      // nothing about who this is — adopting its null would throw away the
+      // seed that is the only reason there was a cache to read at all, and
+      // leave the boot the pointer exists for with no key.
+      if (live) storageUserId = live.user_id ?? null;
+      else if (cfg?.user_id) storageUserId = cfg.user_id;
       // The pointer the *next* cold launch reads the cache by, written on
       // every successful config read rather than once — a device that changes
       // hands re-points before anything is read by the old id. Only from a
@@ -2971,7 +3053,7 @@ function createSession(): ChatSession {
       // After the id is known, or it would be stored under nothing. Only a
       // live read is worth writing back — re-storing what was just read would
       // push its own expiry out forever.
-      if (live && storageUserId) void writeConfig(storageUserId, live);
+      if (live && storageUserId) void writeConfig(cacheUserId(), live);
       // Normalized rather than adopted: the column takes any string a hand
       // edit puts in it, and an unrecognized value must read as the default
       // instead of leaving the transcript with no branch to take.
@@ -2989,7 +3071,7 @@ function createSession(): ChatSession {
       let list: ChatRoom[];
       try {
         list = (await fetchingRooms).rooms;
-        void writeRooms(storageUserId, list);
+        void writeRooms(cacheUserId(), list);
       } catch (e) {
         // Offline with a cached list, the rest of `init` is worth running: the
         // queue restores, the last room paints from its own cache, and the
@@ -3203,7 +3285,7 @@ function createSession(): ChatSession {
     const pending = pendingCacheRows.get(token);
     if (pending) clearTimeout(pending.timer);
     pendingCacheRows.delete(token);
-    void deleteTranscript(storageUserId, token);
+    void deleteTranscript(cacheUserId(), token);
     // The *stored* copy deliberately stays. Two of this function's three
     // callers are recoverable — an archive is undone by unarchiving, and a
     // `remove` frame can be another device's edit — and dropping the key here
@@ -3907,6 +3989,14 @@ function createSession(): ChatSession {
     // would be POSTed, time out, and be parked again — one 30s stall per
     // message, for an answer the store already has (ISSUE-202).
     if (!get(online)) return false;
+    // Nothing goes out under a guessed identity (ISSUE-202). A session that
+    // booted from the `chat.lastUserId` pointer restored its queue out of that
+    // id's storage, and if the guess is wrong those are someone else's
+    // messages — sending one under this session's cookie would post it as this
+    // user. The guess is settled by the first config the server answers, which
+    // on a connection good enough to drain is moments away, so this costs a
+    // beat on the one path where it applies and closes the outcome outright.
+    if (userIdFromPointer) return false;
     // The three ways the room can still be busy. `status` alone is not enough:
     // it is set idle while a stream is being handed on, and a send that is
     // mid-POST has not claimed it yet.

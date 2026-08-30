@@ -234,13 +234,25 @@
   // rather than a flourish: the running page was served by the worker being
   // unregistered, and its module graph is the one being cleared. Reloading is
   // what makes the next document come from the network.
+  //
+  // Withheld when the stored data is still there. The row exists to escape a
+  // state the user can see, so reloading over a clear that did nothing would
+  // present the failure as the fix — and a reload takes the report away with
+  // it. The other two steps are counted rather than reported: a worker that
+  // was never registered and an origin with no caches are the ordinary case,
+  // not a failure.
   async function clearOfflineStorage() {
     confirmingClearOffline = false;
     clearingOffline = true;
+    let cleared = false;
     try {
-      await clearOfflineData();
+      cleared = (await clearOfflineData()).database;
     } finally {
       clearingOffline = false;
+    }
+    if (!cleared) {
+      error = 'Could not clear the offline data. Close the app’s other tabs and try again.';
+      return;
     }
     window.location.reload();
   }

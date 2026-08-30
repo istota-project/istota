@@ -997,15 +997,29 @@ export async function pruneOffline(
  *
  * One transaction across all four, so this cannot half-succeed and leave the
  * held bytes of a queue entry behind without the transcript they belong to.
+ *
+ * The only function here that **reports** whether it worked, against the
+ * module's own resolve-rather-than-reject discipline. Everywhere else a
+ * storage failure costs the offline paint and the caller has nothing to say
+ * about it; here the caller is a user who pressed a button to escape a state
+ * they can see, and reloading over a clear that quietly did nothing is the one
+ * outcome the row must not produce. `false` means the transaction did not
+ * complete; a database that cannot be opened at all is `true`, since there is
+ * nothing stored to clear.
  */
-export async function clearOffline(): Promise<void> {
+export async function clearOffline(): Promise<boolean> {
+  const db = await openOfflineDb();
+  if (!db) return true;
   const stores = [STORE_TRANSCRIPTS, STORE_ROOMS, STORE_CONFIG, STORE_BLOBS];
-  await withTx<void>(
+  return withTx<boolean>(
     stores,
     'readwrite',
-    (tx) => {
+    (tx, done) => {
       for (const name of stores) tx.objectStore(name).clear();
+      // Reported through `done`, so it is `oncomplete` that answers rather
+      // than the last `clear()` having been issued.
+      done(true);
     },
-    undefined,
+    false,
   );
 }

@@ -146,13 +146,18 @@ describe('the navigation fallback chain', () => {
       `${base}/chat/`,
       `${base}/chat`,
       `${base}/index.html`,
-      `${base}/`,
     ]);
   });
 
-  it('ends at the app root, which is always precached', () => {
-    const keys = documentCacheKeys(`${base}/somewhere/new`);
-    expect(keys.at(-1)).toBe(`${base}/`);
-    expect(PRECACHE_URLS).toContain(`${base}/`);
+  it('never falls back to the app root for a path the build does not carry', () => {
+    // The app navigates out of itself to server-rendered routes — sign-in,
+    // sign-out, the OAuth starts — and none of them is prerendered. A chain
+    // ending at the root would answer a slow sign-in with a 200 carrying the
+    // app shell, painting the app at /login with the session unresolved.
+    for (const path of ['/login', '/logout', '/reconnect', '/google/connect']) {
+      const keys = documentCacheKeys(`${base}${path}`);
+      expect(keys).not.toContain(`${base}/`);
+      for (const key of keys) expect(PRECACHE_URLS).not.toContain(key);
+    }
   });
 });

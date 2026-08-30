@@ -20,19 +20,38 @@
  * them should stop the rest, because a half-cleared state is exactly what the
  * caller pressed the button to get out of.
  */
+import { base } from '$app/paths';
 import { clearOffline } from './db';
 
-/** How many of the three steps did what they were asked. For a caller's log. */
+/** What each of the three steps managed. The caller reports the last one. */
 export interface ClearOfflineResult {
   workers: number;
   caches: number;
+  /** False when the stored data is still there — see `clearOffline`. */
   database: boolean;
+}
+
+/**
+ * This app's own registrations, and not the origin's.
+ *
+ * `getRegistrations()` answers with every worker on the origin, and this app is
+ * served under a base path on a host that may carry other things — the
+ * deployment's Nextcloud among them. A row offering to clear *this app's*
+ * offline data must not unregister a neighbour's worker, which is the same
+ * rule the worker's own activate step follows for caches.
+ */
+function isOurs(registration: ServiceWorkerRegistration): boolean {
+  try {
+    return new URL(registration.scope).pathname.startsWith(`${base}/`);
+  } catch {
+    return false;
+  }
 }
 
 async function unregisterWorkers(): Promise<number> {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return 0;
   try {
-    const registrations = await navigator.serviceWorker.getRegistrations();
+    const registrations = (await navigator.serviceWorker.getRegistrations()).filter(isOurs);
     const results = await Promise.all(
       registrations.map((registration) => registration.unregister().catch(() => false)),
     );
@@ -59,12 +78,14 @@ async function deleteCaches(): Promise<number> {
 export async function clearOfflineData(): Promise<ClearOfflineResult> {
   const workers = await unregisterWorkers();
   const cacheCount = await deleteCaches();
-  let database = true;
+  let database = false;
   try {
-    await clearOffline();
+    // The one step that reports rather than swallows: an aborted or timed-out
+    // transaction leaves the transcripts and the held bytes where they were,
+    // and the caller reloads over the top, so it has to be able to say that
+    // the button did nothing.
+    database = await clearOffline();
   } catch {
-    // `clearOffline` swallows its own storage failures; this is the belt for
-    // an environment where the import itself throws.
     database = false;
   }
   return { workers, caches: cacheCount, database };

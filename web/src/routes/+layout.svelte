@@ -14,7 +14,7 @@
   import { startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
-  import { isNativeShell } from '$lib/platform/native';
+  import { shellAtLeast } from '$lib/platform/native';
   import { forgetLastUserId } from '$lib/offline/lastUser';
   import '../app.css';
 
@@ -84,10 +84,18 @@
   // it is the only place this runs. Kit's own automatic registration is off
   // (`svelte.config.js`) so that this gate is the only way in.
   //
+  // On the *version* rather than on the shell alone, per the facade's rule
+  // that a shell-dependent capability is gated on the version that introduced
+  // it: 0.10.0 is the build that declares the app-bound domains WebKit needs
+  // before it will run a worker here at all, and it is also the build whose
+  // settings row can unregister one. An older app is expected to have no
+  // `navigator.serviceWorker` to register with — but if that expectation is
+  // ever wrong, it would install a worker it has no way to remove.
+  //
   // Fire-and-forget: a registration that fails leaves the app exactly as it is
   // without one, which is what every other surface already runs.
   onMount(() => {
-    if (!isNativeShell()) return;
+    if (!shellAtLeast('0.10.0')) return;
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     navigator.serviceWorker
       // Kit bundles the worker as a classic script for the build and serves it

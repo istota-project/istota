@@ -198,6 +198,7 @@ describe('chat store — a cold launch with no connection', () => {
     conn.setOnline(false);
     persisted.store.clear();
     native.isNativeShell.mockReturnValue(true);
+    native.shellAtLeast.mockReturnValue(true);
     Object.values(notices).forEach((v) => v.mockReset());
     api.getChatConfig.mockImplementation(NO_CONNECTION);
     api.getChatRooms.mockImplementation(NO_CONNECTION);
@@ -244,11 +245,14 @@ describe('chat store — a cold launch with no connection', () => {
     s.teardown();
   });
 
-  it('does not read the pointer in a browser', async () => {
+  it('does not read the pointer in a browser or in an older app', async () => {
     // The gate that makes the pointer safe: off the shell, the per-user
     // namespace is guarding a profile two people take turns using, and a
     // pointer answering there would paint one of them the other's transcript.
-    native.isNativeShell.mockReturnValue(false);
+    // It is the shell *version* that decides, the same gate the service worker
+    // registers behind — without a worker there is no boot with no connection
+    // for the guess to be needed on.
+    native.shellAtLeast.mockReturnValue(false);
     persisted.store.set(LAST_USER_KEY, JSON.stringify('alice'));
     cacheFor('alice', 'what alice was reading');
 
@@ -288,6 +292,7 @@ describe('chat store — settling the guess against the server', () => {
     conn.setOnline(false);
     persisted.store.clear();
     native.isNativeShell.mockReturnValue(true);
+    native.shellAtLeast.mockReturnValue(true);
     Object.values(notices).forEach((v) => v.mockReset());
     api.getChatConfig.mockImplementation(NO_CONNECTION);
     api.getChatRooms.mockImplementation(NO_CONNECTION);
@@ -378,6 +383,68 @@ describe('chat store — settling the guess against the server', () => {
     await vi.waitFor(() => expect(api.getRoomMessages.mock.calls.length).toBeGreaterThan(1));
 
     expect(api.getChatConfig.mock.calls.length).toBe(configReads);
+    s.teardown();
+  });
+
+  it('sends nothing at all while the guess stands', async () => {
+    // The sequence the repaint alone cannot cover, and the one that makes an
+    // unsettled guess dangerous: the config read fails so nothing settles, but
+    // the connection is back by the time the room list is asked for. Without a
+    // gate the drain at the foot of `init` POSTs the guessed user's restored
+    // messages under this session's cookie.
+    persisted.store.set(LAST_USER_KEY, JSON.stringify('alice'));
+    cacheFor('alice', 'alice’s cached transcript');
+    seedQueue('alice', 't1', [storedEntry('alice’s unsent message', { reason: 'offline' })]);
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.markRoomRead.mockResolvedValue({ ok: true, last_read_message_id: 0 });
+    conn.setOnline(true);
+
+    const s = await freshSession();
+    await s.init();
+
+    expect(api.sendChatMessage).not.toHaveBeenCalled();
+    // The other half: what the server just answered with is this session's,
+    // and stored under the guess it would be read back as the guessed user's
+    // own on their next launch — the cross-user read the namespace exists to
+    // prevent, arrived at from the writing side.
+    for (const write of [db.writeRooms, db.writeTranscript, db.writeConfig]) {
+      for (const call of write.mock.calls) expect(call[0]).not.toBe('alice');
+    }
+    s.teardown();
+  });
+
+  it('takes what this session typed out of the guessed storage', async () => {
+    // A message typed while the guess stood was keyed by the guess. Dropping it
+    // from memory is not enough: left in storage it is restored by the guessed
+    // user's own next session and, being an offline entry inside the auto-send
+    // window, goes out as them.
+    persisted.store.set(LAST_USER_KEY, JSON.stringify('alice'));
+    cacheFor('alice', 'alice’s cached transcript');
+    seedQueue('alice', 't1', [storedEntry('alice’s own unsent message', { reason: 'offline' })]);
+
+    const s = await freshSession();
+    await s.init();
+    await s.send('typed by whoever is actually here');
+
+    const stored = () => {
+      const raw = persisted.store.get(SEND_QUEUE_STORAGE_KEY);
+      return raw ? ((JSON.parse(raw)['alice:room:t1'] ?? []) as { text: string }[]) : [];
+    };
+    expect(stored().map((e) => e.text)).toContain('typed by whoever is actually here');
+
+    serverIs('bob');
+    conn.setOnline(true);
+    await vi.waitFor(() =>
+      expect(get(s.messages).some((m) => m.text === "bob's real transcript")).toBe(true),
+    );
+
+    const left = stored().map((e) => e.text);
+    expect(left).not.toContain('typed by whoever is actually here');
+    // The guessed user's own entry stays exactly where it was: it is theirs,
+    // and their next session is where it belongs.
+    expect(left).toEqual(['alice’s own unsent message']);
     s.teardown();
   });
 
