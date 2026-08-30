@@ -28,6 +28,7 @@ from istota.llm.types import (
     ToolSchema,
     UserMessage,
 )
+from istota.llm.provider import TextDelta
 
 from ._mock_provider import MockProvider
 
@@ -115,6 +116,40 @@ class TestBasicLoop:
         assert assistant[0].text == "hello there"
         assert sink.types()[0] == "agent_start"
         assert sink.types()[-1] == "agent_end"
+
+    async def test_abort_closes_ready_provider_stream_and_balances_message_events(self):
+        class SimultaneousProvider:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.closed = asyncio.Event()
+
+            async def stream(self, *args, **kwargs):
+                try:
+                    self.started.set()
+                    await self.release.wait()
+                    yield TextDelta(text="too late")
+                finally:
+                    self.closed.set()
+
+        provider = SimultaneousProvider()
+        abort = asyncio.Event()
+        sink = _Sink()
+        running = asyncio.create_task(run_agent_loop(
+            [UserMessage(content=[TextContent(text="stop")])],
+            _ctx(),
+            _config(provider, abort=abort),
+            sink,
+        ))
+        await provider.started.wait()
+        provider.release.set()
+        abort.set()
+        out = await asyncio.wait_for(running, timeout=1)
+
+        assistant = [m for m in out if isinstance(m, AssistantMessage)]
+        assert assistant[-1].stop_reason == "aborted"
+        assert provider.closed.is_set()
+        assert sink.types().count("message_start") == sink.types().count("message_end")
 
     async def test_single_tool_call_then_text(self):
         calls: list = []

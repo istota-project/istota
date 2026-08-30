@@ -17,6 +17,7 @@ import asyncio
 import inspect
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -305,13 +306,30 @@ async def _stream_assistant_response(
         render_tool_images=config.render_tool_images,
     )
 
-    async for event in stream:
-        if config.abort and config.abort.is_set():
-            return AssistantMessage(
+    iterator = stream.__aiter__()
+    while True:
+        event = await _next_stream_event(iterator, config.abort)
+        if event is _STREAM_ABORTED:
+            # Aborting strands the provider generator unless it is closed by
+            # hand: a cancelled ``anext`` does not reliably run its cleanup,
+            # and when abort wins the race against an event that was already
+            # ready the generator is left suspended after a yield nobody
+            # consumed. Close it explicitly so its ``async with`` (the httpx
+            # stream) exits. ``message_end`` keeps the pair with the
+            # ``message_start`` above balanced for event consumers.
+            aclose = getattr(iterator, "aclose", None)
+            if aclose is not None:
+                with suppress(Exception):
+                    await aclose()
+            aborted = AssistantMessage(
                 content=[TextContent(text="".join(text_parts))],
                 stop_reason="aborted",
                 model=config.model,
             )
+            await emit(AgentEvent(type="message_end", message=aborted))
+            return aborted
+        if event is _STREAM_EXHAUSTED:
+            break
 
         if isinstance(event, TextDelta):
             text_parts.append(event.text)
@@ -339,6 +357,49 @@ async def _stream_assistant_response(
 
     await emit(AgentEvent(type="message_end", message=final))
     return final
+
+
+_STREAM_ABORTED = object()
+_STREAM_EXHAUSTED = object()
+
+
+async def _next_stream_event(iterator, abort: asyncio.Event | None):
+    """Wait for the provider or cancellation, whichever happens first.
+
+    Checking ``abort`` only after an event leaves cancellation stuck behind a
+    provider that has not produced its first byte or has gone quiet mid-stream.
+    Cancelling the pending ``anext`` also closes an httpx streaming response via
+    the provider generator's ``async with`` cleanup.
+    """
+    if abort is None:
+        try:
+            return await anext(iterator)
+        except StopAsyncIteration:
+            return _STREAM_EXHAUSTED
+
+    if abort.is_set():
+        return _STREAM_ABORTED
+
+    next_event = asyncio.create_task(anext(iterator))
+    wait_for_abort = asyncio.create_task(abort.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            (next_event, wait_for_abort),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if wait_for_abort in done:
+            return _STREAM_ABORTED
+        try:
+            return await next_event
+        except StopAsyncIteration:
+            return _STREAM_EXHAUSTED
+    finally:
+        for task in (next_event, wait_for_abort):
+            if not task.done():
+                task.cancel()
+        for task in (next_event, wait_for_abort):
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
+                await task
 
 
 def _accumulate_tool_delta(acc: list[dict], event: ToolCallDelta) -> None:

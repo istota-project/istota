@@ -1284,6 +1284,11 @@ function createSession(): ChatSession {
     // A task parked awaiting confirmation owns its room until the user acts —
     // hold the queue rather than advancing past it.
     let paused = false;
+    // Consecutive SSE errors while the browser is still retrying on its own.
+    // Same rule as the room stream: a blip must not cost the connection, but
+    // a persistently failing endpoint concedes to polling eventually.
+    let sseFailures = 0;
+    const SSE_FAILURE_LIMIT = 3;
 
     // Stop the stream without touching the queue. Used both as the terminal
     // path (settle, below) and as the external "stop now" hook for room
@@ -1342,14 +1347,24 @@ function createSession(): ChatSession {
       if (kind === 'done' || kind === 'cancelled' || kind === 'error') settle(kind);
     };
 
-    const poll = async () => {
-      if (finished) return;
+    const poll = async (): Promise<boolean> => {
+      if (finished) return false;
       try {
         const { events } = await getTaskEvents(taskId, lastSeq);
         for (const ev of events) handle(ev.kind, JSON.stringify(ev.payload), ev.seq);
       } catch {
         /* transient; try again next tick */
+        return false;
       }
+      // A snapshot landed. If SSE is still live beside a running poll timer,
+      // the timer was only the hydration retry below — the stream carries the
+      // tail from here. (When SSE conceded to polling, `es` is null and the
+      // timer is the live path, so it stays.)
+      if (es && pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      return true;
     };
     const startPolling = () => {
       if (pollTimer || finished) return;
@@ -1359,6 +1374,16 @@ function createSession(): ChatSession {
 
     try {
       es = new EventSource(chatStreamUrl(taskId), { withCredentials: true });
+      let opened = false;
+      es.onopen = () => {
+        sseFailures = 0;
+        // EventSource reuses this object when it reconnects. The server will
+        // replay from Last-Event-ID, but a proxy may buffer that replay until a
+        // later frame. Read the durable snapshot as soon as the connection is
+        // back so already-written progress appears immediately.
+        if (opened) void poll();
+        opened = true;
+      };
       for (const k of STREAM_KINDS) {
         es.addEventListener(k, (e: MessageEvent) => {
           // The browser fires a native 'error' event (no data) on the
@@ -1371,6 +1396,13 @@ function createSession(): ChatSession {
       }
       es.onerror = () => {
         if (finished) return;
+        sseFailures += 1;
+        // readyState CONNECTING (0, per the spec constant) means the browser
+        // has already scheduled its own retry; closing here would throw that
+        // away and pre-empt exactly the free reconnect SSE was chosen for. Let
+        // it try, up to the limit. Anything else — CLOSED, or an implementation
+        // with no readyState at all — is fatal, so fall back at once.
+        if (es?.readyState === 0 && sseFailures < SSE_FAILURE_LIMIT) return;
         // SSE failed (or the mock backend isn't an event-stream): close it
         // and fall back to polling the snapshot endpoint.
         if (es) {
@@ -1382,6 +1414,14 @@ function createSession(): ChatSession {
     } catch {
       startPolling();
     }
+
+    // SSE is the low-latency tail, not the initial-state loader. Hydrate from
+    // the durable log now; the seq guard deduplicates its overlap with SSE. A
+    // failed snapshot must not wait for the next SSE frame to retry — the poll
+    // timer reruns it until one lands (and stops again once it does, above).
+    void poll().then((ok) => {
+      if (!ok) startPolling();
+    });
 
     return { stop: halt };
   }

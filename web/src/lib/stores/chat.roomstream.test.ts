@@ -85,12 +85,22 @@ async function freshSession() {
 /** A minimal EventSource stand-in so the SSE branch (named `message` / `gap` /
  * `room` listeners) can be exercised — jsdom has none, and without one every
  * test would only ever cover the polling fallback. */
-function installFakeEventSource(): { current: FakeEventSource | null; opened: number } {
-  const ref: { current: FakeEventSource | null; opened: number } = {
+function installFakeEventSource(): {
+  current: FakeEventSource | null;
+  instances: FakeEventSource[];
+  opened: number;
+} {
+  const ref: {
+    current: FakeEventSource | null;
+    instances: FakeEventSource[];
+    opened: number;
+  } = {
     current: null,
+    instances: [],
     opened: 0,
   };
   class FakeEventSource {
+    url: string;
     listeners = new Map<string, ((e: any) => void)[]>();
     onerror: (() => void) | null = null;
     onopen: (() => void) | null = null;
@@ -99,8 +109,10 @@ function installFakeEventSource(): { current: FakeEventSource | null; opened: nu
     // 2 = CLOSED. Left undefined by default so the pre-existing tests keep
     // exercising the "fatal error → poll" branch.
     readyState: number | undefined = undefined;
-    constructor() {
+    constructor(url: string) {
+      this.url = url;
       ref.current = this as unknown as FakeEventSource;
+      ref.instances.push(this as unknown as FakeEventSource);
       ref.opened += 1;
     }
     addEventListener(kind: string, fn: (e: any) => void) {
@@ -121,9 +133,10 @@ function installFakeEventSource(): { current: FakeEventSource | null; opened: nu
     }
   }
   (globalThis as any).EventSource = FakeEventSource;
-  return ref as { current: FakeEventSource | null; opened: number };
+  return ref;
 }
 type FakeEventSource = {
+  url: string;
   emit: (kind: string, payload: unknown, lastEventId?: string) => void;
   fail: () => void;
   onerror: (() => void) | null;
@@ -285,6 +298,95 @@ describe('chat store — live room stream', () => {
     // A placeholder bound to the task, and its stream started.
     expect(msgs.some((m) => m.role === 'assistant' && m.taskId === 77)).toBe(true);
     expect(get(s.activeTaskId)).toBe(77);
+    s.teardown();
+  });
+
+  it('hydrates an active task from its durable events before another SSE frame arrives', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.getRoomMessages.mockResolvedValue({
+      messages: [
+        row(10, 't1', { role: 'user', text: 'long task', task_id: 77, status: 'running' }),
+        row(11, 't1', { role: 'assistant', text: '', task_id: 77, status: 'running' }),
+      ],
+      active_task: { id: 77, status: 'running' },
+      active_tasks: [{ id: 77, status: 'running' }],
+    });
+    api.getTaskEvents.mockResolvedValue({
+      events: [{ seq: 4, kind: 'progress_text', payload: { text: 'Reading the archive…' } }],
+    });
+
+    const s = await freshSession();
+    await s.init();
+    await Promise.resolve();
+
+    const active = get(s.messages).find((m) => m.role === 'assistant' && m.taskId === 77);
+    expect(active?.progress).toBe('Reading the archive…');
+    expect(api.getTaskEvents).toHaveBeenCalledWith(77, 0);
+    expect(es.opened).toBeGreaterThan(0);
+    s.teardown();
+  });
+
+  it('rehydrates missed task progress when EventSource reconnects', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.getRoomMessages.mockResolvedValue({
+      messages: [
+        row(10, 't1', { role: 'user', text: 'long task', task_id: 77, status: 'running' }),
+        row(11, 't1', { role: 'assistant', text: '', task_id: 77, status: 'running' }),
+      ],
+      active_task: { id: 77, status: 'running' },
+      active_tasks: [{ id: 77, status: 'running' }],
+    });
+    api.getTaskEvents.mockResolvedValueOnce({ events: [] }).mockResolvedValueOnce({
+      events: [{ seq: 5, kind: 'progress_text', payload: { text: 'Resumed progress' } }],
+    });
+
+    const s = await freshSession();
+    await s.init();
+    await Promise.resolve();
+    const taskStream = es.instances.find((instance) => instance.url === '/task-stream');
+    expect(taskStream?.onopen).toBeTypeOf('function');
+    taskStream!.readyState = 1;
+    taskStream?.onopen?.();
+    taskStream!.readyState = 0;
+    taskStream?.fail();
+    taskStream?.onopen?.();
+    await Promise.resolve();
+
+    const active = get(s.messages).find((m) => m.role === 'assistant' && m.taskId === 77);
+    expect(active?.progress).toBe('Resumed progress');
+    expect(taskStream?.closed).toBe(false);
+    expect(api.getTaskEvents).toHaveBeenLastCalledWith(77, 0);
+    s.teardown();
+  });
+
+  it('retries a failed active-task hydration without waiting for an SSE frame', async () => {
+    vi.useFakeTimers();
+    installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.getRoomMessages.mockResolvedValue({
+      messages: [
+        row(10, 't1', { role: 'user', text: 'long task', task_id: 77, status: 'running' }),
+        row(11, 't1', { role: 'assistant', text: '', task_id: 77, status: 'running' }),
+      ],
+      active_task: { id: 77, status: 'running' },
+      active_tasks: [{ id: 77, status: 'running' }],
+    });
+    api.getTaskEvents.mockRejectedValueOnce(new Error('temporary')).mockResolvedValueOnce({
+      events: [{ seq: 3, kind: 'progress_text', payload: { text: 'Recovered snapshot' } }],
+    });
+
+    const s = await freshSession();
+    await s.init();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    const active = get(s.messages).find((m) => m.role === 'assistant' && m.taskId === 77);
+    expect(active?.progress).toBe('Recovered snapshot');
+    expect(api.getTaskEvents).toHaveBeenCalledTimes(2);
     s.teardown();
   });
 

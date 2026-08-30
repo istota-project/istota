@@ -243,6 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop now interrupts a Native-brain task even when the model endpoint has not produced another token. Both the web chat Stop button and `!stop` already recorded the request, but the Native loop only read it between streamed model events, so a slow or stalled endpoint could leave the task running indefinitely. Returning to a room also restores the active task's existing progress at once, from its stored event log, instead of showing an empty reply until the next event arrives.
+
 - The admin dashboard now reports a primary brain that is running through its fallback as degraded on a server install. The scheduler and web interface are separate services there, so the web process could not see the scheduler's in-memory cooldown and said Healthy after Claude Code hit a usage limit. The scheduler now publishes that state for the web process until the cooldown ends or a successful primary probe clears it.
 
 - Logging a measurement by hand in Health works again. Save did nothing at all — no error, no spinner, nothing written — because the form checked the typed value as though it were text while the number field had already turned it into a number, and the check fell over before anything could report it. It was every measurement rather than only weight: one form serves all of them.

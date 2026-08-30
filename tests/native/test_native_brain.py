@@ -2,9 +2,14 @@
 
 import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
+
+from istota import db
 from istota.brain import BrainRequest, make_brain
 from istota.brain._events import TextEvent
 from istota.brain.native import NativeBrain
@@ -111,6 +116,7 @@ class TestTextCompletion:
         assert result.success is True
         assert "The answer is fo" in result.result_text
         assert "truncated" in result.result_text.lower()
+
 
     def test_content_filter_marker(self, tmp_path):
         provider = MockProvider(
@@ -642,6 +648,103 @@ class TestErrorAndStops:
         result = _brain(provider).execute(req)
         assert result.success is True
         assert result.result_text == "done"
+
+
+class TestLiveCancellation:
+    class _BlockedProvider:
+        """A provider waiting for its first byte, as a slow HTTP stream does."""
+
+        def __init__(self):
+            self.started = threading.Event()
+            self._loop = None
+            self._release = None
+
+        async def stream(self, *args, **kwargs):
+            self._loop = asyncio.get_running_loop()
+            self._release = asyncio.Event()
+            self.started.set()
+            await self._release.wait()
+            if False:
+                yield StreamStart()
+
+        def release(self):
+            if self._loop is not None and self._release is not None:
+                self._loop.call_soon_threadsafe(self._release.set)
+
+    def test_cancel_interrupts_provider_wait_before_first_event(self, tmp_path):
+        provider = self._BlockedProvider()
+        cancelled = threading.Event()
+        req = _req("wait forever", tmp_path)
+        req.cancel_check = cancelled.is_set
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_brain(provider).execute, req)
+            assert provider.started.wait(timeout=1)
+            cancelled.set()
+            try:
+                result = future.result(timeout=2)
+            except FutureTimeoutError:
+                provider.release()
+                future.result(timeout=1)
+                raise
+
+        assert result.stop_reason == "cancelled"
+        assert result.result_text == "Cancelled by user"
+
+    @pytest.mark.parametrize("control", ["command", "web"])
+    def test_chat_cancel_controls_interrupt_native_provider_wait(
+        self, control, make_config, monkeypatch, tmp_path,
+    ):
+        from istota.commands import CommandContext, cmd_stop
+
+        config = make_config()
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn,
+                prompt="wait forever",
+                user_id="alice",
+                source_type="web" if control == "web" else "talk",
+                conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "running")
+
+        provider = self._BlockedProvider()
+        req = _req("wait forever", tmp_path)
+
+        def cancelled():
+            with db.get_db(config.db_path) as conn:
+                return db.is_task_cancelled(conn, task_id)
+
+        req.cancel_check = cancelled
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_brain(provider).execute, req)
+            assert provider.started.wait(timeout=1)
+
+            if control == "command":
+                with db.get_db(config.db_path) as conn:
+                    asyncio.run(cmd_stop(CommandContext(
+                        config=config,
+                        conn=conn,
+                        user_id="alice",
+                        conversation_token="room1",
+                        args="",
+                    )))
+            else:
+                import istota.web_app as web_app
+
+                monkeypatch.setattr(web_app, "_config", config)
+                web_app._chat_cancel_task(task_id)
+
+            try:
+                result = future.result(timeout=2)
+            except FutureTimeoutError:
+                provider.release()
+                future.result(timeout=1)
+                raise
+
+        assert result.stop_reason == "cancelled"
+        assert result.result_text == "Cancelled by user"
 
 
 class TestProgressStreaming:
