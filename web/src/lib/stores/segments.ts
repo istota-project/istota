@@ -261,6 +261,33 @@ export interface ChatMessage {
   sendPayload?: SendPayload;
 }
 
+// ---- Client-only rows -------------------------------------------------------
+//
+// The two rows the server has no copy of. Here rather than inside the chat
+// session because the transcript renders them too (ISSUE-351): the store keeps
+// them at the tail, and the page has to know not to date them.
+
+/** Client-only without ambiguity: a server row always carries a `msgId`. */
+export const isStranded = (m: ChatMessage) => m.sendState === 'failed' && m.msgId === undefined;
+
+/** A message typed into a busy room: written, committed to, never POSTed. */
+export const isQueued = (m: ChatMessage) => m.sendState === 'queued';
+
+/**
+ * A row the server has no copy of, and so one a rebuild has to carry rather
+ * than drop.
+ *
+ * These are pending actions rather than events in the history — they carry
+ * Send / Edit / Remove or a Retry, and they belong against the composer. The
+ * store keeps them at the tail of the transcript for that reason, which is
+ * also why they are not part of its chronology: a queued row is stamped when
+ * it was typed and a restored one keeps that stamp for up to a week, so
+ * anything reading `createdAt` off consecutive rows has to skip them or it
+ * reports a day boundary at the bottom of a transcript that is otherwise
+ * today's.
+ */
+export const isClientOnly = (m: ChatMessage) => isStranded(m) || isQueued(m);
+
 // ---- Helpers ----------------------------------------------------------------
 
 let _textSegSeq = 0;
