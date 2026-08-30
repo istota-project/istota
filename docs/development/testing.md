@@ -43,7 +43,7 @@ scripts/qt --full              # the whole suite, refreshing testmon's data
 scripts/qt tests/test_db.py    # scoped, still incrementally
 ```
 
-The full suite is ~16,700 tests in ~110s, and it is **throughput-bound across every core** — roughly 740s of CPU over 110s of wall, with no long pole (the slowest single test is 5s). Measured consequences: xdist's `worksteal`, `loadfile` and `loadscope` are all *slower* than the default `load`; gating the twenty slowest infrastructure files removes 1,179 tests and 4% of the wall time; and making individual tests cheaper backfires if it trades CPU for I/O. There is no version of "make the suite faster" that pays. The only lever is running fewer tests.
+The full suite is ~17,350 tests in ~125s (2026-08-30; it was ~16,700 in ~110s when the profiling below was done, so read these as the shape rather than as thresholds), and it is **throughput-bound across every core** — roughly 740s of CPU over 110s of wall at that measurement, with no long pole (the slowest single test is 5s). Measured consequences: xdist's `worksteal`, `loadfile` and `loadscope` are all *slower* than the default `load`; gating the twenty slowest infrastructure files removes 1,179 tests and 4% of the wall time; and making individual tests cheaper backfires if it trades CPU for I/O. There is no version of "make the suite faster" that pays. The only lever is running fewer tests.
 
 `scripts/qt` is that lever. pytest-testmon records which tests executed which source lines, so an ordinary Python change reruns a handful of tests in under a second, and a change that affects nothing exits immediately.
 

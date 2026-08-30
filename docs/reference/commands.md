@@ -32,6 +32,17 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!drafts` | List outbound mail held for your approval, with ids |
 | `!drafts send ID` | Release one held draft (id optional when exactly one is waiting) |
 | `!drafts discard ID` | Bin one held draft |
+| `!confirm [#ID] [no\|trust]` | Answer a task parked in `pending_confirmation` — approve it, discard it with `no`, or approve and trust the sender with `trust` (hidden aliases: `!yes`, `!y`, `!approve`, `!no`, `!n`, `!decline`, `!reject`) |
+
+## Answering a held task
+
+A task held for your approval — inbound mail from an unknown sender, or a question the model asked mid-run — is answered with `!confirm`, from any surface. It replaced a Talk-only path where a plain "yes" was intercepted before task creation: typing "yes" in web chat just started a new task, so a gated email was unanswerable there.
+
+`!yes` / `!no` and the rest are aliases on the same handler, so a decline is not a different command to learn. The verb can come from either half: `!no 41` and `!confirm 41 no` are the same thing.
+
+A bare `!confirm` acts only when **exactly one** question is open. With several it lists them and does nothing — the held task is untrusted inbound mail, and approving the wrong one is the misfire the gate exists to prevent. A contradiction is refused rather than resolved: `!no 41 trust` says two different things and gets an explanation, not an approval.
+
+The same items appear behind the [notification bell](../features/notifications.md) in the web UI, and answering in one place closes them everywhere.
 
 ## Steering a running task
 

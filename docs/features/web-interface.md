@@ -202,6 +202,7 @@ A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, an
 | `/istota/api/notifications` | The panel's rendered rows plus `total_open`; `?filter=` and `?limit=` |
 | `/istota/api/notifications/{id}/dismiss` | Close one row. Another user's row is a 404, never a 403 |
 | `/istota/api/notifications/seen` | Mark rendered rows seen. The body carries `(id, updated_at)` pairs, so a row bumped between the fetch and the POST is stamped but not closed |
+| `/istota/api/map/basemap` | The resolved map tile spec for this user — style URLs and attribution, never a bare key. Reads the same resolver as doctor's `web.basemap` check, so the check cannot pass while the map is blank. See [`[web.map]`](../configuration/reference.md#webmap) |
 
 The SvelteKit build is served as static files for all other `/istota/*` paths.
 

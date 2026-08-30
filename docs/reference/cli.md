@@ -89,6 +89,11 @@ briefing-source `path`, with no convention-default filename).
 `istota briefings` is the unified tree. Schedule and delivery are framework-owned (`briefing_configs`); content (blocks and their sources) lives in the per-user briefings module DB.
 
 ```bash
+# Every briefing name this user actually has, with block counts and the
+# latest archived generation. The set is the effective one -- config defaults
+# and disabled rows applied, plus block-backed names with no schedule.
+istota briefings list -u USER
+
 # Schedule + delivery
 istota briefings schedule ensure -u USER --name NAME --cron CRON [--title TITLE] [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--disabled]
 istota briefings schedule list   -u USER

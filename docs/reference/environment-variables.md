@@ -18,6 +18,12 @@ Set for every task:
 | `ISTOTA_BOT_DIR_NAME` | `config.bot_dir_name` — the per-user bot directory (`Users/<user>/<bot_dir_name>/`) skills write into |
 | `ISTOTA_CONFIG_PATH` | Config file path (propagated to subprocess children so module-skill jobs find the config) |
 | `ISTOTA_EXPERIMENTAL_FEATURES` | CSV of enabled experimental features (`config.experimental.features`). Injected by every subprocess builder so `@requires_feature`-gated CLI subcommands and gated skills see the same gate as the LLM path |
+| `SHELLOPTS` | Fixed to `pipefail` (`shell_exec.pipefail_env`), applied last by `build_clean_env`. Bash imports it at startup, so every bash below a task has the option on — including the ones istota never sees, which is the point: a `claude_code` or `tmux_claude` task runs its commands through the Claude Code CLI's own Bash tool (`bash -c 'source <snapshot> && eval <cmd>'`), a process istota launches but does not instrument, and that shell started with `pipefail` off and reported a pipeline's *last* stage (ISSUE-321). `SHELLOPTS` rather than `BASH_ENV` because it names shell *options* and cannot name a file to source, so it opens no exec inlet — `pipefail:$(touch /tmp/x)` is rejected as an invalid option name rather than evaluated. Being inherited rather than a flag, it also reaches a pipeline inside a nested `bash script.sh`, which `-o pipefail` does not; it reaches nothing that is not bash. `BASH_ENV`, `SHELLOPTS` and `BASHOPTS` are stripped from the inherited environment by **both** env builders first, so no value from outside survives to be trusted |
+
+Two variables belong to the daemon's own environment (`build_stripped_env`) rather than to a task, so they are not in the table above:
+
+- `PRECOMMIT_SCANS_REQUIRED=1` on cron `command` jobs and heartbeat shell commands, so the pre-commit scans refuse rather than warn where they cannot run. A model task is recognised as unattended by `ISTOTA_SANDBOXED` / `DEVELOPER_REPOS_DIR` instead, and those are built per task. See [secret scanning](../development/secret-scanning.md).
+- No `SHELLOPTS`. Those two paths take `pipefail` from `shell_exec.shell_argv`'s `bash -o pipefail -c` instead — flag depth only, deliberately, because the commands there are operator-authored rather than model-authored.
 
 ## Nextcloud
 
@@ -105,6 +111,29 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth |
 | `GH_HOST`, `GITLAB_HOST` | Written by the forge wrapper into the real CLI's environment, derived from the two URLs |
 | `ISTOTA_PATH_PREPEND` | Internal. The task's `{user_temp_dir}/.developer` directory, which holds the `gh` / `glab` wrappers, plus `.developer/exec-shims` where development work runs in the devbox (`[developer] enabled`, `[developer] repos_dir` and `[devbox] enabled` all set); the executor folds them onto `PATH` and strips the variable before the model sees it |
+
+## Package caches
+
+Set only where the filesystem sandbox is really in force, and only when a cache root resolves for the task's user — with `[developer] enabled` and a `repos_dir` that is `{repos_dir}/{user_id}/.package-caches`, derived rather than configured; otherwise `{sandbox_cache_dir}/{user_id}`. Without them a task's downloads land on bubblewrap's root tmpfs, which is RAM (ISSUE-305). What is left behind is bounded by `sandbox_cache_sweep_interval` and `sandbox_cache_max_gb`.
+
+| Variable | Source |
+|---|---|
+| `UV_CACHE_DIR` | `{cache root}/uv` |
+| `npm_config_cache` | `{cache root}/npm` — npm on Linux uses `~/.npm` and ignores XDG, so `XDG_CACHE_HOME` alone would leave it in RAM |
+| `XDG_CACHE_HOME` | The cache root itself, so a third tool's cache lands there too. It counts against the budget while neither sweep verb can touch it |
+| `HF_HOME` | Pinned back to `$HOME/.cache/huggingface`, *not* moved with XDG. It defaults to `$XDG_CACHE_HOME/huggingface`, so moving XDG would orphan the read-only pre-warmed model bind and every task would re-download it |
+
+## Devbox
+
+Set when `[devbox] enabled`. The exec socket directory is bound into a sandbox only when `developer` is in the task's authorized skills.
+
+| Variable | Source |
+|---|---|
+| `ISTOTA_DEVBOX_CONTAINER` | `{devbox.container_prefix}{user_id}` |
+| `ISTOTA_DEVBOX_DOCKER_CLI` | `config.devbox.docker_cli` |
+| `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` | `config.devbox.max_output_bytes` |
+
+There is deliberately **no** `ISTOTA_DEVBOX_EXEC_TIMEOUT`: the transport imposes no timeout, the task's own budget governs, and a caller wanting a kill passes `--timeout`. The exec protocol carries no `env` field either — a task's environment is never forwarded into the container, whose caches are set on the container itself.
 
 ## Credential proxy
 

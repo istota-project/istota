@@ -87,7 +87,8 @@ uv run istota repl                                    # Interactive REPL
 uv run istota chat backfill-history                   # Web chat room maintenance
 uv run istota email list|poll|test                    # Email commands
 uv run istota user ensure|list|show|lookup|remove     # User management
-uv run istota briefing ensure|list|remove             # Per-user briefings
+uv run istota briefings schedule|blocks|sources|shared|archive   # Briefings
+uv run istota doctor [--only NAME]                    # Runtime self-check
 uv run istota secret ensure|list|remove               # Encrypted credential store
 uv run istota calendar discover|test                  # Calendar commands
 uv run istota nextcloud ...                           # Nextcloud helpers
@@ -106,6 +107,10 @@ uv run istota show <task-id>                          # Task details
 src/istota/          # Python package
 config/              # Configuration files
 tests/               # pytest test suite
+testbed/             # Staging environment for the deployment tiers -- compose
+                     #   shapes, service stubs, DB probe. Its own pyproject.toml,
+                     #   beside src/ rather than inside tests/ because it is not
+                     #   part of the shipped application
 web/                 # SvelteKit frontend
 deploy/              # Ansible role + install script
 docker/              # Docker Compose stack
@@ -113,6 +118,8 @@ scripts/             # Setup and runner scripts
 schema.sql           # Database schema
 pyproject.toml       # Project metadata and dependencies
 ```
+
+Which tests to run, and when, is [testing](testing.md). The short version: `scripts/qt` while iterating (only the tests your change affects), `scripts/qtest uv run pytest` once before the commit.
 
 ## External tooling
 
