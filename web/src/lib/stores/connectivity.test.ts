@@ -229,6 +229,45 @@ describe('the probe backoff', () => {
     expect(get(store.online)).toBe(true);
   });
 
+  it('does not spend a backoff step per trigger that lands during one probe', async () => {
+    // Each trigger used to join the running probe and then re-arm on its own
+    // when that probe failed, so three triggers took three steps off the
+    // schedule for one attempt: the next probe was 40s out rather than 10s.
+    // A phone waking in and out of signal produces exactly that overlap.
+    let reject: (e: unknown) => void = () => {};
+    api.getChatConfig.mockReturnValue(new Promise((_resolve, r) => (reject = r)));
+    stop = store.startConnectivity();
+    store.noteTransport(false, 'unreachable');
+
+    await vi.advanceTimersByTimeAsync(store.PROBE_BACKOFF_MS[0]);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event('online'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    reject(new Error('unreachable'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(1);
+
+    api.getChatConfig.mockRejectedValue(new Error('unreachable'));
+    await vi.advanceTimersByTimeAsync(store.PROBE_BACKOFF_MS[1] - 1);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(2);
+  });
+
+  it('arms the schedule when it is started while already offline', async () => {
+    // The banner is up before the listeners are installed on any path that
+    // tears the store down and starts it again. Without a schedule armed here,
+    // nothing but a user-driven request could clear it.
+    api.getChatConfig.mockRejectedValue(new Error('unreachable'));
+    store.noteTransport(false, 'unreachable');
+    expect(get(store.online)).toBe(false);
+
+    stop = store.startConnectivity();
+    await vi.advanceTimersByTimeAsync(store.PROBE_BACKOFF_MS[0]);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(1);
+  });
+
   it('does not probe before it is started', async () => {
     store.noteTransport(false, 'unreachable');
     await vi.advanceTimersByTimeAsync(10 * 60_000);
@@ -256,6 +295,31 @@ describe('teardown', () => {
 
     store.noteTransport(true);
     window.dispatchEvent(new Event('offline'));
+    expect(get(store.online)).toBe(true);
+  });
+
+  it('lets a restart probe again rather than waiting on the stopped run', async () => {
+    // A probe on the wire at teardown cannot be recalled, so the restart must
+    // not be handed its promise — it would stand in for the probe the new
+    // session needs and never re-arm anything.
+    let release: (v: unknown) => void = () => {};
+    api.getChatConfig.mockReturnValue(new Promise((resolve) => (release = resolve)));
+    const teardown = store.startConnectivity();
+    store.noteTransport(false, 'unreachable');
+    await vi.advanceTimersByTimeAsync(store.PROBE_BACKOFF_MS[0]);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(1);
+
+    teardown();
+    api.getChatConfig.mockResolvedValue({});
+    stop = store.startConnectivity();
+    await vi.advanceTimersByTimeAsync(store.PROBE_BACKOFF_MS[0]);
+    expect(api.getChatConfig).toHaveBeenCalledTimes(2);
+    expect(get(store.online)).toBe(true);
+
+    // The abandoned probe settling afterwards must not take the live one's
+    // slot with it.
+    release({});
+    await vi.advanceTimersByTimeAsync(0);
     expect(get(store.online)).toBe(true);
   });
 });

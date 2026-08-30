@@ -15,14 +15,29 @@
  *    completion, so ordinary use of the app keeps this current for free.
  * 2. **The probe** — the same fact, asked for deliberately, on a backoff while
  *    the store believes it is offline. `getChatConfig` because it is small,
- *    already exists, and is authenticated, so a captive portal answering
- *    everything with its own login page fails it where a `HEAD /favicon` would
- *    not.
+ *    already exists, and goes to our own https origin, which nothing between
+ *    the phone and the server can answer for: an interface that is up behind a
+ *    captive portal fails it, where a request something else may answer would
+ *    pass.
  * 3. **`navigator.onLine`**, which is a hint and is trusted in one direction
  *    only. In a WKWebView it is `CPNetworkObserver`'s interface reachability:
  *    `false` means there is no interface, so there is certainly no server, and
  *    is worth acting on at once; `true` routinely means a portal, so it buys a
  *    probe and nothing more.
+ *
+ * The spec this comes from lists the room stream as its second input, on the
+ * grounds that `roomStreamLive` already flips on the stream's `onopen` and off
+ * on its error path. It is **deliberately not wired here**: the error path is
+ * not conclusive (a stream also ends because no room is open, or because the
+ * server closed it), so only its `onopen` would be usable, and that is a
+ * `chat.ts` change belonging to the stage that touches the drain. The two
+ * inputs above already cover everything it would report.
+ *
+ * A report is about the moment a request ended, and nothing here is stamped:
+ * a send bounded at 30s can report a gap that closed while it was stalling,
+ * so the banner can come back up for one backoff step after the connection
+ * has actually returned. Left alone deliberately — the probe corrects it
+ * within 5s, and the alternative is a generation on every call site.
  *
  * Nothing here reports to the user. The banner reads `online`; a connectivity
  * state is not an event, so it never goes through `notify()`.
@@ -82,9 +97,13 @@ function cancelSchedule(): void {
  * kept a timer alive after teardown would go on waking a torn-down page. Going
  * offline without a running loop is still recorded — the store is a fact, and
  * the next request to succeed clears it.
+ *
+ * Only while offline, too. A request can succeed between a probe reading the
+ * store and its caller resuming, and a schedule armed against an online store
+ * would spend a request finding out what it already knew.
  */
 function armProbe(): void {
-  if (!listening) return;
+  if (!listening || get(state)) return;
   cancelSchedule();
   const delay = PROBE_BACKOFF_MS[Math.min(backoffStep, PROBE_BACKOFF_MS.length - 1)];
   backoffStep += 1;
@@ -101,9 +120,18 @@ async function probeAndRearm(): Promise<void> {
   if (!ok) armProbe();
 }
 
-/** Probe now rather than at the scheduled time, if there is anything to resolve. */
+/**
+ * Probe now rather than at the scheduled time, if there is anything to resolve.
+ *
+ * A probe already running is that answer arriving, so the trigger is spent
+ * rather than joined. Joining looks harmless — `probe()` hands back the same
+ * promise — but every joiner also re-arms when it fails, and each re-arm takes
+ * a step off the backoff, so two triggers landing during one probe pushed the
+ * schedule to 20s after a single failure. A phone waking in and out of signal
+ * produces exactly that overlap.
+ */
 function probeNow(): void {
-  if (get(state)) return;
+  if (get(state) || inFlight !== null) return;
   cancelSchedule();
   void probeAndRearm();
 }
@@ -156,10 +184,16 @@ export function noteTransport(ok: boolean, failure?: SendFailure): void {
  * `noteTransport`.
  */
 export function probe(): Promise<boolean> {
-  inFlight ??= runProbe().finally(() => {
-    inFlight = null;
+  if (inFlight !== null) return inFlight;
+  // Clears the slot only if it still holds this probe. A teardown drops the
+  // slot without being able to recall the request, so an unconditional clear
+  // here would let a probe from the previous session cancel the current one's
+  // claim and let a second run in parallel with it.
+  const mine: Promise<boolean> = runProbe().finally(() => {
+    if (inFlight === mine) inFlight = null;
   });
-  return inFlight;
+  inFlight = mine;
+  return mine;
 }
 
 async function runProbe(): Promise<boolean> {
@@ -170,7 +204,9 @@ async function runProbe(): Promise<boolean> {
     noteTransport(true);
   } catch {
     // Already reported by `apiFetch`, which is the only thing that can tell a
-    // gap from a server saying no.
+    // gap from a server saying no. Reading the store back rather than assuming
+    // the worst is what makes a 500 — or a config endpoint that has since
+    // changed shape — a reachable server rather than an outage.
   }
   return get(state);
 }
@@ -185,7 +221,10 @@ async function runProbe(): Promise<boolean> {
  */
 export function startConnectivity(): () => void {
   if (typeof window === 'undefined') return () => {};
-  if (listening) return stopConnectivity;
+  // A second caller gets a teardown that stops nothing: it installed nothing,
+  // and handing it the real one would let its unmount switch connectivity off
+  // under whoever is still using it.
+  if (listening) return () => {};
   listening = true;
 
   offlineHandler = () => setOnline(false);
@@ -204,6 +243,13 @@ export function startConnectivity(): () => void {
   // exists for — has no event coming to tell it so.
   if (typeof navigator !== 'undefined' && navigator.onLine === false) setOnline(false);
 
+  // Starting while already offline arms nothing above: `setOnline` returns
+  // early on an unchanged value, and `armProbe` refuses before `listening`.
+  // Without this the invariant "listening and offline implies a schedule"
+  // holds only by the order the layout happens to run in, and a restart while
+  // offline would sit with the banner up and nothing on its way to clear it.
+  if (!get(state)) armProbe();
+
   return stopConnectivity;
 }
 
@@ -211,6 +257,10 @@ function stopConnectivity(): void {
   listening = false;
   cancelSchedule();
   backoffStep = 0;
+  // A probe on the wire cannot be recalled, but the next session must not be
+  // handed its promise — it would resolve against the state of a torn-down
+  // page and stand in for the probe that session needed.
+  inFlight = null;
   if (offlineHandler) window.removeEventListener('offline', offlineHandler);
   if (onlineHandler) window.removeEventListener('online', onlineHandler);
   if (visibilityHandler && typeof document !== 'undefined') {

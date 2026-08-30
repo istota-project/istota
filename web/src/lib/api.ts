@@ -49,10 +49,26 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
     }
     // Whatever it says, something answered. A 401 or a 500 is a server, and
     // the connectivity store's whole job is to keep that apart from silence.
+    // Reported before the status branches, since a status is an answer.
     noteTransport(true);
     if (resp.status === 401) throw new AuthError();
     if (!resp.ok) throw new Error(`API error: ${resp.status}`);
-    return resp.json();
+    try {
+      // **Awaited**, so the read happens inside this `try` and ahead of the
+      // `finally` below. `return resp.json()` cleared the timer on the headers
+      // alone and left the body unbounded — a proxy that flushes headers and
+      // then stalls is the same hang the bound exists for, which is what
+      // `sendChatMessage` has always said about its own body read. It also
+      // reported that stall to the connectivity store as a reachable server,
+      // which is worse than saying nothing: the probe rides on this call, so a
+      // half-delivered answer would have cleared the offline banner.
+      return await resp.json();
+    } catch (e) {
+      // Only our own abort. A body that is not JSON is an error page, which
+      // the status already described, and says nothing about the connection.
+      if (timedOut) noteTransport(false, 'timeout');
+      throw e;
+    }
   } finally {
     if (timer) clearTimeout(timer);
   }

@@ -76,12 +76,42 @@ describe('apiFetch', () => {
     expect(get(connectivity.online)).toBe(false);
   });
 
-  it('reports a gap when its own timeout fires', async () => {
+  it('reports a gap when nothing answers inside its own timeout', async () => {
     fetchMock.mockImplementation(
       (_url: string, init: RequestInit) =>
         new Promise((_resolve, reject) => {
           init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted')));
         }),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const pending = api.getChatRooms(5_000);
+      const settled = expect(pending).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(get(connectivity.online)).toBe(false);
+  });
+
+  it('reports a gap when the headers arrive and the body then stalls', async () => {
+    // The half-delivered answer, and the one that used to pass for a reachable
+    // server: a proxy flushes the headers and holds the socket. The store must
+    // not clear the banner on that, because the probe rides on this call — a
+    // stall answering as "reachable" would take the banner down and cancel the
+    // schedule that was going to correct it.
+    fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted')));
+          }),
+      } as unknown as Response),
     );
 
     vi.useFakeTimers();
@@ -167,10 +197,9 @@ describe('the probe', () => {
   });
 
   it('comes back online for a server that answers with an error', async () => {
-    // A captive portal is the case this is aimed at from the other side: the
-    // portal answers, but not with our config, so the request fails on status
-    // and the store still learns that *something* is there. A 500 from our own
-    // server is the same shape and is likewise not a connectivity fault.
+    // A 500, or a config endpoint that has since changed shape: the request
+    // fails, and the store still learns the one thing it asked about, which is
+    // that the server is there. Its own error is not a connectivity fault.
     connectivity.noteTransport(false, 'unreachable');
     fetchMock.mockResolvedValue(jsonResponse(500));
 
