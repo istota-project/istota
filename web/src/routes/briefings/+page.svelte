@@ -2,7 +2,11 @@
   import { base } from '$app/paths';
   import { renderMarkdown } from '$lib/markdown';
   import { getBriefingArchiveItem, type BriefingArchiveItem } from '$lib/api';
-  import { selectedBriefingId, briefingArchiveCount } from '$lib/stores/briefings';
+  import {
+    selectedBriefingId,
+    briefingArchiveCount,
+    briefingArchiveError,
+  } from '$lib/stores/briefings';
 
   let current = $state<BriefingArchiveItem | null>(null);
   let loading = $state(false);
@@ -52,7 +56,7 @@
 
 <div class="reader">
   {#if error}
-    <p class="status error">{error}</p>
+    <p class="center-msg error">{error}</p>
   {:else if current}
     <article class="briefing">
       <header class="briefing-head">
@@ -74,6 +78,11 @@
     </article>
   {:else if loading || $briefingArchiveCount === null}
     <p class="center-msg">Loading…</p>
+  {:else if $briefingArchiveError}
+    <!-- Ahead of the empty state and behind everything else: a briefing already
+         on screen stays readable through a failed refresh, but an archive that
+         could not be fetched must not read as an archive with nothing in it. -->
+    <p class="center-msg error">{$briefingArchiveError}</p>
   {:else}
     <div class="empty-state">
       <h1>No briefings yet</h1>
@@ -92,9 +101,10 @@
 		   overflow *past* padding-bottom, losing the bottom gap at scroll-end.
 		   flex-grow keeps short content (and the empty state) filling the area. */
     flex: 1 0 auto;
-    /* A column so the loading state (`.center-msg`, the only child in that
-		   branch) can center itself in the pane with `flex: 1`. The article and
-		   the empty state keep their natural height at the top of the column. */
+    /* A column so the whole-pane states (`.center-msg`, the only child in the
+		   loading and error branches) can center themselves in the pane with
+		   `flex: 1`. The article and the empty state keep their natural height at
+		   the top of the column. */
     display: flex;
     flex-direction: column;
     padding: var(--space-6) var(--space-8);
@@ -170,15 +180,6 @@
     border: 1px solid var(--border-subtle);
     padding: var(--space-1) var(--space-2);
     text-align: left;
-  }
-
-  .status {
-    padding: var(--space-6) 0;
-    color: var(--text-dim);
-  }
-
-  .status.error {
-    color: var(--status-danger-fg);
   }
 
   .empty-state {

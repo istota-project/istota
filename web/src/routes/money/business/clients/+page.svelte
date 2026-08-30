@@ -179,9 +179,11 @@
     </div>
   {/if}
 
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left below. -->
-  {#if !loading}
+  <!-- Held back behind both whole-pane states, so the pane shows nothing but the
+       centered message rather than centering it in the space left below. On
+       error the count is also a lie: it reports 0 of something that failed to
+       load. -->
+  {#if !loading && !error}
     <div class="money-toolbar control-row">
       <span class="money-result-count">
         {clients.length}
@@ -194,7 +196,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if clients.length === 0}
     <div class="money-table-empty">No clients configured yet — add your first one.</div>
   {:else}

@@ -42,9 +42,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="settings">
-    <div class="banner error">{error}</div>
-  </div>
+  <div class="center-msg error">{error}</div>
 {:else if !moduleEnabled}
   <div class="settings">
     <div class="banner info">

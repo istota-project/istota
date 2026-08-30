@@ -242,7 +242,7 @@
   });
 </script>
 
-{#if !loading}
+{#if !loading && !error}
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
@@ -263,7 +263,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="banner error">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if encounter}
   {#if editing}
     <form class="form" onsubmit={save}>

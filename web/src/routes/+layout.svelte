@@ -363,7 +363,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="error-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if user}
   <nav class="app-nav">
     <a href="{base}/" class="app-name">

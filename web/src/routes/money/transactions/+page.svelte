@@ -234,7 +234,7 @@
 </script>
 
 <div class="txn-content">
-  {#if !loading}
+  {#if !loading && !error}
     <div class="money-toolbar control-row">
       <span class="money-result-count">{total.toLocaleString()} entries</span>
     </div>
@@ -243,7 +243,7 @@
   {#if loading && transactions.length === 0}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="error-msg">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if transactions.length === 0}
     <div class="empty">No transactions found.</div>
   {:else}

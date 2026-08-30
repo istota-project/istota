@@ -338,7 +338,7 @@
   {#if loading && !stats}
     <div class="center-msg">Loading…</div>
   {:else if error}
-    <div class="banner error">{error}</div>
+    <div class="center-msg error">{error}</div>
   {:else if stats}
     {#if stats.runtime?.mode === 'standalone'}
       <NoticeBanner

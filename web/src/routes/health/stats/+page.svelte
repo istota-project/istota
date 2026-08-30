@@ -368,9 +368,9 @@
   onMount(load);
 </script>
 
-{#if !loading}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
+{#if !loading && !error}
+  <!-- Held back behind both whole-pane states, so the pane shows nothing but
+       the centered message rather than centering it in the space left under
        this header. -->
   <div class="bar">
     <div class="ranges">
@@ -387,7 +387,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="banner error">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}
   <div class="empty">
     No measurements yet.

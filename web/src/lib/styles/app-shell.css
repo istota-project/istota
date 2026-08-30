@@ -170,7 +170,15 @@ body:has(.app-content-fill) {
    `.error-msg` is the older, top-aligned pair of `.loading`; both survive for
    in-card status lines that are not a pane state (an inline "Generating…", a
    banner above a still-rendered layout). Reach for `.center-msg` for anything
-   that is the only thing on screen. */
+   that is the only thing on screen.
+
+   A load failure that replaces the whole pane is `.center-msg error`, never
+   `.error-msg` and never `.banner error` — the test for it is whether the
+   branch is the exclusive twin of the `.center-msg` loading state in the same
+   `{#if}` chain. It drifted three ways before anything checked: money read
+   0.85rem and top-aligned, health and admin read as a tinted full-width strip
+   at the top of the pane, and only feeds and location centered. The invariant
+   is held by `scripts/pane-error-state.test.ts`. */
 .center-msg {
   flex: 1;
   min-height: 8rem;
