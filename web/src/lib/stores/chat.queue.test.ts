@@ -331,6 +331,50 @@ describe('chat store — the send queue', () => {
       expect(queued[0].queueHeld).toBe(true);
     });
 
+    it('holds the rest of the queue when a drained send cites a message that is gone', async () => {
+      const s = await streaming();
+      await s.send('first');
+      await s.send('second');
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 409,
+        failure: 'reply_target_gone',
+      });
+
+      await emit('done');
+
+      // `returnSend` takes the row off the transcript and hands the text back
+      // to the composer, so only the second is left — and it is held.
+      const queued = queuedRows(get(s.messages));
+      expect(queued.map((m) => m.text)).toEqual(['second']);
+      expect(queued[0].queueHeld).toBe(true);
+      expect(get(s.sendReturned).text).toBe('first');
+    });
+
+    it('does not hold the queue when an inline command fails', async () => {
+      // A failed `!status` says nothing about the turn the queued messages
+      // were written against, and holding there would strand them: the turn's
+      // own `done` no longer drains a held queue.
+      const s = await streaming();
+      await s.send('and another thing');
+      api.sendChatMessage.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
+
+      await s.send('!status');
+
+      const queued = queuedRows(get(s.messages));
+      expect(queued).toHaveLength(1);
+      expect(queued[0].queueHeld).toBeUndefined();
+      // And it still goes out when the turn it was written against ends well.
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+      await emit('done');
+      expect(api.sendChatMessage.mock.calls.at(-1)?.[1]).toBe('and another thing');
+    });
+
     it('does not drain a held queue when a later turn ends done', async () => {
       const s = await streaming();
       await s.send('and another thing');
@@ -421,6 +465,37 @@ describe('chat store — the send queue', () => {
       expect(api.sendChatMessage).not.toHaveBeenCalled();
     });
 
+    it('carries the citation back with an edited reply', async () => {
+      const s = await streaming();
+      await s.send('and another thing', [], { msgId: 7, role: 'assistant', excerpt: 'earlier' });
+      const cid = queuedRows(get(s.messages))[0].cid;
+
+      s.editQueued(cid);
+
+      const returned = get(s.sendReturned);
+      expect(returned.replyToMsgId).toBe(7);
+      expect(returned.replyTo?.msgId).toBe(7);
+    });
+
+    it('refuses to edit an entry belonging to a room that is not open', async () => {
+      // The page's restore returns early on a token mismatch, so taking the
+      // entry apart first would delete the only copy of the message.
+      const s = await streaming();
+      await s.send('and another thing');
+      const cid = queuedRows(get(s.messages))[0].cid;
+      await s.selectRoom(2);
+      const before = get(s.sendReturned).n;
+
+      s.editQueued(cid);
+
+      expect(get(s.sendReturned).n).toBe(before);
+      // Still there when the room comes back.
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 92 });
+      await s.selectRoom(1);
+      await flush();
+      expect(api.sendChatMessage.mock.calls.at(-1)?.[1]).toBe('and another thing');
+    });
+
     it('ignores a cid that names no queued message', async () => {
       const s = await streaming();
       await s.send('and another thing');
@@ -505,16 +580,172 @@ describe('chat store — the send queue', () => {
     it('withholds queued rows from the All view and gives them back after', async () => {
       const s = await streaming();
       await s.send('and another thing');
+      // Room 1 is still working on re-entry, so the row comes back as a row
+      // rather than draining — which is the property this test is about.
+      api.getRoomMessages.mockImplementation(async (roomId: number) =>
+        roomId === 1
+          ? {
+              messages: [],
+              active_task: { id: 42, status: 'running' },
+              active_tasks: [{ id: 42, status: 'running' }],
+            }
+          : { messages: [], active_task: null, active_tasks: [] },
+      );
 
       await s.selectView('all');
       expect(queuedRows(get(s.messages))).toHaveLength(0);
+      // Withheld, not discarded: the All view is the one rebuild that skips a
+      // queued row, so it has to leave it in the holding map on the way past.
+      expect(get(s.messages).some((m) => m.text === 'and another thing')).toBe(false);
 
       await s.selectRoom(1);
       await flush();
-      // The room is idle by now, so it drains rather than re-rendering as
-      // queued — either way the message came back rather than being lost.
-      const mine = get(s.messages).filter((m) => m.text === 'and another thing');
-      expect(mine).toHaveLength(1);
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      const queued = queuedRows(get(s.messages));
+      expect(queued.map((m) => m.text)).toEqual(['and another thing']);
+    });
+  });
+
+  describe('the drain conditions', () => {
+    it('waits for a second task already queued behind the settling one', async () => {
+      // Two live tasks in one room — a Talk turn adopted alongside our own, or
+      // two resumed from history. The room is still busy when the first ends.
+      const s = await freshSession();
+      api.getRoomMessages.mockResolvedValue({
+        messages: [],
+        active_task: { id: 70, status: 'running' },
+        active_tasks: [
+          { id: 70, status: 'running' },
+          { id: 71, status: 'running' },
+        ],
+      });
+      await s.init();
+      await s.selectRoom(1);
+      await flush();
+      expect(get(s.status)).toBe('streaming');
+      await s.send('and another thing');
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+
+      // Task 70 finishes; task 71 takes the room, so nothing may drain yet.
+      await emit('done');
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 72 });
+      await emit('done');
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('and another thing');
+    });
+
+    it('holds when the first of two live tasks is cancelled and the second ends done', async () => {
+      // The hold is decided before the stream queue advances, or the second
+      // turn's `done` would release a message written behind the abandoned one.
+      const s = await freshSession();
+      api.getRoomMessages.mockResolvedValue({
+        messages: [],
+        active_task: { id: 70, status: 'running' },
+        active_tasks: [
+          { id: 70, status: 'running' },
+          { id: 71, status: 'running' },
+        ],
+      });
+      await s.init();
+      await s.selectRoom(1);
+      await flush();
+      await s.send('and another thing');
+
+      await emit('cancelled');
+      await emit('done');
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      const queued = queuedRows(get(s.messages));
+      expect(queued).toHaveLength(1);
+      expect(queued[0].queueHeld).toBe(true);
+    });
+
+    it('waits while an inline command is still in flight, then drains', async () => {
+      // A command leaves its row 'sending' without claiming `status`, so the
+      // room reads idle while a second send would still be concurrent.
+      const s = await streaming();
+      await s.send('and another thing');
+      let releaseCommand: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValueOnce(
+        new Promise((r) => {
+          releaseCommand = r;
+        }),
+      );
+      const commandDone = s.send('!status');
+      await flush();
+
+      // The turn settles while the command is still open: no drain.
+      await emit('done');
+      expect(get(s.status)).toBe('idle');
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+
+      // The command settles and re-tests the conditions, so the queue is not
+      // stranded waiting for a room switch.
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+      releaseCommand({ ok: true, status: 200, task_id: null, inline_result: 'nothing running' });
+      await commandDone;
+      await flush();
+
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(2);
+      expect(api.sendChatMessage.mock.calls[1][1]).toBe('and another thing');
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+    });
+  });
+
+  describe('drain triggers other than a room switch', () => {
+    it('drains on a transcript rebuilt by init rather than by selectRoom', async () => {
+      // The session is a module singleton and `teardown` leaves the queue
+      // alone, so leaving /chat and coming back rebuilds the open room through
+      // `loadHistory` directly. `recoverStream` does the same after a stale
+      // reconnect — and that one halts the stream first, so the task's own
+      // `settle` can never fire. A drain hung on `selectRoom` reaches neither,
+      // and the entry has no trigger left at all.
+      const s = await streaming();
+      await s.send('and another thing');
+      // The turn finished while the tab was away, so the reload finds nothing
+      // running.
+      api.getRoomMessages.mockResolvedValue({
+        messages: [],
+        active_task: null,
+        active_tasks: [],
+      });
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 90 });
+
+      s.teardown();
+      await s.init();
+      await flush();
+
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('and another thing');
+    });
+
+    it('advances the queue when a drained send resolves inline with no task', async () => {
+      // The endpoint answers every `!word` inside the request; `send()` queues
+      // any it cannot find in its catalogue. Such a body drains, comes back
+      // with no task id, and so never produces a stream to settle.
+      const s = await streaming();
+      await s.send('!nope do the thing');
+      await s.send('and another thing');
+      api.sendChatMessage.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        task_id: null,
+        inline_result: 'Unknown command',
+      });
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 91 });
+
+      await emit('done');
+      await flush();
+
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(2);
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('!nope do the thing');
+      expect(api.sendChatMessage.mock.calls[1][1]).toBe('and another thing');
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
     });
   });
 
@@ -558,6 +789,38 @@ describe('chat store — the send queue', () => {
 
       expect(queuedRows(get(s.messages))).toHaveLength(0);
       expect(api.sendChatMessage).not.toHaveBeenCalled();
+    });
+
+    it('drops the queue on archive, so a token that comes back does not send it', async () => {
+      // `forgetRoom` is the one place a departed room's client-only rows go,
+      // so archive and a `remove` frame from another device cannot diverge
+      // from delete.
+      //
+      // Asserting the row is off screen would prove nothing: archiving the
+      // active room reselects a neighbour, which rebuilds the transcript
+      // anyway. The discriminating question is whether the *entry* survived,
+      // and the way to ask it is to bring the token back — which is the exact
+      // hazard `forgetRoom`'s own comment names.
+      const s = await streaming();
+      await s.send('and another thing');
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+      api.updateChatRoom.mockResolvedValue({ ...room(1), archived: true });
+
+      await s.archiveRoom(1);
+      await flush();
+      expect(get(s.activeRoomId)).toBe(2);
+
+      // Room 1 surfaces again — un-archived elsewhere, or a Talk room
+      // re-mirrored — and the refresh re-appends it.
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+      await vi.advanceTimersByTimeAsync(30000);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 80 });
+
+      await s.selectRoom(1);
+      await flush();
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
     });
 
     it('keeps the queue when the delete is refused', async () => {

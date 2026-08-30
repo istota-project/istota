@@ -228,6 +228,15 @@ export interface SendReturn {
   token: string | null;
   text: string;
   attachments: ChatAttachment[];
+  /**
+   * The citation the message carried, for a return that has one.
+   *
+   * Unset on the `reply_target_gone` path, whose whole premise is that the
+   * cited parent is gone. Set by `editQueued`, where the parent is fine and
+   * dropping it would quietly turn an edited reply into an ordinary message.
+   */
+  replyTo?: MessageReply;
+  replyToMsgId?: number;
 }
 
 export interface ChatSession {
@@ -622,22 +631,6 @@ function createSession(): ChatSession {
     return { token: found.token, entry };
   }
 
-  /**
-   * Drop a room's whole queue — entries, stashed rows and rendered rows.
-   *
-   * For a room that no longer exists. Deliberately not called on an archive:
-   * an archived room can come back, and the text in its queue was committed to
-   * by the user, so it is kept where a deleted room's cannot be.
-   */
-  function dropRoomQueue(token: string | null | undefined) {
-    if (!token) return;
-    sendQueue.delete(token);
-    const stashed = (strandedSends.get(token) ?? []).filter((m) => !isQueued(m));
-    if (stashed.length) strandedSends.set(token, stashed);
-    else strandedSends.delete(token);
-    messages.update((arr) => arr.filter((m) => !(isQueued(m) && m.roomToken === token)));
-  }
-
   // Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
   // text/thinking are flat; only a tool segment has a nested object to clone.
   const cloneSeg = (s: Segment): Segment =>
@@ -825,6 +818,19 @@ function createSession(): ChatSession {
   // Otherwise advance to the next queued task, or go idle.
   function onStreamSettled(paused: boolean, terminal: StreamTerminal) {
     activeStream = null;
+    const rid = get(activeRoomId);
+    // The send queue's one rule: a turn that finished normally releases the
+    // messages typed behind it, and anything else holds them. A paused turn
+    // holds for the sharper reason that the room is idle only because it is
+    // waiting on the user — firing past an unanswered question is the surprise
+    // the queue exists to avoid.
+    //
+    // Decided here, *above* the stream-queue advance, because a second task
+    // waiting its turn returns early below. A room can hold two live tasks (a
+    // Talk turn adopted by `pickUpStreamedTask`, or two resumed from history),
+    // and if this turn's Stop did not mark the entries, the *next* turn's
+    // `done` would release messages written behind a turn the user abandoned.
+    if (rid != null && (paused || terminal !== 'done')) holdRoomQueue(roomTokenOf(rid));
     if (!paused) {
       const next = streamQueue.shift();
       if (next) {
@@ -836,16 +842,9 @@ function createSession(): ChatSession {
     activeTaskId.set(null);
     // A turn finished in the open room — its reply is now on screen, so mark
     // the room read (visibility-gated) before the user switches away.
-    const rid = get(activeRoomId);
     if (rid == null) return;
     markActiveRead(rid);
-    // The send queue's one rule: a turn that finished normally releases the
-    // messages typed behind it, and anything else holds them. A paused turn
-    // holds for the sharper reason that the room is idle only because it is
-    // waiting on the user — firing past an unanswered question is the surprise
-    // the queue exists to avoid.
-    if (paused || terminal !== 'done') holdRoomQueue(roomTokenOf(rid));
-    else void drainSendQueue(rid);
+    if (!paused && terminal === 'done') void drainSendQueue(rid);
   }
 
   // Halt the active stream and drop the queue without advancing — for room
@@ -1850,6 +1849,20 @@ function createSession(): ChatSession {
       }
       enqueueStream(at.id, cid);
     }
+    // A room whose turn finished while the user was elsewhere sends its queue
+    // now. Here rather than in `selectRoom`, which is only one of three ways
+    // this transcript gets rebuilt: `init()` restores the last room by calling
+    // `loadHistory` directly, and `recoverStream` rebuilds it after a stale
+    // reconnect — and that one halts the active stream first, so its task's
+    // `settle` early-returns on `finished` and `onStreamSettled` never fires
+    // for it. A queued entry would have no trigger left at all in either case
+    // until the user switched rooms and came back.
+    //
+    // After the resume loop above, so `canDrain` sees whatever is still
+    // running rather than an empty room. Guarded on this being the room on
+    // screen, because a background load must send nothing. Not awaited — a
+    // transcript load must not wait on a POST.
+    if (roomId === get(activeRoomId)) void drainSendQueue(roomId);
   }
 
   // Load (or reload) the first page of an aggregate view into the transcript.
@@ -2136,12 +2149,6 @@ function createSession(): ChatSession {
     markRoomRead(id).catch(() => {
       /* non-fatal; refresh/poll will retry */
     });
-    // A room whose turn finished while the user was elsewhere sends its queue
-    // now: `loadHistory` has re-appended the queued rows and resumed whatever
-    // task was still running, so `canDrain` can see the room's real state.
-    // Not awaited, for the reason `markRoomRead` is not — a room switch must
-    // not wait on a POST.
-    void drainSendQueue(id);
   }
 
   async function newRoom(name: string) {
@@ -2182,6 +2189,12 @@ function createSession(): ChatSession {
   // that the user's next message un-hides, resurrect them under a token that
   // has come back.
   //
+  // That covers a queued message as well as a failed one, and it is the only
+  // place either is dropped, so the three callers (delete, archive, and a
+  // `remove` frame from another device) cannot diverge. A queue entry outlives
+  // its room in `$rooms` otherwise, which leaves it neither drainable nor
+  // droppable — and, if the token ever comes back, sends it.
+  //
   // Clearing the map is not enough on its own. The departed room's transcript
   // is still in `messages` at this point (`deleteRoom` reselects a neighbour,
   // and `selectRoom` clears `messages` only *after* `stopActive`), so the
@@ -2190,7 +2203,8 @@ function createSession(): ChatSession {
     const token = get(rooms).find((r) => r.id === id)?.token;
     if (!token) return;
     strandedSends.delete(token);
-    messages.update((arr) => arr.filter((m) => !(isStranded(m) && m.roomToken === token)));
+    sendQueue.delete(token);
+    messages.update((arr) => arr.filter((m) => !(isClientOnly(m) && m.roomToken === token)));
   }
 
   async function archiveRoom(id: number) {
@@ -2208,9 +2222,6 @@ function createSession(): ChatSession {
   }
 
   async function deleteRoom(id: number) {
-    // Read before the delete: the room has to still be in `$rooms` for its
-    // token to be resolvable, and a refused delete must keep the queue.
-    const token = roomTokenOf(id);
     try {
       await deleteChatRoom(id);
     } catch (e) {
@@ -2224,7 +2235,6 @@ function createSession(): ChatSession {
     // On success (or a 404 already-gone) drop it from the list, mirroring
     // archiveRoom's fall-through when the active room disappears.
     forgetRoom(id);
-    dropRoomQueue(token);
     rooms.update((r) => r.filter((x) => x.id !== id));
     if (get(activeRoomId) === id) {
       const remaining = get(rooms);
@@ -2420,9 +2430,15 @@ function createSession(): ChatSession {
     replyTo?: MessageReply,
   ) {
     const roomToken = roomTokenOf(roomId);
-    // The queue is keyed by token, so a room we cannot name has nowhere to
-    // file this. Refusing beats a row on screen with no entry behind it.
-    if (!roomToken) return;
+    // The queue is keyed by token, so a room that has left `$rooms` (deleted
+    // on another device, mid-frame) has nowhere to file this. The idle path
+    // would have POSTed it regardless — `runTurn` takes the id, not the token
+    // — so refusing here is a real loss and has to be reported rather than
+    // swallowed. A row on screen with no entry behind it would be worse.
+    if (!roomToken) {
+      notifyError('Couldn’t queue that message — the room is no longer available.');
+      return;
+    }
     const cid = nextCid();
     messages.update((a) => [
       ...a,
@@ -2570,6 +2586,13 @@ function createSession(): ChatSession {
    * which is exactly the guard this needs.
    */
   function editQueued(cid: number) {
+    // The destructive half runs first, and the page's restore returns early
+    // when the token is not the active room's — so without this the only copy
+    // of a background room's message would be deleted and nothing would put it
+    // back. `findQueued` scans every room's queue by cid, so the check has to
+    // be here rather than assumed from the caller.
+    const found = findQueued(cid);
+    if (!found || found.token !== roomTokenOf(get(activeRoomId) ?? -1)) return;
     const taken = takeQueued(cid);
     if (!taken) return;
     sendReturned.update((s) => ({
@@ -2577,6 +2600,11 @@ function createSession(): ChatSession {
       token: taken.token,
       text: taken.entry.text,
       attachments: taken.entry.attachments,
+      // Carried so an edited reply does not come back as an ordinary message
+      // and get re-sent without its parent. `returnSend` leaves both unset:
+      // its whole reason for existing is that the cited parent is gone.
+      replyTo: taken.entry.replyTo,
+      replyToMsgId: taken.entry.replyToMsgId,
     }));
   }
 
@@ -2593,6 +2621,12 @@ function createSession(): ChatSession {
     updateMsg(cid, (m) => {
       m.queueHeld = undefined;
     });
+    // The mirror of `holdRoomQueue`'s second loop: a row that is off screen
+    // lives in the holding map, and leaving it marked would bring it back
+    // rendering as held while its entry says otherwise.
+    for (const m of strandedSends.get(found.token) ?? []) {
+      if (m.cid === cid) m.queueHeld = undefined;
+    }
     const roomId = get(activeRoomId);
     if (roomId != null) await drainSendQueue(roomId);
   }
@@ -2730,10 +2764,17 @@ function createSession(): ChatSession {
     // row left with its room).
     if (settleStatus && get(activeRoomId) === roomId) status.set('idle');
     // Whatever was typed behind this send was written on the assumption that
-    // it would go out; it did not, so the rest of the queue holds. Unguarded
-    // by the room on purpose — the queue belongs to `roomId` whether or not
-    // that room is the one on screen.
-    holdRoomQueue(roomTokenOf(roomId));
+    // it would go out; it did not, so the rest of the queue holds. Not guarded
+    // by the *active* room — the queue belongs to `roomId` whether or not that
+    // room is the one on screen.
+    //
+    // `settleStatus` is what separates the two callers, and it is exactly the
+    // right line: it is false only for a `!command` failing alongside a
+    // running turn, whose failure says nothing about the turn the queued
+    // messages were written against. Holding there would mark every queued
+    // message on a failed `!status` and then strand them, since the turn's own
+    // `done` no longer drains a held queue.
+    if (settleStatus) holdRoomQueue(roomTokenOf(roomId));
   }
 
   /**
@@ -2921,7 +2962,16 @@ function createSession(): ChatSession {
       // about a room that may have a task streaming in it — unlocking the
       // composer and hiding its Stop. The append above already guards; this
       // line did not, one line away from it.
-      if (get(activeRoomId) === roomId) status.set('idle');
+      if (get(activeRoomId) === roomId) {
+        status.set('idle');
+        // This turn produced no task, so no stream will settle and
+        // `onStreamSettled` will never run for it. Without this the entry that
+        // just drained is the last one that ever does: the endpoint answers
+        // every `!word` inline, and `send()` queues any it cannot find in the
+        // catalogue (a typo, an unlisted alias, anything typed before the
+        // catalogue lands), so a queued body can land here.
+        void drainSendQueue(roomId);
+      }
       return;
     }
     // Stamp the task id on BOTH halves of the turn. The assistant placeholder
@@ -3122,6 +3172,13 @@ function createSession(): ChatSession {
       updateMsg(userCid, (m) => {
         m.showSending = undefined;
       });
+      // A command's row is 'sending' for the life of its request, which
+      // `canDrain` reads as a busy room — correctly, since a drain would put a
+      // second send in flight beside it. But that means a turn settling `done`
+      // *during* the command loses its drain: the trigger has fired and the
+      // conditions were false. Re-test them here rather than adding a policy;
+      // without it the queue waits for the next room switch.
+      void drainSendQueue(roomId);
     }
   }
 
