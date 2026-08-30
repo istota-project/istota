@@ -64,7 +64,9 @@
   // Modal state for manual entry.
   let modalOpen = $state(false);
   let formMetric = $state('weight');
-  let formValue = $state('');
+  // `bind:value` on a number input writes back a number, or null once the
+  // field is cleared — never the empty string this starts as (ISSUE-358).
+  let formValue = $state<string | number | null>('');
   let formUnit = $state('');
   let formDate = $state('');
   let formNotes = $state('');
@@ -282,11 +284,17 @@
 
   async function submitEntry(e: Event) {
     e.preventDefault();
-    if (!formValue.trim()) return;
+    // Not `formValue.trim()`: the binding above has made this a number by the
+    // time anyone can press Save, so a string guard threw here — outside the
+    // try, so the modal reported nothing at all. NaN is unreachable through
+    // the input itself, which sanitizes a bad entry to '', but the field is
+    // also written by `openEntry` and by the reset below.
+    const entered = Number(formValue);
+    if (formValue === null || formValue === '' || Number.isNaN(entered)) return;
     saving = true;
     formError = '';
     try {
-      const canonical = toCanonical(formMetric, Number(formValue), formUnit);
+      const canonical = toCanonical(formMetric, entered, formUnit);
       await createHealthStat({
         metric: formMetric,
         value: canonical.value,
