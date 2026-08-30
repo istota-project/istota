@@ -2723,12 +2723,21 @@ class TestSkillOverlays:
         assert "alice/develper.md" in r.detail
         assert "mallory" not in r.detail
 
-    def test_an_overlay_dir_redirected_out_of_the_user_tree_is_skipped(
+    def test_an_overlay_dir_redirected_out_of_the_user_tree_is_named_not_followed(
         self, make_config, tmp_path
     ):
         """`config/` and `skills/` are ordinary entries a task can replace with
         a link. Following one would report — and open — files anywhere the
-        daemon can read."""
+        daemon can read.
+
+        That property is unchanged; the status is not. This used to be skipped
+        outright and so reported by nothing, which left the most clear-cut
+        plant of the set as the one case an operator never heard about
+        (ISSUE-344). It is now named at WARN — WARN rather than FAIL because a
+        sandboxed task can create the link at will, and a deployment-scope red
+        an attacker can raise on demand is the aimable alert ISSUE-340 split
+        this check to avoid.
+        """
         config = self._config(make_config, tmp_path)
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
@@ -2741,7 +2750,10 @@ class TestSkillOverlays:
         (user_config / "skills").symlink_to(elsewhere, target_is_directory=True)
 
         r = self._run(config)
-        assert r.status == OK
+        assert r.status == WARN
+        assert "dir_outside_user_tree" in r.detail
+        # The half that matters and has not moved: nothing behind the link was
+        # opened, so the planted filename appears nowhere in the report.
         assert "develper" not in r.detail
 
     def test_a_symlinked_overlay_file_is_reported_and_never_read(

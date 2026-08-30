@@ -986,14 +986,21 @@ def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
     and the mount is reached through a symlink on some hosts — the same reason
     ``contained_overlay_dir`` resolves both sides before comparing.
 
-    **Only the search reindex walks this way so far**, which is where the
-    consequence was largest: what it indexes, `!search` reads back. The same
-    check-then-resolve-by-name shape is still live on the prompt loader
-    (`_load_user_overlay`), on ``doctor``'s sweep and on the nightly inventory,
-    and the prompt path is the worse one — the same swap puts up to
-    ``OVERLAY_MAX_BYTES`` of any daemon-readable file into a skill's section.
-    Those are ISSUE-341 item 3's remaining half, not a class this function
-    closed by existing.
+    **Every reader of the overlay directory walks this way now** (ISSUE-344).
+    The search reindex came first, in ``7c83c2f3``, because what it indexes
+    ``!search`` reads back; the prompt loader (``_load_user_overlay``), the two
+    ``skills`` read verbs, ``doctor``'s sweep and the nightly inventory
+    followed, and the prompt path was the worse of them — the same swap put up
+    to ``OVERLAY_MAX_BYTES`` of any daemon-readable file into a skill's section
+    on every task that selected the skill. Two callers reach this function
+    directly and neither can use the helper: ``memory.search`` walks it for a
+    configured user but also needs the resolved path as the index key that
+    ``skill_overlay`` rows are reaped against, and ``doctor`` sweeps every tree
+    on the mount rather than one configured user, so it has no ``user_id`` to
+    hand over. Everything else comes through
+    ``storage.open_user_skill_overlays``, which returns the descriptor and the
+    path together or returns neither — a caller cannot take one and forget the
+    other, which is exactly how four of five callers came to be wrong.
 
     The caller closes the fd. Raises nothing an ordinary filesystem produces:
     every ``OSError`` is a None. A platform without ``dir_fd`` support would
@@ -1246,6 +1253,7 @@ def _load_user_overlay(
     skill_name: str,
     bot_name: str,
     bot_dir: str,
+    dir_fd: int | None = None,
 ) -> str | None:
     """Read and render one skill's per-user overlay body, or None.
 
@@ -1253,6 +1261,23 @@ def _load_user_overlay(
     an over-cap one and a denylisted skill all degrade to exactly the prompt
     this skill would have had with no overlay at all. The worst case here is
     that a customization is inert.
+
+    ``dir_fd`` is an open descriptor on ``user_overlay_dir`` (``open_overlay_dir``
+    through ``storage.open_user_skill_overlays``). Given one, only the leaf name
+    is resolved and it is resolved relative to that descriptor, so the
+    components above it are never walked a second time.
+
+    Without one the read falls back to the path, walking every component by
+    name — which is what every caller did before ISSUE-344 and what that issue
+    exists to remove. **Both production callers get the pair from
+    ``storage.open_user_skill_overlays``, which never returns a path without a
+    descriptor**, so the fallback is reached only from tests asserting on
+    rendering rather than on containment. That sentence was false in the first
+    draft of this change and the gap was real: the helper had a third return
+    shape for an absent directory, ``(path, None)``, both callers forwarded it,
+    and a task creating ``config/skills`` as a symlink inside the window put a
+    file from outside the mount into the prompt. The invariant now lives in the
+    helper rather than in a rule two call sites have to remember.
     """
     if user_overlay_dir is None or _denylist_key(skill_name) in OVERLAY_DENYLIST:
         return None
@@ -1262,7 +1287,9 @@ def _load_user_overlay(
     # it the file is not loaded at all, so there is nothing to gain by reading
     # it. The CLI passes the larger bound instead, because it has to be able to
     # read a file back in order to shrink it.
-    raw, refusal, size = read_overlay_bytes(path, max_bytes=OVERLAY_MAX_BYTES)
+    raw, refusal, size = read_overlay_bytes(
+        path, max_bytes=OVERLAY_MAX_BYTES, dir_fd=dir_fd
+    )
     if refusal == OVERLAY_UNREADABLY_LARGE:
         logger.warning(
             "skill overlay %s is %s bytes (cap %d) — not loaded. An overlay "
@@ -1323,6 +1350,7 @@ def load_skills(
     skill_index: dict[str, SkillMeta] | None = None,
     bundled_dir: Path | None = None,
     user_overlay_dir: Path | None = None,
+    user_overlay_dir_fd: int | None = None,
 ) -> str:
     """Load and concatenate selected skill docs, substituting placeholders.
 
@@ -1331,6 +1359,14 @@ def load_skills(
     the overlay here rather than at the call sites is the point: there are two
     load paths — the eager one in ``executor`` and ``skills show`` — and this
     codebase keeps getting bitten by the two drifting.
+
+    ``user_overlay_dir_fd`` is an open descriptor on that directory, and both
+    real callers get the pair from ``storage.open_user_skill_overlays`` rather
+    than deriving either half here. Every overlay read then goes through the
+    descriptor, so the directory that passed containment is the directory that
+    is read — the components above the leaf are model-writable and re-resolving
+    them by name is the window ISSUE-344 closed. This function does not close
+    the descriptor; the caller that opened it does.
     """
     if not bot_dir:
         bot_dir = bot_name.lower()
@@ -1342,7 +1378,18 @@ def load_skills(
     # directory — `ensure_user_directories_v2` does not — so on almost every
     # deployment it is absent, and the target is the network mount this repo has
     # already moved every database off.
-    if user_overlay_dir is not None and not user_overlay_dir.is_dir():
+    #
+    # Skipped entirely when a descriptor was supplied, which is both production
+    # paths: the descriptor already proves the directory is there and is the
+    # contained one, so the stat would be a second, name-based resolution of a
+    # model-writable path — the thing being removed — and it can only lie in
+    # one direction, dropping an overlay whose fd is still perfectly good
+    # because a task swapped the *name* mid-task.
+    if (
+        user_overlay_dir_fd is None
+        and user_overlay_dir is not None
+        and not user_overlay_dir.is_dir()
+    ):
         user_overlay_dir = None
 
     parts = []
@@ -1354,7 +1401,10 @@ def load_skills(
             content = _strip_frontmatter(doc_path.read_text()).strip()
             content = content.replace("{BOT_NAME}", bot_name).replace("{BOT_DIR}", bot_dir)
             block = f"### {title}\n\n{content}"
-            overlay = _load_user_overlay(user_overlay_dir, name, bot_name, bot_dir)
+            overlay = _load_user_overlay(
+                user_overlay_dir, name, bot_name, bot_dir,
+                dir_fd=user_overlay_dir_fd,
+            )
             if overlay:
                 block += f"\n\n{OVERLAY_LABEL}\n\n{OVERLAY_PREAMBLE}\n\n{overlay}"
             parts.append(block)

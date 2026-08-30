@@ -34,7 +34,7 @@ from .storage import (
     ensure_channel_directories,
     ensure_user_directories_v2,
     get_user_scripts_path,
-    resolve_user_skill_overlays_dir,
+    open_user_skill_overlays,
     read_channel_memory,
     read_dated_memories,
     read_user_config_file,
@@ -4667,13 +4667,26 @@ def execute_task(
     # Per-skill user overlays. Derived by the shared helper rather than here, so
     # this path and `skills show` cannot resolve different directories.
     # `{user_id}` in the injected label is substituted below with the rest.
-    _overlay_dir = resolve_user_skill_overlays_dir(config, task.user_id)
+    #
+    # The directory and an open descriptor on it, together. Every component
+    # under `{mount}/Users/{user_id}` is model-writable, so resolving the path
+    # again for each overlay read is a window a task can land a symlink in —
+    # and this is the surface where that win was worst, since what it steals
+    # goes straight into the next prompt (ISSUE-344). `(None, None)` covers the
+    # refusal as well as the ordinary absence, which degrades to exactly the
+    # prompt this task would have had with no overlay at all; `doctor`'s
+    # `config.skill_overlays` is what reports the refusal, once, on a cadence.
+    _overlay_dir, _overlay_fd = open_user_skill_overlays(config, task.user_id)
 
-    skills_doc = load_skills(
-        config.skills_dir, eager_skills, config.bot_name, config.bot_dir_name,
-        skill_index=skill_index, bundled_dir=_bundled_dir,
-        user_overlay_dir=_overlay_dir,
-    )
+    try:
+        skills_doc = load_skills(
+            config.skills_dir, eager_skills, config.bot_name, config.bot_dir_name,
+            skill_index=skill_index, bundled_dir=_bundled_dir,
+            user_overlay_dir=_overlay_dir, user_overlay_dir_fd=_overlay_fd,
+        )
+    finally:
+        if _overlay_fd is not None:
+            os.close(_overlay_fd)
     if skills_doc:
         # Resolve per-user scripts directory
         scripts_nc_path = get_user_scripts_path(task.user_id, config.bot_dir_name)

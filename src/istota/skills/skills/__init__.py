@@ -106,15 +106,19 @@ def _workspace_dir(config, user_id: str) -> str:
 
 
 def _overlay_dir(config, user_id: str):
-    """The user's per-skill overlay directory, or None.
+    """The user's per-skill overlay directory and an open descriptor on it.
 
-    One line, and deliberately not its own derivation: `executor` resolves the
-    same directory for the eager path, and the two agreeing is what keeps an
+    One line, and deliberately not its own derivation: `executor` opens the
+    same pair for the eager path, and the two agreeing is what keeps an
     overlay from applying on one path and not the other.
-    """
-    from istota.storage import resolve_user_skill_overlays_dir
 
-    return resolve_user_skill_overlays_dir(config, user_id)
+    `(path, fd)`, `(path, None)` when the directory is simply absent, or
+    `(None, None)` when there is nothing readable and the reason is not benign.
+    The caller closes the descriptor. See `storage.open_user_skill_overlays`.
+    """
+    from istota.storage import open_user_skill_overlays
+
+    return open_user_skill_overlays(config, user_id)
 
 
 def _render_companion_body(config, name: str, meta) -> str | None:
@@ -152,15 +156,21 @@ def cmd_show(args) -> None:
 
     config = ctx["config"]
     skill_index = ctx["skill_index"]
-    body = load_skills(
-        config.skills_dir,
-        [name],
-        config.bot_name,
-        config.bot_dir_name,
-        skill_index=skill_index,
-        bundled_dir=config.bundled_skills_dir,
-        user_overlay_dir=_overlay_dir(config, ctx["user_id"]),
-    )
+    overlay_dir, overlay_fd = _overlay_dir(config, ctx["user_id"])
+    try:
+        body = load_skills(
+            config.skills_dir,
+            [name],
+            config.bot_name,
+            config.bot_dir_name,
+            skill_index=skill_index,
+            bundled_dir=config.bundled_skills_dir,
+            user_overlay_dir=overlay_dir,
+            user_overlay_dir_fd=overlay_fd,
+        )
+    finally:
+        if overlay_fd is not None:
+            os.close(overlay_fd)
     if not body:
         _output_error(f"no documentation found for skill {name!r}")
 
@@ -250,36 +260,72 @@ def _mount_relative(ctx, path):
 
 
 def _resolve_overlay_dir(ctx):
-    """The user's overlay directory, or refuse.
+    """The user's overlay directory and an open descriptor on it, or refuse.
 
-    `resolve_user_skill_overlays_dir` **degrades** to None — right for the
+    `open_user_skill_overlays` **degrades** to `(None, None)` — right for the
     loader, whose worst case is a prompt without a customization, and wrong
     here, where the caller asked a direct question and "no overlays" would be
-    a false answer to it. So the two None cases are separated: no mount is a
-    fact about the deployment and reports as an empty inventory, while a
-    directory that resolves outside the user's own tree is a planted symlink
-    and is named as one.
+    a false answer to it. So the benign case is separated from the rest: no
+    mount is a fact about the deployment and reports as an empty inventory,
+    while a directory that cannot be reached is a planted symlink and is named
+    as one. An absent directory comes back as `(path, None)` and also reports
+    as empty, since nothing creates `config/skills` and having none is normal.
 
-    Containment itself is not re-derived. `contained_overlay_dir` behind that
-    resolver is the same rule the loader and the search reindex apply, and it
-    returns the **resolved** path so a caller cannot re-walk by the unresolved
-    name after the check — which matters most here, since this CLI runs
-    host-side under the skill proxy with the daemon's filesystem view while
+    Containment itself is not re-derived. The descriptor behind that helper is
+    the same `open_overlay_dir` walk the loader and the search reindex go
+    through, and holding it is what removes the window between the check and
+    the read — which matters most here, since this CLI runs host-side under the
+    skill proxy with the daemon's filesystem view while
     `{mount}/Users/{user_id}` is bound read-write into that user's sandbox.
     Every component of the path is model-plantable and the bytes go straight
-    back to the model.
+    back to the model. The caller closes the descriptor.
+
+    **The absent-versus-refused question is asked here rather than in the
+    helper**, and the distinction is deliberately weaker than it looks. The
+    helper returns the path only together with a descriptor, because handing
+    back a usable path with nothing to read through is what produced ISSUE-344.
+    So when it refuses, this asks `resolve_user_skill_overlays_dir` for the
+    spelling and stats it — a stat whose answer chooses a *message*, never a
+    file to open. Nothing is read through that path, and the reads below still
+    go through the descriptor.
     """
     config = ctx["config"]
     if not config.use_mount:
-        return None
-    d = _overlay_dir(config, ctx["user_id"])
-    if d is None:
+        return None, None
+    d, fd = _overlay_dir(config, ctx["user_id"])
+    if fd is not None:
+        return d, fd
+
+    from istota.storage import resolve_user_skill_overlays_dir
+
+    spelling = resolve_user_skill_overlays_dir(config, ctx["user_id"])
+    if spelling is None:
+        # Resolved outside this user's own tree. That much *was* established,
+        # by `contained_overlay_dir`, so it keeps the name that says it.
         _output_error("overlay_dir_outside_user_tree")
-    return d
+    try:
+        absent = not spelling.exists()
+    except OSError:
+        absent = False
+    if absent:
+        # Nothing is there. That is the ordinary state — nothing creates this
+        # directory — and reports as an empty inventory rather than an error.
+        return spelling, None
+    # Something is there, resolves inside the tree, and could not be opened
+    # through a chain of plain directories. `open_overlay_dir` collapses every
+    # `OSError` to a refusal, so this one name covers a symlink at a component,
+    # a regular file at `skills`, an unreadable `config` and an I/O error on
+    # the mount alike. It says what was established — the directory could not
+    # be opened — rather than naming a cause it did not determine.
+    _output_error("overlay_dir_unopenable")
 
 
 def _overlay_path(name: str, ctx):
-    """`(path, overlay_dir)` for one skill's overlay, or refuse.
+    """`(path, dir_fd)` for one skill's overlay, or refuse.
+
+    The descriptor is what the read goes through; `path` is what the refusal is
+    reported about. `(None, None)` where the deployment has no mount at all.
+    The caller closes the descriptor.
 
     The name is checked against the skill index and nothing else. It is a
     caller-supplied path component and the index is the whole of what bounds
@@ -314,10 +360,10 @@ def _overlay_path(name: str, ctx):
 
     if name != Path(name).name or name in ("", ".", ".."):
         _output_error(f"skill name is not a filename component: {name!r}")
-    d = _resolve_overlay_dir(ctx)
+    d, fd = _resolve_overlay_dir(ctx)
     if d is None:
         return None, None
-    return d / f"{name}.md", d
+    return d / f"{name}.md", fd
 
 
 def cmd_overlay(args) -> None:
@@ -333,13 +379,26 @@ def cmd_overlay(args) -> None:
     from istota.skills._loader import OVERLAY_READ_CAP_BYTES, read_overlay_bytes
 
     ctx = _load_context()
-    path, _d = _overlay_path(args.name, ctx)
+    path, dir_fd = _overlay_path(args.name, ctx)
     if path is None:
         # No mount, so this deployment has no overlays for anyone. Printing an
         # empty body would answer "this skill has no overlay", which is a
         # different and false claim.
         _output_error("no_overlay_storage", skill=args.name)
-    raw, refusal, _size = read_overlay_bytes(path, max_bytes=OVERLAY_READ_CAP_BYTES)
+    if dir_fd is None:
+        # The directory is not there. Nothing to read, and deliberately no
+        # read attempted: falling back to the path would walk components a
+        # task can replace between the `is_dir` and the `open`, which is the
+        # whole of what the descriptor removes (ISSUE-344). An absent overlay
+        # prints nothing, exactly as an absent file does below.
+        print("")
+        return
+    try:
+        raw, refusal, _size = read_overlay_bytes(
+            path, max_bytes=OVERLAY_READ_CAP_BYTES, dir_fd=dir_fd
+        )
+    finally:
+        os.close(dir_fd)
     if refusal is not None:
         # A refusal reaches the caller rather than degrading to "absent". The
         # loader can treat a planted inode as an inert customization; here it
@@ -381,32 +440,54 @@ def cmd_overlays(args) -> None:
     from istota.skills._loader import OVERLAY_READ_CAP_BYTES, inspect_overlay
 
     ctx = _load_context()
-    d = _resolve_overlay_dir(ctx)
-    payload: dict = {"status": "ok", "dir": _mount_relative(ctx, d), "skills": []}
-    if d is None or not d.is_dir():
+    d, dir_fd = _resolve_overlay_dir(ctx)
+    if d is None or dir_fd is None:
+        payload = {"status": "ok", "dir": _mount_relative(ctx, d), "skills": []}
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
+    # Built inside the `try`, because `_mount_relative` calls `os.path.realpath`
+    # unguarded and the descriptor is already open by this point. Cosmetic in a
+    # one-shot CLI that exits either way, but the rule this change establishes
+    # is that the caller closes it on every path.
     rows: list[dict] = []
-    for entry in sorted(d.glob("*.md")):
-        found = inspect_overlay(
-            entry,
-            known_skills=ctx["skill_index"],
-            disabled_skills=ctx["disabled"],
-            max_read_bytes=OVERLAY_READ_CAP_BYTES,
-        )
-        row: dict = {"skill": found.skill, "bytes": found.size}
-        # Omitted rather than zeroed when there was no body to count: printing
-        # `lines: 0` for a planted symlink would describe content never read.
-        if found.lines is not None:
-            row["lines"] = found.lines
-            row["first_line"] = (found.first_line or "")[:_FIRST_LINE_CHARS]
-        row["binds"] = found.binds
-        if found.reason is not None:
-            row["reason"] = found.reason
-        if found.warnings:
-            row["warnings"] = list(found.warnings)
-        rows.append(row)
+    try:
+        payload = {"status": "ok", "dir": _mount_relative(ctx, d), "skills": []}
+        # `scandir` on the descriptor rather than `d.glob("*.md")`, so the
+        # listing and every read below it come from the directory that passed
+        # rather than from whatever the name resolves to now (ISSUE-344).
+        # `glob` filters dotfiles and this does not, matching what the search
+        # reindex already does — a dotfile cannot bind (`.developer.md` is the
+        # skill `.developer`), so the only effect is that the three listings of
+        # this one directory agree.
+        try:
+            with os.scandir(dir_fd) as entries:
+                names = sorted(e.name for e in entries if e.name.endswith(".md"))
+        except OSError:
+            names = []
+        for name in names:
+            found = inspect_overlay(
+                d / name,
+                known_skills=ctx["skill_index"],
+                disabled_skills=ctx["disabled"],
+                max_read_bytes=OVERLAY_READ_CAP_BYTES,
+                dir_fd=dir_fd,
+            )
+            row: dict = {"skill": found.skill, "bytes": found.size}
+            # Omitted rather than zeroed when there was no body to count:
+            # printing `lines: 0` for a planted symlink would describe content
+            # never read.
+            if found.lines is not None:
+                row["lines"] = found.lines
+                row["first_line"] = (found.first_line or "")[:_FIRST_LINE_CHARS]
+            row["binds"] = found.binds
+            if found.reason is not None:
+                row["reason"] = found.reason
+            if found.warnings:
+                row["warnings"] = list(found.warnings)
+            rows.append(row)
+    finally:
+        os.close(dir_fd)
 
     payload["skills"] = rows
     print(json.dumps(payload, indent=2, ensure_ascii=False))

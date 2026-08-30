@@ -237,13 +237,33 @@ class TestPlantedPaths:
         assert "TOP SECRET" not in captured
         assert json.loads(captured)["error"] == "overlay_dir_outside_user_tree"
 
-    def test_a_link_that_stays_inside_the_users_own_tree_is_read(
+    def test_a_link_that_stays_inside_the_users_own_tree_is_now_refused(
         self, overlay_env, capsys
     ):
-        # Containment is the user's own root, not the literal path — the same
-        # rule the loader applies, so the read verb and the prompt agree. This
-        # is a deliberate relaxation of the write path's stricter leaf rule,
-        # which existed because that path created and owned the directory.
+        """ISSUE-344 reverses this deliberately, and the reversal has a cost.
+
+        This used to be read. Containment was the user's own root rather than
+        the literal path — the same rule the loader applied, so the read verb
+        and the prompt agreed — and it was a conscious relaxation of the write
+        path's stricter leaf rule, which existed because that path created and
+        owned the directory. ISSUE-343 kept the relaxation when it moved these
+        verbs.
+
+        What changed is not the containment question but how it is answered. A
+        comparison of resolved paths is only true until something moves, and
+        everything under `{mount}/Users/{user_id}` is model-writable, so the
+        check and the read that follows it are separated by a window a task can
+        land a rename in. `open_overlay_dir` refuses a symlink at any component
+        — including one landing back inside the tree — because refusing is the
+        only answer that survives the path being rewritten underneath it, and
+        every reader now takes that answer.
+
+        The price is paid by a user who deliberately linked `config/skills`
+        somewhere else in their own workspace: their overlays stop loading.
+        That is why `doctor`'s `config.skill_overlays` reports the directory
+        with a remedy rather than leaving it to be discovered as silence —
+        `tests/test_overlay_dir_containment.py::TestTheDoctorSweep`.
+        """
         config_dir = overlay_env.overlays.parent
         real = config_dir.parent / "config.real"
         config_dir.rename(real)
@@ -251,8 +271,16 @@ class TestPlantedPaths:
         (real / "skills").mkdir()
         (real / "skills" / "developer.md").write_text("- a rule\n")
 
-        _overlay()
-        assert "a rule" in capsys.readouterr().out
+        with pytest.raises(SystemExit):
+            _overlay()
+        captured = capsys.readouterr().out
+        assert "a rule" not in captured
+        # Not `overlay_dir_outside_user_tree`: this link resolves *inside* the
+        # tree, so that name would claim something the check did not establish.
+        # The error says what was determined — the directory could not be
+        # opened — which also covers an unreadable `config` or a regular file
+        # left at `skills`, since `open_overlay_dir` collapses every `OSError`.
+        assert json.loads(captured)["error"] == "overlay_dir_unopenable"
 
 
 class TestUnreadableFiles:

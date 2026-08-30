@@ -703,6 +703,83 @@ def write_regular_file(path: Path, text: str) -> bool:
         return False
 
 
+def open_user_skill_overlays(
+    config: "Config", user_id: str
+) -> tuple[Path | None, int | None]:
+    """The user's overlay directory and an open descriptor on it.
+
+    Every reader of this directory used to answer containment with
+    ``resolve_user_skill_overlays_dir`` and then resolve the path by name again
+    for each file it read. The comparison is only true for as long as nobody
+    moves anything, and every component under ``{mount}/Users/{user_id}`` is
+    model-writable — ``build_bwrap_cmd`` binds that tree read-write into the
+    user's own sandbox — so ``mv config config.real && ln -s /anywhere config``
+    lands in the middle of the window. ``open_overlay_dir`` walks each component
+    with ``O_NOFOLLOW | O_DIRECTORY`` instead and hands back a descriptor
+    pinned to an inode, which is containment by construction rather than by a
+    comparison (ISSUE-341 item 3, ISSUE-344).
+
+    **There are exactly two answers, and the path never comes back without the
+    descriptor.** Either ``(path, fd)`` — the directory is open, ``path`` is the
+    resolved spelling for messages and index keys, ``fd`` is what every read
+    goes through, and **the caller closes it** — or ``(None, None)``, meaning
+    there is nothing to read: no mount, no directory, a directory outside the
+    user's own tree, or one that could not be opened without following a
+    symlink.
+
+    The first draft of this returned a third answer, ``(path, None)``, for the
+    ordinary case of a directory that does not exist yet. That was the bug both
+    reviews of ISSUE-344 found, and it reintroduced the very race the issue
+    exists to close: the prompt loader took the path, had no descriptor to read
+    through, and re-resolved it by name — so a task that created
+    ``config/skills`` as a symlink between this function's ``is_dir`` and
+    ``load_skills``' own put a file from outside the mount into the next
+    prompt. Reproduced end to end before it was removed. A caller holding a
+    usable path with no descriptor is the shape that produced this issue in the
+    first place, and offering it as a documented return value only made it
+    easier to reach. **Do not reintroduce it**: a surface that needs to tell an
+    absent directory from a refused one (the ``skills`` read verbs do, to
+    report an empty inventory rather than an error) asks that question for
+    itself, where the answer is used for wording rather than for reaching a
+    file.
+
+    ``open_overlay_dir`` is deliberately stricter than ``contained_overlay_dir``
+    — it refuses a symlink at any component, including one landing back inside
+    the user's own tree, because refusing is the only answer that survives the
+    path being rewritten underneath it. So the two can disagree, and on this
+    layout the second answer is the one that stands.
+
+    **The returned path is for display and for index keys, never for opening.**
+    It is realpath'd *before* the walk, so under a concurrent swap the two can
+    name different inodes; every consumer reaches files through the descriptor
+    and uses the path only for ``path.name`` and for messages, which is what
+    makes that harmless. Held by
+    ``tests/test_overlay_dir_containment.py::TestTheReturnedPathIsDisplayOnly``
+    rather than by convention.
+
+    An operator ``bot_dir_name`` that is not a single plain filename component
+    (a ``/``, ``.``, ``..`` or NUL) is refused by the walk while
+    ``resolve_user_skill_overlays_dir`` accepts it, so such a deployment reads
+    as "no overlays" rather than erroring. Fail-closed, and unreachable through
+    a sanitized config.
+    """
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    overlay_dir = resolve_user_skill_overlays_dir(config, user_id)
+    if overlay_dir is None:
+        return None, None
+    # No `is_dir` precheck. The `openat` walk below answers "is there a
+    # directory here" and "is it reachable without following a link" in one
+    # act, and a stat first would only be a second, name-based resolution of a
+    # model-writable path — which is the thing being removed, not a shortcut to
+    # it. A missing directory fails the walk with ENOENT like anything else.
+    user_root = _get_mount_path(config, f"Users/{user_id}")
+    fd = open_overlay_dir(user_root, config.bot_dir_name, "config", "skills")
+    if fd is None:
+        return None, None
+    return overlay_dir, fd
+
+
 CRON_TEMPLATE = """\
 # Scheduled Jobs
 

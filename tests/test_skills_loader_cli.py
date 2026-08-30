@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 
 import pytest
 
@@ -374,13 +375,19 @@ class TestShowOverlays:
 
         config = load_config()
 
-        assert _overlay_dir(config, "alice") == resolve_user_skill_overlays_dir(
-            config, "alice"
-        )
-        # And it is the documented layout, not merely two equal wrong answers.
-        assert _overlay_dir(config, "alice") == (
-            config.nextcloud_mount_path / "Users/alice/istota/config/skills"
-        )
+        # `_overlay_dir` now returns `(path, fd)` — the pair is what ISSUE-344
+        # made atomic, so a caller cannot take the directory and forget the
+        # descriptor. The directory half is still the one both paths derive.
+        d, fd = _overlay_dir(config, "alice")
+        try:
+            assert d == resolve_user_skill_overlays_dir(config, "alice")
+            # And it is the documented layout, not merely two equal wrong answers.
+            assert d == (
+                config.nextcloud_mount_path / "Users/alice/istota/config/skills"
+            )
+        finally:
+            if fd is not None:
+                os.close(fd)
 
     def test_a_redirected_config_directory_yields_no_overlay_dir(
         self, tmp_path, monkeypatch
