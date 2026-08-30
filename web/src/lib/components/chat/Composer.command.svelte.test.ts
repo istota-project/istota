@@ -1,16 +1,24 @@
 /**
- * Typing a `!command` while a turn is in flight (ISSUE-300).
+ * Typing a `!command` while a turn is in flight (ISSUE-300, re-cut by
+ * ISSUE-238).
  *
- * The mode gate is one derivation shared by the button and the send chord, and
- * it used to be `busy && !!onCancel` — which refused a command exactly as it
- * refused ordinary text. That put `!steer`, the one way to reach a task that is
- * already running, out of reach on the surface where the stream is being
- * watched.
+ * The composer used to hold the rule itself. Its send control was one button
+ * in two modes, and the mode gate — `busy && !!onCancel && !isInlineCommand` —
+ * refused ordinary text while a turn ran and carved a command out of that
+ * refusal, so that `!steer`, the one way to reach a task already running, was
+ * typeable on the surface watching the stream.
  *
- * What the gate must keep refusing is anything that would start a second turn:
- * ordinary text, a name the server does not register as a command, and the
- * `!model` prefix, which is a `!`-word that produces a task rather than an
- * inline answer.
+ * There is nothing left to carve out of. A message typed against a running
+ * turn is queued and sent as the next one, so everything is sendable and the
+ * composer holds no opinion about what it is sending. The rule still exists,
+ * at the seam that owns the invariant it protects: the store's `send()` routes
+ * a known command to `sendInlineCommand`, which claims none of the three
+ * things the non-re-entrant `runTurn` owns, and queues everything else.
+ * `chat.command.test.ts` and `chat.queue.test.ts` are where that is asserted.
+ *
+ * What is left here is the composer's half: it hands every submission to
+ * `onSend` whatever the turn is doing, and it no longer waits on the command
+ * catalogue to decide whether it may.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
@@ -49,7 +57,7 @@ beforeEach(() => {
   (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue(CATALOGUE);
 });
 
-/** Let the catalogue fetch resolve and its effect on the gate render. */
+/** Let the catalogue fetch resolve and anything watching it render. */
 async function settle() {
   await Promise.resolve();
   await tick();
@@ -59,7 +67,7 @@ async function settle() {
 function mount(props: Record<string, unknown> = {}) {
   const onSend = vi.fn();
   const onCancel = vi.fn();
-  const utils = render(Composer, { onSend, onCancel, busy: true, ...props });
+  const utils = render(Composer, { onSend, onCancel, busy: true, queueing: true, ...props });
   const textarea = utils.container.querySelector('textarea') as HTMLTextAreaElement;
   return { ...utils, textarea, onSend, onCancel };
 }
@@ -71,20 +79,21 @@ async function type(textarea: HTMLTextAreaElement, value: string) {
   await tick();
 }
 
-const primary = (c: HTMLElement) =>
+const sendBtn = (c: HTMLElement) =>
   c.querySelector('.icon-btn.send:not([aria-label="Finish recording"])') as HTMLButtonElement;
+const stopBtn = (c: HTMLElement) => c.querySelector('.icon-btn.stop') as HTMLButtonElement | null;
 
 describe('Composer — a !command while a turn is in flight', () => {
-  it('offers Send for a command the server registers', async () => {
+  it('offers Send for a command, with Stop beside it rather than in its place', async () => {
     const { container, textarea, onSend, onCancel } = mount();
     await settle();
     await type(textarea, '!steer check the other branch too');
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Send');
-    expect(primary(container).classList.contains('stop')).toBe(false);
-    expect(primary(container).disabled).toBe(false);
+    expect(sendBtn(container).getAttribute('aria-label')).toBe('Send');
+    expect(sendBtn(container).disabled).toBe(false);
+    expect(stopBtn(container)).toBeTruthy();
 
-    await fireEvent.click(primary(container));
+    await fireEvent.click(sendBtn(container));
     expect(onSend).toHaveBeenCalledWith('!steer check the other branch too', [], null);
     expect(onCancel).not.toHaveBeenCalled();
   });
@@ -100,67 +109,73 @@ describe('Composer — a !command while a turn is in flight', () => {
     expect(onSend).toHaveBeenCalledWith('!status', [], null);
   });
 
-  it('keeps refusing ordinary text', async () => {
+  it('hands ordinary text over too, for the store to queue', async () => {
+    // The refusal ISSUE-238 removed. What the composer used to eat, it now
+    // passes on; `send()` sees a busy room and a body that is not a command,
+    // and enqueues it as the next turn.
     const { container, textarea, onSend, onCancel } = mount();
     await settle();
     await type(textarea, 'let me in');
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Stop');
-    await fireEvent.click(primary(container));
-    expect(onSend).not.toHaveBeenCalled();
-    expect(onCancel).toHaveBeenCalledTimes(1);
+    await fireEvent.click(sendBtn(container));
+    expect(onSend).toHaveBeenCalledWith('let me in', [], null);
+    expect(onCancel).not.toHaveBeenCalled();
   });
 
-  it('keeps refusing a name the server does not register', async () => {
-    // The catalogue is the only evidence the client has. The server would
-    // answer this one inline too, so the refusal is conservatism rather than a
-    // claim that it would become a task.
-    const { container, textarea, onSend } = mount();
+  it('hands over a name the server does not register, rather than judging it', async () => {
+    // The composer no longer holds a copy of the command rule, so it has no
+    // opinion here. `send()` asks the same catalogue and, finding nothing
+    // registered, queues this as an ordinary message.
+    const { textarea, onSend } = mount();
     await settle();
     await type(textarea, '!nope do the thing');
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Stop');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('!nope do the thing', [], null);
   });
 
-  it('keeps refusing the literal !model prefix, which makes a task rather than an answer', async () => {
-    // The one `!`-prefixed body that really does become a task. Refused
-    // because nothing is registered under the name `model`.
-    const { container, textarea, onSend } = mount();
+  it('hands over the literal !model prefix, which makes a task rather than an answer', async () => {
+    // The one `!`-prefixed body that really does become a task. It queues like
+    // any other message now, which is what the queue is for.
+    const { textarea, onSend } = mount();
     await settle();
     await type(textarea, '!model opus write me a poem');
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Stop');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('!model opus write me a poem', [], null);
   });
 
   it('leaves the draft of a send still awaiting its ack', async () => {
-    // Two sends can be open in one room now, and the draft slot is per room.
-    // The command is not a draft; the message still in flight is, and its
-    // stored copy is the only one that survives a reload if its send fails.
+    // Two sends can be open in one room, and the draft slot holds one. The
+    // command is not a draft, and neither is a queued message — it has its own
+    // persisted copy — while the message still in flight *is*: its stored copy
+    // is the only one that survives a reload if its send fails.
     localStorage.clear();
-    const { container, textarea, rerender, onSend } = mount({ busy: false, draftKey: 'room:3' });
+    const { container, textarea, rerender, onSend } = mount({
+      busy: false,
+      queueing: false,
+      draftKey: 'room:3',
+    });
     await settle();
     await type(textarea, 'the message that matters');
-    await fireEvent.click(primary(container));
+    await fireEvent.click(sendBtn(container));
     expect(readDraft('room:3')).toBe('the message that matters');
 
     // Its POST is still open — which is exactly when the user asks what is
     // going on — so the composer goes busy without the send having settled.
-    await rerender({ busy: true });
+    await rerender({ busy: true, queueing: true });
     await tick();
     await type(textarea, '!status');
-    await fireEvent.click(primary(container));
+    await fireEvent.click(sendBtn(container));
 
     expect(onSend).toHaveBeenCalledTimes(2);
     expect(readDraft('room:3')).toBe('the message that matters');
   });
 
-  it('refuses a command carrying an attachment', async () => {
-    // An attachment is what makes `!model <alias>` meaningful with no prompt,
-    // and a command does nothing with one. Either way it belongs to a task.
+  it('sends a command carrying an attachment, and lets the store decide', async () => {
+    // An attachment used to disqualify a command from the composer's carve-out,
+    // because a file belongs to a task. The store still applies exactly that
+    // rule at the seam that routes the send; here it is one more submission.
     (uploadChatAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: 'inbox/a.png',
       name: 'a.png',
@@ -169,7 +184,6 @@ describe('Composer — a !command while a turn is in flight', () => {
     const { container, textarea, onSend } = mount();
     await settle();
     await type(textarea, '!steer look at this');
-    // Staged after the text, so the gate has to re-derive against it.
     const input = container.querySelector('input[data-picker="file"]') as HTMLInputElement;
     Object.defineProperty(input, 'files', { value: [new File(['x'], 'a.png')] });
     await fireEvent.change(input);
@@ -177,31 +191,32 @@ describe('Composer — a !command while a turn is in flight', () => {
     await tick();
     expect(container.querySelector('.attach-chip')).toBeTruthy();
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Stop');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('!steer look at this', [expect.anything()], null);
   });
 
-  it('leaves the gate open when no turn is running', async () => {
-    const { container, textarea, onSend } = mount({ busy: false });
+  it('sends when no turn is running, exactly as it does when one is', async () => {
+    const { container, textarea, onSend } = mount({ busy: false, queueing: false });
     await settle();
     await type(textarea, '!steer hello');
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Send');
-    await fireEvent.click(primary(container));
+    expect(sendBtn(container).getAttribute('aria-label')).toBe('Send');
+    expect(stopBtn(container)).toBeNull();
+    await fireEvent.click(sendBtn(container));
     expect(onSend).toHaveBeenCalledWith('!steer hello', [], null);
   });
 
-  it('stays shut while the catalogue has not landed', async () => {
-    // The check is a snapshot of a fetch, and the safe answer before it
-    // resolves is "not a command" — the gate as it was.
+  it('does not wait on the command catalogue to decide it may send', async () => {
+    // The catalogue used to gate the button: until the fetch resolved, a
+    // command was refused, because a name we could not confirm was not one to
+    // let through. Nothing in the composer reads it now, so a catalogue that
+    // never lands costs autocompletion and nothing else.
     (fetchChatCommands as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
-    const { container, textarea, onSend } = mount();
+    const { textarea, onSend } = mount();
     await settle();
     await type(textarea, '!steer hello');
 
-    expect(primary(container).getAttribute('aria-label')).toBe('Stop');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('!steer hello', [], null);
   });
 });

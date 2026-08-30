@@ -27,7 +27,7 @@
   import { REPLY_EXCERPT_CHARS, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
   import { dropDraft } from '$lib/stores/drafts';
-  import { dropQueue } from '$lib/stores/sendQueue';
+  import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
   import { getMe, type ChatAttachment, type ChatRoom, type ChatView } from '$lib/api';
 
@@ -137,6 +137,20 @@
     key: userId && $sendSettled.token ? `${userId}:room:${$sendSettled.token}` : null,
   });
   const busy = $derived($status === 'sending' || $status === 'streaming');
+  // How many messages are waiting to send in the open room (ISSUE-238).
+  //
+  // Counted off the transcript rather than read from the store's queue map,
+  // which is a plain Map and reactive to nothing: a queued row and its queue
+  // entry are appended and removed in the same breath, so this is the same
+  // number by a route Svelte can see. Scoped to the open room's token, since
+  // the transcript can still be holding another room's stranded rows.
+  const queuedHere = $derived(
+    $messages.filter((m) => m.sendState === 'queued' && m.roomToken === activeRoom?.token).length,
+  );
+  // Past the cap the composer refuses with the reason on screen and keeps the
+  // text in the field. The store refuses at the same cap on the way in, which
+  // is the backstop under this rather than a substitute for it.
+  const queueFull = $derived(queuedHere >= MAX_QUEUED_PER_ROOM);
 
   // The message the next send will cite. Held as the bare id, because that is
   // all the composer ever names and all the draft ever stores; the author
@@ -946,6 +960,8 @@
           }}
           onCancel={() => session.cancel()}
           {busy}
+          queueing={busy}
+          {queueFull}
           placeholder="Your message…"
           {draftKey}
           sendSettled={settleSignal}
