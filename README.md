@@ -60,17 +60,6 @@ Want to run Istota on your own machine without a server, Nextcloud, or login? Th
 
 Full walkthroughs, optional services, and configuration: **[Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/)** · **[Bare metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/)**.
 
-## Why Nextcloud?
-
-Most AI assistant projects connect to third-party APIs for storage, calendars, and messaging, accumulating credentials and vendor dependencies. Istota instead runs on its own server and, when you connect it to Nextcloud, integrates as a regular user — files, calendars, contacts, Talk messaging, and sharing all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
-
-- **Zero Nextcloud configuration.** Create a user account, invite it to a chat.
-- **File sharing is native.** Users share files with the bot like they share with colleagues.
-- **Multi-user comes free.** Nextcloud handles user isolation, file ownership, and access control.
-- **Self-hosted end to end.** Your data stays on your server; the only external dependency is a model provider.
-
-Config files (persona, briefings, cron jobs, heartbeat checks) live in each user's Nextcloud folder, editable with any text editor. See [Why Nextcloud](https://istota.cynium.com/docs) for the full rationale.
-
 ## Development
 
 ```bash
