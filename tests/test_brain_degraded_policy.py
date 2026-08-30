@@ -84,6 +84,21 @@ class TestReportBrainResult:
         assert r2 is None  # already open → no second alert
         assert primary_brain_unavailable(cfg)[0] is False
 
+    def test_direct_caller_publishes_unavailability_for_web(self, tmp_path):
+        config = _sleep_config(tmp_path)
+        result = BrainResult(False, "usage limit", stop_reason="usage_limit")
+
+        assert report_brain_result(
+            result,
+            config.brain,
+            config=config,
+            started_at=1000,
+            started_monotonic=1000,
+        ) == "usage_limit"
+
+        from istota.brain_availability import read_unavailable
+        assert read_unavailable(config, "claude_code") == {"reason": "usage_limit"}
+
     def test_not_found_opens_breaker(self):
         cfg = BrainConfig(kind="claude_code", fallback_cooldown_seconds=900)
         assert report_brain_result(

@@ -243,6 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The admin dashboard now reports a primary brain that is running through its fallback as degraded on a server install. The scheduler and web interface are separate services there, so the web process could not see the scheduler's in-memory cooldown and said Healthy after Claude Code hit a usage limit. The scheduler now publishes that state for the web process until the cooldown ends or a successful primary probe clears it.
+
 - Logging a measurement by hand in Health works again. Save did nothing at all — no error, no spinner, nothing written — because the form checked the typed value as though it were text while the number field had already turned it into a number, and the check fell over before anything could report it. It was every measurement rather than only weight: one form serves all of them.
 
 - Tapping beside a feed picture in the full-screen viewer no longer sets off whatever was behind it. The tap did dismiss the viewer, but on a touch screen the click a tap leaves behind arrives a moment later, once the viewer has gone, and landed on the darkened thing underneath — so a tap aimed at empty space opened the post behind it, or closed the reader you were in. A tap on the picture itself never did this, because the viewer stays up briefly to see whether a second tap is coming and so absorbs its own click; the viewer now claims that click on both paths. A mouse was never affected and is left alone.

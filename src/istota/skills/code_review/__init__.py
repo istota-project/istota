@@ -43,6 +43,7 @@ cheap to import and so tests can patch them at their real home.
 
 import argparse
 import json
+import time
 import logging
 import os
 import sys
@@ -353,6 +354,8 @@ def cmd_run(args):
             sandbox_wrap=None,
             result_file=None,
         )
+        primary_started_at = time.time()
+        primary_started_monotonic = time.monotonic()
         result = brain.execute(req)
 
         # Imported here rather than at module scope: `executor` imports
@@ -369,7 +372,10 @@ def cmd_run(args):
             stop_reason=result.stop_reason, success=result.success,
         )
 
-        report_brain_result(result, config.brain)
+        report_brain_result(
+            result, config.brain, config=config, started_at=primary_started_at,
+            started_monotonic=primary_started_monotonic,
+        )
         if not result.success:
             logger.error(
                 "code_review %s failed (stop_reason=%s)", agent, result.stop_reason

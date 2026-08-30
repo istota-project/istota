@@ -5839,6 +5839,8 @@ def execute_task(
         # The effort the attempt actually ran at. The fallback re-resolves it in
         # its own namespace, so `req.effort` describes the primary only.
         _usage_effort = req.effort
+        _primary_started_at = None
+        _primary_started_monotonic = None
 
         def _notice(reason):
             """A `brain_fallback` emitter bound to `reason`, for `on_start`.
@@ -5914,6 +5916,8 @@ def execute_task(
                         _usage_effort = _fb_effort
                     brain_result = _fb if _fb is not None else brain.execute(req)
                 else:
+                    _primary_started_at = time.time()
+                    _primary_started_monotonic = time.monotonic()
                     brain_result = brain.execute(req)
                     _triggers = set(TRIGGER_STOP_REASONS)
                     if config.brain.fallback_on_transient:
@@ -5926,11 +5930,20 @@ def execute_task(
                         # conditions (usage_limit / not_found). "fallback" is
                         # excluded so tmux keeps being probed per-task (its own
                         # launch _CircuitBreaker governs when to stop).
-                        if (
+                        opened_breaker = (
                             _cooldown > 0
                             and brain_result.stop_reason in COOLDOWN_STOP_REASONS
                             and _breaker.open(_primary_kind, _cooldown)
-                        ):
+                        )
+                        if opened_breaker:
+                            from .brain_availability import record_unavailable
+
+                            record_unavailable(
+                                config,
+                                _primary_kind,
+                                brain_result.stop_reason,
+                                cooldown_seconds=_cooldown,
+                            )
                             _fire_fallback_alert(
                                 config, task, _primary_kind, _fallback_kind,
                                 brain_result.stop_reason,
@@ -5983,7 +5996,14 @@ def execute_task(
                             brain_result = _fb
                     elif brain_result.success and _cooldown > 0:
                         # Primary healthy again → close the breaker.
-                        _breaker.record_success(_primary_kind)
+                        _breaker.record_success(
+                            _primary_kind, started_at=_primary_started_monotonic,
+                        )
+                        from .brain_availability import clear_unavailable
+
+                        clear_unavailable(
+                            config, _primary_kind, started_at=_primary_started_at,
+                        )
         finally:
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep

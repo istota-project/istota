@@ -1418,12 +1418,11 @@ def _admin_brain_status_section() -> dict:
     """Live brain posture for the admin dashboard (ISSUE-188).
 
     Distinct from :func:`_admin_models_section`, which reports the *configured*
-    brain: this consults the process-global availability breaker so the operator
-    can see when the primary brain is down and the fallback is serving traffic.
-    When the primary breaker is open, reports ``degraded: true`` with the
-    configured fallback kind as ``active``; otherwise ``degraded: false`` on the
-    primary. The breaker is process-global in-memory, so a stats call inside the
-    daemon's own web process sees the real state (single-daemon deployment).
+    brain: this reads the scheduler's published availability state so the
+    operator can see when the primary brain is down and the fallback is serving
+    traffic. The local single-process launcher also sees its in-memory breaker.
+    When either source is open, reports ``degraded: true`` with the configured
+    fallback kind as ``active``; otherwise ``degraded: false`` on the primary.
     Best-effort: any failure returns an ``error`` string rather than aborting the
     whole stats payload.
     """
@@ -1439,7 +1438,10 @@ def _admin_brain_status_section() -> dict:
         brain_config = _config.brain
         primary_kind = brain_config.kind
         available, reason = primary_brain_unavailable(brain_config)
-        if available:
+        from .brain_availability import read_unavailable
+
+        persisted = read_unavailable(_config, primary_kind)
+        if available and persisted is None:
             return {
                 "degraded": False,
                 "active": primary_kind,
@@ -1450,7 +1452,7 @@ def _admin_brain_status_section() -> dict:
             "degraded": True,
             "primary": primary_kind,
             "active": effective_fallback_kind(brain_config),
-            "reason": reason,
+            "reason": persisted["reason"] if persisted is not None else reason,
         }
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin brain status section failed")

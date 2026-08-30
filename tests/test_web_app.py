@@ -1665,6 +1665,25 @@ class TestAdminBrainStatus:
         finally:
             self._reset_breaker()
 
+    def test_degraded_from_scheduler_availability_state(self, tmp_path):
+        """The web service has a separate process from the scheduler."""
+        import istota.web_app as mod
+        from istota.brain_availability import record_unavailable
+
+        config = self._config_with_fallback(tmp_path)
+        record_unavailable(
+            config, "claude_code", "usage_limit", cooldown_seconds=900
+        )
+        self._reset_breaker()
+        mod._config = config
+
+        section = mod._admin_brain_status_section()
+
+        assert section["degraded"] is True
+        assert section["primary"] == "claude_code"
+        assert section["active"] == "native"
+        assert section["reason"] == "usage_limit"
+
     def test_degraded_with_no_fallback_configured(self, tmp_path):
         import istota.web_app as mod
         from istota.config import BrainConfig

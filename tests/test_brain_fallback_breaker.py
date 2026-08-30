@@ -77,6 +77,21 @@ class TestBreaker:
         # Deadline stayed at 100 (not pushed to 190) → breaker has reopened.
         assert b.should_skip("x", 100) is False
 
+    def test_success_does_not_close_a_breaker_opened_after_its_probe(self, monkeypatch):
+        import istota.brain._fallback as mod
+        clock = [0.0]
+        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        b = PrimaryAvailabilityBreaker()
+        b.open("x", 100)
+        clock[0] = 101.0
+        primary_started_at = clock[0]
+        clock[0] = 102.0
+        b.open("x", 100)
+
+        b.record_success("x", started_at=primary_started_at)
+
+        assert b.should_skip("x", 100) is True
+
 
 class TestProcessGlobal:
     def test_reset_clears(self):

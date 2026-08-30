@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -205,6 +206,8 @@ def _run_sleep_cycle_brain(
         result_file=None,
     )
     try:
+        primary_started_at = time.time()
+        primary_started_monotonic = time.monotonic()
         result = make_brain(config.brain).execute(req)
     except FileNotFoundError:
         logger.error("Brain CLI not found for %s", label)
@@ -234,7 +237,10 @@ def _run_sleep_cycle_brain(
         success=result.success,
     )
 
-    _opened_reason = report_brain_result(result, config.brain)
+    _opened_reason = report_brain_result(
+        result, config.brain, config=config, started_at=primary_started_at,
+        started_monotonic=primary_started_monotonic,
+    )
     if _opened_reason:
         _alert_brain_unavailable(config, label, _opened_reason)
 

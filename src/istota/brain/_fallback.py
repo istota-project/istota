@@ -97,10 +97,12 @@ class PrimaryAvailabilityBreaker:
                 return False
             return (time.monotonic() - opened) < cooldown
 
-    def record_success(self, kind: str) -> None:
-        """A primary probe for ``kind`` succeeded — close the breaker."""
+    def record_success(self, kind: str, *, started_at: float | None = None) -> None:
+        """A primary probe for ``kind`` succeeded — close its older breaker state."""
         with self._lock:
-            self._opened_at.pop(kind, None)
+            opened = self._opened_at.get(kind)
+            if started_at is None or opened is None or opened <= started_at:
+                self._opened_at.pop(kind, None)
 
     def reset(self) -> None:
         """Clear all state (test/teardown)."""
@@ -162,7 +164,8 @@ def primary_brain_unavailable(brain_config: "BrainConfig") -> tuple[bool, str | 
 
 
 def report_brain_result(
-    brain_result: "BrainResult", brain_config: "BrainConfig"
+    brain_result: "BrainResult", brain_config: "BrainConfig", *, config=None,
+    started_at: float | None = None, started_monotonic: float | None = None,
 ) -> str | None:
     """Feed a direct caller's ``BrainResult`` into the shared availability breaker.
 
@@ -181,10 +184,20 @@ def report_brain_result(
     if cooldown <= 0:
         return None
     if getattr(brain_result, "success", False):
-        _BREAKER.record_success(kind)
+        _BREAKER.record_success(kind, started_at=started_monotonic)
+        if config is not None:
+            from ..brain_availability import clear_unavailable
+
+            clear_unavailable(config, kind, started_at=started_at)
         return None
     stop_reason = getattr(brain_result, "stop_reason", "")
     if stop_reason in COOLDOWN_STOP_REASONS and _BREAKER.open(kind, cooldown):
+        if config is not None:
+            from ..brain_availability import record_unavailable
+
+            record_unavailable(
+                config, kind, stop_reason, cooldown_seconds=cooldown,
+            )
         return stop_reason
     return None
 

@@ -6941,6 +6941,14 @@ def run_daemon(
             f"{lock_path})."
         )
 
+    # The availability breaker is process-local and starts clear. Remove its
+    # observational cross-process state too, or the web unit can keep showing
+    # a cooldown that this fresh scheduler will no longer honor. This must be
+    # after the daemon lock: a rejected second instance cannot clear the live
+    # scheduler's state.
+    from .brain_availability import clear_all as clear_brain_availability
+    clear_brain_availability(config)
+
     # Write PID to lock file for debugging
     lock_file.write(str(os.getpid()))
     lock_file.flush()

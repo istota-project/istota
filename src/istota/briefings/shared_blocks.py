@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -272,6 +273,8 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
         result_file=None,
     )
     try:
+        primary_started_at = time.time()
+        primary_started_monotonic = time.monotonic()
         result = brain.execute(req)
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s brain error: %s", label, e)
@@ -292,7 +295,10 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
     )
 
     # Feed the result into the shared breaker (one-shot alert on open).
-    _opened_reason = report_brain_result(result, config.brain)
+    _opened_reason = report_brain_result(
+        result, config.brain, config=config, started_at=primary_started_at,
+        started_monotonic=primary_started_monotonic,
+    )
     if _opened_reason:
         _alert_brain_unavailable(config, label, _opened_reason)
     if not result.success or result.stop_reason in ("timeout", "not_found"):

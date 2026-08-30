@@ -232,7 +232,9 @@ def stub_brain(monkeypatch):
     monkeypatch.setattr(
         "istota.brain.primary_brain_unavailable", lambda cfg: (True, "")
     )
-    monkeypatch.setattr("istota.brain.report_brain_result", lambda result, cfg: None)
+    monkeypatch.setattr(
+        "istota.brain.report_brain_result", lambda result, cfg, **kwargs: None
+    )
     return brain
 
 
