@@ -8,11 +8,11 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 |---|---|
 | `files` | File operations in your workspace |
 | `sensitive_actions` | Confirmation rules for destructive operations |
-| `memory` | Persistent memory writes — USER.md (behavioral), the knowledge graph (facts), and per-skill overlays. CLI: append, add-heading, remove, replace, remove-heading, show, headings, skills |
+| `memory` | Persistent memory writes — USER.md and a room's CHANNEL.md (behavioral) plus the knowledge graph (facts). CLI: append, add-heading, remove, replace, remove-heading, remove-subheading, show, headings. Per-skill overlays are **not** written here (ISSUE-343): they are user-authored files, read on the `skills` CLI |
 | `scripts` | User's reusable Python scripts |
 | `memory_search` | Memory search CLI (search, index, reindex, stats, facts, timeline, add-fact, invalidate, delete-fact, fact-history) |
 | `kv` | Key-value store for persistent runtime state |
-| `skills` | On-demand skill loader (`istota-skill skills show <name>` / `list`) — always eager so the model can pull menu skills |
+| `skills` | On-demand skill loader (`istota-skill skills show <name>` / `list`) — always eager so the model can pull menu skills. Also the read side of [per-skill overlays](../configuration/per-user.md#per-skill-overlays): `overlay <name>` prints one whole, `overlays` is the inventory (skill, bytes, lines, first line, whether it binds, and why not) |
 
 ## Communication
 
@@ -38,7 +38,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | Skill | Keywords | CLI |
 |---|---|---|
 | `briefing` | (auto-selected for briefing source type) | doc-only -- output formatting for a generated briefing |
-| `briefings` | briefing, block, digest, briefing source | yes -- blocks list/add/set/reorder/remove, sources list/add/remove, archive list/show |
+| `briefings` | briefing, block, digest, briefing source | yes -- list (every briefing name this user has, with block counts and the latest archived generation), blocks list/add/set/reorder/remove, sources list/add/remove, archive list/show |
 | `briefings_config` | briefing config, briefing schedule | doc-only -- user-editable briefing schedule in `{bot_dir}/config/` |
 | `markets` | market, stock, ticker, index, futures | yes -- quote, summary, finviz |
 | `feeds` | feed, rss, subscribe, unsubscribe, opml | yes -- list, categories, entries, add, remove, refresh, poll, run-scheduled, import-opml, export-opml |

@@ -120,6 +120,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `doctor_check_interval` | `3600` | Seconds between re-runs of the `istota doctor` runtime self-check (1h; 0 disables). Re-run rather than trusted from boot, because the drift it catches happens after boot — the auto-update cron changes what is installed under a config the daemon already loaded |
 | `worktree_reap_interval` | `21600` | Seconds between developer-worktree reaping sweeps (ISSUE-288, 6h; 0 disables). Also gated by `[developer] worktree_reap_enabled`. Well under the 24h default retention, so nothing waits long after becoming eligible. A periodic job rather than a task setup hook: `setup_env` hooks run for every skill whatever the task selected, so a sweep there fired on every Talk reply and every heartbeat tick |
 | `sandbox_cache_sweep_interval` | `21600` | Seconds between package-cache sweeps (ISSUE-317, 6h; 0 disables). It follows the caches rather than a key: with `[developer] enabled` and `repos_dir` both set it walks `{repos_dir}/{user_id}/.package-caches` for each configured user, and otherwise `{root}/{user_id}` under `[security] sandbox_cache_dir`, so it is inert only where neither is set. Also gated by `[security] sandbox_cache_sweep_enabled`. Moving the caches onto disk is what makes them persist, so this is what keeps the fix for a RAM leak from being a disk leak on the volume `worktree_reap_interval` is already fighting for |
+| `skill_overlay_reindex_interval` | `21600` | Seconds between memory-search reindexes of every configured user's [per-skill overlays](per-user.md#per-skill-overlays) (ISSUE-343, 6h; 0 disables). An overlay is a user-written file with no CLI write path, so there is nothing to index from on write, and the per-write reindex never covered a text-editor edit over Nextcloud anyway — which is the authoring mode the file is for. One pass walks the directory, indexes only what actually binds, and reaps rows for files that no longer do, so an edit, a create and a delete are all covered. Deliberately a scheduler tick rather than part of the sleep cycle: that pass is gated on `[sleep_cycle] enabled` and on the primary brain's breaker, while `[memory_search] enabled` is an independent setting, and this makes no model call. Seeded to 0 so a fresh daemon indexes on its first tick — a restart is the one moment an overlay edited while the daemon was down is guaranteed to be unindexed. Skipped without a mount and without `[memory_search] auto_index_memory_files` |
 | `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early. 0 disables |
 | `loop_stall_alert_seconds` | `180` | Defense-in-depth: a watchdog thread logs an ERROR and fires one operator alert if the single-threaded main dispatch loop hasn't ticked in this long (a slow call that slipped onto the loop thread, a wedged check), then re-arms when the loop recovers. Suspended around known multi-minute in-loop work (sleep cycles, DB-health sweep) to avoid false pages. 0 disables |
 
@@ -551,6 +552,26 @@ Knobs for the in-app web chat surface (the "Chat" tab). The surface is always en
 | `room_stream_max_bytes` | `2000000` | Serialized-byte budget for the same guard |
 | `room_stream_room_check_seconds` | `10` | Per-connection room-metadata diff cadence (0 disables) |
 
+### `[web.map]`
+
+Where the background tiles under the location maps come from (ISSUE-334). The two CARTO URLs used to be literals inside a Svelte component; CARTO began requiring an API key and watermarking unauthenticated requests with "API KEY REQUIRED", so every map surface rendered defaced tiles and no deployment could change that without a code edit.
+
+| Setting | Default | Description |
+|---|---|---|
+| `provider` | `"openfreemap"` | `openfreemap`, `carto`, `osm`, or `custom`. An unrecognised name warns and falls back to `openfreemap` |
+| `api_key` | `""` | CARTO only. Free from <https://carto.com/basemaps/apikey/> |
+| `dark_style` | `""` | `custom` only: a MapLibre style URL |
+| `light_style` | `""` | `custom` only |
+| `attribution` | `""` | `custom` only |
+
+`openfreemap` needs no key and is the default for that reason. Resolution never returns an unusable spec: an unknown provider, a `custom` with no URL or a non-`http(s)` one, **and a keyed provider with no key** all fall back to `openfreemap`. Returning the keyless CARTO templates with a "needs key" flag was the original bug wearing a label — nothing in a browser can act on a flag, so the user still got the watermark. The flag survives on the fallback as the *reason*, which is what lets `istota doctor --only web.basemap` say "carto, with no key" rather than the vaguer "did not resolve as written".
+
+`api_key` **is not a secret.** MapLibre puts it in the tile URL, so it ships to every browser that loads a map and appears in every request they make; CARTO issues these free for exactly that. It is redacted in the admin config view because the name matches the redaction rule, which is harmless but is not a guarantee about the value.
+
+A user can also store their own CARTO key on the Location settings page, where it is a module-owned service rather than one of the account-wide Connected services. **A stored key selects CARTO for that user**, overriding `provider` — otherwise pasting a key would do nothing visible, and the reason would live in a file the user cannot reach. `GET /istota/api/map/basemap` returns that key only already embedded in the tile URL, never as a field.
+
+The `web.basemap` doctor check reads the same resolver as the endpoint, so it cannot pass while the map is blank. It opens no socket, deliberately: CARTO returns 200 with a byte-identical body and ETag for a keyless request and a bogus-key one, so a probe would report a working basemap for a defaced one — and tiles are fetched by the browser over a different route, so a proxied deployment would fail a probe for a basemap every browser renders.
+
 ## `[location]`
 
 | Setting | Default | Description |
@@ -562,7 +583,7 @@ Knobs for the in-app web chat surface (the "Chat" tab). The surface is always en
 | `reconcile_enabled` | `true` | Batch-reconcile visits from pings, cleaning up state-machine drift |
 | `reconcile_lookback_hours` | `6.0` | How far back a reconcile pass looks |
 | `reconcile_buffer_minutes` | `10.0` | Buffer around the lookback window |
-| `reconcile_grace_minutes` | `10.0` | Grace period before a gap counts as a departure |
+| `reconcile_grace_minutes` | `10.0` | Time away before an *unassigned* ping closes a visit. A gap between two pings at the same place no longer splits it (ISSUE-329): a tracker that goes quiet supplies no evidence that you left, and only an observed ping somewhere else does |
 | `reconcile_min_pings` | `3` | Minimum pings for a reconstructed visit to count |
 | `reconcile_min_dwell_sec` | `60` | Minimum dwell for a reconstructed visit to count |
 

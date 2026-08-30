@@ -46,6 +46,8 @@ There is no `type` field. The loader infers the kind from which of `prompt`, `pr
 
 **Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the Nextcloud mount root. `prompt_file` cannot be combined with `prompt` or `command`.
 
+A multiline `prompt` becomes one of these the first time anything rewrites the file — `!cron enable` / `!cron disable`, the removal of a `once` job, or a schedule migration (ISSUE-330). The text is written to `{bot_dir}/scripts/prompts/<job-name>.txt` and the job is left pointing at it. This is not tidiness: the rewriter used to re-serialize a multiline prompt as a TOML block, where a single stray backslash made *every* job in the file fail to load. A `prompt_file` you set yourself is never touched, and an existing file is only reused when its contents already match.
+
 **Command jobs**: Run shell commands in a subprocess (via `_run_capture`, which kills the whole process group on timeout). No brain invocation. Output captured and optionally posted to Talk.
 
 All job types go through the same task queue with retry logic, `!stop` support, failure tracking, and auto-disable.
@@ -59,9 +61,9 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `prompt` | for prompt jobs | The prompt to send to Claude |
 | `prompt_file` | for prompt_file jobs | Path to prompt file (relative to mount root) |
 | `command` | for command jobs | Shell command to execute |
-| `type` | no | `"prompt"` (default), `"prompt_file"`, or `"command"` |
-| `conversation_token` | no | Talk room for output |
-| `output_target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor |
+| `room` | no | Talk room token for output |
+| `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor |
+| `enabled` | no | `false` parks a job without deleting it (default `true`) |
 | `once` | no | Auto-delete after successful execution |
 | `silent_unless_action` | no | Suppress output unless response has `ACTION:` prefix |
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |

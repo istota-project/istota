@@ -42,11 +42,13 @@ Six sources ship.
 
 The first five are **object-backed**: something outside the table changes and the row closes. `task_alert` is **fire-and-forget** — nothing will ever close it, so it closes when you see it.
 
-Two of these are worth spelling out because the obvious reading is wrong.
+Three of these are worth spelling out because the obvious reading is wrong.
 
 **A disabled cron job is tracked by its failure counter, not by whether it is enabled.** `CRON.md` is authoritative for the enabled flag and the scheduler re-syncs it every tick, so a job auto-disabled after five failures is switched back on within a tick. A row watching the flag would go stale minutes after it was raised, leaving you a push about something the panel then denied all knowledge of. Every path that really ends the condition — a successful run, `!cron enable`, the module-job rescue — zeroes the counter instead.
 
 **A module job (`_module.*`) raises nothing here at all.** Those are re-enabled hourly whether or not anything was fixed, so a row would be raised, marked stale by the rescue, and reopened an hour later — and a reopen delivers. That turns a permanently broken module job into an hourly push with no command to run against it. A module job failing for a reason you can act on has a source of its own: a dead Garmin credential raises `connected_service`.
+
+**A `task_alert` the model wrote itself comes in three grades, and only two of them interrupt you.** `security` and `action_needed` are written to the panel *and* pushed. `note` is written and never pushed: info severity, no action chip, closed on the first render. It is also the fallback, so the two loud grades have to be named — an unrecognised type, or an alert with no `type` key at all, is a `note`. That direction is deliberate. It used to collapse onto `security`, and the example in the bot's own email guideline wrote the file with no `type`, so the shape a model copies landed on the loudest grade in the system: an ordinary polite refusal to a stranger arrived as "Action needed", and their follow-up as "Security alert" at danger severity. A grade that interrupts somebody was reachable by saying nothing.
 
 ## How an item closes
 

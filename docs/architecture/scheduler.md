@@ -40,6 +40,8 @@ while not shutdown_requested:
     check_db_health()           # off-thread; every db_health_check_interval (24h)
     check_doctor()              # off-thread; every doctor_check_interval (1h)
     check_worktree_reap()       # off-thread; every worktree_reap_interval (6h)
+    check_sandbox_cache_sweep() # off-thread; every sandbox_cache_sweep_interval (6h)
+    check_skill_overlay_reindex()  # off-thread; every skill_overlay_reindex_interval (6h)
     _run_db_backup()            # off-thread; every db_backup_interval (24h)
     _maybe_alert_backup_stale() # every tick
     _emit_scheduler_stats()     # every scheduler_stats_interval (60s; 0 disables)
@@ -55,7 +57,7 @@ Talk polling runs in a separate daemon thread, started at scheduler launch.
 
 ### Off-thread periodic checks
 
-Seven checks can outlast a tick, and each is on the list for a reason of its own:
+Nine checks can outlast a tick, and each is on the list for a reason of its own:
 
 | Check | Why it can run long |
 |---|---|
@@ -66,6 +68,8 @@ Seven checks can outlast a tick, and each is on the list for a reason of its own
 | `email-poll` | one IMAP connection per message read and another per message with attachments, each attachment uploaded to Nextcloud over WebDAV — unbounded network I/O whose duration an outside sender can influence (ISSUE-250) |
 | `doctor` | `runtime.model_cli` and the forge version checks each spawn a `--version`, so a wedged binary would starve dispatch |
 | `worktree-reap` | fetches each bare clone and walks each candidate checkout, so a slow forge or a cold cache would starve dispatch |
+| `sandbox-cache-sweep` | walks every cache tree and shells to `uv` and `npm`, either of which can take minutes on a cold cache |
+| `skill-overlay-reindex` | embeds every binding overlay, so a cold `sentence-transformers` load would starve dispatch |
 
 Run inline they blocked `pool.dispatch()` for their whole duration. `_spawn_background_check(name, fn, inflight, *, overlap_expected=False)` puts each on a short-lived `bgcheck-<name>` daemon thread, skipping the tick when the previous run under the same name is still alive, so a wedged sweep cannot stack one thread per tick. `overlap_expected=True` (sleep cycles, travel timezone, email poll) demotes that skip log to DEBUG, because for those three a pass outliving the poll interval is the normal case rather than a symptom — an email batch draining a backlog legitimately runs past the interval. Exceptions are contained and logged. The interval clocks advance at spawn time (fixed cadence; the in-flight guard prevents overlap), while the *staleness* alert reads the persisted last-run clock, which only advances on a durable OK run.
 
@@ -251,11 +255,13 @@ Runs every `briefing_check_interval`:
 | SQLite health (`quick_check` + self-heal `REINDEX`) | 86400s (24h) | `db_health_check_interval` |
 | Runtime self-check (`istota doctor`) | 3600s (1h) | `doctor_check_interval` |
 | Developer worktree reap | 21600s (6h) | `worktree_reap_interval` |
+| Sandbox package-cache sweep | 21600s (6h) | `sandbox_cache_sweep_interval` |
+| Per-skill overlay search reindex | 21600s (6h) | `skill_overlay_reindex_interval` |
 | DB backup snapshot | 86400s (24h) | `db_backup_interval` |
 | Scheduler process-health line | 60s | `scheduler_stats_interval` |
 | Host memory breadcrumb | 300s | `host_pressure_breadcrumb_interval_seconds` |
 | Host memory gate/snapshot sample | 30s | `host_pressure_sample_interval_seconds` |
 
-A 0 disables the check in every row below the dispatch sub-tick. The worktree reap additionally needs `developer.enabled`, `developer.repos_dir` and `developer.worktree_reap_enabled`; the backup needs `db_backup_enabled`.
+A 0 disables the check in every row below the dispatch sub-tick. The worktree reap additionally needs `developer.enabled`, `developer.repos_dir` and `developer.worktree_reap_enabled`; the cache sweep needs `security.sandbox_cache_sweep_enabled` and a cache root that resolves under the layout in force; the overlay reindex needs `memory_search.enabled`, `memory_search.auto_index_memory_files` and a mount; the backup needs `db_backup_enabled`.
 
 `dispatch_interval` decouples cold pending-task pickup latency from the interval-gated checks: the main loop runs `pool.dispatch()` on this sub-tick cadence without re-running the per-subsystem checks (0 or ≥ `poll_interval` = legacy one-dispatch-per-tick). `cron_max_staleness_minutes` (default 60) is the insertion-time staleness gate for `check_scheduled_jobs` / `check_briefings` — after a long outage it skips the catch-up insert and resumes from the next future fire, suppressing thundering-herd catch-up.
