@@ -7,6 +7,7 @@ SvelteKit frontend served as static files, Python handles auth and API.
 """
 
 import asyncio
+import base64
 import hashlib
 import importlib
 import json
@@ -623,6 +624,11 @@ body {
   display: block;
 }
 :root[data-theme='light'] .mark { filter: invert(1); }
+/* The bot icon is a photograph rather than a silhouette, so it opts out of the
+   inversion above — running one through that filter produces a negative. Same
+   reason `Avatar.svelte` never applies `--sigil-filter`. */
+.mark.icon { border-radius: 1rem; }
+:root[data-theme='light'] .mark.icon { filter: none; }
 h1 {
   margin: 0;
   font-size: 1.35rem;
@@ -740,7 +746,65 @@ _MAIL_ICON = _lucide(
 )
 
 
-def _render_login_page(bot_name: str, version: str) -> str:
+# The mark at the top of both server-rendered cards: the deployment's bot icon
+# when an admin has set one, and the octopus sigil otherwise.
+#
+# The icon is inlined as a `data:` URI rather than reached through a second
+# route. That is **not** a privacy measure and should not be read as one — this
+# same page already serves the favicon and the sigil to an unauthenticated
+# browser off the static mount, and the inlined icon is public by the same
+# token. It is one fewer route for one image on one page, and the icon is
+# deployment branding rather than anything confidential.
+#
+# Memoized on the content hash, so a page load costs a `SELECT content_hash`
+# and never a BLOB out of SQLite. One tuple replaced whole: two threads racing
+# here encode the same bytes from the same row and the rebind is atomic, so a
+# lock would buy a consistency nothing can observe. A stale entry cannot be
+# served either — the key *is* the hash, so a changed icon simply misses.
+_LOGIN_SIGIL_MARK = (
+    '<img class="mark sigil" src="/istota/octopus-sigil.webp" alt="" '
+    'width="68" height="72">'
+)
+_login_icon_memo: tuple[str, str] | None = None
+
+
+def _login_page_mark() -> str:
+    """The card's `<img>`: the bot icon inlined, or the sigil.
+
+    Never raises. This runs on the unauthenticated login path and on the
+    sign-in failure path, and a decoration that could take either of those down
+    would be a worse bug than a missing picture.
+    """
+    global _login_icon_memo
+
+    if _config is None:
+        return _LOGIN_SIGIL_MARK
+    try:
+        from . import avatars, db  # noqa: PLC0415
+
+        with db.get_db(_config.db_path) as conn:
+            content_hash = avatars.bot_avatar_hash(conn)
+            if not content_hash:
+                return _LOGIN_SIGIL_MARK
+            memo = _login_icon_memo
+            if memo is not None and memo[0] == content_hash:
+                return memo[1]
+            icon = avatars.get_bot_avatar(conn)
+        if icon is None:
+            return _LOGIN_SIGIL_MARK
+        encoded = base64.b64encode(icon.image).decode("ascii")
+        mark = (
+            f'<img class="mark icon" src="data:{icon.mime};base64,{encoded}" '
+            f'alt="" width="72" height="72">'
+        )
+        _login_icon_memo = (icon.content_hash, mark)
+        return mark
+    except Exception:
+        logger.debug("bot icon unavailable for the login page", exc_info=True)
+        return _LOGIN_SIGIL_MARK
+
+
+def _render_login_page(bot_name: str, version: str, mark: str) -> str:
     """The unauthenticated landing page: one card, one working way in."""
     name = escape(bot_name)
     return (
@@ -751,7 +815,7 @@ def _render_login_page(bot_name: str, version: str) -> str:
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
         f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
         f'<main class="card">'
-        f'<img class="mark" src="/istota/octopus-sigil.webp" alt="" width="68" height="72">'
+        f'{mark}'
         f'<h1>{name}</h1>'
         f'<p class="tagline">Sign in to continue</p>'
         f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
@@ -767,7 +831,7 @@ def _render_login_page(bot_name: str, version: str) -> str:
 
 
 def _render_login_error_page(
-    bot_name: str, version: str, headline: str, detail: str
+    bot_name: str, version: str, headline: str, detail: str, mark: str
 ) -> str:
     """A login failure the user can act on, in the same card as the login page.
 
@@ -784,7 +848,7 @@ def _render_login_error_page(
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
         f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
         f'<main class="card">'
-        f'<img class="mark" src="/istota/octopus-sigil.webp" alt="" width="68" height="72">'
+        f'{mark}'
         f'<h1>{name}</h1>'
         f'<p class="tagline">{escape(headline)}</p>'
         f'<p class="tagline">{escape(detail)}</p>'
@@ -809,7 +873,8 @@ async def login(request: Request):
         from . import __version__
 
         bot_name = _config.bot_name if _config else "Istota"
-        return HTMLResponse(_render_login_page(bot_name, __version__))
+        mark = await asyncio.to_thread(_login_page_mark)
+        return HTMLResponse(_render_login_page(bot_name, __version__, mark))
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
 
@@ -871,9 +936,15 @@ async def callback(request: Request):
 
     _bot_name = _config.bot_name if _config else "Istota"
 
-    def _login_error(status: int, headline: str, detail: str) -> HTMLResponse:
+    async def _login_error(status: int, headline: str, detail: str) -> HTMLResponse:
+        # `async` so the mark's one indexed read stays off the event loop, the
+        # same way the login page resolves it. The card is the login card, so
+        # the two must not diverge on what they render at the top.
+        mark = await asyncio.to_thread(_login_page_mark)
         return HTMLResponse(
-            _render_login_error_page(_bot_name, __version__, headline, detail),
+            _render_login_error_page(
+                _bot_name, __version__, headline, detail, mark,
+            ),
             status_code=status,
         )
 
@@ -890,7 +961,7 @@ async def callback(request: Request):
             "OAuth2 callback state mismatch — session cookie missing or stale "
             "(client=%s)", request.client.host if request.client else "?",
         )
-        return _login_error(
+        return await _login_error(
             400,
             "Sign-in could not be completed",
             "This sign-in link has expired, or your browser did not send the "
@@ -899,7 +970,7 @@ async def callback(request: Request):
     except OAuthError as e:
         # The provider declined — a cancelled consent, a revoked client.
         logger.warning("OAuth2 callback rejected by provider: %s", e)
-        return _login_error(
+        return await _login_error(
             400,
             "Sign-in was declined",
             "The identity provider did not authorise this sign-in.",
@@ -908,7 +979,7 @@ async def callback(request: Request):
         # Token-endpoint unreachable or misbehaving. Distinct from the above:
         # retrying may work, but nothing the user did caused it.
         logger.exception("OAuth2 token exchange failed")
-        return _login_error(
+        return await _login_error(
             502,
             "Sign-in is temporarily unavailable",
             "Could not reach the identity provider. Please try again shortly.",
@@ -1812,6 +1883,15 @@ def _admin_storage_section(db_path: Path) -> dict:
         # (standalone) install has no mount, so the frontend hides the row.
         "nextcloud_configured": bool(_config and _config.storage_is_nextcloud),
         "nextcloud_mount_healthy": mount_healthy,
+        # The bot's own Nextcloud account, so the bot-icon control can name the
+        # picture it is *not* changing rather than implying the two are linked.
+        # The app password the daemon holds cannot set an avatar there —
+        # `POST /index.php/avatar` is a session-and-CSRF-guarded web route, not
+        # OCS — so the divergence is permanent and worth stating.
+        "nextcloud_username": (
+            (_config.nextcloud.username or None)
+            if (_config and _config.storage_is_nextcloud) else None
+        ),
     }
 
 
@@ -7797,6 +7877,88 @@ async def settings_delete_avatar(
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
     deleted = await asyncio.to_thread(_drop_user_avatar, user["username"])
+    return {"deleted": deleted}
+
+
+# The deployment's bot icon, set by an admin.
+#
+# These are the first mutating admin routes in this file, and deliberately not
+# a new shape: `briefings/routes.py` already ships three under the same
+# `require_admin` + `verify_origin` pair, and these copy them. The upload takes
+# `_read_avatar_upload` whole rather than reproducing the two size checks and
+# the one-at-a-time decode budget — a second copy of a bound is a second thing
+# to get wrong, and this endpoint's body is as untrusted as the user's own.
+#
+# The icon is deployment-wide and there is one row, so two admins setting it at
+# once resolve as last writer wins. Nothing to merge, so nothing to merge
+# wrongly.
+#
+# Distinct from the bot's Nextcloud Talk avatar, and unable to change it: that
+# one is the bot account's profile picture, and `POST /index.php/avatar` is a
+# session-and-CSRF-guarded web route rather than OCS, while the daemon holds an
+# app password used as HTTP Basic. The admin page says so in a sentence rather
+# than implying the two are linked.
+
+
+def _store_bot_avatar(image: bytes, content_hash: str) -> None:
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        avatars.put_bot_avatar(conn, image=image, content_hash=content_hash)
+
+
+@api_router.put("/admin/avatar")
+async def admin_upload_bot_avatar(
+    request: Request,
+    _admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Replace the deployment's bot icon.
+
+    Takes `request` rather than an `UploadFile` parameter for the reason the
+    user's own upload does: FastAPI reads and parses the whole body before it
+    solves dependencies, so a declared-length check written as a dependency
+    would run after the thing it is meant to bound had already been spooled.
+    """
+    from . import avatars
+    from .avatars import AvatarError
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    try:
+        image, digest = await _read_avatar_upload(request)
+    except AvatarError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status)
+
+    await asyncio.to_thread(_store_bot_avatar, image, digest)
+    logger.info(
+        "bot icon set by %s bytes=%d hash=%s",
+        _admin["username"], len(image), digest[:12],
+    )
+    return {"hash": digest, "mime": avatars.NORMALIZED_MIME, "bytes": len(image)}
+
+
+def _drop_bot_avatar() -> bool:
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        return avatars.delete_bot_avatar(conn)
+
+
+@api_router.delete("/admin/avatar")
+async def admin_delete_bot_avatar(
+    _admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Clear the deployment's bot icon, reverting to the amber initial chip.
+
+    Idempotent: no row is `{"deleted": false}`, not a 404.
+    """
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    deleted = await asyncio.to_thread(_drop_bot_avatar)
+    if deleted:
+        logger.info("bot icon cleared by %s", _admin["username"])
     return {"deleted": deleted}
 
 

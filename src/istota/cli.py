@@ -1856,6 +1856,93 @@ def cmd_nextcloud_provision_rooms(args):
     print(f"STATE: {state}")
 
 
+# --- bot-icon ---------------------------------------------------------------
+#
+# The headless counterpart to the admin page's upload control: one icon for the
+# deployment, in the `bot_avatar` table. Three verbs, in `cli.py` rather than a
+# module of their own, because that is what every small group here does —
+# `chat`, `nextcloud`, `kv`, `calendar` and `experimental` are all inline, and
+# only `money` and `briefings` are large enough to have earned a file.
+#
+# Idempotent by hash and reporting `STATE: created|updated|noop`, matching
+# `user ensure` and `nextcloud provision-rooms`, so an Ansible play can call it
+# on every deploy and compute `changed_when` from stdout.
+
+
+def _bot_icon_max_bytes(config) -> int:
+    """The decode cap for an operator-supplied file.
+
+    `web.max_avatar_kb = 0` switches the *upload endpoint* off — a statement
+    about an unauthenticated network body. This reads a local file as the
+    operator, in their own shell, so it falls back to the shipped default
+    rather than refusing everything.
+    """
+    from istota.config import WebConfig
+
+    return (config.web.max_avatar_kb or WebConfig.max_avatar_kb) * 1024
+
+
+def cmd_bot_icon_set(args):
+    """Store an image file as the deployment's bot icon."""
+    from istota import avatars
+
+    config = load_config(Path(args.config) if args.config else None)
+    path = Path(args.path)
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        print(f"Error: could not read {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        image, digest = avatars.normalize(
+            raw, declared_format=None, max_bytes=_bot_icon_max_bytes(config),
+        )
+    except avatars.AvatarError as e:
+        print(f"Error: {e.message}", file=sys.stderr)
+        sys.exit(1)
+
+    with db.get_db(config.db_path) as conn:
+        current = avatars.bot_avatar_hash(conn)
+        if current == digest:
+            state = "noop"
+        else:
+            state = "updated" if current else "created"
+            avatars.put_bot_avatar(conn, image=image, content_hash=digest)
+
+    print(f"  mime:  {avatars.NORMALIZED_MIME}")
+    print(f"  bytes: {len(image)}")
+    print(f"  hash:  {digest}")
+    print(f"STATE: {state}")
+
+
+def cmd_bot_icon_clear(args):
+    """Remove the bot icon. The web UI reverts to the initial chip."""
+    from istota import avatars
+
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        deleted = avatars.delete_bot_avatar(conn)
+    print(f"STATE: {'updated' if deleted else 'noop'}")
+
+
+def cmd_bot_icon_show(args):
+    """Report what is stored — never the bytes."""
+    from istota import avatars
+
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        icon = avatars.get_bot_avatar(conn)
+    if icon is None:
+        print("No bot icon set.")
+        return
+    print("Bot icon:")
+    print(f"  mime:       {icon.mime}")
+    print(f"  bytes:      {len(icon.image)}")
+    print(f"  hash:       {icon.content_hash}")
+    print(f"  updated_at: {icon.updated_at}")
+
+
 def cmd_experimental_list(args):
     """List known experimental feature flags with current on/off status."""
     from istota.experimental import KNOWN_FEATURES
@@ -2423,6 +2510,20 @@ def main():
     )
     nc_rooms_parser.add_argument("--json", action="store_true", help="Machine-readable output")
 
+    # bot-icon (with subparsers)
+    bot_icon_parser = subparsers.add_parser(
+        "bot-icon", help="The deployment's bot icon in the web UI",
+    )
+    bot_icon_subparsers = bot_icon_parser.add_subparsers(
+        dest="bot_icon_action", required=True,
+    )
+    bot_icon_set_parser = bot_icon_subparsers.add_parser(
+        "set", help="Store an image file as the bot icon (idempotent by content)",
+    )
+    bot_icon_set_parser.add_argument("path", help="Path to a JPEG, PNG, WebP, GIF or HEIC")
+    bot_icon_subparsers.add_parser("clear", help="Remove the bot icon")
+    bot_icon_subparsers.add_parser("show", help="Show what is stored, never the bytes")
+
     # experimental
     exp_parser = subparsers.add_parser("experimental", help="Experimental feature flags")
     exp_subparsers = exp_parser.add_subparsers(dest="experimental_action", required=True)
@@ -2502,6 +2603,13 @@ def main():
             "provision-rooms": cmd_nextcloud_provision_rooms,
         }
         nextcloud_commands[args.nextcloud_action](args)
+    elif args.command == "bot-icon":
+        bot_icon_commands = {
+            "set": cmd_bot_icon_set,
+            "clear": cmd_bot_icon_clear,
+            "show": cmd_bot_icon_show,
+        }
+        bot_icon_commands[args.bot_icon_action](args)
     elif args.command == "experimental":
         experimental_commands = {
             "list": cmd_experimental_list,

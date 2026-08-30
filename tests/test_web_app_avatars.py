@@ -725,3 +725,237 @@ class TestMeCarriesTheHashes:
         resp = await alice.get("/istota/api/me")
         assert resp.status_code == 200
         assert resp.json()["avatars"] == {"user": None, "bot": None}
+
+
+# --- the admin bot-icon writes ----------------------------------------------
+#
+# Stage 5. The first mutating admin routes in `web_app.py`, though not in the
+# app: they copy `briefings/routes.py`'s `require_admin` + `verify_origin`
+# pair. What is asserted here is that the gate is real on both verbs, that the
+# body takes the same two size checks the user's own upload does rather than a
+# second implementation of them, and that a refusal stores nothing.
+
+
+@pytest.fixture
+async def admin(config, alice):
+    """Alice, with the deployment naming her an admin.
+
+    `_user_is_web_admin` reads `_config.admin_users` per request, so mutating
+    the config the app already holds is enough and the order the two fixtures
+    resolve in does not matter.
+    """
+    config.admin_users = {"alice"}
+    return alice
+
+
+async def _put_bot_icon(client, data=None, name="icon.png", content_type="image/png",
+                        headers=ORIGIN):
+    return await client.put(
+        "/istota/api/admin/avatar",
+        files={"file": (name, data if data is not None else _png(), content_type)},
+        headers=headers,
+    )
+
+
+def _stored_bot_icon(db_path):
+    with db.get_db(db_path) as conn:
+        return avatars.get_bot_avatar(conn)
+
+
+class TestAdminBotIconWrites:
+    async def test_an_admin_sets_it_and_every_caller_can_fetch_it(
+        self, admin, bob, db_path,
+    ):
+        resp = await _put_bot_icon(admin)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["hash"]) == 64
+        assert body["mime"] == avatars.NORMALIZED_MIME
+        assert body["bytes"] > 0
+
+        served = await bob.get(f"/istota/api/avatars/bot?v={body['hash']}")
+        assert served.status_code == 200
+        assert served.content == _stored_bot_icon(db_path).image
+
+    async def test_a_non_admin_may_not_set_it(self, bob, db_path):
+        assert (await _put_bot_icon(bob)).status_code == 403
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_an_anonymous_caller_may_not_set_it(self, client, db_path):
+        assert (await _put_bot_icon(client)).status_code == 401
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_a_missing_origin_is_refused(self, admin, db_path):
+        assert (await _put_bot_icon(admin, headers={})).status_code == 403
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_the_last_writer_wins(self, admin, db_path):
+        first = (await _put_bot_icon(admin)).json()["hash"]
+        second = (await _put_bot_icon(admin, data=_png(color=(9, 200, 30)))).json()["hash"]
+        assert first != second
+        assert _stored_bot_icon(db_path).content_hash == second
+        with db.get_db(db_path) as conn:
+            rows = conn.execute("SELECT COUNT(*) AS n FROM bot_avatar").fetchone()
+        assert rows["n"] == 1
+
+    async def test_a_declared_length_over_the_cap_never_reaches_the_decoder(
+        self, admin, config, monkeypatch, db_path,
+    ):
+        # The admin route must take `_read_avatar_upload`'s two checks rather
+        # than a second copy of them: the cap has to bite before the body
+        # exists in memory, and `len(raw)` is too late.
+        import istota.avatars as avatars_mod
+        calls = []
+        monkeypatch.setattr(
+            avatars_mod, "normalize",
+            lambda *a, **k: calls.append(1) or (b"", ""),
+        )
+        config.web.max_avatar_kb = 1
+        resp = await _put_bot_icon(admin, data=_noisy_png((200, 200)))
+        assert resp.status_code == 413
+        assert resp.json()["error"]
+        assert calls == []
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_an_svg_is_refused_and_stores_nothing(self, admin, db_path):
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="9" height="9"/></svg>'
+        resp = await _put_bot_icon(admin, data=svg, name="icon.svg",
+                                   content_type="image/svg+xml")
+        assert resp.status_code == 415
+        assert resp.json()["error"]
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_the_bot_hash_reaches_me(self, admin):
+        digest = (await _put_bot_icon(admin)).json()["hash"]
+        me = (await admin.get("/istota/api/me")).json()
+        assert me["avatars"]["bot"] == digest
+
+
+class TestAdminBotIconClear:
+    async def test_an_admin_clears_it(self, admin, db_path):
+        await _put_bot_icon(admin)
+        resp = await admin.delete("/istota/api/admin/avatar", headers=ORIGIN)
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_it_is_idempotent(self, admin):
+        resp = await admin.delete("/istota/api/admin/avatar", headers=ORIGIN)
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is False
+
+    async def test_a_non_admin_may_not_clear_it(self, admin, bob, db_path):
+        await _put_bot_icon(admin)
+        assert (await bob.delete("/istota/api/admin/avatar",
+                                 headers=ORIGIN)).status_code == 403
+        assert _stored_bot_icon(db_path) is not None
+
+    async def test_a_missing_origin_is_refused(self, admin, db_path):
+        await _put_bot_icon(admin)
+        assert (await admin.delete("/istota/api/admin/avatar")).status_code == 403
+        assert _stored_bot_icon(db_path) is not None
+
+    async def test_it_leaves_users_pictures_alone(self, admin, db_path):
+        _seed(db_path, "bob")
+        await _put_bot_icon(admin)
+        await admin.delete("/istota/api/admin/avatar", headers=ORIGIN)
+        with db.get_db(db_path) as conn:
+            assert avatars.get_user_avatar(conn, "bob") is not None
+
+
+# --- the login page's mark --------------------------------------------------
+#
+# The server-rendered login card inlines the bot icon as a `data:` URI rather
+# than gaining a second route for one image on one page. That is explicitly not
+# a privacy measure — the same page already serves the favicon and the sigil to
+# an unauthenticated browser off the static mount — so what these assert is the
+# two things that *are* load-bearing: the blob is not read out of SQLite per
+# request, and the icon does not inherit the sigil's light-theme inversion,
+# which would render a photograph as a negative.
+
+
+@pytest.fixture(autouse=True)
+def _clear_login_icon_memo():
+    import istota.web_app as mod
+    mod._login_icon_memo = None
+    yield
+    mod._login_icon_memo = None
+
+
+def _seed_bot_icon(db_path, color=(120, 130, 140)):
+    image, digest = avatars.normalize(
+        _png(color=color), declared_format=None, max_bytes=10 * 1024 * 1024,
+    )
+    with db.get_db(db_path) as conn:
+        avatars.put_bot_avatar(conn, image=image, content_hash=digest)
+    return image, digest
+
+
+class TestTheLoginPageMark:
+    async def test_the_sigil_renders_when_no_icon_is_set(self, client):
+        html = (await client.get("/istota/login")).text
+        assert "/istota/octopus-sigil.webp" in html
+        assert "data:image/webp;base64," not in html
+
+    async def test_the_icon_is_inlined_when_one_is_set(self, client, db_path):
+        import base64
+        image, _ = _seed_bot_icon(db_path)
+        html = (await client.get("/istota/login")).text
+        assert "/istota/octopus-sigil.webp" not in html
+        expected = base64.b64encode(image).decode("ascii")
+        assert f"data:image/webp;base64,{expected}" in html
+
+    async def test_the_inlined_icon_opts_out_of_the_light_theme_inversion(
+        self, client, db_path,
+    ):
+        # `.mark` is inverted for the light theme because the sigil is a flat
+        # near-white silhouette. Running a photograph through that filter
+        # produces a negative — the same reason `Avatar.svelte` applies none.
+        _seed_bot_icon(db_path)
+        html = (await client.get("/istota/login")).text
+        assert 'class="mark icon"' in html
+        assert ":root[data-theme='light'] .mark.icon { filter: none; }" in html
+
+    async def test_the_blob_is_read_once_across_two_renders(
+        self, client, db_path, monkeypatch,
+    ):
+        _seed_bot_icon(db_path)
+        import istota.avatars as avatars_mod
+        blob_reads = []
+        real = avatars_mod.get_bot_avatar
+        monkeypatch.setattr(
+            avatars_mod, "get_bot_avatar",
+            lambda conn: blob_reads.append(1) or real(conn),
+        )
+        first = (await client.get("/istota/login")).text
+        second = (await client.get("/istota/login")).text
+        assert first == second
+        assert len(blob_reads) == 1
+
+    async def test_a_new_icon_re_encodes(self, client, db_path):
+        _seed_bot_icon(db_path)
+        first = (await client.get("/istota/login")).text
+        image, _ = _seed_bot_icon(db_path, color=(2, 4, 8))
+        second = (await client.get("/istota/login")).text
+        assert first != second
+        import base64
+        assert base64.b64encode(image).decode("ascii") in second
+
+    async def test_a_read_failure_falls_back_to_the_sigil(self, client, db_path):
+        # Nothing on the login path may raise on account of decoration.
+        with db.get_db(db_path) as conn:
+            conn.execute("DROP TABLE bot_avatar")
+        resp = await client.get("/istota/login")
+        assert resp.status_code == 200
+        assert "/istota/octopus-sigil.webp" in resp.text
+
+    async def test_the_error_card_carries_the_same_mark(self, client, db_path):
+        import base64
+        import istota.web_app as mod
+        image, _ = _seed_bot_icon(db_path)
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(
+            side_effect=RuntimeError("boom"),
+        )
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        assert resp.status_code >= 400
+        assert base64.b64encode(image).decode("ascii") in resp.text
