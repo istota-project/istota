@@ -2729,6 +2729,27 @@ _OVERLAY_NAME_CHARS = 64
 #: that is a typo and a typo is the case the check exists for.
 _OVERLAY_FATAL_REASONS = frozenset({"denylisted", "over_cap"})
 
+#: Reported against a user's overlay *directory* rather than against a file in
+#: it: the directory resolves inside that user's own tree, so
+#: `contained_overlay_dir` accepts it, but a component of the path is a symlink
+#: and `open_overlay_dir` refuses to follow one (ISSUE-344). Every reader takes
+#: the strict answer, so none of that user's overlays reaches a prompt. Not in
+#: `_OVERLAY_FATAL_REASONS`, which is matched against an `inspect_overlay`
+#: reason and never sees this one — it is appended to `dir_findings` directly,
+#: which reports at WARN rather than FAIL (a task can produce one at will).
+#: Names what was established rather than a cause: `open_overlay_dir` collapses
+#: every `OSError` to a refusal, so an unreadable `config`, a regular file at
+#: `skills` and an I/O error on the mount all arrive here too.
+_OVERLAY_DIR_UNOPENABLE = "dir_not_openable"
+
+#: The other directory-level refusal, from `contained_overlay_dir` rather than
+#: from the descriptor walk: the path resolves *outside* the user's own tree.
+#: Reported rather than skipped, because nothing else looks at this directory —
+#: the loader degrades to no overlay, and the read verbs only ever run for one
+#: user who asked. Skipping it left the most clear-cut plant of the set as the
+#: only one nothing anywhere reported.
+_OVERLAY_DIR_OUTSIDE_TREE = "dir_outside_user_tree"
+
 #: Edits allowed between a filename and a real skill name before the two stop
 #: being a plausible typo of each other, keyed on whether the *filename* is
 #: short. Two edits out of four characters is most of the name, so at that
@@ -2990,8 +3011,11 @@ def _overlay_near_miss(stem: str, known_skills: Collection[str]) -> str | None:
     return None if best is None else best[1]
 
 
-def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
-    """`(user_id, overlay dir)` for every user under the mount that has one.
+def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path, Path | None]]:
+    """`(user_id, user dir, overlay dir)` for every user under the mount with one.
+
+    A `None` overlay dir means the path resolved outside that user's own tree —
+    reported by the caller rather than dropped, since nothing else looks at it.
 
     Walked rather than taken from ``config.users`` because a user whose config
     block was removed still has a tree on disk, and a file left there is exactly
@@ -3010,9 +3034,12 @@ def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
       user's tree, since ``config`` and ``skills`` are both ordinary entries a
       task can replace with a link. That rule is
       ``_loader.contained_overlay_dir``, shared with the loader, the memory CLI
-      and the search reindex, and the **resolved** path is what is returned and
-      walked — re-walking by the unresolved name would leave the check and the
-      reads separated by a window in which the link can be swapped;
+      and the search reindex, and the **resolved** path is what is returned;
+      the caller then opens it with ``_loader.open_overlay_dir`` and walks the
+      descriptor, since the resolved path alone still leaves the check and the
+      reads separated by a window in which the link can be swapped
+      (ISSUE-344). The user directory comes back too, because that is the root
+      the descriptor walk starts from;
     - nothing here opens a file. ``scandir`` stats, and the read that follows
       is ``inspect_overlay``'s, which refuses a FIFO — ``doctor`` runs on the
       daemon's start-up path, where a blocking ``open(2)`` has no timeout over
@@ -3026,7 +3053,7 @@ def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
     except OSError:
         return []
 
-    found: list[tuple[str, Path]] = []
+    found: list[tuple[str, Path, Path]] = []
     for entry in entries:
         try:
             if not entry.is_dir(follow_symlinks=False):
@@ -3036,13 +3063,19 @@ def _overlay_dirs(mount: Path, bot_dir: str) -> list[tuple[str, Path]]:
         user_dir = Path(entry.path)
         resolved = contained_overlay_dir(user_dir / bot_dir / "config" / "skills", user_dir)
         if resolved is None:
+            # Resolves outside the user's own tree. Reported rather than
+            # skipped: nothing else reports this directory, so a link pointing
+            # clean out of the mount — the most clear-cut plant of the set —
+            # was the one case nothing anywhere named. `None` in the third slot
+            # is what the caller reads as "refused before it was opened".
+            found.append((entry.name, user_dir, None))
             continue
         try:
             if not resolved.is_dir():
                 continue
         except OSError:
             continue
-        found.append((entry.name, resolved))
+        found.append((entry.name, user_dir, resolved))
     return found
 
 
@@ -3111,6 +3144,7 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
             OVERLAY_UNKNOWN_SKILL,
             inspect_overlay,
             load_skill_index,
+            open_overlay_dir,
         )
         known = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
     except Exception as exc:  # noqa: BLE001 - a check never raises
@@ -3120,40 +3154,111 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
     total = 0
     dead: list[str] = []
     warned: list[str] = []
-    for user_id, overlay_dir in dirs:
-        try:
-            entries = sorted(overlay_dir.glob("*.md"))
-        except OSError:
+    # Directory-level refusals. Kept in their own list for two reasons. They
+    # are not files, so measuring them against `total` rendered "1 of 0 overlay
+    # file(s) are misfiled"; and they report at **WARN**, not FAIL, because a
+    # sandboxed task can produce one at will — `ln -s /tmp config` inside its
+    # own workspace — and a deployment-scope red an attacker can raise on
+    # demand is the aimable alert ISSUE-340 split this check to avoid. That is
+    # also the severity this module already gives a symlinked overlay *file*:
+    # it loads as nothing and belongs in the report, but it is not the
+    # misfiling a person fixes by renaming or shrinking, which is what
+    # `_OVERLAY_FATAL_REASONS` is reserved for. Nothing about the safety half
+    # turns on the severity — the link is refused either way, and no file from
+    # behind it is opened or named.
+    dir_findings: list[str] = []
+    for user_id, user_dir, overlay_dir in dirs:
+        if overlay_dir is None:
+            dir_findings.append(
+                _overlay_label(user_id, f"{config.bot_dir_name}/config/skills",
+                               _OVERLAY_DIR_OUTSIDE_TREE)
+            )
             continue
-        for path in entries:
-            total += 1
-            found = inspect_overlay(path, known_skills=known)
-            if found.reason == OVERLAY_UNKNOWN_SKILL:
-                # The one reason a task produces with a single `touch`, so the
-                # severity turns on what the name looks like rather than on the
-                # reason alone. See ISSUE-340 and `_OVERLAY_FATAL_REASONS`.
-                fails, note = _classify_unknown_overlay(found.skill, known)
-                bucket = dead if fails else warned
-                bucket.append(_overlay_label(user_id, path.name, note))
-            elif found.reason in _OVERLAY_FATAL_REASONS:
-                dead.append(_overlay_label(user_id, path.name, found.reason))
-            elif found.reason is not None:
-                # Empty, not UTF-8, or a read this process was refused. Each
-                # loads as nothing and so belongs in the report, but none is a
-                # misfiling an operator acts on the way a renamed or shrunk
-                # file is, and a transient EACCES on one user's file must not
-                # turn a deployment-scope check red.
-                warned.append(_overlay_label(user_id, path.name, found.reason))
-            elif found.warnings:
-                warned.append(
-                    _overlay_label(user_id, path.name, ", ".join(found.warnings))
+        # Opened one user at a time rather than all of them up front: this
+        # walks every tree on the mount, and holding a descriptor per user
+        # for the length of the sweep is a file-table cost for nothing.
+        dir_fd = open_overlay_dir(user_dir, config.bot_dir_name, "config", "skills")
+        if dir_fd is None:
+            # `contained_overlay_dir` passed and this did not, so the two
+            # disagree — deliberately: it accepts a symlink landing back inside
+            # the user's own tree and the descriptor walk refuses one at any
+            # component. Every reader now takes the strict answer, so this
+            # user's overlays reach no prompt at all, which is exactly the
+            # misfiling this check exists to name. The prompt loader degrades
+            # silently and logs at `debug` (it runs once per eager skill per
+            # task); this is the report that posture depends on (ISSUE-344).
+            dir_findings.append(
+                _overlay_label(user_id, f"{config.bot_dir_name}/config/skills",
+                               _OVERLAY_DIR_UNOPENABLE)
+            )
+            continue
+        try:
+            # `scandir` on the descriptor rather than `overlay_dir.glob`, so the
+            # listing comes from the directory that passed. The dotfile filter
+            # `glob` applied is kept, and the asymmetry with the search reindex
+            # and `skills overlays` is deliberate: those two attach no severity
+            # to what they list, and this check does. `_classify_unknown_overlay`
+            # reads `.developer.md` as a near-miss of `developer` and buckets it
+            # `dead`, so listing dotfiles here would let any sandboxed task turn
+            # a deployment-scope check red with one `touch` — the aimable alert
+            # ISSUE-340 split this check to avoid.
+            with os.scandir(dir_fd) as entries:
+                names = sorted(
+                    e.name for e in entries
+                    if e.name.endswith(".md") and not e.name.startswith(".")
                 )
+        except OSError:
+            os.close(dir_fd)
+            continue
+        try:
+            for entry_name in names:
+                total += 1
+                path = overlay_dir / entry_name
+                found = inspect_overlay(path, known_skills=known, dir_fd=dir_fd)
+                if found.reason == OVERLAY_UNKNOWN_SKILL:
+                    # The one reason a task produces with a single `touch`, so
+                    # the severity turns on what the name looks like rather
+                    # than on the reason alone. See ISSUE-340 and
+                    # `_OVERLAY_FATAL_REASONS`.
+                    fails, note = _classify_unknown_overlay(found.skill, known)
+                    bucket = dead if fails else warned
+                    bucket.append(_overlay_label(user_id, path.name, note))
+                elif found.reason in _OVERLAY_FATAL_REASONS:
+                    dead.append(_overlay_label(user_id, path.name, found.reason))
+                elif found.reason is not None:
+                    # Empty, not UTF-8, or a read this process was refused. Each
+                    # loads as nothing and so belongs in the report, but none is
+                    # a misfiling an operator acts on the way a renamed or
+                    # shrunk file is, and a transient EACCES on one user's file
+                    # must not turn a deployment-scope check red.
+                    warned.append(_overlay_label(user_id, path.name, found.reason))
+                elif found.warnings:
+                    warned.append(
+                        _overlay_label(user_id, path.name, ", ".join(found.warnings))
+                    )
+        finally:
+            os.close(dir_fd)
 
-    if not total:
+    # `dir_findings` as well as `total`, because a refused directory contributes
+    # no files: a check that returned OK here would report "no per-skill
+    # overlays filed" for a user whose whole directory just stopped being
+    # readable, which is the reassuring direction.
+    if not total and not dead and not dir_findings:
         return CheckResult(
             name, OK,
             f"no per-skill overlays filed under {mount}/Users/*/{config.bot_dir_name}/config/skills",
         )
+
+    #: A directory is not one of `total` overlay files, so it gets a clause of
+    #: its own rather than a place in that fraction — counting it there read
+    #: "1 of 0 overlay file(s) are misfiled" for a lone refused tree, and
+    #: understated the ratio wherever one sat beside another user's good files.
+    def _dir_clause() -> str:
+        return (
+            f"{len(dir_findings)} overlay director(y/ies) could not be read, so "
+            f"none of those users' overlays loads: {_overlay_list(dir_findings)}"
+        )
+
     if dead:
         detail = (
             f"{len(dead)} of {total} overlay file(s) are misfiled and will never "
@@ -3170,6 +3275,8 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
                 f"; {len(warned)} more reach no prompt or need a look: "
                 f"{_overlay_list(warned)}"
             )
+        if dir_findings:
+            detail += f"; {_dir_clause()}"
         return CheckResult(
             name, FAIL, detail,
             remedy=(
@@ -3181,11 +3288,17 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
                 + _OVERLAY_WARN_REMEDY
             ),
         )
-    if warned:
+    if warned or dir_findings:
+        parts = []
+        if warned:
+            parts.append(
+                f"{len(warned)} of {total} overlay file(s) need a look: "
+                f"{_overlay_list(warned)}"
+            )
+        if dir_findings:
+            parts.append(_dir_clause())
         return CheckResult(
-            name, WARN,
-            f"{len(warned)} of {total} overlay file(s) need a look: {_overlay_list(warned)}",
-            remedy=_OVERLAY_WARN_REMEDY,
+            name, WARN, "; ".join(parts), remedy=_OVERLAY_WARN_REMEDY,
         )
     return CheckResult(
         name, OK, f"{total} overlay file(s) across {len(dirs)} user tree(s), all load"
@@ -3206,7 +3319,14 @@ _OVERLAY_WARN_REMEDY = (
     "resembles no skill, so it is most likely a scratch file — delete it, or "
     "rename it if it was meant to be an overlay. empty / overlay_not_utf8 / "
     "overlay_is_a_symlink / overlay_not_a_regular_file / overlay_unreadable: "
-    "the file is there and contributes nothing to any prompt. Run "
+    "the file is there and contributes nothing to any prompt. "
+    "dir_not_openable / dir_outside_user_tree: these name a directory rather "
+    "than a file, and none of that user's overlays is read by anything. The "
+    "path has to be a chain of plain directories inside the user's own tree: "
+    "the usual cause is a symlink at `config` or `skills` (replace it with a "
+    "real directory and move the files into it), but an unreadable directory "
+    "or a regular file left at `skills` reads the same way, so check what is "
+    "actually there before assuming a link. Run "
     "`istota-skill skills overlays` as that user for the per-file verdict."
 )
 

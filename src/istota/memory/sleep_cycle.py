@@ -17,8 +17,8 @@ from ..config import Config
 from ..usage import SYSTEM_USER_ID
 from ..storage import (
     _get_mount_path,
+    open_user_skill_overlays,
     resolve_user_config_dir,
-    resolve_user_skill_overlays_dir,
     get_user_memories_path,
     get_user_playbooks_path,
     get_channel_memories_path,
@@ -1135,6 +1135,36 @@ def _load_kg_facts_text(
         return None
 
 
+def _skill_overlay_dir_state(config: Config, user_id: str) -> str:
+    """Why there is no overlay directory to read: for a log line, nothing else.
+
+    `"absent"` (or no mount) is the ordinary state and says nothing.
+    `"outside_tree"` and `"unopenable"` are both a planted directory and are
+    worth one line each — and they are **kept apart** because the first is the
+    worse of the two and a single boolean reported it as the quieter one. That
+    is the same three-way split `skills._resolve_overlay_dir` makes for its
+    error codes, and the two should stay in step.
+
+    Deliberately never used to reach a file. `open_user_skill_overlays` returns
+    the path only together with a descriptor; this asks a question about a name
+    and returns a string.
+    """
+    from ..storage import resolve_user_skill_overlays_dir  # noqa: PLC0415
+
+    if not getattr(config, "use_mount", False):
+        return "absent"
+    try:
+        d = resolve_user_skill_overlays_dir(config, user_id)
+        if d is None:
+            # `contained_overlay_dir` refused: it resolves outside the user's
+            # own tree. The clearest plant of the set, and the one a boolean
+            # keyed on `exists()` reported as an ordinary absence.
+            return "outside_tree"
+        return "unopenable" if d.exists() else "absent"
+    except OSError:
+        return "unopenable"
+
+
 def _load_skill_overlay_inventory(
     config: Config, user_id: str
 ) -> list[tuple[str, int]]:
@@ -1167,21 +1197,40 @@ def _load_skill_overlay_inventory(
     curator could act on.
 
     Everything else about reaching those files is `_loader`'s and `storage`'s
-    rather than this module's. `resolve_user_skill_overlays_dir` carries the
+    rather than this module's. `open_user_skill_overlays` carries the
     containment rule (`config` and `skills` are both entries a task can replace
-    with a symlink to anywhere the daemon can read), and `inspect_overlay`
-    opens each file `O_NOFOLLOW` and `O_NONBLOCK` and refuses anything that is
-    not a regular file — a FIFO left at `notes.md` would otherwise block this
-    read forever, and the nightly pass runs unsandboxed with no timeout over it.
+    with a symlink to anywhere the daemon can read) and hands back a descriptor
+    on the directory that passed, so every read below goes through it rather
+    than resolving those components again by name; and `inspect_overlay` opens
+    each file `O_NOFOLLOW` and `O_NONBLOCK` and refuses anything that is not a
+    regular file — a FIFO left at `notes.md` would otherwise block this read
+    forever, and the nightly pass runs unsandboxed with no timeout over it.
 
     Returns [] on any failure, like `_load_kg_facts_text`, but logs first: the
     section vanishing from every nightly prompt for every user is the exact
     duplication this exists to stop, and silence would make a permanently
     broken index indistinguishable from a user with no overlays.
     """
+    dir_fd: int | None = None
     try:
-        overlay_dir = resolve_user_skill_overlays_dir(config, user_id)
-        if overlay_dir is None or not overlay_dir.is_dir():
+        overlay_dir, dir_fd = open_user_skill_overlays(config, user_id)
+        if dir_fd is None:
+            # Absent is the ordinary state and says nothing. A directory that
+            # is *there* and could not be opened is a different fact, and this
+            # function's own contract two paragraphs up is that silence would
+            # make a permanently broken inventory look like a user with no
+            # overlays — so say it once, as `reindex_skill_overlays` does for
+            # the same disagreement between the two gates.
+            state = _skill_overlay_dir_state(config, user_id)
+            if state != "absent":
+                logger.warning(
+                    "skill overlay inventory skipped for %s: the overlay "
+                    "directory %s",
+                    user_id,
+                    "resolves outside the user's own tree"
+                    if state == "outside_tree"
+                    else "could not be opened as a chain of plain directories",
+                )
             return []
         # Function-local: `istota.skills` star-imports every skill on the way
         # to `_loader`, and this module is imported by the scheduler.
@@ -1205,6 +1254,7 @@ def _load_skill_overlay_inventory(
                 known_skills=known,
                 disabled_skills=disabled,
                 max_read_bytes=OVERLAY_MAX_BYTES,
+                dir_fd=dir_fd,
             )
             if found.binds and found.lines is not None:
                 rows.append((found.skill, found.lines))
@@ -1214,6 +1264,9 @@ def _load_skill_overlay_inventory(
             "skill overlay inventory unavailable for %s: %s", user_id, e
         )
         return []
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
 
 
 # Phase A observability for USER.md growth. Warning fires once the file
