@@ -2230,3 +2230,278 @@ class TestTheNativeBrainDoesNotAddTheDerivedCache:
 
         roots = self._write_roots(sandbox_config, make_sandbox_task, "alice", True)
         assert str(cache_root / "alice") in roots
+
+
+class TestSessionLogContainment:
+    """Where the native brain's session transcripts sit relative to the sandbox.
+
+    The boundary is that **nothing binds the directory**; the database mask is
+    defence in depth behind it, and on one shipped shape the mask is refused
+    outright. Both halves are asserted here rather than only the comfortable
+    one, because a change that silently regressed the Ansible shape into the
+    standalone one would otherwise look like nothing at all.
+
+    These are argv assertions. The tier that executes a real sandbox is
+    `smoke`; `tests/smoke/test_sandbox_in_stack.py::TestTheDatabaseMasks` is the
+    existing witness that a mask is real.
+    """
+
+    # -- the three shipped shapes -----------------------------------------
+
+    def _ansible_shape(self, tmp_path):
+        """The Ansible template: db under `{istota_home}/data`, temp dir and
+        mount both elsewhere."""
+        home = tmp_path / "srv" / "app" / "istota"
+        (home / "data").mkdir(parents=True)
+        (home / "data" / "istota.db").touch()
+        mount = tmp_path / "mnt" / "shared"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        (mount / "Channels" / "room123").mkdir(parents=True)
+        temp = tmp_path / "tmp" / "istota"
+        temp.mkdir(parents=True)
+        return Config(
+            db_path=home / "data" / "istota.db",
+            temp_dir=temp,
+            nextcloud_mount_path=mount,
+            skills_dir=tmp_path / "skills",
+            security=SecurityConfig(sandbox_enabled=True),
+        )
+
+    def _standalone_shape(self, tmp_path):
+        """`setup_wizard.py`: db_path.parent *is* the workspace, and the temp dir
+        is inside it. Both are in `_mask_protected`, so the mask is refused."""
+        workspace = tmp_path / "istota-home"
+        (workspace / "Users" / "alice").mkdir(parents=True)
+        (workspace / "Channels" / "room123").mkdir(parents=True)
+        (workspace / "tmp").mkdir(parents=True)
+        (workspace / "istota.db").touch()
+        return Config(
+            db_path=workspace / "istota.db",
+            temp_dir=workspace / "tmp",
+            nextcloud_mount_path=workspace,
+            skills_dir=tmp_path / "skills",
+            security=SecurityConfig(sandbox_enabled=True),
+        )
+
+    def _docker_shape(self, tmp_path):
+        """The Docker render: `db_path = "/data/db/istota.db"`, so the logs land
+        at `/data/db/logs` — *inside* the masked directory. The plausible-looking
+        `/data/logs` is a sibling of it and outside the mask, which is the way
+        this shape is easy to get wrong. Rooted under tmp_path so the binds have
+        something to bind.
+        """
+        data = tmp_path / "data"
+        (data / "db").mkdir(parents=True)
+        (data / "db" / "istota.db").touch()
+        mount = tmp_path / "mnt" / "shared"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        (mount / "Channels" / "room123").mkdir(parents=True)
+        temp = tmp_path / "tmp" / "istota"
+        temp.mkdir(parents=True)
+        return Config(
+            db_path=data / "db" / "istota.db",
+            temp_dir=temp,
+            nextcloud_mount_path=mount,
+            skills_dir=tmp_path / "skills",
+            security=SecurityConfig(sandbox_enabled=True),
+        )
+
+    def _shape(self, name, tmp_path):
+        return getattr(self, "_" + name + "_shape")(tmp_path)
+
+    # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _log_dir(config):
+        from istota.session.session_log import resolve_session_log_dir
+
+        return resolve_session_log_dir(
+            config.db_path, config.brain.native.session_log.dir,
+        )
+
+    @staticmethod
+    def _masked(result, path):
+        path = Path(path)
+        return any(
+            path == Path(m) or path.is_relative_to(Path(m))
+            for m in _tmpfs_masks(result)
+        )
+
+    @staticmethod
+    def _bind_paths(result):
+        """Every path either side of every bind operation in the argv."""
+        paths = []
+        i = 0
+        while i < len(result):
+            if result[i] in ("--bind", "--ro-bind", "--ro-bind-try", "--bind-try"):
+                paths.extend(result[i + 1:i + 3])
+                i += 3
+            else:
+                i += 1
+        return [Path(p) for p in paths]
+
+    @classmethod
+    def _reachable_through_a_bind(cls, result, path):
+        """True when the path is inside — or is — something the sandbox binds.
+
+        Not "appears as a bind argument": a bind of an *ancestor* puts the
+        directory in the namespace just as surely, and that is the shape a
+        widened `sandbox_ro_paths` would take.
+        """
+        path = Path(path)
+        return any(path == b or path.is_relative_to(b) for b in cls._bind_paths(result))
+
+    # -- the mask, on each shape ------------------------------------------
+
+    def test_the_ansible_shape_masks_the_log_directory(self, tmp_path, make_sandbox_task):
+        config = self._ansible_shape(tmp_path)
+        log_dir = self._log_dir(config)
+        assert log_dir == config.db_path.parent / "logs"
+
+        result = _run_bwrap(config, make_sandbox_task(), is_admin=False)
+
+        assert self._masked(result, log_dir)
+
+    def test_the_docker_shape_masks_the_log_directory(self, tmp_path, make_sandbox_task):
+        config = self._docker_shape(tmp_path)
+        log_dir = self._log_dir(config)
+
+        result = _run_bwrap(config, make_sandbox_task(), is_admin=False)
+
+        assert self._masked(result, log_dir)
+        # The sibling this shape is easy to mistake it for is *not* covered,
+        # which is why the real path had to be used here.
+        assert not self._masked(result, config.db_path.parent.parent / "logs")
+
+    def test_the_docker_path_is_under_the_masked_directory_not_beside_it(self):
+        from istota.session.session_log import resolve_session_log_dir
+
+        resolved = resolve_session_log_dir(Path("/data/db/istota.db"), "")
+        assert resolved == Path("/data/db/logs")
+        assert resolved.is_relative_to(Path("/data/db"))
+        assert not resolved.is_relative_to(Path("/data/logs"))
+
+    def test_the_standalone_shape_refuses_the_mask_and_the_test_says_so(
+        self, tmp_path, make_sandbox_task, caplog,
+    ):
+        # Not a wish: `_mask_dir` logs an error and returns covered=False when
+        # the candidate contains the workspace and the temp dir, and on this
+        # shape it always does. Asserting the refusal is what stops a later
+        # change from quietly regressing the Ansible case into this one.
+        import logging
+
+        config = self._standalone_shape(tmp_path)
+        log_dir = self._log_dir(config)
+
+        with caplog.at_level(logging.ERROR, logger="istota.executor"):
+            result = _run_bwrap(config, make_sandbox_task(), is_admin=False)
+
+        assert not self._masked(result, log_dir)
+        assert "Not masking" in caplog.text
+
+    # -- the boundary: nothing binds it ------------------------------------
+
+    @pytest.mark.parametrize("shape", ["ansible", "docker", "standalone"])
+    def test_the_log_directory_is_in_no_bind_on_any_shape(
+        self, tmp_path, make_sandbox_task, shape,
+    ):
+        config = self._shape(shape, tmp_path)
+        log_dir = self._log_dir(config)
+
+        result = _run_bwrap(config, make_sandbox_task(), is_admin=True)
+
+        assert not self._reachable_through_a_bind(result, log_dir)
+
+    @pytest.mark.parametrize("shape", ["ansible", "docker", "standalone"])
+    def test_the_log_directory_is_never_under_the_user_temp_dir(self, tmp_path, shape):
+        # `user_temp_dir` is bound read-write into every sandbox because it
+        # doubles as ISTOTA_DEFERRED_DIR. A log directory under it would hand
+        # every task the transcript of every previous task for that user, and
+        # let it rewrite the record of what it did.
+        config = self._shape(shape, tmp_path)
+        log_dir = self._log_dir(config)
+        assert not log_dir.is_relative_to(Path(config.temp_dir))
+
+    def test_the_negative_control_a_log_dir_inside_the_temp_dir_is_bound(
+        self, tmp_path, make_sandbox_task,
+    ):
+        # The control for the assertion above. A deliberately mis-set `dir`
+        # pointing inside `user_temp_dir` must make `_reachable_through_a_bind`
+        # answer True — otherwise that helper answers False for everything and
+        # the three parametrized cases above assert nothing at all.
+        config = self._ansible_shape(tmp_path)
+        user_temp = Path(config.temp_dir) / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+        config.brain.native.session_log.dir = str(user_temp / "logs")
+        log_dir = self._log_dir(config)
+
+        result = _run_bwrap(
+            config, make_sandbox_task(), is_admin=False, user_temp=user_temp,
+        )
+
+        assert self._reachable_through_a_bind(result, log_dir)
+        assert not self._masked(result, log_dir)
+
+    # -- the shared predicate ---------------------------------------------
+
+    def test_mask_shadowed_by_is_empty_for_the_ansible_shape(self, tmp_path):
+        from istota.executor import mask_protected_paths, mask_shadowed_by
+
+        config = self._ansible_shape(tmp_path)
+        protected = mask_protected_paths(config)
+        assert mask_shadowed_by(config.db_path.parent.resolve(), protected) == []
+
+    def test_mask_shadowed_by_is_non_empty_for_the_standalone_shape(self, tmp_path):
+        from istota.executor import mask_protected_paths, mask_shadowed_by
+
+        config = self._standalone_shape(tmp_path)
+        protected = mask_protected_paths(config)
+        assert mask_shadowed_by(config.db_path.parent.resolve(), protected) != []
+
+    def test_the_predicate_is_the_one_the_sandbox_builder_uses(
+        self, tmp_path, make_sandbox_task,
+    ):
+        """One rule, two callers. If `_mask_dir` stopped calling it, this pair
+        would disagree — which is the `map_basemap` two-consumers failure the
+        extraction exists to prevent."""
+        from istota.executor import mask_protected_paths, mask_shadowed_by
+
+        for shape in ("ansible", "docker", "standalone"):
+            config = self._shape(shape, tmp_path / shape)
+            user_temp = Path(config.temp_dir) / "alice"
+            user_temp.mkdir(parents=True, exist_ok=True)
+            predicted = not mask_shadowed_by(
+                config.db_path.parent.resolve(),
+                mask_protected_paths(config, user_temp_dir=user_temp),
+            )
+            result = _run_bwrap(
+                config, make_sandbox_task(), is_admin=False, user_temp=user_temp,
+            )
+            assert self._masked(result, self._log_dir(config)) is predicted, shape
+
+    # -- the native brain's own confinement --------------------------------
+
+    @pytest.mark.parametrize("shape", ["ansible", "docker", "standalone"])
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_no_native_fs_root_reaches_the_log_directory(
+        self, tmp_path, make_sandbox_task, shape, is_admin,
+    ):
+        """The native counterpart of the mask assertion.
+
+        `native_fs_roots` has no masks — what holds the property there is that
+        the log directory is under none of the roots it returns. That is held by
+        an absence rather than by a rule, which is exactly the kind of thing a
+        widened bind breaks silently, so it is pinned here on every shape.
+        """
+        config = self._shape(shape, tmp_path)
+        log_dir = self._log_dir(config)
+        user_temp = Path(config.temp_dir) / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        read, write, _ = native_fs_roots(
+            config, make_sandbox_task(), is_admin, [], user_temp,
+        )
+
+        for root in [*read, *write]:
+            assert not log_dir.resolve().is_relative_to(root), shape + ": " + str(root)
