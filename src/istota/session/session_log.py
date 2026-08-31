@@ -51,12 +51,27 @@ loses the records the OS had buffered, which is a cost worth paying to keep an
 ``0700`` directory, set through the open flags. There is no group-readable case
 and no content-based redaction: a regex sweep for credentials would miss the
 shapes it does not know and mangle legitimate content that resembles a token.
-``api_key`` and ``extra_headers`` are never serialized and ``base_url`` reaches
-the header as its host only, because an operator can put a token in a URL path.
 The residual risk is stated rather than denied — a ``Bash`` call that cats a
 credential file puts that credential in the log, and the retention window is how
 long it stays there. That is already true of ``task_N_prompt.txt`` and of the
 app log; an operator who cannot accept it sets the feature off.
+
+What this module does **not** do is decide what goes in the ``session``
+header: :meth:`SessionLogWriter.open` copies the caller's mapping through,
+minus the three fields that are the record's own. Keeping ``api_key`` and
+``extra_headers`` out of it, and reducing ``base_url`` to its host — an
+operator can put a token in a URL path — belongs to whoever builds that
+mapping, which is ``brain/native.py``. Stated here because a reader looking
+for the rule should find out where it lives rather than assume it is enforced
+below.
+
+**The caps reach slightly wider than the content blocks.** ``TextContent`` and
+``ThinkingContent`` are the ones the format is written around, and
+``ToolCallContent.arguments`` has its own. ``max_content_chars`` is also
+applied to the ``context`` record's system prompt, to a ``steer``'s text and to
+both halves of an ``error`` record, because each is an unbounded string reaching
+the file from somewhere this module does not control. ``result_text`` is the one
+deliberate exemption.
 
 :func:`sweep_session_logs` lives here rather than in the scheduler, on the
 :mod:`istota.worktree_reaper` precedent: the delete rule and the write rule
@@ -112,6 +127,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import stat
 import traceback
@@ -149,8 +165,9 @@ _BLOCK = 512
 
 _GIB = 1024 ** 3
 
-# Defaults, restated by `SessionLogConfig` in `config.py`. They live here too so
-# a caller with no config — a test, a one-off script — gets the shipped policy.
+# The shipped policy, so a caller with no config — a test, a one-off script —
+# gets it. `SessionLogConfig` will restate them in `config.py`; nothing reads
+# this module yet.
 DEFAULT_MAX_CONTENT_CHARS = 32768
 DEFAULT_MAX_ARGS_CHARS = 8192
 DEFAULT_RETENTION_DAYS = 14
@@ -168,6 +185,10 @@ LIVE_WINDOW_SECONDS = 3600.0
 # How much of an over-cap arguments object survives in the marker. Enough to
 # recognise the call, far short of the cap it is standing in for.
 _ARGS_PREVIEW_CHARS = 512
+
+# How deep `_count_truncations` walks a record looking for this module's own
+# cap markers. The deepest one it writes is at 5.
+_MAX_SCAN_DEPTH = 6
 
 _SECONDS_PER_DAY = 86400.0
 
@@ -279,14 +300,18 @@ def session_log_path(
     base = f"{stamp}_task-{int(ident.task_id)}-{int(ident.attempt)}"
     directory = Path(root) / ident.user_id
 
+    # `lexists`, not `exists`: the writer opens with `O_EXCL`, which refuses a
+    # dangling symlink where `exists()` follows it and reports nothing there.
+    # The two disagreeing meant the retry recomputed the same name eight times
+    # and disabled the log for the whole attempt rather than renaming past it.
     candidate = directory / f"{base}{LOG_SUFFIX}"
-    if not candidate.exists():
+    if not os.path.lexists(candidate):
         return candidate
 
     suffix = _short_suffix(session_id)
     candidate = directory / f"{base}-{suffix}{LOG_SUFFIX}"
     n = 2
-    while candidate.exists() and n < 1000:
+    while os.path.lexists(candidate) and n < 1000:
         candidate = directory / f"{base}-{suffix}-{n}{LOG_SUFFIX}"
         n += 1
     return candidate
@@ -299,12 +324,26 @@ def session_log_path(
 def _cap_text(text: str, limit: int) -> tuple[str, bool, int]:
     """Head-and-tail truncation. Returns ``(text, truncated, chars_total)``.
 
-    Head *and* tail: a long tool result's tail is usually where the error is.
+    Head *and* tail: a long tool result's tail is usually where the error is,
+    so a head-only cut discards the one part anybody opens the file for.
+
+    ``limit`` bounds the *result*, note included, rather than the two halves.
+    Charging the note to the caller instead let the "cap" make the text longer
+    than the input: at ``limit=1`` a two-character string came back with every
+    original character plus twenty-five injected ones, flagged ``truncated``
+    and reporting ``[truncated 0 chars]``. Below the width where a head, a tail
+    and the note between them all fit, there is no head-and-tail to write and
+    the text is clipped instead — a degenerate setting, kept honest rather than
+    made to work.
     """
     total = len(text)
     if limit <= 0 or total <= limit:
         return text, False, total
-    half = max(1, limit // 2)
+    # `total` is the widest the count can print, so this bounds the real note.
+    widest_note = len(f"\n… [truncated {total} chars] …\n")
+    if limit <= 2 * widest_note:
+        return text[:limit], True, total
+    half = (limit - widest_note) // 2
     dropped = total - 2 * half
     note = f"\n… [truncated {dropped} chars] …\n"
     return text[:half] + note + text[-half:], True, total
@@ -465,15 +504,38 @@ def serialize_message(msg: Message, policy: SessionLogPolicy) -> dict:
     }
 
 
-def _count_truncations(obj: Any) -> int:
-    """Whether anything in a record was capped, so ``result`` can report it."""
+def _count_truncations(obj: Any, depth: int = 0) -> int:
+    """Whether anything in a record was capped, so ``result`` can report it.
+
+    Two bounds, and both are about the same thing: a record contains one blob
+    this module did not build, and that blob is JSON the *model* emitted.
+
+    ``arguments`` is never descended into beyond its own marker key. Recursing
+    freely there let a 600-deep nested tool argument — 1200 bytes, so far under
+    ``max_args_chars`` that the marker never fired — blow the interpreter's
+    frame limit and raise out of ``message()``, on the one path Stage 3 calls
+    once per turn. It also let a model that wrote a literal ``{"truncated":
+    true}`` inflate a counter whose whole job is to tell "the model saw a short
+    result" from "the log is short".
+
+    :data:`_MAX_SCAN_DEPTH` is the belt to that pair of braces: the deepest
+    marker this module writes sits at depth 5 (record, message, content, block,
+    arguments), so nothing below is ours to find anyway.
+    """
+    if depth > _MAX_SCAN_DEPTH:
+        return 0
     if isinstance(obj, dict):
         found = 1 if (obj.get("truncated") is True or obj.get("_truncated") is True) else 0
-        for value in obj.values():
-            found += _count_truncations(value)
+        for key, value in obj.items():
+            if key == "arguments":
+                # This module's own marker, and nothing below it.
+                if isinstance(value, dict) and value.get("_truncated") is True:
+                    found += 1
+                continue
+            found += _count_truncations(value, depth + 1)
         return found
     if isinstance(obj, list):
-        return sum(_count_truncations(value) for value in obj)
+        return sum(_count_truncations(value, depth + 1) for value in obj)
     return 0
 
 
@@ -505,6 +567,7 @@ class SessionLogWriter:
         self._path: Path | None = None
         self._truncated = 0
         self._warned = False
+        self._opened = False
         self.session_id = "" if self._disabled else str(uuid.uuid4())
 
     # -- state -------------------------------------------------------------
@@ -531,7 +594,11 @@ class SessionLogWriter:
         to find out: the brain, the provider, the model, the effort. ``type``,
         ``v`` and ``ts`` are this module's and cannot be overridden.
         """
-        if self._disabled or self._fh is not None:
+        # `_opened` rather than `_fh is not None`: `close()` clears the handle,
+        # so the latter let a second `open()` after a close start a *second*
+        # file and orphan the first — silently, with `path` now naming the new
+        # one. One attempt is one file.
+        if self._disabled or self._opened:
             return
         try:
             # Before any mkdir, not just before the open: `{root}/../escape`
@@ -545,24 +612,30 @@ class SessionLogWriter:
             os.makedirs(self._root, mode=0o700, exist_ok=True)
             os.makedirs(directory, mode=0o700, exist_ok=True)
             self._fh, self._path = self._open_exclusive()
+            self._opened = True
+
+            record = {
+                "type": "session",
+                "v": FORMAT_VERSION,
+                "ts": _ts(),
+                "session_id": self.session_id,
+                "task_id": self._ident.task_id,
+                "attempt": self._ident.attempt,
+                "user_id": self._ident.user_id,
+                "source_type": self._ident.source_type,
+                "conversation_token": self._ident.conversation_token,
+                "is_group_chat": bool(self._ident.is_group_chat),
+            }
+            if isinstance(header, dict):
+                record.update(
+                    {k: v for k, v in header.items() if k not in ("type", "v", "ts")}
+                )
         except Exception as exc:
+            # The header build is inside the `try` too: it reads a
+            # caller-supplied mapping, and "every public method is wrapped" has
+            # to mean the whole method.
             self._fail("could not open", exc)
             return
-
-        record = {
-            "type": "session",
-            "v": FORMAT_VERSION,
-            "ts": _ts(),
-            "session_id": self.session_id,
-            "task_id": self._ident.task_id,
-            "attempt": self._ident.attempt,
-            "user_id": self._ident.user_id,
-            "source_type": self._ident.source_type,
-            "conversation_token": self._ident.conversation_token,
-            "is_group_chat": bool(self._ident.is_group_chat),
-        }
-        if header:
-            record.update({k: v for k, v in header.items() if k not in ("type", "v", "ts")})
         self._write(record)
 
     def _open_exclusive(self):
@@ -576,6 +649,12 @@ class SessionLogWriter:
             except FileExistsError as exc:  # lost the race; take the next name
                 last = exc
                 continue
+            # `utf-8` is load-bearing rather than a default, and it is what
+            # makes `backslashreplace` safe here. That handler emits `\xNN` for
+            # a codepoint below 0x100, which is *not* valid JSON escape syntax
+            # — but under UTF-8 the only unencodable codepoints are the
+            # surrogates, which always render as `\uXXXX`, which is. Change the
+            # encoding and lines start coming out unparseable.
             handle = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
             return handle, path
         raise last if last is not None else OSError("could not pick a session log name")
@@ -676,7 +755,12 @@ class SessionLogWriter:
             )
             return
         record = {"type": kind, "ts": _ts()}
-        record.update(body)
+        # `type` and `ts` are this module's, at every record kind rather than
+        # only at `session` and `context`. The reader's contract is stated in
+        # terms of them — "`result` is always the last line", "line 1 is a
+        # `session` header or the file is unreadable" — so a caller's stray
+        # field must not be able to rename a record.
+        record.update({k: v for k, v in body.items() if k not in ("type", "ts")})
         self._write(record)
 
     def _write(self, record: dict) -> None:
@@ -698,8 +782,13 @@ class SessionLogWriter:
         except Exception as exc:
             self._fail("could not write to", exc)
             return
-        if _count_truncations(record):
-            self._truncated += 1
+        try:
+            if _count_truncations(record):
+                self._truncated += 1
+        except Exception as exc:
+            # The record is already on disk. A statistic must not be the thing
+            # that raises out of a writer whose contract is that it does not.
+            logger.debug("session log: could not count truncations (%s)", exc)
 
     def _fail(self, what: str, exc: Exception) -> None:
         """One warning, then silence for the rest of the run."""
@@ -731,8 +820,16 @@ class SessionLogWriter:
 class SweepResult:
     """What one sweep did.
 
-    ``deleted_size > 0`` is the signal ``doctor`` reads to say the configured
-    retention is not the retention actually in force.
+    ``deleted_size`` is kept apart from ``deleted_age`` rather than summed
+    because the two mean different things to an operator: a non-zero one says
+    the ceiling is what reclaimed, so ``retention_days`` is not the retention
+    actually in force and the effective window is a function of load. That is
+    the condition ``doctor`` is meant to surface; no reader exists yet.
+
+    The ceiling pass removes files and never a directory. A user directory it
+    empties is collected by the age pass instead, a full ``retention_days``
+    after its last write — the cost is inodes rather than bytes, which is the
+    same reason directory inodes are left out of the measurement.
     """
 
     deleted_age: int = 0
@@ -889,7 +986,12 @@ def sweep_session_logs(
         )
 
     still_over = False
-    if max_total_gb > 0:
+    # `isfinite` before the comparison: TOML accepts `inf` as a float, so
+    # `max_total_gb = inf` is a plausible operator spelling of "no ceiling" —
+    # and `int(inf * _GIB)` raises `OverflowError` out of a module whose whole
+    # contract is that it does not. Non-finite reads as no ceiling, which is
+    # what the operator meant.
+    if math.isfinite(max_total_gb) and math.isfinite(floor_gb) and max_total_gb > 0:
         ceiling = int(max(max_total_gb, floor_gb) * _GIB)
         while total > ceiling:
             # Largest-user-first: water-filling trims the heaviest producer
@@ -909,6 +1011,17 @@ def sweep_session_logs(
             victim = evictable[heaviest].pop(0)
             try:
                 victim.path.unlink()
+            except FileNotFoundError:
+                # Somebody else removed it between the walk and here. Its bytes
+                # are off the volume either way, so the running total has to
+                # come down: leaving it up made the loop evict a second file to
+                # reclaim space that was already free, and reported a
+                # `bytes_after` describing a tree that no longer existed. On a
+                # delete path an accounting error that rounds toward more
+                # deletion is the wrong direction.
+                total -= victim.size
+                per_user[heaviest] -= victim.size
+                continue
             except OSError as exc:
                 errors += 1
                 logger.debug("session log sweep: cannot remove %s (%s)", victim.path, exc)

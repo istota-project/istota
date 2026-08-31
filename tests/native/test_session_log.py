@@ -19,6 +19,7 @@ every case here passes `floor_gb=0` to make a tree of a few kilobytes exceed it.
 gets the real one.
 """
 
+import ast
 import base64
 import hashlib
 import json
@@ -163,7 +164,6 @@ class TestSerializeText:
 
         assert out["truncated"] is True
         assert out["chars_total"] == 101
-        assert len(out["text"]) < len(original) + 64
 
         # Head *and* tail: a build log's error is in the tail, so a head-only
         # truncation discards the one part anybody opens the file for. The
@@ -172,14 +172,36 @@ class TestSerializeText:
         text = out["text"]
         head = text[: text.index("\n… [truncated")]
         tail = text[text.index(" …\n") + len(" …\n") :]
-        assert len(head) == 50 and len(tail) == 50
+        assert len(head) == len(tail) > 0
         assert original.startswith(head)
         assert original.endswith(tail)
-        assert tail == "T" * 50
+        assert set(tail) == {"T"}
 
-    def test_the_truncation_note_names_how_many_chars_went(self):
+    def test_the_cap_bounds_the_result_and_not_just_the_two_halves(self):
+        # Charging the note to the caller rather than to the budget is what let
+        # the "cap" hand back something longer than its own limit.
+        for limit in (64, 100, 512, 4096):
+            out = serialize_content(
+                TextContent(text="x" * 100_000), SessionLogPolicy(max_content_chars=limit)
+            )
+            assert len(out["text"]) <= limit, limit
+
+    @pytest.mark.parametrize("limit", [1, 2, 3, 10, 40])
+    def test_a_limit_too_small_for_a_note_clips_rather_than_growing_the_text(self, limit):
+        original = "abcdefghij" * 10
+        out = serialize_content(TextContent(text=original), SessionLogPolicy(max_content_chars=limit))
+        assert len(out["text"]) <= limit
+        assert out["text"] == original[:limit]
+        assert out["truncated"] is True
+        assert out["chars_total"] == len(original)
+
+    def test_the_truncation_note_accounts_for_every_dropped_char(self):
         out = serialize_content(TextContent(text="x" * 1000), SessionLogPolicy(max_content_chars=100))
-        assert "[truncated 900 chars]" in out["text"]
+        text = out["text"]
+        head = text[: text.index("\n… [truncated")]
+        tail = text[text.index(" …\n") + len(" …\n") :]
+        dropped = int(text.split("[truncated ", 1)[1].split(" chars]", 1)[0])
+        assert len(head) + dropped + len(tail) == out["chars_total"] == 1000
 
     def test_thinking_is_capped_by_the_same_rule(self):
         out = serialize_content(
@@ -420,6 +442,17 @@ class TestTheWriter:
         # events._UNCAPPED_EVENT_KINDS.
         assert read_records(writer.path)[-1]["result_text"] == deliverable
 
+    def test_the_context_record_caps_an_oversized_system_prompt(self, tmp_path):
+        writer = SessionLogWriter(tmp_path, IDENT, SessionLogPolicy(max_content_chars=200))
+        writer.open()
+        writer.context("S" * 5000, ["Bash"], "sha")
+        writer.close()
+
+        ctx = read_records(writer.path)[1]
+        assert ctx["truncated"] is True
+        assert ctx["chars_total"] == 5000
+        assert len(ctx["system_prompt"]) <= 200
+
     def test_truncated_records_counts_records_not_blocks(self, tmp_path):
         writer = SessionLogWriter(tmp_path, IDENT, SessionLogPolicy(max_content_chars=10))
         writer.open()
@@ -434,6 +467,51 @@ class TestTheWriter:
         writer.message(UserMessage(content=[TextContent(text="short")]))
         assert writer.truncated_records == 2
         writer.close()
+
+    def test_a_capped_arguments_object_still_counts_as_a_truncation(self, tmp_path):
+        writer = SessionLogWriter(tmp_path, IDENT, SessionLogPolicy(max_args_chars=50))
+        writer.open()
+        writer.message(
+            AssistantMessage(
+                content=[ToolCallContent(id="c", name="Write", arguments={"body": "z" * 500})]
+            )
+        )
+        writer.close()
+        assert writer.truncated_records == 1
+
+    def test_the_model_cannot_inflate_the_truncation_count(self, tmp_path):
+        # `truncated_records` exists to tell "the model saw a short result"
+        # from "the log is short". A number the model can raise by writing a
+        # word into its own tool arguments answers neither question.
+        writer = SessionLogWriter(tmp_path, IDENT, POLICY)
+        writer.open()
+        writer.message(
+            AssistantMessage(
+                content=[
+                    ToolCallContent(
+                        id="c",
+                        name="Bash",
+                        arguments={"truncated": True, "note": {"_truncated": True}},
+                    )
+                ]
+            )
+        )
+        writer.close()
+        assert writer.truncated_records == 0
+
+    def test_a_stray_field_cannot_rename_a_record(self, tmp_path):
+        # The reader's contract is stated in terms of `type` — "`result` is
+        # always the last line" — so a caller's field must not forge one.
+        writer = SessionLogWriter(tmp_path, IDENT, POLICY)
+        writer.open()
+        writer.result(type="not-a-result", ts="whenever", success=True)
+        writer.compaction(type="session", trigger="proactive")
+        writer.close()
+
+        records = read_records(writer.path)
+        assert [r["type"] for r in records] == ["session", "result", "compaction"]
+        assert records[1]["ts"] != "whenever"
+        assert records[1]["success"] is True
 
     def test_the_error_record_carries_the_kind_message_and_traceback(self, tmp_path):
         writer = SessionLogWriter(tmp_path, IDENT, POLICY)
@@ -463,6 +541,20 @@ class TestTheWriter:
         first = writer.path
         writer.open()
         writer.close()
+        assert writer.path == first
+        assert len(list((tmp_path / "alice").iterdir())) == 1
+
+    def test_reopening_after_close_does_not_orphan_the_first_file(self, tmp_path):
+        # One attempt is one file. A guard reading `_fh is not None` passes the
+        # case above and still starts a second file here, with `path` silently
+        # renaming itself to the new one.
+        writer = SessionLogWriter(tmp_path, IDENT, POLICY)
+        writer.open()
+        first = writer.path
+        writer.close()
+        writer.open({"brain": "native"})
+        writer.close()
+
         assert writer.path == first
         assert len(list((tmp_path / "alice").iterdir())) == 1
 
@@ -622,10 +714,76 @@ class TestNeverRaises:
         assert records[1]["record_type"] == "message"
         assert "repr exploded" in records[1]["error"]
 
-    def test_a_lone_surrogate_does_not_turn_a_finished_run_into_a_traceback(self, tmp_path):
+    def test_deeply_nested_tool_arguments_do_not_raise_out_of_message(self, tmp_path):
+        # `arguments` is JSON the model emitted, so its *structure* is
+        # attacker-influenced and not only its size. 600 levels encode to 1200
+        # characters — far under `max_args_chars`, so no marker fires and the
+        # whole thing is embedded — while a naive recursive walk over the
+        # assembled record blows the frame limit and raises into the agent
+        # loop, failing a task that had nothing wrong with it.
+        deep = json.loads("[" * 600 + "]" * 600)
         writer = SessionLogWriter(tmp_path, IDENT, POLICY)
         writer.open()
-        writer.message(UserMessage(content=[TextContent(text="bad \udcff byte")]))
+        writer.message(
+            AssistantMessage(content=[ToolCallContent(id="c", name="Bash", arguments={"x": deep})])
+        )
+        writer.message(UserMessage(content=[TextContent(text="the session continues")]))
+        writer.result(success=True)
+        writer.close()
+
+        records = read_records(writer.path)
+        assert [r["type"] for r in records] == ["session", "message", "message", "result"]
+        assert writer.truncated_records == 0
+
+    def test_a_header_that_is_not_a_mapping_does_not_raise(self, tmp_path):
+        writer = SessionLogWriter(tmp_path, IDENT, POLICY)
+        writer.open("not a mapping")
+        writer.message(UserMessage(content=[TextContent(text="hi")]))
+        writer.close()
+
+        records = read_records(writer.path)
+        assert [r["type"] for r in records] == ["session", "message"]
+
+    def test_a_dangling_symlink_at_the_chosen_name_is_renamed_past(self, tmp_path):
+        # `Path.exists()` follows a symlink and reports nothing there; the
+        # writer's `O_EXCL` open does not follow it and refuses. The two
+        # disagreeing turned a rename into a disabled log for the whole
+        # attempt.
+        directory = tmp_path / "alice"
+        directory.mkdir(parents=True)
+        wanted = session_log_path(tmp_path, IDENT, session_log._utcnow())
+        wanted.symlink_to(tmp_path / "nowhere-at-all")
+
+        writer = SessionLogWriter(tmp_path, IDENT, POLICY)
+        writer.open()
+        writer.result(success=True)
+        writer.close()
+
+        assert writer.path is not None
+        assert writer.path != wanted
+        assert not (tmp_path / "nowhere-at-all").exists()
+        assert [r["type"] for r in read_records(writer.path)] == ["session", "result"]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "bad \udcff byte",          # lone low surrogate
+            "bad \ud800 byte",          # lone high surrogate
+            "pair 😀 here",   # adjacent surrogates
+            "astral 𝕏 here",            # a real astral codepoint
+            "nul \x00 here",
+            "esc \x1b[31m here",
+        ],
+    )
+    def test_undecodable_content_does_not_turn_a_finished_run_into_a_traceback(
+        self, tmp_path, payload
+    ):
+        # `backslashreplace` on a UTF-8 handle only ever escapes surrogates,
+        # which render as `\uXXXX` and stay valid JSON. Every line must still
+        # parse.
+        writer = SessionLogWriter(tmp_path, IDENT, POLICY)
+        writer.open()
+        writer.message(UserMessage(content=[TextContent(text=payload)]))
         writer.result(success=True)
         writer.close()
 
@@ -809,12 +967,27 @@ class TestTheCeiling:
         assert result.bytes_after <= ceiling
         assert result.still_over is False
 
-    def test_max_total_gb_zero_disables_the_ceiling(self, tmp_path):
-        files = [write_log(tmp_path, "alice", f"{n}.jsonl", age_days=30) for n in range(4)]
-        result = sweep(tmp_path, max_total_gb=0)
+    def test_max_total_gb_zero_disables_the_ceiling_and_the_age_rule_runs_on(self, tmp_path):
+        keep = [write_log(tmp_path, "alice", f"{n}.jsonl", age_days=1) for n in range(4)]
+        aged = write_log(tmp_path, "alice", "aged.jsonl", age_days=90)
+
+        result = sweep(tmp_path, retention_days=14, max_total_gb=0)
+
         assert result.deleted_size == 0
+        assert all(f.exists() for f in keep)
+        # The other half of the `or` gate, from the opposite side.
+        assert result.deleted_age == 1
+        assert not aged.exists()
+        assert result.bytes_after == measured(*keep)
+
+    def test_a_non_finite_ceiling_reads_as_no_ceiling_rather_than_raising(self, tmp_path):
+        # TOML accepts `inf` as a float, so this is a config-reachable value and
+        # a plausible spelling of "no ceiling". `int(inf * GiB)` raises.
+        files = [write_log(tmp_path, "alice", f"{n}.jsonl", age_days=30) for n in range(3)]
+        result = sweep(tmp_path, max_total_gb=float("inf"))
+        assert result.deleted_size == 0
+        assert result.still_over is False
         assert all(f.exists() for f in files)
-        assert result.bytes_after == measured(*files)
 
     def test_the_two_rules_are_independent(self, tmp_path):
         # `retention_days = 0` keeps everything indefinitely by age and must
@@ -986,6 +1159,36 @@ class TestSweepRobustness:
         assert not aged.exists()
         assert result.deleted_age == 1
 
+    def test_a_file_that_vanished_under_the_sweep_does_not_cost_a_second_one(self, tmp_path):
+        # ENOENT means the bytes are already off the volume, so the running
+        # total has to come down. Leaving it up evicted a second file to
+        # reclaim space that was free, and reported a `bytes_after` describing
+        # a tree that no longer existed — on a delete path, an accounting error
+        # in the direction of more deletion.
+        first = write_log(tmp_path, "alice", "a.jsonl", age_days=90)
+        second = write_log(tmp_path, "alice", "b.jsonl", age_days=60)
+        third = write_log(tmp_path, "alice", "c.jsonl", age_days=30)
+        ceiling = measured(second, third)
+
+        real_unlink = Path.unlink
+
+        def vanishing_unlink(self, *args, **kwargs):
+            if self.name == "a.jsonl":
+                real_unlink(self)
+                raise FileNotFoundError(2, "No such file or directory", str(self))
+            return real_unlink(self, *args, **kwargs)
+
+        Path.unlink = vanishing_unlink
+        try:
+            result = sweep(tmp_path, max_total_gb=ceiling / (1024 ** 3))
+        finally:
+            Path.unlink = real_unlink
+
+        assert not first.exists()
+        assert second.exists() and third.exists()
+        assert result.errors == 0
+        assert result.bytes_after == measured(second, third)
+
     def test_a_file_at_the_root_is_not_mistaken_for_a_user_directory(self, tmp_path):
         stray = tmp_path / "stray.jsonl"
         stray.write_text("{}\n")
@@ -1031,10 +1234,15 @@ def test_the_module_reaches_nothing_but_llm_types():
     hot path.
     """
     source = Path(session_log.__file__).read_text(encoding="utf-8")
-    package_imports = [
-        line.strip()
-        for line in source.splitlines()
-        if line.startswith(("from istota", "import istota"))
-    ]
-    assert package_imports
-    assert all(line.startswith("from istota.llm.types") for line in package_imports)
+    reached: list[str] = []
+    # The AST rather than the lines: the import that actually gets added later
+    # to a leaf on a hot path is the *lazy* one, indented inside a function or
+    # a `TYPE_CHECKING` block, precisely because a top-level one would look
+    # obviously wrong. A `startswith` on the raw line cannot see it.
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("istota"):
+            reached.append(node.module)
+        elif isinstance(node, ast.Import):
+            reached.extend(a.name for a in node.names if a.name.startswith("istota"))
+
+    assert reached == ["istota.llm.types"]
