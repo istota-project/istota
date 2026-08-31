@@ -159,6 +159,13 @@ FORMAT_VERSION = 1
 
 LOG_SUFFIX = ".jsonl"
 
+# The directory `resolve_session_log_dir` hangs off `db_path.parent` when the
+# operator configured none. `logs` rather than `sessions` because that is what
+# these are, and a generic name leaves room for a second log kind without a
+# rename — the sweep is scoped to `*.jsonl` under `logs/{user_id}/`, so a
+# future sibling is not in its path.
+LOG_DIR_NAME = "logs"
+
 # Bytes per block in the unit `st_blocks` is defined in. POSIX fixes it at 512
 # regardless of the filesystem's own block size.
 _BLOCK = 512
@@ -248,6 +255,46 @@ def _ts() -> str:
 # --------------------------------------------------------------------------
 # Paths
 # --------------------------------------------------------------------------
+
+def resolve_session_log_dir(db_path: Path | str | None, configured: str = "") -> Path:
+    """Where the logs go, from the only two things that decide it.
+
+    A pure function of ``config.db_path`` and
+    ``config.brain.native.session_log.dir`` rather than a method on ``Config``,
+    so the writer, the scheduler's sweep, ``doctor`` and the skill proxy all ask
+    one question and this module stays a stdlib-only leaf that imports no
+    config. The resolved directory is derived on every read and stored nowhere:
+    a second copy is how a checker starts passing while the real thing is
+    wrong.
+
+    Blank — the shipped default — is ``{db_path.parent}/logs``. That is local
+    disk on every shipped shape (appending JSONL all day to the rclone mount
+    would be worse than a WAL database there), it is the state directory that
+    already holds ``modules/``, ``backups/`` and ``subscription_usage.json``,
+    and on the Ansible and Docker shapes it is behind the read-only tmpfs
+    ``build_bwrap_cmd`` masks ``db_path.parent`` with. On the standalone shape
+    that mask is refused — ``db_path.parent`` *is* the workspace there — so the
+    logs are merely unbound rather than masked, which the ``doctor`` check
+    reports rather than papers over. The boundary in both cases is that nothing
+    binds the path.
+
+    A configured value is used **as given**, including a relative one. Nothing
+    expands ``~`` or resolves against a base, matching every other path in
+    ``config.py``; only surrounding whitespace is dropped, since a rendered
+    config is where a stray space comes from and a directory named with one is
+    not. An operator who points this outside ``db_path.parent`` gets a ``WARN``
+    from ``doctor`` naming the exposure, not a refusal.
+
+    Never raises. A missing ``db_path`` yields the relative ``logs``, which no
+    shipped shape reaches — ``Config.db_path`` carries a default — and which is
+    still somewhere the writer can honestly fail on rather than an exception on
+    the task path.
+    """
+    text = str(configured or "").strip()
+    if text:
+        return Path(text)
+    return Path(db_path or "istota.db").parent / LOG_DIR_NAME
+
 
 def is_one_component(value: str) -> bool:
     """Whether *value* is a single, ordinary path component.

@@ -170,6 +170,59 @@ features = []
 #                                            #   endpoint that rejects cache_control needs
 #                                            #   `false`).
 #
+# Per-attempt transcript of a native-brain run: one append-only JSONL file per
+# task attempt holding the assembled prompt, every assistant turn with its
+# thinking and tool calls, every tool result, every compaction and steer, and a
+# terminal record. `tasks.execution_trace` keeps tool *labels* and no output at
+# all, so this is the only artifact that answers "what did the model actually
+# see and do" for a run that already finished. Native-only — claude_code and
+# tmux_claude already get a transcript from the `claude` CLI.
+#
+# The files hold the assembled prompt, which holds USER.md, and raw tool
+# output, which can hold whatever a Bash call printed. They are written 0600
+# behind a 0700 per-user directory, on local disk, bound into no sandbox, and
+# nothing copies them off the host. An operator who cannot accept a credential
+# a task `cat`ed living there for the retention window sets `enabled = false`.
+#
+# DOCKER: these knobs are deliberately not operator-settable on the Docker
+# shape. There is no ISTOTA_BRAIN_NATIVE_SESSION_LOG_* variable in
+# docker/istota/render-config.sh or docker/docker-compose.yml — a Docker
+# deployment runs the shipped defaults, with the directory resolving to
+# /data/logs on the istota_data volume. Adding one means adding it to *both*
+# files; a variable the generator reads and compose never passes is silently
+# ignored, which is the documented defect class (ISTOTA_EMAIL_AUTHSERV_ID).
+# [brain.native.session_log]
+# enabled = true                  # false = no writer, no file, no directory, no cost
+# dir = ""                        # "" resolves to {db_path.parent}/logs — local disk,
+#                                 #   beside istota.db / modules/ / backups/, and behind
+#                                 #   the sandbox's database mask where that mask applies.
+#                                 #   A value set here is used AS GIVEN (no ~ expansion,
+#                                 #   no resolving against a base); pointing it outside
+#                                 #   db_path.parent gets a WARN from `istota doctor`.
+# retention_days = 14             # age rule, for privacy. Deliberately longer than
+#                                 #   [scheduler] task_retention_days — the log's value is
+#                                 #   that it outlives the task row. 0 = keep for ever by
+#                                 #   age; the size ceiling below still applies.
+# max_total_gb = 2.0              # size ceiling, for the disk, across EVERY user summed —
+#                                 #   the thing being protected is a filesystem, and this
+#                                 #   one also holds istota.db and every module DB. Lean on
+#                                 #   purpose: on a busy deployment the ceiling, not
+#                                 #   retention_days, is what binds, and `istota doctor`
+#                                 #   warns when the last sweep evicted by size. Eviction is
+#                                 #   largest-user-first, then oldest within that user, so a
+#                                 #   noisy neighbour cannot clear a quiet user's history.
+#                                 #   Clamped to a 0.5 floor. 0 = no ceiling; the age rule
+#                                 #   still applies.
+# max_content_chars = 32768       # per text/thinking block; over the cap the block keeps its
+#                                 #   head and its tail (a build log's tail is where the
+#                                 #   error is) and records the real length
+# max_args_chars = 8192           # per tool-call arguments object; over the cap it becomes an
+#                                 #   honest marker rather than a truncated JSON fragment
+# include_thinking = true         # reasoning traces in the written log. The most useful
+#                                 #   record for debugging a wrong answer, and the bulkiest.
+#                                 #   Independent of `istota-skill tasks transcript`, where
+#                                 #   thinking stays off unless asked for.
+#
 # Tmux-driven interactive-TUI brain (only used when kind = "tmux_claude", or via
 # a routing override below). All fields default in code to the prototype's pinned
 # values, so an empty/absent block is behavioral parity. The marker lists are
