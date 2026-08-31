@@ -395,6 +395,101 @@ class TestStickiness:
         assert alerts == []
 
 
+class TestCooldownEndsAtTheQuotaReset:
+    """ISSUE-374, through the task path the failure was observed on."""
+
+    def _cache_reset_in(self, tmp_path, seconds):
+        import time
+        from datetime import datetime, timezone
+
+        import istota.subscription_usage as su
+
+        resets_at = datetime.fromtimestamp(
+            time.time() + seconds, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        su.write_cache(
+            su.cache_path(tmp_path),
+            su.UsageSnapshot(
+                fetched_at=time.time(),
+                windows=(
+                    su.UsageWindow(
+                        key="session", label="5-hour", percent=100.0,
+                        resets_at=resets_at, resets_in_seconds=int(seconds),
+                    ),
+                ),
+                source="fetch",
+            ),
+        )
+
+    def test_the_breaker_ends_at_the_reset_not_the_flat_cooldown(self, tmp_path):
+        self._cache_reset_in(tmp_path, 660)
+        _results, _primary, _fb, alerts = _run(
+            tmp_path,
+            cooldown=3600,
+            primary_result=BrainResult(
+                False, "session limit · resets 7pm", stop_reason="usage_limit",
+            ),
+        )
+        remaining = get_availability_breaker().remaining("claude_code")
+        assert remaining is not None
+        assert 600 < remaining <= 660
+        # The operator alert names the window in force, not the configured
+        # ceiling — it is the one message whose job is to say when the primary
+        # comes back.
+        assert len(alerts) == 1
+        assert "3600s" not in alerts[0][0]
+        assert "for 660s" in alerts[0][0] or "for 659s" in alerts[0][0]
+
+    def test_the_alert_names_the_flat_window_when_there_is_no_reset(self, tmp_path):
+        _results, _primary, _fb, alerts = _run(
+            tmp_path,
+            cooldown=3600,
+            primary_result=BrainResult(False, "session limit", stop_reason="usage_limit"),
+        )
+        assert len(alerts) == 1
+        assert "for 3600s" in alerts[0][0]
+
+    def test_the_shipped_cooldown_still_caps_a_distant_reset(self, tmp_path):
+        """At the shipped 900s default the ceiling governs a five-hour window."""
+        self._cache_reset_in(tmp_path, 5 * 3600)
+        _run(
+            tmp_path,
+            cooldown=900,
+            primary_result=BrainResult(False, "session limit", stop_reason="usage_limit"),
+        )
+        remaining = get_availability_breaker().remaining("claude_code")
+        assert 890 < remaining <= 900
+
+    def test_the_published_record_carries_the_same_window(self, tmp_path):
+        import time
+
+        from istota.brain_availability import read_unavailable
+
+        self._cache_reset_in(tmp_path, 660)
+        _run(
+            tmp_path,
+            cooldown=3600,
+            primary_result=BrainResult(False, "session limit", stop_reason="usage_limit"),
+        )
+        from istota.config import Config
+
+        # `_run` builds its own config; this one only has to name the same file.
+        probe = Config(db_path=tmp_path / "test.db")
+        now = time.time()
+        assert read_unavailable(probe, "claude_code", now=now + 600) is not None
+        # A flat hour would still be open here; the reset window is not.
+        assert read_unavailable(probe, "claude_code", now=now + 700) is None
+
+    def test_no_usage_cache_keeps_the_flat_cooldown(self, tmp_path):
+        _run(
+            tmp_path,
+            cooldown=3600,
+            primary_result=BrainResult(False, "session limit", stop_reason="usage_limit"),
+        )
+        remaining = get_availability_breaker().remaining("claude_code")
+        assert 3590 < remaining <= 3600
+
+
 class TestPrimaryHealthyClosesBreaker:
     def test_healthy_primary_runs_and_breaker_stays_closed(self, tmp_path):
         # A healthy primary run takes the record_success branch (elif success):

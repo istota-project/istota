@@ -230,9 +230,14 @@ brain when the primary is unavailable. Kept executor-level: brains have no
 - **Trigger set** `{usage_limit, not_found, fallback}` (+ `transient_api_error`
   iff `fallback_on_transient`, **on by default** since ISSUE-212): on a matching `brain_result.stop_reason` with a
   fallback configured, the executor reruns via `_run_fallback`. **Cooldown set**
-  `{usage_limit, not_found}` opens the breaker (`open()` returns True once →
-  `_fire_fallback_alert`, one operator alert). `fallback` is excluded from the
-  cooldown set (tmux keeps being probed per-task); the tmux launch alert
+  `{usage_limit, not_found}` opens the breaker through
+  `open_primary_breaker(primary_kind, cooldown, stop_reason, config=config)`,
+  which returns True once → `_fire_fallback_alert`, one operator alert. That
+  helper also publishes the availability record, so the executor no longer calls
+  `record_unavailable` itself: the two used to be handed `_cooldown`
+  independently, and the window is now a deadline off the quota's reset
+  (ISSUE-374), which only one of them can compute. `fallback` is excluded from
+  the cooldown set (tmux keeps being probed per-task); the tmux launch alert
   (`consume_circuit_open_alert`) is still fired for a `tmux_claude` primary.
   A successful primary run (breaker armed) calls `record_success` to close it.
 - `_run_fallback(config, brain_config, fallback_kind, task, req)` →
