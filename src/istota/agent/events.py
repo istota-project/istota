@@ -29,6 +29,15 @@ _TOOL_EMOJI = {
 }
 
 
+# How a `Read` call renders in the execution trace, named rather than spelled
+# out twice. The executor's post-run image audit reads it back: a Claude Code
+# task's vision claim rests on the model complying with a prompt directive, so
+# the trace is checked for one `Read` per prepared image. Producer and reader in
+# one file, because a copied literal is how the audit would silently start
+# reporting every image unread.
+READ_DESCRIPTION_PREFIX = f"{_TOOL_EMOJI['Read']} Reading "
+
+
 def _describe_tool_use(name: str, input_data: dict) -> str:
     """Extract a human-readable description from a tool_use block."""
     emoji = _TOOL_EMOJI.get(name, "🔧")
@@ -45,7 +54,7 @@ def _describe_tool_use(name: str, input_data: dict) -> str:
     if name == "Read":
         path = input_data.get("file_path", "")
         filename = Path(path).name if path else "file"
-        return f"{emoji} Reading {filename}"
+        return f"{READ_DESCRIPTION_PREFIX}{filename}"
 
     if name in ("Edit", "MultiEdit"):
         path = input_data.get("file_path", "")
