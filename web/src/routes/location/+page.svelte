@@ -37,6 +37,8 @@
   let loading = $state(true);
   let error = $state('');
   let pollInterval: ReturnType<typeof setInterval> | undefined;
+  let loadInFlight = false;
+  let destroyed = false;
   let mapComponent: LocationMap | undefined = $state();
   let panelOpen = $state(loadSetting('location.panelOpen', false));
   let browserPos = $state<{ lat: number; lon: number; at: number } | null>(null);
@@ -49,8 +51,6 @@
   function localDate(d: Date = new Date()): string {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
-  const today = localDate();
-
   let places = $derived($locationPlaces);
 
   let currentPos = $derived(
@@ -120,28 +120,34 @@
   );
 
   async function loadData() {
+    if (loadInFlight) return;
+    loadInFlight = true;
+    const today = localDate();
     try {
-      const [c, p, s] = await Promise.all([
+      const [currentResult, pingsResult, summaryResult] = await Promise.allSettled([
         getLocationCurrent(),
         getLocationPings({ date: today }),
         getDaySummary(today),
       ]);
-      current = c;
-      pings = p.pings;
-      summary = s;
-      if (!current?.last_ping) tryBrowserGeolocation();
-    } catch {
-      error = 'Failed to load location data';
-    } finally {
-      loading = false;
-    }
-  }
+      if (destroyed) return;
 
-  async function refreshCurrent() {
-    try {
-      current = await getLocationCurrent();
+      if (currentResult.status === 'fulfilled') current = currentResult.value;
+      if (pingsResult.status === 'fulfilled') pings = pingsResult.value.pings;
+      if (summaryResult.status === 'fulfilled') summary = summaryResult.value;
+
+      const loadedAny = [currentResult, pingsResult, summaryResult].some(
+        (result) => result.status === 'fulfilled',
+      );
+      if (loadedAny) error = '';
+      else if (loading) error = 'Failed to load location data';
+      if (currentResult.status === 'fulfilled' && !currentResult.value.last_ping) {
+        tryBrowserGeolocation();
+      }
     } catch {
-      // ignore
+      if (loading) error = 'Failed to load location data';
+    } finally {
+      loadInFlight = false;
+      if (!destroyed) loading = false;
     }
   }
 
@@ -159,10 +165,11 @@
 
   onMount(() => {
     loadData();
-    pollInterval = setInterval(refreshCurrent, 60000);
+    pollInterval = setInterval(loadData, 60000);
   });
 
   onDestroy(() => {
+    destroyed = true;
     if (pollInterval) clearInterval(pollInterval);
     mapFlyTo.set(undefined);
   });

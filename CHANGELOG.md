@@ -263,6 +263,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Location map now adds new tracker pings and updates its day summary while the page stays open. It also moves to the new day's track after midnight instead of continuing to poll the date from when the page was opened.
+
 - Long attachment names in web chat no longer make the conversation or composer scroll sideways on a phone. Attachment chips now stay within the message column, shorten the visible name with an ellipsis, and keep the staged attachment's remove button in view.
 
 - When your Claude plan hits a usage limit, the bot now goes back to it as soon as the quota resets instead of an hour later. Hitting a limit switched every task over to the backup model for a fixed cooldown measured from the failure, which has nothing to do with when the quota comes back — a limit hit eleven minutes before the reset kept the whole hour on the backup model with the plan sitting idle and available. It now ends the switchover at the reset time it already knows, taking the configured cooldown as a ceiling and one minute as a floor. The alert you get when this happens says how long the switchover actually lasts rather than quoting the setting, and the admin dashboard agrees with it. Nothing changes for a missing binary or a non-subscription model, where a quota reset says nothing useful.
