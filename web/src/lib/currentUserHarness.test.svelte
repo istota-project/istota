@@ -16,10 +16,12 @@
     user: User;
     /** Whether the server confirmed the record. Defaults to the ordinary case. */
     live?: boolean;
+    /** Observe session expiry in a caller-boundary test. */
+    onExpireSession?: () => void;
     component: Component<Record<string, never>>;
   }
 
-  let { user, live = true, component: Page }: Props = $props();
+  let { user, live = true, onExpireSession, component: Page }: Props = $props();
 
   // A getter, so a test can drive the prop and the page sees the new record —
   // the reactivity the real layout relies on when it upgrades a cached identity
@@ -31,6 +33,7 @@
     get live() {
       return live;
     },
+    expireSession: () => onExpireSession?.(),
     reload: async () => live,
   });
 </script>

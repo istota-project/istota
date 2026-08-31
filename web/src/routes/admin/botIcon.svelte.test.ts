@@ -27,15 +27,19 @@ import type { AdminStats, User } from '$lib/api';
  * say nothing.
  */
 
-vi.mock('$lib/api', () => ({
-  getAdminStats: vi.fn(),
-  avatarUrl: vi.fn(() => 'about:blank'),
-  AVATAR_ACCEPT: 'image/png',
-  uploadBotAvatar: vi.fn(),
-  deleteBotAvatar: vi.fn(),
-}));
+vi.mock('$lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('$lib/api')>();
+  return {
+    ...actual,
+    getAdminStats: vi.fn(),
+    avatarUrl: vi.fn(() => 'about:blank'),
+    AVATAR_ACCEPT: 'image/png',
+    uploadBotAvatar: vi.fn(),
+    deleteBotAvatar: vi.fn(),
+  };
+});
 
-import { getAdminStats, uploadBotAvatar, deleteBotAvatar, avatarUrl } from '$lib/api';
+import { AuthError, getAdminStats, uploadBotAvatar, deleteBotAvatar, avatarUrl } from '$lib/api';
 import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
@@ -122,9 +126,17 @@ function person(botHash: string | null): User {
 }
 
 /** Render the page and wait for the card. */
-async function show(botHash: string | null = null, nextcloudUsername: string | null = null) {
+async function show(
+  botHash: string | null = null,
+  nextcloudUsername: string | null = null,
+  onExpireSession?: () => void,
+) {
   vi.mocked(getAdminStats).mockResolvedValue(stats(nextcloudUsername));
-  const rendered = render(Harness, { component: Page, user: person(botHash) });
+  const rendered = render(Harness, {
+    component: Page,
+    user: person(botHash),
+    onExpireSession,
+  });
   await screen.findByText('Bot icon');
   return rendered;
 }
@@ -238,6 +250,17 @@ describe('the upload', () => {
     const { container } = await show();
     await pick(container, new File(['x'], 'icon.png', { type: 'image/png' }));
     await screen.findByText('that image is too large');
+  });
+
+  it('hands an expired upload session back to the root identity flow', async () => {
+    vi.mocked(uploadBotAvatar).mockRejectedValue(new AuthError());
+    const expireSession = vi.fn();
+    const { container } = await show(null, null, expireSession);
+
+    await pick(container, new File(['x'], 'icon.png', { type: 'image/png' }));
+
+    await waitFor(() => expect(expireSession).toHaveBeenCalledOnce());
+    expect(screen.queryByText('Not authenticated')).toBeNull();
   });
 
   it('replaces the picker while it is going up, rather than disabling it', async () => {
