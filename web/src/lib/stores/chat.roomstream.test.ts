@@ -549,6 +549,51 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('refuses to adopt an echo the server attributed to somebody else', async () => {
+    // The adoption claims a row on the body alone, which was safe while a user
+    // row carried no writer. It does now: a co-member typing the same words
+    // while this client holds an unsent row would have their turn folded into
+    // it — and the adoption writes no author, so the row keeps reading as the
+    // viewer's own. That used to cost the wrong name; since `author_id` it
+    // costs the reader's own face over another member's words.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+
+    api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
+    await s.send('hello');
+    expect(get(s.messages)[0].sendState).toBe('queued');
+
+    queueEvents(
+      [
+        row(10, 't1', {
+          role: 'user',
+          text: 'hello',
+          task_id: 7,
+          status: 'running',
+          author: 'Bob',
+          author_id: 'bob',
+        }),
+      ],
+      10,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const users = get(s.messages).filter((m) => m.role === 'user');
+    // Two bubbles: the viewer's message, still unsent, and Bob's. A duplicate
+    // is the outcome the adoption exists to avoid, and it is the right one
+    // here — these are two different people's messages.
+    expect(users).toHaveLength(2);
+    const mine = users.find((m) => m.authorId === undefined)!;
+    expect(mine.sendState).toBe('queued');
+    expect(mine.taskId).toBeUndefined();
+    const theirs = users.find((m) => m.authorId === 'bob')!;
+    expect(theirs.taskId).toBe(7);
+    s.teardown();
+  });
+
   it('dedups the echo of a retried send into the row it was retried from', async () => {
     // Reusing the failed row's cid is justified only by this: the dedup keys on
     // (role, task_id), so stamping the retry's new task id onto the existing

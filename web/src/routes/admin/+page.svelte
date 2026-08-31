@@ -574,7 +574,18 @@
 										     this revalidates on an ETag. A user this admin
 										     shares no room with 404s — being an admin is not the
 										     endpoint's predicate, deliberately — and falls back
-										     to the chip the table drew before. -->
+										     to the chip the table drew before.
+
+										     Two consequences of the keyed `{#each}`, both
+										     accepted. The 60s refresh hands every row the same
+										     props, so the URL never changes and nothing
+										     re-requests — which is also why `Avatar`'s failure
+										     chip is sticky here where the transcript's is not
+										     (that one re-mints a cid per rebuild): a request
+										     that failed once holds the chip until the page is
+										     left. And a mount costs one request per listed user
+										     at once, bounded after that by the 404's own 30s
+										     negative cache. -->
                     <span class="user-face">
                       <Avatar
                         kind="user"
@@ -1693,7 +1704,7 @@
 	   that column came out exactly 0px wide, with the headings painted over each
 	   other. `.table-scroll` scrolls instead. */
   @media (max-width: 768px) {
-    /* The 34.5rem of column widths below, plus 11rem for the auto 24h column —
+    /* The 36.5rem of column widths below, plus 11rem for the auto 24h column —
 		   a rem more than the desktop table leaves it, since the chips have a whole
 		   phone screen less to be legible in. Every column keeps a legible width and
 		   the surplus becomes horizontal scroll. */

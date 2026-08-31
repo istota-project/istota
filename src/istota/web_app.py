@@ -4930,6 +4930,13 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
         # The id alone, never the picture's hash: this dict rides the
         # byte-budgeted room-event stream, and a hash per row buys one saved
         # 304 per author per session (D13).
+        #
+        # Publishing it is not a grant, and the two are not the same question:
+        # this is a column on a stored row, while `/avatars/user/{id}` asks
+        # `shares_room_with` live. A writer who has since left the room keeps
+        # their id on every historic row and their picture 404s — the chip,
+        # which is the right answer and the reason the endpoint gates for
+        # itself rather than trusting what the payload named.
         out["author_id"] = author_user_id
 
     # `_row_get` rather than indexing, like the author columns above: a producer

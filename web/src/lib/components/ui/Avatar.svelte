@@ -7,8 +7,8 @@
     /**
      * The istota user id, which is what the endpoint keys on. Without one a
      * `user` avatar renders the chip rather than requesting a URL it cannot
-     * build — a supported state, not an omission: a co-member's turn carries
-     * no id until the server starts naming one.
+     * build — a supported state, not an omission: an external sender mirrored
+     * into a room is named by an email address with no account behind it.
      */
     userId?: string;
     /**
@@ -44,8 +44,9 @@
     // Known to have no picture, so do not ask for one.
     if (version === null) return '';
     // `avatarUrl` throws on this pairing rather than building a URL with an
-    // empty last segment. A user whose id the client has not been given yet is
-    // an ordinary case here (a co-member's turn until Stage 6 names them), so
+    // empty last segment. A user whose id the client has not been given is an
+    // ordinary case here (an external sender's turn, and the viewer's own on
+    // an offline boot, where the id under a guess is the wrong person's), so
     // it is answered with the chip rather than an exception in a render.
     if (kind === 'user' && !userId) return '';
     return avatarUrl(kind, userId, version);
