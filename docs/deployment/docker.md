@@ -80,6 +80,16 @@ smart = "..."
 
 Restart `istota` afterwards. This only changes behaviour if you pointed a role at something other than `ISTOTA_BRAIN_NATIVE_MODEL` — an unmapped role already falls back to the single configured model, so an install that left all three the same loses only the warning.
 
+A third patch applies to any install running `ISTOTA_BRAIN_KIND=tmux_claude` that was created before ISSUE-362. That brain used to fail over to `claude_code` with nothing configured; failover is explicit now, for every brain kind. A **new** install gets `fallback = "claude_code"` written in for it, but the config is rendered once and kept, so an existing one keeps a `[brain]` block with no `fallback` key and now has no failover at all — a tmux launch failure or a usage limit fails the task. Every process start logs one INFO line saying so. To restore it, add the key in `/data/config/config.toml`:
+
+```toml
+[brain]
+kind = "tmux_claude"
+fallback = "claude_code"
+```
+
+Restart `istota` afterwards. Leaving it out is a valid choice now; the notice is there because it was not previously expressible.
+
 ## Optional profiles
 
 ```bash

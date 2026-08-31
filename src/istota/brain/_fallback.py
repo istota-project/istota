@@ -3,8 +3,8 @@
 Two pieces live here:
 
 - ``effective_fallback_kind`` — resolves the configured ``[brain] fallback`` into
-  the brain kind to fall back to, encoding the tmux back-compat default
-  (a ``tmux_claude`` primary falls back to ``claude_code`` unless overridden).
+  the brain kind to fall back to. Explicit config only: no brain kind has an
+  implicit failover target (ISSUE-362).
 - ``PrimaryAvailabilityBreaker`` — a process-global, thread-safe breaker keyed by
   primary brain kind. Once a primary reports a *persistent* unavailability
   (``usage_limit`` / ``not_found``), subsequent tasks skip it for a cooldown
@@ -41,19 +41,33 @@ COOLDOWN_STOP_REASONS: frozenset[str] = frozenset({"usage_limit", "not_found"})
 
 
 def effective_fallback_kind(brain_config) -> str | None:
-    """The brain kind to fall back to for ``brain_config``, or None.
+    """The configured ``[brain] fallback`` for ``brain_config``, or None.
 
-    Precedence: the configured ``fallback`` if set; else the tmux back-compat
-    default (``claude_code`` for a ``tmux_claude`` primary — preserving the old
-    hardcoded behaviour); else None. Kept out of ``config.py`` so brain-kind
-    logic doesn't leak into config.
+    Failover happens only where an operator named a kind; every brain kind is
+    treated alike. ``tmux_claude`` used to resolve to ``claude_code`` here with
+    nothing configured — a shim from before ``[brain] fallback`` existed — which
+    inverted what an empty setting meant (there was no value of ``fallback``
+    that turned failover off on a tmux deployment) and made
+    ``_validate_brain_fallback``'s two "disabling fallback" warnings false:
+    blanking the field is what activated the implicit target. Removed in
+    ISSUE-362. Kept out of ``config.py`` so brain-kind logic doesn't leak into
+    config.
+
+    A fallback equal to this config's own ``kind`` resolves to None, because
+    rerunning the same brain cannot help. That test belongs **here** rather than
+    only at config load, because ``brain_config`` may be a *routed* config:
+    ``resolve_brain_kind`` returns ``replace(brain_config, kind=target)`` for a
+    ``source_type_overrides`` entry, inheriting ``fallback``. So
+    ``kind = "claude_code"`` routing ``scheduled`` to tmux with
+    ``fallback = "claude_code"`` is a self-fallback for an interactive task and a
+    real target for a scheduled one, and only the resolved config can tell them
+    apart. Config load keeps its own warning for the case where *no* kind the
+    deployment can run would benefit.
     """
     configured = (getattr(brain_config, "fallback", "") or "").strip()
-    if configured:
-        return configured
-    if getattr(brain_config, "kind", "") == "tmux_claude":
-        return "claude_code"
-    return None
+    if not configured or configured == getattr(brain_config, "kind", ""):
+        return None
+    return configured
 
 
 class PrimaryAvailabilityBreaker:

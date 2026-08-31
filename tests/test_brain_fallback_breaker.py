@@ -110,6 +110,7 @@ class TestConstantsAndHelper:
         assert "fallback" not in COOLDOWN_STOP_REASONS
 
     def test_effective_fallback_kind(self):
-        assert effective_fallback_kind(BrainConfig(kind="tmux_claude")) == "claude_code"
+        # ISSUE-362: no implicit target for any kind, tmux_claude included.
+        assert effective_fallback_kind(BrainConfig(kind="tmux_claude")) is None
         assert effective_fallback_kind(BrainConfig(kind="claude_code")) is None
         assert effective_fallback_kind(BrainConfig(kind="claude_code", fallback="native")) == "native"

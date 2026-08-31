@@ -293,7 +293,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 
 | Setting | Default | Description |
 |---|---|---|
-| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the headless `claude -p` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`); `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing (configured under `[brain.tmux]`, with automatic fallback to `claude_code`). |
+| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the headless `claude -p` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`); `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing (configured under `[brain.tmux]`; set `fallback = "claude_code"` for failover). |
 | `source_type_overrides` | `{}` | Per-`source_type` brain override (e.g. route `scheduled` to `native` while interactive tasks stay on `claude_code`). |
 | `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |

@@ -66,8 +66,8 @@ kind = "{{ istota_brain_kind | default('claude_code', true) }}"
 # usage limit / missing binary / tmux launch failure), run the task on this brain
 # with its own configured [brain.native] / [brain.tmux] settings. A portable role
 # tier (fast/general/smart) carries across; a provider-specific model pin drops to
-# the fallback brain's own default (logged + noted in the reply). "" = no fallback
-# (a tmux_claude primary still defaults to claude_code).
+# the fallback brain's own default (logged + noted in the reply). Omitted
+# entirely = no fallback, whatever the primary kind.
 fallback = "{{ istota_brain_fallback }}"
 {% endif %}
 {# No boolean flavour on default(): `| default(x, true)` treats a legitimate

@@ -4,7 +4,7 @@ Istota has three model-invocation backends behind one protocol:
 
 - **`claude_code`** (default) — wraps the headless `claude -p` CLI subprocess. Battle-tested; delegates the agentic loop, tool use, and context management to Claude Code.
 - **`native`** — istota's own in-process agent loop against an OpenAI-compatible provider. Gives istota direct control over the loop, tool execution, context compaction, and model selection.
-- **`tmux_claude`** — drives the interactive `claude` TUI in a detached tmux session (keeps traffic on subscription billing), with automatic fallback to `claude_code` and a circuit breaker. Configured under `[brain.tmux]`; see `config.example.toml` for the full block.
+- **`tmux_claude`** — drives the interactive `claude` TUI in a detached tmux session (keeps traffic on subscription billing), with a launch circuit breaker. Set `[brain] fallback = "claude_code"` to reroute an unavailable tmux primary. Configured under `[brain.tmux]`; see `config.example.toml` for the full block.
 
 All coexist permanently and are switchable per instance or per task. Switching does not touch executor orchestration (memory, skills, sandbox, deferred writes) — only which `Brain` implementation runs.
 
@@ -104,6 +104,7 @@ The full variable set is documented in `deploy/ansible/defaults/main.yml`: `isto
     | `istota_brain_native_effort` | `medium` | `""` |
     | `istota_brain_native_max_tokens` | `32000` | `16384` |
     | `istota_brain_fallback_cooldown_seconds` | `3600` | `900` |
+    | `istota_brain_fallback` | `claude_code` when `istota_brain_kind` is `tmux_claude`, `""` otherwise | `""` |
 
     The base_url one has a consequence worth spelling out: because a stock Ansible deploy points at OpenRouter, the "prompt caching defaults off for a non-Anthropic base_url" note above applies to it. Set `istota_brain_native_prompt_caching: true` if you want caching there.
 

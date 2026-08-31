@@ -1807,7 +1807,14 @@ class TestSimpleExecutionRetry:
 class TestTmuxFallback:
     """Executor in-attempt fallback (tmux-production spec §4): when the tmux
     brain returns stop_reason="fallback"/"not_found", execute_task reruns the
-    same attempt once through claude_code — no new task, no attempt increment."""
+    same attempt once through the configured fallback — no new task, no attempt
+    increment.
+
+    ISSUE-362: claude_code is named in the config here rather than left implicit.
+    tmux_claude used to resolve to it with `fallback` empty, which is the whole
+    behaviour that issue removed; the no-fallback half is covered by
+    tests/test_executor_fallback.py::TestTmuxFolding.
+    """
 
     def _fake_brain(self, kind, result):
 
@@ -1847,7 +1854,7 @@ class TestTmuxFallback:
         reset_availability_breaker()
 
         config = _make_config(tmp_path)
-        config.brain = BrainConfig(kind="tmux_claude")
+        config.brain = BrainConfig(kind="tmux_claude", fallback="claude_code")
         config.security.sandbox_enabled = False
         task = _make_task(source_type="cli")
 

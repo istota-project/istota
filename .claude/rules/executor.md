@@ -248,8 +248,15 @@ brain when the primary is unavailable. Kept executor-level: brains have no
   every other failure keeps its original text (useful in the REPL), and
   `tasks.error` keeps the raw text either way.
 
-No fallback configured (`fallback = ""`, non-tmux primary) collapses the whole
-block to the plain `brain.execute(req)` call. See `.claude/rules/brain.md`
+No fallback configured (`fallback = ""`, any primary kind since ISSUE-362) skips
+only the `_run_fallback` reroute. The rest still runs on a trigger stop_reason:
+the availability breaker opens, `record_unavailable` writes the row, and both
+operator alerts fire, each saying there is nothing to reroute to. That is
+deliberate — the breaker is what the sleep cycle and shared-block generation read
+through `primary_brain_unavailable`, and gating it on a fallback left a
+fallback-less deployment with no signal at all that its primary had gone down.
+`_skip_primary` stays gated on a fallback existing, so an open breaker never
+skips a primary there is nothing to replace. See `.claude/rules/brain.md`
 "Brain fallback" for the classification + portable-alias contract.
 
 ## Result composition (`_compose_full_result`)

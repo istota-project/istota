@@ -416,9 +416,16 @@ fallback_cooldown_seconds: int = 900            # skip an unavailable primary th
 availability failover (brain-fallback spec). When the primary brain is
 unavailable (usage limit / missing binary / tmux launch failure) the executor
 reruns the attempt through the fallback brain with that brain's own settings.
-`""` = no fallback (a `tmux_claude` primary still defaults to `claude_code` via
-`brain._fallback.effective_fallback_kind`). `_validate_brain_fallback` (config
-load) neutralizes an unknown kind or a self-fallback with one WARNING. See
+`""` = no fallback, for every brain kind — `brain._fallback.effective_fallback_kind`
+is the configured value or None, with no implicit target (ISSUE-362; a
+`tmux_claude` primary used to resolve to `claude_code` there with nothing
+configured). `_validate_brain_fallback` (config load) neutralizes an unknown kind
+with one WARNING, and a self-fallback — read as "the only kind this deployment
+runs", so a `source_type_overrides` entry routing elsewhere keeps a value equal
+to `kind`, which is the only spelling of "route scheduled work to tmux and fail
+it over to the CLI" — with another. It also logs one INFO line per process where
+`tmux_claude` runs with no fallback, since that pairing was unconfigurable before
+ISSUE-362 and an upgrade would otherwise drop failover silently. See
 `.claude/rules/brain.md` "Brain fallback" + `.claude/rules/executor.md`.
 
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),

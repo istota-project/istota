@@ -98,8 +98,15 @@ istota_brain_kind: "claude_code"
 # (usage limit, missing binary, tmux launch failure) run the task on the fallback
 # brain with its own settings. Portable role tiers cross the provider boundary; a
 # provider-specific pin drops to the fallback's default (with a visible note).
-# "" = no fallback (tmux_claude still falls back to claude_code). Single level only.
-istota_brain_fallback: ""                       # "" | "claude_code" | "native" | "tmux_claude"
+# "" = no fallback, whatever the primary kind — no brain has an implicit target
+# (ISSUE-362). The default below keeps a tmux_claude deployment on the failover
+# it had before that change, by writing the line into config.toml rather than by
+# magic; set it to "" to turn failover off there. It covers a source_type_overrides
+# entry routing to tmux as well as a tmux primary, because a routed config
+# inherits `fallback` from this one and would otherwise lose failover with
+# nothing in `kind` to see it by. Single level only.
+# Values: "" | "claude_code" | "native" | "tmux_claude".
+istota_brain_fallback: "{{ 'claude_code' if (istota_brain_kind == 'tmux_claude' or 'tmux_claude' in (istota_brain_source_type_overrides | default({})).values()) else '' }}"
 istota_brain_fallback_on_transient: true        # also reroute a persistent transient_api_error
 istota_brain_fallback_cooldown_seconds: 3600    # skip an unavailable primary this long; 0 disables
 
@@ -155,8 +162,8 @@ istota_brain_source_type_overrides: {}
 # Tmux-driven interactive-TUI brain ([brain.tmux]). Emitted to config.toml only
 # when tmux_claude is the kind, the fallback, or a source_type_overrides target.
 # Drives the interactive `claude` TUI in a detached tmux session to keep traffic
-# on subscription billing; claude_code stays the automatic fallback. Needs tmux
-# on the host. Runbook: .claude/rules/brain.md "TmuxClaudeBrain". All fields
+# on subscription billing; istota_brain_fallback defaults to claude_code for it.
+# Needs tmux on the host. Runbook: .claude/rules/brain.md "TmuxClaudeBrain". All fields
 # default in code to the prototype's pinned values; the marker lists are pane-text
 # heuristics pinned to a CLI version (override on a CLI reword, no code release).
 istota_brain_tmux_fallback_trip_threshold: 5       # launch failures before the circuit opens

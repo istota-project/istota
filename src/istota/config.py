@@ -1419,8 +1419,8 @@ class BrainConfig:
     source_type_overrides: dict[str, str] = field(default_factory=dict)
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found / tmux launch failure), the task runs
-    # on ``fallback`` with that brain's own configured settings. "" = no fallback
-    # (a tmux_claude primary still defaults to claude_code — see
+    # on ``fallback`` with that brain's own configured settings. "" = no
+    # fallback, for every brain kind — no implicit target (ISSUE-362; see
     # brain._fallback.effective_fallback_kind).
     fallback: str = ""
     # Include a persistent transient_api_error in the reroute trigger set.
@@ -3386,35 +3386,91 @@ def _validate_advisor_model(config: "Config") -> None:
         )
 
 
-def _validate_brain_fallback(config: "Config") -> None:
-    """Neutralize a misconfigured ``[brain] fallback`` so it can't wedge tasks.
+# Said once per process, not once per `load_config` — see the notice at the end
+# of `_validate_brain_fallback` for why.
+_TMUX_NO_FALLBACK_NOTICE_SAID = False
 
-    Two guards, each logs one WARNING and blanks ``fallback`` (falling back to no
-    fallback, or the tmux back-compat default):
-    1. Unknown kind — ``fallback`` not in ``KNOWN_BRAIN_KINDS``.
-    2. Self-fallback — the configured fallback equals the primary kind (it can't
-       help).
+
+def _runnable_brain_kinds(config: "Config") -> set[str]:
+    """Every brain kind this deployment can actually put a task on.
+
+    ``kind`` plus the ``source_type_overrides`` targets, minus any target
+    ``resolve_brain_kind`` would log and ignore — an override naming a kind that
+    does not exist runs on ``kind``, so it must not count as a second brain.
     """
     from .brain import KNOWN_BRAIN_KINDS
 
-    fb = (config.brain.fallback or "").strip()
-    if not fb:
-        return
+    overrides = (config.brain.source_type_overrides or {}).values()
+    return {config.brain.kind} | {v for v in overrides if v in KNOWN_BRAIN_KINDS}
+
+
+def _validate_brain_fallback(config: "Config") -> None:
+    """Neutralize a misconfigured ``[brain] fallback`` so it can't wedge tasks.
+
+    Two guards, each logs one WARNING and blanks ``fallback``, which since
+    ISSUE-362 means what it says — no failover, whatever the primary kind:
+    1. Unknown kind — ``fallback`` not in ``KNOWN_BRAIN_KINDS``.
+    2. Self-fallback — the configured fallback is the *only* kind the deployment
+       runs, so no task could benefit. Deliberately not the bare
+       ``fallback == kind`` comparison it used to be: a ``source_type_overrides``
+       entry routing to another kind makes the same value a real target for those
+       tasks, and that combination is the only way to spell "route scheduled work
+       to tmux and fail it over to the CLI". The per-task half of the rule lives
+       in ``brain._fallback.effective_fallback_kind``, which sees the resolved
+       config and returns None where the fallback equals its kind.
+
+    Then one INFO line, once per process, where ``tmux_claude`` runs with no
+    fallback. That combination was unconfigurable before ISSUE-362 (it always
+    resolved to ``claude_code``), so an operator who upgrades past it and keeps
+    an empty field loses failover; the notice is informational, not a
+    correction, since "no failover" is now a legitimate thing to want.
+
+    Two things about it are deliberate. It covers a ``source_type_overrides``
+    entry routing to tmux as well as a tmux primary, because
+    ``resolve_brain_kind`` returns a ``replace(brain_config, kind=target)`` that
+    inherits ``fallback`` — so a ``claude_code`` primary routing ``scheduled``
+    to tmux is the same lost failover with nothing in ``kind`` to see it by, and
+    the Ansible default that writes the target back in covers that shape too.
+    And it fires once per process rather than per call: ``load_config`` runs in
+    every CLI invocation and in every host-side skill CLI the proxy spawns, so a
+    per-call line would be one per skill call rather than one per start-up.
+    """
+    from .brain import KNOWN_BRAIN_KINDS
+
     _logger = logging.getLogger("istota.config")
-    if fb not in KNOWN_BRAIN_KINDS:
+    fb = (config.brain.fallback or "").strip()
+    if fb and fb not in KNOWN_BRAIN_KINDS:
         _logger.warning(
             "[brain] fallback=%r is not a known brain kind %s; disabling fallback",
             fb, sorted(KNOWN_BRAIN_KINDS),
         )
         config.brain.fallback = ""
-        return
-    if fb == config.brain.kind:
+    elif fb and _runnable_brain_kinds(config) == {fb}:
+        # Only where *nothing* the deployment can run would benefit. A
+        # `source_type_overrides` entry routing to another kind makes this a real
+        # target for those tasks even though it equals `kind`, and blanking it
+        # here would take that away with no way to express it — the resolved
+        # config is the only thing that can tell the two apart, which is why
+        # `effective_fallback_kind` carries the per-task half of this rule.
         _logger.warning(
-            "[brain] fallback=%r equals the primary brain kind; a self-fallback "
-            "can't help — disabling it",
+            "[brain] fallback=%r is the only brain kind this deployment runs; a "
+            "self-fallback can't help — disabling it",
             fb,
         )
         config.brain.fallback = ""
+    global _TMUX_NO_FALLBACK_NOTICE_SAID
+    if (
+        "tmux_claude" in _runnable_brain_kinds(config)
+        and not (config.brain.fallback or "").strip()
+        and not _TMUX_NO_FALLBACK_NOTICE_SAID
+    ):
+        _TMUX_NO_FALLBACK_NOTICE_SAID = True
+        _logger.info(
+            'tmux_claude runs with no [brain] fallback configured: a tmux launch '
+            "failure or usage limit fails the task rather than rerouting. Set "
+            'fallback = "claude_code" to keep the behaviour it had before '
+            "ISSUE-362.",
+        )
 
 
 def _validate_claude_code_brain(config: "Config") -> None:

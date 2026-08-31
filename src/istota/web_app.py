@@ -1558,7 +1558,10 @@ def _admin_brain_status_section() -> dict:
                 "active": primary_kind,
                 "primary": primary_kind,
             }
-        # Breaker open: the primary is skipped and the fallback (if any) serves.
+        # Breaker open. With a fallback configured the primary is skipped and
+        # the fallback serves; with none, `active` is null and the primary keeps
+        # being called (and keeps failing) — the pane renders that case as
+        # "<primary> down · no fallback".
         return {
             "degraded": True,
             "primary": primary_kind,

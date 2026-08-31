@@ -99,7 +99,9 @@ def _run(
     )
     config.security.sandbox_enabled = False
 
-    fallback_kind = fallback or ("claude_code" if primary_kind == "tmux_claude" else "")
+    # ISSUE-362: no implicit target for any kind — the fake fallback brain is
+    # named by what the config asked for, nothing else.
+    fallback_kind = fallback
     primary = _FakeBrain(primary_kind, primary_result)
     fb = _FakeBrain(
         fallback_kind,
@@ -181,7 +183,35 @@ class TestNoReroute:
         )
         assert fb.calls == 0
         assert results[0][0] is False
-        assert alerts == []
+        # ISSUE-362: the reroute is gated on a configured fallback; the operator
+        # alert is not. It fires here and says there is nothing to reroute to.
+        assert len(alerts) == 1
+        message, purpose = alerts[0]
+        assert purpose == "alert"
+        assert "no fallback configured" in message
+        assert "falling back to" not in message
+
+    def test_breaker_opens_without_a_fallback(self, tmp_path):
+        """ISSUE-362: the breaker is what the sleep cycle reads, so a
+        fallback-less deployment must still record its primary going down."""
+        _results, _primary, fb, _alerts = _run(
+            tmp_path,
+            fallback="",
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        assert fb.calls == 0
+        assert get_availability_breaker().should_skip("claude_code", 900) is True
+
+    def test_no_fallback_still_calls_the_primary_while_cooling_down(self, tmp_path):
+        """An open breaker must not skip a primary there is nothing to replace."""
+        _results, primary, fb, _alerts = _run(
+            tmp_path,
+            fallback="",
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+            n_runs=2,
+        )
+        assert primary.calls == 2
+        assert fb.calls == 0
 
 
 class TestTransientGate:
@@ -399,17 +429,64 @@ class TestPrimaryHealthyClosesBreaker:
 
 
 class TestTmuxFolding:
-    def test_tmux_fallback_reruns_claude_code_breaker_closed(self, tmp_path):
+    def test_tmux_reruns_configured_fallback_breaker_closed(self, tmp_path):
         results, primary, fb, alerts = _run(
             tmp_path,
             primary_kind="tmux_claude",
-            fallback="",  # effective default = claude_code
+            fallback="claude_code",
             primary_result=BrainResult(False, "not ready", stop_reason="fallback"),
         )
         assert results[0][0] is True
         assert fb.calls == 1  # claude_code fallback ran
         # "fallback" is not in the cooldown set → availability breaker stays closed.
         assert get_availability_breaker().should_skip("tmux_claude", 900) is False
+
+    @pytest.mark.parametrize(
+        "fallback,expected,forbidden",
+        [
+            ("claude_code", "falling back.", "no fallback configured"),
+            ("", "no fallback configured, so tasks keep failing.", "falling back."),
+        ],
+    )
+    def test_the_circuit_open_alert_says_whether_anything_takes_over(
+        self, tmp_path, fallback, expected, forbidden
+    ):
+        """ISSUE-362: the alert used to promise a reroute unconditionally.
+
+        It reaches an operator, and on a deployment with no fallback the old
+        wording told them their tasks were being served when they were failing.
+        """
+        with patch(
+            "istota.brain.tmux_claude.consume_circuit_open_alert", return_value=True
+        ):
+            _results, _primary, _fb, alerts = _run(
+                tmp_path,
+                primary_kind="tmux_claude",
+                fallback=fallback,
+                primary_result=BrainResult(
+                    False, "not ready", stop_reason="fallback"
+                ),
+            )
+        circuit = [m for m, _p in alerts if "circuit opened" in m]
+        assert len(circuit) == 1
+        assert expected in circuit[0]
+        assert forbidden not in circuit[0]
+
+    def test_tmux_without_a_configured_fallback_does_not_reroute(self, tmp_path):
+        """ISSUE-362: the implicit tmux -> claude_code target is gone.
+
+        This is the pairing that was unconfigurable before: an empty `fallback`
+        on a tmux primary now means what it says.
+        """
+        results, primary, fb, _alerts = _run(
+            tmp_path,
+            primary_kind="tmux_claude",
+            fallback="",
+            primary_result=BrainResult(False, "not ready", stop_reason="fallback"),
+        )
+        assert results[0][0] is False
+        assert primary.calls == 1
+        assert fb.calls == 0
 
 
 class TestFallbackIsVisibleOnStreamSurfaces:

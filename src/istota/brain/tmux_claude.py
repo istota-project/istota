@@ -17,15 +17,20 @@ Production hardening (``Specs/Active/claude-tmux-production-readiness.md``):
   error-marker / dead-pane / stall instead of always burning the full timeout; a
   transient API error retries a fresh session (≤3, 5s apart) without consuming a
   task attempt, matching ``ClaudeCodeBrain``.
-- **Automatic fallback** — a launch-level failure returns ``stop_reason="fallback"``
-  so the executor reruns the task once headless; a process-global circuit breaker
+- **Fallback, when one is configured** — a launch-level failure returns
+  ``stop_reason="fallback"``, so the executor reruns the task once through
+  ``[brain] fallback`` if that names a kind; a process-global circuit breaker
   trips after repeated launch failures (a CLI upgrade rewording a dialog) and
-  short-circuits to fallback for a cooldown, with one operator alert.
+  short-circuits to it for a cooldown, with one operator alert. This brain used
+  to resolve to ``claude_code`` with nothing configured; that implicit target is
+  gone (ISSUE-362), so with an empty ``fallback`` the task simply fails and the
+  alert says so.
 - **Live streaming** — on stream surfaces a background ``_TranscriptTailer``
   forwards tool/text/thinking blocks to ``on_progress`` as they flush, instead of
   only at turn end (the Stop-time parse stays authoritative for the result/trace).
 
-``claude_code`` remains the constructible fallback kind.
+``claude_code`` remains the fallback kind to name for this brain, and the one an
+Ansible or Docker deploy writes in for a ``tmux_claude`` primary.
 """
 
 import itertools
