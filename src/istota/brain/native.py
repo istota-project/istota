@@ -71,7 +71,7 @@ from istota.session.compaction import (
     derive_reserve_tokens,
     estimate_context_tokens,
     find_cut_point,
-    find_image_message,
+    plan_image_pin,
     should_compact,
 )
 from istota.session.loop_detection import detect_repeated_tool_calls
@@ -117,9 +117,31 @@ _NO_VISION_NOTICE = (
 )
 _UNREADABLE_NOTICE = "[image {name} omitted: could not be read at send time ({reason})]"
 
+# Refuse to read a prepared image larger than this. `image_attachments` already
+# bounds a task's whole payload (`MAX_ENCODED_BYTES`, 8 MiB of base64), but it
+# bounds the file as it stood at preparation time — and this is a *second* read,
+# of a path under the user temp dir, which bwrap binds read-write into that
+# user's own sandboxes. Another task of the same user can replace the file
+# between the two reads, so the bound is asserted here rather than inherited.
+# Restated rather than imported: a brain module importing `image_attachments`
+# would close a cycle back through `brain/__init__.py`, so the two are held
+# equal by `tests/native/test_input_images.py` instead.
+_MAX_IMAGE_BYTES = 6 * 1024 * 1024
+
+
+def _read_image_bytes(path: Path) -> bytes:
+    """The prepared file's bytes, refusing one that outgrew its budget."""
+    size = path.stat().st_size
+    if size > _MAX_IMAGE_BYTES:
+        raise ValueError(f"{size} bytes exceeds the {_MAX_IMAGE_BYTES}-byte cap")
+    return path.read_bytes()
+
 
 def _initial_user_content(
-    prompt: str, images: list[ImageInput], supports_vision: bool
+    prompt: str,
+    images: list[ImageInput] | None,
+    supports_vision: bool,
+    model: str = "",
 ) -> list:
     """Build the first user message's content blocks.
 
@@ -129,22 +151,36 @@ def _initial_user_content(
 
     Encoding happens here, immediately before the first provider call, so the
     base64 exists for exactly as long as the request does and never rides on the
-    ``BrainRequest``. A file that vanished between preparation and the send
-    becomes a named text notice and the remaining images still go: one
-    unreadable attachment must not cost the task its other images or its text.
+    ``BrainRequest``. A file that vanished, or grew, between preparation and the
+    send becomes a named text notice and the remaining images still go: one bad
+    attachment must not cost the task its other images or its text.
 
     With no declared vision support nothing is read at all — reading bytes only
     to discard them is pure cost — and each image gets its own named omission so
     the request stays valid and the model is told exactly what it is missing.
     """
     content: list = [TextContent(text=prompt)]
+    images = images or []
+    if images and not supports_vision:
+        # The model-facing notice says this, but only the model reads it. An
+        # operator seeing every attachment dropped needs to be able to tell a
+        # model that has no vision from a catalog that never learned it has:
+        # `supports_vision` defaults to False, and the live catalog is fetched
+        # for OpenRouter base URLs only, so a direct-Anthropic endpoint resolves
+        # to `_DEFAULT` and reads as no-vision until an override says otherwise.
+        logger.warning(
+            "native brain: %d image attachment(s) sent as text notices — model "
+            "%r declares no vision support; set [brain.native.model_overrides] "
+            "supports_vision if the catalog is wrong about it",
+            len(images), model,
+        )
     for image in images:
         name = image.display_name or Path(image.path).name
         if not supports_vision:
             content.append(TextContent(text=_NO_VISION_NOTICE.format(name=name)))
             continue
         try:
-            encoded = base64.b64encode(Path(image.path).read_bytes()).decode("ascii")
+            encoded = base64.b64encode(_read_image_bytes(Path(image.path))).decode("ascii")
         except Exception as e:  # noqa: BLE001 — one bad file must not fail the task
             # Metadata only: no bytes, no base64, and the basename rather than
             # the full user-controlled path.
@@ -1045,8 +1081,18 @@ class NativeBrain:
                 if cut > 0:
                     to_compact = ctx.messages[:cut]
                     remaining = ctx.messages[cut:]
+                    # The task's own image attachments sit in the message at
+                    # index 0 and `find_cut_point` walks back from the newest,
+                    # so the first compaction is exactly the cut that drops
+                    # them. `plan_image_pin` decides what is carried over and
+                    # hands back the summarizer's input with those blocks
+                    # already removed — the loss notice must not be written
+                    # about an image that is being kept. The notice is the
+                    # floor for the case where there is nothing to pin; the pin
+                    # is what keeps the capability itself.
+                    pin, to_summarize = plan_image_pin(to_compact, keep_recent)
                     summary, details = await compact_messages(
-                        to_compact,
+                        to_summarize,
                         compaction_state["summary"],
                         compaction_state["details"],
                         # Through the retrying provider so a transient 429 during
@@ -1063,19 +1109,9 @@ class NativeBrain:
                     summary_msg = CompactionSummaryMessage(
                         summary=summary, tokens_before=tokens, details=details
                     )
-                    # The task's own image attachments sit in the message at
-                    # index 0 and `find_cut_point` walks back from the newest,
-                    # so the first compaction is exactly the cut that drops
-                    # them. Pin that message ahead of the summary: the blocks
-                    # are bounded and known (capped at 20 images and 8 MiB of
-                    # encoded payload by preparation), unlike the history the
-                    # cut exists to shed. The summary's loss notice is the
-                    # floor for the case where there is nothing to pin; this is
-                    # what keeps the capability itself.
-                    images_msg = find_image_message(to_compact)
                     compacted = (
-                        [images_msg, summary_msg, *remaining]
-                        if images_msg is not None
+                        [pin, summary_msg, *remaining]
+                        if pin is not None
                         else [summary_msg, *remaining]
                     )
 
@@ -1137,7 +1173,9 @@ class NativeBrain:
             tools=self._build_tools(req),
         )
         prompt_msg = UserMessage(
-            content=_initial_user_content(req.prompt, req.images, supports_vision)
+            content=_initial_user_content(
+                req.prompt, req.images, supports_vision, model
+            )
         )
 
         # The loop captures agent_end's stop_reason; we sniff it from the final
@@ -1679,11 +1717,21 @@ async def _build_recovery_context(
         cut = _aggressive_cut(transcript)
     to_compact = transcript[:cut]
     remaining = transcript[cut:]
+    # The same pin as the proactive path, and needed here more rather than
+    # less: this path always sheds index 0 (`find_cut_point` walks back from
+    # the newest, and `_aggressive_cut` cuts harder still), so without it a
+    # task that once overflowed is blind for the rest of the run and no later
+    # compaction can restore what is gone. The size guard is what makes that
+    # safe on the one path where the window has already been exceeded — an
+    # oversized set of blocks is dropped with the summary's loss notice rather
+    # than carried into a request that just failed for length.
+    pin, to_summarize = plan_image_pin(to_compact, keep_recent_tokens)
     summary, details = await compact_messages(
-        to_compact, prev_summary, prev_details, provider, model, convert_to_llm,
+        to_summarize, prev_summary, prev_details, provider, model, convert_to_llm,
         max_input_chars=max_input_chars,
     )
     messages: list = [
+        *([pin] if pin is not None else []),
         CompactionSummaryMessage(summary=summary, tokens_before=0, details=details),
         *remaining,
     ]

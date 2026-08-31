@@ -12,12 +12,14 @@ from istota.llm.types import (
     UserMessage,
 )
 from istota.session.compaction import (
+    _serialize_for_summary,
     compact_messages,
     derive_keep_recent_tokens,
     derive_reserve_tokens,
     estimate_context_tokens,
     find_cut_point,
     find_image_message,
+    plan_image_pin,
     should_compact,
 )
 from istota.session.messages import CompactionDetails, CompactionSummaryMessage
@@ -335,3 +337,71 @@ class TestFindImageMessage:
             content=[ImageContent(media_type="image/png", data="AAAA")],
         )
         assert find_image_message([result]) is None
+
+
+class TestPlanImagePin:
+    def _prefix(self, *, images=1):
+        return [
+            UserMessage(
+                content=[
+                    TextContent(text="PROMPT-MARKER"),
+                    *[
+                        ImageContent(
+                            media_type="image/png",
+                            data="AAAA",
+                            display_name=f"shot{i}.png",
+                        )
+                        for i in range(images)
+                    ],
+                ]
+            ),
+            _assistant("working"),
+        ]
+
+    def test_the_pin_holds_the_blocks_and_a_label_not_the_prompt(self):
+        pin, _summary_input = plan_image_pin(self._prefix())
+        assert isinstance(pin, UserMessage)
+        assert isinstance(pin.content[0], TextContent)
+        assert "PROMPT-MARKER" not in pin.content[0].text
+        assert [c.display_name for c in pin.content[1:]] == ["shot0.png"]
+
+    def test_the_summary_input_keeps_the_text_and_drops_the_pinned_blocks(self):
+        prefix = self._prefix()
+        _pin, summary_input = plan_image_pin(prefix)
+        rendered = _serialize_for_summary(summary_input)
+        assert "PROMPT-MARKER" in rendered
+        assert "no longer in context" not in rendered
+        # And the caller's own list is untouched.
+        assert any(isinstance(c, ImageContent) for c in prefix[0].content)
+
+    def test_a_tool_result_image_still_reads_as_lost(self):
+        # It is never pinned, so the notice about it is true.
+        prefix = [
+            *self._prefix(),
+            ToolResultMessage(
+                tool_call_id="c1",
+                tool_name="screenshot",
+                content=[ImageContent(media_type="image/png", data="BBBB")],
+            ),
+        ]
+        _pin, summary_input = plan_image_pin(prefix)
+        assert "no longer in context" in _serialize_for_summary(summary_input)
+
+    def test_nothing_to_pin_returns_the_prefix_unchanged(self):
+        prefix = [_user("hi"), _assistant("ok")]
+        pin, summary_input = plan_image_pin(prefix)
+        assert pin is None
+        assert summary_input is prefix
+
+    def test_a_pin_too_large_for_the_recent_budget_is_refused(self):
+        # `find_cut_point` returns 0 when the walk back does not reach
+        # `keep_recent_tokens` before index 0, so a pin that swallows that
+        # budget on its own turns compaction into a permanent no-op and the
+        # request goes out over-window.
+        pin, summary_input = plan_image_pin(self._prefix(images=20), 4)
+        assert pin is None
+        assert "no longer in context" in _serialize_for_summary(summary_input)
+
+    def test_a_zero_budget_asks_for_no_size_check(self):
+        pin, _ = plan_image_pin(self._prefix(images=20), 0)
+        assert pin is not None
