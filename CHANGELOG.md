@@ -263,6 +263,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stopping a long-running task, or having one run out of time, no longer throws away everything the bot wrote while working on it. A 29-minute investigation came back as the words "Cancelled by user" and nothing else, on exactly the runs long enough to be worth reading. What the bot had written is now kept on the task and delivered under a heading saying the run was cut short — the same way a run that hits its step limit has always been handled. A task you stopped on purpose still posts nothing new, since you already know you stopped it, but the work is there when you open it again.
+
+- A run that is going to be killed by the clock now stops itself a little early instead. The two limits on a task disagree: one of them delivers what the bot had written and the other discards it, and on a slow backup model the discarding one always arrived first. The bot now ends the run at 90% of the time it was given, on the limit that keeps the work. The last tenth still covers a run that hangs outright, where there is no safe moment to stop at.
+
+- The reminders the bot gives itself as it approaches a limit ("about 15 steps left, start wrapping up") now count time as well as steps. They were sized against a fast model, so on a slow one the clock ran out before the later reminders were ever reached and the run ended with no wrap-up at all. The bot now estimates how many steps the remaining time has room for and paces itself against whichever is running out sooner.
+
 - Ctrl-C now stops `istota serve`, promptly and without a stack trace. With a browser tab open on the chat, the web server waited for that tab's live event stream to end — and it never does, because it runs until the browser goes away — so the first Ctrl-C hung indefinitely and the second, which the message on screen says will force the quit, did not either; only `kill -9` ended it. The live streams now close themselves when the process is told to stop, leaving nothing to wait for, with the bounded wait and a force-quitting second Ctrl-C behind them as backstops. The deployed web service gets the same: a restart no longer sits out its whole shutdown window and logs a cancelled-task traceback.
 
 - The Briefings screen you see before your first briefing has run now reads at the same size as the rest of the app. Its heading and the line pointing you at settings were both set a step larger than everything around them, including a real briefing in the same place.
