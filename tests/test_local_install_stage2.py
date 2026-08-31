@@ -394,3 +394,45 @@ class TestForceQuit:
             assert conn.transport.aborted == 1
 
         asyncio.run(_drive())
+
+
+class TestSupervisorShutdownNotice:
+    """The stream stop-notice is signal-driven, and this shutdown has no signal.
+
+    `_supervise` sets `should_exit` when the scheduler thread dies. Without
+    raising the notice too, the SSE generators keep polling, uvicorn waits out
+    the whole graceful window and then cancels them — the `CancelledError`
+    traceback the notice exists to remove, on the one path no Ctrl-C reaches.
+    """
+
+    def test_a_dead_scheduler_thread_raises_the_stream_stop_notice(
+        self, tmp_path, monkeypatch,
+    ):
+        import istota.scheduler as sched
+        from istota import serve, web_shutdown
+
+        cfg = _standalone_config(tmp_path)
+
+        def fake_daemon(config, *, install_signal_handlers=True, ready_event=None):
+            if ready_event is not None:
+                ready_event.set()
+            return  # the thread ends, which is what the supervisor watches for
+
+        monkeypatch.setattr(sched, "run_daemon", fake_daemon)
+
+        class _BlockingServer(_FakeServer):
+            def run(self):
+                self.ran = True
+                deadline = time.monotonic() + 10
+                while not self.should_exit and time.monotonic() < deadline:
+                    time.sleep(0.05)
+
+        server = _BlockingServer()
+        monkeypatch.setattr(serve, "build_uvicorn_server", lambda host, port: server)
+        web_shutdown.reset_for_tests()
+        try:
+            serve.run_serve(cfg, host="127.0.0.1", port=8799)
+            assert server.should_exit is True, "the supervisor never tripped"
+            assert web_shutdown.is_shutting_down() is True
+        finally:
+            web_shutdown.reset_for_tests()

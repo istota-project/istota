@@ -880,3 +880,77 @@ class TestAdminChatGauge:
         for _ in range(5):
             mod._room_stream_conn_delta(-1)
         assert mod._admin_chat_section()["room_stream_connections"] == 0
+
+
+@_needs_web_deps
+class TestRoomStreamShutdown:
+    """The session-lived stream a browser tab always holds open.
+
+    Nothing server-side ends it, so before `istota.web_shutdown` every shutdown
+    ran the graceful window out and then cancelled this generator — which
+    uvicorn logs as `ERROR: Exception in ASGI application` with a
+    `CancelledError` traceback, on an ordinary Ctrl-C.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_shutdown_state(self):
+        from istota import web_shutdown
+        web_shutdown.reset_for_tests()
+        yield
+        web_shutdown.reset_for_tests()
+
+    async def _setup(self, tmp_path, **chat_kwargs):
+        chat_kwargs.setdefault("room_stream_poll_interval_ms", 5)
+        chat_kwargs.setdefault("room_stream_room_check_seconds", 0)
+        chat_kwargs.setdefault("room_stream_keepalive_seconds", 3600)
+        config = _make_config(tmp_path, **chat_kwargs)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="https://example.com",
+        ) as client:
+            cookies = await _login(client, "alice")
+            return await _default_room(client, cookies)
+
+    async def test_a_stop_signal_ends_the_stream(self, tmp_path):
+        import asyncio
+
+        from istota import web_shutdown
+
+        await self._setup(tmp_path)
+
+        def on_check(n):
+            if n == 2:
+                web_shutdown.begin_shutdown()
+
+        # The client never disconnects: the only thing that can end this is the
+        # stop notice. A generous limit rather than an unbounded one so a
+        # regression fails on the timeout below rather than running forever.
+        await asyncio.wait_for(
+            _drain(_FakeRequest(disconnect_after=100_000, on_check=on_check)),
+            timeout=10,
+        )
+
+    async def test_the_wake_beats_the_poll_interval(self, tmp_path):
+        """The stop notice must reach a stream *while it sleeps*, not on its
+        next tick — a poll interval is up to a second of the graceful window,
+        and the log tail's is longer.
+
+        The sibling test above fires the notice from the disconnect check, so
+        the generator sees it on the same iteration at the top of the loop and
+        the sleep is never exercised. Here the interval is 30s and the deadline
+        is 5s, so only a wake can make it.
+        """
+        import asyncio
+
+        from istota import web_shutdown
+
+        await self._setup(tmp_path, room_stream_poll_interval_ms=30_000)
+
+        async def _drain_it():
+            return await _drain(_FakeRequest(disconnect_after=100_000))
+
+        drain = asyncio.create_task(_drain_it())
+        await asyncio.sleep(0.3)  # let the generator reach its sleep
+        web_shutdown.begin_shutdown()
+        await asyncio.wait_for(drain, timeout=5)

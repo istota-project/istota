@@ -56,6 +56,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as _db
 from . import user_profiles
+from . import web_shutdown
 from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
@@ -245,6 +246,13 @@ async def lifespan(app: FastAPI):
     _reload_config()
     _publish_config(app)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
+    # Wrap the stop signals so the SSE streams below can end themselves instead
+    # of being cancelled at the graceful-shutdown timeout — which is what put a
+    # CancelledError traceback in the log on every Ctrl-C and every restart.
+    # Here rather than in `serve.py` because this is the one startup path both
+    # `istota serve` and a plain `uvicorn istota.web_app:app` share, and it runs
+    # after uvicorn has installed the handler being wrapped.
+    web_shutdown.install_signal_hook()
     yield
 
 
@@ -2913,7 +2921,7 @@ async def chat_task_stream(
     async def _generate():
         last = since_seq
         while True:
-            if await request.is_disconnected():
+            if await request.is_disconnected() or web_shutdown.is_shutting_down():
                 return
             events = await asyncio.to_thread(_load_task_events, task_id, last)
             for ev in events:
@@ -2937,7 +2945,11 @@ async def chat_task_stream(
                            f"data: {json.dumps(ev['payload'])}\n\n")
                     if ev["kind"] == "done":
                         return
-            await asyncio.sleep(_sse_poll_seconds())
+            # Ending here rather than waiting to be cancelled: the process is
+            # stopping and this stream never ends on its own, so a return is
+            # what lets the response complete cleanly. See `web_shutdown`.
+            if not await web_shutdown.sleep_unless_shutdown(_sse_poll_seconds()):
+                return
 
     return StreamingResponse(
         _generate(),
@@ -3337,7 +3349,7 @@ async def chat_room_stream(
         _room_stream_conn_delta(1)
         try:
             while True:
-                if await request.is_disconnected():
+                if await request.is_disconnected() or web_shutdown.is_shutting_down():
                     return
                 try:
                     batch = await asyncio.to_thread(
@@ -3441,7 +3453,11 @@ async def chat_room_stream(
                 if time.monotonic() - last_frame >= keepalive:
                     last_frame = time.monotonic()
                     yield ": ping\n\n"
-                await asyncio.sleep(poll)
+                # This is the session-lived stream a browser tab always holds
+                # open, so it is the one that made every shutdown run out the
+                # graceful window. See `web_shutdown`.
+                if not await web_shutdown.sleep_unless_shutdown(poll):
+                    return
         finally:
             _room_stream_conn_delta(-1)
 
@@ -3692,7 +3708,7 @@ async def admin_log_stream(
         current = cursor
         idle = 0
         while True:
-            if await request.is_disconnected():
+            if await request.is_disconnected() or web_shutdown.is_shutting_down():
                 return
             try:
                 tail = await asyncio.to_thread(_read_log_tail, source_id, current, query)
@@ -3722,7 +3738,9 @@ async def admin_log_stream(
                 if idle >= _LOG_STREAM_KEEPALIVE_TICKS:
                     idle = 0
                     yield ": ping\n\n"
-            await asyncio.sleep(_LOG_STREAM_POLL_SECONDS)
+            # See `web_shutdown`: end on a stop signal rather than be cancelled.
+            if not await web_shutdown.sleep_unless_shutdown(_LOG_STREAM_POLL_SECONDS):
+                return
 
     return StreamingResponse(
         _generate(),

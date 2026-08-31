@@ -11,9 +11,16 @@ neither is visible to a test that stubs uvicorn out:
   ``asyncio.Server.wait_closed()``, which since 3.12 waits for the same
   connections. Only SIGKILL ended the process.
 
+Both of those are backstops, and both are loud: running the graceful window out
+ends in uvicorn cancelling the ASGI task, and uvicorn logs any exception out of
+an ASGI app — ``CancelledError`` included — as ``ERROR: Exception in ASGI
+application`` with a full traceback. So the ordinary path is the third case
+here: the stream sees the stop signal (``istota.web_shutdown``) and ends itself,
+leaving the shutdown nothing to wait on and nothing to cancel.
+
 So these run a real uvicorn in a subprocess with a real SSE client attached and
 signal it the way a person does. Each case is given a graceful window that the
-*other* mechanism could not satisfy, so neither passes on the other's work.
+*other* mechanisms could not satisfy, so none passes on another's work.
 """
 
 from __future__ import annotations
@@ -50,11 +57,11 @@ def _wait_exit(proc: subprocess.Popen, timeout: float) -> int | None:
 
 
 @contextlib.contextmanager
-def _serving(graceful: int):
+def _serving(graceful: int, aware: bool = False):
     port = _free_port()
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
-        [sys.executable, str(_CHILD), str(port), str(graceful)],
+        [sys.executable, str(_CHILD), str(port), str(graceful), "1" if aware else "0"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
     )
     sse: socket.socket | None = None
@@ -119,4 +126,36 @@ def test_repeat_interrupt_forces_the_quit():
     assert status is not None, (
         "a repeat SIGINT did not quit — force_exit was set and the process "
         "still blocked in asyncio.Server.wait_closed()"
+    )
+
+
+def test_a_shutdown_aware_stream_ends_itself_and_logs_no_traceback():
+    """The ordinary path: nothing is left for the shutdown to wait on.
+
+    Both mechanisms above are backstops, and both are loud — running the
+    graceful window out ends with uvicorn cancelling the ASGI task, and uvicorn
+    logs *any* exception out of an ASGI app, `CancelledError` included, as
+    ``ERROR: Exception in ASGI application`` with a full traceback. A person
+    pressing Ctrl-C got that every time.
+
+    The window here is far longer than the deadline, so this can only pass by
+    the stream ending itself on the signal.
+    """
+    graceful = 300
+    with _serving(graceful, aware=True) as proc:
+        proc.send_signal(signal.SIGINT)
+        # Asserted before the output is read, and inside the `with`: reading to
+        # EOF on a process that has not exited blocks until it does, which on
+        # this window is five minutes. A failure here has to fail now.
+        assert _wait_exit(proc, 20) is not None, (
+            "a shutdown-aware stream did not end on SIGINT — the process sat "
+            "in the graceful window"
+        )
+        out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+
+    assert "Exception in ASGI application" not in out, (
+        f"the stream was cancelled rather than ending itself:\n{out}"
+    )
+    assert "timeout graceful shutdown exceeded" not in out, (
+        f"the graceful window ran out with a stream still open:\n{out}"
     )
