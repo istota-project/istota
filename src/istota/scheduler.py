@@ -112,6 +112,14 @@ from .notification_store import (
 )
 from .notifications import effective_log_destinations, send_notification
 from .process_group import kill_process_group
+from .session.session_log import (
+    SWEEP_STATE_KEY,
+    SWEEP_STATE_NAMESPACE,
+    SweepResult,
+    encode_sweep_state,
+    resolve_session_log_dir,
+    sweep_session_logs,
+)
 from .transport import (
     Destination,
     is_canonical_room_view,
@@ -4863,6 +4871,33 @@ def _record_avatar_import_tick(
         logger.warning("avatar_import_state_unwritten err=%s", exc)
 
 
+def _record_session_log_sweep(config: Config, result: SweepResult) -> None:
+    """Write down what this sweep did, for `doctor`'s `runtime.session_log_dir`.
+
+    That check runs in three processes that never see the sweep — daemon
+    start-up, `istota doctor` and the web process behind the admin Health pane —
+    so the one fact it needs cannot be module state: whether the *size ceiling*
+    is what reclaimed. When it is, `retention_days` is not the retention
+    actually in force and the effective window is a function of load, which is a
+    condition to surface rather than absorb.
+
+    Written on every sweep, not only on an eviction, so a ceiling that stopped
+    binding stops warning. Failure costs the row and never the tick: this is a
+    record of the cleanup, not part of it.
+    """
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.shared_kv_set(
+                conn,
+                SWEEP_STATE_NAMESPACE,
+                SWEEP_STATE_KEY,
+                encode_sweep_state(result, now=time.time()),
+                "scheduler:session_log_sweep",
+            )
+    except Exception as exc:  # noqa: BLE001 - a record, not the work
+        logger.warning("session_log_sweep_state_unwritten err=%s", exc)
+
+
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
@@ -6216,6 +6251,47 @@ def run_cleanup_checks(config: Config) -> None:
                 logger.info(f"Deleted {deleted_files} old temp file(s)")
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
+
+    # 7b. Clean up old native-brain session logs
+    #
+    # The **only** caller of the sweep. The feature ships enabled and the writer
+    # appends for every native task attempt, onto the filesystem the framework
+    # database is writing to, so without this step nothing on the deployment
+    # ever deletes one.
+    #
+    # The gate is `or`, not `and`: the age rule and the disk ceiling bound
+    # different things and neither implies the other. An operator who sets
+    # `retention_days = 0` to keep everything indefinitely still wants the
+    # ceiling enforced, and wiring this as `and` would silently disable it —
+    # which is the exact failure the ceiling exists to prevent.
+    #
+    # Reads `config.brain.native` directly rather than going through
+    # `resolve_brain_kind`, because this is about a directory on disk and not
+    # about which brain a given task would route to. A deployment that switched
+    # away from native still sweeps the logs native left behind.
+    _slog = config.brain.native.session_log
+    if _slog.enabled and (_slog.retention_days > 0 or _slog.max_total_gb > 0):
+        try:
+            _sweep = sweep_session_logs(
+                resolve_session_log_dir(config.db_path, _slog.dir),
+                retention_days=_slog.retention_days,
+                max_total_gb=_slog.max_total_gb,
+                now=time.time(),
+            )
+            if _sweep.deleted_age or _sweep.deleted_size:
+                logger.info(
+                    "Session logs: deleted %d aged, %d over ceiling, %d dir(s); "
+                    "%.1f MB remain",
+                    _sweep.deleted_age, _sweep.deleted_size, _sweep.dirs_removed,
+                    _sweep.bytes_after / 1_048_576,
+                )
+            if _sweep.errors:
+                logger.warning(
+                    "Session log sweep: %d path(s) could not be processed", _sweep.errors,
+                )
+            _record_session_log_sweep(config, _sweep)
+        except Exception as e:
+            logger.error(f"Error cleaning up session logs: {e}")
 
     # 8. Clean up old location pings (per-user location.db)
     if sched.location_ping_retention_days > 0:

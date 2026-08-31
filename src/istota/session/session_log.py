@@ -929,6 +929,64 @@ class SweepResult:
     errors: int = 0
 
 
+# Where the scheduler writes down what its last sweep did, and where `doctor`
+# reads it back. The two processes are different — the sweep runs on the
+# scheduler's cleanup tick, and the check runs at daemon start-up, from `istota
+# doctor` and from the web process behind the admin Health pane — so "did the
+# ceiling reclaim anything" cannot be module state.
+#
+# `shared_kv` rather than a table: it is one small JSON row of deployment-wide
+# daemon state, on the `avatars.IMPORT_STATE_NAMESPACE` precedent. The leading
+# underscore is what keeps it away from the model — `kv_namespaces` reserves the
+# prefix, so the `kv` skill refuses the namespace on every verb and the deferred
+# op replay refuses it again for a sandboxed task.
+#
+# The constants and the JSON shape live here, beside `SweepResult`, so the
+# writer and the reader cannot disagree about either. The two `shared_kv` calls
+# themselves stay with their callers: this module imports nothing from the
+# package and `db` is not about to be the exception.
+SWEEP_STATE_NAMESPACE = "_session_log_sweep"
+SWEEP_STATE_KEY = "last_sweep"
+
+
+def encode_sweep_state(result: SweepResult, *, now: float) -> str:
+    """The row body for the sweep that just finished.
+
+    Every counter, not only ``deleted_size``: the field doctor keys its warning
+    on is the interesting one, and an operator reading the row by hand wants the
+    rest of the picture beside it.
+    """
+    return json.dumps(
+        {
+            "at": _iso_ms(datetime.fromtimestamp(now, tz=timezone.utc)),
+            "deleted_age": result.deleted_age,
+            "deleted_size": result.deleted_size,
+            "dirs_removed": result.dirs_removed,
+            "bytes_after": result.bytes_after,
+            "still_over": result.still_over,
+            "errors": result.errors,
+        },
+        sort_keys=True,
+    )
+
+
+def decode_sweep_state(raw: object) -> dict | None:
+    """The last sweep's record, or ``None`` when there is not a usable one.
+
+    ``None`` rather than a raise on anything unparseable, because the one reader
+    is a doctor check on the daemon's start-up path: a row nobody can read is,
+    for the operator, indistinguishable from no row at all, and it is certainly
+    not worth a traceback.
+    """
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 @dataclass
 class _Candidate:
     """One evictable file: where it is, what it costs, when it was last written."""
@@ -1013,6 +1071,28 @@ def sweep_session_logs(
     *floor_gb* is the clamp :data:`MIN_MAX_TOTAL_GB` describes, exposed so a
     test can exceed a ceiling without writing half a gigabyte. Production
     callers take the default.
+
+    **There is no containment rule on the root, and that is a decision rather
+    than an omission.** Every other delete path in this codebase carries one —
+    ``sandbox_cache_sweeper`` as an equality against a derived layout,
+    ``worktree_reaper`` as containment under ``developer.repos_dir``,
+    ``skill_host_paths`` as an allowlist of roots — and each exists because a
+    *model-supplied or model-plantable* name is being resolved against a trusted
+    base. There is no such name here: the root is the whole input, it comes from
+    ``[brain.native.session_log] dir`` in the operator's config file, the tree is
+    bound into no sandbox at any path, and a directory inside it can only have
+    been created by the writer. So this is trusted the way
+    ``security.sandbox_cache_dir`` is trusted, and ``config.example.toml`` says
+    so beside the setting rather than leaving an operator to find out here.
+
+    There is also no ancestor to bound it against that would not contradict the
+    specified behaviour. ``db_path.parent`` is the only candidate, and requiring
+    it would refuse both a perfectly reasonable ``dir = "/var/log/istota"`` and
+    the relative value :func:`resolve_session_log_dir` is required to honour as
+    given. What bounds a mis-set root instead is the shape of the walk, and it is
+    narrow on purpose: only ``*.jsonl``, only one level below the root, never
+    through a symlinked entry, and ``rmdir`` only on a directory this sweep found
+    empty and older than the window.
     """
     root = Path(root)
     deleted_age = deleted_size = dirs_removed = 0

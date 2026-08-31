@@ -1239,6 +1239,15 @@ class SessionLogConfig:
     own (``/``, ``.``, ``..``) is refused back to the default, because the
     resolved directory is what the retention sweep deletes under.
 
+    **Beyond that refusal the value is trusted**, the way
+    ``security.sandbox_cache_dir`` is: the sweep carries no containment rule
+    bounding an operator-set root against an ancestor, so it treats every
+    subdirectory of whatever is written here as a user's and unlinks the
+    ``*.jsonl`` under it. That is settled rather than pending — the reasoning is
+    in :func:`istota.session.session_log.sweep_session_logs`, and
+    ``config.example.toml`` states it beside the setting so an operator meets it
+    before they set one.
+
     The numbers below are restated from ``session/session_log.py``'s
     ``DEFAULT_*`` constants rather than imported, so ``config.py`` stays below
     the session layer in the import graph — it is loaded by the daemon, the web

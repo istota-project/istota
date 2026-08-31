@@ -207,6 +207,17 @@ features = []
 #                                 #   `istota doctor`. "/" and other values naming no
 #                                 #   directory of their own are refused (the sweep deletes
 #                                 #   under whatever this resolves to).
+#                                 #   OTHERWISE THIS VALUE IS TRUSTED, the way
+#                                 #   [security] sandbox_cache_dir is: there is no
+#                                 #   containment rule bounding it against an ancestor, so
+#                                 #   the retention sweep below treats every subdirectory of
+#                                 #   whatever you write here as a user's and unlinks the
+#                                 #   *.jsonl files under it. Point it at a directory istota
+#                                 #   owns. Nothing the model writes can reach this setting;
+#                                 #   what bounds the damage of a mis-set one is that the
+#                                 #   sweep only ever touches *.jsonl, one level down, never
+#                                 #   through a symlink, and removes only directories it
+#                                 #   emptied.
 # retention_days = 14             # age rule, for privacy. Deliberately longer than
 #                                 #   [scheduler] task_retention_days — the log's value is
 #                                 #   that it outlives the task row. 0 = keep for ever by

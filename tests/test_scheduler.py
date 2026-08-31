@@ -54,6 +54,7 @@ from istota.config import (
     LocationReceiverConfig,
 )
 from istota import db
+from istota.session.session_log import SweepResult
 from istota.transport.email.outbound import (
     _parse_email_output,
     _load_deferred_email_output,
@@ -8597,3 +8598,241 @@ class TestMainLoopReadTimeout:
         with patch("istota.scheduler.db.get_db", side_effect=spy):
             _count_pending(config, "alice", "foreground")
         assert seen.get("busy_timeout_ms") == 2000
+
+
+# ---------------------------------------------------------------------------
+# TestSessionLogSweepWiring
+# ---------------------------------------------------------------------------
+
+
+class TestSessionLogSweepWiring:
+    """Step 7b of `run_cleanup_checks`: the only caller of the session-log sweep.
+
+    The feature ships `enabled = true` and the writer appends for every native
+    task attempt, so until this step exists nothing on the deployment deletes a
+    session log — an observability artifact with unbounded growth on the same
+    filesystem as the framework database. Every assertion here is about the
+    *gate* and the *arguments*; the delete rules themselves are held by
+    `tests/native/test_session_log.py`, which is where they live.
+    """
+
+    def _config(self, tmp_path, **session_log_kwargs):
+        from istota.config import BrainConfig, NativeBrainConfig, SessionLogConfig
+
+        framework_db = tmp_path / "data" / "istota.db"
+        framework_db.parent.mkdir(parents=True, exist_ok=True)
+        db.init_db(framework_db)
+        return Config(
+            db_path=framework_db,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(
+                # Every other cleanup step off, so a call this class does not
+                # expect cannot come from one of them.
+                temp_file_retention_days=0,
+                email_retention_days=0,
+                location_ping_retention_days=0,
+            ),
+            temp_dir=tmp_path / "temp",
+            brain=BrainConfig(
+                kind="native",
+                native=NativeBrainConfig(
+                    session_log=SessionLogConfig(**session_log_kwargs),
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _age(path: Path, days: float) -> None:
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def _write_log(self, root: Path, user: str, name: str, *, age_days: float) -> Path:
+        directory = root / user
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_text('{"type":"session"}\n')
+        self._age(path, age_days)
+        return path
+
+    # -- the gate ---------------------------------------------------------
+
+    def test_the_sweep_runs_when_the_feature_is_enabled(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        assert sweep.call_count == 1
+
+    def test_the_sweep_does_not_run_when_the_feature_is_off(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path, enabled=False)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        assert sweep.call_count == 0
+
+    def test_retention_days_zero_still_sweeps_for_the_ceiling(self, tmp_path):
+        # The `or` gate, from the age side. An operator who keeps everything
+        # indefinitely by age still wants the disk bound in force; wiring the
+        # gate as `and` silently disables the ceiling, which is the exact
+        # failure the ceiling exists to prevent.
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path, retention_days=0, max_total_gb=2.0)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        assert sweep.call_count == 1
+
+    def test_a_zero_ceiling_still_sweeps_for_age(self, tmp_path):
+        # The `or` gate, from the other side.
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path, retention_days=14, max_total_gb=0)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        assert sweep.call_count == 1
+
+    def test_both_rules_disabled_sweeps_nothing(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path, retention_days=0, max_total_gb=0)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        assert sweep.call_count == 0
+
+    # -- the arguments ----------------------------------------------------
+
+    def test_the_sweep_is_handed_the_resolved_directory_and_the_policy(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+        from istota.session.session_log import resolve_session_log_dir
+
+        config = self._config(tmp_path, retention_days=9, max_total_gb=3.5)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        args, kwargs = sweep.call_args
+        assert args[0] == resolve_session_log_dir(config.db_path, "")
+        assert kwargs["retention_days"] == 9
+        assert kwargs["max_total_gb"] == 3.5
+        assert isinstance(kwargs["now"], float)
+
+    def test_an_operator_set_directory_is_what_gets_swept(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        elsewhere = tmp_path / "elsewhere"
+        config = self._config(tmp_path, dir=str(elsewhere))
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult()
+            run_cleanup_checks(config)
+
+        assert sweep.call_args[0][0] == elsewhere
+
+    # -- the deletion actually happens ------------------------------------
+
+    def test_a_tick_deletes_an_aged_log_off_the_disk(self, tmp_path):
+        # Not a mock: the one assertion that the wiring reaches a real unlink.
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path, retention_days=14)
+        root = tmp_path / "data" / "logs"
+        aged = self._write_log(root, "alice", "old.jsonl", age_days=30)
+        fresh = self._write_log(root, "alice", "new.jsonl", age_days=1)
+
+        run_cleanup_checks(config)
+
+        assert not aged.exists()
+        assert fresh.exists()
+
+    def test_a_tick_deletes_nothing_when_the_feature_is_off(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path, enabled=False, retention_days=14)
+        root = tmp_path / "data" / "logs"
+        aged = self._write_log(root, "alice", "old.jsonl", age_days=900)
+
+        run_cleanup_checks(config)
+
+        assert aged.exists()
+
+    # -- failure is absorbed ----------------------------------------------
+
+    def test_a_raising_sweep_does_not_abort_the_tick(self, tmp_path, caplog):
+        import logging
+
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path)
+        with patch("istota.scheduler.sweep_session_logs", side_effect=OSError("boom")):
+            with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
+                run_cleanup_checks(config)  # must not raise
+
+        assert "session log" in caplog.text.lower()
+
+    # -- what doctor reads back -------------------------------------------
+
+    def test_a_sweep_that_evicted_by_size_is_recorded_for_doctor(self, tmp_path):
+        # `deleted_size > 0` means `retention_days` is not the retention in
+        # force. doctor cannot see the sweep, so the tick has to write it down.
+        from istota.scheduler import run_cleanup_checks
+        from istota.session.session_log import (
+            SWEEP_STATE_KEY,
+            SWEEP_STATE_NAMESPACE,
+            decode_sweep_state,
+        )
+
+        config = self._config(tmp_path)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult(deleted_age=2, deleted_size=3, bytes_after=99)
+            run_cleanup_checks(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = db.shared_kv_get(conn, SWEEP_STATE_NAMESPACE, SWEEP_STATE_KEY)
+        assert row is not None
+        state = decode_sweep_state(row["value"])
+        assert state["deleted_size"] == 3
+        assert state["deleted_age"] == 2
+        assert state["bytes_after"] == 99
+
+    def test_the_recorded_state_is_replaced_by_the_next_tick(self, tmp_path):
+        # A ceiling that stopped binding must stop warning, so the row is the
+        # last sweep rather than the worst one.
+        from istota.scheduler import run_cleanup_checks
+        from istota.session.session_log import (
+            SWEEP_STATE_KEY,
+            SWEEP_STATE_NAMESPACE,
+            decode_sweep_state,
+        )
+
+        config = self._config(tmp_path)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult(deleted_size=5)
+            run_cleanup_checks(config)
+            sweep.return_value = SweepResult(deleted_size=0)
+            run_cleanup_checks(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = db.shared_kv_get(conn, SWEEP_STATE_NAMESPACE, SWEEP_STATE_KEY)
+        assert decode_sweep_state(row["value"])["deleted_size"] == 0
+
+    def test_an_unwritable_state_row_does_not_fail_the_tick(self, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(tmp_path)
+        with patch("istota.scheduler.sweep_session_logs") as sweep:
+            sweep.return_value = SweepResult(deleted_size=1)
+            with patch("istota.scheduler.db.shared_kv_set", side_effect=OSError("nope")):
+                run_cleanup_checks(config)  # must not raise
