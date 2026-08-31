@@ -1232,8 +1232,12 @@ class SessionLogConfig:
     resolves to ``{db_path.parent}/logs`` via
     :func:`istota.session.session_log.resolve_session_log_dir`, which is local
     disk on every shipped shape and behind the sandbox's database mask on two
-    of the three. A value set here is taken literally, including a relative
-    one; nothing expands ``~``, matching every other path in this file.
+    of the three. A value set here is taken literally; nothing expands ``~``,
+    matching every other path in this file. A *relative* value is honoured and
+    then followed against each process's own working directory, so an absolute
+    path is what an operator should write; a value naming no directory of its
+    own (``/``, ``.``, ``..``) is refused back to the default, because the
+    resolved directory is what the retention sweep deletes under.
 
     The numbers below are restated from ``session/session_log.py``'s
     ``DEFAULT_*`` constants rather than imported, so ``config.py`` stays below
@@ -1251,9 +1255,12 @@ class SessionLogConfig:
     # Size ceiling, for the disk, across *every* user. 0 drops the ceiling; the
     # age rule still runs. Clamped to a 0.5 GB floor by the sweep.
     max_total_gb: float = 2.0
-    # Per text / thinking block, head-and-tail truncated over the cap.
+    # Per text / thinking block, head-and-tail truncated over the cap. 0 here
+    # means NO cap rather than "off" as it does on the two limits above: an
+    # uncapped block is one raw tool result at whatever size it came back.
     max_content_chars: int = 32768
-    # Per tool-call arguments object, replaced by an honest marker over the cap.
+    # Per tool-call arguments object, replaced by an honest marker over the
+    # cap. 0 = no cap, as above.
     max_args_chars: int = 8192
     # Thinking blocks in the written log. Independent of `tasks transcript`,
     # where thinking stays off by default behind --thinking.

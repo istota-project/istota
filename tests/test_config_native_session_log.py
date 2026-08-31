@@ -236,15 +236,56 @@ class TestOneSourceOfTruthForTheDefaults:
     """``session_log.py`` imports no config and carries its own copy of these
     numbers. This is what stops the two drifting."""
 
-    def test_the_policy_defaults_match(self):
-        slog = SessionLogConfig()
-        assert slog.max_content_chars == session_log.DEFAULT_MAX_CONTENT_CHARS
-        assert slog.max_args_chars == session_log.DEFAULT_MAX_ARGS_CHARS
+    def test_every_shared_default_matches(self):
+        """Derived, not a hand-written list of four.
 
-    def test_the_sweep_defaults_match(self):
+        The header above argues that restating field names is the pattern that
+        carried the defect, and a hand-written parity list has the same shape:
+        a sixth shared constant added later would be guarded by nothing. So
+        pair the two namespaces mechanically and require the pairing to be
+        non-empty, which is what catches the module losing a constant as well
+        as the two values drifting.
+        """
         slog = SessionLogConfig()
-        assert slog.retention_days == session_log.DEFAULT_RETENTION_DAYS
-        assert slog.max_total_gb == session_log.DEFAULT_MAX_TOTAL_GB
+        pairs = {
+            f.name: f"DEFAULT_{f.name.upper()}"
+            for f in dataclasses.fields(SessionLogConfig)
+            if hasattr(session_log, f"DEFAULT_{f.name.upper()}")
+        }
+        assert pairs, "no field pairs with a DEFAULT_* constant; the pairing has rotted"
+        mismatched = {
+            name: (getattr(slog, name), getattr(session_log, const))
+            for name, const in pairs.items()
+            if getattr(slog, name) != getattr(session_log, const)
+        }
+        assert not mismatched, f"config and session_log disagree: {mismatched}"
+
+    def test_every_default_constant_has_a_field(self):
+        """The other direction: a ``DEFAULT_*`` the config never mirrors.
+
+        ``DEFAULT_RETENTION_DAYS`` and ``DEFAULT_MAX_TOTAL_GB`` are read by
+        nothing in ``src/`` — ``sweep_session_logs`` takes both as required
+        keyword arguments — so their only job is to be the module's written-down
+        shipped policy. That is worth keeping and worth pinning; it is not worth
+        keeping silently.
+        """
+        constants = {
+            n for n in dir(session_log)
+            if n.startswith("DEFAULT_") and isinstance(getattr(session_log, n), (int, float))
+        }
+        fields = {f"DEFAULT_{f.name.upper()}" for f in dataclasses.fields(SessionLogConfig)}
+        assert constants - fields == set(), (
+            f"{sorted(constants - fields)} is a shipped default with no config field "
+            "mirroring it; either give it one or drop the constant."
+        )
+
+    def test_the_documented_ceiling_floor_is_the_real_one(self):
+        """``config.example.toml`` and the dataclass docstring both write the
+        0.5 floor as a literal. Nothing else held them to the constant."""
+        assert session_log.MIN_MAX_TOTAL_GB == 0.5
+        text = EXAMPLE_CONFIG.read_text()
+        block = text.split("[brain.native.session_log]", 1)[1]
+        assert f"{session_log.MIN_MAX_TOTAL_GB} floor" in block
 
     def test_the_shipped_policy_is_reachable_from_the_config(self):
         """A ``SessionLogPolicy`` built from an untouched config is the
@@ -282,8 +323,27 @@ class TestResolveSessionLogDir:
 
     def test_the_docker_shape_resolves_onto_the_data_volume(self):
         """The decision recorded in ``config.example.toml``: Docker gets no
-        knobs and runs this."""
-        assert session_log.resolve_session_log_dir(Path("/data/istota.db"), "") == Path("/data/logs")
+        knobs and runs whatever this resolves to, so the comment has to name
+        the real directory.
+
+        The ``db_path`` is read out of ``render-config.sh`` rather than written
+        here. An earlier version of this test asserted ``/data/istota.db`` ->
+        ``/data/logs``, a shape the deployment never produces: the generator
+        writes ``/data/db/istota.db``, so the real answer is ``/data/db/logs``.
+        It passed and confirmed a fabrication, and the documentation it was
+        standing behind was wrong in a way that matters — ``/data/logs`` is a
+        sibling of ``db_path.parent`` and would sit outside the mask that
+        ``/data/db/logs`` is inside.
+        """
+        render = (REPO / "docker" / "istota" / "render-config.sh").read_text()
+        match = re.search(r'^db_path\s*=\s*"([^"]+)"', render, re.M)
+        assert match, "render-config.sh no longer writes a literal db_path; re-read it"
+        db_path = Path(match.group(1))
+        resolved = session_log.resolve_session_log_dir(db_path, "")
+        assert resolved == db_path.parent / "logs"
+        # And the example config names that directory rather than another one.
+        block = EXAMPLE_CONFIG.read_text().split("[brain.native.session_log]", 1)[0]
+        assert str(resolved) in block
 
     def test_an_absolute_directory_is_used_as_given(self):
         resolved = session_log.resolve_session_log_dir(
@@ -293,8 +353,17 @@ class TestResolveSessionLogDir:
 
     def test_a_relative_directory_resolves_against_nothing(self):
         """Used as given, not joined to ``db_path.parent`` and not made
-        absolute. Resolving it here would give the daemon and a CLI run from
-        another directory two different answers for one config file."""
+        absolute — the behaviour the spec's test strategy names.
+
+        Note which way the cost runs, because the first draft of this comment
+        had it backwards: *not* resolving is what lets the daemon, the sweep
+        and a shell command disagree, since each then follows its own working
+        directory. Resolving once would give one answer. It is not done here
+        because the specified behaviour is "used as given" and because this is
+        a pure function with no filesystem access; the consequence is that an
+        operator should write an absolute path, which the example config now
+        says.
+        """
         resolved = session_log.resolve_session_log_dir(
             Path("/srv/app/istota/data/istota.db"), "transcripts"
         )
@@ -326,12 +395,85 @@ class TestResolveSessionLogDir:
         assert session_log.resolve_session_log_dir(None, "") == Path("logs")
         assert session_log.resolve_session_log_dir("", "") == Path("logs")
 
+    @pytest.mark.parametrize("db_path", [b"/data/istota.db", 5, ["/data"], object()])
+    def test_a_db_path_of_the_wrong_type_takes_the_default(self, db_path):
+        """"Never raises" has to mean outside the annotated types too.
+
+        ``Path(b"/data/istota.db")`` raises ``TypeError``, and the function was
+        asymmetric about it: a bad ``configured`` was coerced and a bad
+        ``db_path`` was not. Nothing ``load_config`` produces reaches here —
+        ``coerce_path`` accepts only ``Path``/``str`` — but the three callers
+        are the task path, a scheduler tick and ``doctor``, and none of them
+        has anywhere to put an exception.
+        """
+        assert session_log.resolve_session_log_dir(db_path, "") == Path("logs")
+
+    @pytest.mark.parametrize("configured", [5, True, ["/a"], {"a": 1}, object()])
+    def test_a_configured_value_of_the_wrong_type_takes_the_default(self, configured):
+        """It used to become a directory named after its ``repr``.
+
+        Measured before the fix: ``5`` yielded ``Path('5')`` and ``['/a']``
+        yielded ``Path("['/a']")`` — a relative directory in the daemon's cwd,
+        silently. ``is_one_component`` in this same module opens with an
+        ``isinstance`` check for exactly this reason.
+        """
+        assert session_log.resolve_session_log_dir(
+            Path("/data/istota.db"), configured
+        ) == Path("/data/logs")
+
+    @pytest.mark.parametrize("configured", ["/", "//", ".", "..", "../..", "a/..", "  /  "])
+    def test_a_value_naming_no_directory_is_refused(self, configured, caplog):
+        """The blast-radius guard, and the reason it is not merely tidiness.
+
+        The resolved directory is handed to ``sweep_session_logs``, which takes
+        every subdirectory of it as a user and unlinks ``*.jsonl`` under each.
+        ``dir = "/"`` is therefore a whole-filesystem delete of every ``.jsonl``
+        older than ``retention_days``, run as the daemon user from the
+        scheduler. Refusing a value that names no directory of its own costs
+        nothing and contradicts no specified behaviour — a relative path with a
+        name is still honoured, which the test above holds.
+
+        This is NOT general containment: ``/var/log`` still resolves as
+        written. Bounding an operator-set root against an ancestor belongs with
+        the sweep, where every other delete path in this repo puts it.
+        """
+        with caplog.at_level(logging.WARNING, logger="istota.session.session_log"):
+            resolved = session_log.resolve_session_log_dir(Path("/data/istota.db"), configured)
+        assert resolved == Path("/data/logs")
+        assert any("names no directory" in r.getMessage() for r in caplog.records)
+
+    def test_a_null_byte_is_refused(self, caplog):
+        """``Path`` does not validate one and ``.strip()`` does not remove it.
+
+        Left in, it survives to ``makedirs`` (caught, since the writer wraps
+        everything) and to ``Path.iterdir`` in the sweep, which raises
+        ``ValueError`` where the guard there catches ``OSError``.
+        """
+        with caplog.at_level(logging.WARNING, logger="istota.session.session_log"):
+            resolved = session_log.resolve_session_log_dir(
+                Path("/data/istota.db"), "/var/lo\x00gs"
+            )
+        assert resolved == Path("/data/logs")
+        assert any("null byte" in r.getMessage() for r in caplog.records)
+
+    def test_a_named_directory_is_still_honoured_however_broad(self):
+        """The limit of the guard above, stated so nobody reads it as
+        containment. Closing this is the retention sweep's job."""
+        assert session_log.resolve_session_log_dir(
+            Path("/data/istota.db"), "/var/log"
+        ) == Path("/var/log")
+
     def test_a_string_db_path_is_accepted(self):
         assert session_log.resolve_session_log_dir(
             "/srv/app/istota/data/istota.db", ""
         ) == Path("/srv/app/istota/data/logs")
 
-    def test_it_is_never_under_the_sandbox_writable_temp_dir(self):
+    @pytest.mark.parametrize("shape,db_path,temp_dir", [
+        ("ansible", "/srv/app/istota/data/istota.db", "/tmp/istota"),
+        ("docker", "/data/db/istota.db", "/data/tmp"),
+        ("standalone", "/home/alice/.istota/istota.db", "/home/alice/.istota/tmp"),
+    ])
+    def test_it_is_never_under_the_sandbox_writable_temp_dir(self, shape, db_path, temp_dir):
         """The one placement that would be wrong on every shape.
 
         ``temp_dir`` is bound read-write into every sandbox because it doubles
@@ -339,13 +481,23 @@ class TestResolveSessionLogDir:
         transcript of every previous task for that user — assembled prompt,
         memory and channel context included — and let it rewrite the record of
         what it did.
+
+        Parametrized over the three shipped shapes with absolute paths, because
+        the first version of this used a default ``Config()``, whose
+        ``db_path`` is the *relative* ``data/istota.db``. ``.resolve()`` then
+        made the answer "pytest's working directory plus data/logs", so the
+        assertion was really "the repo checkout is not under /tmp/istota" —
+        true by accident of where the suite runs, exercising no deployment, and
+        red for nothing if the suite ever ran from under ``/tmp/istota``.
+
+        The standalone row is the one that matters: there ``db_path.parent`` is
+        the workspace and ``temp_dir`` is a child of it, which is the shape
+        where the sandbox mask is refused. The logs land as a *sibling* of the
+        temp dir, not inside it.
         """
-        config = Config()
-        resolved = session_log.resolve_session_log_dir(
-            config.db_path, config.brain.native.session_log.dir
-        )
-        temp_dir = Path(config.temp_dir).resolve()
-        assert not resolved.resolve().is_relative_to(temp_dir)
+        resolved = session_log.resolve_session_log_dir(Path(db_path), "")
+        assert resolved.is_absolute()
+        assert not resolved.is_relative_to(Path(temp_dir)), shape
 
 
 class TestTheExampleConfigDocumentsIt:

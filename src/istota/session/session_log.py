@@ -278,21 +278,63 @@ def resolve_session_log_dir(db_path: Path | str | None, configured: str = "") ->
     reports rather than papers over. The boundary in both cases is that nothing
     binds the path.
 
-    A configured value is used **as given**, including a relative one. Nothing
-    expands ``~`` or resolves against a base, matching every other path in
-    ``config.py``; only surrounding whitespace is dropped, since a rendered
-    config is where a stray space comes from and a directory named with one is
-    not. An operator who points this outside ``db_path.parent`` gets a ``WARN``
-    from ``doctor`` naming the exposure, not a refusal.
+    A configured value is used **as given**. Nothing expands ``~`` or resolves
+    against a base, matching every other path in ``config.py``; only
+    surrounding whitespace is dropped, since a rendered config is where a stray
+    space comes from and a directory named with one is not. **A relative value
+    therefore follows each process's own working directory**, so the daemon,
+    the scheduler's sweep and an ``istota`` command run from a shell can
+    address three different places from one config file. That is a reason to
+    write an absolute path rather than a property of this function, and it is
+    stated here because the opposite claim — that resolving would be the thing
+    to cause disagreement — is the wrong way round and was in an earlier draft
+    of this docstring. An operator who points the value outside
+    ``db_path.parent`` gets a ``WARN`` from ``doctor`` naming the exposure, not
+    a refusal.
 
-    Never raises. A missing ``db_path`` yields the relative ``logs``, which no
-    shipped shape reaches — ``Config.db_path`` carries a default — and which is
-    still somewhere the writer can honestly fail on rather than an exception on
-    the task path.
+    **A value that names no directory of its own is refused** and falls back to
+    the default: ``/``, ``//``, ``.``, ``..``, ``../..`` and ``a/..``. The point
+    is not tidiness. The resolved directory is handed to
+    :func:`sweep_session_logs`, which treats every subdirectory of it as a user
+    and unlinks ``*.jsonl`` under each, so ``dir = "/"`` is a whole-filesystem
+    delete and ``dir = ".."`` is the parent of whatever directory the daemon
+    happens to be in. A null byte is refused for the same reason: it survives
+    ``Path`` untouched and surfaces as a ``ValueError`` from somewhere much
+    further down, where an ``except OSError`` will not catch it.
+
+    **This is not general containment and must not be read as it.** ``dir =
+    "/var/log"`` still resolves to ``/var/log`` and the sweep would still walk
+    it. Bounding an operator-set root against an ancestor is a rule the
+    delete path has to carry — the shape ``sandbox_cache_sweeper`` states as an
+    equality and ``worktree_reaper`` as containment — and it belongs with the
+    sweep rather than here, where refusing more would contradict the specified
+    behaviour that a relative directory is honoured as written.
+
+    Never raises, for the annotated types and outside them: a ``db_path`` or a
+    ``configured`` of some other type takes the default rather than a
+    ``TypeError``, because the callers are the task path, a scheduler tick and
+    ``doctor``, and none of the three has anywhere to put an exception. A
+    missing ``db_path`` yields the relative ``logs``, which no shipped shape
+    reaches — ``Config.db_path`` carries a default.
     """
-    text = str(configured or "").strip()
-    if text:
-        return Path(text)
+    text = configured.strip() if isinstance(configured, str) else ""
+    if text and "\x00" not in text:
+        candidate = Path(text)
+        # `.name` is empty for `/`, `//` and `.`. It is **not** empty for `..`
+        # — pathlib keeps that as an ordinary name — so the second test is
+        # needed and is not belt-and-braces: without it `dir = ".."` reaches
+        # the sweep as the parent of the daemon's working directory.
+        if candidate.name and candidate.name != "..":
+            return candidate
+        logger.warning(
+            "[session_log] dir=%r names no directory of its own; using the "
+            "default beside db_path instead", configured,
+        )
+    elif text:
+        logger.warning("[session_log] dir contains a null byte; using the default instead")
+
+    if not isinstance(db_path, (str, Path)):
+        db_path = None
     return Path(db_path or "istota.db").parent / LOG_DIR_NAME
 
 

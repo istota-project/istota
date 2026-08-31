@@ -187,18 +187,26 @@ features = []
 # DOCKER: these knobs are deliberately not operator-settable on the Docker
 # shape. There is no ISTOTA_BRAIN_NATIVE_SESSION_LOG_* variable in
 # docker/istota/render-config.sh or docker/docker-compose.yml — a Docker
-# deployment runs the shipped defaults, with the directory resolving to
-# /data/logs on the istota_data volume. Adding one means adding it to *both*
-# files; a variable the generator reads and compose never passes is silently
-# ignored, which is the documented defect class (ISTOTA_EMAIL_AUTHSERV_ID).
+# deployment runs the shipped defaults. render-config.sh writes
+# db_path = "/data/db/istota.db", so the directory resolves to /data/db/logs on
+# the istota_data volume, beside the framework database and behind the same
+# sandbox mask. Adding a knob means adding it to *both* files; a variable the
+# generator reads and compose never passes is silently ignored, which is the
+# documented defect class (ISTOTA_EMAIL_AUTHSERV_ID).
 # [brain.native.session_log]
 # enabled = true                  # false = no writer, no file, no directory, no cost
 # dir = ""                        # "" resolves to {db_path.parent}/logs — local disk,
 #                                 #   beside istota.db / modules/ / backups/, and behind
 #                                 #   the sandbox's database mask where that mask applies.
 #                                 #   A value set here is used AS GIVEN (no ~ expansion,
-#                                 #   no resolving against a base); pointing it outside
-#                                 #   db_path.parent gets a WARN from `istota doctor`.
+#                                 #   no resolving against a base), so WRITE AN ABSOLUTE
+#                                 #   PATH: a relative one follows each process's own
+#                                 #   working directory, and the daemon, the sweep and an
+#                                 #   `istota` command run from a shell need not share it.
+#                                 #   Pointing it outside db_path.parent gets a WARN from
+#                                 #   `istota doctor`. "/" and other values naming no
+#                                 #   directory of their own are refused (the sweep deletes
+#                                 #   under whatever this resolves to).
 # retention_days = 14             # age rule, for privacy. Deliberately longer than
 #                                 #   [scheduler] task_retention_days — the log's value is
 #                                 #   that it outlives the task row. 0 = keep for ever by
@@ -215,9 +223,13 @@ features = []
 #                                 #   still applies.
 # max_content_chars = 32768       # per text/thinking block; over the cap the block keeps its
 #                                 #   head and its tail (a build log's tail is where the
-#                                 #   error is) and records the real length
+#                                 #   error is) and records the real length. NOTE 0 here
+#                                 #   means NO CAP, not "off" as it does on the two limits
+#                                 #   above — an uncapped block is one raw tool result of
+#                                 #   whatever size, which is what the caps exist to bound.
 # max_args_chars = 8192           # per tool-call arguments object; over the cap it becomes an
-#                                 #   honest marker rather than a truncated JSON fragment
+#                                 #   honest marker rather than a truncated JSON fragment.
+#                                 #   0 = no cap, as above.
 # include_thinking = true         # reasoning traces in the written log. The most useful
 #                                 #   record for debugging a wrong answer, and the bulkiest.
 #                                 #   Independent of `istota-skill tasks transcript`, where
