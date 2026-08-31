@@ -963,7 +963,9 @@ istota_web_port: 8766
 # uvicorn's default "wait forever for open connections" turned every restart
 # with a browser tab open into a 90s SIGKILL. The graceful window is how long
 # uvicorn drains before cancelling stragglers; the stop timeout is the systemd
-# cap behind it (a SIGKILL at that point means wedged, not draining).
+# cap behind it (a SIGKILL at that point means wedged, not draining). Both are
+# backstops: the streams observe SIGTERM (istota.web_shutdown) and end
+# themselves, so a restart normally reaches neither deadline.
 istota_web_graceful_shutdown_seconds: 5
 istota_web_stop_timeout_seconds: 20
 

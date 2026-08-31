@@ -263,7 +263,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Ctrl-C now stops `istota serve`. With a browser tab open on the chat, the web server waited for that tab's live event stream to end — and it never does, because it runs until the browser goes away — so the first Ctrl-C hung indefinitely and the second, which the message on screen says will force the quit, did not either. Only `kill -9` ended it. The wait is now bounded, and a second Ctrl-C drops the open connections and exits immediately.
+- Ctrl-C now stops `istota serve`, promptly and without a stack trace. With a browser tab open on the chat, the web server waited for that tab's live event stream to end — and it never does, because it runs until the browser goes away — so the first Ctrl-C hung indefinitely and the second, which the message on screen says will force the quit, did not either; only `kill -9` ended it. The live streams now close themselves when the process is told to stop, leaving nothing to wait for, with the bounded wait and a force-quitting second Ctrl-C behind them as backstops. The deployed web service gets the same: a restart no longer sits out its whole shutdown window and logs a cancelled-task traceback.
 
 - The Briefings screen you see before your first briefing has run now reads at the same size as the rest of the app. Its heading and the line pointing you at settings were both set a step larger than everything around them, including a real briefing in the same place.
 

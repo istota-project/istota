@@ -22,6 +22,16 @@ sets ``force_exit``, which breaks uvicorn's wait loops, but the next line is
 every open connection — so the process hangs with force_exit set and only
 SIGKILL ends it. :func:`install_force_quit` closes that by aborting the open
 transports, which is what lets ``wait_closed()`` return.
+
+Both of those are backstops. The ordinary path is that the streams end
+themselves: :mod:`istota.web_shutdown` wraps the stop signals from the web app's
+lifespan and the SSE generators return when they see it, so the shutdown has
+nothing left to wait for and nothing left to cancel. Without it every Ctrl-C ran
+the graceful window out in full and then logged a ``CancelledError`` traceback
+under ``ERROR: Exception in ASGI application`` — uvicorn logs any exception out
+of an ASGI app that way, cancellation included. That notice is signal-driven, so
+the one shutdown here that starts without a signal — the supervisor tripping on
+a dead scheduler thread — raises it itself.
 """
 
 from __future__ import annotations
@@ -32,6 +42,7 @@ import os
 import threading
 from pathlib import Path
 
+from . import web_shutdown
 from .config import Config
 
 logger = logging.getLogger("istota.serve")
@@ -353,6 +364,11 @@ def run_serve(
                 logger.error(
                     "Scheduler thread exited unexpectedly — stopping web server.",
                 )
+                # The stream notice is signal-driven, and no signal is coming
+                # here — without this the SSE generators keep polling and this
+                # shutdown waits out the whole graceful window before uvicorn
+                # cancels them, which is the traceback the notice removes.
+                web_shutdown.begin_shutdown()
                 server.should_exit = True
                 return
 
