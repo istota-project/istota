@@ -198,13 +198,20 @@ Per-task BrainRequest fields the executor populates:
 - `result_file = {user_temp_dir}/task_{task_id}_result.txt`
 
 After `brain.execute()` returns, the executor:
-1. Calls `_compose_full_result(result_text, trace)` on success to reconcile
+1. On a **failure** carrying `BrainResult.partial_text` (ISSUE-372), sets
+   `task.partial_result` — the same post-run hand-off `model_used` uses, and for
+   the same reason: `result_text` is what the scheduler dispatches on (by exact
+   equality for a cancel), so the partial answer cannot travel in it, and
+   widening the four-tuple would touch every caller for a value only the
+   scheduler reads. Nothing is set on success — a successful run's answer *is*
+   `result`, and a second candidate for one column is a bug.
+2. Calls `_compose_full_result(result_text, trace)` on success to reconcile
    the final ResultEvent text against substantial intermediate text blocks
    (CM-aware + terse-result recovery — same logic both brains will need).
-2. On a dropped-pin fallback (see below), appends the visible model note
+3. On a dropped-pin fallback (see below), appends the visible model note
    **after** composition.
-3. Updates the user skills fingerprint when interactive task succeeded.
-4. Returns `(success, result, actions_taken_json, execution_trace_json)` —
+4. Updates the user skills fingerprint when interactive task succeeded.
+5. Returns `(success, result, actions_taken_json, execution_trace_json)` —
    shape unchanged from before the refactor.
 
 ## Brain fallback (availability failover)

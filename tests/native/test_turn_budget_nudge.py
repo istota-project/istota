@@ -13,6 +13,7 @@ from istota.brain.native import (
     NativeBrain,
     _pick_turn_budget_nudge,
     _turn_budget_nudge_message,
+    _turns_left_by_clock,
 )
 from istota.config import NativeBrainConfig
 from istota.llm.types import AssistantMessage, TextContent, ToolCallContent, Usage
@@ -194,3 +195,93 @@ class TestUpfrontSystemPrompt:
         )
         _brain(provider, max_turns=10).execute(_req("hi", tmp_path))
         assert "mid-stream" not in provider.calls[0]["system_prompt"]
+
+
+class TestClockAwareBudget:
+    """ISSUE-373: on a slow brain the wall clock, not the cap, ends the run.
+
+    The ladder counts turns, so with the shipped numbers it fires at turns 50,
+    85 and 95 of a 100-turn cap. Which of those a run reaches depends entirely
+    on how long a turn takes — at 60s/turn a 60-minute clock lands near turn 60
+    and only the halfway reminder ever fires. Converting the time budget into a
+    turn budget and running the ladder against whichever is scarcer is what
+    makes the notices reachable.
+    """
+
+    def test_no_samples_means_no_estimate(self):
+        assert _turns_left_by_clock(600.0, []) is None
+
+    def test_one_sample_is_not_a_pace(self):
+        # A single slow first turn (cold connection, large prompt) must not
+        # fire the urgent notices on turn 2 of a run with ten minutes left.
+        assert _turns_left_by_clock(600.0, [120.0]) is None
+
+    def test_estimate_is_the_rolling_median(self):
+        assert _turns_left_by_clock(100.0, [10.0, 10.0, 10.0]) == 10
+        assert _turns_left_by_clock(100.0, [20.0, 20.0, 20.0]) == 5
+
+    def test_one_slow_turn_does_not_collapse_the_budget(self):
+        # Turn latency is heavy-tailed: one `npm install` or one full test run
+        # is minutes where its neighbours are seconds. A mean lets that single
+        # sample set the budget — four 10s turns and one 400s build average to
+        # 88s, so a 22-minute remainder reads as 15 turns and spends the whole
+        # ladder on a spike, telling the model "~15 steps remain" about a run
+        # that then continues for 70 more. The thresholds are marked fired when
+        # crossed, so nothing fires when the real crossing arrives.
+        spiky = [10.0, 10.0, 400.0, 10.0, 10.0]
+        assert _turns_left_by_clock(1320.0, spiky) == 132
+
+    def test_a_genuinely_slow_window_still_collapses_it(self):
+        # Three of the last five turns slow is a pace, not an outlier.
+        assert _turns_left_by_clock(1320.0, [400.0, 10.0, 400.0, 10.0, 400.0]) == 3
+
+    def test_a_spike_does_not_spend_the_ladder(self):
+        # The same worked example through the ladder: the spike must leave both
+        # thresholds unfired so the genuine crossing at turn 85 still lands.
+        fired: set = set()
+        spike_budget = _turns_left_by_clock(1320.0, [10.0, 10.0, 400.0, 10.0, 10.0])
+        assert _pick_turn_budget_nudge(15, 100, 50, [15, 5], fired, spike_budget) is None
+        assert fired == set()
+
+    def test_no_deadline_means_no_estimate(self):
+        assert _turns_left_by_clock(None, [10.0, 10.0, 10.0]) is None
+
+    def test_expired_clock_estimates_zero(self):
+        assert _turns_left_by_clock(-5.0, [10.0, 10.0, 10.0]) == 0
+
+    def test_clock_budget_wins_when_scarcer(self):
+        # Turn 20 of a 100-turn cap: 80 turns remain on the cap, but only 4 on
+        # the clock. The urgent notice must fire now, not 60 turns from now.
+        fired: set = set()
+        picked = _pick_turn_budget_nudge(20, 100, 50, [15, 5], fired, 4)
+        assert picked == (4, "late")
+
+    def test_turn_budget_still_wins_when_it_is_scarcer(self):
+        # Plenty of clock, nearly out of turns: the original ladder, unchanged.
+        fired: set = set()
+        picked = _pick_turn_budget_nudge(97, 100, 50, [15, 5], fired, 500)
+        assert picked == (3, "late")
+
+    def test_early_reminder_is_measured_against_the_effective_budget(self):
+        # 30 turns in, 30 more on the clock: halfway through the run that will
+        # actually happen, even though it is under a third of the turn cap. The
+        # turn ladder alone would say nothing until turn 50.
+        fired: set = set()
+        assert _pick_turn_budget_nudge(30, 100, 50, [15, 5], fired) is None
+        picked = _pick_turn_budget_nudge(30, 100, 50, [15, 5], set(), 30)
+        assert picked == (30, "early")
+
+    def test_a_threshold_crossed_on_the_clock_does_not_refire_on_turns(self):
+        fired: set = set()
+        assert _pick_turn_budget_nudge(20, 100, 50, [15, 5], fired, 12) == (12, "late")
+        # Later, with the clock no longer the constraint, turn 88 crosses the
+        # same level-15 threshold. It has already been spent.
+        assert _pick_turn_budget_nudge(88, 100, 50, [15, 5], fired, 500) is None
+
+    def test_an_absent_estimate_leaves_the_ladder_exactly_as_it_was(self):
+        fired_a: set = set()
+        fired_b: set = set()
+        for turns in (40, 50, 86, 96):
+            assert _pick_turn_budget_nudge(
+                turns, 100, 50, [15, 5], fired_a
+            ) == _pick_turn_budget_nudge(turns, 100, 50, [15, 5], fired_b, None)

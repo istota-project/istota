@@ -486,6 +486,51 @@ class TestAPermanentFailureReachesTheUser:
         assert alerts, "a failed self-reply told the user nothing"
         assert str(task.id) in alerts[0].args[2]
 
+    def test_the_alert_carries_the_partial_work(self, db_path, config):
+        """ISSUE-372, on the surface that most needs it.
+
+        This branch's own comment says `tasks.result` is the only copy of the
+        answer left with an email-only plan and nothing puts it in front of the
+        user. A run cut short by a cancel or the clock now has prose worth
+        reading on the task, and this alert is the only thing that reaches its
+        author — so it goes here as well as into the Talk notice three lines
+        above, through the one composer both call.
+        """
+        from istota.scheduler import PARTIAL_WORK_MARKER
+
+        task = _self_reply(config, db_path)
+
+        def _stamp(t, *args, **kwargs):
+            t.partial_result = "The poller's cursor never advances."
+            return (False, "Task execution timed out after 60 minutes", None, None)
+
+        with db.get_db(db_path) as conn:
+            db.update_task_status(conn, task.id, "running")
+        with (
+            patch("istota.scheduler.execute_task", side_effect=_stamp),
+            patch("istota.scheduler.run_coro", return_value=None),
+            patch("istota.scheduler.post_result_to_email", return_value=True),
+            patch("istota.scheduler.send_notification") as notify,
+        ):
+            with db.get_db(db_path) as conn:
+                db.update_task_status(conn, task.id, "pending")
+                conn.execute(
+                    "UPDATE tasks SET attempt_count = max_attempts - 1 WHERE id = ?",
+                    (task.id,),
+                )
+            process_one_task(config)
+
+        alerts = [
+            c for c in notify.call_args_list
+            if c.kwargs.get("purpose") == "alert"
+        ]
+        assert alerts, "a failed self-reply told the user nothing"
+        body = alerts[0].args[2]
+        assert PARTIAL_WORK_MARKER in body
+        assert "The poller's cursor never advances." in body
+        # The failure still leads.
+        assert body.index(PARTIAL_WORK_MARKER) > 0
+
     def test_an_email_only_plan_that_is_not_withheld_stays_silent(
         self, db_path, config,
     ):

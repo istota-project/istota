@@ -74,6 +74,12 @@ class Task:
     # command paths.
     skill: str | None = None
     skill_args: str | None = None
+    # What the model had written when a run was cancelled or timed out
+    # (ISSUE-372). Set post-run by the executor, read by the scheduler in the
+    # same process, and never loaded from a row — it is a hand-off between two
+    # halves of one attempt, not task state. The durable copy is what the
+    # scheduler writes into the `result` column; there is no column here.
+    partial_result: str | None = None
 
 
 @dataclass
@@ -1632,11 +1638,28 @@ def update_task_status(
         # `completed_at` is set so `cleanup_old_tasks`' retention window can
         # reap cancelled rows (NULL `completed_at` stranded them forever) and
         # the web duration badge renders.
+        #
+        # `result` goes with them (ISSUE-372). The trace records the tool calls
+        # and their descriptions; the model's own prose was the one thing an
+        # interrupted run lost outright, and this argument was accepted and then
+        # dropped on the floor here. It carries the *partial* answer, never the
+        # error text — the error has its own column and the two must stay
+        # distinguishable to anything reading the row back.
+        #
+        # `COALESCE`, not a plain assignment, and that is the load-bearing half:
+        # this branch is also reached by a row that already **completed** and had
+        # its answer written. `process_one_task` re-marks a completed task
+        # `failed` when its email delivery fails, passing no `result` — so a
+        # plain write would blank the answer with the argument's `None` default,
+        # and with an email-only plan `tasks.result` is the only copy of it left
+        # (ISSUE-255). Three of the six failure-branch callers pass a value and
+        # three do not; the column is preserved for the ones that do not.
         conn.execute(
             "UPDATE tasks SET status = ?, completed_at = datetime('now'), "
-            "error = ?, actions_taken = ?, execution_trace = ?, worker_pid = NULL, "
+            "result = COALESCE(?, result), error = ?, actions_taken = ?, "
+            "execution_trace = ?, worker_pid = NULL, "
             "updated_at = datetime('now') WHERE id = ?",
-            (status, error, actions_taken, execution_trace, task_id),
+            (status, result, error, actions_taken, execution_trace, task_id),
         )
     else:
         conn.execute(

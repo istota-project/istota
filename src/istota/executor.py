@@ -6358,6 +6358,17 @@ def execute_task(
         actions = brain_result.actions_taken
         trace = brain_result.execution_trace
 
+        # What the model had written when a cancel or a timeout ended the run
+        # (ISSUE-372). It rides on the task rather than in the return tuple:
+        # `result_text` is what the scheduler dispatches on — by exact equality
+        # for a cancel — so the partial answer cannot travel in it, and widening
+        # the four-tuple would touch every caller for a value only the scheduler
+        # reads. Same hand-off `model_used` uses two blocks down. Only on a
+        # failure: a successful run's answer *is* `result`, and setting this too
+        # would give the scheduler two candidates for one column.
+        if not success and brain_result.partial_text:
+            task.partial_result = brain_result.partial_text
+
         # Record the model the brain actually used. Prefer the brain's reported
         # value (accurate even when the model was the brain/CLI default); fall
         # back to the resolved request model. Set it on the task object so the
@@ -6514,6 +6525,9 @@ def execute_task_interactive(
         if success:
             db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions, execution_trace=trace)
         else:
-            db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions, execution_trace=trace)
+            db.update_task_status(
+                conn, task_id, "failed", result=task.partial_result, error=result,
+                actions_taken=actions, execution_trace=trace,
+            )
 
         return success, result

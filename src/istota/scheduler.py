@@ -31,6 +31,31 @@ from . import host_pressure as host_pressure_mod
 from . import task_cgroup
 
 logger = logging.getLogger("istota.scheduler")
+# What a partial answer from an interrupted run is labelled with when it is
+# delivered beside a failure notice (ISSUE-372). Its job is to stop the prose
+# reading as a finished answer, which is the same job the native brain's
+# `_PARTIAL_ANSWER_MARKERS` do for the stops that deliver as a success.
+PARTIAL_WORK_MARKER = "**What I had before it stopped:**"
+
+
+def _with_partial_work(body: str, task: "db.Task") -> str:
+    """Append an interrupted run's partial answer to a failure notice.
+
+    One composer rather than a copy per surface: the Talk branch and the
+    email-only alert branch are three lines apart and answer the same question,
+    and the email-only one is the branch that most needs it — its own comment
+    says `tasks.result` is the only copy of the answer left there and nothing
+    puts it in front of the user. Below the error, never above it: the first
+    line still has to say the task failed.
+
+    Not length-capped. The Talk transport already splits a long body at 30,000
+    characters, which is what a long *successful* answer does; truncating here
+    would defeat the fix while the untruncated copy sat on a row the user cannot
+    read.
+    """
+    if not task.partial_result:
+        return body
+    return f"{body}\n\n{PARTIAL_WORK_MARKER}\n\n{task.partial_result}"
 # Dedicated logger so operators can isolate the periodic health line from the
 # noisy general scheduler logger (`journalctl … | grep scheduler_stats`).
 _SCHEDULER_STATS_LOGGER = logging.getLogger("istota.scheduler.stats")
@@ -2143,7 +2168,9 @@ def run_task_inline(
     with db.get_db(config.db_path) as conn:
         db.update_task_status(
             conn, task.id, status,
-            result=result if success else None,
+            # On a failure the answer column carries whatever the model had
+            # written before the stop, not the error (ISSUE-372).
+            result=result if success else task.partial_result,
             error=None if success else result,
             actions_taken=actions_taken, execution_trace=execution_trace,
         )
@@ -2912,7 +2939,17 @@ def process_one_task(
                     task_id, result[:200],
                 )
             if is_cancelled:
-                db.update_task_status(conn, task_id, "cancelled", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
+                # `result` here is the partial answer, not the error: the brain
+                # kept what the model had written when the cancel landed and the
+                # row is where it survives (ISSUE-372). Nothing is posted — the
+                # user stopped this on purpose and !stop already answered them —
+                # but a 29-minute investigation is no longer reduced to the
+                # three words in the `error` column.
+                db.update_task_status(
+                    conn, task_id, "cancelled",
+                    result=task.partial_result, error=result,
+                    actions_taken=actions_taken, execution_trace=execution_trace,
+                )
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
                 # No Talk notification needed — !stop already acknowledged
             elif is_policy:
@@ -2986,7 +3023,11 @@ def process_one_task(
                 # emitted from the terminal-events block below (outside this DB
                 # transaction, so the writer's own connection can't contend).
             else:
-                db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
+                db.update_task_status(
+                    conn, task_id, "failed",
+                    result=task.partial_result, error=result,
+                    actions_taken=actions_taken, execution_trace=execution_trace,
+                )
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
 
                 if task.source_type in ("briefing", "scheduled"):
@@ -2996,7 +3037,12 @@ def process_one_task(
                 elif plan_talk and talk_token:
                     # Use user-friendly error message, not raw error
                     friendly_error = _format_error_for_user(result)
-                    post_talk_message = f"🐙 {friendly_error}"
+                    # A run that died on the clock usually had something worth
+                    # reading (ISSUE-372) — deliver it rather than sending an
+                    # apology and silently dropping half an hour of work.
+                    post_talk_message = _with_partial_work(
+                        f"🐙 {friendly_error}", task,
+                    )
                     is_failure_notify = True
                 elif task.withheld_from_room or email_from_the_user:
                     # An email-only plan with no error channel at all (ISSUE-255,
@@ -3027,10 +3073,11 @@ def process_one_task(
                     # a stranger is waiting for that answer, not the user. See
                     # `tests/test_email_self_reply_residue.py::TestAPermanent
                     # FailureReachesTheUser`, which pins both directions.
-                    failure_alert = (
+                    failure_alert = _with_partial_work(
                         f"⚠️ **Your emailed request failed** (task #{task.id})\n\n"
                         f"{_format_error_for_user(result)}\n\n"
-                        "Nothing was sent in reply. Resend the mail to try again."
+                        "Nothing was sent in reply. Resend the mail to try again.",
+                        task,
                     )
                     failure_alert_title = f"Your emailed request failed — task #{task.id}"
                 # NOTE: We intentionally do NOT email errors to users.

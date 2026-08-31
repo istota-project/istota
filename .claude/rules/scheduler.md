@@ -188,7 +188,7 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
    - Deliver results
    - Reset scheduled job failures, and close any `cron_job` inbox row the disable had raised
 6. **Failure path**:
-   - Check cancellation (`Cancelled by user` → status `cancelled`, no retry)
+   - Check cancellation (`Cancelled by user` → status `cancelled`, no retry). The row's `result` column now carries `task.partial_result` — what the model had written when the cancel landed (ISSUE-372). Nothing is posted, as before: the user stopped this on purpose and `!stop` already answered them. `update_task_status` accepted a `result` on this branch and dropped it; it writes it now, beside the trace ISSUE-183 added
    - Check policy refusal (`_is_policy_refusal()`: 400 + safety/policy/content/refused/harm/blocked keyword) → mark failed, post alert via `_post_policy_refusal_alert()` (extracts `From:` header for email tasks), no retry
    - Check shutdown collateral (`_is_shutdown_collateral()`: `_shutdown_requested` **and** `is_signal_termination(result)`) → `db.release_task_for_restart` — back to `pending`, liveness cleared, **no attempt charged, no backoff**, deferred-op files purged. Not a task failure: under systemd's default `KillMode=control-group` a `systemctl restart` (the auto-update cron issues one per commit) SIGTERMs the whole cgroup, killing an in-flight task's `claude` child while the daemon shuts down gracefully — so the surviving worker recorded the corpse as a failure, permanently on a final attempt (ISSUE-191). The attempt is not charged because it was aborted by infrastructure, so a terminal attempt recovers too; `fail_ancient_pending_tasks` is the bound. The unit template now also sets `KillMode=mixed`, which converts the same event into the startup orphan-recovery path — this branch is the belt-and-braces (and the half that ships via auto-update, since unit files need an Ansible run). The terminal-events block mirrors the classification (`is_requeued`) and emits a "Scheduler restarting…" `progress_text` instead of a terminal frame.
    - Check permanent provider error (`is_api_error_banner` **and**
@@ -199,7 +199,7 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
      must not suppress a legitimate retry. The terminal-events block mirrors
      the classification (`is_permanent_api`) so no "retrying" notice is emitted
    - Retry with backoff if attempts remain (1, 4, 16 min) — skipped for OOM
-   - Mark failed permanently
+   - Mark failed permanently, `result` again carrying `task.partial_result`. Both user-facing failure notices append it through `_with_partial_work` — the Talk one and the email-only alert, which is the branch that most needs it since its own comment says `tasks.result` is the only surviving copy there. Below the error, never above it: the first line still has to say the task failed. Not length-capped, because the Talk transport already splits a long body at 30,000 characters and that is what a long *successful* answer does. Only on a *terminal* failure: a task going back through the retry ladder has not finished, so it has no answer to record
    - Track scheduled job failures, auto-disable after threshold. All three disable sites (this one, the policy-refusal branch, and `_record_publish_failure`) buffer a `cron_job` notification into `notification_results` and let the post-`with` `deliver_pending` send it — the disable used to write a `task_logs` warning and tell nobody. The resolver watches `consecutive_failures`, not `enabled`: `_sync_cron_files` runs every tick and CRON.md is authoritative for `enabled`, so a file-defined job is switched back on within a tick of being auto-disabled while the state columns survive
 7. Deliver results (Talk/email) outside DB context
 
@@ -521,6 +521,12 @@ create_task(conn, prompt, user_id, source_type="cli", conversation_token=None,
 claim_task(conn, worker_id, max_retry_age_minutes=60, user_id=None) -> Task | None
 get_task(conn, task_id) -> Task | None
 update_task_status(conn, task_id, status, result=None, error=None, actions_taken=None, execution_trace=None) -> None
+    # On `failed`/`cancelled` the answer column is written as `COALESCE(?, result)`
+    # (ISSUE-372): passing a value records the partial answer, passing nothing
+    # leaves the column alone. The COALESCE is load-bearing — this branch is also
+    # reached by a row that already *completed* and had its answer written, when
+    # `process_one_task` re-marks it `failed` on an email-delivery failure with no
+    # `result`; a plain assignment would blank the only surviving copy (ISSUE-255).
 set_task_pending_retry(conn, task_id, error, retry_delay_minutes) -> None
 release_task_for_restart(conn, task_id, error) -> None   # requeue, attempt_count untouched
 set_task_confirmation(conn, task_id, confirmation_prompt) -> None

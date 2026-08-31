@@ -166,6 +166,16 @@ features = []
 #                                            #   meta-instructions.
 # turn_budget_nudge_early_percent = 50       # first (~halfway) reminder fires at this % of the cap
 # turn_budget_nudge_remaining = [15, 5]      # escalating late fires at these absolute steps-remaining
+#                                            #   Both ladders also run against the wall clock: the
+#                                            #   loop estimates the turns the remaining time has
+#                                            #   room for and uses whichever budget is scarcer, so
+#                                            #   the notices stay reachable on a slow brain.
+# soft_deadline_percent = 90                 # stop the loop at this % of scheduler.task_timeout_
+#                                            #   minutes, on a stop that keeps the model's partial
+#                                            #   work. The hard clock discards it; max_turns
+#                                            #   delivers it, and on a slow brain the clock is what
+#                                            #   arrives first. The remaining slack still covers a
+#                                            #   turn that hangs. 0 or >= 100 disables.
 # prompt_caching = true                      # cache_control breakpoints. Omit to use the
 #                                            #   default: ON for api.anthropic.com,
 #                                            #   OFF for any other endpoint. Set explicitly

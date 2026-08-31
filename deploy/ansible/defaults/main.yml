@@ -128,6 +128,7 @@ istota_brain_native_bash_spill_full_output: true  # spill over-cap Bash output t
 istota_brain_native_turn_budget_nudge: true       # nudge the model to pace itself as it nears max_turns
 istota_brain_native_turn_budget_nudge_early_percent: 50   # first (~halfway) reminder fires at this % of the cap
 istota_brain_native_turn_budget_nudge_remaining: [15, 5]  # escalating late fires at these absolute steps-remaining
+istota_brain_native_soft_deadline_percent: 90     # stop the loop at this % of the task timeout, on the stop that keeps the partial work (0 or >= 100 disables)
 istota_brain_native_prompt_caching: ""            # "" = derive from base_url (ON for api.anthropic.com); set true/false to force
 
 # Native-brain WebFetch tool ([brain.native.web_fetch]). Runs in the daemon
