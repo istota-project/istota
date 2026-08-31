@@ -45,7 +45,7 @@ import sys
 
 from istota.process_group import kill_process_group
 
-__all__ = ["ocr_image_out_of_process", "DEFAULT_TIMEOUT_SECONDS"]
+__all__ = ["ocr_image_out_of_process", "child_argv", "DEFAULT_TIMEOUT_SECONDS"]
 
 logger = logging.getLogger("istota.transcribe_out_of_process")
 
@@ -64,29 +64,24 @@ _REAP_TIMEOUT_SECONDS = 10.0
 _ERROR_DETAIL_MAX_CHARS = 500
 
 
-def ocr_image_out_of_process(path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
-    """OCR `path` in a child process and return the CLI's result dict.
+def child_argv(path: str) -> list[str]:
+    """The exact argv the child is spawned with.
 
-    Same contract as `transcribe.cmd_ocr`: a dict carrying `status` of `"ok"`
-    or `"error"`, and on success `text`, `confidence` and `word_count`.
-
-    Never raises. Every failure — a child that cannot be spawned, one that
-    times out, one that writes nothing parseable, a missing `pytesseract` or a
-    missing Tesseract binary — comes back as an error dict, because the caller
-    treats OCR as best-effort context beside an image the model can see for
-    itself.
+    Split out so the module it names can be asserted without a subprocess. The
+    entry point is `istota.ocr_leaf`, a top-level stdlib+Pillow+pytesseract
+    leaf, and deliberately **not** `istota.skills.transcribe`: importing that
+    runs `istota/skills/__init__.py`, which star-imports every skill and pulled
+    `caldav` and `niquests` into this process — 0.22s of the 0.41s each spawn
+    cost, paid once per image.
     """
-    if not sys.executable:
-        return {"status": "error", "error": "no interpreter to spawn an OCR process with"}
-
-    argv = [
+    return [
         sys.executable,
         # `-m` prepends the working directory to the child's `sys.path`. `-P`
         # takes it back off: the daemon's cwd is operator-chosen and this is
         # not the place to inherit an import surface from it.
         "-P",
         "-m",
-        "istota.skills.transcribe",
+        "istota.ocr_leaf",
         "ocr",
         # Deliberately no `--preprocess`. Automatic OCR runs the normal mode
         # once; a second enhanced pass would double the work for every image on
@@ -102,6 +97,24 @@ def ocr_image_out_of_process(path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS
         "--",
         path,
     ]
+
+
+def ocr_image_out_of_process(path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
+    """OCR `path` in a child process and return the CLI's result dict.
+
+    Same contract as `transcribe.cmd_ocr`: a dict carrying `status` of `"ok"`
+    or `"error"`, and on success `text`, `confidence` and `word_count`.
+
+    Never raises. Every failure — a child that cannot be spawned, one that
+    times out, one that writes nothing parseable, a missing `pytesseract` or a
+    missing Tesseract binary — comes back as an error dict, because the caller
+    treats OCR as best-effort context beside an image the model can see for
+    itself.
+    """
+    if not sys.executable:
+        return {"status": "error", "error": "no interpreter to spawn an OCR process with"}
+
+    argv = child_argv(path)
 
     try:
         proc = subprocess.Popen(

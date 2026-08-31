@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from istota.skills.transcribe import out_of_process
 from istota.skills.transcribe.out_of_process import (
     DEFAULT_TIMEOUT_SECONDS,
     _parse_cli_json,
@@ -48,14 +49,14 @@ def _ok_payload(text="Hello World", confidence=0.94, word_count=2):
 
 
 class TestArgv:
-    def test_it_runs_the_transcribe_cli_with_this_interpreter(self):
+    def test_it_runs_the_ocr_leaf_with_this_interpreter(self):
         with patch(_POPEN) as popen:
             popen.return_value = _fake_proc(stdout=_ok_payload())
             ocr_image_out_of_process("/tmp/shot.png")
 
         argv = popen.call_args[0][0]
         assert argv[0] == sys.executable
-        assert argv[1:4] == ["-P", "-m", "istota.skills.transcribe"]
+        assert argv[1:4] == ["-P", "-m", "istota.ocr_leaf"]
         assert argv[4] == "ocr"
 
     def test_the_path_goes_last_behind_a_double_dash(self):
@@ -291,3 +292,109 @@ class TestAgainstTheRealCli:
 
 def test_the_default_timeout_is_the_shared_ocr_deadline():
     assert DEFAULT_TIMEOUT_SECONDS == 60.0
+
+
+class TestTheChildImportSurface:
+    """What the child imports is paid once per image, and it was mostly waste.
+
+    The spawn used to be `-m istota.skills.transcribe`, which runs
+    `istota/skills/__init__.py` and star-imports every skill in the package.
+    Measured in this checkout, that pulled `istota.skills.calendar` ->
+    `caldav` -> `niquests` — an HTTP client — into a process whose whole job is
+    to read one image with Tesseract, at about 0.22s of the 0.41s each spawn
+    cost. A five-image send paid it five times, in the window between the
+    transport and the first byte the model sees.
+    """
+
+    def test_the_spawn_names_the_leaf_not_the_skill_package(self):
+        argv = out_of_process.child_argv("/tmp/x.png")
+
+        assert "-m" in argv
+        module = argv[argv.index("-m") + 1]
+        assert module == "istota.ocr_leaf"
+        assert "istota.skills.transcribe" not in argv
+
+    def test_importing_the_leaf_does_not_drag_in_the_skills_package(self):
+        """A real subprocess: the claim is about an import graph, not a mock.
+
+        `-P` matches the spawn, so the check is against the same `sys.path` the
+        child actually gets.
+        """
+        probe = (
+            "import sys; import istota.ocr_leaf; "
+            "print(','.join(sorted(m for m in sys.modules "
+            "if m.startswith('istota.') and m != 'istota.ocr_leaf')))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-P", "-c", probe],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "", (
+            f"the leaf pulled in {out.stdout.strip()}; it may import the standard "
+            "library, Pillow and pytesseract, and nothing from `istota`"
+        )
+
+    def test_pandas_is_pytesseracts_own_import_and_is_left_alone(self):
+        """Recorded rather than fixed, so the next reader does not re-measure it.
+
+        `pytesseract` does `try: import pandas` at module scope for its
+        `Output.DATAFRAME` path, which this leaf never asks for — about 0.12s
+        of the child's remaining 0.23s. It could be suppressed by seeding
+        `sys.modules["pandas"] = None` before the import, since pytesseract
+        catches the resulting ImportError and sets `pandas_installed = False`.
+        That is not done: it is a hack on a third party's module internals that
+        would turn a future `Output.DATAFRAME` call into a confusing failure,
+        and running the children concurrently already amortizes it across a
+        send rather than paying it per image.
+
+        pandas is not pytesseract's own dependency — in this venv it arrives
+        through `yfinance`, from the `markets` extra — so the import succeeds
+        under the documented `uv sync --extra test` and would not under
+        `--extra transcribe` alone. That is why this skips rather than asserts
+        when pandas is absent: the cost being recorded is real only when
+        something else in the environment supplies it.
+        """
+        pytest.importorskip("pandas")
+        probe = (
+            "import sys; import istota.ocr_leaf; print('pandas' in sys.modules)"
+        )
+        out = subprocess.run(
+            [sys.executable, "-P", "-c", probe],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "True", (
+            "pandas is installed but no longer resident after importing the leaf, so "
+            "pytesseract stopped importing it at module scope; the note above and the "
+            "0.12s figure in the leaf's own docstring are now stale"
+        )
+
+    def test_the_skill_cli_and_the_child_run_the_same_ocr(self):
+        """One implementation, two entry points.
+
+        The seam is `cmd_ocr` -> `ocr_leaf.ocr_image`, so that is what this
+        asserts. Comparing the re-exported helpers instead proved only that two
+        names pointed at one object, and `cmd_ocr` calls neither of them.
+        """
+        from types import SimpleNamespace
+
+        from istota import ocr_leaf
+        from istota.skills import transcribe
+
+        seen = {}
+
+        def fake(image_path, preprocess=False):
+            seen["args"] = (image_path, preprocess)
+            return {"status": "ok", "text": "t", "confidence": 0.5, "word_count": 1}
+
+        with patch.object(ocr_leaf, "ocr_image", fake), \
+                patch.object(transcribe, "ocr_image", fake):
+            result = transcribe.cmd_ocr(
+                SimpleNamespace(image_path="/tmp/shot.png", preprocess=True)
+            )
+
+        assert seen["args"] == ("/tmp/shot.png", True)
+        assert result == {"status": "ok", "text": "t", "confidence": 0.5, "word_count": 1}

@@ -57,7 +57,7 @@ class TestCmdOcr:
         assert result["status"] == "error"
         assert "not found" in result["error"]
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_ocr_success(self, mock_to_data, tmp_path):
         # Create a test image
         image_path = tmp_path / "test.png"
@@ -79,7 +79,7 @@ class TestCmdOcr:
         assert result["confidence"] == 0.94  # (95 + 92) / 2 / 100
         assert result["word_count"] == 2
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_ocr_with_preprocess(self, mock_to_data, tmp_path):
         # Create a test image
         image_path = tmp_path / "test.png"
@@ -101,7 +101,7 @@ class TestCmdOcr:
         # The single pass ran against the preprocessed image.
         mock_to_data.assert_called_once()
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_ocr_empty_result(self, mock_to_data, tmp_path):
         # Create a blank image
         image_path = tmp_path / "blank.png"
@@ -123,7 +123,7 @@ class TestCmdOcr:
         assert result["confidence"] == 0
         assert result["word_count"] == 0
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_ocr_low_confidence(self, mock_to_data, tmp_path):
         # Create a test image
         image_path = tmp_path / "blurry.png"
@@ -158,7 +158,7 @@ class TestCmdOcr:
         assert result["status"] == "error"
         assert "error" in result
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_ocr_tesseract_error(self, mock_to_data, tmp_path):
         # Create a valid image but simulate tesseract failure
         image_path = tmp_path / "test.png"
@@ -207,7 +207,7 @@ class TestBuildParser:
 
 
 class TestMain:
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_main_ocr_success(self, mock_to_data, tmp_path, capsys):
         # Create a test image
         image_path = tmp_path / "test.png"
@@ -237,7 +237,7 @@ class TestMain:
         with pytest.raises(SystemExit):
             main([])
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_main_with_preprocess(self, mock_to_data, tmp_path, capsys):
         image_path = tmp_path / "test.png"
         Image.new("RGB", (100, 100), color="red").save(image_path)
@@ -263,8 +263,8 @@ class TestOneTesseractPassPerCall:
     `image_to_data` result; the JSON schema is unchanged.
     """
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_string")
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_string")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_tesseract_runs_exactly_once(self, mock_to_data, mock_to_string, tmp_path):
         image_path = tmp_path / "test.png"
         Image.new("RGB", (100, 100), color="white").save(image_path)
@@ -288,7 +288,7 @@ class TestOneTesseractPassPerCall:
         assert set(result) == {"status", "text", "confidence", "word_count"}
         assert result["text"] == "Hello World"
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_line_structure_becomes_line_breaks(self, mock_to_data, tmp_path):
         image_path = tmp_path / "test.png"
         Image.new("RGB", (100, 100), color="white").save(image_path)
@@ -309,7 +309,7 @@ class TestOneTesseractPassPerCall:
 
         assert result["text"] == "Account 12345\nBalance 42"
 
-    @patch("istota.skills.transcribe.pytesseract.image_to_data")
+    @patch("istota.ocr_leaf.pytesseract.image_to_data")
     def test_blank_word_entries_do_not_produce_empty_lines(self, mock_to_data, tmp_path):
         image_path = tmp_path / "test.png"
         Image.new("RGB", (100, 100), color="white").save(image_path)

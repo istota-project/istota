@@ -56,6 +56,7 @@ import re
 import shutil
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -173,6 +174,30 @@ JPEG_QUALITY = 85
 # One deadline for the whole OCR pass rather than one per image, inclusive of
 # the interpreter and Pillow import each spawn pays.
 OCR_TOTAL_TIMEOUT_SECONDS = 60.0
+
+# How many OCR children may be in flight at once. The pass used to be serial,
+# which put roughly a second per image between the transport receiving a
+# message and the model seeing its first byte — a five-image send spent five
+# seconds there. The children are already separate processes, so there is
+# nothing structural to overlap around.
+#
+# Bounded rather than one per image, for two reasons that pull the same way:
+# Tesseract is CPU-bound, so past the core count more children only trade
+# throughput for context switches; and this runs on a `WorkerPool` thread with
+# the daemon's other tasks beside it, so an unbounded fan-out would let one
+# twenty-image send claim the host.
+#
+# **This bounds one call, not the host**, and the difference is worth stating
+# rather than implying. `SchedulerConfig` ships `max_foreground_workers = 5`
+# and `max_background_workers = 3`, so eight tasks can be inside `_run_ocr` at
+# once and the real ceiling is 32 concurrent children, each a fresh interpreter
+# with Pillow and pytesseract resident. Those children are in the daemon's own
+# cgroup rather than a per-task one, so `scheduler.task_pids_max` does not see
+# them and the scheduler unit's `MemoryHigh` is what absorbs the worst case.
+# Four is chosen against that number, not against a core count. A module-level
+# semaphore shared across tasks would bound it properly and is the change to
+# make if the ceiling is ever observed to bite.
+OCR_MAX_CONCURRENCY = 4
 
 # A flat per-image cap against the task total would let four dense pages
 # consume everything and leave images 5 through 20 rendering empty blocks. The
@@ -926,40 +951,110 @@ def _discard(written: list[Path], task_id: int, name: str) -> None:
 # --------------------------------------------------------------------------
 
 
+# Sentinels rather than a dict shape or a string, so a worker's "did not run"
+# is never mistaken for a result the child produced. `object()` rather than a
+# string literal: `is` against an interned literal is a weaker guarantee than
+# the comment above it claims, and the whole point of these two is identity.
+_OCR_CANCELLED = object()
+_OCR_DEADLINE = object()
+
+
 def _run_ocr(
     prepared: list[tuple[int, ImageInput, Path, str]],
     blocks: dict[int, OcrBlock],
     cancel_check: Callable[[], bool] | None,
     task_id: int,
 ) -> None:
-    """One OCR pass per prepared image, inside one shared deadline."""
+    """One OCR pass per prepared image, inside one shared deadline.
+
+    The children run concurrently and the results are accounted for serially.
+    A child is a separate process costing about a second, so running them one
+    after another put that second per image between the transport and the first
+    byte the model sees; the fan-out is the point of this shape.
+
+    The serial accounting is honesty rather than necessity, and it is worth
+    being exact about which. `used` accumulates across images and feeds
+    `limit = min(per_image, OCR_MAX_CHARS_TOTAL - used)`, so applying each
+    result as its child lands *reads* as though it would make the rendering
+    depend on which child finished first. It would not: `per_image` is
+    `min(cap, total // count)`, so `count * per_image` never exceeds the total
+    and `total - used` is never the smaller term — the same arithmetic that
+    makes the `KIND_BUDGET` branch below unreachable. So this walks `prepared`
+    in sender order because that costs nothing and keeps the code true if those
+    constants are ever loosened, not because a completion-order version is
+    observably broken today.
+    `tests/test_image_attachments.py::TestOcrConcurrency::
+    test_the_per_image_share_makes_accounting_order_inert` pins the arithmetic
+    that decides which of those two it is.
+
+    Cancellation is checked inside each child's own task rather than only
+    before the fan-out, because a queued image whose child has not started is
+    exactly the one a cancel should reach. Every image still gets a block on
+    every path; `OcrBlock` promises one per candidate, and an image reaching
+    the model with no notice at all is the confident blind answer this module
+    exists to remove.
+    """
     if not prepared:
         return
 
     deadline = time.monotonic() + OCR_TOTAL_TIMEOUT_SECONDS
     per_image = min(OCR_MAX_CHARS_PER_IMAGE, OCR_MAX_CHARS_TOTAL // max(1, len(prepared)))
-    used = 0
 
-    for position, (index, image, ocr_path, note) in enumerate(prepared):
+    def read(image: ImageInput, ocr_path: Path) -> dict | str:
         if _cancelled(cancel_check):
-            # Every remaining image still gets a block. `OcrBlock` promises one
-            # per candidate, and an image reaching the model with no notice at
-            # all is the confident blind answer this module exists to remove —
-            # `_cancelled` swallows exceptions, so a flaky cancel channel lands
-            # exactly here rather than stopping the send.
-            logger.info("Image OCR cancelled for task %s", task_id)
-            for rest_index, rest_image, _, rest_note in prepared[position:]:
-                blocks[rest_index] = OcrBlock(
-                    rest_image.display_name,
-                    str(rest_image.path),
-                    KIND_UNAVAILABLE,
-                    detail="the task was cancelled before this image was read",
-                    note=rest_note,
-                )
-            return
-
+            return _OCR_CANCELLED
+        # Read at the child's own start, not at fan-out: with a bounded pool a
+        # second wave begins after the first has spent some of the budget.
         remaining_time = deadline - time.monotonic()
         if remaining_time <= 0:
+            return _OCR_DEADLINE
+        try:
+            return ocr_image_out_of_process(str(ocr_path), timeout=remaining_time)
+        except Exception as exc:
+            # The runner's own contract is never to raise; this covers a caller
+            # that replaced it and a failure on the way in.
+            _log_failure(task_id, image.display_name, "ocr", exc)
+            return {"status": "error", "error": type(exc).__name__}
+
+    workers = max(1, min(OCR_MAX_CONCURRENCY, len(prepared)))
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="istota-ocr") as pool:
+            # `map` keeps the results in submission order, which is sender
+            # order, and the context manager joins every worker before the
+            # accounting below reads any of them.
+            outcomes = list(pool.map(lambda item: read(item[1], item[2]), prepared))
+    except Exception as exc:
+        # `read` is defensive, but the pool is not, and the serial version this
+        # replaced created no threads at all. `Executor.map` submits eagerly and
+        # `submit` starts threads, so it raises `RuntimeError` when the OS
+        # refuses one ("can't start new thread") or during interpreter shutdown
+        # ("cannot schedule new futures"). Neither is hypothetical here: this
+        # daemon ships `host_pressure.py` because it runs under memory pressure,
+        # and its unit is capped with `MemoryHigh`, which is the state where
+        # `pthread_create` begins to fail.
+        #
+        # `prepare_image_attachments` promises never to raise, and its caller in
+        # `executor.py` does not wrap it — so without this the whole task fails
+        # and retries because a thread could not be started, discarding a text
+        # request that was perfectly usable. Every image still gets a block,
+        # which is what `OcrBlock` promises.
+        _log_failure(task_id, f"{len(prepared)} images", "ocr-pool", exc)
+        outcomes = [{"status": "error", "error": type(exc).__name__}] * len(prepared)
+
+    cancelled_any = False
+    used = 0
+    for (index, image, _ocr_path, note), outcome in zip(prepared, outcomes):
+        if outcome is _OCR_CANCELLED:
+            cancelled_any = True
+            blocks[index] = OcrBlock(
+                image.display_name,
+                str(image.path),
+                KIND_UNAVAILABLE,
+                detail="the task was cancelled before this image was read",
+                note=note,
+            )
+            continue
+        if outcome is _OCR_DEADLINE:
             blocks[index] = OcrBlock(
                 image.display_name,
                 str(image.path),
@@ -984,16 +1079,11 @@ def _run_ocr(
             )
             continue
 
-        try:
-            result = ocr_image_out_of_process(str(ocr_path), timeout=remaining_time)
-        except Exception as exc:
-            # The runner's own contract is never to raise; this covers a caller
-            # that replaced it and a failure on the way in.
-            _log_failure(task_id, image.display_name, "ocr", exc)
-            result = {"status": "error", "error": type(exc).__name__}
-
-        blocks[index] = _block_from_result(image, result, note, per_image, used)
+        blocks[index] = _block_from_result(image, outcome, note, per_image, used)
         used += len(blocks[index].text)
+
+    if cancelled_any:
+        logger.info("Image OCR cancelled for task %s", task_id)
 
 
 def _block_from_result(

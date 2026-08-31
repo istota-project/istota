@@ -16,6 +16,8 @@ import base64
 import builtins
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -183,6 +185,14 @@ class TestLimits:
         assert image_attachments.OCR_TOTAL_TIMEOUT_SECONDS == 60.0
         assert image_attachments.OCR_MAX_CHARS_PER_IMAGE == 12_000
         assert image_attachments.OCR_MAX_CHARS_TOTAL == 48_000
+
+    def test_the_concurrency_bound_is_the_one_the_rules_file_names(self):
+        """`.claude/rules/skills.md` hardcodes the number, so it can go stale."""
+        assert image_attachments.OCR_MAX_CONCURRENCY == 4
+        rules = (
+            Path(__file__).resolve().parents[1] / ".claude" / "rules" / "skills.md"
+        ).read_text()
+        assert f"OCR_MAX_CONCURRENCY` ({image_attachments.OCR_MAX_CONCURRENCY})" in rules
 
     def test_the_inbound_extension_set_is_the_ten_the_spec_names(self):
         assert IMAGE_EXTENSIONS == frozenset(
@@ -1526,3 +1536,218 @@ class TestImageInputContract:
 
         assert isinstance(prep.images[0], ImageInput)
         assert not hasattr(prep.images[0], "data")
+
+
+# --------------------------------------------------------------------------
+# OCR concurrency
+# --------------------------------------------------------------------------
+
+
+class TestOcrConcurrency:
+    """The children are separate processes, so the pass need not be serial.
+
+    Each one costs about a second, wall clock, and preparation sits between
+    the transport and the first byte the model sees. Serial, a five-image send
+    spends five seconds there before anything is sent.
+    """
+
+    def test_the_children_overlap_rather_than_running_one_after_another(
+        self, tmp_path, monkeypatch
+    ):
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(4)]
+        live = {"now": 0, "peak": 0}
+        lock = threading.Lock()
+
+        def fake(path, timeout=60.0):
+            with lock:
+                live["now"] += 1
+                live["peak"] = max(live["peak"], live["now"])
+            time.sleep(0.15)
+            with lock:
+                live["now"] -= 1
+            return {"status": "ok", "text": "x", "confidence": 0.9, "word_count": 1}
+
+        monkeypatch.setattr(image_attachments, "ocr_image_out_of_process", fake)
+
+        prep = _prep(srcs, tmp_path)
+
+        assert len(prep.ocr_blocks) == 4
+        # Overlap, observed rather than timed. A wall-clock bound would say the
+        # same thing and add a flake surface to a suite that runs `-n auto`
+        # across every core; the serial version drives this to exactly 1.
+        assert live["peak"] > 1, "no two children were ever in flight together"
+
+    def test_concurrency_is_bounded_rather_than_one_child_per_image(
+        self, tmp_path, monkeypatch
+    ):
+        """Tesseract is CPU-bound and the daemon runs other tasks beside this one."""
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(12)]
+        live = {"now": 0, "peak": 0}
+        lock = threading.Lock()
+
+        def fake(path, timeout=60.0):
+            with lock:
+                live["now"] += 1
+                live["peak"] = max(live["peak"], live["now"])
+            time.sleep(0.05)
+            with lock:
+                live["now"] -= 1
+            return {"status": "ok", "text": "x", "confidence": 0.9, "word_count": 1}
+
+        monkeypatch.setattr(image_attachments, "ocr_image_out_of_process", fake)
+
+        _prep(srcs, tmp_path)
+
+        assert live["peak"] <= image_attachments.OCR_MAX_CONCURRENCY
+
+    def test_blocks_stay_in_sender_order_however_the_children_finish(
+        self, tmp_path, monkeypatch
+    ):
+        """A late first child must not reorder the rendered blocks."""
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(4)]
+
+        def fake(path, timeout=60.0):
+            # The first image's child is the slowest to answer.
+            time.sleep(0.2 if path.endswith("_n0.png") or "n0" in Path(path).name else 0.01)
+            return {
+                "status": "ok", "text": Path(path).stem, "confidence": 0.9, "word_count": 1,
+            }
+
+        monkeypatch.setattr(image_attachments, "ocr_image_out_of_process", fake)
+
+        prep = _prep(srcs, tmp_path)
+
+        assert [b.display_name for b in prep.ocr_blocks] == [
+            "n0.png", "n1.png", "n2.png", "n3.png",
+        ]
+
+    def test_no_image_share_is_reduced_by_the_ones_accounted_before_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Why the concurrent pass may account serially and lose nothing.
+
+        `_run_ocr` walks `prepared` in sender order when it turns results into
+        blocks, because `used` accumulates across images and feeds
+        `limit = min(per_image, OCR_MAX_CHARS_TOTAL - used)`. Applying each
+        result as its child landed *reads* as though it would make the render
+        depend on which child finished first.
+
+        It does not, and this is the behavioural check of that rather than a
+        restatement of the arithmetic: every child returns more text than any
+        share allows, so if the running total could ever bind, a later image
+        would come back shorter than an earlier one. Through the real
+        `_run_ocr`, with the real constants, every block is truncated to the
+        same length and none is `KIND_BUDGET`.
+
+        Discriminating, unlike the arithmetic identity it replaced: a flat
+        `per_image = OCR_MAX_CHARS_PER_IMAGE` in `_run_ocr` — which genuinely
+        does make accounting order load-bearing — turns this red at five
+        images, and so does raising the per-image cap to the task total.
+        """
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(5)]
+
+        def fake(path, timeout=60.0):
+            return {
+                "status": "ok",
+                "text": "w " * image_attachments.OCR_MAX_CHARS_TOTAL,
+                "confidence": 0.9,
+                "word_count": 1,
+            }
+
+        monkeypatch.setattr(image_attachments, "ocr_image_out_of_process", fake)
+
+        prep = _prep(srcs, tmp_path)
+
+        assert len(prep.ocr_blocks) == 5
+        assert [b.kind for b in prep.ocr_blocks] == [KIND_TRUNCATED] * 5, (
+            f"got {[b.kind for b in prep.ocr_blocks]}; a KIND_BUDGET block means the "
+            "task total bound, so accounting order is now load-bearing"
+        )
+        lengths = {len(b.text) for b in prep.ocr_blocks}
+        assert len(lengths) == 1, (
+            f"images were cut to different lengths ({sorted(lengths)}), so the share "
+            "an image gets depends on what was accounted before it"
+        )
+
+    def test_a_pool_that_cannot_start_still_leaves_a_block_per_image(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The fan-out must not be able to fail the task.
+
+        `read` is defensive but the pool is not, and the serial version this
+        replaced started no threads at all. `Executor.map` submits eagerly, so
+        it raises `RuntimeError` when the OS refuses a thread — the state a
+        daemon under `MemoryHigh` is in — and `prepare_image_attachments`
+        promises never to raise, with no `try` around it at the call site.
+        """
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(3)]
+
+        class RefusingPool:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def map(self, *a, **kw):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(image_attachments, "ThreadPoolExecutor", RefusingPool)
+
+        with caplog.at_level(logging.WARNING):
+            prep = _prep(srcs, tmp_path)
+
+        assert len(prep.images) == 3, "the images were discarded with the OCR"
+        assert len(prep.ocr_blocks) == 3
+        assert all(b.kind == KIND_UNAVAILABLE for b in prep.ocr_blocks)
+        assert "RuntimeError" in caplog.text
+        # The thread failure is an operational fact, not something to paste at
+        # the model with the daemon's own paths in it.
+        assert "can't start new thread" not in "\n".join(
+            b.detail for b in prep.ocr_blocks
+        )
+
+    def test_a_cancelled_task_stops_the_queued_children(self, tmp_path, monkeypatch):
+        """Cancellation still has to reach an image whose child never started."""
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(8)]
+        started = []
+        lock = threading.Lock()
+        cancelled = threading.Event()
+
+        def fake(path, timeout=60.0):
+            with lock:
+                started.append(path)
+            cancelled.set()
+            time.sleep(0.02)
+            return {"status": "ok", "text": "x", "confidence": 0.9, "word_count": 1}
+
+        monkeypatch.setattr(image_attachments, "ocr_image_out_of_process", fake)
+
+        prep = _prep(srcs, tmp_path, cancel_check=cancelled.is_set)
+
+        assert len(prep.ocr_blocks) == 8
+        assert len(started) < 8, "every child ran despite the cancellation"
+        tail = [b for b in prep.ocr_blocks if b.kind == KIND_UNAVAILABLE]
+        assert tail, "no image was told the task was cancelled"
+        assert any("cancelled" in b.detail for b in tail)
+
+    def test_each_child_is_given_what_is_left_of_the_one_shared_deadline(
+        self, tmp_path, ocr_calls
+    ):
+        srcs = [_png(tmp_path / f"n{n}.png") for n in range(3)]
+
+        _prep(srcs, tmp_path)
+
+        timeouts = [t for _, t in ocr_calls]
+        assert len(timeouts) == 3
+        # Strictly less than the whole budget: `<=` passes against a flat
+        # `timeout=OCR_TOTAL_TIMEOUT_SECONDS`, which is the per-image budget
+        # this test is named against, so the bound has to exclude it.
+        for t in timeouts:
+            assert 0 < t < image_attachments.OCR_TOTAL_TIMEOUT_SECONDS
+        # And each child reads the clock at its own start, so what is left of
+        # the one shared deadline only ever shrinks.
+        assert timeouts == sorted(timeouts, reverse=True)
