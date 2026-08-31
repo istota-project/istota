@@ -579,3 +579,133 @@ class TestExternalOriginIsEmitted:
         assert user_rows[0]["origin"] == "email"
         assert user_rows[0]["subject"] == "Re: Scheduling"
         assert user_rows[0]["origin"] == self._one_user_row("roomtok")["origin"]
+
+
+# ---------------------------------------------------------------------------
+# `author_id` — the writer's user id, for the avatar the client draws
+# ---------------------------------------------------------------------------
+#
+# `author` is a display label and nothing else, so a co-member's turn could be
+# named but not pictured: `GET /avatars/user/{id}` keys on the istota user id,
+# and the transcript never learned one. The id rides beside the label, under
+# exactly the condition the label's `elif` already states — a user id, not the
+# viewer's, and no `author_label` — so an external sender, who is not an istota
+# user at all, still carries a name and no id. Nothing else is added: the
+# picture's content hash deliberately does not travel per message (D13), and
+# the client pays one conditional request per author per session instead.
+
+
+@_needs_web_deps
+class TestAuthorIdIsEmitted:
+    def _one_user_row(self, token):
+        from istota import web_app
+
+        page = web_app._chat_room_messages("alice", token, 20)
+        rows = [m for m in page["messages"] if m["role"] == "user"]
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    def _co_member_room(self, db_path, web_config):
+        web_config.users["bob"] = UserConfig(display_name="Bob")
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            db.add_room_member(conn, "roomtok", "alice")
+            from istota.transport.ingest import record_inbound
+            record_inbound(
+                conn, web_config, surface="web", surface_ref="roomtok",
+                user_id="bob", text="I pushed the fix",
+            )
+
+    def test_a_co_members_turn_carries_their_user_id(self, db_path, web_config):
+        self._co_member_room(db_path, web_config)
+        row = self._one_user_row("roomtok")
+        # The id, not the display name: the endpoint keys on the id, and two
+        # users may share a display name.
+        assert row["author_id"] == "bob"
+        assert row["author"] == "Bob"
+
+    def test_an_external_senders_turn_carries_no_id(self, db_path, web_config):
+        """A label and no id. The sender of a mirrored email is not an istota
+        user, so there is no avatar to ask for and a request built from the
+        address would 404 once per turn."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            _email_turn(
+                conn, web_config, "roomtok", EMISSARY_PROMPT,
+                "contact@example.com",
+            )
+        row = self._one_user_row("roomtok")
+        assert row["author"] == "contact@example.com"
+        assert "author_id" not in row
+
+    def test_a_row_carrying_both_columns_keeps_the_labels_answer(
+        self, db_path, web_config,
+    ):
+        """The tiebreak the label rule already states, applied to the picture.
+
+        `record_inbound` sets at most one column, so this row is written by
+        hand — which is the point. The two columns are the shape a future
+        writer could set together, `schema.sql` says the label wins, and a
+        picture that did not follow the name would put a co-member's face on
+        mail from a stranger who claimed their id.
+        """
+        web_config.users["bob"] = UserConfig(display_name="Bob")
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            tid = db.create_task(
+                conn, "hand-written", "alice", source_type="email",
+                conversation_token="roomtok",
+            )
+            db.add_message(
+                conn, "roomtok", role="user", body="hand-written",
+                origin_surface="email", task_id=tid,
+                author_user_id="bob", author_label="contact@example.com",
+            )
+        row = self._one_user_row("roomtok")
+        assert row["author"] == "contact@example.com"
+        assert "author_id" not in row
+
+    def test_the_viewers_own_turn_carries_neither(self, db_path, web_config):
+        """Absence is what tells the client the row is its own, for the picture
+        exactly as for the name — and the client already holds its own hash off
+        `/me`, so an id here would swap an immutable URL for a bare one."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="web")
+            _web_turn(conn, web_config, "roomtok", "hello there")
+        row = self._one_user_row("roomtok")
+        assert "author_id" not in row
+        assert "author" not in row
+
+    def test_a_row_with_neither_column_carries_neither(
+        self, db_path, web_config,
+    ):
+        """A pre-migration row is the room owner's, which is the viewer."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="web")
+            tid = db.create_task(
+                conn, "legacy turn", "alice", source_type="web",
+                conversation_token="roomtok",
+            )
+            db.add_message(
+                conn, "roomtok", role="user", body="legacy turn",
+                origin_surface="web", task_id=tid,
+            )
+        row = self._one_user_row("roomtok")
+        assert "author_id" not in row
+        assert "author" not in row
+
+    def test_the_stream_agrees_with_the_reload(self, db_path, web_config):
+        """Both producers go through the one builder, so a co-member's face
+        must not appear on a reload and vanish on the next streamed row."""
+        from istota import web_app
+
+        self._co_member_room(db_path, web_config)
+        with db.get_db(db_path) as conn:
+            rows = db.list_room_events_since(conn, "alice", since_id=0, limit=50)
+        streamed = [
+            web_app._cross_room_message_dict(r, "alice") for r in rows
+        ]
+        user_rows = [d for d in streamed if d["role"] == "user"]
+        assert len(user_rows) == 1
+        assert user_rows[0]["author_id"] == "bob"
+        assert user_rows[0]["author_id"] == self._one_user_row("roomtok")["author_id"]

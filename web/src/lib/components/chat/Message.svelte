@@ -142,8 +142,7 @@
   // A user row the *viewer* wrote. `message.author` is set only when the server
   // named somebody else — another room member, or the sender of a mirrored
   // email — so its absence on a user row is what identifies the viewer's own
-  // words. Nothing on the row carries a co-member's user id yet, so their turns
-  // keep the initial chip until `author_id` arrives.
+  // words.
   //
   // Reading an *absence* as the viewer is only safe because the server refuses
   // to emit an empty one: `web_app._display_name_for` falls back to the user id
@@ -153,6 +152,14 @@
   // on somebody else's turn — a stronger claim than the wrong initial the same
   // gap used to produce.
   const ownTurn = $derived(isUser && !message.author);
+  /* Whose picture the gutter asks for on a user row: the viewer's own id on
+     their own turn, and the writer's on a co-member's. `undefined` on the bot
+     row (the bot has no user id) and on an external sender's, whose name is an
+     email address with no account behind it — `Avatar` answers a missing id
+     with the chip and issues no request, which is the whole handling of that
+     case. Never the viewer's id as a stand-in for a missing one: that paints
+     the reader's face on somebody else's words. */
+  const authorAvatarId = $derived(!isUser ? undefined : ownTurn ? userId : message.authorId);
 
   // System (!command) output goes through the safe markdown renderer; user text
   // is shown verbatim and the assistant body is rendered below.
@@ -580,8 +587,8 @@
       {#if !continuation}
         <Avatar
           kind={isUser ? 'user' : 'bot'}
-          userId={ownTurn ? userId : undefined}
-          version={isUser ? (ownTurn ? userAvatar : null) : botAvatar}
+          userId={authorAvatarId}
+          version={isUser ? (ownTurn ? userAvatar : undefined) : botAvatar}
           label={author}
         />
       {:else if revealed}
@@ -809,6 +816,8 @@
         <ConfirmationCard
           onConfirm={() => onConfirm(message.cid, message.taskId!)}
           onReject={() => onReject(message.cid, message.taskId!)}
+          {botName}
+          {botAvatar}
         />
       {/if}
 

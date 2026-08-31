@@ -4848,7 +4848,10 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     `author_label` is an already-sanitized external sender, and both NULL means
     the room owner — which is the correct fallback for a pre-migration row.
     `author` is emitted only when the writer is *not* the viewer, since absence
-    is what tells the client to use its own label.
+    is what tells the client to use its own label. `author_id` rides beside it
+    on that one branch — the label is a display string and the avatar endpoint
+    keys on the user id — so a co-member's turn can be pictured as well as
+    named, and an external sender's turn carries neither an id nor a request.
 
     The label is tested first, so it wins if a writer ever sets both. That is
     the cautious direction and the reason is in the `schema.sql` comment: the
@@ -4916,6 +4919,18 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
         out["author"] = author_label
     elif author_user_id and author_user_id != viewer:
         out["author"] = _display_name_for(author_user_id)
+        # The label names the writer; this is the writer, as the avatar
+        # endpoint keys them. It rides only in this branch, which is the label
+        # rule restated rather than a second one: an `author_label` is an
+        # external sender who is no istota user, so a request built from it
+        # would 404 once per turn, and the viewer's own row is identified by
+        # absence here exactly as it is above — the client holds its own hash
+        # off `/me` and would trade an immutable URL for a bare one.
+        #
+        # The id alone, never the picture's hash: this dict rides the
+        # byte-budgeted room-event stream, and a hash per row buys one saved
+        # 304 per author per session (D13).
+        out["author_id"] = author_user_id
 
     # `_row_get` rather than indexing, like the author columns above: a producer
     # that predates the column must degrade to today's rendering, not raise.

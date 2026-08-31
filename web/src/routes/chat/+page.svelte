@@ -288,6 +288,10 @@
     // into the room, and collapsing its header would hide the one thing that
     // says it wasn't the viewer.
     if (prev.author !== cur.author) return false;
+    // The label is a display name and two members can share one; the id is who
+    // they are. Collapsing across it would hang one person's run — and now
+    // their face — over another's words.
+    if (prev.authorId !== cur.authorId) return false;
     // Aggregate views interleave rooms: a room change always starts a fresh
     // group (the header carries the room chip).
     if (prev.roomToken !== cur.roomToken) return false;

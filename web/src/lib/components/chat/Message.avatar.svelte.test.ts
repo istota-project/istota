@@ -65,12 +65,30 @@ describe('the chat gutter renders an identity, not a letter', () => {
     expect(gutterChip(container)?.textContent?.trim()).toBe('I');
   });
 
-  it("leaves another member's turn on the chip, since the client has no id for them", () => {
-    // `author_id` on the message row is Stage 6. Until it lands, a turn the
-    // server named someone else for must not be drawn with the *viewer's* own
-    // picture, which is what passing the id through unconditionally would do.
+  it('gives a co-member their own picture, asked for without a version', () => {
+    // The third state of `version`: nobody told the client this face's hash,
+    // so the request goes out bare and pays one conditional round trip per
+    // author per session rather than a field on every streamed row (D13).
     const { container } = render(Message, {
-      message: turn({ role: 'user', text: 'hello', author: 'Bob' }),
+      message: turn({ role: 'user', text: 'hello', author: 'Bob', authorId: 'bob' }),
+      onConfirm: noop,
+      onReject: noop,
+      userName: 'Alice',
+      userId: 'alice',
+      userAvatar: 'me77',
+    });
+
+    // Not `alice`, and not `?v=me77`: the viewer's own hash on someone else's
+    // id is the wrong person's face under an immutable cache entry.
+    expect(gutterImage(container)?.getAttribute('src')).toBe('/api/avatars/user/bob');
+  });
+
+  it("leaves an external sender's turn on the chip, since they have no id", () => {
+    // A mirrored email carries a display label and no `author_id` — the sender
+    // is not an istota user, so there is nothing to ask the endpoint for. The
+    // viewer's own id must not stand in for the missing one.
+    const { container } = render(Message, {
+      message: turn({ role: 'user', text: 'hello', author: 'contact@example.com' }),
       onConfirm: noop,
       onReject: noop,
       userName: 'Alice',
@@ -79,7 +97,7 @@ describe('the chat gutter renders an identity, not a letter', () => {
     });
 
     expect(gutterImage(container)).toBeNull();
-    expect(gutterChip(container)?.textContent?.trim()).toBe('B');
+    expect(gutterChip(container)?.textContent?.trim()).toBe('C');
   });
 
   it('collapses the whole identity on a continuation row', () => {

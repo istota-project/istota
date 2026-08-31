@@ -2541,8 +2541,12 @@ function createSession(): ChatSession {
       starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
       roomToken: m.room_token,
       roomName: m.room_name,
-      // Server-resolved author for a user row the viewer did not write.
+      // Server-resolved author for a user row the viewer did not write, and —
+      // when that writer holds an account here — the id their picture is
+      // served under. Folded to `undefined` the same way, since an empty id
+      // would build a URL matching no route.
       author: typeof m.author === 'string' && m.author ? m.author : undefined,
+      authorId: typeof m.author_id === 'string' && m.author_id ? m.author_id : undefined,
       // Provenance for a user row that entered from outside the room. Both are
       // set here and nowhere else, so history, the aggregate panes and the live
       // stream mark the same turns as external.

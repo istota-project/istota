@@ -2363,6 +2363,14 @@ export interface ChatHistoryMessage {
   // email mirrored into the room it continues. Absent means the viewer, which
   // is what every user row was assumed to be.
   author?: string;
+  // The writer's istota user id, which is what the avatar endpoint keys on —
+  // `author` is a display label and two people may share one. Set only where
+  // the writer is an istota user who is not the reader, so an external
+  // sender's turn carries a name and no id, and nothing here is requested for
+  // it. The picture's content hash deliberately does not ride along: this row
+  // is on the byte-budgeted room-event stream, and the client pays one
+  // conditional request per author per session instead (D13).
+  author_id?: string;
   // The surface a user row entered from, when it is not one the room itself
   // lives on — today `'email'` alone. Absent is the signal for "from inside
   // this conversation", so a co-member's Talk or web turn carries no key.
