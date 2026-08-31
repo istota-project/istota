@@ -19,6 +19,31 @@ if TYPE_CHECKING:
     from istota.usage import BrainUsage
 
 
+@dataclass(frozen=True)
+class ImageInput:
+    """One prepared image attachment, ready for whichever vision path applies.
+
+    `path` is the normalized file the model is allowed to read, always
+    `Path.resolve()`d: `build_bwrap_cmd`'s `_bind` uses the resolved source as
+    the in-namespace destination, so on a deployment whose `temp_dir` sits
+    behind a symlink an unresolved path names a file that does not exist inside
+    the sandbox.
+
+    `media_type` is derived from the decoded Pillow format and the format the
+    rewrite chose — never from the sender's extension or claimed MIME type —
+    and is always one of `image/png`, `image/jpeg` or `image/webp`, which every
+    provider this deployment reaches accepts.
+
+    `display_name` is the basename shown to the model. No image bytes and no
+    OCR text travel on this record: each brain reads the file itself, at the
+    last moment, so nothing large lands in a task row or a log line.
+    """
+
+    path: Path
+    media_type: str
+    display_name: str
+
+
 @dataclass
 class BrainRequest:
     """Inputs the brain needs to execute one task attempt."""

@@ -29,8 +29,46 @@ def preprocess_image(image):
     return enhanced
 
 
+def text_from_data(data: dict) -> str:
+    """Reassemble Tesseract's word table into text, one line per OCR line.
+
+    `image_to_data` already carries every word `image_to_string` would return,
+    under `text`, alongside the page/block/paragraph/line numbers that say
+    where each one sat. Grouping on those four reproduces the line breaks
+    instead of paying for a second full pass over the same pixels.
+
+    The line columns are read defensively rather than assumed: a caller that
+    supplies only `text` and `conf` gets everything on one line, which is a
+    worse transcript than the real table gives but not a crash.
+    """
+    words = data.get("text") or []
+    keys = ("page_num", "block_num", "par_num", "line_num")
+    grouped = all(len(data.get(key) or ()) == len(words) for key in keys)
+
+    lines: list[list[str]] = []
+    previous: tuple | None = None
+    for index, raw in enumerate(words):
+        word = (raw or "").strip() if isinstance(raw, str) else str(raw).strip()
+        if not word:
+            continue
+        current = tuple(data[key][index] for key in keys) if grouped else ()
+        if not lines or (grouped and current != previous):
+            lines.append([])
+        previous = current
+        lines[-1].append(word)
+
+    return "\n".join(" ".join(line) for line in lines).strip()
+
+
 def cmd_ocr(args) -> dict:
-    """Run Tesseract OCR on an image file."""
+    """Run Tesseract OCR on an image file.
+
+    One Tesseract pass, not two. This used to call `image_to_data` and then
+    `image_to_string`, which is two full passes over the same pixels with no
+    shared page-segmentation state between them — and automatic attachment OCR
+    runs this once per image for up to twenty images in a send. The result
+    schema is unchanged.
+    """
     if pytesseract is None:
         raise ImportError("pytesseract not installed. Install with: uv sync --extra transcribe")
     path = Path(args.image_path)
@@ -42,9 +80,9 @@ def cmd_ocr(args) -> dict:
         if args.preprocess:
             image = preprocess_image(image)
 
-        # Get OCR text and confidence data
+        # One pass: text, confidence and word count all come out of this.
         data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-        text = pytesseract.image_to_string(image).strip()
+        text = text_from_data(data)
 
         # Calculate average confidence (exclude -1 values which indicate no text)
         confidences = [c for c in data["conf"] if c > 0]
