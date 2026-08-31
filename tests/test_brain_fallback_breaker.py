@@ -1,8 +1,11 @@
 """PrimaryAvailabilityBreaker unit tests (brain-fallback spec, Stage 4)."""
 
 
+import pytest
+
 from istota.brain._fallback import (
     COOLDOWN_STOP_REASONS,
+    MIN_COOLDOWN_SECONDS,
     PrimaryAvailabilityBreaker,
     TRIGGER_STOP_REASONS,
     effective_fallback_kind,
@@ -91,6 +94,77 @@ class TestBreaker:
         b.record_success("x", started_at=primary_started_at)
 
         assert b.should_skip("x", 100) is True
+
+
+class TestDeadline:
+    """ISSUE-374: the window ends at a deadline, and a caller may name it."""
+
+    def _clocked(self, monkeypatch, start=0.0):
+        import istota.brain._fallback as mod
+        clock = [start]
+        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        return clock, PrimaryAvailabilityBreaker()
+
+    def test_until_shortens_the_window(self, monkeypatch):
+        clock, b = self._clocked(monkeypatch)
+        assert b.open("x", 3600, until=660.0) is True
+        clock[0] = 659.0
+        assert b.should_skip("x", 3600) is True
+        clock[0] = 661.0
+        assert b.should_skip("x", 3600) is False
+
+    def test_until_is_capped_by_the_cooldown(self, monkeypatch):
+        clock, b = self._clocked(monkeypatch)
+        b.open("x", 100, until=10_000.0)
+        assert b.remaining("x") == 100
+        clock[0] = 101.0
+        assert b.should_skip("x", 100) is False
+
+    def test_until_is_floored(self, monkeypatch):
+        _clock, b = self._clocked(monkeypatch)
+        b.open("x", 3600, until=1.0)
+        assert b.remaining("x") == MIN_COOLDOWN_SECONDS
+
+    def test_the_floor_never_outgrows_the_cooldown(self, monkeypatch):
+        _clock, b = self._clocked(monkeypatch)
+        b.open("x", 10, until=1.0)
+        assert b.remaining("x") == 10
+
+    def test_a_repeat_open_cannot_extend_the_deadline(self, monkeypatch):
+        clock, b = self._clocked(monkeypatch)
+        assert b.open("x", 3600, until=660.0) is True
+        clock[0] = 600.0
+        assert b.open("x", 3600, until=100_000.0) is False
+        assert b.remaining("x") == 60
+        clock[0] = 661.0
+        assert b.should_skip("x", 3600) is False
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_until_falls_back_to_the_cooldown(self, monkeypatch, bad):
+        _clock, b = self._clocked(monkeypatch)
+        b.open("x", 300, until=bad)
+        assert b.remaining("x") == 300
+        assert b.should_skip("x", 300) is True
+
+    def test_remaining_is_none_when_closed(self):
+        assert PrimaryAvailabilityBreaker().remaining("x") is None
+
+    def test_remaining_is_none_once_the_deadline_passes(self, monkeypatch):
+        clock, b = self._clocked(monkeypatch)
+        b.open("x", 100)
+        clock[0] = 101.0
+        assert b.remaining("x") is None
+
+    def test_success_still_closes_a_deadline_window(self, monkeypatch):
+        _clock, b = self._clocked(monkeypatch)
+        b.open("x", 3600, until=660.0)
+        b.record_success("x")
+        assert b.should_skip("x", 3600) is False
+
+    def test_a_zero_cooldown_never_skips(self, monkeypatch):
+        _clock, b = self._clocked(monkeypatch)
+        b.open("x", 0, until=660.0)
+        assert b.should_skip("x", 0) is False
 
 
 class TestProcessGlobal:

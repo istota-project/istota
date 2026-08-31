@@ -8,15 +8,24 @@ a disk cache with a TTL and a stale-fallback read. Three surfaces (the doctor
 check, the admin card, ``!usage``) read it; none of them grows its own fetch or
 its own parse.
 
+A fourth reader is not a surface and does not fetch. ``cached_reset_seconds`` is
+how the brain-availability breaker learns when a quota comes back (ISSUE-374),
+and it is on a *task's* failure path rather than a diagnostic one, so it takes
+the disk cache alone — no credential, no socket, no dependence on a fetch having
+succeeded. That constraint is the whole reason it lives here as its own entry
+point rather than as a ``get_snapshot`` call at the call site.
+
 A *failure* is recorded beside the cache rather than in it, and suppresses the
 next TTL's worth of attempts — see the failure-timer section below. Without it a
 rejected credential would be re-tried on every dashboard poll, because a failed
 reading is never cached and there is nothing else to bound the retry.
 
-**Nothing here raises.** Every entry point returns a ``UsageSnapshot``, and a
-failure is a snapshot carrying a non-empty ``error``. Both callers reach it from
-a diagnostic path — one of them is the daemon's boot sequence — where an
-exception is worse than a missing number.
+**Nothing here raises.** Every snapshot entry point returns a ``UsageSnapshot``,
+and a failure is a snapshot carrying a non-empty ``error``; the two reset
+readers return ``int | None`` and answer a failure with ``None``. Callers reach
+this module from a diagnostic path — one of them is the daemon's boot sequence —
+or from a task that is already failing, where an exception is worse than a
+missing number either way.
 
 **Stdlib only** (``urllib.request``, not httpx), following the leaf convention of
 ``host_pressure.py``, ``forge_cli.py`` and ``ntfy_headers.py``: this is imported
@@ -1546,6 +1555,91 @@ def _with_stale_fallback(
         token_source=failure.token_source,
         error=failure.error,
     )
+
+
+# ---------------------------------------------------------------------------
+# Reset lookup (ISSUE-374)
+# ---------------------------------------------------------------------------
+
+
+def soonest_reset_seconds(snapshot: "UsageSnapshot | None") -> int | None:
+    """Seconds until the soonest *future* reset among a snapshot's windows.
+
+    The availability breaker's question is "when could the primary plausibly
+    work again", and the earliest reset is the earliest moment anything changes.
+    Which window actually produced the limit is not knowable from a
+    ``stop_reason``, and picking the earliest is the side of that ignorance
+    worth being on: too short costs one failed primary attempt, one reopened
+    breaker and the operator alert that reopening arms, while too long runs
+    every task in the remainder of the window on a different model. That extra
+    alert is the accepted cost, and it is bounded — a reopen that finds the
+    quota back succeeds and alerts nobody, and one that does not re-arms against
+    the *next* reset, which is a full window away.
+
+    ``percent`` is deliberately not read, though a window at 100% would name the
+    culprit better than the arithmetically earliest one does. In the shipped
+    payload the five-hour session window is always the earliest, so the two
+    rules differ only when an exhausted weekly window resets sooner than the
+    ceiling — where they collapse to the same answer anyway — and a threshold on
+    a percentage sampled minutes before the limit landed is a tunable with no
+    good value.
+
+    A window already at or past its reset is skipped rather than reported as
+    zero — it has reset, so it explains nothing about a limit being hit now, and
+    a zero would collapse the breaker onto its floor once a minute.
+
+    The type guards here are belt-and-braces, not the boundary: every route into
+    ``resets_in_seconds`` already floors at 0, and the containment for a value
+    that is merely *wrong* is the caller's clamp — never past the configured
+    cooldown, never below its floor — not validation here.
+
+    Returns ``None`` when there is nothing to go on, which is the caller's
+    signal to keep whatever duration it had.
+    """
+    windows = getattr(snapshot, "windows", ()) or ()
+    soonest: int | None = None
+    for window in windows:
+        seconds = getattr(window, "resets_in_seconds", None)
+        if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0:
+            continue
+        if soonest is None or seconds < soonest:
+            soonest = seconds
+    return soonest
+
+
+def cached_reset_seconds(config: object, *, now_ts: float) -> int | None:
+    """:func:`soonest_reset_seconds` over the disk cache alone. Never fetches.
+
+    Deliberately not :func:`get_snapshot`. The caller is the brain-availability
+    breaker, on the path a task takes when the primary just reported a usage
+    limit, and that path must not resolve a credential (a ``security``
+    subprocess on macOS), must not open a socket, and must not depend on a
+    fetch having succeeded. It need not: ``resets_at`` is absolute, and
+    :func:`read_cache_any_age` recomputes the countdown against ``now_ts``, so a
+    reading of any age answers this question as well as a fresh one — with one
+    exception, which the clamp contains. ``_windows_from_json`` recomputes only
+    where ``resets_at`` parses, and falls back to the stored countdown where it
+    does not, so an entry the endpoint wrote in a shape this module cannot read
+    can hand back an arbitrarily old number. Nothing on the deployment reads
+    only this — the doctor check, the admin card and ``!usage`` keep the cache
+    warm.
+
+    Honours ``subscription_usage``: an operator who turned the endpoint off gets
+    ``None`` rather than an answer off a cache nothing is maintaining.
+
+    Never raises.
+    """
+    try:
+        enabled, _ttl, _timeout = _settings(config)
+        if not enabled:
+            return None
+        data_dir = _data_dir(config)
+        if data_dir is None:
+            return None
+        return soonest_reset_seconds(read_cache_any_age(cache_path(data_dir), now_ts=now_ts))
+    except Exception:  # noqa: BLE001 — a missing hint costs the hint, nothing else
+        logger.debug("subscription usage reset lookup failed", exc_info=True)
+        return None
 
 
 def _home_dir() -> Path | None:
