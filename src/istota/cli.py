@@ -2040,16 +2040,32 @@ def _resolve_session_target(root: Path, target: str, attempt=None):
     A bare task id is what the file-name convention is for: glob
     ``*_task-{id}-*.jsonl`` across every user directory. Newest first, so with
     no ``--attempt`` the most recent attempt is what a bare id means.
+
+    A path is tried first, and a target that is *both* a path in the working
+    directory and a valid task id falls through to the id when the file turns
+    out not to be a transcript. Without that, a directory named ``4471`` in
+    whatever shell the operator is standing in silently shadows task 4471 and
+    the failure names the wrong problem.
     """
     from .session import session_log_read as slr
 
-    candidate = Path(target).expanduser()
-    if candidate.exists():
-        return candidate
-
+    try:
+        candidate = Path(target).expanduser()
+    except (RuntimeError, OSError):
+        # `~nosuchuser/x` — pathlib raises where `os.path.expanduser` hands the
+        # string back unchanged. Not a path, then; try the id.
+        candidate = None
+    task_id = None
     try:
         task_id = int(str(target).strip())
     except (TypeError, ValueError):
+        pass
+
+    if candidate is not None and candidate.exists():
+        if task_id is None or slr.read_header(candidate) is not None:
+            return candidate
+
+    if task_id is None:
         print(f"No such file: {target}", file=sys.stderr)
         return None
 
@@ -2060,7 +2076,12 @@ def _resolve_session_target(root: Path, target: str, attempt=None):
             if (slr.parse_log_name(p.name) or {}).get("attempt") == attempt
         ]
     if not found:
-        where = f"task {task_id}" + (f" attempt {attempt}" if attempt else "")
+        # `is not None`, not truthiness: attempts are 1-based, so `--attempt 0`
+        # matches nothing and reporting "no log for task N" would name a
+        # different problem from the one the operator has.
+        where = f"task {task_id}"
+        if attempt is not None:
+            where += f" attempt {attempt}"
         print(f"No session log for {where} under {root}", file=sys.stderr)
         return None
     return found[0]
@@ -2100,6 +2121,15 @@ def cmd_session_list(args):
             f"task {task}-{attempt}  {_fmt_bytes(row['size']):>9}  {state}"
         )
         print(f"      {row['name']}")
+        if row["header_user_id"]:
+            # The owner shown is the *directory*, which is what the scoping uses;
+            # a header naming somebody else is a file that did not come from
+            # where it sits, and saying nothing would leave an operator reading
+            # it as that user's run.
+            print(
+                f"      ! header claims user {row['header_user_id']} — "
+                f"filed under {row['user_id']}"
+            )
 
 
 def _print_session_header(header: dict, path: Path, row: dict) -> None:
@@ -2152,6 +2182,67 @@ def _indent(text, prefix) -> str:
     return "\n".join(prefix + line for line in str(text).splitlines()) or prefix
 
 
+def _print_record(record) -> None:
+    """One conversation record, in the place the run put it.
+
+    A ``message`` is the common case; the other four are mid-run events, and
+    printing them **here rather than as a summary at the end** is the whole
+    point. A steer and a nudge are injections, so a transcript that omits them
+    shows a user turn arriving in the middle of an agent loop with nothing
+    saying where it came from — an operator then reads a steered run as one the
+    model wandered into, or attributes to the user a sentence the turn-budget
+    nudge wrote. Position carries the same weight for the other two: a
+    compaction explains why the model forgot something, and *which two turns it
+    landed between* is the fact, not that it happened.
+    """
+    kind = record.get("type")
+    stamp = record.get("ts", "")
+    if kind == "message":
+        message = record.get("message") or {}
+        role = message.get("role", "?")
+        if role == "assistant":
+            head = f"assistant ({message.get('stop_reason') or '-'})"
+        elif role == "tool_result":
+            state = "error" if message.get("is_error") else "ok"
+            head = f"tool_result {message.get('tool_name') or '?'} ({state})"
+        else:
+            head = role
+        print(f"{stamp}  {head}")
+        _print_blocks(message.get("content"))
+    elif kind == "steer":
+        # Labelled as an injection rather than as a user message, because that
+        # is what distinguishes it from the turn it is about to become.
+        print(f"{stamp}  steer (injected mid-run)")
+        print(_indent(record.get("text") or "", "    "))
+    elif kind == "nudge":
+        # The framework talking to the model about its own turn budget, not the
+        # user. `remaining` is the number the notice leads with.
+        print(
+            f"{stamp}  nudge ({record.get('phase') or '-'}): "
+            f"{record.get('remaining')} of {record.get('max_turns')} turns remaining"
+        )
+    elif kind == "compaction":
+        print(
+            f"{stamp}  compaction ({record.get('trigger') or '-'}): dropped "
+            f"{record.get('messages_dropped')} messages"
+        )
+        summary = record.get("summary")
+        if summary:
+            print(_indent(summary, "    "))
+    elif kind == "error":
+        print(f"{stamp}  error: {record.get('kind')}: {record.get('message')}")
+    elif kind == "serialization_error":
+        # A record the writer could not serialize. Shown in place because the
+        # only thing it says is "something is missing here", which is a claim
+        # about a position in the run.
+        print(
+            f"{stamp}  serialization error: a {record.get('record_type') or '?'} "
+            f"record was lost ({record.get('error')})"
+        )
+    else:
+        print(f"{stamp}  {kind}")
+
+
 def cmd_session_show(args):
     """Render one session log as readable text."""
     from .session import session_log_read as slr
@@ -2191,26 +2282,8 @@ def cmd_session_show(args):
         )
 
     for record in out["records"]:
-        message = record.get("message") or {}
-        role = message.get("role", "?")
-        if role == "assistant":
-            head = f"assistant ({message.get('stop_reason') or '-'})"
-        elif role == "tool_result":
-            state = "error" if message.get("is_error") else "ok"
-            head = f"tool_result {message.get('tool_name') or '?'} ({state})"
-        else:
-            head = role
         print(f"\n{_SESSION_RULE}")
-        print(f"{record.get('ts', '')}  {head}")
-        _print_blocks(message.get("content"))
-
-    for entry in digest["compactions"]:
-        print(
-            f"\ncompaction ({entry['trigger']}): dropped "
-            f"{entry['messages_dropped']} messages"
-        )
-    for entry in digest["errors"]:
-        print(f"\nerror: {entry['kind']}: {entry['message']}")
+        _print_record(record)
 
     print(f"\n{_SESSION_RULE}")
     result = digest["result"]
@@ -2230,6 +2303,24 @@ def cmd_session_show(args):
             f"display capped: {out['records_returned']} of {out['records_total']} "
             f"records shown (--full for all)"
         )
+        # The mid-run events are rendered in place, so a cut display can drop
+        # the compaction or the error that explains the whole run. Counting them
+        # from the digest — which reads the file whole — is what keeps the cut
+        # from being a silent one.
+        held = [
+            (len(digest["compactions"]), "compaction"),
+            (len(digest["errors"]), "error"),
+            (digest["steers"], "steer"),
+            (digest["nudges"], "nudge"),
+        ]
+        present = [f"{count} {label}" for count, label in held if count]
+        if present:
+            notes.append("this run also holds " + ", ".join(present) + " record(s)")
+    if digest["serialization_errors"]:
+        notes.append(
+            f"{digest['serialization_errors']} record(s) the writer could not "
+            "serialize"
+        )
     if digest["malformed"]:
         notes.append(f"{digest['malformed']} malformed line(s) skipped")
     if digest["partial_tail"]:
@@ -2240,56 +2331,91 @@ def cmd_session_show(args):
 
 
 def cmd_session_tail(args):
-    """Print the end of a session log, and by default follow it."""
-    import time as _time
+    """Print the end of a session log, and by default follow it.
 
-    from .session import session_log_read as slr
+    The reader is deliberately not used here. `tail` prints raw JSONL lines and
+    follows by byte offset, so it works on bytes throughout; parsing each line
+    only to re-serialize it would spend the whole file's decode cost to print
+    what was already there, and would put a *second* rule for what a partial
+    trailing line is beside the one the offset arithmetic already implements.
+    """
+    import time as _time
 
     _config, root = _session_root(args)
     path = _resolve_session_target(root, args.target, args.attempt)
     if path is None:
         return 1
 
-    records = list(slr.read_records(path))
-    for record in records[-args.lines:] if args.lines > 0 else records:
-        print(json.dumps(record, ensure_ascii=False))
+    # One binary read produces both the records to print and the offset to
+    # resume from, and they have to come from the same read. Taking the offset
+    # from a fresh `getsize` after a separate `read_records` pass is wrong twice
+    # over, and both were measured. `read_records` stops *before* an
+    # unterminated trailing line, by contract — a live session always has one —
+    # so an offset past it makes the follow loop print that record's tail as
+    # though it were a whole line, which is the very thing the non-follow half
+    # refuses to do. And any record the writer completes between the end of the
+    # read and the `getsize` sits below the offset and is never printed by
+    # either half.
+    complete, offset = _read_complete_lines(path)
+    if complete is None:
+        return 1
+    lines = [line for line in complete.split(b"\n") if line.strip()]
+    for line in lines[-args.lines:] if args.lines > 0 else lines:
+        print(line.decode("utf-8", "replace"))
     if args.no_follow:
         return None
 
-    # Follow by byte offset rather than by re-reading: the file is append-only,
-    # so everything past the last complete line we consumed is new. A trailing
-    # partial line is left alone until its newline lands.
-    try:
-        offset = os.path.getsize(path)
-    except OSError:
-        return None
     polls = 0
     try:
         while args.poll_limit is None or polls < args.poll_limit:
             polls += 1
             try:
                 size = os.path.getsize(path)
-            except OSError:
+            except (OSError, ValueError):
                 break
+            if size < offset:
+                # Shorter than what we have already read: the file was replaced
+                # or truncated under us — the retention sweep unlinks under this
+                # root on the scheduler's interval. Say so and start over rather
+                # than waiting silently for a size that will never come back.
+                print("note: file truncated or replaced — following from the start")
+                offset = 0
+                continue
             if size > offset:
-                # Binary, so the offset the next poll resumes from is the byte
-                # count the seek needs. Decoding first and measuring the text
-                # would drift the moment a replacement character stood in for a
-                # multi-byte sequence, and a drifted offset prints fragments.
                 with open(path, "rb") as handle:
                     handle.seek(offset)
                     chunk = handle.read()
-                complete, newline, _partial = chunk.rpartition(b"\n")
+                body, newline, _partial = chunk.rpartition(b"\n")
                 if newline:
-                    for line in complete.split(b"\n"):
+                    for line in body.split(b"\n"):
                         text = line.decode("utf-8", "replace").strip()
                         if text:
                             print(text)
-                    offset += len(complete) + 1
+                    offset += len(body) + 1
             _time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
     return None
+
+
+def _read_complete_lines(path):
+    """``(bytes up to the last newline, byte offset just past it)``.
+
+    Binary, so the offset is the byte count a later `seek` needs: decoding first
+    and measuring the text drifts the moment a replacement character stands in
+    for a multi-byte sequence, and a drifted offset prints fragments. ``(None,
+    0)`` when the file cannot be read at all.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except (OSError, ValueError) as exc:
+        print(f"{path}: {exc}", file=sys.stderr)
+        return None, 0
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return b"", 0
+    return data[:cut], cut + 1
 
 
 def cmd_session_stats(args):

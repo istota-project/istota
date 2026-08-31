@@ -98,7 +98,9 @@ def tree(deployment):
         [_session(attempt=2), _context(), _user(), _assistant(text="half a run")],
     )
     full_session(root / "alice" / "2026-08-31T16-00-00-000Z_task-5000-1.jsonl")
-    full_session(root / "bob" / "2026-08-31T14-00-00-000Z_task-6000-1.jsonl")
+    full_session(
+        root / "bob" / "2026-08-31T14-00-00-000Z_task-6000-1.jsonl", user_id="bob",
+    )
     return cfg, root
 
 
@@ -180,6 +182,27 @@ class TestList:
         cfg, root = deployment
         cli.cmd_session_list(_FakeArgs(config=str(cfg)))
         assert "No session logs" in capsys.readouterr().out
+
+    def test_a_header_naming_another_user_is_flagged_rather_than_believed(
+        self, deployment, capsys,
+    ):
+        # The owner shown is the directory, which is the identity the scoping
+        # used; the header is file content. Saying nothing about a disagreement
+        # would leave an operator reading the row as bob's run.
+        cfg, root = deployment
+        write_log(
+            root / "alice" / f"{STAMP}_task-8100-1.jsonl",
+            [_session(task_id=8100, user_id="bob"), _context(), _user(), _result()],
+        )
+        cli.cmd_session_list(_FakeArgs(config=str(cfg)))
+        out = capsys.readouterr().out
+        assert "header claims user bob" in out
+        assert "filed under alice" in out
+
+    def test_an_agreeing_header_adds_no_line(self, tree, capsys):
+        cfg, _root = tree
+        cli.cmd_session_list(_FakeArgs(config=str(cfg)))
+        assert "header claims user" not in capsys.readouterr().out
 
 
 class TestShow:
@@ -284,6 +307,101 @@ class TestShow:
         assert "compaction (overflow): dropped 12 messages" in out
         assert "error: ProviderError: 429 rate limited" in out
 
+    def test_a_steer_is_rendered_where_it_landed(self, deployment, capsys):
+        # The one command an operator reads a transcript with. Without this the
+        # injected user turn below appears in the middle of an agent loop with
+        # nothing saying where it came from, and the run reads as one the model
+        # wandered into rather than one somebody redirected.
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-6500-1.jsonl"
+        write_log(
+            path,
+            [
+                _session(task_id=6500), _context(), _user(),
+                _assistant(text="looking at main", stop_reason="tool_use"),
+                {"type": "steer", "ts": "t", "text": "check the staging branch"},
+                _user("check the staging branch"),
+                _assistant(text="on staging now", stop_reason="end_turn"),
+                _result(),
+            ],
+        )
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        out = capsys.readouterr().out
+        assert "steer (injected mid-run)" in out
+        assert "check the staging branch" in out
+        # In place, not appended: the steer is between the turn it interrupted
+        # and the user turn it became.
+        assert out.index("looking at main") < out.index("steer (injected mid-run)")
+        assert out.index("steer (injected mid-run)") < out.index("on staging now")
+
+    def test_a_nudge_is_rendered_as_the_framework_and_not_as_the_user(
+        self, deployment, capsys,
+    ):
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-6310-1.jsonl"
+        write_log(
+            path,
+            [
+                _session(task_id=6310), _context(), _user(),
+                {"type": "nudge", "ts": "t", "phase": "late",
+                 "remaining": 5, "turns": 95, "max_turns": 100},
+                _assistant(text="wrapping up", stop_reason="end_turn"),
+                _result(),
+            ],
+        )
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        out = capsys.readouterr().out
+        assert "nudge (late): 5 of 100 turns remaining" in out
+
+    def test_a_lost_record_is_named_rather_than_passed_over(
+        self, deployment, capsys,
+    ):
+        # The writer's own marker for a record it could not serialize. Rendering
+        # nothing would let the operator believe they read the whole run, which
+        # is the failure the malformed count exists to prevent.
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-6320-1.jsonl"
+        write_log(
+            path,
+            [
+                _session(task_id=6320), _context(), _user(),
+                {"type": "serialization_error", "ts": "t",
+                 "record_type": "message", "error": "TypeError: not JSON"},
+                _result(),
+            ],
+        )
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        out = capsys.readouterr().out
+        assert "serialization error" in out
+        assert "1 record(s) the writer could not serialize" in out
+
+    def test_a_capped_display_says_what_the_run_also_holds(
+        self, deployment, capsys,
+    ):
+        # The mid-run events render in place now, so a cut display can drop the
+        # error that explains the whole run. The count comes from the digest,
+        # which reads the file whole.
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-6330-1.jsonl"
+        write_log(
+            path,
+            [
+                _session(task_id=6330), _context(),
+                _user("q" * 4000),
+                {"type": "steer", "ts": "t", "text": "check staging"},
+                {"type": "error", "ts": "t", "kind": "ProviderError",
+                 "message": "429 rate limited"},
+                _result(stop_reason="error", success=False),
+            ],
+        )
+        cli.cmd_session_show(
+            _FakeArgs(config=str(cfg), target=str(path), max_chars=100)
+        )
+        out = capsys.readouterr().out
+        assert "display capped" in out
+        assert "1 error" in out
+        assert "1 steer" in out
+
     def test_the_display_cap_reports_itself_and_full_lifts_it(
         self, deployment, capsys,
     ):
@@ -312,6 +430,28 @@ class TestShow:
         cfg, _root = tree
         assert cli.cmd_session_show(_FakeArgs(config=str(cfg), target="nope.jsonl")) == 1
         assert "No such file" in capsys.readouterr().err
+
+    def test_a_directory_named_like_a_task_id_does_not_shadow_the_task(
+        self, tree, capsys, monkeypatch, tmp_path,
+    ):
+        # `4471` names a task and, in whatever shell the operator is standing
+        # in, might also name a file. Taking the path unconditionally makes the
+        # failure name the wrong problem.
+        cfg, _root = tree
+        cwd = tmp_path / "cwd"
+        (cwd / "4471").mkdir(parents=True)
+        monkeypatch.chdir(cwd)
+        assert cli.cmd_session_show(_FakeArgs(config=str(cfg), target="4471")) is None
+        assert "task 4471" in capsys.readouterr().out
+
+    def test_a_missing_attempt_is_named_even_when_it_is_zero(self, tree, capsys):
+        # Attempts are 1-based, so `--attempt 0` matches nothing. Reporting "no
+        # log for task N" would name a different problem from the real one.
+        cfg, _root = tree
+        assert cli.cmd_session_show(
+            _FakeArgs(config=str(cfg), target="4471", attempt=0)
+        ) == 1
+        assert "task 4471 attempt 0" in capsys.readouterr().err
 
 
 class TestTail:
@@ -381,6 +521,72 @@ class TestTail:
         cli.cmd_session_tail(_FakeArgs(config=str(cfg), target=str(path), lines=0))
         lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert [json.loads(line)["type"] for line in lines] == ["session", "context"]
+
+    def test_a_partial_trailing_line_does_not_move_the_follow_offset(
+        self, deployment, capsys, monkeypatch,
+    ):
+        # The offset and the printed records have to come from one read. A
+        # separate `getsize` puts the offset *past* the unterminated line a live
+        # session always has, so the follow loop then prints that record's tail
+        # as though it were a whole line — the very thing the non-follow half
+        # refuses to do.
+        import time
+
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-6600-1.jsonl"
+        write_log(
+            path, [_session(task_id=6600), _context()],
+            trailing_newline=False, extra_lines=['{"type":"result","ts":"t"'],
+        )
+
+        finished = {"done": False}
+
+        def _sleep(_seconds):
+            if not finished["done"]:
+                finished["done"] = True
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(',"stop_reason":"completed"}\n')
+
+        monkeypatch.setattr(time, "sleep", _sleep)
+        cli.cmd_session_tail(
+            _FakeArgs(
+                config=str(cfg), target=str(path), lines=0,
+                no_follow=False, poll_limit=2, interval=0.0,
+            )
+        )
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        # Every line is whole JSON, and the completed record arrives entire.
+        assert [json.loads(line)["type"] for line in lines] == [
+            "session", "context", "result",
+        ]
+
+    def test_a_file_replaced_under_the_follow_loop_is_said_rather_than_hung_on(
+        self, deployment, capsys, monkeypatch,
+    ):
+        # The retention sweep unlinks under this root on the scheduler's
+        # interval. Waiting silently for a size that will never come back leaves
+        # a follower staring at nothing with no reason given.
+        import time
+
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-6610-1.jsonl"
+        write_log(path, [_session(task_id=6610), _context(), _result()])
+
+        replaced = {"done": False}
+
+        def _sleep(_seconds):
+            if not replaced["done"]:
+                replaced["done"] = True
+                write_log(path, [_session(task_id=6610)])
+
+        monkeypatch.setattr(time, "sleep", _sleep)
+        cli.cmd_session_tail(
+            _FakeArgs(
+                config=str(cfg), target=str(path), lines=0,
+                no_follow=False, poll_limit=3, interval=0.0,
+            )
+        )
+        assert "truncated or replaced" in capsys.readouterr().out
 
     def test_an_unresolvable_target_exits_non_zero(self, tree, capsys):
         cfg, _root = tree
