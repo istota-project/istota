@@ -1588,10 +1588,16 @@
   .attachments {
     display: flex;
     flex-wrap: wrap;
+    min-width: 0;
     gap: var(--space-1);
     margin-top: var(--space-1);
   }
   .attachment {
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--text-xs);
     color: var(--text-muted);
     background: var(--surface-base);
