@@ -4,6 +4,7 @@ import pytest
 
 from istota.llm.types import (
     AssistantMessage,
+    ImageContent,
     TextContent,
     ToolCallContent,
     ToolResultMessage,
@@ -16,6 +17,7 @@ from istota.session.compaction import (
     derive_reserve_tokens,
     estimate_context_tokens,
     find_cut_point,
+    find_image_message,
     should_compact,
 )
 from istota.session.messages import CompactionDetails, CompactionSummaryMessage
@@ -253,3 +255,83 @@ class TestCompactMessages:
         assert "elided to fit" in provider.prompt
         # The elided conversation section is bounded (plus fixed scaffolding).
         assert len(provider.prompt) < 30000
+
+
+class TestImageLossNotice:
+    """An ``ImageContent`` block matched neither serializer branch, so the
+    summarizer never learned an image had been in the conversation — and the
+    model carried on a multi-turn task believing it could still see one. The
+    notice is the floor; the pin below is what keeps the capability."""
+
+    @pytest.mark.asyncio
+    async def test_the_summary_prompt_names_each_lost_image(self):
+        from istota.llm.provider import StreamDone
+
+        class _RecordingProvider:
+            def __init__(self):
+                self.prompt = ""
+
+            async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+                self.prompt = messages[-1].content[0].text
+                yield StreamDone(message=AssistantMessage(content=[TextContent(text="S")]))
+
+        provider = _RecordingProvider()
+        msgs = [
+            UserMessage(
+                content=[
+                    TextContent(text="what is in these?"),
+                    ImageContent(media_type="image/png", data="AAAA", display_name="shot.png"),
+                    ImageContent(media_type="image/jpeg", data="BBBB", display_name="photo.jpg"),
+                ]
+            ),
+            _assistant("a screenshot and a photo"),
+        ]
+        await compact_messages(msgs, None, None, provider, "m", _to_llm)
+
+        assert "[image shot.png — no longer in context]" in provider.prompt
+        assert "[image photo.jpg — no longer in context]" in provider.prompt
+        # The base64 payload is never part of a summary prompt.
+        assert "AAAA" not in provider.prompt
+
+    def test_a_tool_result_image_is_named_too(self):
+        from istota.session.compaction import _serialize_for_summary
+
+        text = _serialize_for_summary(
+            [
+                ToolResultMessage(
+                    tool_call_id="c1",
+                    tool_name="screenshot",
+                    content=[
+                        TextContent(text="captured"),
+                        ImageContent(media_type="image/png", data="CCCC"),
+                    ],
+                )
+            ]
+        )
+        assert "captured" in text
+        assert "no longer in context" in text
+        assert "CCCC" not in text
+
+
+class TestFindImageMessage:
+    def test_returns_the_first_image_bearing_user_message(self):
+        img = UserMessage(
+            content=[
+                TextContent(text="look"),
+                ImageContent(media_type="image/png", data="AAAA", display_name="a.png"),
+            ]
+        )
+        assert find_image_message([_user("hi"), img, _assistant("ok")]) is img
+
+    def test_none_when_no_message_carries_an_image(self):
+        assert find_image_message([_user("hi"), _assistant("ok")]) is None
+
+    def test_a_tool_result_image_is_not_pinned(self):
+        # A ``ToolResultMessage`` must follow its ``tool_call``. Hoisting one to
+        # the head of the compacted list would strand it and 400 the request.
+        result = ToolResultMessage(
+            tool_call_id="c1",
+            tool_name="screenshot",
+            content=[ImageContent(media_type="image/png", data="AAAA")],
+        )
+        assert find_image_message([result]) is None

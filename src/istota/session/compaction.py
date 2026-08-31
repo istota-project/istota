@@ -27,6 +27,7 @@ import logging
 from istota.llm.tokens import estimate_tokens
 from istota.llm.types import (
     AssistantMessage,
+    ImageContent,
     TextContent,
     ToolResultMessage,
     UserMessage,
@@ -190,19 +191,55 @@ def _format_file_operations(details: CompactionDetails) -> str:
     return "Files touched this session:\n" + "\n".join(parts) + "\n\n"
 
 
+def _image_loss_notice(block: ImageContent) -> str:
+    """What the summarizer is told about an image block being cut.
+
+    An ``ImageContent`` matched neither serializer branch, so the summary never
+    recorded that an image had been in the conversation at all — and the model
+    went on answering from a picture it could no longer see, which is the exact
+    confident-blind failure this pipeline exists to prevent, reached through
+    compaction instead of through a retry. The base64 payload is deliberately
+    not rendered: the summary is a prompt, and the bytes are what the cut is
+    shedding.
+    """
+    return f"[image {block.display_name or 'attachment'} — no longer in context]"
+
+
+def find_image_message(messages: list):
+    """The first ``UserMessage`` in ``messages`` carrying image blocks, or None.
+
+    Used by the compaction assembly to pin the task's own attachments across the
+    cut. Restricted to ``UserMessage`` on purpose: a ``ToolResultMessage`` can
+    carry images too, and hoisting one to the head of the compacted list would
+    strand it from the ``tool_call`` it answers and 400 the next request.
+    """
+    for msg in messages:
+        if isinstance(msg, UserMessage) and any(
+            isinstance(c, ImageContent) for c in msg.content
+        ):
+            return msg
+    return None
+
+
 def _serialize_for_summary(llm_messages: list) -> str:
     """Render LLM messages to plain text for the summary prompt."""
     lines: list[str] = []
     for msg in llm_messages:
         role = getattr(msg, "role", "?")
         if isinstance(msg, ToolResultMessage):
-            text = "\n".join(getattr(c, "text", "") for c in msg.content)
+            text = "\n".join(
+                _image_loss_notice(c) if isinstance(c, ImageContent)
+                else getattr(c, "text", "")
+                for c in msg.content
+            )
             lines.append(f"[tool_result {msg.tool_name}]\n{text}")
             continue
         text_parts = []
         for c in getattr(msg, "content", []):
             if isinstance(c, TextContent):
                 text_parts.append(c.text)
+            elif isinstance(c, ImageContent):
+                text_parts.append(_image_loss_notice(c))
             elif getattr(c, "type", "") == "tool_call":
                 text_parts.append(f"[tool_call {c.name} {c.arguments}]")
         lines.append(f"{role}: {' '.join(p for p in text_parts if p)}")

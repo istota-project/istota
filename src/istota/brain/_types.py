@@ -143,6 +143,22 @@ class BrainRequest:
     # executor may leave it unset.
     session_label: str = ""
 
+    # Prepared image attachments for this task, in sender order
+    # (``image_attachments.prepare_image_attachments`` produces them). Empty for
+    # every caller that builds a text-only request, which is all of them but the
+    # task path.
+    #
+    # Each brain owns the provider-specific conversion, at the last moment:
+    # NativeBrain base64-encodes into initial content blocks, the Claude Code
+    # brains name the paths in a mandatory ``Read`` directive. So no image bytes
+    # and no base64 ever ride on the request itself — nothing large reaches a
+    # task row or a log line, and the executor learns no provider wire format.
+    #
+    # A fallback copy is ``dataclasses.replace(req, model=…, effort=…,
+    # advisor=…)``, which names no other field, so this carries across a reroute
+    # untouched and the fallback brain makes its own capability decision.
+    images: list[ImageInput] = field(default_factory=list)
+
 
 @dataclass
 class BrainResult:

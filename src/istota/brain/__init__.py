@@ -61,7 +61,7 @@ from ._roles import (
     get_portable_alias_names,
     set_alias_overrides,
 )
-from ._types import Brain, BrainConfig, BrainRequest, BrainResult
+from ._types import Brain, BrainConfig, BrainRequest, BrainResult, ImageInput
 from .claude_code import (
     ClaudeCodeBrain,
     is_usage_limit_banner,
@@ -135,6 +135,7 @@ __all__ = [
     "EFFORT_LEVELS",
     "COOLDOWN_STOP_REASONS",
     "ContextManagementEvent",
+    "ImageInput",
     "KNOWN_BRAIN_KINDS",
     "NativeBrain",
     "POSTURE_FAIL_CLEAN",

@@ -698,6 +698,42 @@ class TestFallbackIsVisibleOnStreamSurfaces:
         assert called, "a throwing hook stopped the fallback from running"
         assert result is not None and result.success is True
 
+    def test_the_fallback_copy_keeps_the_prepared_images(self, tmp_path):
+        """`_dc.replace` names only model / effort / advisor, so every other
+        field rides across untouched — including `images`. That is what lets the
+        fallback brain make its own vision-capability decision instead of
+        answering an image-bearing task blind, so it is pinned rather than
+        assumed."""
+        from istota.brain._types import BrainRequest, ImageInput
+
+        fb = _FakeBrain("native", BrainResult(True, "answer", stop_reason="completed"))
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native")
+        task = _make_task(source_type="cli")
+        images = [
+            ImageInput(
+                path=tmp_path / "shot.png",
+                media_type="image/png",
+                display_name="shot.png",
+            )
+        ]
+        req = BrainRequest(
+            prompt="p",
+            allowed_tools=[],
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+            images=images,
+        )
+
+        with contextmanager_chain([
+            patch("istota.executor.make_brain", return_value=fb),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+        ]):
+            _run_fallback(config, config.brain, "native", task, req)
+
+        assert fb.received_reqs[0].images == images
+
     def test_the_reroute_settles_the_primarys_buffered_stream(self, tmp_path):
         """A reroute is a stream boundary. Whatever the primary streamed into
         the shared delta buffer must be resolved *before* the notice, or the
