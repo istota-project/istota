@@ -31,13 +31,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
+import hashlib
 import json
 import logging
 import re
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
+from istota import __version__ as _ISTOTA_VERSION
 from istota import usage as usage_types
 from istota.agent.events import AgentEvent, _describe_tool_use, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
@@ -77,6 +81,12 @@ from istota.session.compaction import (
 from istota.session.loop_detection import detect_repeated_tool_calls
 from istota.session.messages import CompactionSummaryMessage
 from istota.session.retry import classify_error, extract_status_code
+from istota.session.session_log import (
+    SessionLogIdentity,
+    SessionLogPolicy,
+    SessionLogWriter,
+    resolve_session_log_dir,
+)
 from istota.session.usage import TaskUsage
 
 from ._aliases import CANONICAL_ROLES, split_effort
@@ -442,6 +452,108 @@ def _pick_turn_budget_nudge(
     return remaining, phase
 
 
+# --------------------------------------------------------------------------- #
+# Session log (per-attempt JSONL transcript)
+# --------------------------------------------------------------------------- #
+
+
+def make_session_log(req: BrainRequest, cfg) -> SessionLogWriter:
+    """The per-attempt transcript writer for *req*, or the disabled one.
+
+    ``SessionLogWriter(root=None)`` is the off switch — every method a no-op —
+    which is the whole reason there is no ``if self._log is not None`` at any
+    of the call sites below. Three conditions produce it: the feature is off,
+    or the caller has no task identity (a direct brain call — the sleep cycle,
+    the REPL, a test — which is not a task attempt and has nothing to name a
+    file after).
+
+    Never raises. Resolving the directory is a pure function and constructing
+    the writer opens nothing; the first filesystem access is ``open()``, which
+    carries the never-raises contract itself.
+    """
+    ident = SessionLogIdentity(
+        task_id=int(getattr(req, "task_id", 0) or 0),
+        attempt=int(getattr(req, "attempt", 0) or 0),
+        user_id=getattr(req, "user_id", "") or "",
+        source_type=getattr(req, "source_type", "") or "",
+        conversation_token=getattr(req, "conversation_token", "") or "",
+        is_group_chat=bool(getattr(req, "is_group_chat", False)),
+    )
+    policy = SessionLogPolicy(
+        max_content_chars=cfg.max_content_chars,
+        max_args_chars=cfg.max_args_chars,
+        include_thinking=cfg.include_thinking,
+    )
+    if not cfg.enabled or ident.task_id <= 0 or not ident.user_id:
+        return SessionLogWriter(None, ident, policy)
+    return SessionLogWriter(resolve_session_log_dir(req.db_path, cfg.dir), ident, policy)
+
+
+def _base_url_host(base_url: str) -> str:
+    """The host of the configured endpoint, and nothing else.
+
+    An operator can put a token in a URL *path*, so the whole ``base_url`` must
+    never reach the header; the host is the part with diagnostic value.
+    """
+    try:
+        return urlparse(str(base_url or "")).hostname or ""
+    except Exception:  # noqa: BLE001 — a header field must not fail a task
+        return ""
+
+
+def _tools_schema_sha(tools) -> str:
+    """SHA-256 over the sorted tool schemas.
+
+    Names go in the record whole; the schemas are large, near-identical across
+    tasks, and it is their *drift* the hash is there to expose.
+    """
+    try:
+        payload = sorted(
+            (dataclasses.asdict(t.schema) for t in (tools or [])),
+            key=lambda d: d.get("name", ""),
+        )
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    except Exception:  # noqa: BLE001 — see above
+        return ""
+
+
+def _estimated_tokens(messages) -> int | None:
+    """``estimate_context_tokens`` for a record field, never raising.
+
+    On the proactive path the estimate is a product value the compaction
+    decision already needed. On the overflow path nothing but the record wants
+    it, and a logging-only computation must not be able to turn a recoverable
+    context overflow into a failed task — the writer's own never-raises
+    contract covers what happens *inside* it, not the arguments handed to it.
+    """
+    try:
+        return estimate_context_tokens(messages)[0]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _details_dict(details) -> dict | None:
+    """``CompactionDetails`` as JSON, since the writer serializes with stdlib
+    ``json`` and a dataclass would land as a ``serialization_error`` line."""
+    if details is None:
+        return None
+    try:
+        return dataclasses.asdict(details)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _usage_dict(usage) -> dict | None:
+    if usage is None:
+        return None
+    try:
+        return dataclasses.asdict(usage)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _drain_one_steer(buffer: list) -> list:
     """Pop one buffered steer text and return it framed as a user turn.
 
@@ -675,9 +787,21 @@ class NativeBrain:
         return result
 
     def _execute_sync(self, req: BrainRequest) -> BrainResult:
+        # The session log is built here rather than inside the async body so
+        # that the `except` below — the one that catches everything
+        # `asyncio.run` lets through — can write the `error` record, and so
+        # that the terminal `result` record and the `close()` sit on the *one*
+        # path every return in `_execute_async` and every return in
+        # `_build_result` funnels through. The spec asks for `result()` at each
+        # of those four returns; one site downstream of all of them says the
+        # same thing and keeps saying it when a fifth is added.
+        log = make_session_log(req, self._config.session_log)
+        stats = {"turns": 0, "compactions": 0}
+        started = time.monotonic()
+
         async def _run_and_close() -> BrainResult:
             try:
-                return await self._execute_async(req)
+                return await self._execute_async(req, log, stats)
             finally:
                 # Close the per-task httpx client on the loop it was used on, so
                 # a long-running daemon doesn't leak an fd/socket per task
@@ -685,15 +809,37 @@ class NativeBrain:
                 await self._maybe_close_provider()
 
         try:
-            return asyncio.run(_run_and_close())
-        except Exception as e:  # noqa: BLE001 — never let the brain crash the worker
-            logger.exception("NativeBrain.execute raised")
-            return BrainResult(
-                success=False,
-                result_text=f"Execution error: {e}",
-                stop_reason="error",
-                model_used=req.model or self._config.model,
+            try:
+                result = asyncio.run(_run_and_close())
+            except Exception as e:  # noqa: BLE001 — never let the brain crash the worker
+                logger.exception("NativeBrain.execute raised")
+                # Both records, in this order: `error` says what went wrong,
+                # `result` says what the task was told.
+                log.error(e)
+                result = BrainResult(
+                    success=False,
+                    result_text=f"Execution error: {e}",
+                    stop_reason="error",
+                    model_used=req.model or self._config.model,
+                )
+            log.result(
+                success=result.success,
+                stop_reason=result.stop_reason,
+                # Deliberately uncapped: it is the deliverable, the same
+                # reasoning that put `result` in `events._UNCAPPED_EVENT_KINDS`.
+                result_text=result.result_text,
+                model_used=result.model_used,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                usage=_usage_dict(result.usage),
+                turns=stats["turns"],
+                compactions=stats["compactions"],
+                # So a reader can tell "the model saw a short result" from
+                # "the log is short".
+                truncated_records=log.truncated_records,
             )
+            return result
+        finally:
+            log.close()
 
     @staticmethod
     def _catalog_cache_dir(req: BrainRequest) -> Path | None:
@@ -814,7 +960,20 @@ class NativeBrain:
         except Exception:  # noqa: BLE001 — cleanup is best-effort
             logger.debug("provider aclose raised", exc_info=True)
 
-    async def _execute_async(self, req: BrainRequest) -> BrainResult:
+    async def _execute_async(
+        self,
+        req: BrainRequest,
+        log: SessionLogWriter | None = None,
+        stats: dict | None = None,
+    ) -> BrainResult:
+        # Both default so a direct caller of this method still works. A `None`
+        # log is the disabled writer, never a live one: opening a file from a
+        # path that did not go through `_execute_sync` would leave nothing to
+        # write the terminal `result` record or to close the handle.
+        if log is None:
+            log = SessionLogWriter(None, SessionLogIdentity(0, 0, ""), SessionLogPolicy())
+        if stats is None:
+            stats = {"turns": 0, "compactions": 0}
         abort = asyncio.Event()
         cancel_task: asyncio.Task | None = None
         if req.cancel_check is not None:
@@ -847,7 +1006,16 @@ class NativeBrain:
             )
 
         def _get_steering_messages() -> list:
-            return _drain_one_steer(steer_buffer)
+            # Peeked before the drain so the record carries the raw text the
+            # user sent rather than `_STEER_FRAME`'s wrapping of it — the frame
+            # is already in the `message` record the injection becomes, and a
+            # steered run is otherwise unexplainable: a user turn appears in the
+            # middle of an agent loop with nothing saying where it came from.
+            raw = steer_buffer[0] if steer_buffer else None
+            drained = _drain_one_steer(steer_buffer)
+            if drained and raw is not None:
+                log.steer(raw)
+            return drained
 
         model = req.model or self._config.model
         provider = _RetryingProvider(self._provider, abort)
@@ -885,6 +1053,30 @@ class NativeBrain:
                 logger.debug(
                     "native effort ignored: model=%s does not support thinking", model
                 )
+
+        # --- session log --------------------------------------------------
+        # Opened here, once the model and the effort are resolved, so the
+        # header can carry them. `api_key` and `extra_headers` are never in it
+        # and `base_url` is reduced to its host — that rule lives at this end,
+        # since `session_log.open` copies the mapping through.
+        log.open(
+            {
+                "brain": BRAIN_KIND,
+                "provider": self._config.provider,
+                "base_url_host": _base_url_host(self._config.base_url),
+                "model": model,
+                "effort": effort,
+                "reasoning_effort": reasoning_effort,
+                "max_turns": self._config.max_turns,
+                "max_tokens": self._config.max_tokens,
+                "context_window": (
+                    self._config.context_window or get_model_info(model).context_window
+                ),
+                "prompt_caching": self._config.prompt_caching,
+                "cwd": str(req.cwd),
+                "istota_version": _ISTOTA_VERSION,
+            }
+        )
 
         # --- event accumulation -------------------------------------------
         trace: list[dict] = []
@@ -945,6 +1137,25 @@ class NativeBrain:
                     await self._emit_progress(
                         req, _thinking_delta_event(ae.thinking)
                     )
+            elif event.type == "message_end":
+                # The whole message path, in one branch. The loop emits
+                # `message_end` for every message it produces — the assembled
+                # prompt, each injected steer or follow-up, each assistant turn
+                # (including an aborted one) and each tool result, serial or
+                # parallel — so user, assistant and tool_result records land in
+                # the exact order the run produced them, with no reordering to
+                # undo and no second source to keep in sync. `run_agent_loop_
+                # continue` shares `_run_loop`, so the overflow-recovery pass
+                # is covered by the same branch; measured before this was
+                # written, which is why the `tool_execution_end` route the spec
+                # held in reserve is not used.
+                #
+                # Deliberately *not* also hooked to `turn_end`: that event
+                # carries the same AssistantMessage `message_end` has already
+                # emitted, so recording both would write every assistant turn
+                # twice.
+                if event.message is not None:
+                    log.message(event.message)
             elif event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
                 entry = {"type": "tool", "text": desc}
@@ -980,6 +1191,11 @@ class NativeBrain:
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
+                    # For the `result` record's turn count. Every assistant
+                    # turn, not only the ones that carried tokens — the two
+                    # counters below answer a different question (cost
+                    # provenance) and a free turn is still a turn.
+                    stats["turns"] += 1
                     last_assistant_stop["value"] = msg.stop_reason or ""
                     # Capture the provider's error text so _build_result can
                     # surface it; the scheduler only sees result_text, and an
@@ -1062,6 +1278,16 @@ class NativeBrain:
                 "turn_budget_nudge fired remaining=%s phase=%s turns=%s/%s",
                 remaining, phase, turns, self._config.max_turns,
             )
+            # The nudge is injected via prepare_next_turn's returned list, so it
+            # never reaches `new_messages` and never emits `message_end`. Its
+            # own record is the only thing that explains why the model's tone
+            # changes partway through a run.
+            log.nudge(
+                phase=phase,
+                remaining=remaining,
+                turns=turns,
+                max_turns=self._config.max_turns,
+            )
             return _turn_budget_nudge_message(remaining, phase)
 
         async def prepare_next_turn(ctx: AgentContext, new_messages):
@@ -1106,6 +1332,21 @@ class NativeBrain:
                     )
                     compaction_state["summary"] = summary
                     compaction_state["details"] = details
+                    stats["compactions"] += 1
+                    # The messages this dropped are already in the file above
+                    # it, so the record does not repeat them. `trigger` is the
+                    # whole diagnostic value: proactive is the system working,
+                    # overflow (below) is it catching a miss.
+                    log.compaction(
+                        trigger="proactive",
+                        summary=summary,
+                        tokens_before=tokens,
+                        cut_index=cut,
+                        messages_dropped=len(to_compact),
+                        image_pinned=pin is not None,
+                        details=_details_dict(details),
+                        recovery_index=None,
+                    )
                     summary_msg = CompactionSummaryMessage(
                         summary=summary, tokens_before=tokens, details=details
                     )
@@ -1171,6 +1412,18 @@ class NativeBrain:
             system_prompt=self._extract_system_prompt(req),
             messages=[],
             tools=self._build_tools(req),
+        )
+        # Line 2 of the file, before the loop emits anything: the system prompt
+        # and the tool surface, recorded once rather than on every turn.
+        log.context(
+            context.system_prompt,
+            [t.schema.name for t in (context.tools or [])],
+            _tools_schema_sha(context.tools),
+            system_prompt_source=(
+                str(req.custom_system_prompt_path)
+                if req.custom_system_prompt_path is not None
+                else "builtin"
+            ),
         )
         prompt_msg = UserMessage(
             content=_initial_user_content(
@@ -1278,6 +1531,24 @@ class NativeBrain:
                         or derive_keep_recent_tokens(_rec_window)
                     ),
                     max_input_chars=_compaction_input_chars(_rec_window),
+                )
+                stats["compactions"] += 1
+                # Written before the no-summary check below, deliberately: a
+                # recovery that produced nothing records `summary: null` and
+                # then the run fails, and this record is what explains the
+                # failure. `messages_dropped` is counted by identity against
+                # the transcript rather than recomputed from `find_cut_point`
+                # — the cut rule lives in `_build_recovery_context` and a
+                # second copy of it here would be free to disagree.
+                _kept = {id(m) for m in recovery_ctx.messages}
+                log.compaction(
+                    trigger="overflow",
+                    recovery_index=recoveries,
+                    summary=summary or None,
+                    tokens_before=_estimated_tokens(transcript),
+                    messages_before=len(transcript),
+                    messages_dropped=sum(1 for m in transcript if id(m) not in _kept),
+                    details=_details_dict(details),
                 )
                 # If compaction produced no summary (the summary request itself
                 # overflowed and there was no prior summary to fall back on),
