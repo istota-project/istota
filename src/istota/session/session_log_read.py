@@ -88,6 +88,34 @@ _RESULT_PREVIEW_CHARS = 400
 # command ran.
 _ARGS_PREVIEW_CHARS = 240
 
+# Bounds on `--grep`, and they are about CPU rather than about correctness. The
+# second consumer is a skill verb whose pattern the *model* writes, running
+# host-side in the daemon's namespace, against a file that can run to megabytes
+# — and `re` has no step limit, so a catastrophically backtracking pattern is an
+# unbounded stall in a process the task is waiting on. Bounding both the pattern
+# and the subject caps the product. Neither bound is reachable by a pattern
+# anybody means: a 200-character regex and 64 KiB of one record's text are far
+# past what "find where it said X" needs.
+_MAX_GREP_PATTERN_CHARS = 200
+_MAX_GREP_SUBJECT_CHARS = 65536
+
+# What "the conversation" is, for a selector that does not narrow it. The three
+# kinds left out are the ones that are not turns: the `session` header and the
+# `context` block, which `digest` reports on their own, and `result`, which every
+# consumer renders as the terminal line rather than as part of the run.
+#
+# **A steer and a nudge are in it, and that is the reason this is a named list
+# rather than `kind == "message"`.** Both are mid-run injections, and a
+# transcript that drops them is unexplainable exactly where it matters most: a
+# user turn appears in the middle of an agent loop with nothing saying where it
+# came from, so a reader attributes to the user something the framework said, or
+# reads a steered run as one the model wandered into. `serialization_error` is
+# here for the same reason a malformed line is counted — it marks a record that
+# was lost, and its value is entirely positional.
+_CONVERSATION_KINDS = (
+    "message", "compaction", "steer", "nudge", "error", "serialization_error",
+)
+
 # `{stamp}_task-{id}-{attempt}` plus an optional collision suffix, which
 # `session_log_path` appends as `-{4 alnum}` and then `-{n}` on a second
 # collision. The task id and the attempt are the two fields the name exists to
@@ -138,7 +166,14 @@ def read_records(
     st = stats if stats is not None else ReadStats()
     try:
         handle = open(path, encoding="utf-8", errors="replace")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # `ValueError` and not only `OSError`: a path carrying a NUL byte raises
+        # `ValueError: embedded null byte` out of `open`, `stat` and `scandir`
+        # alike, and that is not an `OSError`, so every plain `except OSError`
+        # in this module would miss it. The one caller that hands these
+        # functions a name from outside the daemon is the skill verb, whose
+        # target the model writes. `session_log.resolve_session_log_dir` names
+        # the same hazard for the same reason.
         st.unreadable = f"{type(exc).__name__}: {exc}"
         return
     try:
@@ -157,7 +192,13 @@ def read_records(
                     continue
                 try:
                     record = json.loads(line)
-                except ValueError as exc:
+                except (ValueError, RecursionError) as exc:
+                    # `RecursionError` is the deep-nesting case the writer
+                    # already paid for in `_count_truncations`: a line of
+                    # 200,000 open brackets exhausts the interpreter's frame
+                    # limit inside the decoder, and it is not a `ValueError`.
+                    # A line that cannot be decoded is malformed whichever way
+                    # the decoder gave up.
                     st.malformed += 1
                     if not skip_malformed:
                         yield {
@@ -181,7 +222,7 @@ def read_records(
                     continue
                 st.records += 1
                 yield record
-    except OSError as exc:  # a read that fails partway through
+    except (OSError, ValueError) as exc:  # a read that fails partway through
         st.unreadable = f"{type(exc).__name__}: {exc}"
 
 
@@ -197,13 +238,13 @@ def read_header(path: Path | str) -> dict | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             first = handle.readline()
-    except OSError:
+    except (OSError, ValueError):
         return None
     if not first.strip():
         return None
     try:
         record = json.loads(first)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(record, dict) or record.get("type") != "session":
         return None
@@ -225,7 +266,7 @@ def read_last_record(path: Path | str) -> dict | None:
     """
     try:
         size = os.path.getsize(path)
-    except OSError:
+    except (OSError, ValueError):
         return None
     if size <= 0:
         return None
@@ -234,7 +275,7 @@ def read_last_record(path: Path | str) -> dict | None:
             window = min(size, _TAIL_WINDOW)
             handle.seek(size - window)
             chunk = handle.read(window)
-    except OSError:
+    except (OSError, ValueError):
         return None
 
     text = chunk.decode("utf-8", "replace")
@@ -252,7 +293,7 @@ def read_last_record(path: Path | str) -> dict | None:
             continue
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(record, dict):
             return record
@@ -295,20 +336,29 @@ def parse_log_name(name: str) -> dict | None:
 def _logs_in(directory: Path, task_id: int | None) -> list[Path]:
     """Every log directly in *directory*, newest first, symlinks excluded.
 
-    A symlink is never returned: the tree is bound into no sandbox, so a link in
-    it should not exist, and following one would let a file outside the root be
-    read as though it belonged to the user whose directory names it.
+    Neither the directory itself nor any entry in it may be a symlink. Both
+    halves are needed and only one of them is obvious: a symlinked *file* would
+    read a log from outside the root, and a symlinked *user directory* would
+    hand back every file under whatever it points at, filed under the user whose
+    name is on the link. The tree is bound into no sandbox, so a link in it
+    should not exist at all — this is defence in depth behind that, and it is
+    the finder the skill verb's ``ISTOTA_USER_ID`` scoping calls.
     """
     try:
+        if directory.is_symlink():
+            return []
+    except (OSError, ValueError):
+        return []
+    try:
         entries = list(os.scandir(directory))
-    except OSError:
+    except (OSError, ValueError):
         return []
     found: list[Path] = []
     for entry in entries:
         try:
             if entry.is_symlink() or not entry.is_file():
                 continue
-        except OSError:
+        except (OSError, ValueError):
             continue
         parsed = parse_log_name(entry.name)
         if parsed is None:
@@ -334,6 +384,10 @@ def find_logs(
     meant "every user" would turn one missing environment variable into a
     cross-user read. :func:`find_all_logs` is the deliberate, separately named
     way to span users.
+
+    A ``{root}/{user_id}`` that is itself a symlink finds nothing — see
+    :func:`_logs_in`. Name containment alone does not give scoping; the entry
+    the name resolves to has to be the directory it appears to be.
     """
     if not is_one_component(user_id):
         return []
@@ -350,14 +404,14 @@ def find_all_logs(root: Path | str, *, task_id: int | None = None) -> list[Path]
     root = Path(root)
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
-    except OSError:
+    except (OSError, ValueError):
         return []
     found: list[Path] = []
     for entry in entries:
         try:
             if entry.is_symlink() or not entry.is_dir():
                 continue
-        except OSError:
+        except (OSError, ValueError):
             continue
         found.extend(_logs_in(Path(entry.path), task_id))
     return sorted(found, key=lambda p: (p.name, str(p)), reverse=True)
@@ -411,7 +465,14 @@ def record_text(record: Any) -> str:
             if isinstance(value, str):
                 parts.append(value)
     else:
-        for key in ("text", "summary", "message", "traceback", "result_text", "kind"):
+        for key in (
+            "text", "summary", "message", "traceback", "result_text", "kind",
+            # A `serialization_error`'s own two fields. The writer emits that
+            # record when one record would not serialize, so it is the marker
+            # for a lost turn — a grep for what went wrong has to be able to
+            # reach it.
+            "error", "record_type",
+        ):
             value = record.get(key)
             if isinstance(value, str):
                 parts.append(value)
@@ -463,12 +524,13 @@ def summarize(path: Path | str) -> dict:
         "turns": None,
         "model": "",
         "brain": "",
+        "header_user_id": "",
     }
     try:
         info = os.stat(path)
         row["size"] = info.st_size
         row["mtime"] = info.st_mtime
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         row["reason"] = f"{type(exc).__name__}: {exc}"
         return row
 
@@ -478,10 +540,18 @@ def summarize(path: Path | str) -> dict:
         return row
 
     row["readable"] = True
-    for key in ("user_id", "task_id", "attempt", "model", "brain"):
+    for key in ("task_id", "attempt", "model", "brain"):
         value = header.get(key)
         if value is not None:
             row[key] = value
+    # `user_id` stays the *directory* the file was found in, deliberately, and
+    # is not overwritten by the header's. The directory is what `find_logs`
+    # scopes on, so it is the identity that carries the boundary; the header is
+    # file content. They agree on everything the writer produced, and where they
+    # disagree the displayed owner must be the one the scoping used.
+    claimed = header.get("user_id")
+    if isinstance(claimed, str) and claimed and claimed != row["user_id"]:
+        row["header_user_id"] = claimed
 
     last = read_last_record(path)
     if isinstance(last, dict) and last.get("type") == "result":
@@ -493,8 +563,56 @@ def summarize(path: Path | str) -> dict:
     return row
 
 
-def _unreadable(path: Path, reason: str) -> dict:
-    return {"ok": False, "reason": reason, "path": str(path)}
+def _empty_digest(path: Path, reason: str) -> dict:
+    """A `digest` that could not be produced, carrying every key one that could.
+
+    Same key set on both paths, deliberately. A consumer that checks ``ok``
+    reads the reason; one that forgets gets an empty answer rather than a
+    ``KeyError``, and there is a real window in which it matters — `digest` and
+    `excerpt` are two reads of the same path, and the retention sweep unlinks
+    ``*.jsonl`` under that root from the scheduler on an interval, so a file can
+    stop existing between them.
+    """
+    return {
+        "ok": False,
+        "reason": reason,
+        "path": str(path),
+        "header": None,
+        "context": None,
+        "turns": 0,
+        "tools": [],
+        "compactions": [],
+        "steers": 0,
+        "nudges": 0,
+        "errors": [],
+        "serialization_errors": 0,
+        "result": None,
+        "complete": False,
+        "records": 0,
+        "malformed": 0,
+        "partial_tail": 0,
+        "size": 0,
+        "mtime": 0.0,
+    }
+
+
+def _empty_excerpt(path: Path, reason: str) -> dict:
+    """An `excerpt` that could not be produced. See :func:`_empty_digest`."""
+    return {
+        "ok": False,
+        "reason": reason,
+        "path": str(path),
+        "header": None,
+        "records": [],
+        "records_total": 0,
+        "records_returned": 0,
+        "chars": 0,
+        "truncated": False,
+        "turn": None,
+        "turn_count": 0,
+        "malformed": 0,
+        "partial_tail": 0,
+    }
 
 
 def _header_or_reason(path: Path) -> tuple[dict | None, str]:
@@ -524,7 +642,7 @@ def digest(path: Path | str) -> dict:
     path = Path(path)
     header, reason = _header_or_reason(path)
     if header is None:
-        return _unreadable(path, reason)
+        return _empty_digest(path, reason)
 
     stats = ReadStats()
     tools: list[dict] = []
@@ -536,6 +654,7 @@ def digest(path: Path | str) -> dict:
     turns = 0
     steers = 0
     nudges = 0
+    serialization_errors = 0
     last_type = ""
 
     for record in read_records(path, stats=stats):
@@ -569,6 +688,7 @@ def digest(path: Path | str) -> dict:
                         "output_chars": 0,
                         "output_chars_total": 0,
                         "truncated": False,
+                        "images": 0,
                     }
                     tools.append(entry)
                     if entry["id"]:
@@ -590,14 +710,16 @@ def digest(path: Path | str) -> dict:
                         "output_chars": 0,
                         "output_chars_total": 0,
                         "truncated": False,
+                        "images": 0,
                     }
                     tools.append(entry)
-                shown, real, truncated = _output_size(message.get("content"))
+                shown, real, truncated, images = _output_size(message.get("content"))
                 entry["answered"] = True
                 entry["is_error"] = bool(message.get("is_error"))
                 entry["output_chars"] = shown
                 entry["output_chars_total"] = real
                 entry["truncated"] = truncated
+                entry["images"] = images
         elif kind == "compaction":
             compactions.append({
                 "trigger": record.get("trigger") or "",
@@ -610,6 +732,13 @@ def digest(path: Path | str) -> dict:
             steers += 1
         elif kind == "nudge":
             nudges += 1
+        elif kind == "serialization_error":
+            # The writer's own marker for a record it could not serialize. It is
+            # the same loss a malformed line is, arriving by a different route,
+            # so it gets the same treatment: counted and reported. Leaving it
+            # uncounted would let a reader believe they saw the whole run, which
+            # is the failure the malformed count exists to prevent.
+            serialization_errors += 1
         elif kind == "error":
             errors.append({
                 "kind": record.get("kind") or "",
@@ -649,6 +778,7 @@ def digest(path: Path | str) -> dict:
         "steers": steers,
         "nudges": nudges,
         "errors": errors,
+        "serialization_errors": serialization_errors,
         "result": result,
         "complete": last_type == "result",
         "records": stats.records,
@@ -659,19 +789,27 @@ def digest(path: Path | str) -> dict:
     }
 
 
-def _output_size(content: Any) -> tuple[int, int, bool]:
-    """``(chars in the log, chars before the writer's cap, truncated)``.
+def _output_size(content: Any) -> tuple[int, int, bool, int]:
+    """``(chars in the log, chars before the writer's cap, truncated, images)``.
 
-    The two differ exactly where the writer capped a block, and reporting both
-    is what lets a reader tell "the model saw a short result" from "the log is
-    short" — the same distinction ``truncated_records`` draws on the terminal
+    The first two differ exactly where the writer capped a block, and reporting
+    both is what lets a reader tell "the model saw a short result" from "the log
+    is short" — the same distinction ``truncated_records`` draws on the terminal
     record.
+
+    **An image is counted as an image and never as characters.** The writer
+    stores it as a descriptor of about 150 characters carrying the *decoded byte
+    length* of the picture, so folding that number into a character count made a
+    one-megabyte screenshot report ``output_chars = 1048576`` for a record that
+    occupies a line and a half. Two different units under one name is a figure
+    nobody can use.
     """
     shown = 0
     real = 0
+    images = 0
     truncated = False
     if not isinstance(content, list):
-        return 0, 0, False
+        return 0, 0, False, 0
     for block in content:
         if not isinstance(block, dict):
             continue
@@ -681,13 +819,10 @@ def _output_size(content: Any) -> tuple[int, int, bool]:
             total = block.get("chars_total")
             real += total if isinstance(total, int) else len(text)
         elif block.get("type") == "image":
-            size = block.get("bytes")
-            if isinstance(size, int):
-                shown += size
-                real += size
+            images += 1
         if block.get("truncated") is True:
             truncated = True
-    return shown, real, truncated
+    return shown, real, truncated, images
 
 
 # --------------------------------------------------------------------------
@@ -707,7 +842,10 @@ def excerpt(
 
     The selectors are checked in the order ``turn`` > ``tools`` > ``grep``, and
     with none of them the whole conversation is returned — which is what
-    ``session show`` renders. Records come back as they are in the file, minus
+    ``session show`` renders. "The conversation" is ``_CONVERSATION_KINDS``, so a
+    steer and a nudge come back in their place in the run rather than being
+    dropped as not-a-message; see that constant for why. Records come back as
+    they are in the file, minus
     thinking blocks unless *thinking* is set: thinking is the bulkiest part of a
     transcript and the least useful for "what went wrong", and handing a model
     its own prior reasoning anchors it on a path it already abandoned. The
@@ -728,18 +866,26 @@ def excerpt(
     path = Path(path)
     header, reason = _header_or_reason(path)
     if header is None:
-        out = _unreadable(path, reason)
-        out.update({"records": [], "records_total": 0, "records_returned": 0})
-        return out
+        return _empty_excerpt(path, reason)
+
+    if turn is not None and turn < 1:
+        # Turns are 1-based because the first assistant message is turn 1. A 0
+        # or a negative used to fall through the selector and hand back the
+        # assembled prompt, which is the one record the docstring says belongs
+        # to no turn — a wrong answer where a refusal was meant.
+        return _empty_excerpt(path, f"turn must be 1 or greater, got {turn}")
 
     pattern = None
     if grep:
+        if len(grep) > _MAX_GREP_PATTERN_CHARS:
+            return _empty_excerpt(
+                path,
+                f"grep pattern longer than {_MAX_GREP_PATTERN_CHARS} characters",
+            )
         try:
             pattern = re.compile(grep)
         except re.error as exc:
-            out = _unreadable(path, f"invalid grep pattern: {exc}")
-            out.update({"records": [], "records_total": 0, "records_returned": 0})
-            return out
+            return _empty_excerpt(path, f"invalid grep pattern: {exc}")
 
     stats = ReadStats()
     selected: list[dict] = []
@@ -755,21 +901,32 @@ def excerpt(
             current_turn = turn_count
 
         if turn is not None:
-            # A turn is bounded by its assistant message: everything after it
-            # up to the next one belongs to it, and the user prompt ahead of
-            # turn 1 belongs to no turn.
-            if current_turn != turn or (role is None and current_turn == 0):
+            # A turn is bounded by its assistant message: everything after it up
+            # to the next one belongs to it, and the assembled prompt ahead of
+            # turn 1 belongs to no turn. `current_turn` is 0 until the first
+            # assistant message, and `turn` is refused below 1 above, so this
+            # one comparison excludes the pre-turn records on its own.
+            if current_turn != turn:
                 continue
-            if kind not in ("message", "compaction", "steer", "nudge", "error"):
+            if kind not in _CONVERSATION_KINDS:
                 continue
         elif tools:
             if role != "tool_result":
                 continue
         elif pattern is not None:
-            if not pattern.search(record_text(record)):
+            # `context` is never searched: it carries the daemon's own system
+            # prompt, which is identical across nearly every task and is
+            # configuration rather than a record of this run. Every other
+            # selector already excludes it — by kind allowlist, by role, and by
+            # `kind != "message"` — so leaving grep as the one way to pull it
+            # back out would be an accident rather than a decision, and the
+            # consumer that supplies the pattern is model-facing.
+            if kind == "context":
+                continue
+            if not pattern.search(record_text(record)[:_MAX_GREP_SUBJECT_CHARS]):
                 continue
         else:
-            if kind != "message":
+            if kind not in _CONVERSATION_KINDS:
                 continue
 
         selected.append(_without_thinking(record) if not thinking else record)

@@ -161,12 +161,18 @@ def write_log(path: Path, records, *, trailing_newline=True, extra_lines=()) -> 
     return path
 
 
-def full_session(path: Path) -> Path:
-    """The canonical two-turn run: prompt, tool call, tool result, answer."""
+def full_session(path: Path, *, user_id="alice") -> Path:
+    """The canonical two-turn run: prompt, tool call, tool result, answer.
+
+    *user_id* goes in the header, and a fixture writing a file into another
+    user's directory has to set it: the reader treats a header that disagrees
+    with the directory as a fact worth reporting, so a fixture that disagrees by
+    accident makes every tree look like a tampered one.
+    """
     return write_log(
         path,
         [
-            _session(),
+            _session(user_id=user_id),
             _context(),
             _user(),
             _assistant(
@@ -196,7 +202,9 @@ def tree(tmp_path: Path) -> Path:
         [_session(attempt=2), _context(), _user(), _assistant(text="half a run")],
     )
     full_session(root / "alice" / "2026-08-31T16-00-00-000Z_task-5000-1.jsonl")
-    full_session(root / "bob" / "2026-08-31T14-00-00-000Z_task-6000-1.jsonl")
+    full_session(
+        root / "bob" / "2026-08-31T14-00-00-000Z_task-6000-1.jsonl", user_id="bob",
+    )
     return root
 
 
@@ -795,6 +803,246 @@ class TestRecordText:
     def test_it_never_raises_on_a_shape_it_has_not_seen(self):
         assert isinstance(reader.record_text({"type": "message", "message": 7}), str)
         assert isinstance(reader.record_text("not a dict"), str)
+
+
+class TestMidRunInjections:
+    """A steer and a nudge are why the default selector is a list of kinds.
+
+    Both are injections, and a transcript that drops them shows a user turn
+    arriving in the middle of an agent loop with nothing saying where it came
+    from — the reader then attributes to the user a sentence the framework
+    wrote, or reads a steered run as one the model wandered into. The spec calls
+    that "unexplainable", which is a stronger claim than "incomplete".
+    """
+
+    def _steered(self, path: Path) -> Path:
+        return write_log(
+            path,
+            [
+                _session(), _context(), _user(),
+                _assistant(text="one", calls=[("c1", "Bash", {"command": "a"})]),
+                _tool_result("c1", text="first output"),
+                {"type": "steer", "ts": "t", "text": "check staging first"},
+                {"type": "nudge", "ts": "t", "phase": "early",
+                 "remaining": 50, "turns": 50, "max_turns": 100},
+                _assistant(text="two", stop_reason="end_turn"),
+                _result(),
+            ],
+        )
+
+    def test_the_default_selection_carries_them_in_file_order(self, tmp_path):
+        path = self._steered(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        kinds = [r["type"] for r in reader.excerpt(path)["records"]]
+        assert kinds == [
+            "message", "message", "message", "steer", "nudge", "message",
+        ]
+
+    def test_the_steer_text_survives_the_selection(self, tmp_path):
+        path = self._steered(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert "check staging first" in json.dumps(reader.excerpt(path)["records"])
+
+    def test_the_header_and_the_terminal_record_are_not_conversation(self, tmp_path):
+        # `session`, `context` and `result` are reported on their own by
+        # `digest`; including them here would render the system prompt as a turn.
+        path = self._steered(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        kinds = {r["type"] for r in reader.excerpt(path)["records"]}
+        assert kinds.isdisjoint({"session", "context", "result"})
+
+    def test_a_turn_carries_the_injections_that_landed_inside_it(self, tmp_path):
+        path = self._steered(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        kinds = [r["type"] for r in reader.excerpt(path, turn=1)["records"]]
+        assert kinds == ["message", "message", "steer", "nudge"]
+
+    def test_a_serialization_error_is_a_conversation_record(self, tmp_path):
+        # It marks a record that was lost, so its whole value is positional.
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [
+                _session(), _context(), _user(),
+                {"type": "serialization_error", "ts": "t",
+                 "record_type": "message", "error": "TypeError: not JSON"},
+                _assistant(text="ok", stop_reason="end_turn"),
+                _result(),
+            ],
+        )
+        kinds = [r["type"] for r in reader.excerpt(path)["records"]]
+        assert "serialization_error" in kinds
+        assert reader.digest(path)["serialization_errors"] == 1
+
+    def test_a_serialization_error_is_reachable_by_grep(self, tmp_path):
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [
+                _session(), _context(), _user(),
+                {"type": "serialization_error", "ts": "t",
+                 "record_type": "message", "error": "TypeError: not JSON"},
+                _result(),
+            ],
+        )
+        assert reader.excerpt(path, grep="TypeError")["records"]
+
+
+class TestExcerptRefusals:
+    def test_turn_zero_is_refused_rather_than_answered(self, tmp_path):
+        # Turns are 1-based. A 0 used to fall through the selector and hand back
+        # the assembled prompt, which belongs to no turn — a wrong answer where
+        # a refusal was meant.
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        out = reader.excerpt(path, turn=0)
+        assert out["ok"] is False
+        assert out["records"] == []
+        assert "1 or greater" in out["reason"]
+
+    def test_a_negative_turn_is_refused(self, tmp_path):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert reader.excerpt(path, turn=-1)["ok"] is False
+
+    def test_an_overlong_grep_pattern_is_refused(self, tmp_path):
+        # The second consumer's pattern is written by a model, `re` has no step
+        # limit, and the file runs to megabytes. Bounding the pattern and the
+        # subject caps the product.
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        out = reader.excerpt(path, grep="a" * 201)
+        assert out["ok"] is False
+        assert "longer than" in out["reason"]
+        assert reader.excerpt(path, grep="a" * 200)["ok"] is True
+
+    def test_grep_never_returns_the_context_record(self, tmp_path):
+        # The system prompt is configuration, not a record of this run, and grep
+        # is the one selector that could otherwise reach it.
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        out = reader.excerpt(path, grep="helpful assistant")
+        assert [r for r in out["records"] if r["type"] == "context"] == []
+
+    def test_an_unreadable_excerpt_carries_the_same_keys_as_a_readable_one(
+        self, tmp_path,
+    ):
+        # `digest` and `excerpt` are two reads of one path, and the retention
+        # sweep unlinks under that root on an interval, so a caller can hold a
+        # readable answer and get an unreadable one. A missing key there is a
+        # KeyError in a consumer that already checked `ok` once.
+        good = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert set(reader.excerpt(good)) == set(reader.excerpt(tmp_path / "gone.jsonl"))
+
+    def test_an_unreadable_digest_carries_the_same_keys_as_a_readable_one(
+        self, tmp_path,
+    ):
+        good = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert set(reader.digest(good)) == set(reader.digest(tmp_path / "gone.jsonl"))
+
+
+class TestImagesAreCountedAsImages:
+    def test_an_image_result_reports_a_picture_and_not_a_character_count(
+        self, tmp_path,
+    ):
+        # The descriptor carries the *decoded byte length* of the picture.
+        # Folding that into a character count made a one-megabyte screenshot
+        # report `output_chars = 1048576` for a record occupying a line and a
+        # half — two different units under one name.
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [
+                _session(), _context(), _user(),
+                _assistant(calls=[("c1", "Shot", {})]),
+                {
+                    "type": "message", "ts": "t",
+                    "message": {
+                        "role": "tool_result", "tool_call_id": "c1",
+                        "tool_name": "Shot", "is_error": False,
+                        "content": [
+                            {"type": "text", "text": "ok"},
+                            {"type": "image", "media_type": "image/png",
+                             "display_name": "shot.png", "bytes": 1_048_576,
+                             "sha256": "a3f9"},
+                        ],
+                    },
+                },
+                _result(),
+            ],
+        )
+        tool = reader.digest(path)["tools"][0]
+        assert tool["images"] == 1
+        assert tool["output_chars"] == len("ok")
+        assert tool["output_chars_total"] == len("ok")
+
+    def test_a_text_only_result_reports_no_images(self, tmp_path):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert reader.digest(path)["tools"][0]["images"] == 0
+
+
+class TestScopingIsAboutTheDirectoryAndNotTheName:
+    def test_a_symlinked_user_directory_finds_nothing(self, tmp_path):
+        # `find_logs` is what the skill verb's ISTOTA_USER_ID scoping calls. A
+        # symlinked *user directory* would hand back every file under whatever
+        # it points at, filed under the name on the link — name containment
+        # alone is not scoping.
+        root = tmp_path / "logs"
+        full_session(root / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        (root / "bob").symlink_to(root / "alice", target_is_directory=True)
+        assert reader.find_logs(root, "alice")
+        assert reader.find_logs(root, "bob") == []
+
+    def test_find_all_logs_does_not_follow_a_symlinked_user_directory(self, tmp_path):
+        root = tmp_path / "logs"
+        full_session(root / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        (root / "bob").symlink_to(root / "alice", target_is_directory=True)
+        assert len(reader.find_all_logs(root)) == 1
+
+    def test_summarize_reports_a_header_that_disagrees_with_the_directory(
+        self, tmp_path,
+    ):
+        # The displayed owner is the directory, because that is the identity the
+        # scoping used. The header is file content, and where the two disagree
+        # the disagreement is the thing worth saying.
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [_session(user_id="bob"), _context(), _user(), _result()],
+        )
+        row = reader.summarize(path)
+        assert row["user_id"] == "alice"
+        assert row["header_user_id"] == "bob"
+
+    def test_an_agreeing_header_reports_no_disagreement(self, tmp_path):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert reader.summarize(path)["header_user_id"] == ""
+
+
+class TestDecoderGivingUp:
+    def test_a_deeply_nested_line_is_counted_as_malformed(self, tmp_path):
+        # A line of 200,000 open brackets exhausts the interpreter's frame limit
+        # inside the decoder, and `RecursionError` is not a `ValueError`. A line
+        # that cannot be decoded is malformed whichever way the decoder gave up.
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(
+            path, [_session(), _context()],
+            extra_lines=["[" * 200_000, json.dumps(_result())],
+        )
+        stats = reader.ReadStats()
+        kinds = [r["type"] for r in reader.read_records(path, stats=stats)]
+        assert kinds == ["session", "context", "result"]
+        assert stats.malformed == 1
+
+    def test_a_deeply_nested_first_line_is_not_a_header(self, tmp_path):
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [], extra_lines=["[" * 200_000, json.dumps(_result())])
+        assert reader.read_header(path) is None
+
+    @pytest.mark.parametrize("call", [
+        lambda p: list(reader.read_records(p)),
+        lambda p: reader.read_header(p),
+        lambda p: reader.read_last_record(p),
+        lambda p: reader.summarize(p),
+        lambda p: reader.digest(p),
+        lambda p: reader.excerpt(p),
+    ])
+    def test_a_path_carrying_a_nul_byte_degrades_rather_than_raising(
+        self, tmp_path, call,
+    ):
+        # `ValueError: embedded null byte`, which is not an `OSError`, so every
+        # plain `except OSError` in the module would miss it. The consumer that
+        # hands these functions a name from outside the daemon is the skill
+        # verb, whose target the model writes.
+        call(str(tmp_path / "a\x00b.jsonl"))
 
 
 def test_the_reader_reads_what_the_writer_writes(tmp_path):
