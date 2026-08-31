@@ -435,6 +435,7 @@ class TestTheScrubHoldsUnderARealRun:
         for name in NO_PROXY_NAMES:
             env.pop(name, None)
         env.update(env_extra)
+        env["PY_COLORS"] = "0"
         return subprocess.run(
             [
                 sys.executable, "-m", "pytest",
@@ -460,7 +461,12 @@ class TestTheScrubHoldsUnderARealRun:
             f"claims:\n{result.stdout[-2000:]}"
         )
 
-    def test_the_control_goes_red_without_the_scrub(self):
+    def test_the_control_goes_red_without_the_scrub(self, monkeypatch):
+        # Keep the child dotenv loader from restoring this worktree's explicit
+        # colour default while leaving FORCE_COLOR in control of pytest.
+        monkeypatch.setenv("PY_COLORS", "")
+        monkeypatch.setenv("NO_COLOR", "")
+        monkeypatch.setenv("FORCE_COLOR", "3")
         result = self._run({**self.POLLUTION, NO_SCRUB_FLAG: "1"})
 
         assert result.returncode != 0, (
