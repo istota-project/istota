@@ -122,10 +122,12 @@ _MODE_FAMILY = {
     "I": "L",
     "I;16": "L",
     "F": "L",
+    "La": "L",
     "P": "RGB",
     "PA": "RGB",
     "RGB": "RGB",
     "RGBA": "RGB",
+    "RGBa": "RGB",
     "RGBX": "RGB",
 }
 
@@ -181,7 +183,9 @@ OCR_MAX_CHARS_TOTAL = 48_000
 # A display name is untrusted: it is whatever the sender called the file, and
 # it is rendered into the prompt. Newlines would let it forge a block heading.
 MAX_DISPLAY_NAME_CHARS = 128
-_UNSAFE_NAME_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+_UNSAFE_NAME_CHARS = re.compile(
+    r"[\x00-\x1f\x7f\u0085\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+"
+)
 _UNSAFE_STEM_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 # A whitespace-delimited token starting at `/` with at least one more `/` in
@@ -306,19 +310,29 @@ def prepare_image_attachments(
         # model, and an image the model is never told about is exactly the
         # confident blind answer this change exists to prevent.
         logger.debug("Pillow not available; image attachments left unprepared")
-        return ImagePreparation(
-            attachments,
-            [],
-            [
+        candidates = [
+            candidate
+            for candidate in attachments
+            if Path(candidate).suffix.lstrip(".").lower() in IMAGE_EXTENSIONS
+        ]
+        reason = "image support is unavailable on this deployment"
+        notices = [
+            _omission(_display_name(candidate), candidate, reason)
+            for candidate in candidates[:MAX_IMAGES]
+        ]
+        if len(candidates) > MAX_IMAGES:
+            # Bounded like the normal path. Without this a 200-image send would
+            # render 200 notices into the prompt.
+            notices.append(
                 _omission(
-                    _display_name(candidate),
-                    candidate,
-                    "image support is unavailable on this deployment",
+                    f"and {len(candidates) - MAX_IMAGES} more",
+                    "",
+                    reason,
                 )
-                for candidate in attachments
-                if Path(candidate).suffix.lstrip(".").lower() in IMAGE_EXTENSIONS
-            ],
-        )
+            )
+        # `list(...)`, matching the normal path: the two returns must not
+        # differ in whether the caller's own list is aliased.
+        return ImagePreparation(list(attachments), [], notices)
 
     _register_heif_opener()
 
@@ -353,7 +367,7 @@ def prepare_image_attachments(
             continue
         if encoded_used >= MAX_ENCODED_BYTES:
             blocks[index] = _omission(
-                name, attachment, "the image payload byte budget was exhausted by earlier images"
+                name, attachment, _byte_budget_reason(encoded_used)
             )
             continue
 
@@ -361,6 +375,11 @@ def prepare_image_attachments(
             index, attachment, out_dir, task_id, name, Image, ImageOps, UnidentifiedImageError
         )
         if rendered.error or rendered.vision_path is None:
+            # A failure between the two saves leaves the first one on disk with
+            # nothing referencing it, so the refusal path discards exactly as
+            # the byte-budget path does. `written` is empty when the source
+            # needed no rewrite, so this can never reach the original file.
+            _discard(rendered.written, task_id, name)
             blocks[index] = _omission(name, attachment, rendered.error or "it could not be read")
             continue
 
@@ -371,9 +390,7 @@ def prepare_image_attachments(
             # rather than leaving a file the sweeper will carry for its whole
             # retention window.
             _discard(rendered.written, task_id, name)
-            blocks[index] = _omission(
-                name, attachment, "the image payload byte budget was exhausted by earlier images"
-            )
+            blocks[index] = _omission(name, attachment, _byte_budget_reason(encoded_used))
             continue
 
         encoded_used += encoded
@@ -417,6 +434,12 @@ def _render_one(
 ) -> _Rendered:
     """Turn one candidate into up to two renditions, or into a refusal."""
     source = Path(attachment)
+    # Shared with `_write_renditions` rather than returned by it, so a failure
+    # between the two saves still names the file the first one wrote. Building
+    # a fresh `_Rendered(error=...)` in the handlers below would forget it, and
+    # `_discard` only ever sees `rendered.written` — leaving an orphaned
+    # rendition on disk with nothing referencing it.
+    written: list[Path] = []
 
     try:
         if not source.is_file():
@@ -431,7 +454,7 @@ def _render_one(
         return _Rendered(
             error=(
                 f"the source file is too large "
-                f"({_mib(size_bytes)} MiB, limit {_mib(MAX_SOURCE_BYTES)} MiB)"
+                f"({_mib_up(size_bytes)} MiB, limit {_mib(MAX_SOURCE_BYTES)} MiB)"
             )
         )
 
@@ -444,25 +467,29 @@ def _render_one(
                 return _Rendered(
                     error=(
                         f"it declares too many pixels "
-                        f"({_mp(width * height)} MP, limit {_mp(MAX_SOURCE_PIXELS)} MP)"
+                        f"({_mp_up(width * height)} MP, limit {_mp(MAX_SOURCE_PIXELS)} MP)"
                     )
                 )
 
             return _write_renditions(
-                index, source, opened, out_dir, task_id, name, Image, ImageOps
+                index, source, opened, out_dir, task_id, name, written, Image, ImageOps
             )
     except UnidentifiedImageError:
-        return _Rendered(error="it could not be decoded as an image")
+        return _Rendered(error="it could not be decoded as an image", written=written)
     except Image.DecompressionBombError:
         # Pillow raises this above roughly 179 MP, well over our own ceiling.
         # Caught by name so the very largest declared images are refused for
         # having too many pixels rather than reported as corrupt.
-        return _Rendered(error="it declares too many pixels to decode safely")
+        return _Rendered(error="it declares too many pixels to decode safely", written=written)
     except MemoryError:
-        return _Rendered(error="it could not be decoded within available memory")
+        return _Rendered(
+            error="it could not be decoded within available memory", written=written
+        )
     except Exception as exc:
         _log_failure(task_id, name, "normalize", exc)
-        return _Rendered(error=f"it could not be prepared ({type(exc).__name__})")
+        return _Rendered(
+            error=f"it could not be prepared ({type(exc).__name__})", written=written
+        )
 
 
 def _write_renditions(
@@ -472,6 +499,7 @@ def _write_renditions(
     out_dir: Path,
     task_id: int,
     name: str,
+    written: list[Path],
     Image,
     ImageOps,
 ) -> _Rendered:
@@ -490,14 +518,21 @@ def _write_renditions(
     # Every format, not a GIF special case. TIFF is newly admitted here and is
     # the standard container for fax and multi-page scanner output, so a
     # 12-page scanned contract would otherwise arrive as page 1 in silence.
-    frames = _frame_count(opened)
+    # MPO is excluded, and it is the one exclusion worth being explicit about.
+    # An ordinary phone photo is frequently MPO, whose second image is a gain
+    # map, a depth map or a parallax pair rather than a page — telling the
+    # model "1 further frame was not read" invites it to tell the user their
+    # image was truncated when nothing was lost. It is still decoded as its
+    # first image, which is the picture.
+    frames = 1 if source_format == "MPO" else _frame_count(opened)
     note = ""
     if frames > 1:
         unit = "page" if source_format == "TIFF" else "frame"
-        plural = "" if frames - 1 == 1 else "s"
+        dropped = frames - 1
         note = (
-            f"first {unit} only; {frames - 1} further {unit}{plural} in this file "
-            f"were not read"
+            f"first {unit} only; {dropped} further "
+            f"{unit if dropped == 1 else unit + 's'} in this file "
+            f"{'was' if dropped == 1 else 'were'} not read"
         )
 
     if source_format in _DRAFT_FORMATS:
@@ -530,6 +565,7 @@ def _write_renditions(
     # decided separately.
     vision_icc = _icc_for(icc, decoded, output_format, flatten=not vision_keeps_alpha)
     ocr_icc = _icc_for(icc, decoded, output_format, flatten=True)
+    source_is_lossless = output_format == "WEBP" and _webp_is_lossless(source)
 
     needs_vision_rewrite = (
         vision_size != decoded.size
@@ -538,7 +574,6 @@ def _write_renditions(
         or orientation not in (0, 1)
     )
 
-    written: list[Path] = []
     if needs_vision_rewrite:
         vision_path = _save(
             decoded,
@@ -547,6 +582,7 @@ def _write_renditions(
             vision_size,
             flatten=not vision_keeps_alpha,
             icc=vision_icc,
+            lossless=source_is_lossless,
             Image=Image,
         )
         written.append(vision_path)
@@ -567,6 +603,7 @@ def _write_renditions(
             ocr_size,
             flatten=True,
             icc=ocr_icc,
+            lossless=source_is_lossless,
             Image=Image,
         )
         written.append(ocr_path)
@@ -591,7 +628,9 @@ def _write_renditions(
     )
 
 
-def _save(decoded, out_path: Path, output_format: str, size, *, flatten, icc, Image) -> Path:
+def _save(
+    decoded, out_path: Path, output_format: str, size, *, flatten, icc, lossless, Image
+) -> Path:
     """Write one rendition at `size`, in `output_format`."""
     prepared = _to_output_mode(decoded, output_format, flatten=flatten, Image=Image)
     if prepared.size != size:
@@ -606,7 +645,21 @@ def _save(decoded, out_path: Path, output_format: str, size, *, flatten, icc, Im
     elif output_format == "PNG":
         kwargs["optimize"] = True
     elif output_format == "WEBP":
-        kwargs["lossless"] = True
+        # Match the source's own compression rather than always writing
+        # lossless. Encoding a *lossy* WebP photo losslessly inflates it about
+        # thirtyfold on the same pixels — measured 21 KB at quality 85 against
+        # 637 KB lossless — which alone cuts a send's capacity from twenty
+        # images to nine against the encoded-byte budget. Lossy WebP is the
+        # common WebP on the web, and this branch only runs when a rewrite is
+        # needed at all, which is to say on the large images.
+        #
+        # Lossless is still right for the case that motivated keeping WebP as
+        # WebP: a lossless screenshot re-encoded lossily gets ringing on every
+        # glyph edge, and it is the OCR rendition that then reads it.
+        if lossless:
+            kwargs["lossless"] = True
+        else:
+            kwargs["quality"] = JPEG_QUALITY
     prepared.save(out_path, output_format, **kwargs)
     return out_path.resolve()
 
@@ -619,8 +672,14 @@ def _target_mode(decoded, output_format: str, *, flatten: bool) -> str:
     """
     if _has_alpha(decoded) and not flatten and output_format in ("PNG", "WEBP"):
         return "RGBA"
-    if output_format == "PNG" and decoded.mode in ("L", "1", "I;16", "I"):
-        # A grayscale scan stays grayscale rather than tripling in size.
+    if output_format in ("PNG", "JPEG") and decoded.mode in ("L", "1", "I;16", "I"):
+        # A grayscale scan stays grayscale rather than tripling its decoded
+        # buffer for the resize — which is on a worker thread — and forfeiting
+        # its grayscale ICC profile for nothing. JPEG is included because the
+        # pre-shrink this replaces kept "L" too (`executor.py`'s
+        # `elif img.mode not in ("RGB", "L")`), so dropping it here would be a
+        # regression rather than a decision. WebP stays out: it has no native
+        # grayscale.
         return "L"
     return "RGB"
 
@@ -654,6 +713,41 @@ def _out_path(out_dir: Path, index: int, source: Path, output_format: str, *, oc
     stem = _UNSAFE_STEM_CHARS.sub("_", source.stem).strip("._") or "image"
     suffix = ".ocr" if ocr else ""
     return out_dir / f"{index:02d}_{stem[:60]}{suffix}.{_SUFFIX[output_format]}"
+
+
+def _webp_is_lossless(source: Path) -> bool:
+    """Whether a WebP file holds a lossless bitstream.
+
+    Pillow does not report this — `Image.open(...).info` is identical for both
+    — and the difference is thirtyfold in the output, so it is read off the
+    container: a RIFF chunk of `VP8L` is lossless, `VP8 ` is lossy, and `VP8X`
+    is an extended header whose real bitstream chunk follows it.
+
+    Defaults to lossy when the file cannot be read or the chunks do not say,
+    which is the safe direction: guessing lossy costs a mild quality loss,
+    while guessing lossless costs an order of magnitude of the byte budget and
+    evicts other images from the send outright.
+    """
+    try:
+        with source.open("rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return False
+
+    if head[:4] != b"RIFF" or head[8:12] != b"WEBP":
+        return False
+
+    offset = 12
+    while offset + 8 <= len(head):
+        fourcc = head[offset : offset + 4]
+        if fourcc == b"VP8L":
+            return True
+        if fourcc == b"VP8 ":
+            return False
+        size = int.from_bytes(head[offset + 4 : offset + 8], "little")
+        # Chunks are padded to an even length.
+        offset += 8 + size + (size & 1)
+    return False
 
 
 def _icc_for(icc, decoded, output_format: str, *, flatten: bool):
@@ -695,7 +789,12 @@ def _fit_area(size) -> tuple[int, int]:
 
 
 def _has_alpha(image) -> bool:
-    return image.mode in ("RGBA", "LA", "PA") or "transparency" in image.info
+    # "La" and "RGBa" are the premultiplied forms. They matter beyond
+    # completeness: Pillow refuses every conversion out of "La", so an image in
+    # that mode missing from this list takes the plain-convert path and comes
+    # back to the user as "it could not be prepared (ValueError)" rather than
+    # being flattened.
+    return image.mode in ("RGBA", "LA", "PA", "La", "RGBa") or "transparency" in image.info
 
 
 def _frame_count(image) -> int:
@@ -743,9 +842,22 @@ def _run_ocr(
     per_image = min(OCR_MAX_CHARS_PER_IMAGE, OCR_MAX_CHARS_TOTAL // max(1, len(prepared)))
     used = 0
 
-    for index, image, ocr_path, note in prepared:
+    for position, (index, image, ocr_path, note) in enumerate(prepared):
         if _cancelled(cancel_check):
+            # Every remaining image still gets a block. `OcrBlock` promises one
+            # per candidate, and an image reaching the model with no notice at
+            # all is the confident blind answer this module exists to remove —
+            # `_cancelled` swallows exceptions, so a flaky cancel channel lands
+            # exactly here rather than stopping the send.
             logger.info("Image OCR cancelled for task %s", task_id)
+            for rest_index, rest_image, _, rest_note in prepared[position:]:
+                blocks[rest_index] = OcrBlock(
+                    rest_image.display_name,
+                    str(rest_image.path),
+                    KIND_UNAVAILABLE,
+                    detail="the task was cancelled before this image was read",
+                    note=rest_note,
+                )
             return
 
         remaining_time = deadline - time.monotonic()
@@ -913,6 +1025,18 @@ def encoded_len(byte_count: int) -> int:
     return 4 * ((max(0, byte_count) + 2) // 3)
 
 
+def _byte_budget_reason(encoded_used: int) -> str:
+    """Why this image got no payload — and whether removing others would help.
+
+    The model relays this to the user, so blaming "earlier images" for the
+    first attachment in a send would send them deleting attachments that were
+    never the problem.
+    """
+    if encoded_used == 0:
+        return "this image alone exceeds the image payload byte budget"
+    return "the image payload byte budget was exhausted by earlier images"
+
+
 def _omission(name: str, path: str, reason: str) -> OcrBlock:
     return OcrBlock(name, path, KIND_OMITTED, detail=_bounded(reason))
 
@@ -994,8 +1118,24 @@ def _as_int(value) -> int | None:
 
 
 def _mib(byte_count: int) -> int:
+    """The limit, floored. Pair with `_mib_up` for the measured value."""
     return byte_count // (1024 * 1024)
+
+
+def _mib_up(byte_count: int) -> int:
+    """The measured value, rounded up.
+
+    Floor division on both halves made every refusal in the band just above a
+    threshold read "the source file is too large (64 MiB, limit 64 MiB)",
+    which is where refusals cluster and which a model reasonably reports as a
+    bug.
+    """
+    return -(-byte_count // (1024 * 1024))
 
 
 def _mp(pixels: int) -> int:
     return pixels // 1_000_000
+
+
+def _mp_up(pixels: int) -> int:
+    return -(-pixels // 1_000_000)

@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 pytest.importorskip("PIL", reason="Pillow not installed")
-from PIL import Image, ImageOps  # noqa: E402
+from PIL import Image, ImageDraw, ImageOps  # noqa: E402
 
 from istota import image_attachments  # noqa: E402
 from istota.brain._types import ImageInput  # noqa: E402
@@ -51,6 +51,36 @@ def _noise(size):
     """A photo-like image that does not compress to nothing."""
     w, h = size
     return Image.frombytes("RGB", size, os.urandom(w * h * 3))
+
+
+def _photo(size):
+    """Smooth gradients plus mild grain — what a camera photo compresses like.
+
+    Pure `os.urandom` noise is pathological for every encoder and would make a
+    lossy-vs-lossless comparison measure the fixture rather than the code.
+    """
+    w, h = size
+    img = Image.new("RGB", size)
+    px = img.load()
+    for y in range(h):
+        for x in range(0, w, 4):
+            base = ((x * 255) // w, (y * 255) // h, ((x + y) * 255) // (w + h))
+            for dx in range(4):
+                if x + dx < w:
+                    px[x + dx, y] = base
+    return img
+
+
+def _screenshot(size):
+    """Large flat areas with hard edges — what a UI capture compresses like."""
+    w, h = size
+    img = Image.new("RGB", size, (250, 250, 250))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, w, h // 8], fill=(30, 30, 40))
+    for row in range(6):
+        top = h // 6 + row * (h // 10)
+        draw.rectangle([w // 20, top, w - w // 20, top + h // 40], fill=(20, 20, 20))
+    return img
 
 
 def _png(path: Path, size=(64, 48), color=(10, 20, 30), mode="RGB") -> Path:
@@ -501,6 +531,71 @@ class TestOutputFormat:
 
         assert prep.images[0].media_type == "image/webp"
 
+    def test_a_lossy_webp_photo_is_not_re_encoded_losslessly(self, tmp_path, ocr_calls):
+        """Encoding a lossy photo losslessly inflated it about thirtyfold.
+
+        That alone cut a send's capacity from twenty images to nine against the
+        encoded-byte budget, and lossy WebP is the common WebP on the web. The
+        rendition's own bitstream is the assertion, not a byte ratio: a ratio
+        on generated pixels measures the fixture more than the code.
+        """
+        src = tmp_path / "photo.webp"
+        _photo((2400, 1800)).save(src, "WEBP", quality=80)
+
+        prep = _prep([src], tmp_path)
+
+        out = prep.images[0].path
+        assert image_attachments._webp_is_lossless(out) is False
+        with Image.open(out) as rendition:
+            same_pixels = rendition.convert("RGB")
+        lossless_equivalent = tmp_path / "control.webp"
+        same_pixels.save(lossless_equivalent, "WEBP", lossless=True)
+        assert out.stat().st_size < lossless_equivalent.stat().st_size
+
+    def test_a_lossless_webp_screenshot_stays_lossless(self, tmp_path, ocr_calls):
+        """The case that motivated keeping WebP as WebP at all.
+
+        Re-encoding a lossless screenshot lossily puts ringing on every glyph
+        edge, and the OCR rendition is what then reads it.
+        """
+        src = tmp_path / "shot.webp"
+        _screenshot((2400, 1800)).save(src, "WEBP", lossless=True)
+
+        prep = _prep([src], tmp_path)
+
+        assert image_attachments._webp_is_lossless(prep.images[0].path) is True
+
+    @pytest.mark.parametrize("lossless", [True, False])
+    def test_the_webp_probe_reads_the_container_not_pillows_info(self, tmp_path, lossless):
+        """Pillow's `info` is identical either way, so the RIFF chunk decides."""
+        src = tmp_path / "x.webp"
+        _noise((200, 160)).save(src, "WEBP", **({"lossless": True} if lossless else
+                                               {"quality": 80}))
+
+        assert image_attachments._webp_is_lossless(src) is lossless
+
+    def test_an_unreadable_or_non_webp_file_probes_as_lossy(self, tmp_path):
+        """The safe default: guessing lossy costs quality, lossless costs the budget."""
+        junk = tmp_path / "junk.webp"
+        junk.write_bytes(b"not a riff container")
+
+        assert image_attachments._webp_is_lossless(junk) is False
+        assert image_attachments._webp_is_lossless(tmp_path / "absent.webp") is False
+
+    def test_a_grayscale_scan_stays_grayscale(self, tmp_path, ocr_calls):
+        """What the pre-shrink this replaces already did.
+
+        Upconverting triples the decoded buffer for the resize — on a worker
+        thread — and forfeits the source's grayscale profile for nothing.
+        """
+        src = tmp_path / "scan.jpg"
+        Image.new("L", (2480, 3508), 128).save(src, "JPEG")
+
+        prep = _prep([src], tmp_path)
+
+        with Image.open(prep.images[0].path) as out:
+            assert out.mode == "L"
+
     def test_a_screenshot_stays_png_so_ocr_does_not_read_jpeg_ringing(
         self, tmp_path, ocr_calls
     ):
@@ -666,6 +761,34 @@ class TestMultiFrame:
         note = _block(prep, "contract.tiff").note
         assert "11" in note and "page" in note
 
+    def test_the_dropped_count_agrees_with_its_verb(self, tmp_path, ocr_calls):
+        src = tmp_path / "two.tiff"
+        pages = [Image.new("RGB", (64, 48), (i * 40, 0, 0)) for i in range(2)]
+        pages[0].save(src, save_all=True, append_images=pages[1:])
+
+        prep = _prep([src], tmp_path)
+
+        assert "1 further page in this file was not read" in _block(prep, "two.tiff").note
+
+    def test_an_mpo_phone_photo_is_not_reported_as_truncated(self, tmp_path, ocr_calls):
+        """An ordinary phone photo is frequently MPO.
+
+        Its second image is a gain map, a depth map or a parallax pair rather
+        than a page, so "1 further frame was not read" invites the model to
+        tell the user their image was truncated when nothing was lost.
+        """
+        src = tmp_path / "IMG_0001.jpg"
+        frames = [_photo((400, 300)), _photo((400, 300))]
+        frames[0].save(src, "MPO", save_all=True, append_images=frames[1:])
+        with Image.open(src) as probe:
+            if (probe.format or "").upper() != "MPO":
+                pytest.skip("this Pillow build does not identify the file as MPO")
+
+        prep = _prep([src], tmp_path)
+
+        assert len(prep.images) == 1
+        assert _block(prep, "IMG_0001.jpg").note == ""
+
     def test_a_single_frame_image_gets_no_dropped_frame_notice(self, tmp_path, ocr_calls):
         src = _png(tmp_path / "still.png")
 
@@ -741,6 +864,72 @@ class TestBudgets:
         assert prep.images == []
         assert "time" in _block(prep, "late.png").detail
 
+    def test_a_lone_oversized_image_does_not_blame_earlier_images(
+        self, tmp_path, monkeypatch, no_ocr
+    ):
+        """The model relays this reason to the user.
+
+        Blaming "earlier images" for the only attachment in a send sends them
+        deleting attachments that were never the problem.
+        """
+        src = _png(tmp_path / "big.png", size=(256, 256))
+        monkeypatch.setattr(image_attachments, "MAX_ENCODED_BYTES", 8)
+
+        prep = _prep([src], tmp_path)
+
+        detail = _block(prep, "big.png").detail
+        assert "this image alone" in detail
+        assert "earlier images" not in detail
+
+    def test_a_refusal_does_not_report_the_measured_value_as_the_limit(
+        self, tmp_path, monkeypatch, no_ocr
+    ):
+        """Floor division on both halves read "64 MiB, limit 64 MiB".
+
+        That band — just above the threshold — is where refusals cluster, and a
+        model told the value equals the limit reasonably reports it as a bug.
+        """
+        src = _png(tmp_path / "big.png", size=(256, 256))
+        monkeypatch.setattr(
+            image_attachments, "MAX_SOURCE_BYTES", 1024 * 1024
+        )
+        # One byte over a 1 MiB limit.
+        src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (1024 * 1024))
+
+        prep = _prep([src], tmp_path)
+
+        detail = _block(prep, "big.png").detail
+        assert "2 MiB, limit 1 MiB" in detail
+
+    def test_a_failure_between_the_two_saves_leaves_no_orphan_on_disk(
+        self, tmp_path, monkeypatch, no_ocr
+    ):
+        """`_discard` only ever sees `rendered.written`.
+
+        A fresh `_Rendered(error=...)` built in the handler would forget the
+        file the first save already wrote, and nothing else references it —
+        `cleanup_old_temp_files` would carry it for its whole retention window.
+        """
+        # An A4 scan, so the area cap binds and a second rendition is written.
+        src = _jpeg(tmp_path / "scan.jpg", size=(2480, 3508))
+        calls = {"n": 0}
+        real_save = Image.Image.save
+
+        def flaky_save(self, fp, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("no space left on device")
+            return real_save(self, fp, *args, **kwargs)
+
+        monkeypatch.setattr(Image.Image, "save", flaky_save)
+
+        prep = _prep([src], tmp_path)
+
+        assert prep.images == []
+        assert _block(prep, "scan.jpg").kind == KIND_OMITTED
+        out_dir = tmp_path / "usertmp" / "attachments" / "task_7"
+        assert list(out_dir.glob("*")) == []
+
     def test_a_capacity_omission_leaves_the_file_in_attachments(
         self, tmp_path, monkeypatch, no_ocr
     ):
@@ -766,6 +955,30 @@ class TestCancellation:
         prep = _prep(srcs, tmp_path, cancel_check=cancel_check)
 
         assert len(prep.images) < 4
+
+    def test_cancelling_mid_ocr_still_leaves_a_block_per_image(self, tmp_path, ocr_calls):
+        """`OcrBlock` promises one per candidate, and this path used to skip them.
+
+        An image reaching the model with no notice at all is the confident
+        blind answer the module exists to remove — and `_cancelled` swallows
+        exceptions, so a flaky cancel channel lands exactly here rather than
+        stopping the send.
+        """
+        srcs = [_png(tmp_path / f"c{n}.png") for n in range(3)]
+        seen = {"n": 0}
+
+        def cancel_check():
+            # False for the three normalization polls, then True inside the
+            # OCR loop.
+            seen["n"] += 1
+            return seen["n"] > 3
+
+        prep = _prep(srcs, tmp_path, cancel_check=cancel_check)
+
+        assert len(prep.images) == 3
+        assert len(prep.ocr_blocks) == 3
+        assert prep.ocr_blocks[-1].kind == KIND_UNAVAILABLE
+        assert "cancelled" in prep.ocr_blocks[-1].detail
 
 
 # --------------------------------------------------------------------------

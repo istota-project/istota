@@ -44,6 +44,16 @@ def text_from_data(data: dict) -> str:
     words = data.get("text") or []
     keys = ("page_num", "block_num", "par_num", "line_num")
     grouped = all(len(data.get(key) or ()) == len(words) for key in keys)
+    if not grouped and words:
+        # pytesseract's `file_to_dict` drops a column for any short TSV row, so
+        # one ragged row silently collapses the whole transcript onto a single
+        # line. Say so rather than degrading in silence — the caller's word
+        # count and confidence are still right, only the line structure is
+        # gone.
+        print(
+            "warning: OCR line columns are incomplete; line breaks not reconstructed",
+            file=sys.stderr,
+        )
 
     lines: list[list[str]] = []
     previous: tuple | None = None
@@ -53,6 +63,11 @@ def text_from_data(data: dict) -> str:
             continue
         current = tuple(data[key][index] for key in keys) if grouped else ()
         if not lines or (grouped and current != previous):
+            # A blank line at a block change, so paragraph separation survives.
+            # `image_to_string` returns "a\n\nb" across a block boundary and
+            # "a\nb" within one, and losing that ran headings into body text.
+            if lines and previous is not None and current[:2] != previous[:2]:
+                lines.append([])
             lines.append([])
         previous = current
         lines[-1].append(word)
