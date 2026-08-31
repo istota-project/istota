@@ -523,13 +523,16 @@ allowed_ports = [80, 443]
 require_url_provenance = false  # only fetch URLs seen in the task (blocks model-fabricated URLs)
 
 [brain.native.session_log]  # per-attempt JSONL transcript (native-only). See "Session logs" below.
-enabled = true              # false = no writer, no file, no directory, no cost
+enabled = true              # false = no writer, no file, no directory, no cost — AND no sweep,
+                            #   since step 7b is gated on this too, so transcripts already on
+                            #   disk are then kept for ever and `doctor` SKIPs. Remove them by hand
 dir = ""                    # "" resolves to {db_path.parent}/logs. A value here is used AS GIVEN
                             #   and is TRUSTED — no containment rule bounds it, and the sweep
                             #   unlinks *.jsonl under every first-level subdirectory of it
-retention_days = 14         # age rule (privacy). 0 = keep for ever; the ceiling below still applies
+retention_days = 14         # age rule (privacy). 0 = keep for ever by age; the ceiling still applies
 max_total_gb = 2.0          # size ceiling (disk) across EVERY user summed, 0.5 floor.
-                            #   0 = no ceiling; the age rule still applies
+                            #   0 = no ceiling; the age rule still applies. Both at 0 (or
+                            #   enabled = false) means nothing is ever deleted
 max_content_chars = 32768   # per text/thinking block, head+tail. 0 here means NO CAP
 max_args_chars = 8192       # per tool-call arguments object. 0 = no cap
 include_thinking = true     # reasoning traces in the written log (independent of the read verb)
@@ -1002,8 +1005,11 @@ Nothing persisted the conversation the native brain holds with the model.
 `task_N_prompt.txt` is the input rather than the run — so a native task that
 produced a wrong answer could not be reconstructed. `ClaudeCodeBrain` never had
 that problem: the `claude` CLI writes its own session JSONL and
-`build_bwrap_cmd` binds `projects`/`debug`/`todos` out of the sandbox for
-exactly this reason, so the asymmetry was accidental rather than designed. The
+`build_bwrap_cmd` binds `projects`/`debug`/`todos` read-write so those
+transcripts survive sandbox exit, so the asymmetry was accidental rather than
+designed. Note that is the *opposite* mount direction from the posture below —
+the CLI's transcripts are bound **into** the sandbox on purpose; istota's are
+bound nowhere. The
 format adapts pi's session store — the same prior art `agent/types.py` already
 cites for `prepareNextTurn` — to istota's unit of work.
 
@@ -1040,7 +1046,7 @@ both apply: `error` says what went wrong, `result` says what the task was told.
 A `BaseException` out of the loop gets the `error` record and no `result`, which
 is what a run that produced no result should look like.
 
-**Wiring is one branch plus six call sites, all in `brain/native.py`** —
+**Wiring is one branch plus the record kinds below, all in `brain/native.py`** —
 `agent/loop.py` and `agent/events.py` are not modified. `emit` gains
 `elif event.type == "message_end": log.message(event.message)`, and that is the
 whole message path: the loop emits `message_end` for every message it *appends*,
@@ -1106,7 +1112,12 @@ one warning, disables the writer and closes the handle, and every later call is
 a no-op — a full disk must not produce one warning per tool call for the rest of
 the day. `SessionLogWriter(root=None)` is the disabled writer, which is how
 `enabled = false` costs nothing and why there is no `if self._log is not None`
-at the call sites. Records are flushed and never `fsync`ed: a daemon that dies
+at the call sites. `make_session_log` returns it on **three** conditions, not
+one: the feature is off, `task_id <= 0`, or `user_id` is empty. The last two are
+the same case in practice — a direct brain call is not a task attempt and has
+nothing to name a file after — so the heartbeat's synthetic `id=0` task and
+every non-task caller (sleep cycle, health OCR, briefings, code review, context,
+the REPL) get no transcript. Records are flushed and never `fsync`ed: a daemon that dies
 loses what the OS had buffered, which beats an `fsync` per tool result on the
 loop's hot path. pi makes the same trade.
 
@@ -1124,18 +1135,49 @@ outside the tmpfs mask, which inverts the property while looking correct.
 
 **The boundary is that nothing binds the directory into any sandbox; the
 database mask is defence in depth behind it.** `build_bwrap_cmd` masks
-`db_path.parent` and `module_db_root()` last, so on the Ansible and Docker
-shapes the logs are behind that mask for free. On the standalone install
-`_mask_dir` *refuses*: `setup_wizard` puts `db_path`, the workspace and the temp
-dir all under `~/.istota`, so `mask_shadowed_by` is non-empty and nothing is
-masked — the logs are unbound rather than masked, joining `modules/` in that
-condition rather than creating it. `mask_shadowed_by` and `mask_protected_paths`
-were lifted out of `_mask_dir`'s closure in `executor.py` precisely so
-`doctor`'s `runtime.session_log_dir` asks the sandbox's own question instead of
-a copy of it; "is the directory under `db_path.parent`" answers yes on the
-standalone shape and would report the property holding while the directory sat
-outside every mask. `native_fs_roots` reaches it on no shape either, pinned by
-`tests/test_sandbox.py::TestSessionLogContainment`.
+`db_path.parent` and `module_db_root()` last, so where a sandbox is built at all
+and `_mask_dir` does not refuse, the logs are behind that mask for free. Three
+shipped shapes, three different answers, and only the first is unconditional:
+
+- **Ansible** — masked. `db_path.parent` is `{istota_home}/data`, which contains
+  no protected path, and bwrap runs unasked as an ordinary user.
+- **Docker** — masked *only if the operator added the two container settings*.
+  The path is right (`/data/db/logs` is under `/data/db`), but the shipped
+  `docker/docker-compose.yml` grants neither `seccomp:unconfined` nor
+  `systempaths=unconfined`, so the bwrap probe fails and `build_bwrap_cmd` hands
+  every command back unwrapped — no sandbox, therefore no mask, and
+  `native_fs_roots` is not applied either since `native_fs_confinement_active`
+  is `effective_sandboxing`. `.claude/rules/testbed.md` and
+  `docs/deployment/docker.md` state the same thing about the databases; the
+  transcripts inherit it.
+- **Standalone** — `_mask_dir` *refuses*. `setup_wizard` puts `db_path`, the
+  workspace and the temp dir all under `~/.istota`, so `mask_shadowed_by` is
+  non-empty and nothing is masked. The logs are unbound rather than masked,
+  joining `modules/` in that condition rather than creating it.
+
+`mask_shadowed_by` and `mask_protected_paths` were lifted out of `_mask_dir`'s
+closure in `executor.py` precisely so `doctor`'s `runtime.session_log_dir` asks
+the sandbox's own question instead of a copy of it; "is the directory under
+`db_path.parent`" answers yes on the standalone shape and would report the
+property holding while the directory sat outside every mask. **That covers the
+path axis and not the availability one**: `_session_log_mask_reason` gates on
+`security.sandbox_enabled` rather than on `effective_sandboxing`, so on a shipped
+Docker stack — flag on, bwrap unavailable — the check reports `OK` and no mask
+finding while nothing is masked. `runtime.bwrap` answers that half separately,
+and until the two are joined this check distinguishes the standalone shape from
+the Ansible one rather than naming every unmasked deployment.
+
+**And "nothing binds it" is a default rather than a guard.** No code in
+`build_bwrap_cmd` knows about this directory; what keeps it out is that
+`security.sandbox_ro_paths` defaults to `[]` and is bound verbatim when it is
+not — the same setting whose old `/srv/app` default is how every database got
+exposed once before. On the standalone shape there is a second route, because
+`nextcloud_mount_path` and `db_path.parent` are the same directory there: a
+`user_resources` row with `resource_path = "logs"` resolves to exactly the
+transcript directory, which both `build_bwrap_cmd` and `native_fs_roots` bind as
+a per-resource mount. `tests/test_sandbox.py::TestSessionLogContainment` pins the
+default shapes — no `sandbox_ro_paths`, no user resources — so widen either and
+nothing goes red.
 
 **An operator-set `dir` is trusted, the way `security.sandbox_cache_dir` is.**
 There is no containment rule bounding it against an ancestor, and that is a
@@ -1161,7 +1203,21 @@ take from the filesystem `istota.db` and every module DB are writing to, which
 is an availability question — `sandbox_cache_sweeper` wrote the reasoning first:
 a rule phrased in days either keeps everything or throws away something minutes
 old, because the growth arrives in bursts rather than at a rate. The gate is
-`or` because setting one to `0` must not silently disable the other.
+`or` between the two rules because setting one to `0` must not silently disable
+the other.
+
+**The whole gate is `enabled and (retention_days > 0 or max_total_gb > 0)`, and
+the `enabled` conjunct is the half worth stating out loud.** Step 7b is the
+sweep's only caller, so `enabled = false` stops new transcripts *and* stops
+anything ever deleting the ones already written — while `check_session_log_dir`
+returns `SKIP` on the same flag, so `doctor` goes quiet about the directory at
+the same moment. An operator who switches the feature off for privacy reasons
+keeps every transcript already on disk, indefinitely and unreported; the
+directory has to be removed by hand. Setting both limits to `0` has the same
+effect with the feature still on. Whether the sweep should run regardless of
+`enabled` is a live question — the step's own comment already makes the
+analogous argument for brain kind, that a deployment which switched away from
+native still sweeps what native left behind.
 
 The ceiling is **deployment-wide across every user**, because the thing being
 protected is a filesystem and a filesystem has no per-user quota; under a
