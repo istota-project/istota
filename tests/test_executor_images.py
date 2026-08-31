@@ -521,6 +521,32 @@ class TestBrainRequestImages:
 
         assert brain.reqs[-1].images == []
 
+    def test_the_request_that_carries_images_also_carries_the_read_tool(
+        self, tmp_path, ocr
+    ):
+        """Istota's half of the Claude Code vision contract.
+
+        The other half — that the CLI really advertises `Read` — belongs to the
+        binary, and the `image` tier cannot ask it: `claude --version` is the
+        whole of what that tier can get out of it offline, so an assertion there
+        would re-run a version probe and prove nothing. What this side owes is
+        that an image-bearing request is a tool-bearing one, since
+        `build_image_prompt` renders the mandatory-`Read` directive only for a
+        request with tools and a named omission otherwise. The behavioural half
+        is `tests/live/test_claude_code_read_image.py`.
+        """
+        config = _make_config(tmp_path)
+        img = _png(tmp_path / "inbox" / "shot.png")
+        brain = _CaptureBrain()
+
+        with db.get_db(config.db_path) as conn:
+            task = _task(conn, attachments=[str(img)])
+            _run(config, task, brain, conn)
+
+        req = brain.reqs[-1]
+        assert req.images, "no image on the request, so the assertion is vacuous"
+        assert "Read" in req.allowed_tools
+
 
 # --------------------------------------------------------------------------
 # cancellation

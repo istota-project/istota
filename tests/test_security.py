@@ -498,6 +498,19 @@ class TestBuildAllowedTools:
         with_dev = build_allowed_tools(is_admin=False, skill_names=["developer"])
         assert base == with_dev
 
+    def test_read_is_present_for_the_claude_code_image_path(self):
+        """`Read` is how the two CLI brains deliver an image at all.
+
+        `build_image_prompt` renders the mandatory inspection directive only for
+        a request with tools, and the tool it names is this one — so dropping
+        `Read` here would turn every image attachment into a named omission with
+        nothing failing. Deliberately duplicating `test_includes_file_tools`
+        above: that one is about the file toolset, this one is about a contract
+        with a specific consumer.
+        """
+        tools = build_allowed_tools(is_admin=False, skill_names=[])
+        assert "Read" in tools
+
     def test_includes_web_tools(self):
         """WebSearch + WebFetch are allowed; page reading is steered to browse
         in the prompt, not by withholding the tools."""
