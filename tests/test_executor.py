@@ -21,8 +21,6 @@ from istota.executor import (
     load_persona,
     load_emissaries,
     _pre_transcribe_attachments,
-    _preshrink_image_attachments,
-    _IMAGE_MAX_EDGE,
     _detect_notification_reply,
     _apply_recency_window_talk,
     _apply_recency_window_db,
@@ -2365,209 +2363,9 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
         assert popen.call_count == 2
 
 
-# ---------------------------------------------------------------------------
-# TestPreshrinkImageAttachments
-# ---------------------------------------------------------------------------
-
-
-def _make_image(
-    path: Path,
-    size: tuple[int, int],
-    exif_orientation: int | None = None,
-    fmt: str = "JPEG",
-    mode: str = "RGB",
-    color=(200, 50, 50),
-    icc_profile: bytes | None = None,
-):
-    """Helper: write an image of given format/mode/size, optionally with EXIF
-    orientation or an ICC profile attached."""
-    from PIL import Image
-    img = Image.new(mode, size, color=color)
-    kwargs: dict = {}
-    if fmt == "JPEG":
-        kwargs["quality"] = 90
-    if exif_orientation is not None:
-        exif = img.getexif()
-        exif[0x0112] = exif_orientation  # Orientation tag
-        kwargs["exif"] = exif.tobytes()
-    if icc_profile is not None:
-        kwargs["icc_profile"] = icc_profile
-    img.save(path, fmt, **kwargs)
-
-
-class TestPreshrinkImageAttachments:
-    def test_no_attachments_passthrough(self, tmp_path):
-        assert _preshrink_image_attachments(None, tmp_path, 1) is None
-        assert _preshrink_image_attachments([], tmp_path, 1) == []
-
-    def test_non_image_passthrough(self, tmp_path):
-        result = _preshrink_image_attachments(
-            ["/tmp/voice.mp3", "/tmp/doc.pdf"], tmp_path, 1,
-        )
-        assert result == ["/tmp/voice.mp3", "/tmp/doc.pdf"]
-
-    def test_small_image_passthrough(self, tmp_path):
-        src = tmp_path / "small.jpg"
-        _make_image(src, (800, 600))
-        result = _preshrink_image_attachments([str(src)], tmp_path, 7)
-        assert result == [str(src)]
-        # No output directory created for a no-op
-        assert not (tmp_path / "attachments" / "task_7").exists()
-
-    def test_large_image_resized(self, tmp_path):
-        from PIL import Image
-        src = tmp_path / "big.jpg"
-        _make_image(src, (4032, 3024))
-        result = _preshrink_image_attachments([str(src)], tmp_path, 42)
-        assert len(result) == 1
-        out = Path(result[0])
-        assert out != src
-        assert out.parent == tmp_path / "attachments" / "task_42"
-        assert out.suffix == ".jpg"
-        with Image.open(out) as resized:
-            assert max(resized.size) == _IMAGE_MAX_EDGE
-            # Aspect ratio is preserved (4:3 → 1568x1176)
-            assert resized.size == (_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE * 3 // 4)
-
-    def test_exif_rotation_applied(self, tmp_path):
-        """Orientation=6 (CW 90°) — a 4000x3000 landscape becomes a 3000x4000 portrait
-        after transpose; longest edge stays the long side after resize."""
-        from PIL import Image
-        src = tmp_path / "rotated.jpg"
-        _make_image(src, (4000, 3000), exif_orientation=6)
-        result = _preshrink_image_attachments([str(src)], tmp_path, 9)
-        out = Path(result[0])
-        with Image.open(out) as resized:
-            w, h = resized.size
-            # After EXIF transpose the image is portrait (taller than wide)
-            assert h > w
-            assert max(w, h) == _IMAGE_MAX_EDGE
-            # Output should not carry over a leftover orientation tag
-            exif = resized.getexif()
-            assert exif.get(0x0112, 1) == 1
-
-    def test_missing_file_passthrough(self, tmp_path):
-        result = _preshrink_image_attachments(
-            ["/tmp/does_not_exist.jpg"], tmp_path, 1,
-        )
-        assert result == ["/tmp/does_not_exist.jpg"]
-
-    def test_corrupt_image_passthrough(self, tmp_path):
-        src = tmp_path / "corrupt.jpg"
-        src.write_bytes(b"not actually a jpeg")
-        result = _preshrink_image_attachments([str(src)], tmp_path, 1)
-        assert result == [str(src)]
-
-    def test_mixed_attachments(self, tmp_path):
-        big = tmp_path / "photo.jpg"
-        _make_image(big, (3000, 2000))
-        result = _preshrink_image_attachments(
-            ["/tmp/voice.mp3", str(big), "/tmp/note.txt"], tmp_path, 11,
-        )
-        assert result[0] == "/tmp/voice.mp3"
-        assert result[2] == "/tmp/note.txt"
-        assert result[1] != str(big)
-        assert Path(result[1]).exists()
-
-    def test_pil_missing_passthrough(self, tmp_path):
-        with patch.dict("sys.modules", {"PIL": None}):
-            result = _preshrink_image_attachments(
-                ["/tmp/photo.jpg"], tmp_path, 1,
-            )
-            assert result == ["/tmp/photo.jpg"]
-
-    def test_large_png_resized(self, tmp_path):
-        from PIL import Image
-        src = tmp_path / "big.png"
-        _make_image(src, (3000, 2250), fmt="PNG")
-        result = _preshrink_image_attachments([str(src)], tmp_path, 13)
-        out = Path(result[0])
-        assert out != src
-        assert out.suffix == ".jpg"
-        with Image.open(out) as resized:
-            assert max(resized.size) == _IMAGE_MAX_EDGE
-
-    def test_large_webp_resized(self, tmp_path):
-        from PIL import Image
-        src = tmp_path / "big.webp"
-        _make_image(src, (3000, 2250), fmt="WEBP")
-        result = _preshrink_image_attachments([str(src)], tmp_path, 14)
-        out = Path(result[0])
-        assert out.suffix == ".jpg"
-        with Image.open(out) as resized:
-            assert max(resized.size) == _IMAGE_MAX_EDGE
-
-    def test_rgba_flattens_onto_white(self, tmp_path):
-        """Transparent screenshots should land on white, not the default black."""
-        from PIL import Image
-        src = tmp_path / "translucent.png"
-        # Fully transparent RGBA — every pixel should resolve to the background.
-        _make_image(src, (3000, 2000), fmt="PNG", mode="RGBA", color=(0, 0, 0, 0))
-        result = _preshrink_image_attachments([str(src)], tmp_path, 15)
-        out = Path(result[0])
-        with Image.open(out) as resized:
-            # JPEG quantization is lossy at quality=85, so allow some slack but
-            # the result has to be far closer to white than to black.
-            px = resized.convert("RGB").getpixel((resized.size[0] // 2, resized.size[1] // 2))
-            assert min(px) > 200, f"expected near-white, got {px}"
-
-    def test_small_rotated_image_is_still_rewritten(self, tmp_path):
-        """H1 regression: an 800x600 scan with orientation=6 needs a physically
-        rotated copy because Tesseract OCR doesn't honor EXIF."""
-        from PIL import Image
-        src = tmp_path / "scan.jpg"
-        _make_image(src, (800, 600), exif_orientation=6)
-        result = _preshrink_image_attachments([str(src)], tmp_path, 16)
-        out = Path(result[0])
-        assert out != src, "small but rotated image should still be rewritten"
-        with Image.open(out) as fixed:
-            w, h = fixed.size
-            # After applying orientation=6 (CW 90°) the image becomes portrait.
-            assert h > w
-            # Output drops the orientation tag.
-            assert fixed.getexif().get(0x0112, 1) == 1
-
-    def test_colliding_stems_do_not_overwrite(self, tmp_path):
-        """M1 regression: two attachments sharing a stem (photo.png + photo.jpg,
-        or duplicate IMG_1234.jpg from different dirs) must not overwrite."""
-        from PIL import Image
-        a_dir = tmp_path / "a"
-        b_dir = tmp_path / "b"
-        a_dir.mkdir()
-        b_dir.mkdir()
-        # Distinguishable colors so we can verify content survives.
-        _make_image(a_dir / "photo.jpg", (3000, 2000), color=(255, 0, 0))
-        _make_image(b_dir / "photo.jpg", (3000, 2000), color=(0, 255, 0))
-        result = _preshrink_image_attachments(
-            [str(a_dir / "photo.jpg"), str(b_dir / "photo.jpg")],
-            tmp_path,
-            17,
-        )
-        assert len(result) == 2
-        out_a = Path(result[0])
-        out_b = Path(result[1])
-        assert out_a != out_b, "outputs must not collide"
-        assert out_a.exists() and out_b.exists()
-        with Image.open(out_a) as ia, Image.open(out_b) as ib:
-            # A is mostly red, B is mostly green.
-            pa = ia.getpixel((ia.size[0] // 2, ia.size[1] // 2))
-            pb = ib.getpixel((ib.size[0] // 2, ib.size[1] // 2))
-            assert pa[0] > pa[1], f"first output should still be red-dominant, got {pa}"
-            assert pb[1] > pb[0], f"second output should still be green-dominant, got {pb}"
-
-    def test_icc_profile_preserved(self, tmp_path):
-        """Md2: color-managed images keep their ICC profile through the
-        re-encode (matters for bloodwork OCR with color reference charts)."""
-        from PIL import Image, ImageCms
-        # Build a synthetic sRGB ICC profile so we don't depend on system files.
-        srgb_profile = ImageCms.createProfile("sRGB")
-        icc_bytes = ImageCms.ImageCmsProfile(srgb_profile).tobytes()
-        src = tmp_path / "color.jpg"
-        _make_image(src, (3000, 2000), icc_profile=icc_bytes)
-        result = _preshrink_image_attachments([str(src)], tmp_path, 18)
-        out = Path(result[0])
-        with Image.open(out) as resized:
-            assert resized.info.get("icc_profile"), "ICC profile should be carried over"
+# Image preparation moved out of the executor into `image_attachments`; its
+# tests live in `tests/test_image_attachments.py` and the executor-side
+# integration in `tests/test_executor_images.py`.
 
 
 # ---------------------------------------------------------------------------
@@ -3100,21 +2898,21 @@ class TestRecallMemories:
         from istota.config import MemorySearchConfig
         config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=False))
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, None, task) is None
+        assert _recall_memories(config, None, task, task.prompt) is None
 
     def test_returns_none_when_search_not_enabled(self):
         from istota.executor import _recall_memories
         from istota.config import MemorySearchConfig
         config = Config(memory_search=MemorySearchConfig(enabled=False, auto_recall=True))
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, None, task) is None
+        assert _recall_memories(config, None, task, task.prompt) is None
 
     def test_returns_none_when_skip_memory(self):
         from istota.executor import _recall_memories
         from istota.config import MemorySearchConfig
         config = Config(memory_search=MemorySearchConfig(enabled=True, auto_recall=True))
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, None, task, skip_memory=True) is None
+        assert _recall_memories(config, None, task, task.prompt, skip_memory=True) is None
 
     @patch("istota.memory.search.search")
     def test_formats_results(self, mock_search):
@@ -3133,7 +2931,7 @@ class TestRecallMemories:
         task = db.Task(id=1, prompt="what language?", user_id="alice", source_type="talk", status="running")
 
         conn = MagicMock()
-        result = _recall_memories(config, conn, task)
+        result = _recall_memories(config, conn, task, task.prompt)
         assert result is not None
         assert "[memory_file]" in result
         assert "User likes Python" in result
@@ -3149,7 +2947,7 @@ class TestRecallMemories:
             db_path=Path("/tmp/test.db"),
         )
         task = db.Task(id=1, prompt="test", user_id="alice", source_type="talk", status="running")
-        assert _recall_memories(config, MagicMock(), task) is None
+        assert _recall_memories(config, MagicMock(), task, task.prompt) is None
 
     @patch("istota.memory.search.search")
     def test_includes_channel_in_search(self, mock_search):
@@ -3165,7 +2963,7 @@ class TestRecallMemories:
             id=1, prompt="test", user_id="alice", source_type="talk", status="running",
             conversation_token="room123",
         )
-        _recall_memories(config, MagicMock(), task)
+        _recall_memories(config, MagicMock(), task, task.prompt)
         call_kwargs = mock_search.call_args[1]
         assert call_kwargs["include_user_ids"] == ["channel:room123"]
 
