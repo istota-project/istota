@@ -263,6 +263,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ctrl-C now stops `istota serve`. With a browser tab open on the chat, the web server waited for that tab's live event stream to end — and it never does, because it runs until the browser goes away — so the first Ctrl-C hung indefinitely and the second, which the message on screen says will force the quit, did not either. Only `kill -9` ended it. The wait is now bounded, and a second Ctrl-C drops the open connections and exits immediately.
+
 - The Briefings screen you see before your first briefing has run now reads at the same size as the rest of the app. Its heading and the line pointing you at settings were both set a step larger than everything around them, including a real briefing in the same place.
 
 - Generating an invoice by hand for a client on a monthly schedule now records that the client was billed this month. The daily scheduler no longer creates another invoice from work left uninvoiced after the manual run; previews still leave the schedule unchanged.

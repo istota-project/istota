@@ -10,10 +10,23 @@ The scheduler runs on a worker thread with ``install_signal_handlers=False``
 the main thread — installs its own SIGINT/SIGTERM handlers; on shutdown the
 launcher drains the scheduler after uvicorn returns. A dead scheduler thread
 stops the web server (fail-loud, no zombie web with no worker).
+
+Shutting down needs two things uvicorn does not give us by default, because the
+web app serves SSE streams (``/chat/stream``, the task stream, the admin log
+tail) whose generators poll until the *client* goes away. uvicorn's graceful
+shutdown waits for every open connection, so one browser tab on the chat wedges
+Ctrl-C forever; ``timeout_graceful_shutdown`` bounds that wait. And uvicorn's
+own "CTRL+C to force quit" does not work here on Python 3.12+: a repeat SIGINT
+sets ``force_exit``, which breaks uvicorn's wait loops, but the next line is
+``await asyncio.Server.wait_closed()``, and since 3.12 that itself waits for
+every open connection — so the process hangs with force_exit set and only
+SIGKILL ends it. :func:`install_force_quit` closes that by aborting the open
+transports, which is what lets ``wait_closed()`` return.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -123,6 +136,14 @@ def bootstrap_checks(config: Config) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Ctrl-C must not hang on an SSE stream that by design never ends. uvicorn's
+# default (``None``) waits for every open connection forever; a single browser
+# tab on the chat is enough to wedge it. Short, because this is a loopback
+# single-user launcher where an ordinary request finishes in milliseconds, and
+# because a second Ctrl-C no longer has to wait this out.
+_GRACEFUL_SHUTDOWN_SECONDS = 5
+
+
 def build_uvicorn_server(host: str, port: int):
     """Construct a programmatic uvicorn ``Server`` for the web app.
 
@@ -142,8 +163,70 @@ def build_uvicorn_server(host: str, port: int):
         log_level="info",
         # Keep the launcher's stdout clean — the app logs through istota logging.
         access_log=False,
+        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_SECONDS,
     )
     return uvicorn.Server(uv_config)
+
+
+def abort_open_connections(server) -> int:
+    """Abort every open connection's transport. Returns how many were aborted.
+
+    Called on a force quit, from the event loop. ``abort()`` rather than
+    ``close()``: a close on a connection mid-response is queued behind the
+    response finishing, and the responses being waited on here are SSE
+    generators that never finish. Best-effort per connection — a transport that
+    is already gone is not a failure, and this runs on the shutdown path where
+    raising would strand the process it is trying to end.
+    """
+    aborted = 0
+    connections = getattr(getattr(server, "server_state", None), "connections", None)
+    for conn in list(connections or ()):
+        transport = getattr(conn, "transport", None)
+        if transport is None:
+            continue
+        try:
+            transport.abort()
+        except Exception:  # noqa: BLE001 - one bad transport must not stop the rest
+            continue
+        aborted += 1
+    return aborted
+
+
+def install_force_quit(server) -> None:
+    """Make a repeat Ctrl-C actually quit, as uvicorn's message promises.
+
+    uvicorn's ``handle_exit`` sets ``force_exit`` on the second SIGINT, which
+    breaks its own "waiting for connections" loops — and then it blocks in
+    ``asyncio.Server.wait_closed()``, which on Python 3.12+ waits for those same
+    connections. Nothing closes them, so the process hangs until SIGKILL. We
+    wrap ``handle_exit`` and abort the transports, which is the one thing that
+    lets ``wait_closed()`` return.
+
+    Replacing the bound attribute is enough: uvicorn reads ``self.handle_exit``
+    when it installs its handlers, inside ``Server.run()``, which runs after
+    this. The abort is deferred onto the loop rather than run inside the signal
+    handler, so it happens between callbacks like any other loop work.
+    """
+    original = server.handle_exit
+
+    def handle_exit(sig, frame) -> None:
+        original(sig, frame)
+        if not getattr(server, "force_exit", False):
+            return
+        # A signal handler that raises would surface as an exception in
+        # whatever the main thread happened to be running.
+        try:
+            logger.warning("Force quit — dropping open connections.")
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                abort_open_connections(server)
+                return
+            loop.call_soon_threadsafe(abort_open_connections, server)
+        except Exception:  # noqa: BLE001 - never raise out of a signal handler
+            pass
+
+    server.handle_exit = handle_exit
 
 
 def _maybe_mount_webhooks(web_app) -> None:
@@ -258,6 +341,7 @@ def run_serve(
         raise ServeError(f"Scheduler failed to start: {err}") from err
 
     server = build_uvicorn_server(host, bind_port)
+    install_force_quit(server)
 
     # Supervise the scheduler thread: if it dies while the web server runs,
     # stop uvicorn so we don't leave a web server with no worker behind it.
