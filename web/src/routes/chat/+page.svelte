@@ -113,6 +113,19 @@
   const identity = getCurrentUser();
   const userName = $derived(identity.user.display_name || 'You');
   const botName = $derived(identity.user.bot_name || 'Istota');
+  /* The two content hashes `/me` carries, for the two identities every
+     transcript renders. `?? null` rather than left undefined: a backend that
+     predates the field, or a cached record from one, then reads as "there is no
+     picture" and asks for nothing, where undefined would mean "unknown" and put
+     a bare request behind every row.
+
+     One consequence of the `live` gate on `userId` below: on an offline cold
+     boot the viewer's own turns fall back to the initial chip, because there is
+     no id to build a URL with. That is deliberate rather than an oversight —
+     the id under a guess is the wrong person's — and it is not a case for
+     dropping the gate. */
+  const userAvatar = $derived(identity.user.avatars?.user ?? null);
+  const botAvatar = $derived(identity.user.avatars?.bot ?? null);
   /* Who is logged in, for the composer's draft key — and **only while the
      server has confirmed it**. `username` is the istota user id, the same value
      the server keys admin checks and workspace paths on, not a display handle.
@@ -275,6 +288,10 @@
     // into the room, and collapsing its header would hide the one thing that
     // says it wasn't the viewer.
     if (prev.author !== cur.author) return false;
+    // The label is a display name and two members can share one; the id is who
+    // they are. Collapsing across it would hang one person's run — and now
+    // their face — over another's words.
+    if (prev.authorId !== cur.authorId) return false;
     // Aggregate views interleave rooms: a room change always starts a fresh
     // group (the header carries the room chip).
     if (prev.roomToken !== cur.roomToken) return false;
@@ -982,7 +999,10 @@
               {message}
               continuation={isContinuation(i)}
               {userName}
+              userId={userId ?? undefined}
+              {userAvatar}
               {botName}
+              {botAvatar}
               onConfirm={session.confirm}
               onReject={session.reject}
               onToggleStar={session.toggleStar}

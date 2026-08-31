@@ -226,6 +226,12 @@ export interface ChatMessage {
   // bubble is not necessarily the reader's own words. Absent → label with the
   // viewer's display name, the long-standing behaviour.
   author?: string;
+  // User rows only: the writer's istota user id, when `author` names them and
+  // they are an istota user. What the avatar endpoint keys on — the label
+  // beside it is a display name and cannot address anything. Absent wherever
+  // `author` is absent, and also on an external sender's turn, which has a
+  // name and no account behind it.
+  authorId?: string;
   // User rows only: the surface the turn entered from, when it is not one the
   // room itself lives on — today `'email'` alone. Absent means it came from
   // inside the conversation, which is every web and Talk turn, so the external

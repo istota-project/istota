@@ -1881,7 +1881,22 @@ function createSession(): ChatSession {
     // server rewrites a few sends (an attachment-only descriptor, a stripped
     // `!model` prefix), and those simply fall through to appending — the same
     // duplicate as before, rather than a wrong row being silently claimed.
-    if (row.role === 'user' && typeof row.task_id === 'number' && typeof row.text === 'string') {
+    //
+    // A row the server attributed to somebody else is refused outright. The
+    // body was the only test while a user row named no writer, and a room is
+    // shared: a co-member typing the same words while this client holds an
+    // unsent row had their turn folded into it, and since the adoption writes
+    // no author the row went on reading as the viewer's own. That cost the
+    // wrong name; with `author_id` on the wire it costs the reader's own face
+    // over another member's words. Both fields are tested, since an external
+    // sender carries a label and no id.
+    if (
+      row.role === 'user' &&
+      typeof row.task_id === 'number' &&
+      typeof row.text === 'string' &&
+      !row.author &&
+      !row.author_id
+    ) {
       const stranded = cur.find(
         (m) =>
           m.role === 'user' &&
@@ -2583,8 +2598,12 @@ function createSession(): ChatSession {
       starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
       roomToken: m.room_token,
       roomName: m.room_name,
-      // Server-resolved author for a user row the viewer did not write.
+      // Server-resolved author for a user row the viewer did not write, and —
+      // when that writer holds an account here — the id their picture is
+      // served under. Folded to `undefined` the same way, since an empty id
+      // would build a URL matching no route.
       author: typeof m.author === 'string' && m.author ? m.author : undefined,
+      authorId: typeof m.author_id === 'string' && m.author_id ? m.author_id : undefined,
       // Provenance for a user row that entered from outside the room. Both are
       // set here and nowhere else, so history, the aggregate panes and the live
       // stream mark the same turns as external.

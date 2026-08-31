@@ -1,14 +1,18 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
+    AVATAR_ACCEPT,
+    deleteBotAvatar,
     getAdminStats,
+    uploadBotAvatar,
     type AdminStats,
     type AdminStatsJob,
     type AdminStatsUser,
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import { NoticeBanner, StatTile } from '$lib/components/ui';
+  import { Avatar, Button, Field, FileDropZone, NoticeBanner, StatTile } from '$lib/components/ui';
+  import { getCurrentUser } from '$lib/userContext';
   import {
     formatCost,
     formatContext,
@@ -28,6 +32,74 @@
 
   const REFRESH_MS = 60_000;
   let timer: ReturnType<typeof setInterval> | null = null;
+
+  /* The bot icon. The identity the layout resolved carries the current hash,
+     and `reload()` is what publishes a new one to the nav and the chat gutter
+     — this page never fetches `/me` itself. */
+  const identity = getCurrentUser();
+  let botIconFile: File | null = $state(null);
+  let botIconBusy = $state(false);
+  let botIconBusyLabel = $state('');
+  let botIconError = $state('');
+  let botIconNote = $state('');
+
+  /* The dropzone is a picker rather than a staging area — there is no Save step
+     — so a picked file is taken and sent.
+
+     The `botIconBusy` guard is unreachable as the template stands, and is kept
+     deliberately rather than as an oversight: `uploadBotIcon` sets
+     `botIconBusyLabel` before its first await and the template swaps the zone
+     out for the busy line, so the zone — and its paste handler — is unmounted
+     for the whole upload and no file can be picked during one. What the guard
+     covers is the version of this control that keeps the zone mounted and
+     merely disables it, which is the obvious refactor: there a file left in the
+     zone would be sent the moment `botIconBusy` cleared, including after a
+     *delete*. Two concurrent PUTs would also resolve in either order, and this
+     row is deployment-wide, so the loser would be everyone's icon. */
+  $effect(() => {
+    if (botIconBusy || !botIconFile) return;
+    const picked = botIconFile;
+    botIconFile = null;
+    void uploadBotIcon(picked);
+  });
+
+  async function uploadBotIcon(file: File) {
+    botIconBusy = true;
+    botIconBusyLabel = 'Saving the icon…';
+    botIconError = '';
+    botIconNote = '';
+    try {
+      await uploadBotAvatar(file);
+      /* The preview reads the shared record, so a reload that does not paint
+         leaves it on the old hash — which the browser holds as `immutable` and
+         will not re-fetch. Say so rather than showing a stale icon silently. */
+      if (!(await identity.reload()))
+        botIconNote = 'Icon saved. The page could not refresh — reload to see it.';
+    } catch (e) {
+      botIconError = (e as Error).message || 'Could not save that icon.';
+    } finally {
+      botIconBusy = false;
+      botIconBusyLabel = '';
+    }
+  }
+
+  async function removeBotIcon() {
+    botIconBusy = true;
+    botIconBusyLabel = 'Removing the icon…';
+    botIconError = '';
+    botIconNote = '';
+    try {
+      const { deleted } = await deleteBotAvatar();
+      const confirmed = await identity.reload();
+      if (!confirmed) botIconNote = 'Removed. The page could not refresh — reload to see it.';
+      else if (!deleted) botIconNote = 'There was nothing to remove.';
+    } catch (e) {
+      botIconError = (e as Error).message || 'Could not remove that icon.';
+    } finally {
+      botIconBusy = false;
+      botIconBusyLabel = '';
+    }
+  }
 
   async function refresh() {
     try {
@@ -493,8 +565,37 @@
               {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
               <tr>
                 <td>
-                  <span class="username">{u.display_name || u.username}</span>
-                  {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
+                  <!-- A flex row inside the cell rather than on it: `display:
+									     flex` on a `<td>` takes it out of the table's own
+									     layout, which is what sizes these columns. -->
+                  <span class="user-cell">
+                    <!-- Bare: `/me` carries the reader's own hash and the
+										     bot's, and nothing carries a third party's (D13), so
+										     this revalidates on an ETag. A user this admin
+										     shares no room with 404s — being an admin is not the
+										     endpoint's predicate, deliberately — and falls back
+										     to the chip the table drew before.
+
+										     Two consequences of the keyed `{#each}`, both
+										     accepted. The 60s refresh hands every row the same
+										     props, so the URL never changes and nothing
+										     re-requests — which is also why `Avatar`'s failure
+										     chip is sticky here where the transcript's is not
+										     (that one re-mints a cid per rebuild): a request
+										     that failed once holds the chip until the page is
+										     left. And a mount costs one request per listed user
+										     at once, bounded after that by the 404's own 30s
+										     negative cache. -->
+                    <span class="user-face">
+                      <Avatar
+                        kind="user"
+                        userId={u.username}
+                        label={u.display_name || u.username}
+                      />
+                    </span>
+                    <span class="username">{u.display_name || u.username}</span>
+                    {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
+                  </span>
                 </td>
                 <td class="num col-total">{formatNumber(u.tasks_total)}</td>
                 <td class="source-cell">
@@ -930,6 +1031,62 @@
       </dl>
     </section>
 
+    <!-- Bot icon.
+         The one control on a page of read-only cards, so it sits at the foot
+         rather than above the status an operator scans first. A card here and
+         not a pane of its own: the admin dashboard is one page, and a single
+         upload control does not earn a section in the sidebar. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>Bot icon</h2>
+      </header>
+      <Field label="Picture" labelled={false} wide error={botIconError} warning={botIconNote}>
+        <div class="bot-icon">
+          <span class="bot-icon-preview">
+            <!-- Named rather than decorative: here the picture is the thing
+                 being edited, and the only other signal is whether Remove
+                 exists. -->
+            <Avatar
+              kind="bot"
+              version={identity.user.avatars?.bot ?? null}
+              label={identity.user.bot_name || 'Istota'}
+              alt="The bot icon"
+            />
+          </span>
+          <div class="bot-icon-pick">
+            <!-- The busy line replaces the picker rather than sitting beside
+                 it, for the two reasons the settings control states: nothing
+                 else on the card says an upload is running, and unmounting the
+                 zone is what resets the native input inside it, so re-picking
+                 the file whose upload just failed does something. -->
+            {#if botIconBusyLabel}
+              <p class="hint busy" aria-live="polite">{botIconBusyLabel}</p>
+            {:else}
+              <FileDropZone bind:file={botIconFile} accept={AVATAR_ACCEPT}>
+                <span>Drop an icon here, paste one, or choose a file.</span>
+              </FileDropZone>
+            {/if}
+            {#if identity.user.avatars?.bot}
+              <Button variant="secondary" size="sm" disabled={botIconBusy} onclick={removeBotIcon}
+                >Remove</Button
+              >
+            {/if}
+          </div>
+        </div>
+      </Field>
+      <p class="hint">
+        Shown wherever the web UI names the bot. It applies to everyone on this deployment.
+        {#if stats.storage.nextcloud_username}
+          This is not the picture Nextcloud shows for
+          <code>{stats.storage.nextcloud_username}</code>, and changing it here does not change that
+          one — set it in Nextcloud if you want them to match.
+        {:else}
+          This is separate from the bot's Nextcloud profile picture, which Nextcloud shows in Talk;
+          changing it here does not change that one.
+        {/if}
+      </p>
+    </section>
+
     {#if stats.error}
       <div class="banner error">Partial data: {stats.error}</div>
     {/if}
@@ -947,6 +1104,38 @@
 	   moved that bar into the layout, which is shared with Configuration and
 	   Logs — neither of which auto-refreshes, so the note belongs with the data
 	   it describes rather than with the chrome. */
+  /* The bot-icon control, laid out like the settings page's own picture field
+     so the two read as one control in two places. The size goes on the wrapper
+     rather than on the primitive, which reads it and holds no opinion about how
+     big an identity is. */
+  .bot-icon {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-4);
+  }
+
+  .bot-icon-preview {
+    flex: 0 0 auto;
+    --avatar-size: 4rem;
+  }
+
+  .bot-icon-pick {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  /* Stands in for the dropzone while an icon is going up or coming down, so the
+     column keeps roughly its height instead of collapsing and pulling the
+     Remove button up under the cursor that just left it. */
+  .bot-icon-pick .busy {
+    margin: 0;
+    padding: var(--space-4) 0;
+  }
+
   .refresh-note {
     margin-top: var(--space-4);
     font-size: var(--text-xs);
@@ -1056,8 +1245,31 @@
     white-space: nowrap;
   }
 
+  /* Face, name, badge on one line. The name is what may be too long for the
+	   column, so it is the part that gives — the face keeps its box. */
+  .user-cell {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .user-face {
+    /* Set on the avatar's own wrapper, never on the cell or the row:
+		   --avatar-size inherits, and a shared container would resize every
+		   avatar nested under it. */
+    --avatar-size: 1.5rem;
+    display: flex;
+    flex: 0 0 auto;
+    margin-right: var(--space-2);
+  }
   .username {
     font-weight: 500;
+  }
+  /* Only in this cell, which is the one that now shares its width with a
+	   picture. The scheduler tables use the same class and are left alone. */
+  .user-cell .username {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Neutral count chip (module-poller row). Distinct from .admin-badge — this
@@ -1143,7 +1355,7 @@
 
   /* Per-user 24h breakdown — stacked bar + tag list. */
   .users-grid {
-    /* The sized columns below come to 46.5rem; this is that plus 10rem for
+    /* The sized columns below come to 48.5rem; this is that plus 10rem for
 		   `col-24h`, the one column deliberately left auto, since it carries the
 		   stacked bar and the per-source chips. The sized columns must not add up to
 		   the whole table, or that column is squeezed to nothing at the declared
@@ -1152,18 +1364,25 @@
 		   floor stops covering them the moment the reader picks a larger text
 		   scale. At 120% the columns alone came to within a few pixels of the old
 		   904px, which left 24h activity nothing again — the same defect reached by
-		   changing a setting rather than a breakpoint. 56.5rem is that 904px at the
-		   default scale, so nothing moves until the reader asks it to. */
-    min-width: 56.5rem;
+		   changing a setting rather than a breakpoint. 56.5rem was that 904px at the
+		   default scale; the extra 2rem is the User column's picture and its gap,
+		   added to the floor rather than taken out of `col-24h`. */
+    min-width: 58.5rem;
   }
 
   /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
 	   columns split the table evenly. Size the narrow columns explicitly and
 	   leave 24h activity auto so it soaks up whatever is left — it carries the
 	   stacked bar plus the per-source chips and needs the room; username and
-	   failure count do not. */
+	   failure count do not.
+
+	   The User column carries a 1.5rem picture and a --space-2 gap ahead of the
+	   name, so it is 2rem wider than the 9rem it held before, and the table's
+	   own min-width above went up by the same 2rem. Both, or the shortfall
+	   comes out of the one unsized column — which is ISSUE-276 exactly, and is
+	   what `adminTables.test.ts` does the arithmetic for. */
   .users-grid .col-user {
-    width: 9rem;
+    width: 11rem;
   }
 
   /* Total holds a lifetime count, which reaches seven figures on a long-running
@@ -1485,12 +1704,12 @@
 	   that column came out exactly 0px wide, with the headings painted over each
 	   other. `.table-scroll` scrolls instead. */
   @media (max-width: 768px) {
-    /* The 34.5rem of column widths below, plus 11rem for the auto 24h column —
+    /* The 36.5rem of column widths below, plus 11rem for the auto 24h column —
 		   a rem more than the desktop table leaves it, since the chips have a whole
 		   phone screen less to be legible in. Every column keeps a legible width and
 		   the surplus becomes horizontal scroll. */
     .users-grid {
-      min-width: 45.5rem;
+      min-width: 47.5rem;
     }
     /* Tighten the columns whose content has a known short bound, so that scroll
 		   stays as short as it can be, and leave the numeric ones at a width their
@@ -1499,8 +1718,12 @@
 		   `toLocaleString` puts commas in but no break opportunity. Total is the one
 		   that bit: it keeps its (widened) desktop width here rather than the 3.5rem
 		   this block used to give it. */
+    /* Widened by the same 2rem the desktop column was, so the picture is not
+		   paid for out of `col-24h`. The name has less room than it had, which is
+		   what the ellipsis on `.user-cell .username` is for — at this width it
+		   was already the column most likely to be cut. */
     .users-grid .col-user {
-      width: 6.5rem;
+      width: 8.5rem;
     }
     .users-grid .col-failed {
       width: 3.5rem;

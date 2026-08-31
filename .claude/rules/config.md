@@ -159,7 +159,28 @@ reconcile_min_dwell_sec: int = 60
 auth: str = "nextcloud"            # "nextcloud" | "none"; env ISTOTA_WEB_AUTH; unknown → warning + "nextcloud"
 port: int = 8766
 token_storage: str = "ephemeral"   # "ephemeral" | "encrypted"; anything else → warning + ephemeral
+max_avatar_kb: int = 4096          # profile-picture upload cap; header + running total; 0 = uploads off
+avatar_import_from_nextcloud: bool = True   # import users' Nextcloud pictures; custom avatars only
 ```
+`max_avatar_kb` bounds one endpoint, and it is deliberately not the same number
+as nginx's `client_max_body_size` (rendered from
+`istota_web_chat_max_attachment_mb`, 100 MB). nginx bounds what reaches the
+process at all; this bounds what the avatar route accepts, and it is checked
+twice — on the declared `Content-Length` before the body is read, and again on
+the running total as the stream arrives, because the declared length is a
+claim. Neither substitutes for the other, and a cap checked on
+`len(await file.read())` would materialize whatever nginx let through before
+refusing. Ansible: `istota_web_max_avatar_kb`.
+`avatar_import_from_nextcloud` switches the scheduler's import job on, and the
+cadence is `[scheduler] avatar_import_interval` (6h). Only a **custom** avatar
+is imported: Nextcloud answers its avatar endpoint with a picture whether or
+not the user set one, generating a coloured letter when they have not, and
+importing that would swap the app's own initial chip for Nextcloud's version of
+the same idea with nothing downstream able to tell them apart. The distinction
+is one response header, so a Nextcloud that does not send it imports nothing and
+`doctor`'s `web.avatar_import` says so — the job records what the last tick saw
+in `shared_kv`, because that check opens no socket. Inert on a local storage
+backend. Ansible: `istota_web_avatar_import_from_nextcloud`.
 `auth = "none"` is the local single-user no-auth mode: `web_app._require_api_auth`
 early-returns the fixed local user (`Config.local_user_id`), `_user_is_web_admin`
 is True for that user, `_verify_origin` no-ops, and `_resolve_session_secret`

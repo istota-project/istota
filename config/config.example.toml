@@ -525,6 +525,14 @@ tasks_file_poll_interval = 30
 # early. 0 disables the emit.
 scheduler_stats_interval = 60
 
+# Seconds between Nextcloud profile-picture import ticks (0 disables). Six
+# hours. The import runs on a cadence rather than at login — a Nextcloud
+# timeout in front of authentication — or on render, so the cost is that a user
+# who has just signed in for the first time sees the initial chip until the
+# next tick; daily would make that a whole day. Also gated by
+# [web] avatar_import_from_nextcloud and by the storage backend being Nextcloud.
+avatar_import_interval = 21600
+
 # Defense-in-depth: alert an operator if the single-threaded main dispatch loop
 # stops ticking for this many seconds (a slow call that slipped onto the loop
 # thread, a wedged check). A separate watchdog thread logs an ERROR and fires
@@ -1114,6 +1122,21 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # post-as-user Talk mirroring of web messages and web<->Talk read-state sync.
 # NC OAuth2 tokens grant full account access, so this is a deliberate opt-in.
 # token_storage = "ephemeral"                      # "ephemeral" | "encrypted"
+#
+# Byte cap on a profile-picture upload, in KB. Checked on the declared
+# Content-Length before the body is read and again on the running total, so an
+# oversized upload is refused rather than buffered. Distinct from nginx's
+# client_max_body_size, which is sized for chat attachments. 0 switches
+# uploads off (the endpoint answers 503); a stored picture is still served.
+# max_avatar_kb = 4096
+#
+# Whether the scheduler imports users' Nextcloud profile pictures. Only a
+# *custom* avatar is ever imported: Nextcloud generates a coloured letter for a
+# user who has set none, and importing that would swap the app's own initial
+# chip for Nextcloud's version of the same idea, with nothing downstream able to
+# tell them apart. Inert on a local storage backend. The cadence is
+# [scheduler] avatar_import_interval.
+# avatar_import_from_nextcloud = true
 
 # Background tiles for the map surfaces (location today; anything geospatial
 # later). The default needs no key and no setup, so this block is only for an

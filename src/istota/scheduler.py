@@ -67,7 +67,7 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import confirmations, db
+from . import avatars, confirmations, db
 from .brain import make_brain
 from .build_info import build_description
 from .consumers import (
@@ -96,6 +96,8 @@ from .executor import (
     parse_api_error,
 )
 from .async_runtime import reset_async_runtime, run_coro
+from .nextcloud import avatars as nc_avatars
+from .nextcloud._http import nc_configured
 from .nextcloud_api import hydrate_user_configs
 from .modules import MODULE_NAMES
 from .notification_resolvers import confirmation as confirmation_source
@@ -4612,6 +4614,255 @@ def check_sandbox_cache_sweep(config: Config) -> list:
         return []
 
 
+AVATAR_IMPORT_IMPORTED = "imported"
+AVATAR_IMPORT_NO_CUSTOM = "no-custom"
+AVATAR_IMPORT_UNCHANGED = "unchanged"
+AVATAR_IMPORT_FAILED = "failed"
+
+# The byte ceiling `normalize` is given for an imported picture. It follows
+# `web.max_avatar_kb` so an operator who lowered the cap lowers this too, but
+# **not through its zero**: `0` there means "switch the upload route off", a
+# statement about a route this job does not use, and reading it as a byte
+# ceiling would silently refuse every import on a deployment that had only meant
+# to stop users uploading. `avatar_import_from_nextcloud` is the switch for
+# this, and it is a different one on purpose.
+_AVATAR_IMPORT_FALLBACK_KB = 4096
+
+
+@dataclass(frozen=True)
+class AvatarImportOutcome:
+    """What one tick did about one user. Returned so a caller can assert on it."""
+
+    user_id: str
+    action: str
+    detail: str = ""
+
+
+def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
+    """Import each user's custom Nextcloud avatar, on a cadence.
+
+    **The user set is `config.users`, and that is the whole point of this
+    function.** An earlier draft of the spec derived it from the `user_avatars`
+    table, which is dead on arrival: a user with no `nextcloud` row is exactly
+    the user who needs the first import, so reading the table for the set
+    excludes precisely them and nothing is ever imported, on any deployment.
+    The table supplies the ETags and nothing else.
+
+    **No transaction is held across a fetch.** The loop is fetch (network, no
+    DB), then one short write for that user, then the next user. This is the
+    first backgrounded scheduler check that writes to the framework DB in a
+    per-user loop interleaved with HTTP — the neighbours are readers, or touch
+    other files — so one `with db.get_db(...)` around the loop would hold the
+    write lock for the length of a Nextcloud timeout and stall every writer in
+    the daemon and in the web process.
+
+    Each returned image runs through the same `avatars.normalize` an upload
+    takes: an image from Nextcloud is not more trusted than one from a browser.
+    The byte ceiling goes to `fetch_avatar` as well as to `normalize`, so it is
+    enforced on the stream before the body exists in memory rather than on
+    `len()` after — the rule the spec states as D15 for the upload route, which
+    nothing about the sender being Nextcloud changes. Every user is wrapped, so
+    one unreachable account does not end the tick.
+
+    Re-checks its own gates rather than trusting the loop's, matching the
+    reaper and the cache sweep: the loop's gate exists to skip the thread spawn
+    cheaply, and this has to be safe to call on its own — which is how the tests
+    and any future operator command reach it.
+
+    `web.enabled` is one of those gates and is easy to leave out, since the
+    other three are about the import itself. An avatar renders in the web UI and
+    nowhere else — Talk draws its own, email and ntfy have no identity gutter —
+    so with the surface off this would spend one Nextcloud request per
+    configured user every six hours on bytes nothing will ever serve. It is also
+    what keeps `doctor` honest: `web.avatar_import` SKIPs with "web interface
+    disabled" the way every other `web.*` check does, and a check reporting SKIP
+    for work the daemon is doing anyway is worse than no check at all.
+    """
+    if not (
+        config.web.enabled
+        and config.storage_is_nextcloud
+        and config.web.avatar_import_from_nextcloud
+        and config.scheduler.avatar_import_interval
+    ):
+        return []
+
+    # `storage_is_nextcloud` is `bool(url)` and `nc_configured` is
+    # `bool(url and username)`, so a config carrying a URL and no username
+    # passes every gate above and then raises "Nextcloud is not configured" for
+    # every user, once per tick, forever. Refusing here makes that one skip
+    # rather than N failures, and leaves the failure counter meaning what it
+    # says: a credential the server rejected, not one nobody supplied.
+    if not nc_configured(config):
+        logger.debug("avatar_import_skipped reason=nextcloud_not_configured")
+        return []
+
+    users = sorted(config.users)
+    if not users:
+        return []
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            etags = avatars.import_probe_state(conn)
+    except Exception as exc:  # noqa: BLE001 - a periodic check must not kill the loop
+        logger.error(
+            "avatar_import_skipped reason=probe_state_unreadable err=%s", exc,
+            exc_info=True,
+        )
+        return []
+
+    max_bytes = (
+        config.web.max_avatar_kb or _AVATAR_IMPORT_FALLBACK_KB
+    ) * 1024
+    outcomes: list[AvatarImportOutcome] = []
+    header_seen = False
+    header_absent = False
+
+    for user_id in users:
+        try:
+            answer = nc_avatars.fetch_avatar(
+                config, user_id, etag=etags.get(user_id, ""),
+                max_bytes=max_bytes,
+            )
+            if answer is None:
+                # A 304, or a user Nextcloud does not know. Nothing was learned,
+                # so the stored row and its ETag are left exactly as they are.
+                outcomes.append(
+                    AvatarImportOutcome(user_id, AVATAR_IMPORT_UNCHANGED)
+                )
+                continue
+
+            if isinstance(answer, nc_avatars.NoCustomAvatar):
+                if answer.header_seen:
+                    header_seen = True
+                    probe_etag = answer.etag
+                else:
+                    header_absent = True
+                    # **No validator for an answer nothing could classify**, and
+                    # this line is the whole of a defect both reviewers found
+                    # independently. An ETag lets the next tick skip a body it
+                    # has already seen; storing one here made the next tick send
+                    # `If-None-Match`, take a 304, record `unobserved` — and
+                    # `unobserved` is an OK. So the `absent` verdict, the single
+                    # finding the recorded state exists to carry, erased itself
+                    # one interval after it was written, on the only deployment
+                    # it was built for, and a restart did not help because the
+                    # first tick after one takes the same 304 path. Asking
+                    # unconditionally costs one GET per user per tick on a
+                    # deployment that can import nothing anyway, and it is what
+                    # keeps the answer observable for as long as it is true.
+                    probe_etag = ""
+                with db.get_db(config.db_path) as conn:
+                    avatars.touch_import_probe(
+                        conn, user_id, remote_etag=probe_etag,
+                    )
+                outcomes.append(
+                    AvatarImportOutcome(user_id, AVATAR_IMPORT_NO_CUSTOM)
+                )
+                continue
+
+            header_seen = True
+            image, digest = avatars.normalize(
+                answer.image, declared_format=None, max_bytes=max_bytes,
+            )
+            with db.get_db(config.db_path) as conn:
+                avatars.put_user_avatar(
+                    conn, user_id,
+                    source=avatars.SOURCE_NEXTCLOUD,
+                    image=image,
+                    content_hash=digest,
+                    remote_etag=answer.etag,
+                )
+            outcomes.append(AvatarImportOutcome(user_id, AVATAR_IMPORT_IMPORTED))
+        except avatars.AvatarError as exc:
+            # **A picture this deployment will never accept, parked rather than
+            # retried.** `normalize` refuses an image over `AVATAR_MAX_PIXELS`
+            # or in a format not on the list, and both are reachable from a
+            # Nextcloud avatar well inside the byte ceiling the fetch already
+            # enforced — so the ceiling cannot prevent them and the refusal is
+            # permanent for as long as that user keeps that picture. Falling
+            # into the generic branch below stored no ETag, which meant the next
+            # tick sent no `If-None-Match`, pulled the whole body down again and
+            # logged another traceback, every interval, forever. Recording the
+            # validator turns that into a 304. INFO, not WARNING with a
+            # traceback: nothing here is broken, and a user can fix it by
+            # changing their Nextcloud picture.
+            logger.info(
+                "avatar_import_unusable user=%s err=%s", user_id, exc,
+            )
+            try:
+                with db.get_db(config.db_path) as conn:
+                    avatars.touch_import_probe(
+                        conn, user_id, remote_etag=getattr(answer, "etag", ""),
+                    )
+            except Exception as write_exc:  # noqa: BLE001 - best effort
+                logger.warning(
+                    "avatar_import_probe_write_failed user=%s err=%s",
+                    user_id, write_exc,
+                )
+            outcomes.append(
+                AvatarImportOutcome(user_id, AVATAR_IMPORT_FAILED, str(exc))
+            )
+        except Exception as exc:  # noqa: BLE001 - one account must not end the tick
+            logger.warning(
+                "avatar_import_failed user=%s err=%s", user_id, exc, exc_info=True,
+            )
+            outcomes.append(
+                AvatarImportOutcome(user_id, AVATAR_IMPORT_FAILED, str(exc))
+            )
+
+    _record_avatar_import_tick(config, outcomes, header_seen, header_absent)
+    return outcomes
+
+
+def _record_avatar_import_tick(
+    config: Config,
+    outcomes: list[AvatarImportOutcome],
+    header_seen: bool,
+    header_absent: bool,
+) -> None:
+    """Write down what this tick did, for `doctor`'s `web.avatar_import` check.
+
+    That check opens no socket, so this row is the only thing telling it whether
+    the import is working — in particular whether the custom-avatar header
+    arrived at all, which is the difference between "nobody has set a Nextcloud
+    avatar" and "nothing will ever be imported here".
+
+    `header_seen` wins over `header_absent`: one response carrying the header is
+    proof the server can send it, and the finding doctor warns on is that
+    nothing can ever be imported.
+    """
+    if header_seen:
+        header = avatars.HEADER_SEEN
+    elif header_absent:
+        header = avatars.HEADER_ABSENT
+    else:
+        # Every user answered 304, or 404, or failed. No response this tick
+        # could have carried the header, which is not the same as its absence.
+        header = avatars.HEADER_UNOBSERVED
+
+    counted = {action: 0 for action in (
+        AVATAR_IMPORT_IMPORTED, AVATAR_IMPORT_NO_CUSTOM,
+        AVATAR_IMPORT_UNCHANGED, AVATAR_IMPORT_FAILED,
+    )}
+    for outcome in outcomes:
+        counted[outcome.action] = counted.get(outcome.action, 0) + 1
+
+    state = {
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "users": len(outcomes),
+        "imported": counted[AVATAR_IMPORT_IMPORTED],
+        "no_custom": counted[AVATAR_IMPORT_NO_CUSTOM],
+        "unchanged": counted[AVATAR_IMPORT_UNCHANGED],
+        "failed": counted[AVATAR_IMPORT_FAILED],
+        "header": header,
+    }
+    try:
+        with db.get_db(config.db_path) as conn:
+            avatars.write_import_state(conn, state)
+    except Exception as exc:  # noqa: BLE001 - a record, not the work
+        logger.warning("avatar_import_state_unwritten err=%s", exc)
+
+
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
@@ -7230,6 +7481,10 @@ def run_daemon(
     # boot run to double up with.
     last_worktree_reap = 0.0
     last_cache_sweep = 0.0
+    # Same seeding, third reason: a user who signed in for the first time while
+    # the daemon was down has no imported picture and nothing else will fetch
+    # one, so a restart should ask rather than wait out a six-hour interval.
+    last_avatar_import = 0.0
     # Same seeding, different reason: a restart is the one moment an overlay
     # edited while the daemon was down is guaranteed to be unindexed.
     last_overlay_reindex = 0.0
@@ -7513,6 +7768,29 @@ def run_daemon(
                 background_checks,
             )
             last_cache_sweep = now
+
+        # Import each user's custom Nextcloud profile picture. On a cadence
+        # rather than at login or on render: a fetch at login puts a 10-second
+        # Nextcloud timeout in front of authentication, and a fetch on render is
+        # the live-proxy coupling the Nextcloud decoupling is unwinding.
+        # Backgrounded like the sweeps above — it makes one HTTP request per
+        # configured user, so on the loop thread a slow Nextcloud would starve
+        # dispatch. Gated on `web.enabled` as well: an avatar renders in the web
+        # UI and nowhere else, so with the surface off this is per-user network
+        # traffic for bytes nothing will serve — and `doctor`'s own check SKIPs
+        # there, as every `web.*` check does.
+        if (
+            config.web.enabled
+            and config.storage_is_nextcloud
+            and config.web.avatar_import_from_nextcloud
+            and config.scheduler.avatar_import_interval
+            and now - last_avatar_import >= config.scheduler.avatar_import_interval
+        ):
+            _spawn_background_check(
+                "avatar-import", lambda: check_avatar_import(config),
+                background_checks,
+            )
+            last_avatar_import = now
 
         # Reindex per-skill overlays for memory search (ISSUE-343). An overlay
         # is a user-written file with no CLI write path, so a periodic full

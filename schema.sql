@@ -1182,3 +1182,51 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_state
 -- other user's row when one user confirms theirs.
 CREATE INDEX IF NOT EXISTS idx_notifications_object
     ON notifications (user_id, source, object_type, object_id);
+
+-- ---------------------------------------------------------------------------
+-- Profile pictures
+-- ---------------------------------------------------------------------------
+
+-- One row per (user, source). The row set is the precedence chain: a user may
+-- hold an uploaded avatar and an imported one at the same time, and removing
+-- the upload reveals the import rather than leaving nothing behind.
+--
+-- The bytes live here rather than in the workspace. Health's uploads_dir is the
+-- precedent for user *documents*, which are large, kept verbatim and served
+-- rarely; an avatar is ~10 KB, disposable, regenerable and requested on every
+-- page load. `Config.workspace_root` also returns None on an rclone deployment,
+-- so a file-backed avatar would be unavailable on exactly the deployments with
+-- no other place to put it.
+--
+-- No indexes. The primary key covers every per-user read, and all but one read
+-- names a user; the exception is the import job's ETag lookup, which filters on
+-- `source` alone and so scans, once per import tick, bounded by the user count.
+CREATE TABLE IF NOT EXISTS user_avatars (
+    user_id      TEXT NOT NULL,
+    source       TEXT NOT NULL,                        -- 'upload' | 'nextcloud'
+    mime         TEXT NOT NULL DEFAULT 'image/webp',
+    -- sha256 hex of `image`, so it identifies what is *served* rather than what
+    -- was sent. The ETag and the cache-busting `?v` both carry it. '' when
+    -- image IS NULL.
+    content_hash TEXT NOT NULL DEFAULT '',
+    -- Normalized 192x192 WebP, or NULL. A NULL image is not an avatar: it is
+    -- the negative result of an import probe ("this user has no custom
+    -- Nextcloud avatar"), kept so the job can send If-None-Match and stop
+    -- re-downloading a generated placeholder every tick. Every read of the
+    -- chain filters `image IS NOT NULL`.
+    image        BLOB,
+    remote_etag  TEXT NOT NULL DEFAULT '',             -- ETag the probe last saw; '' for an upload
+    checked_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, source)
+);
+
+-- The deployment's bot icon. One row, or none — distinct from the bot's
+-- Nextcloud Talk avatar, which an app password cannot set.
+CREATE TABLE IF NOT EXISTS bot_avatar (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    mime         TEXT NOT NULL DEFAULT 'image/webp',
+    content_hash TEXT NOT NULL,
+    image        BLOB NOT NULL,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
