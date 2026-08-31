@@ -130,13 +130,15 @@ These are not Python packages -- they're system-level tools used at runtime:
 | `claude` CLI | Claude Code execution engine | yes |
 | `rclone` | Nextcloud file access (mount or CLI mode) | yes |
 | `bwrap` (bubblewrap) | Filesystem sandbox (Linux only) | recommended |
-| `tesseract` | OCR engine (for transcribe skill) | optional |
+| `tesseract` | OCR engine: the `transcribe` skill, and the automatic pass over every image attachment | optional |
 | Docker | Browser container, Docker deployment | optional |
 | Node.js | SvelteKit frontend build | optional (web UI only) |
 
 ## Dependencies
 
-Core (always installed): `httpx`, `requests`, `croniter`, `tomli`, `cryptography`, `Pillow`, `pillow-heif`. Pillow and its HEIC plugin are core rather than an extra because every task with an image attachment pre-shrinks it before the model sees it; `cryptography` backs the encrypted secrets store.
+Core (always installed): `httpx`, `requests`, `croniter`, `tomli`, `cryptography`, `Pillow`, `pillow-heif`. Pillow and its HEIC plugin are core rather than an extra because every image attachment is decoded, rotated, resized and re-encoded before the model sees it (`istota/image_attachments.py`); `cryptography` backs the encrypted secrets store.
+
+Automatic OCR is the part that degrades. Without the `transcribe` extra or the `tesseract` binary, every image attachment still reaches the model through the vision path — the prompt's OCR section says `OCR unavailable` per image instead of carrying text, and nothing fails. With Pillow missing, which a core dependency makes unlikely, images are left as ordinary attachment paths and each one is named to the model as unavailable rather than passed over in silence.
 
 Optional extras add feature-specific dependencies. Notable packages across extras: `caldav` + `icalendar` (calendar), `imap-tools` (email), `yfinance` (markets), `feedparser` (RSS), `pytesseract` (OCR), `faster-whisper` (audio), `sqlite-vec` + `sentence-transformers` (memory search), `fastapi` + `uvicorn` (web/location).
 

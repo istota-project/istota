@@ -27,6 +27,7 @@ import logging
 from istota.llm.tokens import estimate_tokens
 from istota.llm.types import (
     AssistantMessage,
+    ImageContent,
     TextContent,
     ToolResultMessage,
     UserMessage,
@@ -190,19 +191,119 @@ def _format_file_operations(details: CompactionDetails) -> str:
     return "Files touched this session:\n" + "\n".join(parts) + "\n\n"
 
 
+def _image_loss_notice(block: ImageContent) -> str:
+    """What the summarizer is told about an image block being cut.
+
+    An ``ImageContent`` matched neither serializer branch, so the summary never
+    recorded that an image had been in the conversation at all — and the model
+    went on answering from a picture it could no longer see, which is the exact
+    confident-blind failure this pipeline exists to prevent, reached through
+    compaction instead of through a retry. The base64 payload is deliberately
+    not rendered: the summary is a prompt, and the bytes are what the cut is
+    shedding.
+    """
+    return f"[image {block.display_name or 'attachment'} — no longer in context]"
+
+
+def find_image_message(messages: list):
+    """The first ``UserMessage`` in ``messages`` carrying image blocks, or None.
+
+    Used by the compaction assembly to pin the task's own attachments across the
+    cut. Restricted to ``UserMessage`` on purpose: a ``ToolResultMessage`` can
+    carry images too, and hoisting one to the head of the compacted list would
+    strand it from the ``tool_call`` it answers and 400 the next request.
+    """
+    for msg in messages:
+        if isinstance(msg, UserMessage) and any(
+            isinstance(c, ImageContent) for c in msg.content
+        ):
+            return msg
+    return None
+
+
+# What the carried-over blocks are introduced as. The pin is deliberately *not*
+# the original message: that one leads with the fully composed prompt
+# (emissaries, persona, memory, skills, the request), and pinning the whole
+# thing would make the largest text in the conversation the one piece
+# compaction can never reclaim — while the summary is already the mechanism for
+# carrying that text forward in reduced form.
+_PIN_LABEL = "[Images attached to this task, carried across compaction]"
+
+# The pin only works because it is small next to the tail budget the cut is
+# working with. `find_cut_point` walks back from the newest and returns 0 when
+# it does not reach `keep_recent_tokens` before index 0 — so a pin large enough
+# to swallow that budget on its own turns compaction into a permanent no-op and
+# the request goes out over-window. At most half the budget, so there is always
+# room for the cut to land somewhere useful.
+_PIN_TOKEN_SHARE = 2
+
+
+def plan_image_pin(to_compact: list, keep_recent_tokens: int = 0):
+    """Decide what survives a cut and what the summarizer is told about it.
+
+    Returns ``(pin, summary_input)``.
+
+    ``pin`` is a small ``UserMessage`` holding a label and the image blocks of
+    the first image-bearing user message in the prefix — or ``None`` when there
+    is nothing to pin, or when the blocks are too large a share of
+    ``keep_recent_tokens`` to carry without wedging the cut (see
+    ``_PIN_TOKEN_SHARE``). A caller passing ``0`` asks for no size check.
+
+    ``summary_input`` is ``to_compact`` with exactly those blocks removed, and
+    it is why the two halves cannot contradict each other: the loss notice is
+    written by ``_serialize_for_summary`` over whatever it is handed, so
+    leaving the pinned blocks in would tell the summarizer an image was gone at
+    the very moment it is being carried over — and that summary text is durable,
+    updated forward on every later cycle. The message's *text* is not removed:
+    that really is being reclaimed, and it belongs in the summary.
+    """
+    source = find_image_message(to_compact)
+    if source is None:
+        return None, to_compact
+
+    blocks = [c for c in source.content if isinstance(c, ImageContent)]
+    pin = UserMessage(content=[TextContent(text=_PIN_LABEL), *blocks])
+    pin_tokens = _msg_tokens(pin)
+    if keep_recent_tokens > 0 and pin_tokens * _PIN_TOKEN_SHARE > keep_recent_tokens:
+        logger.info(
+            "compaction: not pinning %d image block(s) (~%d tokens) against a "
+            "%d-token recent budget; the summary's loss notice carries it instead",
+            len(blocks), pin_tokens, keep_recent_tokens,
+        )
+        return None, to_compact
+
+    summary_input = [
+        UserMessage(
+            role=source.role,
+            content=[c for c in source.content if not isinstance(c, ImageContent)],
+            timestamp=source.timestamp,
+        )
+        if msg is source
+        else msg
+        for msg in to_compact
+    ]
+    return pin, summary_input
+
+
 def _serialize_for_summary(llm_messages: list) -> str:
     """Render LLM messages to plain text for the summary prompt."""
     lines: list[str] = []
     for msg in llm_messages:
         role = getattr(msg, "role", "?")
         if isinstance(msg, ToolResultMessage):
-            text = "\n".join(getattr(c, "text", "") for c in msg.content)
+            text = "\n".join(
+                _image_loss_notice(c) if isinstance(c, ImageContent)
+                else getattr(c, "text", "")
+                for c in msg.content
+            )
             lines.append(f"[tool_result {msg.tool_name}]\n{text}")
             continue
         text_parts = []
         for c in getattr(msg, "content", []):
             if isinstance(c, TextContent):
                 text_parts.append(c.text)
+            elif isinstance(c, ImageContent):
+                text_parts.append(_image_loss_notice(c))
             elif getattr(c, "type", "") == "tool_call":
                 text_parts.append(f"[tool_call {c.name} {c.arguments}]")
         lines.append(f"{role}: {' '.join(p for p in text_parts if p)}")

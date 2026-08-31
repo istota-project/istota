@@ -60,12 +60,25 @@ from .claude_code import (
     _is_root,
     advisor_active,
     build_claude_cli_flags,
+    build_image_prompt,
     is_transient_api_error,
     _success_frame_stop_reason,
     is_usage_limit_error,
 )
 
 logger = logging.getLogger("istota.brain.tmux_claude")
+
+
+def prompt_file_text(req: BrainRequest) -> str:
+    """What goes into `prompt.txt`, which the bracketed paste then loads.
+
+    The image inspection directive belongs in the file rather than beside it:
+    this brain submits one buffer per run and the session lifecycle is one turn,
+    so a second paste would be a second turn. `build_image_prompt` is the
+    headless brain's own composer — the two CLI brains speak to the same tool
+    set, and a second wording for the same instruction is how they drift.
+    """
+    return build_image_prompt(req)
 
 # Wide, fixed pane geometry reduces TUI reflow noise if pane scraping is needed.
 _PANE_WIDTH = 220
@@ -672,7 +685,7 @@ class TmuxClaudeBrain:
         try:
             workdir.mkdir(parents=True, exist_ok=True)
             config_dir.mkdir(parents=True, exist_ok=True)
-            prompt_file.write_text(req.prompt, encoding="utf-8")
+            prompt_file.write_text(prompt_file_text(req), encoding="utf-8")
             self._write_hooks(config_dir, sentinel, started_sentinel)
             self._seed_onboarding(config_dir, base_dir)
 

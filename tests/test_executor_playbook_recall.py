@@ -41,7 +41,7 @@ class TestRecallPlaybooks:
             return [_FakeResult("# Open a PR\n1. gh pr create")]
 
         with patch("istota.memory.search.search", side_effect=fake_search):
-            out = _recall_playbooks(config, object(), _task())
+            out = _recall_playbooks(config, object(), _task(), "the prompt")
 
         assert captured["source_types"] == ["playbook"]
         assert captured["limit"] == 3
@@ -50,25 +50,25 @@ class TestRecallPlaybooks:
     def test_disabled_returns_none(self, tmp_path):
         config = self._config(tmp_path, enabled=False)
         with patch("istota.memory.search.search") as s:
-            assert _recall_playbooks(config, object(), _task()) is None
+            assert _recall_playbooks(config, object(), _task(), "the prompt") is None
             s.assert_not_called()
 
     def test_automated_task_returns_none(self, tmp_path):
         config = self._config(tmp_path)
         with patch("istota.memory.search.search") as s:
-            assert _recall_playbooks(config, object(), _task(source_type="scheduled")) is None
+            assert _recall_playbooks(config, object(), _task(source_type="scheduled"), "the prompt") is None
             s.assert_not_called()
 
     def test_skip_memory_returns_none(self, tmp_path):
         config = self._config(tmp_path)
         with patch("istota.memory.search.search") as s:
-            assert _recall_playbooks(config, object(), _task(), skip_memory=True) is None
+            assert _recall_playbooks(config, object(), _task(), "the prompt", skip_memory=True) is None
             s.assert_not_called()
 
     def test_no_results_returns_none(self, tmp_path):
         config = self._config(tmp_path)
         with patch("istota.memory.search.search", return_value=[]):
-            assert _recall_playbooks(config, object(), _task()) is None
+            assert _recall_playbooks(config, object(), _task(), "the prompt") is None
 
     def test_touches_recalled_playbook_mtime(self, tmp_path):
         """ISSUE-174 Concern 3: recall stamps use-recency onto the file so the
@@ -88,7 +88,7 @@ class TestRecallPlaybooks:
             source_id = str(pb_file)
 
         with patch("istota.memory.search.search", return_value=[_R()]):
-            out = _recall_playbooks(config, object(), _task())
+            out = _recall_playbooks(config, object(), _task(), "the prompt")
 
         assert "Open a PR" in out
         assert pb_file.stat().st_mtime > past + 86400  # mtime advanced to ~now

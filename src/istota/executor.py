@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -61,7 +61,15 @@ from .brain._fallback import (
     effective_fallback_kind,
     get_availability_breaker,
 )
+from .agent.events import READ_DESCRIPTION_PREFIX
 from .events import EventWriter, random_progress_message
+from .image_attachments import (
+    KIND_OMITTED,
+    ImagePreparation,
+    ocr_query_text,
+    prepare_image_attachments,
+    render_ocr_context,
+)
 from .shell_exec import pipefail_env
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
@@ -138,14 +146,10 @@ _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm
 # only bound there is.
 _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS = 900.0
 
-# Image extensions eligible for pre-shrinking before they reach the vision model
-_IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "heif"})
-
-# 1568 px matches Anthropic's vision long-edge limit; sending anything larger
-# just pays tokens for pixels the model downsamples on its end. (Vision also
-# enforces a separate ~1.15 MP area limit, which Claude handles itself.)
-_IMAGE_MAX_EDGE = 1568
-_IMAGE_JPEG_QUALITY = 85
+# Inbound image preparation — extension screening, the pre-decode gates,
+# normalization, the two renditions and automatic OCR — lives in
+# `image_attachments`, which owns the limits and the model-facing notices and
+# imports no brain. `_preshrink_image_attachments` was its ancestor.
 
 
 # Result composition + malformed-output detection moved to session.result in
@@ -177,6 +181,7 @@ from .session.result import (  # noqa: E402,F401
 def _pre_transcribe_attachments(
     attachments: list[str] | None,
     prompt: str,
+    cancel_check: "Callable[[], bool] | None" = None,
 ) -> str:
     """Pre-transcribe audio attachments so skill selection sees real text.
 
@@ -201,6 +206,15 @@ def _pre_transcribe_attachments(
     else bounds it — and a per-file timeout would mean a send carrying five
     audio files could hold the worker for five times the limit, which is the
     stall the timeout exists to prevent rather than a smaller version of it.
+
+    `cancel_check` is polled between files, for the same reason
+    `prepare_image_attachments` polls it: this window sits *before* the brain
+    call, so `scheduler.task_timeout_minutes` does not cover it and
+    `BrainRequest.cancel_check` is not yet in play. Without the poll `!stop` and
+    the web cancel button are inert for the whole budget — 900 s here, and one
+    send can put normalization and OCR behind it on the same worker. What is
+    already transcribed is kept: the prompt is still better with a partial
+    transcript than with none.
     """
     if not attachments:
         return prompt
@@ -217,6 +231,9 @@ def _pre_transcribe_attachments(
     deadline = time.monotonic() + _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS
     transcribed_parts = []
     for audio_path in audio_paths:
+        if _cancelled(cancel_check):
+            logger.info("Audio pre-transcription cancelled, stopping the pass")
+            break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             # Keep what earlier files produced; the prompt is still better with
@@ -254,113 +271,70 @@ def _pre_transcribe_attachments(
     return block if not prompt.strip() else f"{prompt}\n\n{block}"
 
 
-def _preshrink_image_attachments(
-    attachments: list[str] | None,
-    user_temp_dir: Path,
-    task_id: int,
-) -> list[str] | None:
-    """Downscale oversized image attachments before they reach the vision model.
+def _cancelled(cancel_check: "Callable[[], bool] | None") -> bool:
+    """Poll a cancellation channel without letting it break the pass.
 
-    Phone photos are typically 12+ MP; that's expensive vision tokens and slow
-    inference for content the model auto-downsamples anyway. For each image
-    attachment we rewrite a JPEG copy under
-    ``user_temp_dir/attachments/task_<id>/`` when either:
-
-    * the longest edge exceeds ``_IMAGE_MAX_EDGE``, or
-    * the EXIF orientation isn't 1 (Tesseract OCR doesn't honor EXIF, so
-      small sideways scans need a physically rotated copy too).
-
-    Returns the (possibly rewritten) attachments list, or the original input
-    when there's nothing to do or PIL isn't available.
+    A channel that raises is not a reason to abandon a task's attachments, so
+    a failure reads as "not cancelled" — the same posture
+    `image_attachments._cancelled` takes for the same callable.
     """
-    if not attachments:
-        return attachments
-
+    if cancel_check is None:
+        return False
     try:
-        from PIL import Image, ImageOps, UnidentifiedImageError
-    except ImportError:
-        logger.debug("Pillow not available, skipping image pre-shrink")
-        return attachments
+        return bool(cancel_check())
+    except Exception:
+        return False
 
-    # Optional HEIC/HEIF support — iPhone photos arrive in this format.
-    try:
-        import pillow_heif  # type: ignore[import-not-found]
-        pillow_heif.register_heif_opener()
-    except ImportError:
-        pass
 
-    out_dir = user_temp_dir / "attachments" / f"task_{task_id}"
-    rewritten: list[str] = []
-    changed = False
-    for idx, att in enumerate(attachments):
-        ext = Path(att).suffix.lstrip(".").lower()
-        if ext not in _IMAGE_EXTENSIONS:
-            rewritten.append(att)
-            continue
-        src = Path(att)
-        if not src.is_file():
-            rewritten.append(att)
-            continue
+def _make_cancel_check(config: Config, task_id: int) -> "Callable[[], bool]":
+    """The task's cancellation channel: one predicate, three consumers.
+
+    Audio pre-transcription, image preparation and the brain all poll the same
+    thing. It opens its own short-lived connection rather than borrowing the
+    caller's, because the caller may be holding a write transaction open and
+    this is read-only.
+    """
+    def _check() -> bool:
         try:
-            with Image.open(src) as img:
-                orientation = img.getexif().get(0x0112, 1) or 1
-                w, h = img.size
-                # Orientations 5-8 swap the axes; project to final dimensions.
-                if orientation in (5, 6, 7, 8):
-                    final_w, final_h = h, w
-                else:
-                    final_w, final_h = w, h
-                needs_shrink = max(final_w, final_h) > _IMAGE_MAX_EDGE
-                needs_rotate = orientation != 1
-                if not needs_shrink and not needs_rotate:
-                    rewritten.append(att)
-                    continue
-                icc = img.info.get("icc_profile")
-                # JPEG-only: ask libjpeg to downsample at decode time so a 50 MP
-                # panorama doesn't fully decode into RAM before we thumbnail.
-                if needs_shrink and ext in ("jpg", "jpeg"):
-                    img.draft("RGB", (_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE))
-                img = ImageOps.exif_transpose(img)
-                if needs_shrink:
-                    img.thumbnail(
-                        (_IMAGE_MAX_EDGE, _IMAGE_MAX_EDGE), Image.Resampling.LANCZOS,
-                    )
-                if img.mode == "RGBA":
-                    # Flatten onto white so transparent screenshots don't end up
-                    # with a black background after JPEG conversion.
-                    flat = Image.new("RGB", img.size, (255, 255, 255))
-                    flat.paste(img, mask=img.split()[3])
-                    rgb = flat
-                elif img.mode not in ("RGB", "L"):
-                    rgb = img.convert("RGB")
-                else:
-                    rgb = img
-                out_dir.mkdir(parents=True, exist_ok=True)
-                # Prefix with the attachment index so two paths sharing a stem
-                # (photo.jpg + photo.png, or duplicate IMG_1234.jpg from
-                # different directories) don't overwrite each other.
-                out_path = out_dir / f"{idx:02d}_{src.stem}.jpg"
-                save_kwargs: dict = {
-                    "quality": _IMAGE_JPEG_QUALITY,
-                    "optimize": True,
-                }
-                if icc:
-                    save_kwargs["icc_profile"] = icc
-                rgb.save(out_path, "JPEG", **save_kwargs)
-                logger.info(
-                    "Pre-shrunk image %s: %dx%d -> %dx%d (%d bytes)",
-                    src.name, w, h, *rgb.size, out_path.stat().st_size,
-                )
-                rewritten.append(str(out_path))
-                changed = True
-        except UnidentifiedImageError:
-            logger.debug("Could not decode %s (unrecognized format)", att)
-            rewritten.append(att)
+            with db.get_db(config.db_path) as cancel_conn:
+                return db.is_task_cancelled(cancel_conn, task_id)
         except Exception:
-            logger.warning("Pre-shrink failed for %s", att, exc_info=True)
-            rewritten.append(att)
+            return False
 
-    return rewritten if changed else attachments
+    return _check
+
+
+def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list[Path]:
+    """The roots an image attachment can live under and still be openable.
+
+    `build_bwrap_cmd` binds the user temp dir plus `{mount}/Users/{user}`,
+    `{mount}/Talk` and `{mount}/Channels/{token}` — and nothing else. The
+    scheduler's nc-data fallback hands out `/mnt/nc-data/<user>/files/Talk/...`,
+    which is under none of them, so a small in-limits screenshot arriving that
+    way would be named in the Claude Code directive and be unreadable. Naming
+    the roots here is what lets `prepare_image_attachments` copy such a file in
+    even when it needs no resize and no conversion.
+
+    Resolved, because `_bind` resolves its source and uses the *resolved* path
+    as the in-namespace destination: on a deployment where `temp_dir` sits
+    behind a symlink an unresolved path names a file that does not exist inside
+    the namespace, and every `Read` fails.
+    """
+    roots = [user_temp_dir]
+    mount = config.nextcloud_mount_path
+    if mount:
+        mount = Path(mount)
+        roots.append(mount / "Users" / task.user_id)
+        roots.append(mount / "Talk")
+        if task.conversation_token:
+            roots.append(mount / "Channels" / task.conversation_token)
+    resolved = []
+    for root in roots:
+        try:
+            resolved.append(Path(root).resolve())
+        except OSError:
+            continue
+    return resolved
 
 
 def get_user_temp_dir(config: Config, user_id: str) -> Path:
@@ -866,6 +840,122 @@ def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
     # (e.g. `claude_code`), which would confuse underscore delimiters.
     note = f"⚠️ *Ran on* `{model_str}` *(*`{dropped_pin}` *unavailable).*"
     return f"{result_text}\n\n{note}"
+
+
+def unread_images(images, trace_json: "str | None") -> list[str]:
+    """Prepared images with no recorded `Read` call, by basename.
+
+    The Claude Code brains deliver an image by telling the model to open it,
+    which means the vision claim otherwise rests entirely on the model
+    complying with a prompt instruction — the failure shape ISSUE-366 records,
+    moved one layer up. This reads a *recorded tool call* instead. It is not
+    the post-hoc answer grading rejected in the spec: a `ToolUseEvent` is a fact
+    about what the model did, not an inference from what it wrote.
+
+    Matched on `READ_DESCRIPTION_PREFIX`, which only `Read` produces — a Bash
+    call carries its own emoji, so the model cannot forge this label by naming a
+    command.
+
+    **What it detects is a `Read` that was never attempted, and nothing more.**
+    Two limits, both in the same direction, so a name returned here is reliable
+    and an empty result is not proof of sight:
+
+    * the trace entry is written from a `ToolUseEvent`, which is emitted from
+      the assistant message's `tool_use` block — at call time, before any tool
+      result. A `Read` that *failed* (a size ceiling, a path outside the
+      namespace) is recorded exactly like one that succeeded. The spec settles
+      that case elsewhere: the tool result reaches the same model and the
+      directive requires it to report the failure rather than guess around it.
+    * the trace records the basename rather than the path, so a `Read` of any
+      unrelated file sharing a basename with a prepared image — a `screenshot.png`
+      in a repository the task is working in, say — satisfies the check.
+
+    An unparseable or absent trace yields no names for the same reason: silence
+    is not evidence that an image went unopened.
+    """
+    if not images or not trace_json:
+        return []
+    try:
+        entries = json.loads(trace_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    read = {
+        str(entry.get("text", ""))[len(READ_DESCRIPTION_PREFIX):]
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("type") == "tool"
+        and str(entry.get("text", "")).startswith(READ_DESCRIPTION_PREFIX)
+    }
+    missing = []
+    for image in images:
+        if Path(image.path).name not in read:
+            missing.append(image.display_name or Path(image.path).name)
+    return missing
+
+
+def _append_unread_images_note(result_text: str, names: list[str]) -> str:
+    """Say plainly which images the model never opened.
+
+    Same mechanism as `_append_model_note`: part of ``result_text``, so it
+    delivers uniformly across every surface and persists with the result. Pure
+    string→string.
+    """
+    listed = ", ".join(f"`{n}`" for n in names)
+    note = (
+        f"⚠️ *The image* {listed} *was never opened during this task, so the "
+        f"answer above was not informed by it.*"
+        if len(names) == 1
+        else f"⚠️ *These images were never opened during this task, so the "
+             f"answer above was not informed by them:* {listed}*.*"
+    )
+    return f"{result_text}\n\n{note}"
+
+
+def _append_vision_dropped_note(
+    result_text: str, names: list[str], model: str, *, rerouted: bool = False
+) -> str:
+    """Say that the answer came from a model that could not see the images.
+
+    A prompt-side notice tells the *model*; only the user reads the result.
+    Without this, an answer written blind arrives with nothing anywhere saying
+    so — which is the same confident-about-an-unseen-image failure the change
+    exists to remove, delivered to the person rather than by the model.
+
+    `rerouted` only changes the wording. A fallback is worth naming because the
+    user did not choose the model that answered; a primary is the configured
+    one and saying "rerouted" there would be false.
+    """
+    listed = ", ".join(f"`{n}`" for n in names)
+    model_str = model or "the model that answered"
+    how = "*rerouted to*" if rerouted else "*ran on*"
+    return (
+        f"{result_text}\n\n⚠️ *Answered without seeing* {listed} — "
+        f"{how} `{model_str}`*, which declares no vision support.*"
+    )
+
+
+def brain_delivers_vision(kind: str, model: str) -> bool | None:
+    """Whether a brain of `kind` would give `model` the pixels, or None.
+
+    `None` is "cannot tell", and the callers treat it as no note rather than as
+    a negative — claiming an answer was written blind when it may not have been
+    is the same class of false statement this whole change removes.
+    """
+    if kind in ("claude_code", "tmux_claude"):
+        # Delivery is Claude Code's own `Read`, available on any model the CLI
+        # runs. Whether the model actually called it is what `unread_images`
+        # answers, and that is a different question.
+        return True
+    if kind == "native":
+        try:
+            from .llm.catalog import get_model_info
+
+            return bool(get_model_info(model).supports_vision)
+        except Exception:
+            return None
+    return None
 
 
 # Plain-language readings of the stop_reasons that open a fallback, for the
@@ -3771,10 +3861,16 @@ def _recall_memories(
     config: Config,
     conn: "db.sqlite3.Connection | None",
     task: db.Task,
+    prompt: str,
     skip_memory: bool = False,
     exclude_task_ids: set[int] | None = None,
 ) -> str | None:
-    """BM25 search using task prompt as query. Independent of context triage.
+    """BM25 search using the task's *effective* prompt. Independent of triage.
+
+    `prompt` is passed explicitly rather than read off `task` because the query
+    is the enriched string — typed request plus audio transcript plus OCR
+    context — and `task.prompt` carries only the first two. Reading the field
+    would make this the one retrieval pass blind to an attachment's text.
 
     `exclude_task_ids` is the set of task IDs already included as conversation
     history; recall drops conversation chunks for those tasks so the same
@@ -3801,7 +3897,7 @@ def _recall_memories(
     try:
         if conn is not None:
             results = search(
-                conn, task.user_id, task.prompt,
+                conn, task.user_id, prompt,
                 limit=config.memory_search.auto_recall_limit,
                 source_types=source_types,
                 include_user_ids=include_ids or None,
@@ -3811,7 +3907,7 @@ def _recall_memories(
         else:
             with db.get_db(config.db_path) as temp_conn:
                 results = search(
-                    temp_conn, task.user_id, task.prompt,
+                    temp_conn, task.user_id, prompt,
                     limit=config.memory_search.auto_recall_limit,
                     source_types=source_types,
                     include_user_ids=include_ids or None,
@@ -3836,9 +3932,10 @@ def _recall_playbooks(
     config: Config,
     conn: "db.sqlite3.Connection | None",
     task: db.Task,
+    prompt: str,
     skip_memory: bool = False,
 ) -> str | None:
-    """Recall learned playbooks relevant to the task prompt (Part B).
+    """Recall learned playbooks relevant to the task's effective prompt (Part B).
 
     Mirrors `_recall_memories` but queries only `source_type="playbook"`,
     user-scoped, top-`playbooks.recall_limit`. Gated on `playbooks.enabled`,
@@ -3858,14 +3955,14 @@ def _recall_playbooks(
     try:
         if conn is not None:
             results = search(
-                conn, task.user_id, task.prompt,
+                conn, task.user_id, prompt,
                 limit=config.playbooks.recall_limit,
                 source_types=["playbook"],
             )
         else:
             with db.get_db(config.db_path) as temp_conn:
                 results = search(
-                    temp_conn, task.user_id, task.prompt,
+                    temp_conn, task.user_id, prompt,
                     limit=config.playbooks.recall_limit,
                     source_types=["playbook"],
                 )
@@ -4168,6 +4265,67 @@ def build_rules_section(
     return f"## Important rules\n\n{body}"
 
 
+# What the executor can truthfully say about a prepared image, and no more.
+# "Attached" alone is not evidence of sight, so a prepared image is marked as
+# distinct from an omitted one — but the line stops short of asserting *how*
+# the pixels arrive, or that they arrived at all.
+#
+# The spec asks this line for `vision supplied` / `vision requires Claude Code
+# Read`, and neither is a fact this layer holds. Prompt assembly runs several
+# hundred lines before the brain is constructed, so the only thing available
+# here is the *configured* kind — and three ordinary states make it wrong:
+# a native model that declares no vision support (the brain sends a named
+# omission instead of the image), an availability-breaker skip-primary that
+# routes to the fallback before the primary is ever called, and an in-attempt
+# reroute, both of which run a brain the prompt did not name. Each of those
+# turns the line into a claim of sight for an image the model cannot see, which
+# is precisely the failure the whole change exists to remove.
+#
+# The layer that *can* be right says it instead, in the same prompt: the CLI
+# brains prepend the `Read` directive naming every path, and the native brain
+# emits one image block per image or one named omission per image. So this line
+# distinguishes prepared from omitted, and delivery is stated by whoever
+# delivers.
+VISION_PREPARED = "prepared for vision"
+
+
+def image_attachment_status(prep: ImagePreparation) -> "dict[str, str]":
+    """Map each recognized image attachment to its one-phrase status.
+
+    An omitted image carries its own reason, which `prepare_image_attachments`
+    already wrote as a bounded model-facing notice.
+    """
+    status: dict[str, str] = {}
+    for block in prep.ocr_blocks:
+        if block.kind == KIND_OMITTED and block.path:
+            status[block.path] = f"not sent to the model: {block.detail}"
+    for image in prep.images:
+        status[str(image.path)] = VISION_PREPARED
+    return status
+
+
+def _attachment_line(
+    attachment: str, config: Config, status: "dict[str, str] | None"
+) -> str:
+    """One `Attached files` line: the path, where it is, and its vision status.
+
+    The location label is per line rather than per section. It used to be one
+    `any(att.startswith("/") …)` predicate over the whole list, which relabels
+    the entire section "local paths" the moment a single entry becomes
+    absolute — presenting a workspace-relative PDF as a local path. Normalizing
+    strictly more images than before makes that mixed list the common case
+    rather than the odd one.
+    """
+    if attachment.startswith("/"):
+        where = "local path"
+    elif config.storage_is_nextcloud:
+        where = "in Nextcloud, access via rclone"
+    else:
+        where = "workspace-relative"
+    note = (status or {}).get(attachment, "")
+    return f"  - {attachment} [{where}]" + (f" — {note}" if note else "")
+
+
 def build_prompt(
     task: db.Task,
     user_resources: list[db.UserResource],
@@ -4192,11 +4350,28 @@ def build_prompt(
     confirmation_context: str | None = None,
     knowledge_facts: str | None = None,
     conn: "db.sqlite3.Connection | None" = None,
+    effective_prompt: str | None = None,
+    attachment_status: "dict[str, str] | None" = None,
 ) -> str:
     """Build the full prompt for Claude Code execution.
 
     Pass ``conn`` to let the per-task timezone lookup reuse an existing
     framework-DB connection instead of opening a throwaway one.
+
+    ``effective_prompt`` is the enriched request — typed text plus audio
+    transcript plus rendered OCR context — and it is what ``## User's request``
+    renders. It is a parameter rather than a mutation of ``task.prompt``
+    because the same string has to reach skill selection and the three
+    retrieval passes, and a field read in five places is how those drift apart.
+    ``None`` falls back to ``task.prompt``, which is what every caller outside
+    ``execute_task`` passes.
+
+    ``attachment_status`` maps an attachment path to the one-phrase status
+    shown after it: ``VISION_PREPARED``, or the reason it was left out.
+    "Attached" alone is not evidence of sight, so a prepared image is marked as
+    distinct from an omitted one here — and no further, since *how* the pixels
+    arrive is not a fact assembly holds. See ``VISION_PREPARED`` for why, and
+    for which layer says the rest.
     """
     # Stage 3a (Resources sunset): resources are no longer a per-task prompt
     # surface. The enumerated Nextcloud Folders / TODO Files / Notes /
@@ -4250,13 +4425,11 @@ def build_prompt(
     # Build attachments section if present
     attachments_text = ""
     if task.attachments:
-        att_list = "\n".join(f"  - {att}" for att in task.attachments)
-        # Check if paths are local (absolute) or workspace-relative
-        if any(att.startswith("/") for att in task.attachments):
-            attachments_text = f"\n\nAttached files (local paths):\n{att_list}"
-        else:
-            where = "in Nextcloud, access via rclone" if config.storage_is_nextcloud else "workspace-relative"
-            attachments_text = f"\n\nAttached files ({where}):\n{att_list}"
+        att_list = "\n".join(
+            _attachment_line(att, config, attachment_status)
+            for att in task.attachments
+        )
+        attachments_text = f"\n\nAttached files:\n{att_list}"
 
     # Build user memory section
     memory_section = ""
@@ -4523,7 +4696,7 @@ You have access to:
 {context_section}
 {confirmation_section}## User's request
 
-{reply_quote_section}{task.prompt}{attachments_text}
+{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}
 {channel_section}"""
 
     if skills_changelog:
@@ -4678,20 +4851,90 @@ def execute_task(
             logger.error("Task %s: %s", task.id, msg)
             return False, msg, None, None
 
-    # Pre-transcribe audio attachments so skill selection sees real text
-    enriched_prompt = _pre_transcribe_attachments(task.attachments, task.prompt)
+    # The cancellation channel, built once. Both pre-brain passes below poll it
+    # and the brain gets the same callable: `scheduler.task_timeout_minutes`
+    # covers neither of them, and `BrainRequest.cancel_check` is not in play
+    # until the brain runs, so without this `!stop` and the web cancel button
+    # are inert for the whole pre-brain window — 900 s of audio plus 180 s of
+    # normalization plus the OCR deadline, in sequence on one worker.
+    _cancel_check = _make_cancel_check(config, task.id)
+
+    # Pre-transcribe audio attachments so skill selection sees real text.
+    #
+    # This one *does* still land on `task.prompt`, and deliberately: the
+    # scheduler indexes `task.prompt` into conversation memory after
+    # `execute_task` returns (`scheduler.py`, `index_conversation`), and an
+    # audio-only send arrives as the transport's stand-in "Process the attached
+    # file(s)". Dropping the assignment would index that stand-in instead of
+    # what the user actually said, for every voice message. Nothing *inside*
+    # this function reads the mutated field any more — every consumer below
+    # takes `effective_prompt` explicitly — so the implicit contract the
+    # mutation used to carry is gone even though the assignment stays.
+    enriched_prompt = _pre_transcribe_attachments(
+        task.attachments, task.prompt, cancel_check=_cancel_check,
+    )
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)
         task.prompt = enriched_prompt
 
-    # Pre-shrink oversized image attachments — vision tokens scale with pixels
-    # and phone photos are 12+ MP. EXIF rotation is applied in the same pass so
-    # the model and any downstream OCR see a correctly-oriented image.
-    shrunken = _preshrink_image_attachments(
-        task.attachments, get_user_temp_dir(config, task.user_id), task.id,
+    # Normalize and OCR the image attachments. Before skill selection and
+    # before prompt assembly, so both see the same orientation, the same paths
+    # and the same OCR context the model will.
+    image_prep = prepare_image_attachments(
+        task.attachments,
+        user_temp_dir,
+        task.id,
+        cancel_check=_cancel_check,
+        # Only where there is a namespace to be outside of. Without effective
+        # sandboxing the model reads with the daemon's own filesystem view, so
+        # every path is already openable and a copy would buy nothing while
+        # replacing the user's own file path with a temp one in the prompt —
+        # on the standalone single-user shape, for every image.
+        bind_roots=(
+            image_bind_roots(config, task, user_temp_dir)
+            if effective_sandboxing(config)
+            else None
+        ),
     )
-    if shrunken is not task.attachments:
-        task.attachments = shrunken
+    if image_prep.attachments is not task.attachments:
+        # In memory only. Nothing writes this back, so a retry regenerates the
+        # renditions and the OCR block from the original attachment rather than
+        # stacking a second copy of either.
+        task.attachments = image_prep.attachments
+
+    # `effective_prompt` is the one string every consumer below sees: the typed
+    # request, plus the audio transcript, plus the rendered OCR context. An
+    # attachment is deliberately supplied input, so its text benefits from
+    # memory, playbook and knowledge-graph recall the way any other input does
+    # — the audio transcript already reached those passes, and holding OCR out
+    # of them alone would be a special case with no principle behind it. The
+    # residual is recorded rather than designed against: retrieval runs before
+    # `untrusted_input` frames anything, so text painted into an image can
+    # influence which of the *user's own* stored facts are pulled in. It selects
+    # among existing memories rather than introducing new ones, and it is bound
+    # by the same per-image and per-task character budgets as the rest.
+    effective_prompt = task.prompt
+    _ocr_context = render_ocr_context(image_prep.ocr_blocks)
+    if _ocr_context:
+        effective_prompt = (
+            f"{effective_prompt}\n\n{_ocr_context}".strip()
+            if effective_prompt.strip()
+            else _ocr_context
+        )
+
+    # The same content, unframed, for the three retrieval passes. They get the
+    # OCR *text* rather than the rendered section, and the difference is not
+    # cosmetic: the two BM25 passes join every whitespace token of their query
+    # with an implicit AND and pass no `allow_or_fallback`, so the rendered
+    # section's ~60-word untrusted-content preamble and its per-image headings
+    # would add sixty-odd terms present in no stored chunk and return zero rows
+    # for every task carrying an image — silently, because an AND miss is not an
+    # error. That is the inverse of the reason OCR reaches retrieval. Framing is
+    # for the model, which must see it; a search index has no use for it.
+    _ocr_query = ocr_query_text(image_prep.ocr_blocks)
+    retrieval_query = (
+        f"{task.prompt}\n\n{_ocr_query}".strip() if _ocr_query else task.prompt
+    )
 
     # Select and load relevant skills
     from .skills._loader import (
@@ -4742,8 +4985,15 @@ def execute_task(
         except Exception:
             logger.debug("Failed to get sticky skills for task %d", task.id, exc_info=True)
 
+    # `prompt` no longer drives selection — `skills/_loader.select_skills` says
+    # so in its own docstring, and the eager selectors are the attachment list
+    # and the source type. It is passed the enriched string anyway so the two
+    # cannot fall out of step, and the inertness is worth naming here rather
+    # than being rediscovered: it is also what stops attacker-painted OCR text
+    # steering which skills load, so re-introducing keyword selection would be
+    # a security change and not a feature.
     selected_skills = select_skills(
-        prompt=task.prompt,
+        prompt=effective_prompt,
         source_type=task.source_type,
         user_resource_types=user_resource_types,
         skill_index=skill_index,
@@ -4761,6 +5011,21 @@ def execute_task(
     # how the ingest skills pull it in via companion expansion — so its
     # inbound-handling guardrails reach the prompt whenever the tool is present.
     if _native_web_fetch_enabled(task, config) and "untrusted_input" in skill_index:
+        if "untrusted_input" not in selected_skills and (
+            not _disabled or "untrusted_input" not in _disabled
+        ):
+            selected_skills = [*selected_skills, "untrusted_input"]
+
+    # Same pattern, same reason, for image attachments. File-type selection
+    # already picks `transcribe` for an image and `transcribe` expands its
+    # `untrusted_input` companion, so this is normally redundant — which is
+    # exactly why it is here explicitly. The OCR block is text read off pixels
+    # an attacker chose, and it reaches the prompt whatever skill metadata says;
+    # a future change to `transcribe`'s companions or file types must not
+    # silently take the guardrails with it. Keyed on the omission notices too,
+    # since those name attacker-supplied filenames even when no image was
+    # prepared.
+    if (image_prep.images or image_prep.ocr_blocks) and "untrusted_input" in skill_index:
         if "untrusted_input" not in selected_skills and (
             not _disabled or "untrusted_input" not in _disabled
         ):
@@ -4980,14 +5245,16 @@ def execute_task(
     # Auto-recall memories via BM25 search. Exclude task IDs already included
     # as conversation history so the same chunk doesn't appear twice.
     recalled_memories = _recall_memories(
-        config, conn, task,
+        config, conn, task, retrieval_query,
         skip_memory=_skip_memory,
         exclude_task_ids=context_task_ids or None,
     )
 
     # Recall learned playbooks (Part B). Independent of _recall_memories;
     # gated on config.playbooks.enabled inside the helper.
-    playbooks_text = _recall_playbooks(config, conn, task, skip_memory=_skip_memory)
+    playbooks_text = _recall_playbooks(
+        config, conn, task, retrieval_query, skip_memory=_skip_memory,
+    )
 
     # Load knowledge graph facts (filtered by relevance to prompt)
     knowledge_facts_text = None
@@ -5003,7 +5270,7 @@ def execute_task(
                 kg_facts = get_current_facts(conn, task.user_id)
                 if kg_facts:
                     kg_facts = select_relevant_facts(
-                        kg_facts, task.prompt, task.user_id, max_facts=max_kf,
+                        kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
                     )
                     if kg_facts:
                         knowledge_facts_text = format_facts_for_prompt(kg_facts)
@@ -5013,7 +5280,7 @@ def execute_task(
                     kg_facts = get_current_facts(_kg_conn, task.user_id)
                     if kg_facts:
                         kg_facts = select_relevant_facts(
-                            kg_facts, task.prompt, task.user_id, max_facts=max_kf,
+                            kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
                         )
                         if kg_facts:
                             knowledge_facts_text = format_facts_for_prompt(kg_facts)
@@ -5067,6 +5334,8 @@ def execute_task(
         confirmation_context=_confirmation_context,
         knowledge_facts=knowledge_facts_text,
         conn=conn,
+        effective_prompt=effective_prompt,
+        attachment_status=image_attachment_status(image_prep),
     )
 
     # Log prompt size breakdown
@@ -5706,13 +5975,6 @@ def execute_task(
             except Exception:
                 pass  # non-critical
 
-        def _cancel_check() -> bool:
-            try:
-                with db.get_db(config.db_path) as cancel_conn:
-                    return db.is_task_cancelled(cancel_conn, task.id)
-            except Exception:
-                return False
-
         def _poll_steers() -> "list[str]":
             # Claim any pending mid-flight steers (`!steer`) for this task,
             # marking them consumed, and hand the raw texts to the brain. The
@@ -5804,6 +6066,13 @@ def execute_task(
                 else ""
             ),
             custom_system_prompt_path=sp_path,
+            # The prepared images, as paths and media types — never bytes. Each
+            # brain converts at the last moment, so nothing large reaches a task
+            # row or a log line and the executor learns no provider wire format.
+            # `_run_fallback` copies the request with `dataclasses.replace`,
+            # which names no other field, so a reroute carries these across and
+            # the fallback brain makes its own capability decision.
+            images=image_prep.images,
             streaming=use_streaming,
             on_progress=_on_event if use_streaming else None,
             cancel_check=_cancel_check,
@@ -6147,6 +6416,36 @@ def execute_task(
             result = _append_model_note(
                 result, _dropped_pin, _primary_kind, actual_model
             )
+
+        # Two image notes, both about the same thing: the user must never read
+        # an answer produced without the picture and have nothing say so.
+        if success and req.images:
+            _ran_kind = _fallback_kind if _ran_fallback else _primary_kind
+            _can_see = brain_delivers_vision(_ran_kind, actual_model)
+            if _can_see is False:
+                # A model that declares no vision support. Not gated on a
+                # fallback having run: the fact that matters is that the answer
+                # was written without the picture, and a *primary* native brain
+                # on a non-vision model produces exactly that with nothing
+                # telling the user so. The brain already told the model it was
+                # missing the images; this is the half the user reads.
+                result = _append_vision_dropped_note(
+                    result,
+                    [i.display_name or Path(i.path).name for i in req.images],
+                    actual_model,
+                    rerouted=_ran_fallback,
+                )
+            elif _ran_kind in ("claude_code", "tmux_claude"):
+                # The directive required one `Read` per image. Check the trace
+                # rather than trusting it.
+                _unread = unread_images(req.images, trace)
+                if _unread:
+                    logger.warning(
+                        "task %d: %d of %d prepared image(s) were never read "
+                        "by %s", task.id, len(_unread), len(req.images),
+                        _ran_kind,
+                    )
+                    result = _append_unread_images_note(result, _unread)
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:

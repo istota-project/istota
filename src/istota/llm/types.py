@@ -20,6 +20,12 @@ class ImageContent:
     type: Literal["image"] = "image"
     media_type: str = ""
     data: str = ""  # base64
+    # Basename of the source attachment, for the surfaces that must name an
+    # image without carrying its bytes — today the compaction summary's loss
+    # notice, which is written when the block itself is about to be cut. Never
+    # sent to a provider. Empty for a tool-produced image, which has no
+    # filename of its own.
+    display_name: str = ""
 
 
 @dataclass(frozen=True)

@@ -218,7 +218,7 @@ pythonpath = ["src", "."]
 testpaths = ["tests"]
 markers = [
     "integration: tests requiring external services (deselected by default)",
-    "live: native-brain tests hitting a real LLM API (needs a key; deselected by default)",
+    "live: tests hitting a real model (needs a Claude Code credential or an API key; costs money; deselected by default)",
     "linux: requires a real Linux kernel and a usable bubblewrap (deselected by default; run via scripts/test-linux.sh)",
     "image: builds and runs a Docker image (needs a Docker daemon, run with -n0; deselected by default)",
     "smoke: end-to-end against the lean compose stack (needs a Docker daemon, run with -n0; deselected by default)",

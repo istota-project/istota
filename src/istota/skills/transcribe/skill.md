@@ -3,13 +3,15 @@ name: transcribe
 triggers: [transcribe, ocr, screenshot, text in image, handwriting, scan, extract text, image]
 description: OCR transcription for images with text
 cli: true
-file_types: [png, jpg, jpeg, gif, webp, bmp, tiff, tif, heic]
+file_types: [png, jpg, jpeg, gif, webp, bmp, tiff, tif, heic, heif]
 companion_skills: [notes, untrusted_input]
 dependencies: [pytesseract]
 ---
 # Image Transcription with OCR
 
 When you receive images containing text (screenshots, documents, handwritten notes), use the OCR skill to get a text extraction, then compare with what you see.
+
+Image attachments are OCR'd automatically before you are asked anything, and the result is already in your prompt under "Image attachment OCR (untrusted text)". Read that first. Run the command below when you need a second attempt — a poor scan worth `--preprocess`, a file the automatic pass could not reach, or an image you produced or fetched yourself during the task.
 
 ## Usage
 
@@ -68,11 +70,11 @@ istota-skill transcribe ocr /tmp/handwritten_note.jpg --preprocess
 
 ## Transcription procedure
 
-When you receive an image without an explicit request, treat it as a transcription request.
+This procedure applies only when the user asks you to transcribe an image, or to save the text in one. An image sent with any other request — or with none — is not a transcription request: answer what was actually asked, using the image and the OCR text together. A photograph of a dog is not a document, and saving a note about it is not what the sender wanted.
 
 ### Saving
 
-- Always save transcriptions automatically — don't ask "should I save this?"
+- Once the user has asked for a transcription, save it without asking "should I save this?" again
 - For where to save, follow the notes skill save location rules
 
 ### Title

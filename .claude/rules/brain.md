@@ -179,6 +179,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `fs_read_roots: list[Path] \| None` / `fs_write_roots: list[Path] \| None` | NativeBrain-only file-tool path allowlist (NB-1). Populated by the executor (`native_fs_roots`) only under effective sandboxing; other brains ignore them (bwrap already confines their tools). `None` = unconfined (dev / no bwrap). |
 | `fs_write_denied_roots: list[Path]` | RO carve-outs nested inside a write root — what bwrap gets by re-binding a subdirectory `--ro-bind` after its parent's RW bind, and what containment alone cannot express. Today `{user_temp_dir}/.developer`. Note the different empty semantics from the pair above: `[]`, not `None`, because a deny set has no unconfined meaning to signal. Enforced on the write path only (the directory stays readable) and ahead of `ToolEnv`'s unconfined early return. |
 | `result_file: Path \| None` | claude_code-specific fallback file path |
+| `images: list[ImageInput]` | The task's prepared image attachments, as `(path, media_type, display_name)` — never bytes. Built by `executor.prepare_image_attachments` (`istota/image_attachments.py`) and passed to every request the executor makes; the other eight construction sites leave it empty on purpose, including the three health OCR paths, which run their own vision prompt. `path` is resolved and normalized, `media_type` is derived from what Pillow decoded and the format the rewrite chose, and each brain converts at the last moment so nothing large reaches a task row or a log line. See "Image attachments" below for what each brain does with it. Preserved across the executor's fallback copy for free — that copy is `dataclasses.replace`, which carries every unnamed field |
 
 ## BrainResult fields
 | Field | Notes |
@@ -362,6 +363,100 @@ Wraps the `claude` CLI subprocess. Owns:
 `_compose_full_result()` does NOT live in the brain — both brains will
 produce `(result_text, execution_trace)` and the executor reconciles them.
 
+## Image attachments
+
+`BrainRequest.images` arrives as paths and media types, and each brain owns the
+conversion to its own provider's shape. That split is what keeps base64 out of
+the task row and out of every log line, and keeps the executor from learning a
+wire format. What the brains share is the rule underneath: **a model must never
+be left to infer that it saw an image.** Every path that cannot deliver the
+pixels names the image and says why, because "attached" alone is not evidence
+of sight and silence is what produced the confident blind answer this whole
+change exists to prevent (ISSUE-366).
+
+**NativeBrain** builds the first user message in `_initial_user_content`: one
+`TextContent` with the prompt, then one `ImageContent` per image — text first,
+which is the order OpenRouter's image-understanding guide documents.
+`OpenAICompatibleProvider._message_to_wire` already renders those as
+`data:<media_type>;base64,<data>` URLs, so the provider layer needed no change.
+Encoding happens immediately before the first call, so the base64 lives exactly
+as long as the request. Three refusals, each per image and none of them fatal to
+the rest: the resolved model's `supports_vision` is false (no file is read at
+all — reading bytes to discard them is pure cost — and every image gets
+`_NO_VISION_NOTICE`, plus one operator WARNING naming the model, since
+`supports_vision` defaults false and a direct-Anthropic base URL fetches no
+catalog); the file vanished or is unreadable (`_UNREADABLE_NOTICE`, naming the
+exception class only); or it outgrew `_MAX_IMAGE_BYTES` (6 MiB). That last bound
+is asserted here rather than inherited from preparation because this is a
+*second* read of a file under the user temp dir, which bwrap binds read-write
+into that user's own sandboxes — another task of theirs can replace it between
+the two reads. The constant is restated rather than imported (importing
+`image_attachments` from a brain closes a cycle through `brain/__init__.py`) and
+`tests/native/test_input_images.py` holds the two equal.
+
+**Compaction must not delete the images in silence** (`session/compaction.py`).
+The image-bearing message is at index 0 and `find_cut_point` walks back from the
+newest, so an ordinary cut takes it — and `_serialize_for_summary` handles only
+`TextContent` and `tool_call`, so the summarizer would never learn an image had
+existed. Two halves, and they are deliberately exclusive rather than belt-and-
+braces. `plan_image_pin` returns `(pin, summary_input)`: the pin is a small
+`UserMessage` holding `_PIN_LABEL` plus the first image-bearing message's
+blocks, prepended ahead of the summary, and `summary_input` is the same history
+with exactly those blocks removed — so the summary's `[image <name> — no longer
+in context]` notice is written only over blocks that really did go. Leaving them
+in both places would write a durable summary saying an image was lost at the
+moment it was being carried over, and that text is updated forward on every
+later cycle. The pin is refused when it would take more than half the
+`keep_recent_tokens` budget (`_PIN_TOKEN_SHARE`), because a pin that swallows
+the tail budget makes `find_cut_point` return 0 and compaction a permanent
+no-op; the loss notice carries the fact instead. The pin is what keeps the
+capability, the notice is the floor.
+
+**ClaudeCodeBrain and TmuxClaudeBrain** have no image block to send, so their
+vision path is Claude Code's own `Read` tool, which returns visual content
+rather than bytes. `build_image_prompt` prepends one of two sections to
+`req.prompt`, and a request with no images is returned byte-identical:
+
+- with tools, `IMAGE_DIRECTIVE_HEADER` plus the resolved absolute path of each
+  image, requiring one `Read` per image before any answer or other action, and
+  requiring a failed `Read` to be reported rather than guessed around. The
+  wording follows `health/ocr._build_vision_prompt`, which shipped the same
+  instruction first;
+- with `allowed_tools=[]`, `IMAGE_OMITTED_HEADER` and the basenames. An empty
+  tool list is a caller's policy decision (the sleep cycle, the health OCR
+  paths), never a gap to fill: the tool set is not enabled implicitly, which is
+  the split `health/ocr.py` already settled with its own
+  `allowed_tools=["Read"] if allow_read` line.
+
+The tmux brain puts the same section in `prompt.txt` via `prompt_file_text`,
+ahead of the original request, because it submits one buffer per run and a
+second paste would be a second turn. Both brains name only basenames in a
+notice and only resolved paths in a directive.
+
+**The directive is checked rather than trusted.** The audit lives in the
+executor (`unread_images`, `.claude/rules/executor.md`): it counts `Read` calls
+in the recorded execution trace and appends a note naming any image that was
+never opened. A recorded `ToolUseEvent` is a fact about what the model did,
+which is a different thing from grading its prose.
+
+**An image-payload rejection re-issues once, with a notice.**
+`ClaudeCodeBrain._execute` applies the image section, runs one attempt, and on
+`is_image_payload_rejection` re-issues with `images=[]` and
+`build_withdrawn_image_prompt`, which names every withdrawn image and tells the
+model not to imply it saw them. Not a silent strip: a blind retry can produce a
+confident answer that lost sight, which is the original defect by another route.
+Four bounds on that second call. It is skipped when the result was a success (an
+answer *quoting* a provider error would otherwise cost a paid call and replace
+the user's answer); it is skipped when `result.work_committed` is set, the same
+veto `_is_retryable` applies for the same reason — a first-call 413 never
+reached the model and arrives with the flag clear, while a 413 later in a run is
+the accumulated context and is a reroute rather than a re-issue; `req.result_file`
+is unlinked first, or the re-issue can deliver the text the *images* produced
+under a prompt saying they were withdrawn; and the timeout is what remains of
+the original budget, floored at `_MIN_REISSUE_SECONDS`, since two full attempts
+under one `timeout_seconds` would hold a worker for twice its configured bound.
+Once only — a rejected re-issue falls through to the ordinary classification.
+
 ## API error helpers
 | Function | Purpose |
 |---|---|
@@ -373,6 +468,7 @@ produce `(result_text, execution_trace)` and the executor reconciles them.
 | `is_api_error_banner(text) -> bool` | True iff the text *is* a bare API-error banner — anchored at the start (past ≤8 chars of decoration) and length-gated, mirroring `is_usage_limit_banner`. `claude -p` reports a provider failure as a **success** result frame with the error as the whole answer, which is how a raw `API Error: 529 Overloaded` reached the user as the final reply; strict so a genuine answer *discussing* an earlier API error isn't converted into a retry + a paid fallback call |
 | `parse_retry_after(text) -> float \| None` | The provider's requested wait, capped at `RETRY_AFTER_MAX_SECONDS` (60s) and treating ≤0 as absent. Both retry loops use it in place of the fixed delay; the cap exists so a worker is never parked on the provider's word for an hour when the task's own retry ladder / the fallback could take over |
 | `is_usage_limit_error(text) -> bool` | True if the text carries a subscription/quota/billing usage-limit signal (keyword set + an "exceeded…limit" regex). Provider-agnostic (works on CLI output, tmux transcript/pane text, and native error bodies). Checked *before* the transient predicate at every call site so a quota 429 classifies as `usage_limit`, not a retry. |
+| `is_image_payload_rejection(text, has_images) -> bool` | True iff the provider is refusing *this* request's images: a 413, or a 400 whose diagnostic names an image (`image`, `media_type`, `attachment`). The 400 arm needs that test and the 413 arm does not — `exceeds`, `too large` and `maximum` are also the vocabulary of a context-length complaint, and matching them buys a second paid run plus a notice blaming images that were not the problem. Checked ahead of the classification above, which puts both statuses in `PERMANENT_STATUS_CODES` and would fail an otherwise valid text task with no answer and no fallback |
 
 `parse_api_error`, `is_transient_api_error` and `is_usage_limit_error` are
 re-exported from `executor` for `scheduler.py` and tests; the newer helpers are

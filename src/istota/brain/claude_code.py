@@ -20,6 +20,7 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 from ._events import (
     ContextManagementEvent,
@@ -130,6 +131,10 @@ RETRY_AFTER_MAX_SECONDS = 60.0
 # Slice length for the retry backoff, so `!stop` lands within a slice
 # instead of waiting out a (now potentially 60s) provider-requested delay.
 _RETRY_SLEEP_SLICE_SECONDS = 0.5
+# Floor for the image re-issue's remaining budget. The first attempt can have
+# consumed the whole timeout, and handing a subprocess a zero or negative one
+# turns "degrade to text" into an instant timeout.
+_MIN_REISSUE_SECONDS = 30.0
 
 
 # Frame `type` values the CLI itself emits, and keys only its own envelope
@@ -140,6 +145,140 @@ _RETRY_SLEEP_SLICE_SECONDS = 0.5
 # in its own schema; it will not report its own token spend.
 _CLI_FRAME_TYPES = frozenset({"result", "system", "assistant", "user", "stream_event"})
 _CLI_ENVELOPE_KEYS = ("modelUsage", "total_cost_usd", "session_id")
+
+
+# --------------------------------------------------------------------------
+# images
+# --------------------------------------------------------------------------
+#
+# Neither CLI brain can be handed image bytes: `claude -p` reads text on stdin
+# and the tmux brain submits a bracketed paste. Their provider-supported image
+# path is Claude Code's own `Read` tool, which returns visual content to the
+# model rather than raw bytes and does its own final recompression — so
+# delivery here is a directive requiring one `Read` per prepared image, and the
+# executor's post-run trace audit is what stops the vision claim resting on the
+# model's compliance with a prompt instruction (which is the failure shape
+# ISSUE-366 records, moved one layer up).
+#
+# The wording follows `health/ocr._build_vision_prompt`, the shipped
+# Read-the-absolute-path directive, rather than inventing a second phrasing for
+# the same instruction.
+
+IMAGE_DIRECTIVE_HEADER = "## Image attachments — open these before answering"
+IMAGE_OMITTED_HEADER = "## Image attachments — not available on this task"
+IMAGE_WITHDRAWN_HEADER = "## Image attachments — withdrawn by the provider"
+
+_IMAGE_DIRECTIVE_BODY = (
+    "Read each of the following absolute paths with the Read tool before you "
+    "answer or take any other action. Reading an image returns the picture "
+    "itself; the path text below is not visual access, and neither is the OCR "
+    "section, which is a separate and fallible source. If a Read fails, say so "
+    "in your answer and do not guess at what the image shows."
+)
+
+_IMAGE_OMITTED_BODY = (
+    "The following image attachments were prepared for this task, but it runs "
+    "without tools, so there is no way to open them. Answer from the text and "
+    "any OCR context, and do not state or imply that you have seen them."
+)
+
+
+def _image_paths(req: BrainRequest) -> list[str]:
+    """The resolved absolute path of each prepared image, in sender order."""
+    return [str(Path(image.path).resolve()) for image in req.images]
+
+
+def _image_names(req: BrainRequest) -> list[str]:
+    """Basenames only — a directive names paths, a notice never does."""
+    return [
+        image.display_name or Path(image.path).name for image in req.images
+    ]
+
+
+def build_image_prompt(req: BrainRequest) -> str:
+    """`req.prompt` with the image section prepended, or unchanged.
+
+    A request carrying no images is returned byte-identical, which is the whole
+    shipped population of this brain's traffic.
+
+    `allowed_tools=[]` is a policy decision by the caller (the sleep cycle, the
+    health OCR paths), never a gap to fill: the tool set is not enabled
+    implicitly. Those requests get a named omission instead, the same split
+    `health/ocr.py` already settled with `allowed_tools=["Read"] if allow_read`.
+    """
+    if not req.images:
+        return req.prompt
+
+    if not req.allowed_tools:
+        listing = "\n".join(f"- {name}" for name in _image_names(req))
+        section = f"{IMAGE_OMITTED_HEADER}\n\n{_IMAGE_OMITTED_BODY}\n\n{listing}"
+    else:
+        listing = "\n".join(f"- {path}" for path in _image_paths(req))
+        section = f"{IMAGE_DIRECTIVE_HEADER}\n\n{_IMAGE_DIRECTIVE_BODY}\n\n{listing}"
+    return f"{section}\n\n{req.prompt}"
+
+
+def build_withdrawn_image_prompt(req: BrainRequest, images, reason: str) -> str:
+    """The re-issue's prompt: the same request, with the images named as gone.
+
+    Not a silent strip. A blind retry lets the model answer confidently without
+    knowing it lost sight, which is the defect this whole change exists to
+    prevent, reached by a different code path — the notice is exactly what
+    removes that objection.
+    """
+    listing = "\n".join(
+        f"- {image.display_name or Path(image.path).name}" for image in images
+    )
+    body = (
+        "The provider rejected this request's image payload "
+        f"({reason}), so it has been re-sent without the images below. "
+        "Answer from the text and any OCR context, and do not state or imply "
+        "that you have seen them."
+    )
+    return f"{IMAGE_WITHDRAWN_HEADER}\n\n{body}\n\n{listing}\n\n{req.prompt}"
+
+
+# A 400 is the status the provider uses for every request-shaped complaint, so
+# it only counts here when the diagnostic actually names an image. Size words
+# alone are not enough and the size arm is 413's: `exceeds`, `too large` and
+# `maximum` are the vocabulary of a context-length or `max_tokens` complaint
+# too, and matching those buys a second paid full run plus a notice telling the
+# user their images were the problem when they were not. 413 needs no such test
+# — the request was too large and this request's images are the largest thing
+# in it.
+_IMAGE_REJECTION_RE = re.compile(r"image|media_?type|attachment", re.IGNORECASE)
+
+
+def is_image_payload_rejection(text: str, has_images: bool) -> bool:
+    """Whether `text` is the provider refusing this request's images.
+
+    Deferring to the existing classification is what makes this necessary
+    rather than defensive: `PERMANENT_STATUS_CODES` holds both 400 and 413,
+    `is_permanent_api_error` maps them to `stop_reason="error"`, and `error` is
+    in the never-fallback set — so an oversized image payload would kill an
+    otherwise valid text task with no answer and no fallback attempt.
+    """
+    if not has_images or not text:
+        return False
+    parsed = parse_api_error(text)
+    if not parsed:
+        return False
+    status = parsed.get("status_code")
+    if status == 413:
+        return True
+    if status == 400:
+        return bool(_IMAGE_REJECTION_RE.search(parsed.get("message") or ""))
+    return False
+
+
+def _rejection_reason(text: str) -> str:
+    """A short, bounded quote of the provider's own diagnostic."""
+    parsed = parse_api_error(text) or {}
+    status = parsed.get("status_code") or "?"
+    message = (parsed.get("message") or "").strip()
+    if len(message) > 200:
+        message = message[:199] + "…"
+    return f"HTTP {status}: {message}" if message else f"HTTP {status}"
 
 
 def _looks_like_cli_envelope(obj) -> bool:
@@ -1056,6 +1195,86 @@ class ClaudeCodeBrain:
         return result
 
     def _execute(self, req: BrainRequest) -> BrainResult:
+        """One attempt, plus the one re-issue an image rejection is allowed.
+
+        The image section is applied here rather than inside either transport
+        path, so the streaming and non-streaming halves cannot disagree about
+        what the model was told, and so the re-issue below is a plain second
+        call with a different request rather than a special case threaded
+        through two retry loops.
+        """
+        import dataclasses as _dc
+
+        attempt = (
+            _dc.replace(req, prompt=build_image_prompt(req)) if req.images else req
+        )
+        started = time.monotonic()
+        result = self._execute_attempt(attempt)
+
+        if result.success or not is_image_payload_rejection(
+            result.result_text, bool(req.images)
+        ):
+            # `success` first, and not merely belt-and-braces: an answer that
+            # *quotes* a provider error — summarising an incident, explaining a
+            # log line — would otherwise cost the user a second paid call and
+            # replace their answer with one written without the images.
+            return result
+
+        reason = _rejection_reason(result.result_text)
+
+        # The same veto `_is_retryable` applies, for the same reason and using
+        # the same flag: a run that reached the model may already have sent an
+        # email or pushed a commit, and re-invoking the identical prompt repeats
+        # those side effects. A 413 on the *first* API call — the case this
+        # branch is for — never reaches the model, so it arrives as an ordinary
+        # failure with the flag clear; a 413 later in a run, caused by the
+        # accumulated context the images are still in, arrives with it set and
+        # is a reroute, not a re-issue.
+        if result.work_committed:
+            logger.warning(
+                "claude_code: image payload rejected (%s) after the run had "
+                "already committed work; not re-issuing", reason,
+            )
+            return result
+
+        logger.warning(
+            "claude_code: provider rejected the image payload (%s); "
+            "re-issuing once without %d image(s)",
+            reason, len(req.images),
+        )
+        # The first attempt may have written the result file before the
+        # provider refused it. Both read paths are guarded on `.exists()`
+        # alone, and the executor unlinks it only once, before the run — so
+        # without this the re-issue can deliver text the *images* produced,
+        # under a prompt saying they were withdrawn.
+        if req.result_file is not None:
+            try:
+                req.result_file.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("could not clear the result file before re-issue")
+
+        # `timeout_seconds` is a per-subprocess bound and `execute_task` runs on
+        # a worker-pool thread, so two full attempts under the same value would
+        # let one task hold a worker for twice its configured budget. The
+        # re-issue gets what is left, floored so it is never handed a
+        # non-positive timeout.
+        remaining = max(
+            _MIN_REISSUE_SECONDS, req.timeout_seconds - (time.monotonic() - started)
+        )
+
+        # Once. If the re-issue is rejected too, the existing classification
+        # decides retry or fallback on its own result, and the provider's
+        # diagnostic reaches the user with it.
+        return self._execute_attempt(
+            _dc.replace(
+                req,
+                images=[],
+                prompt=build_withdrawn_image_prompt(req, req.images, reason),
+                timeout_seconds=remaining,
+            )
+        )
+
+    def _execute_attempt(self, req: BrainRequest) -> BrainResult:
         try:
             # --dangerously-skip-permissions (added by _build_command for
             # tool-bearing tasks) is refused under root/sudo unless IS_SANDBOX=1
@@ -1126,8 +1345,9 @@ class ClaudeCodeBrain:
             ]
         else:
             # The non-streaming path is where the daemon's own model calls run
-            # — the nightly sleep cycle, shared briefing blocks, four health OCR
-            # paths, the code reviewer, and conversation-context triage — none
+            # — the nightly sleep cycle, shared briefing blocks, three health OCR
+            # paths plus the biomarker explainer, the code reviewer, and
+            # conversation-context triage — none
             # of which has a task row. Without a structured format they were the
             # largest unmeasured spend in the deployment. Triage is the odd one
             # out on frequency: it runs once per conversational task with older
@@ -1226,7 +1446,7 @@ class ClaudeCodeBrain:
         # A timeout is classified here rather than left to propagate. The old
         # comment said it reached "the caller's own timeout handling, which
         # builds the result itself" — there is no such caller on this path: it
-        # unwound past `_execute_simple` to `_execute`'s generic `except
+        # unwound past `_execute_simple` to `_execute_attempt`'s generic `except
         # Exception`, which logs `logger.exception` and returns
         # `stop_reason="error"`. So every non-streaming caller's timeout arrived
         # as an ERROR-level stack trace attributed to the brain, and lost the

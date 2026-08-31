@@ -20,6 +20,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
 1b. **Deferred briefing prompt** (ISSUE-143): when `task.source_type == "briefing"` and `task.briefing_name` is set, `build_deferred_briefing_prompt(task, config)` resolves the live briefing config + timezone and builds the full prompt (`build_briefing_prompt`'s slow news/yfinance/FinViz/IMAP fetch) here, in the worker — `task.prompt` is replaced. This keeps the slow network I/O off the scheduler dispatch thread (the scheduler creates briefing tasks with only the identity + a placeholder). Build failure / unresolvable briefing → keeps the placeholder, never fails the task.
+1c. **Prepare attachments** (image-attachment-vision spec): `_pre_transcribe_attachments()` for audio, then `prepare_image_attachments()` for images — both before skill selection and before `build_prompt`, so selection, assembly and the model all see the same orientation, the same paths and the same OCR text. See "Image attachments" below.
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
 3. **Load skills**: `load_skill_index()` → `select_skills()` (deterministic matching, the only selection pass) produces the **eager** set → `load_skills(eager)` for the body + `eligible_skill_names(exclude = selected ∪ ⋃ exclude_skills_of_selected)` for the **menu** (the full eligible catalogue) → `build_disclosure_index(menu)` → `skills_index`. Always on, single-axis (selected ⇒ eager, else eligible ⇒ menu); no `progressive_disclosure` flag, no eager/lazy partition. The menu replaced the removed LLM Pass 2; the executor logs `skills: eager=N menu=M`.
 4. **Skills changelog**: fingerprint compare, interactive only
@@ -28,18 +29,19 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 7. **Channel memory**: `read_channel_memory()`, only if `conversation_token`
 8. **CalDAV discovery**: `get_calendars_for_user()`
 8b. **Dated memories**: `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
-8c. **Memory recall**: `_recall_memories()`, BM25 search using task prompt, skip for briefings
-8d. **Knowledge facts**: load from `knowledge_graph`, relevance-filtered by prompt, capped by `max_knowledge_facts`
-8d2. **Playbook recall**: `_recall_playbooks()`, BM25/vector over `source_type="playbook"`, gated on `playbooks.enabled`, skipped for automated/`skip_memory` tasks (Part B). On a hit it `os.utime`s each recalled playbook file so retention keys on last-*use*, not last-write (ISSUE-174 Concern 3)
+8c. **Memory recall**: `_recall_memories()`, BM25 search using `retrieval_query`, skip for briefings
+8d. **Knowledge facts**: load from `knowledge_graph`, relevance-filtered by `retrieval_query`, capped by `max_knowledge_facts`
+8d2. **Playbook recall**: `_recall_playbooks()`, BM25/vector over `source_type="playbook"` using `retrieval_query`, gated on `playbooks.enabled`, skipped for automated/`skip_memory` tasks (Part B). On a hit it `os.utime`s each recalled playbook file so retention keys on last-*use*, not last-write (ISSUE-174 Concern 3)
 8e. **Memory cap**: `_apply_memory_cap()`, truncates recalled → knowledge facts → dated → playbooks if `max_memory_chars` exceeded (playbooks truncated last — most protected; returns a 6-tuple)
 9. **Confirmation context**: load from `task.confirmation_prompt` if confirmed task
 10. **Build prompt**: includes `confirmation_context` when set
 11. **Dry run check**: return prompt text
 12. **Write prompt file**: `task_{id}_prompt.txt`
 13. **Build env**: see env var table below; credential vars split via `_split_credential_env()` when proxy enabled
-14. **Build BrainRequest**: prompt + allowed_tools + env + model/effort + sandbox_wrap closure + on_progress/cancel_check/on_pid callbacks
+14. **Build BrainRequest**: prompt + allowed_tools + env + model/effort + sandbox_wrap closure + on_progress/cancel_check/on_pid callbacks + `images` (the prepared attachments)
 15. **Execute**: `make_brain(config.brain).execute(req)` — see `.claude/rules/brain.md`
 16. **Compose result**: `_compose_full_result(result, trace)` reconciles result-text vs trace (CM-aware + terse-result recovery)
+16b. **Image notes**: `_append_vision_dropped_note` when the brain that actually ran cannot see, `unread_images` + `_append_unread_images_note` when a CLI brain skipped a `Read` the directive required
 17. **Update fingerprint**: on success, interactive only
 
 ## `build_prompt()`
@@ -54,14 +56,18 @@ def build_prompt(
     source_type: str | None = None, output_target: str | None = None,
     recalled_memories: str | None = None,
     playbooks: str | None = None,
-    excluded_resource_types: set[str] | None = None,
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
     skills_index: str | None = None,
     confirmation_context: str | None = None,
     knowledge_facts: str | None = None,
+    conn: "db.sqlite3.Connection | None" = None,
+    effective_prompt: str | None = None,
+    attachment_status: "dict[str, str] | None" = None,
 ) -> str:
 ```
+
+`effective_prompt` is what `## User's request` renders — the typed request plus any audio transcript plus the rendered OCR context. It is a parameter rather than a mutation of `task.prompt` because the same string has to reach skill selection and the three retrieval passes as well, and a field read in five places is how those drift apart. `None` falls back to `task.prompt`, which is what every caller outside `execute_task` passes. `attachment_status` maps an attachment path to the one-phrase status rendered after it; see "Image attachments" below.
 
 ### Prompt Section Order
 1. Header: role, user_id, datetime, task_id, conversation_token, and a database line that names no path (the file is masked out of the sandbox; naming it would point at nothing)
@@ -78,10 +84,28 @@ def build_prompt(
 10. Rules: resource restrictions, confirmation, subtasks, output
 11. Context: previous messages
 11b. Confirmation context: previous bot output for confirmed actions — interpolated after the context section, immediately before the request
-12. Request: prompt + attachments
+12. Request: `effective_prompt` — the typed request, then any audio transcript, then the OCR section framed as untrusted text — followed by the attachment list, each line carrying its own location label and vision status
 13. Guidelines: `config/guidelines/{source_type}.md`
 14. Skills changelog
 15. Skills doc (eager skills only — the menu skills are surfaced by the index in step 9, not inlined)
+
+## Image attachments
+
+`prepare_image_attachments()` (`istota/image_attachments.py`) runs before skill selection and before assembly, and never raises: every failure is a bounded model-facing notice plus a metadata-only log line, because a corrupt image or a missing Tesseract must not fail a task whose text request is usable. It returns `attachments` (the original order, with normalized paths substituted for accepted images), `images` (the `ImageInput` list for `BrainRequest`) and `ocr_blocks` (one result or notice per candidate). `task.attachments` is updated in memory only — nothing writes it back, so a retry regenerates renditions and OCR rather than stacking a second copy of either. The module owns the gates, the two renditions and the OCR budget; the rest of this section is what the executor owns.
+
+**One enriched request, two renderings, five consumers.** The same content — the typed request plus any audio transcript plus the OCR text — reaches skill selection, prompt assembly and the three retrieval passes, and none of them reads `task.prompt` for it. The first two get `effective_prompt`, which carries the OCR framed as untrusted text; the three retrieval passes get `retrieval_query`, which carries the same OCR unframed, for the reason below. An attachment is deliberately supplied input, so its text earns recall the way any other input does; the audio transcript already reached those passes.
+
+**The retrieval passes get the OCR text unframed** (`image_attachments.ocr_query_text`), not the rendered section the other two get. `memory.search` joins every whitespace token of a query with an implicit AND and the recall path passes no `allow_or_fallback`, so the rendered section's untrusted-content preamble and per-image headings would add sixty-odd terms present in no stored chunk and return zero rows for every task carrying an image — silently, since an AND miss is not an error. Framing is for the model, which must see it; an index has no use for it.
+
+**The audio transcript still lands on `task.prompt` and OCR text never does.** That assignment survives for one consumer outside this function: `scheduler.py` indexes `task.prompt` into conversation memory after `execute_task` returns, and an audio-only send arrives carrying the transport's stand-in "Process the attached file(s)", so dropping it would index the stand-in instead of what the user said, for every voice message. Nothing *inside* `execute_task` reads the mutated field any more, so the implicit contract is gone even though the assignment stays. OCR text is kept off it because a retry re-runs preparation and would otherwise stack the same block.
+
+**`untrusted_input` is added to the eager set explicitly** when there are prepared images or image notices, using the same pattern as the native WebFetch gate. File-type selection already pulls it in as `transcribe`'s companion; the explicit add is defence against a future metadata change, not a second mechanism.
+
+**Paths.** Every path in `attachments`, in `ImageInput.path` and in the Claude Code directive is `Path.resolve()`d, because `build_bwrap_cmd`'s `_bind` uses the resolved source as the in-namespace destination — on a deployment whose `temp_dir` sits behind a symlink, an unresolved path names a file that does not exist inside the sandbox, and a mandatory `Read` of it fails every time. An image whose resolved source lies under none of `image_bind_roots(config, task, user_temp_dir)` is copied into the task temp directory even when it needs no resize: the scheduler's nc-data fallback hands out `/mnt/nc-data/<user>/files/Talk/<name>`, which `build_bwrap_cmd` binds nowhere. `bind_roots` is passed only under `effective_sandboxing(config)`; without a namespace there is nothing to be outside of, and copying would replace the user's own path with a temp one for every image on the standalone shape.
+
+**Status, per line.** `image_attachment_status()` marks a prepared image `VISION_PREPARED` and an omitted one with its reason. It stops there deliberately: assembly runs several hundred lines before the brain is constructed, so `vision supplied` would be a claim of sight that a non-vision native model, an availability-breaker skip-primary or an in-attempt reroute each falsify. The layer that can be right says the rest in the same prompt — the CLI brains' `Read` directive, the native brain's image blocks or named omissions. `_attachment_line` also moved the location label from a whole-list `any(att.startswith("/") …)` predicate onto each line, since normalizing more images makes a mixed list ordinary and that predicate presented a workspace-relative PDF as a local path.
+
+**Two after-the-fact notes on the result.** `unread_images(req.images, trace)` counts `Read` calls in the execution trace and `_append_unread_images_note` names any image the model never opened, so a CLI brain's vision claim rests on a recorded tool call rather than on prompt compliance. It errs toward silence in both directions and its docstring says how: the trace entry comes from the `tool_use` block at call time, so a *failed* `Read` reads as done (the tool result reaches the same model, and the directive requires it to report the failure), and the entry carries a basename, so an unrelated file of the same name satisfies it. `brain_delivers_vision(kind, model)` plus `_append_vision_dropped_note` cover the other side: an answer written by a model with no declared vision support says so in the result, since a prompt-side notice is read by the model and only the result is read by the user. `None` from that predicate means "cannot tell" and produces no note — asserting an answer was written blind when it may not have been is the same class of false statement.
 
 ## Environment Variable Mapping
 
