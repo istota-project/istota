@@ -565,8 +565,26 @@
               {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
               <tr>
                 <td>
-                  <span class="username">{u.display_name || u.username}</span>
-                  {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
+                  <!-- A flex row inside the cell rather than on it: `display:
+									     flex` on a `<td>` takes it out of the table's own
+									     layout, which is what sizes these columns. -->
+                  <span class="user-cell">
+                    <!-- Bare: `/me` carries the reader's own hash and the
+										     bot's, and nothing carries a third party's (D13), so
+										     this revalidates on an ETag. A user this admin
+										     shares no room with 404s — being an admin is not the
+										     endpoint's predicate, deliberately — and falls back
+										     to the chip the table drew before. -->
+                    <span class="user-face">
+                      <Avatar
+                        kind="user"
+                        userId={u.username}
+                        label={u.display_name || u.username}
+                      />
+                    </span>
+                    <span class="username">{u.display_name || u.username}</span>
+                    {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
+                  </span>
                 </td>
                 <td class="num col-total">{formatNumber(u.tasks_total)}</td>
                 <td class="source-cell">
@@ -1216,8 +1234,31 @@
     white-space: nowrap;
   }
 
+  /* Face, name, badge on one line. The name is what may be too long for the
+	   column, so it is the part that gives — the face keeps its box. */
+  .user-cell {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .user-face {
+    /* Set on the avatar's own wrapper, never on the cell or the row:
+		   --avatar-size inherits, and a shared container would resize every
+		   avatar nested under it. */
+    --avatar-size: 1.5rem;
+    display: flex;
+    flex: 0 0 auto;
+    margin-right: var(--space-2);
+  }
   .username {
     font-weight: 500;
+  }
+  /* Only in this cell, which is the one that now shares its width with a
+	   picture. The scheduler tables use the same class and are left alone. */
+  .user-cell .username {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Neutral count chip (module-poller row). Distinct from .admin-badge — this
@@ -1303,7 +1344,7 @@
 
   /* Per-user 24h breakdown — stacked bar + tag list. */
   .users-grid {
-    /* The sized columns below come to 46.5rem; this is that plus 10rem for
+    /* The sized columns below come to 48.5rem; this is that plus 10rem for
 		   `col-24h`, the one column deliberately left auto, since it carries the
 		   stacked bar and the per-source chips. The sized columns must not add up to
 		   the whole table, or that column is squeezed to nothing at the declared
@@ -1312,18 +1353,25 @@
 		   floor stops covering them the moment the reader picks a larger text
 		   scale. At 120% the columns alone came to within a few pixels of the old
 		   904px, which left 24h activity nothing again — the same defect reached by
-		   changing a setting rather than a breakpoint. 56.5rem is that 904px at the
-		   default scale, so nothing moves until the reader asks it to. */
-    min-width: 56.5rem;
+		   changing a setting rather than a breakpoint. 56.5rem was that 904px at the
+		   default scale; the extra 2rem is the User column's picture and its gap,
+		   added to the floor rather than taken out of `col-24h`. */
+    min-width: 58.5rem;
   }
 
   /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
 	   columns split the table evenly. Size the narrow columns explicitly and
 	   leave 24h activity auto so it soaks up whatever is left — it carries the
 	   stacked bar plus the per-source chips and needs the room; username and
-	   failure count do not. */
+	   failure count do not.
+
+	   The User column carries a 1.5rem picture and a --space-2 gap ahead of the
+	   name, so it is 2rem wider than the 9rem it held before, and the table's
+	   own min-width above went up by the same 2rem. Both, or the shortfall
+	   comes out of the one unsized column — which is ISSUE-276 exactly, and is
+	   what `adminTables.test.ts` does the arithmetic for. */
   .users-grid .col-user {
-    width: 9rem;
+    width: 11rem;
   }
 
   /* Total holds a lifetime count, which reaches seven figures on a long-running
@@ -1650,7 +1698,7 @@
 		   phone screen less to be legible in. Every column keeps a legible width and
 		   the surplus becomes horizontal scroll. */
     .users-grid {
-      min-width: 45.5rem;
+      min-width: 47.5rem;
     }
     /* Tighten the columns whose content has a known short bound, so that scroll
 		   stays as short as it can be, and leave the numeric ones at a width their
@@ -1659,8 +1707,12 @@
 		   `toLocaleString` puts commas in but no break opportunity. Total is the one
 		   that bit: it keeps its (widened) desktop width here rather than the 3.5rem
 		   this block used to give it. */
+    /* Widened by the same 2rem the desktop column was, so the picture is not
+		   paid for out of `col-24h`. The name has less room than it had, which is
+		   what the ellipsis on `.user-cell .username` is for — at this width it
+		   was already the column most likely to be cut. */
     .users-grid .col-user {
-      width: 6.5rem;
+      width: 8.5rem;
     }
     .users-grid .col-failed {
       width: 3.5rem;
