@@ -44,6 +44,8 @@ export interface CurrentUser {
    * person may do.
    */
   readonly live: boolean;
+  /** End the current session and route to the server-rendered login page. */
+  expireSession: () => void;
   /**
    * Re-resolve the identity from the server, for a page that needs it fresh
    * rather than merely current — `nextcloud_token` changes while the settings

@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     AVATAR_ACCEPT,
+    AuthError,
     deleteBotAvatar,
     getAdminStats,
     uploadBotAvatar,
@@ -76,7 +77,8 @@
       if (!(await identity.reload()))
         botIconNote = 'Icon saved. The page could not refresh — reload to see it.';
     } catch (e) {
-      botIconError = (e as Error).message || 'Could not save that icon.';
+      if (e instanceof AuthError) identity.expireSession();
+      else botIconError = (e as Error).message || 'Could not save that icon.';
     } finally {
       botIconBusy = false;
       botIconBusyLabel = '';
@@ -94,7 +96,8 @@
       if (!confirmed) botIconNote = 'Removed. The page could not refresh — reload to see it.';
       else if (!deleted) botIconNote = 'There was nothing to remove.';
     } catch (e) {
-      botIconError = (e as Error).message || 'Could not remove that icon.';
+      if (e instanceof AuthError) identity.expireSession();
+      else botIconError = (e as Error).message || 'Could not remove that icon.';
     } finally {
       botIconBusy = false;
       botIconBusyLabel = '';

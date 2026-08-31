@@ -191,6 +191,16 @@
    * difference between a record it can trust to be current and one the cache
    * supplied, and only the caller knows which of the two its own screen needs.
    */
+  function expireSession() {
+    // The session is over, so the pointer that says whose cache to read before
+    // the next one resolves goes with it (ISSUE-202). Whoever signs in next
+    // writes their own on the first config read; until then a cold launch with
+    // no connection reads nothing, which is the right answer when nobody is
+    // signed in.
+    forgetLastUserId();
+    window.location.href = `${base}/login`;
+  }
+
   async function loadUser(): Promise<boolean> {
     const mine = ++loadGeneration;
     const current = () => mine === loadGeneration;
@@ -225,17 +235,10 @@
       return true;
     } catch (e) {
       if (e instanceof AuthError) {
-        // The session is over, so the pointer that says whose cache to read
-        // before the next one resolves goes with it (ISSUE-202). Whoever signs
-        // in next writes their own on the first config read; until then a cold
-        // launch with no connection reads nothing, which is the right answer
-        // when nobody is signed in.
-        //
         // Ahead of every offline branch below, and ahead of the generation
         // check too: a dead session and a dead network are different answers
         // and must stay different, and a 401 is authoritative whoever asked.
-        forgetLastUserId();
-        window.location.href = `${base}/login`;
+        expireSession();
         return false;
       }
       if (!current()) return false;
@@ -296,6 +299,7 @@
     get live(): boolean {
       return live;
     },
+    expireSession,
     reload: loadUser,
   });
 

@@ -11,6 +11,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 
 const api = vi.hoisted(() => ({
+  AuthError: class AuthError extends Error {},
   getSettingsServices: vi.fn(async () => ({ services: [] })),
   getModules: vi.fn(async () => ({ modules: [] })),
   getProfile: vi.fn(async () => ({
@@ -99,13 +100,27 @@ const picture = new File(['not really a jpeg'], 'me.jpg', { type: 'image/jpeg' }
    too, so a test that wants a *changed* record has to move this after the page
    has settled rather than seeding it. */
 let served: User | null = null;
+let reloads = 0;
+let expiredSessions = 0;
 
 function renderPage(user: User) {
   served = user;
-  return render(Harness, { component: Page, user, onReload: () => served });
+  return render(Harness, {
+    component: Page,
+    user,
+    onReload: () => {
+      reloads += 1;
+      return served;
+    },
+    onExpireSession: () => {
+      expiredSessions += 1;
+    },
+  });
 }
 
 beforeEach(() => {
+  reloads = 0;
+  expiredSessions = 0;
   api.uploadAvatar.mockClear();
   api.deleteAvatar.mockClear();
   api.updateProfile.mockClear();
@@ -185,6 +200,17 @@ describe('the profile-picture control', () => {
     expect(preview().querySelector('img')?.getAttribute('src')).toBe(
       '/api/avatars/user/alice?v=old11',
     );
+  });
+
+  it('hands an expired upload session back to the root identity flow', async () => {
+    api.uploadAvatar.mockRejectedValue(new api.AuthError());
+    renderPage(person());
+    await waitFor(() => expect(dropzone()).not.toBeNull());
+
+    await drop(picture);
+
+    await waitFor(() => expect(expiredSessions).toBe(1));
+    expect(screen.queryByText('Not authenticated')).toBeNull();
   });
 
   it('offers Remove only while a picture is showing', async () => {

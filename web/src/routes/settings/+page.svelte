@@ -7,6 +7,7 @@
     getProfile,
     updateProfile,
     disconnectNextcloudToken,
+    AuthError,
     uploadAvatar,
     deleteAvatar,
     AVATAR_ACCEPT,
@@ -155,7 +156,8 @@
       else if (!confirmed)
         avatarNote = 'Picture saved. Your account details could not be refreshed.';
     } catch (e) {
-      avatarError = (e as Error).message || 'Could not save that picture.';
+      if (e instanceof AuthError) identity.expireSession();
+      else avatarError = (e as Error).message || 'Could not save that picture.';
     } finally {
       avatarBusy = false;
       avatarBusyLabel = '';
@@ -187,7 +189,8 @@
           ? 'There was nothing of yours to remove. The picture showing was imported from Nextcloud.'
           : 'There was nothing to remove.';
     } catch (e) {
-      avatarError = (e as Error).message || 'Could not remove that picture.';
+      if (e instanceof AuthError) identity.expireSession();
+      else avatarError = (e as Error).message || 'Could not remove that picture.';
     } finally {
       avatarBusy = false;
       avatarBusyLabel = '';

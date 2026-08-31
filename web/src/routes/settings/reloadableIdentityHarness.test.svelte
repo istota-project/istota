@@ -25,10 +25,11 @@
      * reports success, which is the ordinary no-op reload.
      */
     onReload?: () => User | null;
+    onExpireSession?: () => void;
     component: Component<Record<string, never>>;
   }
 
-  let { user, onReload, component: Page }: Props = $props();
+  let { user, onReload, onExpireSession, component: Page }: Props = $props();
 
   /* Seeded from the prop and owned from then on — `reload()` is what replaces
      it, the way the root layout replaces the record it publishes. `untrack`
@@ -43,6 +44,7 @@
     get live() {
       return true;
     },
+    expireSession: () => onExpireSession?.(),
     reload: async () => {
       const next = onReload?.();
       if (next) current = next;
