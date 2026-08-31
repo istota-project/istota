@@ -478,8 +478,20 @@ same-attempt rerun already lives there). Three cooperating pieces:
   `.claude/rules/executor.md` "Brain fallback". `PrimaryAvailabilityBreaker` is a
   process-global, thread-safe breaker keyed by primary kind — distinct from
   `tmux_claude._BREAKER` (which governs tmux launch fast-fail); the two compose.
-  `effective_fallback_kind(brain_config)` encodes the tmux back-compat default
-  (a `tmux_claude` primary falls back to `claude_code` unless `fallback` is set).
+  `effective_fallback_kind(brain_config)` is the configured `[brain] fallback`
+  or None — explicit config only, no implicit target for any kind, and None also
+  where the configured value equals *this* config's `kind`, since rerunning the
+  same brain cannot help. That last test is here rather than only at config load
+  because `brain_config` may be a **routed** config: `resolve_brain_kind` returns
+  `replace(brain_config, kind=target)` and the routed config inherits `fallback`,
+  so `kind = "claude_code"` + `source_type_overrides = {scheduled = "tmux_claude"}`
+  + `fallback = "claude_code"` is a self-fallback for an interactive task and a
+  real target for a scheduled one. A
+  `tmux_claude` primary used to resolve to `claude_code` there with nothing
+  configured; that shim predated the generalized `fallback` key and was removed
+  in ISSUE-362, because it left no value of `fallback` meaning "no failover" on
+  a tmux deployment and made both of `_validate_brain_fallback`'s "disabling
+  fallback" warnings false — blanking the field is what activated it.
 
 **Trigger set** (reroute this attempt): `{usage_limit, not_found, fallback}` +
 `transient_api_error` iff `fallback_on_transient` (**on by default** since
@@ -492,7 +504,13 @@ probed per-task (its own breaker decides when to stop). **Never fallback:**
 `oom` / `timeout` / `cancelled` / `error` (task-level outcomes, flow through the
 normal path). Config keys: `[brain] fallback` / `fallback_on_transient` /
 `fallback_cooldown_seconds`; `_validate_brain_fallback` (config load) neutralizes
-an unknown kind or a self-fallback with one WARNING. Single fallback level only;
+an unknown kind with one WARNING, and a self-fallback — now "the only kind this
+deployment runs", not the bare `fallback == kind` string comparison, so the
+routed shape above survives — with another. It also logs one INFO line, once per
+process, where `tmux_claude` runs (as `kind` or as an override target) with no
+fallback: that pairing was unconfigurable before ISSUE-362, so an upgrade drops
+failover silently otherwise, and `load_config` runs in every skill-CLI spawn, so
+the notice is process-scoped rather than per call. Single fallback level only;
 if the fallback is also unavailable the task fails/retries normally. On a dropped
 non-portable pin the successful reply gets a one-line italic model note.
 

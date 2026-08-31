@@ -155,7 +155,9 @@ TOML
     #
     # Brain fallback (availability failover): when the primary brain is
     # unavailable (usage limit / missing binary / tmux launch failure), rerun the
-    # task on ISTOTA_BRAIN_FALLBACK with that brain's own settings. "" = none.
+    # task on ISTOTA_BRAIN_FALLBACK with that brain's own settings. "" = none,
+    # whatever the primary kind (ISSUE-362) — except that an unset value on a
+    # tmux_claude primary is filled in with claude_code below.
     cat >> "$CONFIG_FILE" <<TOML
 
 [brain]
@@ -163,8 +165,20 @@ kind = "${ISTOTA_BRAIN_KIND:-claude_code}"
 fallback_on_transient = ${ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT:-false}
 fallback_cooldown_seconds = ${ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS:-900}
 TOML
-    if [ -n "${ISTOTA_BRAIN_FALLBACK:-}" ]; then
-        echo "fallback = \"${ISTOTA_BRAIN_FALLBACK}\"" >> "$CONFIG_FILE"
+    # A tmux_claude primary with nothing set gets claude_code written in, which
+    # is the failover it had implicitly before ISSUE-362 — same default the
+    # Ansible role applies, so the two deployment shapes agree. Setting
+    # ISTOTA_BRAIN_FALLBACK to any other value, including a single space, wins.
+    # This reaches a *first* boot only: the entrypoint skips the render once
+    # config.toml exists, so an already-provisioned tmux deployment keeps its
+    # file and learns from the config-load INFO line that it has no failover.
+    _brain_fallback="${ISTOTA_BRAIN_FALLBACK:-}"
+    if [ -z "$_brain_fallback" ] \
+        && [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "tmux_claude" ]; then
+        _brain_fallback="claude_code"
+    fi
+    if [ -n "$_brain_fallback" ]; then
+        echo "fallback = \"${_brain_fallback}\"" >> "$CONFIG_FILE"
     fi
     if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "native" ]; then
         cat >> "$CONFIG_FILE" <<TOML

@@ -977,6 +977,47 @@ class TestSubscriptionUsage:
         )
         assert self._result(config).status == WARN
 
+    def test_the_busy_remedy_names_the_configured_fallback(
+        self, make_config, monkeypatch
+    ):
+        """ISSUE-362: the remedy used to promise a failover unconditionally.
+
+        `claude_code` has never had an implicit fallback and since ISSUE-362 no
+        kind has, so on a deployment with none the old fixed literal told the
+        operator their tasks would reroute when they will simply fail.
+        """
+        from istota.config import BrainConfig, ClaudeCodeBrainConfig
+
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(97)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        config = make_config(
+            brain=BrainConfig(
+                kind="claude_code",
+                fallback="native",
+                claude_code=ClaudeCodeBrainConfig(),
+            )
+        )
+        r = self._result(config)
+        assert r.status == WARN
+        assert "native" in r.remedy
+        assert "No [brain] fallback" not in r.remedy
+
+    def test_the_busy_remedy_says_so_when_there_is_no_fallback(
+        self, make_config, monkeypatch
+    ):
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(97)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == WARN
+        assert "No [brain] fallback is configured" in r.remedy
+        assert "fail over" not in r.remedy
+
     @pytest.mark.parametrize("percent", [0, 79.9, 80, 94.9, 95, 100, 150])
     def test_no_utilization_ever_fails(self, make_config, monkeypatch, percent):
         """A plan at 97% is a fact about the plan, not a defect in the host.

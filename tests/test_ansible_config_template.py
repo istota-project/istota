@@ -450,6 +450,58 @@ def load_config_from(rendered: str) -> Config:
         return load_config(path)
 
 
+class TestTheBrainFallbackDefault:
+    """ISSUE-362 — the whole back-compat mechanism for existing tmux deployments.
+
+    The hardcoded ``tmux_claude`` -> ``claude_code`` failover was removed from
+    ``effective_fallback_kind``; what keeps a deployed tmux host on the failover
+    it already had is one Jinja expression in ``defaults/main.yml``. Nothing else
+    asserts it, and a later edit to ``istota_brain_kind``'s default or to the
+    ``{% if istota_brain_fallback %}`` gate would break it in silence.
+    """
+
+    def test_a_tmux_primary_renders_the_claude_code_fallback(self):
+        config = load_config_from(render(istota_brain_kind="tmux_claude"))
+        assert config.brain.kind == "tmux_claude"
+        assert config.brain.fallback == "claude_code"
+
+    @pytest.mark.parametrize("kind", ["claude_code", "native"])
+    def test_no_other_primary_gets_an_implicit_fallback(self, kind):
+        rendered = render(istota_brain_kind=kind)
+        config = load_config_from(rendered)
+        assert config.brain.kind == kind
+        assert config.brain.fallback == ""
+        assert "\nfallback = " not in rendered
+
+    def test_an_explicit_empty_string_turns_tmux_failover_off(self):
+        """The operator override has to win, or "" still means nothing on tmux."""
+        rendered = render(istota_brain_kind="tmux_claude", istota_brain_fallback="")
+        assert "\nfallback = " not in rendered
+        assert load_config_from(rendered).brain.fallback == ""
+
+    def test_a_routed_tmux_target_gets_the_fallback_too(self):
+        """A routed config inherits `fallback` from `[brain]`.
+
+        `resolve_brain_kind` returns `replace(brain_config, kind=target)`, so a
+        `claude_code` primary routing `scheduled` to tmux loses exactly the same
+        failover as a tmux primary — with nothing in `kind` to see it by. The
+        template already knows this shape: it is the `_tmux_routed` condition
+        that decides whether to emit `[brain.tmux]` at all.
+        """
+        config = load_config_from(
+            render(istota_brain_source_type_overrides={"scheduled": "tmux_claude"})
+        )
+        assert config.brain.kind == "claude_code"
+        assert config.brain.source_type_overrides == {"scheduled": "tmux_claude"}
+        assert config.brain.fallback == "claude_code"
+
+    def test_an_explicit_kind_wins_over_the_tmux_default(self):
+        config = load_config_from(
+            render(istota_brain_kind="tmux_claude", istota_brain_fallback="native")
+        )
+        assert config.brain.fallback == "native"
+
+
 class TestThePackageCacheRoot:
     """ISSUE-305, ISSUE-317, ISSUE-319 — the root, the sweep keys, the bind order.
 

@@ -814,16 +814,37 @@ def _mark_if_exhausted(fb_result):
 
 
 def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason):
-    """One operator alert when the availability breaker opens for a primary."""
+    """One operator alert when the availability breaker opens for a primary.
+
+    ``fallback_kind`` is None on a deployment with no ``[brain] fallback``
+    configured, which is a legitimate shape since ISSUE-362. The breaker still
+    opens there (the sleep cycle and the shared-block generator read it), so the
+    alert still fires — it just can't promise a reroute.
+    """
     try:
         from . import notifications
 
+        cooldown = config.brain.fallback_cooldown_seconds
+        if fallback_kind is not None:
+            what_happens = (
+                f"falling back to {fallback_kind} for {cooldown}s. "
+                "The primary will be probed again after the cooldown."
+            )
+        else:
+            # Not "tasks pause for the cooldown". `_skip_primary` is gated on a
+            # fallback existing, so with none every task still calls the primary
+            # and the first one after the provider recovers succeeds. What the
+            # cooldown holds back is the direct callers — the sleep cycle and
+            # shared-block generation — through `primary_brain_unavailable`.
+            what_happens = (
+                "no fallback configured, so tasks keep failing until it "
+                f"recovers. Background memory and briefing work pauses for "
+                f"{cooldown}s."
+            )
         notifications.send_notification(
             config,
             task.user_id,
-            f"⚠️ {primary_kind} brain unavailable ({reason}) — falling back to "
-            f"{fallback_kind} for {config.brain.fallback_cooldown_seconds}s. "
-            f"The primary will be probed again after the cooldown.",
+            f"⚠️ {primary_kind} brain unavailable ({reason}) — {what_happens}",
             purpose="alert",
         )
     except Exception:
@@ -5932,14 +5953,25 @@ def execute_task(
                     _triggers = set(TRIGGER_STOP_REASONS)
                     if config.brain.fallback_on_transient:
                         _triggers.add("transient_api_error")
-                    if (
-                        _fallback_kind is not None
-                        and brain_result.stop_reason in _triggers
-                    ):
+                    if brain_result.stop_reason in _triggers:
                         # Open the availability breaker only for persistent
                         # conditions (usage_limit / not_found). "fallback" is
                         # excluded so tmux keeps being probed per-task (its own
                         # launch _CircuitBreaker governs when to stop).
+                        #
+                        # Deliberately not gated on a fallback being configured
+                        # (ISSUE-362). The breaker is a shared signal: the
+                        # direct callers (sleep cycle, shared blocks) read it
+                        # through `primary_brain_unavailable`, and
+                        # `report_brain_result` already opens it for them with
+                        # no regard to a fallback. Gating it here left a
+                        # deployment with no fallback without the availability
+                        # record and without either operator alert, so the only
+                        # notice that a primary had gone down was the failed
+                        # task itself. Safe for the task path: `_skip_primary`
+                        # is separately gated on a fallback existing, so an open
+                        # breaker never skips a primary there is nothing to
+                        # replace.
                         opened_breaker = (
                             _cooldown > 0
                             and brain_result.stop_reason in COOLDOWN_STOP_REASONS
@@ -5958,11 +5990,20 @@ def execute_task(
                                 config, task, _primary_kind, _fallback_kind,
                                 brain_result.stop_reason,
                             )
-                        logger.error(
-                            "brain fallback: task=%d primary=%s reason=%s -> %s",
-                            task.id, _primary_kind, brain_result.stop_reason,
-                            _fallback_kind,
-                        )
+                        if _fallback_kind is not None:
+                            logger.error(
+                                "brain fallback: task=%d primary=%s reason=%s "
+                                "-> %s",
+                                task.id, _primary_kind,
+                                brain_result.stop_reason, _fallback_kind,
+                            )
+                        else:
+                            logger.error(
+                                "brain unavailable: task=%d primary=%s "
+                                "reason=%s, no [brain] fallback configured",
+                                task.id, _primary_kind,
+                                brain_result.stop_reason,
+                            )
                         # Preserve tmux's own launch alert: its _CircuitBreaker
                         # governs fallback/not_found (which are NOT in the
                         # availability breaker's cooldown set), so its
@@ -5974,10 +6015,16 @@ def execute_task(
                                 )
                                 if consume_circuit_open_alert():
                                     from . import notifications
+                                    _tail = (
+                                        "falling back."
+                                        if _fallback_kind is not None
+                                        else "no fallback configured, so tasks "
+                                             "keep failing."
+                                    )
                                     notifications.send_notification(
                                         config, task.user_id,
                                         "⚠️ tmux_claude brain circuit opened — "
-                                        "falling back. Check the claude CLI "
+                                        f"{_tail} Check the claude CLI "
                                         "version / readiness markers.",
                                         purpose="alert",
                                     )
@@ -5985,10 +6032,12 @@ def execute_task(
                                 logger.debug(
                                     "tmux circuit-open alert failed", exc_info=True
                                 )
-                        _fb, _dropped_pin, _fb_effort = _run_fallback(
-                            config, _brain_config, _fallback_kind, task, req,
-                            on_start=_notice(brain_result.stop_reason),
-                        )
+                        _fb = None
+                        if _fallback_kind is not None:
+                            _fb, _dropped_pin, _fb_effort = _run_fallback(
+                                config, _brain_config, _fallback_kind, task,
+                                req, on_start=_notice(brain_result.stop_reason),
+                            )
                         if _fb is not None:
                             # The fallback *replaces* brain_result, so without
                             # this the single persist call below would record the

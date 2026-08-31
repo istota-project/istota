@@ -161,8 +161,10 @@ services:
       # read straight from the environment at load time (never written to disk).
       # Runbook: docs/configuration/native-brain.md
       ISTOTA_BRAIN_KIND: ${ISTOTA_BRAIN_KIND:-claude_code}
-      # Brain fallback (availability failover). "" = none; a tmux_claude primary
-      # still falls back to claude_code by default.
+      # Brain fallback (availability failover). "" = none, for every brain kind
+      # — except that leaving it unset on a tmux_claude primary writes
+      # claude_code in at first boot, which is the failover that kind used to
+      # have implicitly. Name a value here to override, including on tmux.
       ISTOTA_BRAIN_FALLBACK: ${ISTOTA_BRAIN_FALLBACK:-}
       ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT: ${ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT:-false}
       ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS: ${ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS:-900}

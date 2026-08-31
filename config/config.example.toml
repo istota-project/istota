@@ -101,8 +101,9 @@ features = []
 #                             OpenAI-compatible (or Claude-CLI) provider.
 #   "tmux_claude"           — drives the interactive `claude` TUI in a detached
 #                             tmux session (keeps traffic on subscription
-#                             billing). Full instance switch; claude_code stays
-#                             the automatic fallback + circuit breaker.
+#                             billing). Full instance switch, with its own
+#                             launch circuit breaker. Set fallback below to
+#                             reroute an unavailable tmux primary.
 # [brain]
 # kind = "claude_code"
 #
@@ -113,10 +114,13 @@ features = []
 # over to a metered native endpoint. A portable role tier (fast/general/smart)
 # carries across the provider boundary; a provider-specific model pin drops to
 # the fallback brain's own default (logged + a visible note in the reply).
-# Single level only. "" = no fallback (a tmux_claude primary still defaults to
-# claude_code). Once the primary reports a persistent unavailability, subsequent
-# tasks skip it for fallback_cooldown_seconds; a successful primary probe closes
-# the cooldown early.
+# Single level only. "" = no fallback, for every brain kind — a tmux_claude
+# primary needs fallback = "claude_code" spelled out here to get one. A value
+# equal to the kind a task runs on is no fallback for that task, so naming
+# claude_code here with a source_type_overrides entry routing to tmux gives the
+# routed tasks failover and leaves the rest alone. Once the
+# primary reports a persistent unavailability, subsequent tasks skip it for
+# fallback_cooldown_seconds; a successful primary probe closes the cooldown early.
 # fallback = ""                       # "" | "claude_code" | "native" | "tmux_claude"
 # fallback_on_transient = true        # also reroute a persistent transient_api_error
 #                                     # (429 / 5xx / 529 / network) after the primary's
@@ -174,7 +178,8 @@ features = []
 # code release.
 # [brain.tmux]
 # fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
-# fallback_cooldown_seconds = 300   # how long the circuit stays open (headless fallback)
+# fallback_cooldown_seconds = 300   # how long the circuit stays open (routes to the
+#                                   # configured [brain] fallback, if any)
 # ready_timeout_seconds = 30        # REPL-ready deadline
 # tmux_command_timeout = 10         # per-tmux-subprocess timeout
 # cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
@@ -185,7 +190,8 @@ features = []
 # bypass_accept_marker = "Yes, I accept"
 # error_markers = ["API Error", "session limit reached", "Context low"]
 # usage_limit_markers = ["session limit reached", "usage limit reached", "Claude usage limit"]
-#                                   # pane substrings → stop_reason=usage_limit → fallback brain
+#                                   # pane substrings → stop_reason=usage_limit → the
+#                                   # configured [brain] fallback, if any
 #
 # Headless `claude -p` brain settings. The brain's model selection still comes
 # from [brain] and [models]; this block is the subscription usage poll only, and

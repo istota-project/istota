@@ -491,9 +491,12 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-# The one remedy this check can offer. A fixed literal: `detail` and `remedy` are
-# built from this plus a percentage, a duration and a resolver branch name, never
-# from the credential, the raw response body or an exception string.
+# The two remedies this check can offer. Both are fixed literals: `detail` and
+# `remedy` are built from these plus a percentage, a duration, a resolver branch
+# name and the configured fallback brain kind — never from the credential, the
+# raw response body or an exception string. The fallback kind is safe to
+# interpolate because `_validate_brain_fallback` blanks anything outside
+# `KNOWN_BRAIN_KINDS` at load, and it is a setting rather than a secret.
 #
 # There used to be three. The other two answered a failure to obtain a reading —
 # check your egress, re-run `claude setup-token`, the response shape changed —
@@ -501,7 +504,17 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
 # operator can act on, and "the endpoint will not serve this credential class"
 # is not one: those rows are SKIPs now, carrying the reason and no instruction.
 _USAGE_BUSY_REMEDY = (
-    "Tasks will fail over to the fallback brain when this window is exhausted."
+    "Tasks will fail over to the {fallback} brain when this window is exhausted."
+)
+
+# The same row on a deployment with no `[brain] fallback` configured. The literal
+# above asserted a failover that most deployments do not have: `claude_code` has
+# never had an implicit fallback, and since ISSUE-362 neither has any other kind,
+# so an exhausted window fails the task outright. Naming a repair the operator
+# can act on beats promising a reroute that will not happen.
+_USAGE_BUSY_NO_FALLBACK_REMEDY = (
+    "No [brain] fallback is configured, so tasks fail when this window is "
+    "exhausted. Set one to reroute them."
 )
 
 
@@ -622,7 +635,15 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
     # `min` reproduces both rows including an inverted pair, which the loader
     # corrects but which a config reaching the dataclass some other way would not.
     if windows[0].percent >= min(warn_at, high_at):
-        return CheckResult(name, WARN, detail, remedy=_USAGE_BUSY_REMEDY)
+        from .brain._fallback import effective_fallback_kind
+
+        fallback_kind = effective_fallback_kind(config.brain)
+        remedy = (
+            _USAGE_BUSY_REMEDY.format(fallback=fallback_kind)
+            if fallback_kind is not None
+            else _USAGE_BUSY_NO_FALLBACK_REMEDY
+        )
+        return CheckResult(name, WARN, detail, remedy=remedy)
     return CheckResult(name, OK, detail)
 
 
