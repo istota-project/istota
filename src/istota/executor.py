@@ -6058,10 +6058,20 @@ def execute_task(
             # Which attempt this is, for the brain's own per-attempt artifacts
             # (NativeBrain's session log names its file after them). Read off
             # the task row rather than out of `env`, which is the sandbox
-            # environment. `attempt_count` is the same counter the task cgroup
-            # and the tmux session label already key on.
+            # environment.
+            #
+            # `+ 1` because `attempt_count` counts *prior* attempts — the claim
+            # path never touches it, and only a release/retry increments it, so
+            # a first run carries 0 (`scheduler.py`: "attempt_count == 0 is left
+            # alone — a first run has no prior attempt"). The session log's
+            # numbering is 1-based, as `task_usage.attempt_seq` is, so a first
+            # run has to be attempt 1 and a retry attempt 2. This deliberately
+            # disagrees with the task cgroup directory and the tmux session
+            # label, which are named from the raw counter: those are within-run
+            # identifiers with no reader outside the process, while an operator
+            # reads a log file name against the usage table.
             task_id=task.id,
-            attempt=task.attempt_count,
+            attempt=task.attempt_count + 1,
             user_id=task.user_id or "",
             source_type=task.source_type or "",
             conversation_token=task.conversation_token or "",

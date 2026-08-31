@@ -218,6 +218,7 @@ class TestTheRecordSequence:
         assert record["system_prompt"]
         assert record["system_prompt_source"] == "builtin"
 
+
     def test_the_first_user_message_is_the_assembled_prompt(self, tmp_path):
         records = self._run(tmp_path)
         first = next(r for r in records if r["type"] == "message")
@@ -236,6 +237,77 @@ class TestTheRecordSequence:
         assert records[-1]["model_used"] == "claude-sonnet-4-6"
         assert records[-1]["turns"] == 3
         assert records[-1]["duration_ms"] >= 0
+
+
+class TestTheContextRecordNamesTheRealSource:
+    """`system_prompt_source` describes the prompt that was assembled, not the
+    request field. The two disagree in both directions: a custom file is
+    *appended* to the built-in block rather than replacing it, and a configured
+    path that does not exist contributes nothing at all."""
+
+    def _source(self, tmp_path, custom: Path | None, tools=("Read",)) -> str:
+        root = tmp_path / "logs"
+        provider = MockProvider([_text_turn("ok")])
+        _brain(provider, root).execute(
+            _req(
+                "hi",
+                tmp_path,
+                tools=list(tools),
+                custom_system_prompt_path=custom,
+            )
+        )
+        return _read(root)[1]["system_prompt_source"]
+
+    def test_no_custom_file(self, tmp_path):
+        assert self._source(tmp_path, None) == "builtin"
+
+    def test_a_custom_file_is_appended_not_substituted(self, tmp_path):
+        custom = tmp_path / "system-prompt.md"
+        custom.write_text("operator guidance")
+        source = self._source(tmp_path, custom)
+        assert source == f"builtin+{custom}"
+
+    def test_a_configured_file_that_does_not_exist_is_not_named(self, tmp_path):
+        missing = tmp_path / "absent.md"
+        assert self._source(tmp_path, missing) == "builtin"
+
+    def test_a_text_only_run_has_no_source_at_all(self, tmp_path):
+        # Empty `allowed_tools` (the sleep-cycle shape) skips the coding block,
+        # so the prompt is empty and saying "builtin" would be a fabrication.
+        assert self._source(tmp_path, None, tools=()) == "empty"
+
+
+class TestPromptCaching:
+    """`make_provider` reads a `None` config as "on for api.anthropic.com",
+    which is the default deployment — so recording the config field would write
+    `null` for a run that cached."""
+
+    def test_the_header_takes_the_providers_resolved_answer(self, tmp_path):
+        class _CachingProvider(MockProvider):
+            prompt_caching = True
+
+        root = tmp_path / "logs"
+        brain = _brain(_CachingProvider([_text_turn("ok")]), root)
+        # The config says nothing; the provider resolved it to on.
+        assert brain._config.prompt_caching is None
+        brain.execute(_req("hi", tmp_path))
+        assert _read(root)[0]["prompt_caching"] is True
+
+    def test_a_provider_that_exposes_none_falls_back_to_the_config(self, tmp_path):
+        root = tmp_path / "logs"
+        brain = _brain(MockProvider([_text_turn("ok")]), root, prompt_caching=False)
+        assert not hasattr(brain._provider, "prompt_caching")
+        brain.execute(_req("hi", tmp_path))
+        assert _read(root)[0]["prompt_caching"] is False
+
+    def test_the_shipped_provider_exposes_it(self, tmp_path):
+        from istota.llm.openai_compat import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(api_key="", prompt_caching=True)
+        try:
+            assert provider.prompt_caching is True
+        finally:
+            asyncio.run(provider.aclose())
 
 
 class TestUsage:
@@ -298,40 +370,45 @@ class TestUsage:
 # --------------------------------------------------------------------------- #
 
 
+def _run_proactive_compaction(tmp_path) -> list[dict]:
+    """A run whose first turn reports a near-full window, so
+    ``prepare_next_turn`` compacts after its tool result."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "notes.txt"
+    # Big enough that `find_cut_point` has something to cut: it walks back
+    # from the newest accumulating estimated tokens, so a three-message
+    # conversation of short strings never reaches any budget and returns 0.
+    target.write_text((MARKER + "\n") * 200)
+    root = tmp_path / "logs"
+    provider = MockProvider(
+        [
+            AssistantMessage(
+                content=[
+                    ToolCallContent(
+                        id="c1", name="Read", arguments={"file_path": str(target)}
+                    )
+                ],
+                stop_reason="tool_use",
+                usage=Usage(input_tokens=1800, output_tokens=20),
+            ),
+            _text_turn("SUMMARY OF THE RUN"),  # the summarizer's own call
+            _text_turn("Done."),
+        ]
+    )
+    brain = _brain(
+        provider,
+        root,
+        context_window=2000,
+        compaction_reserve_tokens=500,
+        compaction_keep_recent_tokens=50,
+    )
+    brain.execute(_req("go", tmp_path, tools=["Read"]))
+    return _read(root)
+
+
 class TestCompaction:
     def test_a_proactive_compaction_is_recorded_between_the_messages(self, tmp_path):
-        target = tmp_path / "notes.txt"
-        # Big enough that `find_cut_point` has something to cut: it walks back
-        # from the newest accumulating estimated tokens, so a three-message
-        # conversation of short strings never reaches any budget and returns 0.
-        target.write_text((MARKER + "\n") * 200)
-        root = tmp_path / "logs"
-        provider = MockProvider(
-            [
-                # Turn 1 reports a near-full window, so prepare_next_turn
-                # compacts after its tool result.
-                AssistantMessage(
-                    content=[
-                        ToolCallContent(
-                            id="c1", name="Read", arguments={"file_path": str(target)}
-                        )
-                    ],
-                    stop_reason="tool_use",
-                    usage=Usage(input_tokens=1800, output_tokens=20),
-                ),
-                _text_turn("SUMMARY OF THE RUN"),  # the summarizer's own call
-                _text_turn("Done."),
-            ]
-        )
-        brain = _brain(
-            provider,
-            root,
-            context_window=2000,
-            compaction_reserve_tokens=500,
-            compaction_keep_recent_tokens=50,
-        )
-        brain.execute(_req("go", tmp_path, tools=["Read"]))
-        records = _read(root)
+        records = _run_proactive_compaction(tmp_path)
         kinds = _kinds(records)
         assert "compaction" in kinds
         compaction = next(r for r in records if r["type"] == "compaction")
@@ -393,6 +470,38 @@ class TestOverflowRecovery:
         assert compaction["trigger"] == "overflow"
         assert compaction["recovery_index"] == 1
         assert compaction["summary"] == "SUMMARY"
+        # `_build_recovery_context` owns the cut rule and does not report it,
+        # so this path has no honest value — null rather than a second copy of
+        # `find_cut_point` free to disagree with the one that ran.
+        assert compaction["cut_index"] is None
+        # Zero, and that is the honest answer rather than a broken count: this
+        # transcript is one user turn plus the assistant turn that overflowed,
+        # so `_aggressive_cut` anchors at index 0 and the recovery keeps
+        # everything, prepending a summary. The count is read back off the two
+        # lists by identity, so it reports what happened rather than what the
+        # cut rule was asked for.
+        assert compaction["messages_dropped"] == 0
+        assert compaction["image_pinned"] is False
+
+    def test_both_triggers_write_the_same_keys(self, tmp_path):
+        """A reader must not have to ask which trigger fired to know which
+        fields exist. The two records are built at different call sites, so
+        nothing but this holds their shapes together."""
+        proactive = next(
+            r for r in _run_proactive_compaction(tmp_path / "a")
+            if r["type"] == "compaction"
+        )
+        work = tmp_path / "b"
+        work.mkdir(parents=True, exist_ok=True)
+        root = work / "logs"
+        provider = _ScriptedProvider(
+            [_OVERFLOW, ("done", "SUMMARY"), ("done", "Recovered answer.")]
+        )
+        _brain(provider, root).execute(_req("hi", work))
+        overflow = next(
+            r for r in _read(root) if r["type"] == "compaction"
+        )
+        assert set(proactive) == set(overflow)
 
     def test_the_continue_pass_still_records_its_messages(self, tmp_path):
         """Stage 3's first task, pinned as a test.

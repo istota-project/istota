@@ -457,19 +457,32 @@ def _pick_turn_budget_nudge(
 # --------------------------------------------------------------------------- #
 
 
+def _disabled_session_log() -> SessionLogWriter:
+    """A writer with no root: every method a no-op, ``path`` ``None``.
+
+    A fresh instance rather than a module-level singleton — the class holds
+    per-run state and tasks run concurrently on their own threads, so sharing
+    one would be a shared mutable across workers for no gain.
+    """
+    return SessionLogWriter(None, SessionLogIdentity(0, 0, ""), SessionLogPolicy())
+
+
 def make_session_log(req: BrainRequest, cfg) -> SessionLogWriter:
     """The per-attempt transcript writer for *req*, or the disabled one.
 
     ``SessionLogWriter(root=None)`` is the off switch — every method a no-op —
     which is the whole reason there is no ``if self._log is not None`` at any
     of the call sites below. Three conditions produce it: the feature is off,
-    or the caller has no task identity (a direct brain call — the sleep cycle,
-    the REPL, a test — which is not a task attempt and has nothing to name a
-    file after).
+    the caller has no task id, or it has no user id. The last two are the same
+    case in practice — a direct brain call (the sleep cycle, the REPL, a test)
+    is not a task attempt and has nothing to name a file after.
 
-    Never raises. Resolving the directory is a pure function and constructing
-    the writer opens nothing; the first filesystem access is ``open()``, which
-    carries the never-raises contract itself.
+    Resolving the directory is a pure function and constructing the writer
+    opens nothing, so the first filesystem access is ``open()``, which carries
+    the never-raises contract itself. This function reads a config object and
+    coerces two request fields, and the caller wraps it rather than this
+    claiming to be infallible: the writer's contract covers what happens inside
+    it, never the construction of its arguments.
     """
     ident = SessionLogIdentity(
         task_id=int(getattr(req, "task_id", 0) or 0),
@@ -532,6 +545,20 @@ def _estimated_tokens(messages) -> int | None:
         return estimate_context_tokens(messages)[0]
     except Exception:  # noqa: BLE001
         return None
+
+
+def _carries_image(msg) -> bool:
+    """Whether *msg* holds an image block.
+
+    How the overflow path answers `image_pinned` without a second copy of
+    ``plan_image_pin``'s rule: the pin is one of the messages
+    ``_build_recovery_context`` added that were not in the transcript, and it is
+    the only one of them that carries an image.
+    """
+    try:
+        return any(isinstance(b, ImageContent) for b in getattr(msg, "content", ()) or ())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _details_dict(details) -> dict | None:
@@ -795,9 +822,19 @@ class NativeBrain:
         # `_build_result` funnels through. The spec asks for `result()` at each
         # of those four returns; one site downstream of all of them says the
         # same thing and keeps saying it when a fifth is added.
-        log = make_session_log(req, self._config.session_log)
+        #
+        # Constructed inside the `try`, because before this change *nothing* in
+        # this method ran outside it: a construction that raised would be the
+        # one path by which a logging feature crashed a worker, which is the
+        # single thing the writer's whole contract exists to prevent.
         stats = {"turns": 0, "compactions": 0}
         started = time.monotonic()
+        log = _disabled_session_log()
+        try:
+            log = make_session_log(req, self._config.session_log)
+        except Exception:  # noqa: BLE001
+            logger.warning("could not build the session log; running without one",
+                           exc_info=True)
 
         async def _run_and_close() -> BrainResult:
             try:
@@ -822,6 +859,17 @@ class NativeBrain:
                     stop_reason="error",
                     model_used=req.model or self._config.model,
                 )
+            except BaseException as e:
+                # `CancelledError`, `KeyboardInterrupt`, `SystemExit`. The
+                # clause above deliberately does not widen to these — the
+                # worker's behaviour on them is not this stage's to change — so
+                # no `BrainResult` exists and no `result` record is written.
+                # The `error` record is what stops the file being an
+                # unexplained truncation, and "an `error` record and no
+                # `result`" is exactly what the spec says a run that produced
+                # no result should look like.
+                log.error(e)
+                raise
             log.result(
                 success=result.success,
                 stop_reason=result.stop_reason,
@@ -971,7 +1019,7 @@ class NativeBrain:
         # path that did not go through `_execute_sync` would leave nothing to
         # write the terminal `result` record or to close the handle.
         if log is None:
-            log = SessionLogWriter(None, SessionLogIdentity(0, 0, ""), SessionLogPolicy())
+            log = _disabled_session_log()
         if stats is None:
             stats = {"turns": 0, "compactions": 0}
         abort = asyncio.Event()
@@ -1011,6 +1059,18 @@ class NativeBrain:
             # is already in the `message` record the injection becomes, and a
             # steered run is otherwise unexplainable: a user turn appears in the
             # middle of an agent loop with nothing saying where it came from.
+            #
+            # The peek and the pop are one synchronous pair with no `await`
+            # between them, and `_poll_steers` extends the same list from the
+            # same event-loop thread, so there is no interleaving point.
+            #
+            # The record means *drained*, not *delivered*: the loop drains at
+            # the end of a turn and injects at the top of the next, so an abort
+            # landing in that window (a `!stop`, or the deadline) leaves the
+            # steer in `pending` and the file holds a `steer` with no user
+            # message after it. That is the pre-existing lost-steer case made
+            # visible rather than a new one — the record is the only evidence
+            # anywhere that the steer was consumed.
             raw = steer_buffer[0] if steer_buffer else None
             drained = _drain_one_steer(steer_buffer)
             if drained and raw is not None:
@@ -1072,7 +1132,15 @@ class NativeBrain:
                 "context_window": (
                     self._config.context_window or get_model_info(model).context_window
                 ),
-                "prompt_caching": self._config.prompt_caching,
+                # The provider's resolved answer, not the config's tri-state:
+                # `make_provider` reads `None` as "on for api.anthropic.com",
+                # which is the default deployment, so recording the config
+                # field would write `null` for a run that cached. An injected
+                # provider (a test double) exposes none, and there the config
+                # value is the best available answer.
+                "prompt_caching": getattr(
+                    self._provider, "prompt_caching", self._config.prompt_caching
+                ),
                 "cwd": str(req.cwd),
                 "istota_version": _ISTOTA_VERSION,
             }
@@ -1139,23 +1207,54 @@ class NativeBrain:
                     )
             elif event.type == "message_end":
                 # The whole message path, in one branch. The loop emits
-                # `message_end` for every message it produces — the assembled
+                # `message_end` for every message it *appends* — the assembled
                 # prompt, each injected steer or follow-up, each assistant turn
                 # (including an aborted one) and each tool result, serial or
                 # parallel — so user, assistant and tool_result records land in
                 # the exact order the run produced them, with no reordering to
-                # undo and no second source to keep in sync. `run_agent_loop_
-                # continue` shares `_run_loop`, so the overflow-recovery pass
-                # is covered by the same branch; measured before this was
-                # written, which is why the `tool_execution_end` route the spec
-                # held in reserve is not used.
+                # undo and no second source to keep in sync.
+                # `run_agent_loop_continue` shares `_run_loop`, so the
+                # overflow-recovery pass is covered by the same branch;
+                # measured before this was written, which is why the
+                # `tool_execution_end` route the spec held in reserve is not
+                # used.
+                #
+                # "Appends" is the exact word, and the gap it leaves is
+                # deliberate. Compaction *replaces* `ctx.messages` wholesale —
+                # `prepare_next_turn`'s returned list on the proactive path,
+                # `_build_recovery_context`'s on the overflow one — and the
+                # loop emits nothing for a replacement. So the summary message,
+                # a pinned image and the recovery nudge reach the model without
+                # a `message` record of their own; the `compaction` record is
+                # what stands for all three, which is why it carries the
+                # summary text, `image_pinned` and the drop count rather than
+                # just a marker.
                 #
                 # Deliberately *not* also hooked to `turn_end`: that event
                 # carries the same AssistantMessage `message_end` has already
                 # emitted, so recording both would write every assistant turn
                 # twice.
+                #
+                # And deliberately *not* routed through `_emit_progress`'s
+                # `run_in_executor` hop, though every neighbouring branch is.
+                # That hop exists because the executor's callback calls
+                # `asyncio.run` internally, which a file append does not, and
+                # here ordering matters more than latency: the record sequence
+                # is the artifact. After the writer's caps the largest record
+                # is bounded at roughly `max_content_chars` plus overhead — a
+                # sub-millisecond write to page cache, flushed but never
+                # `fsync`ed, so a crashed daemon loses the buffered tail rather
+                # than the loop paying for durability per tool result.
                 if event.message is not None:
                     log.message(event.message)
+                    # Counted here rather than at `turn_end` so the `result`
+                    # record's `turns` always equals the number of assistant
+                    # `message` records in the same file. A hard cancel can
+                    # land between the two events, and two fields of one file
+                    # disagreeing about how many turns there were is a worse
+                    # artifact than a count that is one low.
+                    if isinstance(event.message, AssistantMessage):
+                        stats["turns"] += 1
             elif event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
                 entry = {"type": "tool", "text": desc}
@@ -1191,11 +1290,6 @@ class NativeBrain:
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
-                    # For the `result` record's turn count. Every assistant
-                    # turn, not only the ones that carried tokens — the two
-                    # counters below answer a different question (cost
-                    # provenance) and a free turn is still a turn.
-                    stats["turns"] += 1
                     last_assistant_stop["value"] = msg.stop_reason or ""
                     # Capture the provider's error text so _build_result can
                     # surface it; the scheduler only sees result_text, and an
@@ -1419,11 +1513,7 @@ class NativeBrain:
             context.system_prompt,
             [t.schema.name for t in (context.tools or [])],
             _tools_schema_sha(context.tools),
-            system_prompt_source=(
-                str(req.custom_system_prompt_path)
-                if req.custom_system_prompt_path is not None
-                else "builtin"
-            ),
+            system_prompt_source=self._system_prompt_source(req),
         )
         prompt_msg = UserMessage(
             content=_initial_user_content(
@@ -1536,18 +1626,31 @@ class NativeBrain:
                 # Written before the no-summary check below, deliberately: a
                 # recovery that produced nothing records `summary: null` and
                 # then the run fails, and this record is what explains the
-                # failure. `messages_dropped` is counted by identity against
-                # the transcript rather than recomputed from `find_cut_point`
-                # — the cut rule lives in `_build_recovery_context` and a
-                # second copy of it here would be free to disagree.
+                # failure.
+                #
+                # The two triggers write the *same* key set, so a reader never
+                # has to ask which one fired before it knows which fields
+                # exist. `cut_index` is the one this path cannot fill: the cut
+                # rule lives inside `_build_recovery_context`, which does not
+                # report it, and recomputing `find_cut_point` here would be a
+                # second copy free to disagree with the one that ran. Null
+                # rather than absent.
+                #
+                # Everything else is read back off the two lists by identity.
+                # `_build_recovery_context` splices the kept tail by reference,
+                # and `transcript` holds every dropped message alive, so no
+                # `id()` can have been recycled — and the set is taken before
+                # the continue mutates `recovery_ctx.messages`.
                 _kept = {id(m) for m in recovery_ctx.messages}
+                _added = [m for m in recovery_ctx.messages if id(m) not in {id(t) for t in transcript}]
                 log.compaction(
                     trigger="overflow",
                     recovery_index=recoveries,
                     summary=summary or None,
                     tokens_before=_estimated_tokens(transcript),
-                    messages_before=len(transcript),
+                    cut_index=None,
                     messages_dropped=sum(1 for m in transcript if id(m) not in _kept),
+                    image_pinned=any(_carries_image(m) for m in _added),
                     details=_details_dict(details),
                 )
                 # If compaction produced no summary (the summary request itself
@@ -1807,6 +1910,22 @@ class NativeBrain:
         return sanitize_tool_pairs(rendered)
 
     def _extract_system_prompt(self, req: BrainRequest) -> str:
+        """The composed system prompt. See :meth:`_system_prompt_parts`."""
+        return "\n\n".join(text for _, text in self._system_prompt_parts(req))
+
+    def _system_prompt_source(self, req: BrainRequest) -> str:
+        """What the composed prompt is made of, for the ``context`` record.
+
+        Derived from the same walk that builds the text rather than from
+        ``req.custom_system_prompt_path`` being set, because the two disagree in
+        both directions: a custom file is *appended* to the built-in block
+        rather than replacing it, and a configured path that does not exist
+        contributes nothing at all. Naming the file in either case would have
+        the record describe a prompt the run did not use.
+        """
+        return "+".join(name for name, _ in self._system_prompt_parts(req)) or "empty"
+
+    def _system_prompt_parts(self, req: BrainRequest) -> list[tuple[str, str]]:
         """Compose the native brain's system prompt.
 
         Tool-bearing tasks (non-empty ``allowed_tools``) get the coding-guidance
@@ -1817,17 +1936,22 @@ class NativeBrain:
         compaction-safe since the system prompt lives outside ``ctx.messages``).
         An operator's ``custom_system_prompt_path`` is appended after the base so
         it still applies.
+
+        Returns ``(name, text)`` pairs so the ``context`` record can say what the
+        prompt was made of without a second copy of these conditions deciding it
+        — a checker with its own copy of the rule is free to disagree with the
+        thing it describes.
         """
-        parts: list[str] = []
+        parts: list[tuple[str, str]] = []
         if req.allowed_tools:
             coding = CODING_SYSTEM_PROMPT
             if self._config.turn_budget_nudge and self._config.max_turns:
                 coding = f"{coding}\n\n- {_TURN_BUDGET_UPFRONT}"
-            parts.append(coding)
+            parts.append(("builtin", coding))
         path = req.custom_system_prompt_path
         if path is not None and Path(path).exists():
-            parts.append(Path(path).read_text())
-        return "\n\n".join(parts)
+            parts.append((str(path), Path(path).read_text()))
+        return parts
 
     @staticmethod
     def _build_result(
