@@ -3289,6 +3289,7 @@ class TestAvatarImport:
         from istota import avatars
         from istota import db as db_module
 
+        recorded_at = _now_iso()
         with db_module.get_db(db_path) as conn:
             avatars.put_user_avatar(
                 conn, "alice", source=avatars.SOURCE_NEXTCLOUD,
@@ -3298,7 +3299,7 @@ class TestAvatarImport:
             avatars.touch_import_probe(conn, "bob", remote_etag='"g"')
             avatars.write_import_state(
                 conn,
-                {"at": "2026-08-30T09:00:00Z", "users": 5, "imported": 1,
+                {"at": recorded_at, "users": 5, "imported": 1,
                  "no_custom": 1, "unchanged": 3, "failed": 0,
                  "header": avatars.HEADER_SEEN},
             )
@@ -3306,7 +3307,7 @@ class TestAvatarImport:
         r = self._run(self._config(make_config, db_path))
 
         assert r.status == OK
-        assert "2026-08-30T09:00:00Z" in r.detail
+        assert recorded_at in r.detail
         # Every counter the tick records is rendered. `unchanged` is the steady
         # state, so omitting it made a healthy deployment report numbers that
         # did not add up to the user count printed beside them.
@@ -3349,7 +3350,7 @@ class TestAvatarImport:
         with db_module.get_db(db_path) as conn:
             avatars.write_import_state(
                 conn,
-                {"at": "2026-08-30T09:00:00Z", "users": 1, "imported": 0,
+                {"at": _now_iso(), "users": 1, "imported": 0,
                  "no_custom": 0, "failed": 0, "header": avatars.HEADER_UNOBSERVED},
             )
 
@@ -3389,4 +3390,3 @@ class TestAvatarImport:
 
         assert not attempts, f"web.avatar_import reached the network: {attempts}"
         assert r.status in (OK, SKIP, WARN)
-

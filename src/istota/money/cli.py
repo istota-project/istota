@@ -971,6 +971,7 @@ def invoice():
 def invoice_generate(ctx, period, client, entity, dry_run):
     """Generate invoices for uninvoiced work entries."""
     from istota.money.core.invoicing import generate_invoices_for_period
+    from istota.money.db import set_invoice_schedule_generation
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -988,6 +989,20 @@ def invoice_generate(ctx, period, client, entity, dry_run):
             invoice_output_dir=invoice_output_dir,
             db_path=ctx.db_path,
         )
+        if not dry_run:
+            scheduled_clients = {
+                result["client_key"]
+                for result in results
+                if config.clients[result["client_key"]].schedule == "monthly"
+            }
+            if scheduled_clients:
+                db_conn = _require_db(ctx)
+                try:
+                    for client_key in scheduled_clients:
+                        set_invoice_schedule_generation(db_conn, client_key)
+                    db_conn.commit()
+                finally:
+                    db_conn.close()
     except Exception as e:
         _output({"status": "error", "error": str(e)})
         return
@@ -1007,6 +1022,8 @@ def invoice_generate(ctx, period, client, entity, dry_run):
     }
     if period:
         result["period"] = period
+    for invoice_result in results:
+        invoice_result.pop("client_key", None)
     _output(result)
 
 
@@ -1491,7 +1508,9 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     db_conn = _require_db(ctx)
 
     try:
-        due_clients = check_scheduled_invoices(config, db_conn)
+        due_clients = check_scheduled_invoices(
+            config, db_conn, data_dir=data_dir,
+        )
         if not due_clients:
             out = {
                 "status": "ok",
@@ -1517,8 +1536,6 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
             )
             if results and not dry_run:
                 set_invoice_schedule_generation(db_conn, client_key)
-            for r in results:
-                r["client_key"] = client_key
             all_results.extend(results)
 
         db_conn.commit()
