@@ -255,6 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Generating an invoice by hand for a client on a monthly schedule now records that the client was billed this month. The daily scheduler no longer creates another invoice from work left uninvoiced after the manual run; previews still leave the schedule unchanged.
+
 - An expired session while uploading or removing a profile picture or bot icon now returns you to sign-in instead of showing "Not authenticated" beside the image control. Upload refusals you can act on, such as an oversized file or an unsupported format, still show the server's explanation there.
 
 - A chat turn that switches to the backup brain now says so once, rather than once per retry. A failing turn is retried a few times under the same message, and each retry repeated the notice — so one thing you asked could come back with the banner stacked three deep, the first naming the real cause and the two behind it repeating that the primary was cooling down. The first one is kept, since it is the one that knows why.

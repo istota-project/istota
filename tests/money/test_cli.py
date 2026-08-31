@@ -381,6 +381,124 @@ class TestInvoiceCreate:
         assert "No line items" in output["error"]
 
 
+class TestInvoiceGenerateScheduleState:
+    @staticmethod
+    def _generate_previous_month(
+        runner, tmp_path, invoicing_ctx, *, dry_run=False,
+    ):
+        from datetime import date, timedelta
+        from istota.money.db import init_db
+
+        config = config_store.load_invoicing(invoicing_ctx.db_path)
+        config.clients["acme"].schedule = "monthly"
+        config.clients["acme"].schedule_day = 1
+        config_store.save_invoicing(invoicing_ctx.db_path, config)
+        init_db(invoicing_ctx.db_path)
+
+        this_month = date.today().replace(day=1)
+        previous_month = (this_month - timedelta(days=1)).replace(day=1)
+        for entry_date in (previous_month, this_month):
+            _invoke(runner, [
+                "work", "add", "-d", entry_date.isoformat(),
+                "-c", "acme", "-s", "dev", "-q", "8",
+            ], tmp_path=tmp_path, obj=invoicing_ctx)
+
+        args = [
+            "invoice", "generate", "--period", previous_month.strftime("%Y-%m"),
+        ]
+        if dry_run:
+            args.append("--dry-run")
+        return _invoke(runner, args, tmp_path=tmp_path, obj=invoicing_ctx)
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_manual_generation_prevents_a_scheduled_invoice_for_the_remainder(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        from istota.money.db import get_db, get_invoice_schedule_state
+
+        result = self._generate_previous_month(runner, tmp_path, invoicing_ctx)
+
+        assert result.exit_code == 0, result.output
+        assert "client_key" not in json.loads(result.output)["invoices"][0]
+        with get_db(invoicing_ctx.db_path) as conn:
+            state = get_invoice_schedule_state(conn, "acme")
+        assert state is not None
+        assert state.last_generation_at is not None
+
+        scheduled = _invoke(
+            runner, ["run-scheduled"], tmp_path=tmp_path, obj=invoicing_ctx,
+        )
+        assert scheduled.exit_code == 0, scheduled.output
+        assert json.loads(scheduled.output)["message"] == "No scheduled invoices due"
+
+        remaining = _invoke(
+            runner, ["work", "list", "--uninvoiced"],
+            tmp_path=tmp_path, obj=invoicing_ctx,
+        )
+        assert json.loads(remaining.output)["count"] == 1
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_invoice_history_guards_against_missing_schedule_state(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        from istota.money.db import get_db
+
+        result = self._generate_previous_month(runner, tmp_path, invoicing_ctx)
+        assert result.exit_code == 0, result.output
+        with get_db(invoicing_ctx.db_path) as conn:
+            conn.execute(
+                "DELETE FROM invoice_schedule_state WHERE client_key = ?", ("acme",),
+            )
+
+        scheduled = _invoke(
+            runner, ["run-scheduled"], tmp_path=tmp_path, obj=invoicing_ctx,
+        )
+
+        assert scheduled.exit_code == 0, scheduled.output
+        assert json.loads(scheduled.output)["message"] == "No scheduled invoices due"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_scheduled_result_keeps_the_client_key(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        from datetime import date
+        from istota.money.db import init_db
+
+        config = config_store.load_invoicing(invoicing_ctx.db_path)
+        config.clients["acme"].schedule = "monthly"
+        config.clients["acme"].schedule_day = 1
+        config_store.save_invoicing(invoicing_ctx.db_path, config)
+        init_db(invoicing_ctx.db_path)
+        _invoke(runner, [
+            "work", "add", "-d", date.today().isoformat(),
+            "-c", "acme", "-s", "dev", "-q", "8",
+        ], tmp_path=tmp_path, obj=invoicing_ctx)
+
+        result = _invoke(
+            runner, ["run-scheduled"], tmp_path=tmp_path, obj=invoicing_ctx,
+        )
+
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.output)
+        assert output["invoice_count"] == 1
+        assert output["invoices"][0]["client_key"] == "acme"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_dry_run_does_not_record_the_client_schedule(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        from istota.money.db import get_db, get_invoice_schedule_state
+
+        result = self._generate_previous_month(
+            runner, tmp_path, invoicing_ctx, dry_run=True,
+        )
+
+        assert result.exit_code == 0, result.output
+        with get_db(invoicing_ctx.db_path) as conn:
+            state = get_invoice_schedule_state(conn, "acme")
+        assert state is None
+
+
 class TestInvoicePaid:
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_ledger_posting_false_skips_post(self, mock_pdf, runner, tmp_path):

@@ -459,6 +459,7 @@ def generate_invoices_for_period(
 
             summary = {
                 "invoice_number": invoice.number,
+                "client_key": client_key,
                 "client": client_config.name,
                 "group": group_name,
                 "items": len(invoice.items),
@@ -511,12 +512,16 @@ def check_scheduled_invoices(
     config: InvoicingConfig,
     db_conn,
     today: date | None = None,
+    data_dir: Path | None = None,
 ) -> list[str]:
     """Return client keys that are due for scheduled invoice generation.
 
     Checks each client with ``schedule = "monthly"``.  A client is due when
     ``today >= schedule_day`` (clamped to the last day of the month) and no
-    generation has been recorded for the current month in the database.
+    generation has been recorded for the current month in the database. When
+    ``data_dir`` is available, an invoice issued this month is also sufficient;
+    that keeps the scheduler safe if recording the schedule state failed after
+    the invoice itself became durable.
     """
     import calendar
 
@@ -542,6 +547,20 @@ def check_scheduled_invoices(
         if state and state.last_generation_at:
             last_gen = date.fromisoformat(state.last_generation_at[:10])
             if last_gen.year == today.year and last_gen.month == today.month:
+                continue
+
+        if data_dir is not None:
+            from istota.money.work import load_work_entries
+
+            already_invoiced = any(
+                entry.client.lower() == client_key.lower()
+                and entry.invoice
+                and entry.invoice_date is not None
+                and entry.invoice_date.year == today.year
+                and entry.invoice_date.month == today.month
+                for entry in load_work_entries(data_dir)
+            )
+            if already_invoiced:
                 continue
 
         due.append(client_key)

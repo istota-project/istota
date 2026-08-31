@@ -362,8 +362,8 @@ def set_invoice_schedule_generation(conn: sqlite3.Connection, client_key: str) -
     conn.execute(
         """
         INSERT INTO invoice_schedule_state (client_key, last_generation_at)
-        VALUES (?, datetime('now'))
-        ON CONFLICT (client_key) DO UPDATE SET last_generation_at = datetime('now')
+        VALUES (?, datetime('now', 'localtime'))
+        ON CONFLICT (client_key) DO UPDATE SET last_generation_at = datetime('now', 'localtime')
         """,
         (client_key,),
     )
