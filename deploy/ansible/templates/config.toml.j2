@@ -108,6 +108,11 @@ bash_spill_full_output = {{ istota_brain_native_bash_spill_full_output | default
 turn_budget_nudge = {{ istota_brain_native_turn_budget_nudge | default(true, true) | lower }}
 turn_budget_nudge_early_percent = {{ istota_brain_native_turn_budget_nudge_early_percent | default(50, true) }}
 turn_budget_nudge_remaining = {{ istota_brain_native_turn_budget_nudge_remaining | default([15, 5], true) | to_json }}
+# Soft wall-clock deadline: stop the loop a little before scheduler.task_timeout_
+# minutes, on a stop that delivers the model's partial work. The hard clock
+# discards it; max_turns delivers it, and on a slow brain the clock arrives
+# first. The remaining slack still covers a turn that hangs. 0 or >= 100 disables.
+soft_deadline_percent = {{ istota_brain_native_soft_deadline_percent | default(90, true) }}
 {# prompt_caching: "" (default) → omit so the code derives it from base_url
    (on for Anthropic). Emit when the operator forced a value — accepts a YAML
    boolean or a "true"/"false" string (e.g. passed via -e on the CLI, which
