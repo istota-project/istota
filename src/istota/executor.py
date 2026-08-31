@@ -4366,11 +4366,12 @@ def build_prompt(
     ``None`` falls back to ``task.prompt``, which is what every caller outside
     ``execute_task`` passes.
 
-    ``attachment_status`` maps an attachment path to the one-phrase vision
-    status shown after it. "Attached" alone is not evidence of sight, so the
-    four states the model must be able to tell apart — supplied, available
-    after a mandatory ``Read``, omitted for a named reason, unreadable — are
-    rendered per line rather than left to be inferred.
+    ``attachment_status`` maps an attachment path to the one-phrase status
+    shown after it: ``VISION_PREPARED``, or the reason it was left out.
+    "Attached" alone is not evidence of sight, so a prepared image is marked as
+    distinct from an omitted one here — and no further, since *how* the pixels
+    arrive is not a fact assembly holds. See ``VISION_PREPARED`` for why, and
+    for which layer says the rest.
     """
     # Stage 3a (Resources sunset): resources are no longer a per-task prompt
     # surface. The enumerated Nextcloud Folders / TODO Files / Notes /
