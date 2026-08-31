@@ -131,6 +131,10 @@ RETRY_AFTER_MAX_SECONDS = 60.0
 # Slice length for the retry backoff, so `!stop` lands within a slice
 # instead of waiting out a (now potentially 60s) provider-requested delay.
 _RETRY_SLEEP_SLICE_SECONDS = 0.5
+# Floor for the image re-issue's remaining budget. The first attempt can have
+# consumed the whole timeout, and handing a subprocess a zero or negative one
+# turns "degrade to text" into an instant timeout.
+_MIN_REISSUE_SECONDS = 30.0
 
 
 # Frame `type` values the CLI itself emits, and keys only its own envelope
@@ -235,12 +239,14 @@ def build_withdrawn_image_prompt(req: BrainRequest, images, reason: str) -> str:
 
 
 # A 400 is the status the provider uses for every request-shaped complaint, so
-# it only counts here when the diagnostic actually names an image or a size.
-# 413 needs no such test: the request was too large and this request's images
-# are the largest thing in it.
-_IMAGE_REJECTION_RE = re.compile(
-    r"image|too large|exceeds|maximum size|size limit|payload", re.IGNORECASE
-)
+# it only counts here when the diagnostic actually names an image. Size words
+# alone are not enough and the size arm is 413's: `exceeds`, `too large` and
+# `maximum` are the vocabulary of a context-length or `max_tokens` complaint
+# too, and matching those buys a second paid full run plus a notice telling the
+# user their images were the problem when they were not. 413 needs no such test
+# — the request was too large and this request's images are the largest thing
+# in it.
+_IMAGE_REJECTION_RE = re.compile(r"image|media_?type|attachment", re.IGNORECASE)
 
 
 def is_image_payload_rejection(text: str, has_images: bool) -> bool:
@@ -1202,6 +1208,7 @@ class ClaudeCodeBrain:
         attempt = (
             _dc.replace(req, prompt=build_image_prompt(req)) if req.images else req
         )
+        started = time.monotonic()
         result = self._execute_attempt(attempt)
 
         if result.success or not is_image_payload_rejection(
@@ -1214,11 +1221,47 @@ class ClaudeCodeBrain:
             return result
 
         reason = _rejection_reason(result.result_text)
+
+        # The same veto `_is_retryable` applies, for the same reason and using
+        # the same flag: a run that reached the model may already have sent an
+        # email or pushed a commit, and re-invoking the identical prompt repeats
+        # those side effects. A 413 on the *first* API call — the case this
+        # branch is for — never reaches the model, so it arrives as an ordinary
+        # failure with the flag clear; a 413 later in a run, caused by the
+        # accumulated context the images are still in, arrives with it set and
+        # is a reroute, not a re-issue.
+        if result.work_committed:
+            logger.warning(
+                "claude_code: image payload rejected (%s) after the run had "
+                "already committed work; not re-issuing", reason,
+            )
+            return result
+
         logger.warning(
             "claude_code: provider rejected the image payload (%s); "
             "re-issuing once without %d image(s)",
             reason, len(req.images),
         )
+        # The first attempt may have written the result file before the
+        # provider refused it. Both read paths are guarded on `.exists()`
+        # alone, and the executor unlinks it only once, before the run — so
+        # without this the re-issue can deliver text the *images* produced,
+        # under a prompt saying they were withdrawn.
+        if req.result_file is not None:
+            try:
+                req.result_file.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("could not clear the result file before re-issue")
+
+        # `timeout_seconds` is a per-subprocess bound and `execute_task` runs on
+        # a worker-pool thread, so two full attempts under the same value would
+        # let one task hold a worker for twice its configured budget. The
+        # re-issue gets what is left, floored so it is never handed a
+        # non-positive timeout.
+        remaining = max(
+            _MIN_REISSUE_SECONDS, req.timeout_seconds - (time.monotonic() - started)
+        )
+
         # Once. If the re-issue is rejected too, the existing classification
         # decides retry or fallback on its own result, and the provider's
         # diagnostic reaches the user with it.
@@ -1227,6 +1270,7 @@ class ClaudeCodeBrain:
                 req,
                 images=[],
                 prompt=build_withdrawn_image_prompt(req, req.images, reason),
+                timeout_seconds=remaining,
             )
         )
 
@@ -1401,7 +1445,7 @@ class ClaudeCodeBrain:
         # A timeout is classified here rather than left to propagate. The old
         # comment said it reached "the caller's own timeout handling, which
         # builds the result itself" — there is no such caller on this path: it
-        # unwound past `_execute_simple` to `_execute`'s generic `except
+        # unwound past `_execute_simple` to `_execute_attempt`'s generic `except
         # Exception`, which logs `logger.exception` and returns
         # `stop_reason="error"`. So every non-streaming caller's timeout arrived
         # as an ERROR-level stack trace attributed to the brain, and lost the

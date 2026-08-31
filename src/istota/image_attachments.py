@@ -590,10 +590,22 @@ def _write_renditions(
         or frames > 1
         or orientation not in (0, 1)
     )
-    # Containment is a second, independent reason to write a file: an image the
-    # sandbox does not bind is unreadable at the path the model is told to
-    # open, whatever its size or format.
+    # Two further, independent reasons to write a file, neither about pixels.
+    #
+    # Containment: an image the sandbox does not bind is unreadable at the path
+    # the model is told to open, whatever its size or format.
+    #
+    # And the path's own text. It is interpolated verbatim into the Claude Code
+    # inspection directive and into the prompt's `Attached files` list, and it
+    # is sender-controlled — so a newline in it forges a block heading inside an
+    # imperative section telling the model what to do, which is the exact
+    # structure-forging `_display_name` and `_out_path` already refuse for the
+    # basename. Copying is the fix rather than escaping, because `_out_path`
+    # sanitizes the stem and the result is a path that is both safe to render
+    # *and* real to open; a rewritten spelling of an unsafe path would be
+    # neither.
     contained = _within_binds(source, bind_roots)
+    renderable = _path_is_renderable(source)
 
     if needs_transform:
         vision_path = _save(
@@ -608,8 +620,9 @@ def _write_renditions(
         )
         written.append(vision_path)
         vision_bytes = vision_path.stat().st_size
-    elif not contained:
-        # Only the *location* is wrong, so this is a byte copy rather than a
+    elif not contained or not renderable:
+        # Only the *location* or the spelling is wrong, so this is a byte copy
+        # rather than a
         # re-encode: putting an already quality-85 JPEG through the encoder a
         # second time adds generation loss to produce a file that has to hold
         # the same picture anyway, and OCR reads the result.
@@ -804,10 +817,32 @@ def _icc_still_applies(source_mode: str, target_mode: str) -> bool:
 
 
 def _copy_in(source: Path, out_path: Path) -> Path:
-    """Put an untouched image where the sandbox can reach it."""
+    """Put an untouched image where the sandbox can reach it.
+
+    Resolved on the way out, matching `_save`: every path written into
+    `attachments` or `ImageInput.path` is resolved, because `_bind` resolves its
+    source and uses the resolved path as the in-namespace destination. An
+    unresolved one names a file that does not exist inside the namespace on a
+    deployment where `temp_dir` sits behind a symlink.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, out_path)
-    return out_path
+    return out_path.resolve()
+
+
+def _path_is_renderable(source: Path) -> bool:
+    """Whether this path can be written into a prompt without forging structure.
+
+    The same control-character class `_display_name` strips from a basename,
+    applied to the whole path text — the directory is sender-controlled on the
+    inbound paths too, and the Claude Code directive interpolates the path, not
+    the display name.
+    """
+    try:
+        text = str(source.resolve())
+    except OSError:
+        return False
+    return not _UNSAFE_NAME_CHARS.search(text)
 
 
 def _within_binds(source: Path, bind_roots: list[Path] | None) -> bool:
@@ -1022,6 +1057,31 @@ def render_ocr_context(blocks: list[OcrBlock]) -> str:
         lines.append(_render_body(block))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def ocr_query_text(blocks: list[OcrBlock]) -> str:
+    """The OCR *content*, unframed, for a retrieval query.
+
+    Deliberately not `render_ocr_context`. That output is what the model reads,
+    so it carries the section header, the ~60-word untrusted-content preamble
+    and a `###` heading per image — and the two BM25 recall passes join every
+    whitespace token of their query with an implicit AND and pass no
+    `allow_or_fallback` (`memory/search.search`, whose docstring records that
+    the recall path leaves it False). Handing them the rendered section would
+    therefore add sixty-odd terms that appear in no stored chunk and return zero
+    rows for *every* task with an image — silently, since an AND miss is not an
+    error — which is the exact inverse of the reason OCR reaches retrieval at
+    all.
+
+    Only the blocks that actually carry text contribute. A `no text detected`
+    or an omission notice is information for the model, not a search term.
+    """
+    parts = [
+        block.text.strip()
+        for block in blocks
+        if block.kind in (KIND_TEXT, KIND_TRUNCATED) and block.text.strip()
+    ]
+    return "\n".join(parts)
 
 
 def _render_body(block: OcrBlock) -> str:

@@ -248,10 +248,20 @@ class TestEffectivePrompt:
 
         assert "buy more milk" in task.prompt
 
-    def test_all_five_consumers_receive_the_same_enriched_string(
+    def test_every_consumer_receives_the_same_content(
         self, tmp_path, ocr, monkeypatch
     ):
-        """Selection, assembly and the three retrieval passes, one string."""
+        """Selection, assembly and the three retrieval passes, one content set.
+
+        The spec asks for one string across all five. It is one string of
+        *content* — the typed request plus the OCR text — but the two BM25
+        passes get it unframed. `memory/search.search` joins every whitespace
+        token of its query with an implicit AND and the recall path passes no
+        `allow_or_fallback`, so handing it the rendered section's ~60-word
+        untrusted-content preamble would add sixty-odd terms present in no
+        stored chunk and return zero rows for every task with an image,
+        silently — the exact inverse of the reason OCR reaches retrieval.
+        """
         config = _make_config(tmp_path)
         config.memory_search.enabled = True
         config.memory_search.auto_recall = True
@@ -303,10 +313,49 @@ class TestEffectivePrompt:
             "select_skills", "recall_memories", "recall_playbooks",
             "knowledge_graph", "build_prompt",
         }, f"a consumer was never reached: {sorted(seen)}"
-        assert len(set(seen.values())) == 1, seen
-        only = next(iter(seen.values()))
-        assert "MARKER-REQUEST" in only
-        assert "INVOICE 4471" in only
+        # Every consumer sees the typed request and the OCR text.
+        for name, value in seen.items():
+            assert "MARKER-REQUEST" in value, name
+            assert "INVOICE 4471" in value, name
+        # Selection and assembly get the framed section; retrieval does not.
+        for name in ("select_skills", "build_prompt"):
+            assert image_attachments.OCR_SECTION_HEADER in seen[name], name
+        for name in ("recall_memories", "recall_playbooks", "knowledge_graph"):
+            assert image_attachments.OCR_SECTION_HEADER not in seen[name], name
+            assert "untrusted" not in seen[name].lower(), name
+
+    def test_the_retrieval_query_is_not_the_rendered_ocr_section(
+        self, tmp_path, ocr, monkeypatch
+    ):
+        """A no-text image must add nothing at all to the recall query.
+
+        `render_ocr_context` emits the preamble and a heading for a `no text
+        detected` block too, so the framing is what would otherwise turn every
+        image task's AND query into a guaranteed miss — including the ones with
+        no OCR content to contribute in the first place.
+        """
+        config = _make_config(tmp_path)
+        config.memory_search.enabled = True
+        config.memory_search.auto_recall = True
+        img = _png(tmp_path / "inbox" / "photo.png")
+        monkeypatch.setattr(
+            image_attachments, "ocr_image_out_of_process",
+            lambda path, timeout=60.0: {
+                "status": "ok", "text": "", "confidence": 0, "word_count": 0,
+            },
+        )
+        seen: dict[str, str] = {}
+        monkeypatch.setattr(
+            executor, "_recall_memories",
+            lambda c, n, t, prompt, **kw: seen.setdefault("q", prompt),
+        )
+        brain = _CaptureBrain()
+
+        with db.get_db(config.db_path) as conn:
+            task = _task(conn, prompt="what is this?", attachments=[str(img)])
+            _run(config, task, brain, conn)
+
+        assert seen["q"] == "what is this?"
 
 
 # --------------------------------------------------------------------------
@@ -324,15 +373,31 @@ class TestAttachmentStatus:
             _run(config, task, brain, conn)
         return _prompt_of(brain)
 
-    def test_a_claude_code_task_says_vision_needs_a_read(self, tmp_path, ocr):
+    def test_a_prepared_image_is_marked_as_prepared(self, tmp_path, ocr):
         img = _png(tmp_path / "inbox" / "shot.png")
         prompt = self._prompt(tmp_path, ocr, [str(img)])
-        assert "vision requires Claude Code Read" in prompt
+        assert executor.VISION_PREPARED in prompt
 
-    def test_a_native_task_says_vision_is_supplied(self, tmp_path, ocr):
+    def test_the_line_never_asserts_the_model_saw_the_image(self, tmp_path, ocr):
+        """Delivery is stated by whoever delivers, not by prompt assembly.
+
+        Assembly runs several hundred lines before the brain is built, so the
+        only thing available is the *configured* kind — and a native model
+        with no vision support, a breaker skip-primary and an in-attempt
+        reroute each make that wrong in the one direction that matters. The
+        `Read` directive and the native brain's per-image blocks or omissions
+        say how the pixels arrive, from the layer that knows.
+        """
         img = _png(tmp_path / "inbox" / "shot.png")
-        prompt = self._prompt(tmp_path, ocr, [str(img)], brain_kind="native")
-        assert "vision supplied" in prompt
+        for kind in ("claude_code", "native", "tmux_claude"):
+            prompt = self._prompt(tmp_path, ocr, [str(img)], brain_kind=kind)
+            line = [
+                ln for ln in prompt.splitlines()
+                if ln.startswith("  - ") and "shot.png" in ln
+            ]
+            assert line, prompt
+            assert "supplied" not in line[0]
+            assert "Read" not in line[0]
 
     def test_an_omitted_image_carries_its_reason_on_its_own_line(
         self, tmp_path, ocr, monkeypatch
@@ -627,7 +692,46 @@ class TestReadAudit:
 # --------------------------------------------------------------------------
 
 
-class TestFallbackVisionNote:
+class TestVisionDroppedNote:
+    def test_a_primary_native_model_with_no_vision_says_so_too(
+        self, tmp_path, ocr, monkeypatch
+    ):
+        """No reroute needed. The fact that matters is that nothing was seen.
+
+        The brain tells the *model* it is missing the images; only the user
+        reads the result, and a primary on a non-vision model otherwise answers
+        with nothing anywhere saying it was written blind.
+        """
+        from istota.llm.catalog import ModelInfo
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="native")
+        monkeypatch.setattr(
+            "istota.llm.catalog.get_model_info",
+            lambda mid: ModelInfo(
+                id=mid, context_window=200_000, max_output_tokens=8192,
+                supports_vision=False,
+            ),
+        )
+        img = _png(tmp_path / "inbox" / "shot.png")
+        brain = _CaptureBrain(
+            BrainResult(
+                success=True, result_text="the answer", stop_reason="completed",
+                model_used="blind-model",
+            ),
+            kind="native",
+        )
+        brain.model_namespace = "openai_compat"
+
+        with db.get_db(config.db_path) as conn:
+            task = _task(conn, attachments=[str(img)])
+            ok, result, _a, _t = _run(config, task, brain, conn)
+
+        assert ok
+        assert "shot.png" in result
+        assert "rerouted" not in result.lower()
+        assert "ran on" in result.lower()
+
     def _run_fallback(self, tmp_path, ocr, monkeypatch, *, supports_vision):
         from istota.brain._fallback import reset_availability_breaker
         from istota.llm.catalog import ModelInfo
@@ -684,6 +788,7 @@ class TestFallbackVisionNote:
         assert ok
         assert "shot.png" in result
         assert "without" in result.lower()
+        assert "rerouted" in result.lower()
 
     def test_a_fallback_that_keeps_vision_adds_no_note(
         self, tmp_path, ocr, monkeypatch

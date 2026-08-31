@@ -66,6 +66,7 @@ from .events import EventWriter, random_progress_message
 from .image_attachments import (
     KIND_OMITTED,
     ImagePreparation,
+    ocr_query_text,
     prepare_image_attachments,
     render_ocr_context,
 )
@@ -853,16 +854,24 @@ def unread_images(images, trace_json: "str | None") -> list[str]:
 
     Matched on `READ_DESCRIPTION_PREFIX`, which only `Read` produces — a Bash
     call carries its own emoji, so the model cannot forge this label by naming a
-    command. The trace records the basename rather than the path, which is the
-    coarser key: a rewritten rendition carries the attachment index in its name
-    and so is unique, while an image that needed no rewrite keeps the sender's
-    own basename and could in principle collide with another. The cost of that
-    is a `Read` credited to the wrong one of two identically-named images, which
-    under-reports rather than fabricates — the direction to be wrong in, since
-    the note is an accusation about what the model did not do.
+    command.
 
-    An unparseable or absent trace yields no names: silence is not evidence
-    that an image went unopened.
+    **What it detects is a `Read` that was never attempted, and nothing more.**
+    Two limits, both in the same direction, so a name returned here is reliable
+    and an empty result is not proof of sight:
+
+    * the trace entry is written from a `ToolUseEvent`, which is emitted from
+      the assistant message's `tool_use` block — at call time, before any tool
+      result. A `Read` that *failed* (a size ceiling, a path outside the
+      namespace) is recorded exactly like one that succeeded. The spec settles
+      that case elsewhere: the tool result reaches the same model and the
+      directive requires it to report the failure rather than guess around it.
+    * the trace records the basename rather than the path, so a `Read` of any
+      unrelated file sharing a basename with a prepared image — a `screenshot.png`
+      in a repository the task is working in, say — satisfies the check.
+
+    An unparseable or absent trace yields no names for the same reason: silence
+    is not evidence that an image went unopened.
     """
     if not images or not trace_json:
         return []
@@ -904,18 +913,26 @@ def _append_unread_images_note(result_text: str, names: list[str]) -> str:
     return f"{result_text}\n\n{note}"
 
 
-def _append_vision_dropped_note(result_text: str, names: list[str], model: str) -> str:
-    """Say that the answer came from a brain that could not see the images.
+def _append_vision_dropped_note(
+    result_text: str, names: list[str], model: str, *, rerouted: bool = False
+) -> str:
+    """Say that the answer came from a model that could not see the images.
 
-    A prompt-side notice tells the *model*; only the user reads the result. A
-    fallback onto a model with no vision support otherwise produces an answer
-    with nothing anywhere saying it was written without the picture.
+    A prompt-side notice tells the *model*; only the user reads the result.
+    Without this, an answer written blind arrives with nothing anywhere saying
+    so — which is the same confident-about-an-unseen-image failure the change
+    exists to remove, delivered to the person rather than by the model.
+
+    `rerouted` only changes the wording. A fallback is worth naming because the
+    user did not choose the model that answered; a primary is the configured
+    one and saying "rerouted" there would be false.
     """
     listed = ", ".join(f"`{n}`" for n in names)
-    model_str = model or "the fallback model"
+    model_str = model or "the model that answered"
+    how = "*rerouted to*" if rerouted else "*ran on*"
     return (
         f"{result_text}\n\n⚠️ *Answered without seeing* {listed} — "
-        f"*rerouted to* `{model_str}`*, which declares no vision support.*"
+        f"{how} `{model_str}`*, which declares no vision support.*"
     )
 
 
@@ -4248,39 +4265,42 @@ def build_rules_section(
     return f"## Important rules\n\n{body}"
 
 
-# The four model-facing states an image attachment can be in. "Attached" alone
-# is not evidence of sight, and a confident answer about an unseen image is the
-# whole failure this change exists to prevent, so the line after each path says
-# which one it is.
-VISION_SUPPLIED = "vision supplied"
-VISION_VIA_READ = "vision requires Claude Code Read"
-VISION_NO_TOOLS = "vision unavailable: this task runs without tools"
+# What the executor can truthfully say about a prepared image, and no more.
+# "Attached" alone is not evidence of sight, so a prepared image is marked as
+# distinct from an omitted one — but the line stops short of asserting *how*
+# the pixels arrive, or that they arrived at all.
+#
+# The spec asks this line for `vision supplied` / `vision requires Claude Code
+# Read`, and neither is a fact this layer holds. Prompt assembly runs several
+# hundred lines before the brain is constructed, so the only thing available
+# here is the *configured* kind — and three ordinary states make it wrong:
+# a native model that declares no vision support (the brain sends a named
+# omission instead of the image), an availability-breaker skip-primary that
+# routes to the fallback before the primary is ever called, and an in-attempt
+# reroute, both of which run a brain the prompt did not name. Each of those
+# turns the line into a claim of sight for an image the model cannot see, which
+# is precisely the failure the whole change exists to remove.
+#
+# The layer that *can* be right says it instead, in the same prompt: the CLI
+# brains prepend the `Read` directive naming every path, and the native brain
+# emits one image block per image or one named omission per image. So this line
+# distinguishes prepared from omitted, and delivery is stated by whoever
+# delivers.
+VISION_PREPARED = "prepared for vision"
 
 
-def image_attachment_status(
-    prep: ImagePreparation, brain_kind: str, has_tools: bool = True
-) -> "dict[str, str]":
-    """Map each recognized image attachment to its one-phrase vision status.
-
-    Only the *kind* of brain is needed, not a constructed one: the CLI brains
-    deliver through a mandatory `Read`, the native brain through content blocks
-    — and where a native model turns out to declare no vision support, the
-    brain itself appends a per-image omission to the message it sends, which is
-    the layer that knows.
+def image_attachment_status(prep: ImagePreparation) -> "dict[str, str]":
+    """Map each recognized image attachment to its one-phrase status.
 
     An omitted image carries its own reason, which `prepare_image_attachments`
-    already wrote as a model-facing notice.
+    already wrote as a bounded model-facing notice.
     """
     status: dict[str, str] = {}
     for block in prep.ocr_blocks:
         if block.kind == KIND_OMITTED and block.path:
             status[block.path] = f"not sent to the model: {block.detail}"
-    if brain_kind in ("claude_code", "tmux_claude"):
-        supplied = VISION_VIA_READ if has_tools else VISION_NO_TOOLS
-    else:
-        supplied = VISION_SUPPLIED
     for image in prep.images:
-        status[str(image.path)] = supplied
+        status[str(image.path)] = VISION_PREPARED
     return status
 
 
@@ -4864,7 +4884,16 @@ def execute_task(
         user_temp_dir,
         task.id,
         cancel_check=_cancel_check,
-        bind_roots=image_bind_roots(config, task, user_temp_dir),
+        # Only where there is a namespace to be outside of. Without effective
+        # sandboxing the model reads with the daemon's own filesystem view, so
+        # every path is already openable and a copy would buy nothing while
+        # replacing the user's own file path with a temp one in the prompt —
+        # on the standalone single-user shape, for every image.
+        bind_roots=(
+            image_bind_roots(config, task, user_temp_dir)
+            if effective_sandboxing(config)
+            else None
+        ),
     )
     if image_prep.attachments is not task.attachments:
         # In memory only. Nothing writes this back, so a retry regenerates the
@@ -4891,6 +4920,20 @@ def execute_task(
             if effective_prompt.strip()
             else _ocr_context
         )
+
+    # The same content, unframed, for the three retrieval passes. They get the
+    # OCR *text* rather than the rendered section, and the difference is not
+    # cosmetic: the two BM25 passes join every whitespace token of their query
+    # with an implicit AND and pass no `allow_or_fallback`, so the rendered
+    # section's ~60-word untrusted-content preamble and its per-image headings
+    # would add sixty-odd terms present in no stored chunk and return zero rows
+    # for every task carrying an image — silently, because an AND miss is not an
+    # error. That is the inverse of the reason OCR reaches retrieval. Framing is
+    # for the model, which must see it; a search index has no use for it.
+    _ocr_query = ocr_query_text(image_prep.ocr_blocks)
+    retrieval_query = (
+        f"{task.prompt}\n\n{_ocr_query}".strip() if _ocr_query else task.prompt
+    )
 
     # Select and load relevant skills
     from .skills._loader import (
@@ -4941,6 +4984,13 @@ def execute_task(
         except Exception:
             logger.debug("Failed to get sticky skills for task %d", task.id, exc_info=True)
 
+    # `prompt` no longer drives selection — `skills/_loader.select_skills` says
+    # so in its own docstring, and the eager selectors are the attachment list
+    # and the source type. It is passed the enriched string anyway so the two
+    # cannot fall out of step, and the inertness is worth naming here rather
+    # than being rediscovered: it is also what stops attacker-painted OCR text
+    # steering which skills load, so re-introducing keyword selection would be
+    # a security change and not a feature.
     selected_skills = select_skills(
         prompt=effective_prompt,
         source_type=task.source_type,
@@ -5194,7 +5244,7 @@ def execute_task(
     # Auto-recall memories via BM25 search. Exclude task IDs already included
     # as conversation history so the same chunk doesn't appear twice.
     recalled_memories = _recall_memories(
-        config, conn, task, effective_prompt,
+        config, conn, task, retrieval_query,
         skip_memory=_skip_memory,
         exclude_task_ids=context_task_ids or None,
     )
@@ -5202,7 +5252,7 @@ def execute_task(
     # Recall learned playbooks (Part B). Independent of _recall_memories;
     # gated on config.playbooks.enabled inside the helper.
     playbooks_text = _recall_playbooks(
-        config, conn, task, effective_prompt, skip_memory=_skip_memory,
+        config, conn, task, retrieval_query, skip_memory=_skip_memory,
     )
 
     # Load knowledge graph facts (filtered by relevance to prompt)
@@ -5219,7 +5269,7 @@ def execute_task(
                 kg_facts = get_current_facts(conn, task.user_id)
                 if kg_facts:
                     kg_facts = select_relevant_facts(
-                        kg_facts, effective_prompt, task.user_id, max_facts=max_kf,
+                        kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
                     )
                     if kg_facts:
                         knowledge_facts_text = format_facts_for_prompt(kg_facts)
@@ -5229,7 +5279,7 @@ def execute_task(
                     kg_facts = get_current_facts(_kg_conn, task.user_id)
                     if kg_facts:
                         kg_facts = select_relevant_facts(
-                            kg_facts, effective_prompt, task.user_id, max_facts=max_kf,
+                            kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
                         )
                         if kg_facts:
                             knowledge_facts_text = format_facts_for_prompt(kg_facts)
@@ -5269,8 +5319,6 @@ def execute_task(
     if task.confirmed_at and task.confirmation_prompt:
         _confirmation_context = task.confirmation_prompt
 
-    from .brain import resolve_brain_kind as _resolve_brain_kind
-
     prompt = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
         discovered_calendars, user_email_addresses, dated_memories, channel_memory,
@@ -5286,14 +5334,7 @@ def execute_task(
         knowledge_facts=knowledge_facts_text,
         conn=conn,
         effective_prompt=effective_prompt,
-        attachment_status=image_attachment_status(
-            image_prep,
-            # The kind, resolved the same way the brain is resolved below.
-            # Cheap and pure — `resolve_brain_kind` reads config — and needed
-            # here because prompt assembly runs several hundred lines before
-            # the brain is constructed.
-            _resolve_brain_kind(task.source_type, config.brain).kind,
-        ),
+        attachment_status=image_attachment_status(image_prep),
     )
 
     # Log prompt size breakdown
@@ -6380,14 +6421,18 @@ def execute_task(
         if success and req.images:
             _ran_kind = _fallback_kind if _ran_fallback else _primary_kind
             _can_see = brain_delivers_vision(_ran_kind, actual_model)
-            if _ran_fallback and _can_see is False:
-                # A reroute onto a model with no vision support. The brain
-                # already told the *model* it was missing the images; this is
-                # the half the user reads.
+            if _can_see is False:
+                # A model that declares no vision support. Not gated on a
+                # fallback having run: the fact that matters is that the answer
+                # was written without the picture, and a *primary* native brain
+                # on a non-vision model produces exactly that with nothing
+                # telling the user so. The brain already told the model it was
+                # missing the images; this is the half the user reads.
                 result = _append_vision_dropped_note(
                     result,
                     [i.display_name or Path(i.path).name for i in req.images],
                     actual_model,
+                    rerouted=_ran_fallback,
                 )
             elif _ran_kind in ("claude_code", "tmux_claude"):
                 # The directive required one `Read` per image. Check the trace

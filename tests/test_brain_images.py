@@ -50,19 +50,39 @@ def _req(tmp_path, *, images=(), allowed_tools=("Read", "Bash"), prompt="What is
 
 
 class _Run:
-    """A `subprocess.run` stub recording the stdin text of every invocation."""
+    """A `subprocess.run` stub recording the stdin text of every invocation.
 
-    def __init__(self, *outputs: str):
+    `codes` matters more than it looks. `claude -p` reports a provider error two
+    ways, and the brain reads them differently: rc 0 with the banner as the
+    answer means the CLI ran a session to completion — so tools may have fired
+    and `work_committed` is set — while a non-zero exit is the request being
+    refused with nothing having run. A payload rejected before the model saw it
+    is the second shape, and using the first would be testing the branch that
+    must *decline* to re-issue.
+    """
+
+    def __init__(self, *outputs: str, codes: "tuple[int, ...] | None" = None):
         self.outputs = list(outputs)
+        self.codes = list(codes) if codes is not None else None
         self.prompts: list[str] = []
 
     def __call__(self, cmd, **kwargs):
         self.prompts.append(kwargs.get("input") or "")
-        out = self.outputs[min(len(self.prompts) - 1, len(self.outputs) - 1)]
+        i = min(len(self.prompts) - 1, len(self.outputs) - 1)
+        out = self.outputs[i]
+        if self.codes is not None:
+            code = self.codes[min(len(self.prompts) - 1, len(self.codes) - 1)]
+        else:
+            code = 0
         return typing.cast(
             typing.Any,
-            type("R", (), {"stdout": out, "stderr": "", "returncode": 0})(),
+            type("R", (), {"stdout": out, "stderr": "", "returncode": code})(),
         )
+
+
+def _refused(*outputs: str) -> _Run:
+    """A run whose first attempt is a refusal the model never saw."""
+    return _Run(*outputs, codes=(1, 0))
 
 
 def _execute(req, runner):
@@ -249,6 +269,25 @@ class TestRejectionPredicate:
     def test_a_400_naming_nothing_image_related_is_not(self):
         assert not is_image_payload_rejection(_UNRELATED_400, has_images=True)
 
+    def test_a_context_length_400_is_not_an_image_rejection(self):
+        """The size vocabulary belongs to 413, not to every 400.
+
+        `exceeds` / `too large` / `maximum` are how a provider phrases a
+        context-length or `max_tokens` complaint too, and matching those buys a
+        second paid run plus a notice telling the user their images were the
+        problem when they were not.
+        """
+        for message in (
+            "input length exceeds the maximum context window for this model",
+            "prompt is too large: 210000 tokens, maximum 200000",
+            "max_tokens exceeds the model's limit",
+        ):
+            text = (
+                'API Error: 400 {"type":"error","error":'
+                f'{{"type":"invalid_request_error","message":"{message}"}}}}'
+            )
+            assert not is_image_payload_rejection(text, has_images=True), message
+
     def test_ordinary_text_is_not(self):
         assert not is_image_payload_rejection("here is your answer", has_images=True)
 
@@ -256,7 +295,7 @@ class TestRejectionPredicate:
 class TestReissueWithoutImages:
     def test_a_413_reissues_exactly_once_without_the_images(self, tmp_path):
         img = _image(tmp_path, "big.png")
-        runner = _Run(_TOO_LARGE_413, "answered from text")
+        runner = _refused(_TOO_LARGE_413, "answered from text")
 
         result = _execute(_req(tmp_path, images=[img]), runner)
 
@@ -268,7 +307,7 @@ class TestReissueWithoutImages:
 
     def test_the_reissue_names_every_withdrawn_image_and_the_reason(self, tmp_path):
         images = [_image(tmp_path, "one.png"), _image(tmp_path, "two.png")]
-        runner = _Run(_TOO_LARGE_413, "ok")
+        runner = _refused(_TOO_LARGE_413, "ok")
 
         _execute(_req(tmp_path, images=images), runner)
 
@@ -279,7 +318,7 @@ class TestReissueWithoutImages:
         assert "413" in second
 
     def test_the_reissue_keeps_the_users_typed_request(self, tmp_path):
-        runner = _Run(_TOO_LARGE_413, "ok")
+        runner = _refused(_TOO_LARGE_413, "ok")
 
         _execute(
             _req(tmp_path, images=[_image(tmp_path)], prompt="MARKER-REQUEST"), runner
@@ -290,7 +329,7 @@ class TestReissueWithoutImages:
     def test_a_rejection_on_the_reissue_falls_through_to_classification(
         self, tmp_path
     ):
-        runner = _Run(_TOO_LARGE_413, _TOO_LARGE_413)
+        runner = _Run(_TOO_LARGE_413, _TOO_LARGE_413, codes=(1, 1))
 
         result = _execute(_req(tmp_path, images=[_image(tmp_path)]), runner)
 
@@ -301,7 +340,7 @@ class TestReissueWithoutImages:
         assert "413" in result.result_text
 
     def test_an_unrelated_400_is_not_reissued(self, tmp_path):
-        runner = _Run(_UNRELATED_400, "should never run")
+        runner = _Run(_UNRELATED_400, "should never run", codes=(1, 0))
 
         result = _execute(_req(tmp_path, images=[_image(tmp_path)]), runner)
 
@@ -309,11 +348,77 @@ class TestReissueWithoutImages:
         assert not result.success
 
     def test_a_413_on_a_request_with_no_images_is_not_reissued(self, tmp_path):
-        runner = _Run(_TOO_LARGE_413, "should never run")
+        runner = _Run(_TOO_LARGE_413, "should never run", codes=(1, 0))
 
         _execute(_req(tmp_path, images=[]), runner)
 
         assert len(runner.prompts) == 1
+
+    def test_a_committed_run_is_rerouted_rather_than_re_issued(self, tmp_path):
+        """`work_committed` vetoes this the way it vetoes the API retry ladder.
+
+        `claude -p` reports a provider error on a *completed* session as rc 0
+        with the banner as the answer, and a completed session may already have
+        sent an email or pushed a commit — re-invoking the identical prompt
+        repeats those side effects. A 413 arriving that way is also unlikely to
+        be about the images at all: the first request carried them, so a later
+        one is the accumulated context growing.
+        """
+        runner = _Run(_TOO_LARGE_413, "should never run", codes=(0, 0))
+
+        result = _execute(_req(tmp_path, images=[_image(tmp_path)]), runner)
+
+        assert len(runner.prompts) == 1
+        assert not result.success
+        assert result.work_committed
+
+    def test_the_reissue_starts_from_a_cleared_result_file(self, tmp_path):
+        """Attempt 1 may have written it before the provider refused it.
+
+        Both read paths are guarded on `.exists()` alone and the executor
+        unlinks it once, before the run — so a stale file lets the re-issue
+        deliver text the *images* produced, under a prompt saying they were
+        withdrawn.
+        """
+        result_file = tmp_path / "result.txt"
+        result_file.write_text("written while the images were still attached")
+        req = _req(tmp_path, images=[_image(tmp_path)])
+        req.result_file = result_file
+        seen: list[bool] = []
+
+        def runner(cmd, **kwargs):
+            seen.append(result_file.exists())
+            code = 1 if len(seen) == 1 else 0
+            out = _TOO_LARGE_413 if len(seen) == 1 else "fresh answer"
+            return typing.cast(
+                typing.Any,
+                type("R", (), {"stdout": out, "stderr": "", "returncode": code})(),
+            )
+
+        _execute(req, runner)
+
+        assert seen == [True, False]
+
+    def test_the_reissue_does_not_get_a_second_full_timeout(self, tmp_path):
+        """Two full attempts would hold a worker for twice its budget."""
+        req = _req(tmp_path, images=[_image(tmp_path)])
+        req.timeout_seconds = 600
+        seen: list[float] = []
+
+        def runner(cmd, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            code = 1 if len(seen) == 1 else 0
+            out = _TOO_LARGE_413 if len(seen) == 1 else "ok"
+            return typing.cast(
+                typing.Any,
+                type("R", (), {"stdout": out, "stderr": "", "returncode": code})(),
+            )
+
+        _execute(req, runner)
+
+        assert len(seen) == 2
+        assert seen[0] == 600
+        assert 0 < seen[1] <= 600
 
     def test_an_answer_that_quotes_a_provider_error_is_not_a_rejection(
         self, tmp_path
