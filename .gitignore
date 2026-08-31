@@ -64,6 +64,7 @@ site/
 .testmondata
 .testmondata-shm
 .testmondata-wal
+.testmondata.aborted
 .coverage
 htmlcov/
 .mypy_cache/

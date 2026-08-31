@@ -13,6 +13,18 @@ from .support.env_isolation import (
     SUITE_ENV_DEFAULTS,
     scrubbed_env_names,
 )
+from .support import testmon_compat
+
+# At import, and this file is the right place for it in both directions.
+# Early enough: testmon reaches the patched method from `pytest_configure`
+# (`determine_stable`, on every filename already in `.testmondata`) as well as
+# from `pytest_runtest_logreport`, and an initial conftest is loaded before
+# either — verified by putting the dotless name in the data file and taking
+# this line out, which fails in `_do_configure`. Late enough is not a question:
+# what it raises there is an INTERNALERROR, not a test failure, so the session
+# dies with every test already passed. A no-op when testmon is not installed.
+# See `tests/support/testmon_compat.py`.
+testmon_compat.install()
 
 
 def _load_dotenv():
