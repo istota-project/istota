@@ -22,6 +22,7 @@ predicate above ornamental the moment it started mattering.
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import os
 import re
@@ -830,6 +831,34 @@ class TestAdminBotIconWrites:
         me = (await admin.get("/istota/api/me")).json()
         assert me["avatars"]["bot"] == digest
 
+    async def test_uploads_switched_off_refuses_here_too(self, admin, config, db_path):
+        # `max_avatar_kb = 0` is about a *web* upload body, and the admin PUT is
+        # one — so it takes the same 503 the user's own upload does. The CLI is
+        # the other door and deliberately keeps working; `docs/reference/cli.md`
+        # and the configuration reference both say so.
+        config.web.max_avatar_kb = 0
+        resp = await _put_bot_icon(admin)
+        assert resp.status_code == 503
+        assert resp.json()["error"]
+        assert _stored_bot_icon(db_path) is None
+
+    async def test_a_stored_icon_is_still_served_with_uploads_off(
+        self, admin, bob, config, db_path,
+    ):
+        # Turning uploads off is not a request to make every face disappear.
+        _, digest = self._seed(db_path)
+        config.web.max_avatar_kb = 0
+        resp = await bob.get(f"/istota/api/avatars/bot?v={digest}")
+        assert resp.status_code == 200
+
+    def _seed(self, db_path):
+        image, digest = avatars.normalize(
+            _png(), declared_format=None, max_bytes=10 * 1024 * 1024,
+        )
+        with db.get_db(db_path) as conn:
+            avatars.put_bot_avatar(conn, image=image, content_hash=digest)
+        return image, digest
+
 
 class TestAdminBotIconClear:
     async def test_an_admin_clears_it(self, admin, db_path):
@@ -898,7 +927,6 @@ class TestTheLoginPageMark:
         assert "data:image/webp;base64," not in html
 
     async def test_the_icon_is_inlined_when_one_is_set(self, client, db_path):
-        import base64
         image, _ = _seed_bot_icon(db_path)
         html = (await client.get("/istota/login")).text
         assert "/istota/octopus-sigil.webp" not in html
@@ -938,8 +966,44 @@ class TestTheLoginPageMark:
         image, _ = _seed_bot_icon(db_path, color=(2, 4, 8))
         second = (await client.get("/istota/login")).text
         assert first != second
-        import base64
         assert base64.b64encode(image).decode("ascii") in second
+
+    async def test_clearing_the_icon_reverts_the_login_page_while_the_memo_is_warm(
+        self, client, db_path,
+    ):
+        # The ordering inside `_login_page_mark` is what makes this true: the
+        # hash is queried *before* the memo is read, so a cleared icon takes the
+        # early return above it. Reading the memo first — the obvious way to
+        # save the connection this route now opens — serves a deleted icon on
+        # the login page forever, and every other test in this class stays
+        # green. This is the one that goes red.
+        _seed_bot_icon(db_path)
+        assert "data:image/webp;base64," in (await client.get("/istota/login")).text
+        with db.get_db(db_path) as conn:
+            assert avatars.delete_bot_avatar(conn) is True
+        html = (await client.get("/istota/login")).text
+        assert "data:image/webp;base64," not in html
+        assert "/istota/octopus-sigil.webp" in html
+
+    async def test_a_quote_in_the_stored_mime_cannot_break_the_attribute(
+        self, client, db_path,
+    ):
+        # Unreachable through `put_bot_avatar`, which binds the literal
+        # `NORMALIZED_MIME` — but `get_bot_avatar` reads the column back, this
+        # lands in an `src="…"` on the one page an anonymous browser sees, and
+        # the app ships no CSP. Written against the column directly, which is
+        # the only way a second writer could ever arrive.
+        image, digest = _seed_bot_icon(db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE bot_avatar SET mime = ? WHERE id = 1",
+                ['image/webp" onerror="alert(1)'],
+            )
+        html = (await client.get("/istota/login")).text
+        assert 'onerror="alert(1)"' not in html
+        assert "&quot;" in html
+        # Still the icon, still inline — escaped rather than dropped.
+        assert base64.b64encode(image).decode("ascii") in html
 
     async def test_a_read_failure_falls_back_to_the_sigil(self, client, db_path):
         # Nothing on the login path may raise on account of decoration.
@@ -950,7 +1014,6 @@ class TestTheLoginPageMark:
         assert "/istota/octopus-sigil.webp" in resp.text
 
     async def test_the_error_card_carries_the_same_mark(self, client, db_path):
-        import base64
         import istota.web_app as mod
         image, _ = _seed_bot_icon(db_path)
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(

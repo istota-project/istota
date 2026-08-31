@@ -242,7 +242,9 @@ The headless counterpart to the Bot icon card at the foot of `/admin`. The file 
 
 Idempotent by the content hash of what is stored, printing `STATE: created|updated|noop`, so an Ansible play can call it on every deploy without reporting a change. Setting the same file twice does not rewrite the row.
 
-`[web] max_avatar_kb` bounds the file, except that `0` — which switches the web upload endpoint off — falls back to the shipped default here: that setting is about an unauthenticated network body, and this reads a local file as the operator.
+`[web] max_avatar_kb` bounds the file, except that `0` — which switches both web upload endpoints off, the admin one included — falls back to the shipped default here: that setting is about an unauthenticated network body, and this reads a local file as the operator. So `0` is the way to leave the icon settable by a deploy and by nobody else.
+
+A database that predates the `bot_avatar` table is a named refusal and exit 1, not a traceback — the play runs before the migrations on exactly one ordering, and `Error: … Run `istota init`` is what an operator can act on.
 
 The icon is separate from the bot account's Nextcloud profile picture and cannot change it (the daemon holds an app password, and Nextcloud's avatar route is session-and-CSRF-guarded). Set that one in Nextcloud if you want the two to match.
 

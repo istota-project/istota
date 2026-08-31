@@ -3,6 +3,7 @@
 import argparse
 import importlib.metadata
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -1869,6 +1870,22 @@ def cmd_nextcloud_provision_rooms(args):
 # on every deploy and compute `changed_when` from stdout.
 
 
+def _bot_icon_die(exc: sqlite3.Error) -> None:
+    """A database that cannot answer, reported the way every other refusal is.
+
+    `docs/reference/cli.md` sells `set` as the thing an Ansible play runs on
+    every deploy, so the ordering of "code lands, play runs, migrations run"
+    decides whether a database predating the `bot_avatar` table gives the play a
+    clean refusal or a Python traceback out of `main()`.
+    """
+    print(
+        f"Error: could not read the bot icon table: {exc}. "
+        "Run `istota init` to apply pending migrations.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _bot_icon_max_bytes(config) -> int:
     """The decode cap for an operator-supplied file.
 
@@ -1902,13 +1919,16 @@ def cmd_bot_icon_set(args):
         print(f"Error: {e.message}", file=sys.stderr)
         sys.exit(1)
 
-    with db.get_db(config.db_path) as conn:
-        current = avatars.bot_avatar_hash(conn)
-        if current == digest:
-            state = "noop"
-        else:
-            state = "updated" if current else "created"
-            avatars.put_bot_avatar(conn, image=image, content_hash=digest)
+    try:
+        with db.get_db(config.db_path) as conn:
+            current = avatars.bot_avatar_hash(conn)
+            if current == digest:
+                state = "noop"
+            else:
+                state = "updated" if current else "created"
+                avatars.put_bot_avatar(conn, image=image, content_hash=digest)
+    except sqlite3.Error as e:
+        _bot_icon_die(e)
 
     print(f"  mime:  {avatars.NORMALIZED_MIME}")
     print(f"  bytes: {len(image)}")
@@ -1921,8 +1941,11 @@ def cmd_bot_icon_clear(args):
     from istota import avatars
 
     config = load_config(Path(args.config) if args.config else None)
-    with db.get_db(config.db_path) as conn:
-        deleted = avatars.delete_bot_avatar(conn)
+    try:
+        with db.get_db(config.db_path) as conn:
+            deleted = avatars.delete_bot_avatar(conn)
+    except sqlite3.Error as e:
+        _bot_icon_die(e)
     print(f"STATE: {'updated' if deleted else 'noop'}")
 
 
@@ -1931,8 +1954,11 @@ def cmd_bot_icon_show(args):
     from istota import avatars
 
     config = load_config(Path(args.config) if args.config else None)
-    with db.get_db(config.db_path) as conn:
-        icon = avatars.get_bot_avatar(conn)
+    try:
+        with db.get_db(config.db_path) as conn:
+            icon = avatars.get_bot_avatar(conn)
+    except sqlite3.Error as e:
+        _bot_icon_die(e)
     if icon is None:
         print("No bot icon set.")
         return

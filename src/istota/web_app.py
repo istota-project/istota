@@ -756,11 +756,31 @@ _MAIL_ICON = _lucide(
 # token. It is one fewer route for one image on one page, and the icon is
 # deployment branding rather than anything confidential.
 #
-# Memoized on the content hash, so a page load costs a `SELECT content_hash`
-# and never a BLOB out of SQLite. One tuple replaced whole: two threads racing
-# here encode the same bytes from the same row and the rebind is atomic, so a
-# lock would buy a consistency nothing can observe. A stale entry cannot be
-# served either — the key *is* the hash, so a changed icon simply misses.
+# Memoized on the content hash, so a page load costs one connection and a
+# `SELECT content_hash`, never a BLOB. The connection is not saved by the memo
+# and that is deliberate: the database is what decides which mark is current,
+# and the two branches that depend on it are one line apart. A *replaced* icon
+# misses because the key is the hash. A *cleared* one takes the early return
+# above the memo read, which is the only thing standing between a warm memo and
+# an icon served on the login page after an admin deleted it — so the hash must
+# be queried before the memo is consulted, and
+# `test_clearing_the_icon_reverts_the_login_page_while_the_memo_is_warm` is what
+# holds that ordering against the obvious "check the memo first" optimization.
+#
+# One tuple replaced whole: two threads racing here encode the same bytes from
+# the same row and the rebind is atomic, so a lock would buy a consistency
+# nothing can observe.
+#
+# It runs on a dedicated single worker rather than the default executor, for the
+# reason the doctor deep check and the avatar decode each have one: this is the
+# app's only *unauthenticated* route that touches SQLite, and the default pool
+# is shared with every other `to_thread` caller in a single-process uvicorn — so
+# an anonymous flood against the login page would otherwise contend with the
+# authenticated app for the same bounded threads. Serializing costs nothing
+# worth measuring: a memo hit is one indexed row.
+_login_mark_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="login-mark",
+)
 _LOGIN_SIGIL_MARK = (
     '<img class="mark sigil" src="/istota/octopus-sigil.webp" alt="" '
     'width="68" height="72">'
@@ -793,8 +813,17 @@ def _login_page_mark() -> str:
         if icon is None:
             return _LOGIN_SIGIL_MARK
         encoded = base64.b64encode(icon.image).decode("ascii")
+        # `mime` is read back from the column, and `get_bot_avatar` is written
+        # as though that column were untrusted (it tolerates a NULL). Only
+        # `put_bot_avatar` writes it and it binds the literal `NORMALIZED_MIME`,
+        # so nothing shipped can put a quote in there — but this lands in an
+        # `src="…"` attribute on the one page an anonymous browser sees, and the
+        # app has no CSP behind it. Escaped so the guarantee is this line's
+        # rather than a different function's. The base64 needs none: it is
+        # `[A-Za-z0-9+/=]` by construction.
         mark = (
-            f'<img class="mark icon" src="data:{icon.mime};base64,{encoded}" '
+            f'<img class="mark icon" '
+            f'src="data:{escape(icon.mime, quote=True)};base64,{encoded}" '
             f'alt="" width="72" height="72">'
         )
         _login_icon_memo = (icon.content_hash, mark)
@@ -873,7 +902,9 @@ async def login(request: Request):
         from . import __version__
 
         bot_name = _config.bot_name if _config else "Istota"
-        mark = await asyncio.to_thread(_login_page_mark)
+        mark = await asyncio.get_running_loop().run_in_executor(
+            _login_mark_executor, _login_page_mark,
+        )
         return HTMLResponse(_render_login_page(bot_name, __version__, mark))
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
@@ -940,7 +971,9 @@ async def callback(request: Request):
         # `async` so the mark's one indexed read stays off the event loop, the
         # same way the login page resolves it. The card is the login card, so
         # the two must not diverge on what they render at the top.
-        mark = await asyncio.to_thread(_login_page_mark)
+        mark = await asyncio.get_running_loop().run_in_executor(
+            _login_mark_executor, _login_page_mark,
+        )
         return HTMLResponse(
             _render_login_error_page(
                 _bot_name, __version__, headline, detail, mark,
@@ -7816,10 +7849,18 @@ async def avatar_user(
     )
 
 
-def _store_user_avatar(username: str, image: bytes, content_hash: str) -> None:
+# The four helpers below take `db_path` rather than reading `_config` for
+# themselves, and that is not tidiness: each runs on a worker thread while the
+# route's `_config is None` check ran on the event loop, so a SIGHUP
+# `_reload_config` rebinding the global in between is an `AttributeError` in
+# the worker and a 500 on a request that had already been validated. Resolving
+# the path where the check happens closes the window.
+def _store_user_avatar(
+    db_path: Path, username: str, image: bytes, content_hash: str,
+) -> None:
     from . import avatars, db
 
-    with db.get_db(_config.db_path) as conn:
+    with db.get_db(db_path) as conn:
         avatars.put_user_avatar(
             conn, username, source=avatars.SOURCE_UPLOAD,
             image=image, content_hash=content_hash,
@@ -7842,6 +7883,9 @@ async def settings_upload_avatar(
     from . import avatars
     from .avatars import AvatarError
 
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    db_path = _config.db_path
     try:
         image, digest = await _read_avatar_upload(request)
     except AvatarError as e:
@@ -7849,7 +7893,9 @@ async def settings_upload_avatar(
         # upload helpers read `body.error`.
         return JSONResponse({"error": e.message}, status_code=e.status)
 
-    await asyncio.to_thread(_store_user_avatar, user["username"], image, digest)
+    await asyncio.to_thread(
+        _store_user_avatar, db_path, user["username"], image, digest,
+    )
     logger.info(
         "avatar uploaded user=%s bytes=%d hash=%s",
         user["username"], len(image), digest[:12],
@@ -7857,10 +7903,10 @@ async def settings_upload_avatar(
     return {"hash": digest, "mime": avatars.NORMALIZED_MIME, "bytes": len(image)}
 
 
-def _drop_user_avatar(username: str) -> bool:
+def _drop_user_avatar(db_path: Path, username: str) -> bool:
     from . import avatars, db
 
-    with db.get_db(_config.db_path) as conn:
+    with db.get_db(db_path) as conn:
         return avatars.delete_user_avatar(conn, username, avatars.SOURCE_UPLOAD)
 
 
@@ -7876,7 +7922,9 @@ async def settings_delete_avatar(
     """
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
-    deleted = await asyncio.to_thread(_drop_user_avatar, user["username"])
+    deleted = await asyncio.to_thread(
+        _drop_user_avatar, _config.db_path, user["username"],
+    )
     return {"deleted": deleted}
 
 
@@ -7900,10 +7948,10 @@ async def settings_delete_avatar(
 # than implying the two are linked.
 
 
-def _store_bot_avatar(image: bytes, content_hash: str) -> None:
+def _store_bot_avatar(db_path: Path, image: bytes, content_hash: str) -> None:
     from . import avatars, db
 
-    with db.get_db(_config.db_path) as conn:
+    with db.get_db(db_path) as conn:
         avatars.put_bot_avatar(conn, image=image, content_hash=content_hash)
 
 
@@ -7925,12 +7973,13 @@ async def admin_upload_bot_avatar(
 
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
+    db_path = _config.db_path
     try:
         image, digest = await _read_avatar_upload(request)
     except AvatarError as e:
         return JSONResponse({"error": e.message}, status_code=e.status)
 
-    await asyncio.to_thread(_store_bot_avatar, image, digest)
+    await asyncio.to_thread(_store_bot_avatar, db_path, image, digest)
     logger.info(
         "bot icon set by %s bytes=%d hash=%s",
         _admin["username"], len(image), digest[:12],
@@ -7938,10 +7987,10 @@ async def admin_upload_bot_avatar(
     return {"hash": digest, "mime": avatars.NORMALIZED_MIME, "bytes": len(image)}
 
 
-def _drop_bot_avatar() -> bool:
+def _drop_bot_avatar(db_path: Path) -> bool:
     from . import avatars, db
 
-    with db.get_db(_config.db_path) as conn:
+    with db.get_db(db_path) as conn:
         return avatars.delete_bot_avatar(conn)
 
 
@@ -7956,7 +8005,7 @@ async def admin_delete_bot_avatar(
     """
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
-    deleted = await asyncio.to_thread(_drop_bot_avatar)
+    deleted = await asyncio.to_thread(_drop_bot_avatar, _config.db_path)
     if deleted:
         logger.info("bot icon cleared by %s", _admin["username"])
     return {"deleted": deleted}

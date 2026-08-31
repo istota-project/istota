@@ -44,11 +44,18 @@
   let botIconNote = $state('');
 
   /* The dropzone is a picker rather than a staging area — there is no Save step
-     — so a picked file is taken and sent. `botIconBusy` is read rather than
-     merely checked: a file picked while one is going up stays in the zone, and
-     this effect re-runs and sends it when the first upload settles. Two
-     concurrent PUTs would resolve in either order, and this row is
-     deployment-wide, so the loser would be everyone's icon. */
+     — so a picked file is taken and sent.
+
+     The `botIconBusy` guard is unreachable as the template stands, and is kept
+     deliberately rather than as an oversight: `uploadBotIcon` sets
+     `botIconBusyLabel` before its first await and the template swaps the zone
+     out for the busy line, so the zone — and its paste handler — is unmounted
+     for the whole upload and no file can be picked during one. What the guard
+     covers is the version of this control that keeps the zone mounted and
+     merely disables it, which is the obvious refactor: there a file left in the
+     zone would be sent the moment `botIconBusy` cleared, including after a
+     *delete*. Two concurrent PUTs would also resolve in either order, and this
+     row is deployment-wide, so the loser would be everyone's icon. */
   $effect(() => {
     if (botIconBusy || !botIconFile) return;
     const picked = botIconFile;

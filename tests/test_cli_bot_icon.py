@@ -241,4 +241,56 @@ class TestItIsRegistered:
         out = capsys.readouterr().out
         assert "STATE: created" in out
         assert "STATE: updated" in out
+        # `show` is the verb with no `STATE:` line, so asserting on the two that
+        # have one leaves its registration unchecked: route `show` to the clear
+        # handler and every other assertion here still holds. Its own output is
+        # what separates the two.
+        assert "Bot icon:" in out
+        assert avatars.NORMALIZED_MIME in out
         assert _stored(db_path) is None
+
+
+class TestAnUnmigratedDatabase:
+    """A database predating the `bot_avatar` table.
+
+    `docs/reference/cli.md` sells `set` as the thing an Ansible play runs on
+    every deploy, so the ordering of "code lands, play runs, migrations run"
+    decides which of these an operator reads. Every other refusal here is
+    `Error: …` and exit 1; a traceback out of `main()` would be the odd one.
+    """
+
+    @pytest.fixture
+    def unmigrated(self, cfg_with_db):
+        cfg, db_path = cfg_with_db
+        with db.get_db(db_path) as conn:
+            conn.execute("DROP TABLE bot_avatar")
+        return cfg, db_path
+
+    def test_set_refuses_cleanly(self, unmigrated, tmp_path, capsys):
+        from istota import cli
+
+        cfg, _ = unmigrated
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_bot_icon_set(_FakeArgs(
+                config=str(cfg), path=str(_png(tmp_path / "icon.png")),
+            ))
+        assert exc.value.code == 1
+        assert "istota init" in capsys.readouterr().err
+
+    def test_clear_refuses_cleanly(self, unmigrated, capsys):
+        from istota import cli
+
+        cfg, _ = unmigrated
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_bot_icon_clear(_FakeArgs(config=str(cfg)))
+        assert exc.value.code == 1
+        assert "istota init" in capsys.readouterr().err
+
+    def test_show_refuses_cleanly(self, unmigrated, capsys):
+        from istota import cli
+
+        cfg, _ = unmigrated
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_bot_icon_show(_FakeArgs(config=str(cfg)))
+        assert exc.value.code == 1
+        assert "istota init" in capsys.readouterr().err
