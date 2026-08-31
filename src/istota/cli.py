@@ -3,6 +3,7 @@
 import argparse
 import importlib.metadata
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -1992,6 +1993,331 @@ def cmd_experimental_list(args):
             print(f"  {name}")
 
 
+# --------------------------------------------------------------------------
+# session — the native brain's per-attempt transcripts
+# --------------------------------------------------------------------------
+#
+# The parsing lives in `session/session_log_read.py`, not here: the `tasks
+# transcript` skill verb reads the same files with the same rules, and a second
+# copy in this file is how the two would start disagreeing about what a
+# transcript says. What belongs here is the *rendering* — these four commands
+# are for a person at a terminal, so thinking is shown by default and tool
+# output is printed plainly. The skill verb renders the same data for a model,
+# wrapped in untrusted-content delimiters, which is a different job.
+
+_SESSION_RULE = "─" * 60
+
+
+def _session_root(args):
+    """The resolved log directory, and the config it came from."""
+    from .session.session_log import resolve_session_log_dir
+
+    config = load_config(Path(args.config) if args.config else None)
+    root = resolve_session_log_dir(config.db_path, config.brain.native.session_log.dir)
+    return config, Path(root)
+
+
+def _fmt_bytes(size) -> str:
+    value = float(size or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _fmt_mtime(mtime) -> str:
+    import datetime as _dt
+
+    if not mtime:
+        return "-"
+    return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+
+def _resolve_session_target(root: Path, target: str, attempt=None):
+    """A path or a bare task id to one file, or ``None`` with a printed reason.
+
+    A bare task id is what the file-name convention is for: glob
+    ``*_task-{id}-*.jsonl`` across every user directory. Newest first, so with
+    no ``--attempt`` the most recent attempt is what a bare id means.
+    """
+    from .session import session_log_read as slr
+
+    candidate = Path(target).expanduser()
+    if candidate.exists():
+        return candidate
+
+    try:
+        task_id = int(str(target).strip())
+    except (TypeError, ValueError):
+        print(f"No such file: {target}", file=sys.stderr)
+        return None
+
+    found = slr.find_all_logs(root, task_id=task_id)
+    if attempt is not None:
+        found = [
+            p for p in found
+            if (slr.parse_log_name(p.name) or {}).get("attempt") == attempt
+        ]
+    if not found:
+        where = f"task {task_id}" + (f" attempt {attempt}" if attempt else "")
+        print(f"No session log for {where} under {root}", file=sys.stderr)
+        return None
+    return found[0]
+
+
+def cmd_session_list(args):
+    """List session logs, newest first."""
+    from .session import session_log_read as slr
+
+    _config, root = _session_root(args)
+    if args.user:
+        paths = slr.find_logs(root, args.user, task_id=args.task)
+    else:
+        paths = slr.find_all_logs(root, task_id=args.task)
+    if not paths:
+        print(f"No session logs under {root}")
+        return
+
+    limit = args.limit if args.limit and args.limit > 0 else len(paths)
+    print(f"{root}  ({len(paths)} file(s))")
+    for path in paths[:limit]:
+        row = slr.summarize(path)
+        task = row["task_id"] if row["task_id"] is not None else "?"
+        attempt = row["attempt"] if row["attempt"] is not None else "?"
+        if not row["readable"]:
+            state = f"unreadable ({row['reason']})"
+        elif row["complete"]:
+            turns = "" if row["turns"] is None else f" {row['turns']} turns"
+            mark = "" if row["success"] else " FAILED"
+            state = f"{row['stop_reason']}{mark}{turns}"
+        else:
+            # Not the same thing as a failure: the file has no terminal record,
+            # so the run is still going or the daemon died under it.
+            state = "interrupted (no result record)"
+        print(
+            f"  {_fmt_mtime(row['mtime'])}  {row['user_id']:<12} "
+            f"task {task}-{attempt}  {_fmt_bytes(row['size']):>9}  {state}"
+        )
+        print(f"      {row['name']}")
+
+
+def _print_session_header(header: dict, path: Path, row: dict) -> None:
+    print(f"Session {header.get('session_id', '')}")
+    print(
+        f"  task {header.get('task_id')} attempt {header.get('attempt')} "
+        f"user {header.get('user_id')} source {header.get('source_type') or '-'}"
+    )
+    print(
+        f"  brain={header.get('brain') or '-'} model={header.get('model') or '-'} "
+        f"effort={header.get('effort') or '-'} "
+        f"host={header.get('base_url_host') or '-'}"
+    )
+    print(f"  started {header.get('ts', '-')}")
+    print(f"  file {path} ({_fmt_bytes(row['size'])})")
+
+
+def _print_blocks(blocks, indent="    ") -> None:
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            print(_indent(block.get("text", ""), indent))
+        elif kind == "thinking":
+            print(_indent("[thinking] " + (block.get("thinking") or ""), indent))
+        elif kind == "tool_call":
+            print(
+                _indent(
+                    f"[tool_call {block.get('name')} {block.get('id')}] "
+                    f"{json.dumps(block.get('arguments'), ensure_ascii=False)}",
+                    indent,
+                )
+            )
+        elif kind == "image":
+            print(
+                _indent(
+                    f"[image {block.get('display_name') or ''} "
+                    f"{block.get('media_type') or ''} {block.get('bytes')} bytes]",
+                    indent,
+                )
+            )
+        else:
+            print(_indent(json.dumps(block, ensure_ascii=False), indent))
+        if block.get("truncated"):
+            print(_indent(f"… [capped from {block.get('chars_total')} chars]", indent))
+
+
+def _indent(text, prefix) -> str:
+    return "\n".join(prefix + line for line in str(text).splitlines()) or prefix
+
+
+def cmd_session_show(args):
+    """Render one session log as readable text."""
+    from .session import session_log_read as slr
+
+    _config, root = _session_root(args)
+    path = _resolve_session_target(root, args.target, args.attempt)
+    if path is None:
+        return 1
+
+    row = slr.summarize(path)
+    digest = slr.digest(path)
+    if not digest["ok"]:
+        # Unreadable, not partially rendered: a file whose line 1 is not a
+        # header is not a transcript, and guessing at the rest of it is how
+        # somebody else's JSONL gets presented as this task's run.
+        print(f"{path}: {digest['reason']}", file=sys.stderr)
+        return 1
+
+    _print_session_header(digest["header"], path, row)
+
+    out = slr.excerpt(
+        path,
+        thinking=not args.no_thinking,
+        # `--full` turns off the reader's display cap. That is a different cap
+        # from the writer's: the file already holds head-and-tail-truncated
+        # blocks, and nothing here can put back what was never written.
+        max_chars=0 if args.full else args.max_chars,
+    )
+    context = digest.get("context")
+    if context:
+        print(f"\n{_SESSION_RULE}")
+        print(
+            f"context  tools: {', '.join(context['tools']) or '-'}  "
+            f"system prompt: {context['system_prompt_chars']} chars"
+            + (f" from {context['system_prompt_source']}"
+               if context["system_prompt_source"] else "")
+        )
+
+    for record in out["records"]:
+        message = record.get("message") or {}
+        role = message.get("role", "?")
+        if role == "assistant":
+            head = f"assistant ({message.get('stop_reason') or '-'})"
+        elif role == "tool_result":
+            state = "error" if message.get("is_error") else "ok"
+            head = f"tool_result {message.get('tool_name') or '?'} ({state})"
+        else:
+            head = role
+        print(f"\n{_SESSION_RULE}")
+        print(f"{record.get('ts', '')}  {head}")
+        _print_blocks(message.get("content"))
+
+    for entry in digest["compactions"]:
+        print(
+            f"\ncompaction ({entry['trigger']}): dropped "
+            f"{entry['messages_dropped']} messages"
+        )
+    for entry in digest["errors"]:
+        print(f"\nerror: {entry['kind']}: {entry['message']}")
+
+    print(f"\n{_SESSION_RULE}")
+    result = digest["result"]
+    if result is None:
+        print("no result record — interrupted run")
+    else:
+        print(
+            f"result: {result['stop_reason']} "
+            f"({'success' if result['success'] else 'failed'}), "
+            f"{result['turns']} turns, {result['duration_ms']} ms"
+        )
+        print(_indent(result["result_text_preview"], "  "))
+
+    notes = []
+    if out["truncated"]:
+        notes.append(
+            f"display capped: {out['records_returned']} of {out['records_total']} "
+            f"records shown (--full for all)"
+        )
+    if digest["malformed"]:
+        notes.append(f"{digest['malformed']} malformed line(s) skipped")
+    if digest["partial_tail"]:
+        notes.append("trailing partial line skipped (session still being written)")
+    for note in notes:
+        print(f"note: {note}")
+    return None
+
+
+def cmd_session_tail(args):
+    """Print the end of a session log, and by default follow it."""
+    import time as _time
+
+    from .session import session_log_read as slr
+
+    _config, root = _session_root(args)
+    path = _resolve_session_target(root, args.target, args.attempt)
+    if path is None:
+        return 1
+
+    records = list(slr.read_records(path))
+    for record in records[-args.lines:] if args.lines > 0 else records:
+        print(json.dumps(record, ensure_ascii=False))
+    if args.no_follow:
+        return None
+
+    # Follow by byte offset rather than by re-reading: the file is append-only,
+    # so everything past the last complete line we consumed is new. A trailing
+    # partial line is left alone until its newline lands.
+    try:
+        offset = os.path.getsize(path)
+    except OSError:
+        return None
+    polls = 0
+    try:
+        while args.poll_limit is None or polls < args.poll_limit:
+            polls += 1
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                break
+            if size > offset:
+                # Binary, so the offset the next poll resumes from is the byte
+                # count the seek needs. Decoding first and measuring the text
+                # would drift the moment a replacement character stood in for a
+                # multi-byte sequence, and a drifted offset prints fragments.
+                with open(path, "rb") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+                complete, newline, _partial = chunk.rpartition(b"\n")
+                if newline:
+                    for line in complete.split(b"\n"):
+                        text = line.decode("utf-8", "replace").strip()
+                        if text:
+                            print(text)
+                    offset += len(complete) + 1
+            _time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    return None
+
+
+def cmd_session_stats(args):
+    """Count and size the session logs, split by user."""
+    import time as _time
+
+    from .session import session_log_read as slr
+
+    config, root = _session_root(args)
+    since = None
+    if args.days and args.days > 0:
+        since = _time.time() - args.days * 86400.0
+    stats = slr.tree_stats(root, since=since)
+
+    window = f" in the last {args.days} day(s)" if since else ""
+    print(f"{root}")
+    print(f"  {stats.files} file(s), {_fmt_bytes(stats.bytes)}{window}")
+    ceiling = config.brain.native.session_log.max_total_gb
+    if ceiling:
+        print(f"  ceiling: {ceiling} GB (deployment-wide, all users)")
+    if stats.files:
+        print(f"  oldest {_fmt_mtime(stats.oldest)}, newest {_fmt_mtime(stats.newest)}")
+    for user, entry in sorted(
+        stats.per_user.items(), key=lambda kv: (-kv[1]["bytes"], kv[0])
+    ):
+        print(f"  {user:<16} {entry['files']:>5} file(s)  {_fmt_bytes(entry['bytes']):>9}")
+
+
 def main():
     # `istota money <op> …` forwards operational commands verbatim to the money
     # Click tree. argparse REMAINDER can't capture a leading option (e.g.
@@ -2478,6 +2804,77 @@ def main():
     )
     kv_status_parser.add_argument("-u", "--user", required=True, help="User ID")
 
+    # session (with subparsers) — the native brain's per-attempt transcripts
+    session_parser = subparsers.add_parser(
+        "session", help="Native-brain session logs (transcripts)",
+    )
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_action", required=True,
+    )
+
+    session_list_parser = session_subparsers.add_parser(
+        "list", help="List session logs, newest first",
+    )
+    session_list_parser.add_argument("-u", "--user", help="Only this user's logs")
+    session_list_parser.add_argument(
+        "-t", "--task", type=int, help="Only this task id (every attempt)",
+    )
+    session_list_parser.add_argument(
+        "-n", "--limit", type=int, default=20, help="Max rows (0 = all)",
+    )
+
+    session_show_parser = session_subparsers.add_parser(
+        "show", help="Render one session log as readable text",
+    )
+    session_show_parser.add_argument(
+        "target", help="Path to a .jsonl log, or a bare task id",
+    )
+    session_show_parser.add_argument(
+        "--attempt", type=int, help="Which attempt, when the target is a task id",
+    )
+    session_show_parser.add_argument(
+        "--no-thinking", action="store_true", help="Omit thinking blocks",
+    )
+    session_show_parser.add_argument(
+        "--full", action="store_true",
+        help="Show every record (disables the display cap, not the writer's caps)",
+    )
+    session_show_parser.add_argument(
+        "--max-chars", type=int, default=200_000,
+        help="Display cap in characters of record JSON (0 = none)",
+    )
+
+    session_tail_parser = session_subparsers.add_parser(
+        "tail", help="Follow a live session log",
+    )
+    session_tail_parser.add_argument(
+        "target", help="Path to a .jsonl log, or a bare task id",
+    )
+    session_tail_parser.add_argument(
+        "--attempt", type=int, help="Which attempt, when the target is a task id",
+    )
+    session_tail_parser.add_argument(
+        "-n", "--lines", type=int, default=20,
+        help="How many existing records to print first (0 = all)",
+    )
+    session_tail_parser.add_argument(
+        "--no-follow", action="store_true", help="Print and exit rather than following",
+    )
+    session_tail_parser.add_argument(
+        "--interval", type=float, default=0.5, help="Poll interval in seconds",
+    )
+    # Bounded polling, so the follow loop is reachable from a test without one
+    # sitting in a terminal deciding when it has seen enough.
+    session_tail_parser.add_argument("--poll-limit", type=int, default=None,
+                                     help=argparse.SUPPRESS)
+
+    session_stats_parser = session_subparsers.add_parser(
+        "stats", help="Count and size the logs, split by user",
+    )
+    session_stats_parser.add_argument(
+        "--days", type=int, default=0, help="Only files written in the last N days",
+    )
+
     # chat (with subparsers)
     chat_parser = subparsers.add_parser("chat", help="Web chat room maintenance")
     chat_subparsers = chat_parser.add_subparsers(dest="chat_action", required=True)
@@ -2614,6 +3011,18 @@ def main():
             "shared-status": cmd_kv_shared_status,
         }
         kv_commands[args.kv_action](args)
+    elif args.command == "session":
+        session_commands = {
+            "list": cmd_session_list,
+            "show": cmd_session_show,
+            "tail": cmd_session_tail,
+            "stats": cmd_session_stats,
+        }
+        # A handler returning a non-zero code means it: `show` on a target that
+        # resolves to nothing must not exit 0 for a script.
+        rc = session_commands[args.session_action](args)
+        if rc:
+            sys.exit(rc)
     elif args.command == "chat":
         chat_commands = {
             "backfill-history": cmd_chat_backfill_history,
