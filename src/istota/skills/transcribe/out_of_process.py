@@ -14,11 +14,25 @@ allocator high-water mark stays for the daemon's lifetime. And a wedged
 Tesseract has no bound at all in-process: the shared OCR deadline is only
 enforceable because there is a process group to kill.
 
-Stdlib-only on purpose. Nothing here can pull Pillow or pytesseract back into
-the caller, which is what makes the boundary a fact rather than a habit. The
-JSON scan below is a near-copy of the whisper module's rather than an import
-from it: these are two leaf modules in two skill packages, and a cross-skill
-import would tie each one's boundary to the other's.
+This module's own body is stdlib-only, and that is all it is. **It does not
+keep Pillow or pytesseract out of the caller's import graph**, and saying it
+did would be false: importing it runs `istota/skills/__init__.py`, which
+star-imports several skills, and then `skills/transcribe/__init__.py`, whose
+module scope is `import pytesseract; from PIL import Image, ImageEnhance`.
+Measured in this checkout, `import istota.image_attachments` leaves both
+resident. The boundary here is about what *runs* — a wedged Tesseract and its
+page dictionary die with a process — not about what is imported.
+
+Making the import graph clean too would mean a top-level leaf beside
+`git_hardening.py` and `forge_bin.py`, which exist for exactly that reason
+(`AGENTS.md` records both). That is worth doing and is not this stage's
+business, since `health/ocr.py` already imports `pytesseract` into the daemon
+on the health upload path. The whisper module this is modelled on has the same
+property and the same unearned claim in its own docstring.
+
+The JSON scan below is a near-copy of the whisper module's rather than an
+import from it: these are two leaf modules in two skill packages, and a
+cross-skill import would tie each one's boundary to the other's.
 """
 
 from __future__ import annotations

@@ -88,8 +88,10 @@ def cmd_ocr(args) -> dict:
         confidences = [c for c in data["conf"] if c > 0]
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0
 
-        # Count actual words (non-empty text entries)
-        word_count = len([w for w in data["text"] if w.strip()])
+        # Count actual words (non-empty text entries). Coerced the same way
+        # `text_from_data` coerces, so the two readings of this one column
+        # cannot disagree about what counts as a word.
+        word_count = len([w for w in data["text"] if str(w).strip()])
 
         return {
             "status": "ok",
