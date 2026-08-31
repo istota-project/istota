@@ -132,7 +132,7 @@ The native harness ships its own daemon-side `WebFetch` tool. It runs in the dae
 |---|---|---|
 | `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
-| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary this long before retrying it; 0 disables |
+| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
 The same availability breaker is what the nightly sleep cycle consults before deciding to run at all. Pin `istota_brain_native_model` whenever native is either primary *or* fallback — an empty model id 400s on failover, which is the worst moment to discover it.
 

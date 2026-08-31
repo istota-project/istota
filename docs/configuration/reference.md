@@ -297,7 +297,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `source_type_overrides` | `{}` | Per-`source_type` brain override (e.g. route `scheduled` to `native` while interactive tasks stay on `claude_code`). |
 | `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
-| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary this long before retrying it; 0 disables |
+| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
 `[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file. Full annotations in the [native brain runbook](native-brain.md).
 
