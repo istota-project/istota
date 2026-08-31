@@ -6055,6 +6055,17 @@ def execute_task(
             ),
             env=env,
             db_path=config.db_path,
+            # Which attempt this is, for the brain's own per-attempt artifacts
+            # (NativeBrain's session log names its file after them). Read off
+            # the task row rather than out of `env`, which is the sandbox
+            # environment. `attempt_count` is the same counter the task cgroup
+            # and the tmux session label already key on.
+            task_id=task.id,
+            attempt=task.attempt_count,
+            user_id=task.user_id or "",
+            source_type=task.source_type or "",
+            conversation_token=task.conversation_token or "",
+            is_group_chat=bool(task.is_group_chat),
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
             model=brain.resolve_model_name((task.model or "").strip() or config.model),
             effort=_resolve_effort(task, config),
