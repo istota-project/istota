@@ -472,6 +472,112 @@ class TestNormalization:
         assert prep.images[0].path != prep.images[1].path
 
 
+class TestBindRoots:
+    """An image the sandbox cannot see is copied, even when it needs no rewrite.
+
+    `build_bwrap_cmd` binds the task temp dir, `{mount}/Users/{user}`,
+    `{mount}/Talk` and `{mount}/Channels/{token}` and nothing else, while the
+    nc-data fallback in the scheduler hands out `/mnt/nc-data/<user>/files/…`
+    paths that are bound by nothing. A small in-limits screenshot arriving that
+    way would be named in the Claude Code directive and be unreadable, so
+    containment — not size or format — is what forces the rewrite here.
+    """
+
+    def test_an_image_outside_every_bind_is_copied_into_the_task_temp_dir(
+        self, tmp_path, ocr_calls
+    ):
+        outside = tmp_path / "nc-data" / "alice" / "files" / "Talk"
+        outside.mkdir(parents=True)
+        src = _png(outside / "shot.png")
+        bound = tmp_path / "bound"
+        bound.mkdir()
+
+        prep = prepare_image_attachments(
+            [str(src)], tmp_path / "usertmp", 3, bind_roots=[bound],
+        )
+
+        out = prep.images[0].path
+        assert out != src.resolve()
+        assert out.is_relative_to((tmp_path / "usertmp").resolve())
+        assert prep.attachments == [str(out)]
+        # Copied, not degraded: a PNG stays a PNG.
+        assert prep.images[0].media_type == "image/png"
+
+    def test_an_image_under_a_bind_is_left_where_it_is(self, tmp_path, ocr_calls):
+        bound = tmp_path / "bound"
+        bound.mkdir()
+        src = _png(bound / "shot.png")
+
+        prep = prepare_image_attachments(
+            [str(src)], tmp_path / "usertmp", 3, bind_roots=[bound],
+        )
+
+        assert prep.images[0].path == src.resolve()
+
+    def test_containment_is_decided_on_the_resolved_path(self, tmp_path, ocr_calls):
+        """A symlink from inside a bind to a file outside it is still outside.
+
+        bwrap binds the *resolved* source, so a link under a bound directory
+        buys the model nothing — the file it points at is in no namespace.
+        """
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        real = _png(outside / "shot.png")
+        bound = tmp_path / "bound"
+        bound.mkdir()
+        (bound / "shot.png").symlink_to(real)
+
+        prep = prepare_image_attachments(
+            [str(bound / "shot.png")], tmp_path / "usertmp", 3, bind_roots=[bound],
+        )
+
+        assert prep.images[0].path.is_relative_to((tmp_path / "usertmp").resolve())
+
+    def test_the_task_temp_dir_itself_never_needs_copying_twice(
+        self, tmp_path, ocr_calls
+    ):
+        """A rewrite already lands under the temp dir, which is always bound."""
+        user_tmp = tmp_path / "usertmp"
+        src = _jpeg(tmp_path / "pano.jpg", size=(3000, 2000))
+
+        prep = prepare_image_attachments(
+            [str(src)], user_tmp, 3, bind_roots=[user_tmp],
+        )
+
+        assert prep.images[0].path.is_relative_to(user_tmp.resolve())
+
+    def test_a_containment_only_copy_is_a_byte_copy_not_a_re_encode(
+        self, tmp_path, ocr_calls
+    ):
+        """Nothing about the pixels is wrong; only the location is.
+
+        Re-encoding an already quality-85 JPEG adds a second generation of loss
+        to produce a file that has to hold the same picture — and OCR reads the
+        result.
+        """
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        src = _jpeg(outside / "scan.jpg", size=(400, 300))
+        bound = tmp_path / "bound"
+        bound.mkdir()
+
+        prep = prepare_image_attachments(
+            [str(src)], tmp_path / "usertmp", 3, bind_roots=[bound],
+        )
+
+        out = prep.images[0].path
+        assert out != src.resolve()
+        assert out.read_bytes() == src.read_bytes()
+
+    def test_no_bind_roots_means_no_forced_copy(self, tmp_path, ocr_calls):
+        """The default is the Stage 1 behaviour: containment is the caller's."""
+        src = _png(tmp_path / "shot.png")
+
+        prep = _prep([src], tmp_path)
+
+        assert prep.images[0].path == src.resolve()
+
+
 class TestOutputFormat:
     @pytest.mark.parametrize(
         "save_format,suffix,expected_media_type",

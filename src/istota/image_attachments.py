@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -284,6 +285,7 @@ def prepare_image_attachments(
     user_temp_dir: Path,
     task_id: int,
     cancel_check: Callable[[], bool] | None = None,
+    bind_roots: list[Path] | None = None,
 ) -> ImagePreparation:
     """Normalize and OCR the image attachments of one task.
 
@@ -298,6 +300,15 @@ def prepare_image_attachments(
     `scheduler.task_timeout_minutes` does not cover them and
     `BrainRequest.cancel_check` is not yet in play — without the poll, `!stop`
     and the web cancel button are inert for the whole pre-brain window.
+
+    `bind_roots` is what the sandbox can see. An accepted image whose *resolved*
+    source lies under none of them is copied into the task temp directory even
+    when it needs no resize and no conversion: the model is told to open the
+    path, and a path bound by nothing names no file inside the namespace. The
+    scheduler's nc-data fallback is the live example — it hands out
+    `/mnt/nc-data/<user>/files/Talk/<name>`, which `build_bwrap_cmd` binds
+    nowhere. `None` means the caller has not established containment and no copy
+    is forced; the empty list means nothing is bound and every image is copied.
     """
     if not attachments:
         return ImagePreparation(attachments, [], [])
@@ -372,7 +383,8 @@ def prepare_image_attachments(
             continue
 
         rendered = _render_one(
-            index, attachment, out_dir, task_id, name, Image, ImageOps, UnidentifiedImageError
+            index, attachment, out_dir, task_id, name, Image, ImageOps,
+            UnidentifiedImageError, bind_roots=bind_roots,
         )
         if rendered.error or rendered.vision_path is None:
             # A failure between the two saves leaves the first one on disk with
@@ -431,6 +443,8 @@ def _render_one(
     Image,
     ImageOps,
     UnidentifiedImageError,
+    *,
+    bind_roots: list[Path] | None = None,
 ) -> _Rendered:
     """Turn one candidate into up to two renditions, or into a refusal."""
     source = Path(attachment)
@@ -472,7 +486,8 @@ def _render_one(
                 )
 
             return _write_renditions(
-                index, source, opened, out_dir, task_id, name, written, Image, ImageOps
+                index, source, opened, out_dir, task_id, name, written, Image,
+                ImageOps, bind_roots=bind_roots,
             )
     except UnidentifiedImageError:
         return _Rendered(error="it could not be decoded as an image", written=written)
@@ -502,6 +517,8 @@ def _write_renditions(
     written: list[Path],
     Image,
     ImageOps,
+    *,
+    bind_roots: list[Path] | None = None,
 ) -> _Rendered:
     source_format = (opened.format or "").upper()
     output_format = _OUTPUT_FORMAT_BY_SOURCE.get(source_format, _FALLBACK_OUTPUT_FORMAT)
@@ -567,14 +584,18 @@ def _write_renditions(
     ocr_icc = _icc_for(icc, decoded, output_format, flatten=True)
     source_is_lossless = output_format == "WEBP" and _webp_is_lossless(source)
 
-    needs_vision_rewrite = (
+    needs_transform = (
         vision_size != decoded.size
         or output_format != source_format
         or frames > 1
         or orientation not in (0, 1)
     )
+    # Containment is a second, independent reason to write a file: an image the
+    # sandbox does not bind is unreadable at the path the model is told to
+    # open, whatever its size or format.
+    contained = _within_binds(source, bind_roots)
 
-    if needs_vision_rewrite:
+    if needs_transform:
         vision_path = _save(
             decoded,
             _out_path(out_dir, index, source, output_format, ocr=False),
@@ -584,6 +605,16 @@ def _write_renditions(
             icc=vision_icc,
             lossless=source_is_lossless,
             Image=Image,
+        )
+        written.append(vision_path)
+        vision_bytes = vision_path.stat().st_size
+    elif not contained:
+        # Only the *location* is wrong, so this is a byte copy rather than a
+        # re-encode: putting an already quality-85 JPEG through the encoder a
+        # second time adds generation loss to produce a file that has to hold
+        # the same picture anyway, and OCR reads the result.
+        vision_path = _copy_in(
+            source, _out_path(out_dir, index, source, output_format, ocr=False)
         )
         written.append(vision_path)
         vision_bytes = vision_path.stat().st_size
@@ -770,6 +801,38 @@ def _icc_still_applies(source_mode: str, target_mode: str) -> bool:
     return _MODE_FAMILY.get(source_mode, source_mode) == _MODE_FAMILY.get(
         target_mode, target_mode
     )
+
+
+def _copy_in(source: Path, out_path: Path) -> Path:
+    """Put an untouched image where the sandbox can reach it."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, out_path)
+    return out_path
+
+
+def _within_binds(source: Path, bind_roots: list[Path] | None) -> bool:
+    """Whether the sandbox can reach `source` at the path it is named by.
+
+    Decided on the *resolved* path on both sides, because that is what bwrap
+    binds: `_bind` resolves its source and uses the resolved path as the
+    in-namespace destination, so a symlink sitting under a bound directory and
+    pointing outside it buys the model nothing. `None` means the caller has not
+    established containment — the Stage 1 behaviour, and what every direct
+    caller other than the executor passes.
+    """
+    if bind_roots is None:
+        return True
+    try:
+        resolved = source.resolve()
+    except OSError:
+        return False
+    for root in bind_roots:
+        try:
+            if resolved == root.resolve() or resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _fit_long_edge(size) -> tuple[int, int]:
