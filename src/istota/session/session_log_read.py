@@ -30,11 +30,22 @@ appends and flushes whole lines, so a partial tail means a run happening right
 now — ``session tail`` on a live file is the ordinary case. It is counted apart
 from a malformed line for exactly that reason.
 
-**Nothing here raises.** One caller is a CLI a script runs and the other answers
-a task; a path that is a directory, a file that vanished between the listing and
-the read, an unreadable mode and a byte sequence that is not UTF-8 are all
-answers rather than tracebacks. The entry points return a ``dict`` carrying
-``ok`` and a ``reason``, or an empty list, or ``None``.
+**Nothing here raises, and that holds outside the annotated types as well as
+inside them.** One caller is a CLI a script runs and the other answers a task,
+where a traceback is a failed task rather than a rendering glitch. A path that is
+a directory, a file that vanished between the listing and the read, an unreadable
+mode, a byte sequence that is not UTF-8, a root that is ``None`` because the
+manifest variable carrying it was never set — all answers rather than tracebacks.
+The entry points return a ``dict`` carrying ``ok`` and a ``reason``, or an empty
+list, or ``None``.
+
+The half of that which is easy to lose is the **record contents**. Every field
+read out of a line comes from ``json.loads``, so its type is whatever was on the
+line rather than whatever the writer meant — the premise of the whole module is
+that the file may be damaged, half-written, or somebody else's JSONL opening
+with a plausible header. ``len(record["summary"])`` on a number is a
+``TypeError``, and it escaped ``digest`` and reached the CLI as a traceback until
+``_as_str`` / ``_as_list`` were put in front of every such read.
 
 **Two finders, and the split is a boundary rather than a convenience.**
 :func:`find_logs` takes a ``user_id`` and refuses anything that is not a single
@@ -88,14 +99,28 @@ _RESULT_PREVIEW_CHARS = 400
 # command ran.
 _ARGS_PREVIEW_CHARS = 240
 
-# Bounds on `--grep`, and they are about CPU rather than about correctness. The
-# second consumer is a skill verb whose pattern the *model* writes, running
-# host-side in the daemon's namespace, against a file that can run to megabytes
-# — and `re` has no step limit, so a catastrophically backtracking pattern is an
-# unbounded stall in a process the task is waiting on. Bounding both the pattern
-# and the subject caps the product. Neither bound is reachable by a pattern
-# anybody means: a 200-character regex and 64 KiB of one record's text are far
-# past what "find where it said X" needs.
+# Bounds on `--grep`'s *input*, and it is worth being exact about what they buy,
+# because the first version of this comment claimed a safety property these
+# numbers do not have. They cap the work an ordinary pattern does, which is
+# linear in the subject: 64 KiB of one record's text is far past what "find
+# where it said X" needs, and it keeps a scan over a multi-megabyte transcript
+# from being paced by its largest record.
+#
+# **They do not bound a catastrophically backtracking pattern, and nothing here
+# does.** Backtracking is exponential in the *subject*, not a product of the two
+# numbers, so these ceilings sit orders of magnitude past where it matters —
+# measured in this tree, `(a+)+b` against 28 characters of one text block takes
+# 19 seconds, and 28 is 2340 times under the subject ceiling. `re` has no step
+# limit and no stdlib mechanism interrupts a scan already running, so a real
+# bound means a different engine or a structural refusal — and a structural one
+# with false negatives would be this same overclaim wearing a check.
+#
+# So the residual is stated rather than closed, and its size depends entirely on
+# who writes the pattern. Here it is an operator at a terminal, who stalls their
+# own shell and ends it with Ctrl-C. That stops being the exposure the moment a
+# *model* writes the pattern and the scan runs host-side in the daemon's
+# namespace with a task waiting on it: the consumer that does that owns closing
+# this, and must not inherit these two numbers believing it is already closed.
 _MAX_GREP_PATTERN_CHARS = 200
 _MAX_GREP_SUBJECT_CHARS = 65536
 
@@ -120,8 +145,16 @@ _CONVERSATION_KINDS = (
 # `session_log_path` appends as `-{4 alnum}` and then `-{n}` on a second
 # collision. The task id and the attempt are the two fields the name exists to
 # carry, so they are anchored and everything after them is opaque.
+#
+# Two details that are hardening rather than live defects, since the writer
+# produces neither shape and NAME_MAX stops the first from existing on disk at
+# all. The digit runs are bounded because `int()` raises `ValueError` past
+# CPython's 4300-digit conversion limit, and this function is in a module whose
+# contract is that it does not raise. `\A`/`\Z` rather than `^`/`$` because `$`
+# also matches before a trailing newline, so a name ending in one would parse.
 _NAME_RE = re.compile(
-    r"^(?P<stamp>[^_]+)_task-(?P<task_id>\d+)-(?P<attempt>\d+)(?:-(?P<suffix>.+))?$"
+    r"\A(?P<stamp>[^_]+)_task-(?P<task_id>\d{1,18})-(?P<attempt>\d{1,9})"
+    r"(?:-(?P<suffix>.+))?\Z"
 )
 
 
@@ -164,6 +197,9 @@ def read_records(
     dropping it and surfacing it.
     """
     st = stats if stats is not None else ReadStats()
+    if _as_path(path) is None:
+        st.unreadable = f"TypeError: not a path: {type(path).__name__}"
+        return
     try:
         handle = open(path, encoding="utf-8", errors="replace")
     except (OSError, ValueError) as exc:
@@ -235,6 +271,8 @@ def read_header(path: Path | str) -> dict | None:
     already stat'ed the path. Reads one line, so it stays cheap on a listing of
     files that run to megabytes.
     """
+    if _as_path(path) is None:
+        return None
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             first = handle.readline()
@@ -264,6 +302,8 @@ def read_last_record(path: Path | str) -> dict | None:
     is what makes an uncapped ``result_text`` safe: the writer bounds every
     record except that one.
     """
+    if _as_path(path) is None:
+        return None
     try:
         size = os.path.getsize(path)
     except (OSError, ValueError):
@@ -389,9 +429,10 @@ def find_logs(
     :func:`_logs_in`. Name containment alone does not give scoping; the entry
     the name resolves to has to be the directory it appears to be.
     """
-    if not is_one_component(user_id):
+    base = _as_path(root)
+    if base is None or not is_one_component(user_id):
         return []
-    return _logs_in(Path(root) / user_id, task_id)
+    return _logs_in(base / user_id, task_id)
 
 
 def find_all_logs(root: Path | str, *, task_id: int | None = None) -> list[Path]:
@@ -401,7 +442,9 @@ def find_all_logs(root: Path | str, *, task_id: int | None = None) -> list[Path]
     reason the sweep's enumeration is: the tree is bound into no sandbox at any
     path, so a directory in it can only have been created by the writer.
     """
-    root = Path(root)
+    root = _as_path(root)
+    if root is None:
+        return []
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
     except (OSError, ValueError):
@@ -492,6 +535,41 @@ def _clip(text: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# Every field below comes out of `json.loads`, so its type is whatever was on
+# the line and not whatever the writer meant to put there. A file can be damaged,
+# half-written, or somebody else's JSONL that happens to open with a `session`
+# record — the module's premise is exactly that — so `len(record.get("summary"))`
+# on a number is a `TypeError` out of a function documented never to raise, and
+# in the second consumer that is a failed task rather than a rendering glitch.
+# `_output_size` already guarded its own `content` this way; these two are the
+# same guard for the fields that did not have one.
+
+def _as_str(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _as_path(value: Any) -> Path | None:
+    """*value* as a ``Path``, or ``None`` where it is not one to begin with.
+
+    The never-raises contract has to hold outside the annotated types as well as
+    inside them, which is the same position `session_log.resolve_session_log_dir`
+    takes and for a concrete reason: the second consumer reads its root out of a
+    ``proxy_only`` manifest variable, so an unwired or unset ``ISTOTA_SESSION_LOG_DIR``
+    arrives here as ``None``. `Path(None)` is a `TypeError`, and the spec
+    requires that path to answer "no transcript" rather than fail.
+    """
+    if isinstance(value, Path):
+        return value
+    try:
+        return Path(value)
+    except TypeError:
+        return None
+
+
 # --------------------------------------------------------------------------
 # Summaries
 # --------------------------------------------------------------------------
@@ -505,8 +583,13 @@ def summarize(path: Path | str) -> dict:
     about it. ``complete`` is False when the last record is not a ``result``:
     an interrupted run, which is a different fact from a failed one and is the
     reading a naive "the last line is the result" would get wrong.
+
+    ``user_id``, ``task_id`` and ``attempt`` are the *name and directory's*,
+    never the header's, because they are what every lookup filters on. A header
+    disagreeing with any of the three is reported as ``header_user_id`` /
+    ``header_task_id`` / ``header_attempt`` rather than believed.
     """
-    path = Path(path)
+    path = _as_path(path) or Path("")
     parsed = parse_log_name(path.name) or {}
     row: dict = {
         "path": str(path),
@@ -525,6 +608,8 @@ def summarize(path: Path | str) -> dict:
         "model": "",
         "brain": "",
         "header_user_id": "",
+        "header_task_id": None,
+        "header_attempt": None,
     }
     try:
         info = os.stat(path)
@@ -536,22 +621,39 @@ def summarize(path: Path | str) -> dict:
 
     header = read_header(path)
     if header is None:
-        row["reason"] = "no session header on line 1"
+        if not path.exists():
+            # The sweep unlinks `*.jsonl` under this root on the scheduler's
+            # interval, and `read_header` deliberately conflates "gone" with
+            # "not a transcript" on the grounds that a caller needing the
+            # difference has already stat'ed the path. This is that caller, and
+            # the stat above is now stale — so without this check an operator
+            # listing a tree during a sweep gets false corruption reports.
+            row["reason"] = "file no longer exists"
+        else:
+            row["reason"] = "no session header on line 1"
         return row
 
     row["readable"] = True
-    for key in ("task_id", "attempt", "model", "brain"):
+    for key in ("model", "brain"):
         value = header.get(key)
         if value is not None:
             row[key] = value
-    # `user_id` stays the *directory* the file was found in, deliberately, and
-    # is not overwritten by the header's. The directory is what `find_logs`
-    # scopes on, so it is the identity that carries the boundary; the header is
-    # file content. They agree on everything the writer produced, and where they
-    # disagree the displayed owner must be the one the scoping used.
-    claimed = header.get("user_id")
-    if isinstance(claimed, str) and claimed and claimed != row["user_id"]:
-        row["header_user_id"] = claimed
+
+    # **Three identity fields come off the name and the directory, never off the
+    # header, and the rule is one rule.** The name and the directory are what
+    # every lookup here filters on — `_logs_in` matches `task_id` against
+    # `parse_log_name`, `find_logs` scopes on the directory, and the CLI's
+    # `--task` and `--attempt` do the same — so they are the identity that
+    # carries the boundary. The header is file content. Taking `task_id` from
+    # the header made `session list --task 5000` print a row labelled "task
+    # 4471", after which `session show 4471` found nothing: the listing named a
+    # task the finder could not resolve. Where the two disagree it is the
+    # disagreement that is worth reporting, not the header's answer.
+    for key, claimed_key in (("user_id", "user_id"), ("task_id", "task_id"),
+                             ("attempt", "attempt")):
+        claimed = header.get(claimed_key)
+        if claimed is not None and claimed != "" and claimed != row[key]:
+            row[f"header_{key}"] = claimed
 
     last = read_last_record(path)
     if isinstance(last, dict) and last.get("type") == "result":
@@ -591,6 +693,7 @@ def _empty_digest(path: Path, reason: str) -> dict:
         "records": 0,
         "malformed": 0,
         "partial_tail": 0,
+        "unreadable": reason,
         "size": 0,
         "mtime": 0.0,
     }
@@ -612,6 +715,7 @@ def _empty_excerpt(path: Path, reason: str) -> dict:
         "turn_count": 0,
         "malformed": 0,
         "partial_tail": 0,
+        "unreadable": reason,
     }
 
 
@@ -639,7 +743,7 @@ def digest(path: Path | str) -> dict:
     result is reported ``answered: False`` rather than dropped — a run that
     timed out mid-tool is exactly the run somebody is reading this for.
     """
-    path = Path(path)
+    path = _as_path(path) or Path("")
     header, reason = _header_or_reason(path)
     if header is None:
         return _empty_digest(path, reason)
@@ -662,10 +766,10 @@ def digest(path: Path | str) -> dict:
         last_type = kind if isinstance(kind, str) else ""
         if kind == "context":
             context = {
-                "tools": record.get("tools") or [],
-                "system_prompt_chars": len(record.get("system_prompt") or ""),
-                "system_prompt_source": record.get("system_prompt_source") or "",
-                "tools_schema_sha256": record.get("tools_schema_sha256") or "",
+                "tools": _as_list(record.get("tools")),
+                "system_prompt_chars": len(_as_str(record.get("system_prompt"))),
+                "system_prompt_source": _as_str(record.get("system_prompt_source")),
+                "tools_schema_sha256": _as_str(record.get("tools_schema_sha256")),
             }
         elif kind == "message":
             message = record.get("message")
@@ -674,7 +778,7 @@ def digest(path: Path | str) -> dict:
             role = message.get("role")
             if role == "assistant":
                 turns += 1
-                for block in message.get("content") or []:
+                for block in _as_list(message.get("content")):
                     if not isinstance(block, dict) or block.get("type") != "tool_call":
                         continue
                     entry = {
@@ -722,11 +826,11 @@ def digest(path: Path | str) -> dict:
                 entry["images"] = images
         elif kind == "compaction":
             compactions.append({
-                "trigger": record.get("trigger") or "",
+                "trigger": _as_str(record.get("trigger")),
                 "recovery_index": record.get("recovery_index"),
                 "messages_dropped": record.get("messages_dropped"),
                 "tokens_before": record.get("tokens_before"),
-                "summary_chars": len(record.get("summary") or ""),
+                "summary_chars": len(_as_str(record.get("summary"))),
             })
         elif kind == "steer":
             steers += 1
@@ -741,16 +845,15 @@ def digest(path: Path | str) -> dict:
             serialization_errors += 1
         elif kind == "error":
             errors.append({
-                "kind": record.get("kind") or "",
-                "message": _clip(record.get("message") or "", _RESULT_PREVIEW_CHARS),
+                "kind": _as_str(record.get("kind")),
+                "message": _clip(_as_str(record.get("message")), _RESULT_PREVIEW_CHARS),
             })
         elif kind == "result":
-            text = record.get("result_text")
-            text = text if isinstance(text, str) else ""
+            text = _as_str(record.get("result_text"))
             result = {
                 "success": bool(record.get("success")),
-                "stop_reason": record.get("stop_reason") or "",
-                "model_used": record.get("model_used") or "",
+                "stop_reason": _as_str(record.get("stop_reason")),
+                "model_used": _as_str(record.get("model_used")),
                 "duration_ms": record.get("duration_ms"),
                 "usage": record.get("usage"),
                 "turns": record.get("turns"),
@@ -784,6 +887,13 @@ def digest(path: Path | str) -> dict:
         "records": stats.records,
         "malformed": stats.malformed,
         "partial_tail": stats.partial_tail,
+        # A read that died partway through — an EIO, a network mount going away,
+        # the sweep unlinking underneath. `read_records` has always recorded it
+        # and nothing read it back, so a truncated record set came out under
+        # `ok: True` with an empty reason: the caller believed it saw the whole
+        # run, which is the one failure the malformed count exists to prevent,
+        # arriving by the route that is counted and then discarded.
+        "unreadable": stats.unreadable,
         "size": size,
         "mtime": mtime,
     }
@@ -863,7 +973,7 @@ def excerpt(
     ``records_total`` is how the caller reports the cut instead of hiding it.
     ``0`` means no cap.
     """
-    path = Path(path)
+    path = _as_path(path) or Path("")
     header, reason = _header_or_reason(path)
     if header is None:
         return _empty_excerpt(path, reason)
@@ -914,14 +1024,19 @@ def excerpt(
             if role != "tool_result":
                 continue
         elif pattern is not None:
-            # `context` is never searched: it carries the daemon's own system
-            # prompt, which is identical across nearly every task and is
-            # configuration rather than a record of this run. Every other
-            # selector already excludes it — by kind allowlist, by role, and by
-            # `kind != "message"` — so leaving grep as the one way to pull it
-            # back out would be an accident rather than a decision, and the
-            # consumer that supplies the pattern is model-facing.
-            if kind == "context":
+            # Grep searches the conversation, the same set every other selector
+            # takes, rather than every record in the file. It was the one
+            # selector without this line, and the two records it could reach
+            # past it are both wrong to return. The `context` record carries the
+            # daemon's own system prompt, which is configuration and identical
+            # across nearly every task. The `result` record carries
+            # `result_text`, which the *writer* deliberately leaves uncapped
+            # because it is the deliverable — and since the size cap below
+            # always keeps its first record whatever it costs, a one-character
+            # pattern matching a result returned a record of unbounded size with
+            # `max_chars` in force. The consumer that supplies the pattern is
+            # model-facing and its own response budget is 8000 characters.
+            if kind not in _CONVERSATION_KINDS:
                 continue
             if not pattern.search(record_text(record)[:_MAX_GREP_SUBJECT_CHARS]):
                 continue
@@ -960,6 +1075,7 @@ def excerpt(
         "turn_count": turn_count,
         "malformed": stats.malformed,
         "partial_tail": stats.partial_tail,
+        "unreadable": stats.unreadable,
     }
 
 
@@ -998,12 +1114,22 @@ def _without_thinking(record: dict) -> dict:
 class TreeStats:
     """What ``istota session stats`` reports. Bytes are ``st_size``, not blocks.
 
-    Deliberately different from the sweep's du-style measurement, and the
-    difference is the point: the sweep bounds what a *volume* holds, so it counts
-    blocks, while this answers "how much transcript is there", which is content.
-    A reader comparing the two numbers should get the same order of magnitude
-    and not the same figure, and ``doctor``'s ``runtime.session_log_dir`` is the
-    check that reports against the ceiling.
+    Deliberately different from the sweep's du-style measurement, and there are
+    **two** differences, not one. The unit: the sweep bounds what a *volume*
+    holds, so it counts blocks, while this answers "how much transcript is
+    there", which is content. And the set: this counts only what
+    :func:`find_all_logs` yields, which is files whose name `parse_log_name`
+    recognises, one level under the root — while the sweep's own scan totals
+    every file under a user directory at any depth and treats anything ending
+    ``.jsonl`` as an eviction candidate. So an operator's stray file counts
+    toward the ceiling, and can be deleted by the sweep, while never appearing
+    here.
+
+    The consequence for a reader is that these two numbers agree in order of
+    magnitude and never exactly, and that this one is a floor on what the
+    ceiling sees rather than an estimate of it. ``doctor``'s
+    ``runtime.session_log_dir`` is the check that reports against the ceiling on
+    the sweep's own terms.
     """
 
     files: int = 0
@@ -1024,7 +1150,7 @@ def tree_stats(root: Path | str, *, since: float | None = None) -> TreeStats:
     for path in find_all_logs(root):
         try:
             info = os.stat(path)
-        except OSError:
+        except (OSError, ValueError):
             continue
         if since is not None and info.st_mtime < since:
             continue

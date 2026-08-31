@@ -2009,8 +2009,27 @@ _SESSION_RULE = "─" * 60
 
 
 def _session_root(args):
-    """The resolved log directory, and the config it came from."""
+    """The resolved log directory, and the config it came from.
+
+    Also the one place every session command passes through, which is why the
+    stdout guard is here. These four print transcript content — arbitrary tool
+    output, in whatever language the run was in — and the reader decodes with
+    ``errors="replace"``, whose own U+FFFD output is not ASCII either. On a
+    single-byte locale (`LC_ALL=en_US.ISO8859-1`; `LC_ALL=C` is safe, PEP 538
+    coerces it) printing any of that raises `UnicodeEncodeError` and turns a
+    readable transcript into a traceback. `repos_relocate.py` sets the precedent
+    and states the reason in the same words.
+    """
     from .session.session_log import resolve_session_log_dir
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            # A stream somebody replaced with something that is not a
+            # TextIOWrapper — a test's capture buffer, a pipe wrapper. Nothing
+            # to configure, and nothing here is worth failing a command over.
+            pass
 
     config = load_config(Path(args.config) if args.config else None)
     root = resolve_session_log_dir(config.db_path, config.brain.native.session_log.dir)
@@ -2092,7 +2111,13 @@ def cmd_session_list(args):
     from .session import session_log_read as slr
 
     _config, root = _session_root(args)
-    if args.user:
+    # `is None`, not truthiness. `find_logs`' whole contract is that a falsy user
+    # id finds nothing rather than quietly widening to every user, and branching
+    # on truthiness here reaches around it: `-u ""` listed the whole tree. It
+    # does not matter much for an operator already holding the tree — it matters
+    # because this is the first caller and the pattern the skill verb will be
+    # written against, and there the falsy value is `ISTOTA_USER_ID` unset.
+    if args.user is not None:
         paths = slr.find_logs(root, args.user, task_id=args.task)
     else:
         paths = slr.find_all_logs(root, task_id=args.task)
@@ -2121,22 +2146,41 @@ def cmd_session_list(args):
             f"task {task}-{attempt}  {_fmt_bytes(row['size']):>9}  {state}"
         )
         print(f"      {row['name']}")
-        if row["header_user_id"]:
-            # The owner shown is the *directory*, which is what the scoping uses;
-            # a header naming somebody else is a file that did not come from
-            # where it sits, and saying nothing would leave an operator reading
-            # it as that user's run.
-            print(
-                f"      ! header claims user {row['header_user_id']} — "
-                f"filed under {row['user_id']}"
-            )
+        _print_identity_disagreements(row)
+
+
+def _print_identity_disagreements(row: dict, indent: str = "      ") -> None:
+    """Say when a file's header disagrees with where and what it is filed as.
+
+    All three identity fields shown are the name's and the directory's, because
+    those are what every lookup filters on — so a header claiming otherwise is a
+    file that did not come from where it sits, and believing it would print a
+    row the finder cannot resolve. Reporting it is not decoration: taking the
+    header's `task_id` made `list --task 5000` print "task 4471", after which
+    `show 4471` found nothing.
+    """
+    for key, label in (
+        ("header_user_id", "user"),
+        ("header_task_id", "task"),
+        ("header_attempt", "attempt"),
+    ):
+        claimed = row.get(key)
+        if claimed in (None, ""):
+            continue
+        actual = row.get(key.replace("header_", "", 1))
+        print(f"{indent}! header claims {label} {claimed} — filed as {actual}")
 
 
 def _print_session_header(header: dict, path: Path, row: dict) -> None:
     print(f"Session {header.get('session_id', '')}")
+    # The identity line comes off `row`, not off `header`, for the reason
+    # `_print_identity_disagreements` states: the name and the directory are
+    # what every lookup filters on, so they are what an operator has to be shown.
+    # Printing the header's here while `list` printed the name's would have the
+    # two commands disagree about the same file.
     print(
-        f"  task {header.get('task_id')} attempt {header.get('attempt')} "
-        f"user {header.get('user_id')} source {header.get('source_type') or '-'}"
+        f"  task {row['task_id']} attempt {row['attempt']} "
+        f"user {row['user_id']} source {header.get('source_type') or '-'}"
     )
     print(
         f"  brain={header.get('brain') or '-'} model={header.get('model') or '-'} "
@@ -2145,10 +2189,19 @@ def _print_session_header(header: dict, path: Path, row: dict) -> None:
     )
     print(f"  started {header.get('ts', '-')}")
     print(f"  file {path} ({_fmt_bytes(row['size'])})")
+    _print_identity_disagreements(row, indent="  ")
 
 
 def _print_blocks(blocks, indent="    ") -> None:
-    for block in blocks or []:
+    # `isinstance`, not `or []`: the content list comes out of `json.loads` and
+    # its type is whatever was on the line. A scalar there was a `TypeError` out
+    # of `session show` on a damaged or foreign file, which is the case this
+    # command exists to be usable on.
+    if not isinstance(blocks, list):
+        if blocks is not None:
+            print(_indent(f"[unreadable content: {type(blocks).__name__}]", indent))
+        return
+    for block in blocks:
         if not isinstance(block, dict):
             continue
         kind = block.get("type")
@@ -2198,7 +2251,10 @@ def _print_record(record) -> None:
     kind = record.get("type")
     stamp = record.get("ts", "")
     if kind == "message":
-        message = record.get("message") or {}
+        message = record.get("message")
+        if not isinstance(message, dict):
+            print(f"{stamp}  message (unreadable: {type(message).__name__})")
+            return
         role = message.get("role", "?")
         if role == "assistant":
             head = f"assistant ({message.get('stop_reason') or '-'})"
@@ -2271,6 +2327,14 @@ def cmd_session_show(args):
         # blocks, and nothing here can put back what was never written.
         max_chars=0 if args.full else args.max_chars,
     )
+    if not out["ok"]:
+        # `digest` and `excerpt` are two reads of one path and the retention
+        # sweep unlinks under this root on the scheduler's interval, so the file
+        # can go between them. Discarding the reason rendered a header, a result
+        # summary and no conversation at all, exit 0 — a complete-looking run
+        # with nothing in it.
+        print(f"{path}: {out['reason']}", file=sys.stderr)
+        return 1
     context = digest.get("context")
     if context:
         print(f"\n{_SESSION_RULE}")
@@ -2325,6 +2389,14 @@ def cmd_session_show(args):
         notes.append(f"{digest['malformed']} malformed line(s) skipped")
     if digest["partial_tail"]:
         notes.append("trailing partial line skipped (session still being written)")
+    if digest["unreadable"]:
+        # The read died partway through — the file went, or the mount did. What
+        # was rendered above is a prefix of the run, and saying nothing here
+        # would present it as the whole of it.
+        notes.append(
+            f"the read stopped early ({digest['unreadable']}) — "
+            "what is shown above is a prefix of the run, not all of it"
+        )
     for note in notes:
         print(f"note: {note}")
     return None
@@ -2371,8 +2443,14 @@ def cmd_session_tail(args):
             polls += 1
             try:
                 size = os.path.getsize(path)
-            except (OSError, ValueError):
-                break
+            except (OSError, ValueError) as exc:
+                # Almost always the retention sweep unlinking underneath. The
+                # sibling branch below says so when the file merely shrank;
+                # breaking out in silence here returned 0 with nothing printed,
+                # which to a script and to an operator is indistinguishable from
+                # the session having ended normally.
+                print(f"{path}: {exc}", file=sys.stderr)
+                return 1
             if size < offset:
                 # Shorter than what we have already read: the file was replaced
                 # or truncated under us — the retention sweep unlinks under this
@@ -2436,6 +2514,16 @@ def cmd_session_stats(args):
     ceiling = config.brain.native.session_log.max_total_gb
     if ceiling:
         print(f"  ceiling: {ceiling} GB (deployment-wide, all users)")
+        # Printing the two figures on adjacent lines invites a comparison they
+        # do not support, so the difference is said rather than left to be
+        # discovered. It is two differences: the sweep counts blocks where this
+        # counts content, and the sweep totals every file under a user directory
+        # at any depth where this counts only recognised transcript names one
+        # level down. So this is a floor on what the ceiling sees.
+        print(
+            "  (the sweep measures blocks, and counts every file under a user "
+            "directory — this counts transcripts only, so it reads low)"
+        )
     if stats.files:
         print(f"  oldest {_fmt_mtime(stats.oldest)}, newest {_fmt_mtime(stats.newest)}")
     for user, entry in sorted(

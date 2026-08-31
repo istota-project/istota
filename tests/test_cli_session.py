@@ -197,12 +197,42 @@ class TestList:
         cli.cmd_session_list(_FakeArgs(config=str(cfg)))
         out = capsys.readouterr().out
         assert "header claims user bob" in out
-        assert "filed under alice" in out
+        assert "filed as alice" in out
 
     def test_an_agreeing_header_adds_no_line(self, tree, capsys):
         cfg, _root = tree
         cli.cmd_session_list(_FakeArgs(config=str(cfg)))
-        assert "header claims user" not in capsys.readouterr().out
+        assert "header claims" not in capsys.readouterr().out
+
+    def test_a_header_task_id_does_not_relabel_the_row(self, deployment, capsys):
+        # The row is labelled from the name because the name is what `--task`
+        # filters on. Taking the header's made `list --task 8200` print "task
+        # 4471", after which `show 4471` found nothing.
+        cfg, root = deployment
+        write_log(
+            root / "alice" / f"{STAMP}_task-8200-1.jsonl",
+            [_session(task_id=4471, attempt=9), _context(), _user(), _result()],
+        )
+        cli.cmd_session_list(_FakeArgs(config=str(cfg), task=8200))
+        out = capsys.readouterr().out
+        assert "task 8200-1" in out
+        assert "task 4471-9" not in out
+        assert "header claims task 4471" in out
+        assert "header claims attempt 9" in out
+
+    def test_an_empty_user_flag_finds_nothing_rather_than_everything(
+        self, tree, capsys,
+    ):
+        # `find_logs` refuses a falsy id by contract, and branching on
+        # truthiness here reached around it. It is the operator CLI, so this is
+        # not a boundary — it is the pattern the skill verb inherits, where the
+        # falsy value is `ISTOTA_USER_ID` unset.
+        cfg, _root = tree
+        cli.cmd_session_list(_FakeArgs(config=str(cfg), user=""))
+        out = capsys.readouterr().out
+        assert "No session logs" in out
+        assert "task-4471" not in out
+        assert "task-6000" not in out
 
 
 class TestShow:
@@ -444,6 +474,71 @@ class TestShow:
         assert cli.cmd_session_show(_FakeArgs(config=str(cfg), target="4471")) is None
         assert "task 4471" in capsys.readouterr().out
 
+    def test_the_identity_line_is_the_name_and_not_the_header(
+        self, deployment, capsys,
+    ):
+        # `show` and `list` must not disagree about the same file, and the one
+        # they have to agree on is the identity every lookup filters on.
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-8300-1.jsonl"
+        write_log(
+            path,
+            [_session(task_id=4471, attempt=9, user_id="bob"), _context(),
+             _user(), _result()],
+        )
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        out = capsys.readouterr().out
+        assert "task 8300 attempt 1 user alice" in out
+        assert "header claims task 4471" in out
+        assert "header claims user bob" in out
+
+    def test_a_record_field_of_the_wrong_type_renders_rather_than_crashing(
+        self, deployment, capsys,
+    ):
+        # `digest` used to raise `TypeError` on a scalar `content` and it came
+        # straight out of here as a traceback. The file may be damaged or
+        # half-written — that is the module's premise.
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-8400-1.jsonl"
+        write_log(
+            path,
+            [
+                _session(task_id=8400),
+                {"type": "context", "ts": "t", "system_prompt": 7, "tools": 7},
+                {"type": "message", "ts": "t",
+                 "message": {"role": "assistant", "content": 7}},
+                {"type": "compaction", "ts": "t", "summary": 7},
+                _result(),
+            ],
+        )
+        assert cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path))) is None
+        assert "Session" in capsys.readouterr().out
+
+    def test_a_read_that_stopped_early_is_said_and_not_passed_off_as_the_run(
+        self, deployment, capsys, monkeypatch,
+    ):
+        from istota.session import session_log_read as slr
+
+        cfg, root = deployment
+        path = full_session(root / "alice" / f"{STAMP}_task-8500-1.jsonl")
+        real = slr.read_records
+
+        def _partial(p, *, skip_malformed=True, stats=None):
+            for index, record in enumerate(
+                real(p, skip_malformed=skip_malformed, stats=stats)
+            ):
+                if index >= 3:
+                    if stats is not None:
+                        stats.unreadable = "OSError: [Errno 5] Input/output error"
+                    return
+                yield record
+
+        monkeypatch.setattr(slr, "read_records", _partial)
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        out = capsys.readouterr().out
+        assert "the read stopped early" in out
+        assert "prefix of the run" in out
+
     def test_a_missing_attempt_is_named_even_when_it_is_zero(self, tree, capsys):
         # Attempts are 1-based, so `--attempt 0` matches nothing. Reporting "no
         # log for task N" would name a different problem from the real one.
@@ -588,6 +683,33 @@ class TestTail:
         )
         assert "truncated or replaced" in capsys.readouterr().out
 
+    def test_a_file_unlinked_under_the_follow_loop_is_not_a_silent_exit_zero(
+        self, deployment, capsys, monkeypatch,
+    ):
+        # The sweep unlinks under this root on the scheduler's interval.
+        # Breaking out in silence returned 0 with nothing printed, which to a
+        # script and to an operator is the session having ended normally.
+        import time
+
+        cfg, root = deployment
+        path = full_session(root / "alice" / f"{STAMP}_task-6620-1.jsonl")
+
+        gone = {"done": False}
+
+        def _sleep(_seconds):
+            if not gone["done"]:
+                gone["done"] = True
+                path.unlink()
+
+        monkeypatch.setattr(time, "sleep", _sleep)
+        assert cli.cmd_session_tail(
+            _FakeArgs(
+                config=str(cfg), target=str(path), lines=0,
+                no_follow=False, poll_limit=3, interval=0.0,
+            )
+        ) == 1
+        assert "No such file" in capsys.readouterr().err
+
     def test_an_unresolvable_target_exits_non_zero(self, tree, capsys):
         cfg, _root = tree
         assert cli.cmd_session_tail(_FakeArgs(config=str(cfg), target="999999")) == 1
@@ -664,7 +786,14 @@ class TestStats:
         # a total with nothing to compare it against is a number nobody acts on.
         cfg, _root = tree
         cli.cmd_session_stats(_FakeArgs(config=str(cfg)))
-        assert "ceiling: 2.0 GB" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "ceiling: 2.0 GB" in out
+        # Two adjacent figures invite a comparison they do not support: the
+        # sweep counts blocks, and it counts every file under a user directory
+        # where this counts recognised transcripts only. Printing them side by
+        # side without saying so is what makes the difference a trap.
+        assert "the sweep measures blocks" in out
+        assert "counts transcripts only" in out
 
     def test_days_excludes_an_older_file(self, tree, capsys):
         import os

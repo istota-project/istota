@@ -161,18 +161,26 @@ def write_log(path: Path, records, *, trailing_newline=True, extra_lines=()) -> 
     return path
 
 
-def full_session(path: Path, *, user_id="alice") -> Path:
+def full_session(path: Path, *, user_id="alice", task_id=None, attempt=None) -> Path:
     """The canonical two-turn run: prompt, tool call, tool result, answer.
 
-    *user_id* goes in the header, and a fixture writing a file into another
-    user's directory has to set it: the reader treats a header that disagrees
-    with the directory as a fact worth reporting, so a fixture that disagrees by
-    accident makes every tree look like a tampered one.
+    The three identity fields default to **what the path says**, and a fixture
+    that wants a disagreement has to write one deliberately. The reader reports
+    a header disagreeing with the name or the directory, so a fixture disagreeing
+    by accident makes every tree look tampered with — and worse, it hides the
+    real assertion: this helper used to write `task_id=4471` into a file named
+    `task-5000-1`, which is exactly the defect the reporting exists to catch,
+    sitting unnoticed in the fixture every listing test ran against.
     """
+    parsed = reader.parse_log_name(path.name) or {}
     return write_log(
         path,
         [
-            _session(user_id=user_id),
+            _session(
+                user_id=user_id,
+                task_id=parsed.get("task_id", 4471) if task_id is None else task_id,
+                attempt=parsed.get("attempt", 1) if attempt is None else attempt,
+            ),
             _context(),
             _user(),
             _assistant(
@@ -296,7 +304,7 @@ class TestReadRecords:
 
 class TestReadHeader:
     def test_line_one_is_returned_when_it_is_a_session_record(self, tmp_path):
-        path = full_session(tmp_path / "a" / f"{STAMP}_task-1-1.jsonl")
+        path = full_session(tmp_path / "a" / f"{STAMP}_task-4471-1.jsonl")
         header = reader.read_header(path)
         assert header["task_id"] == 4471
         # 1-based, as the writer emits it.
@@ -349,10 +357,18 @@ class TestReadLastRecord:
         assert reader.read_last_record(path)["type"] == "result"
 
     def test_it_finds_the_last_record_past_a_long_tail(self, tmp_path):
-        # The backward read takes a bounded window; a record larger than that
-        # window must still be found rather than reported missing.
+        # The backward read takes a bounded window; a complete last record
+        # sitting behind an oversized *earlier* record must still be found.
+        #
+        # The size assertion is the point of the test, not decoration. At the
+        # 200,000 this used to write, the whole file fit inside `_TAIL_WINDOW`
+        # and the read never took the windowed path at all — it passed through
+        # the plain whole-file branch and could not have failed for the property
+        # its own comment names. Asserting the file is over the window is what
+        # stops a later bump to that constant from quietly neutering it again.
         path = tmp_path / f"{STAMP}_task-1-1.jsonl"
-        write_log(path, [_session(), _user("y" * 200_000), _result()])
+        write_log(path, [_session(), _user("y" * 400_000), _result()])
+        assert path.stat().st_size > reader._TAIL_WINDOW
         assert reader.read_last_record(path)["type"] == "result"
 
     def test_a_single_enormous_line_is_still_found(self, tmp_path):
@@ -770,13 +786,244 @@ class TestNeverRaises:
     def test_a_path_that_does_not_exist(self, tmp_path, call):
         call(tmp_path / "nope" / "x.jsonl")
 
+    @pytest.mark.requires_dac
     def test_an_unreadable_file_degrades(self, tmp_path):
+        # `requires_dac` because the assertion is about a permission bit, and
+        # root bypasses them: `scripts/test-linux.sh` runs as root in a
+        # container, where the file is still readable, `digest` answers ok and
+        # the tier goes red for a reason that says nothing about the code.
         path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
         path.chmod(0o000)
         try:
             assert reader.digest(path)["ok"] is False
         finally:
             path.chmod(0o600)
+
+
+class TestARecordFieldOfTheWrongType:
+    """Every field read off a line comes from `json.loads`, so its type is
+    whatever was written and not what the writer meant.
+
+    `TestNeverRaises` above parametrizes *filesystem* states — a directory, a
+    missing path, mode 000 — and never a value of an unexpected shape, so this
+    whole class was untested by construction. `digest` raised `TypeError` on
+    three of them and it escaped all the way out of `istota session show`. The
+    module's premise is that the file may be damaged, half-written, or somebody
+    else's JSONL that happens to open with a plausible header; in the second
+    consumer a traceback here is a failed task.
+    """
+
+    @pytest.mark.parametrize("record", [
+        # `content` a scalar, where `for block in ...` was iterating it.
+        {"type": "message", "ts": "t",
+         "message": {"role": "assistant", "content": 7}},
+        {"type": "message", "ts": "t",
+         "message": {"role": "tool_result", "tool_call_id": "c", "content": 7}},
+        # `len()` on a number.
+        {"type": "context", "ts": "t", "system_prompt": 7, "tools": 7},
+        {"type": "compaction", "ts": "t", "summary": 7, "trigger": 7},
+        {"type": "error", "ts": "t", "kind": 7, "message": 7},
+        {"type": "result", "ts": "t", "result_text": 7, "stop_reason": 7},
+        # The containers themselves being the wrong shape.
+        {"type": "message", "ts": "t", "message": "not a dict"},
+        {"type": "message", "ts": "t", "message": [1, 2, 3]},
+        {"type": 7, "ts": "t"},
+    ])
+    @pytest.mark.parametrize("call", [
+        lambda p: reader.digest(p),
+        lambda p: reader.excerpt(p),
+        lambda p: reader.excerpt(p, tools=True),
+        lambda p: reader.excerpt(p, grep="7"),
+        lambda p: reader.summarize(p),
+        lambda p: list(reader.read_records(p)),
+    ])
+    def test_no_entry_point_raises_on_it(self, tmp_path, record, call):
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [_session(), record, _result()],
+        )
+        call(path)
+
+    def test_the_header_itself_being_the_wrong_shape_is_survivable(self, tmp_path):
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [{"type": "session", "task_id": [], "user_id": 7, "attempt": {}},
+             _user(), _result()],
+        )
+        assert reader.digest(path)["ok"] is True
+        assert reader.summarize(path)["readable"] is True
+
+    def test_a_scalar_content_still_produces_a_tool_row(self, tmp_path):
+        # Degrading, not dropping: the call is still in the file and a reader
+        # asking "what did it run" gets an answer with zero output rather than
+        # a missing row.
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [
+                _session(), _context(), _user(),
+                _assistant(calls=[("c1", "Bash", {"command": "ls"})]),
+                {"type": "message", "ts": "t",
+                 "message": {"role": "tool_result", "tool_call_id": "c1",
+                             "tool_name": "Bash", "content": 7}},
+                _result(),
+            ],
+        )
+        tool = reader.digest(path)["tools"][0]
+        assert tool["name"] == "Bash"
+        assert tool["answered"] is True
+        assert tool["output_chars"] == 0
+
+
+class TestAReadThatStopsPartway:
+    """`read_records` has always recorded a mid-read failure and nothing read it
+    back, so a truncated record set came out under `ok: True` with an empty
+    reason — the caller believing it saw the whole run, which is the one failure
+    the malformed count exists to prevent, arriving by the counted route."""
+
+    def _dies_after(self, monkeypatch, after: int):
+        """`read_records` stopping partway, the way an EIO makes it.
+
+        `read_records`' own half — catching the failure and recording it — is
+        covered by `TestNeverRaises`. What was missing is the other half: the
+        two summarizing entry points carrying the field out, which is what
+        turned a truncated read into a clean `ok: True`. So the trigger is
+        substituted and the plumbing is what is asserted.
+        """
+        real = reader.read_records
+
+        def _partial(path, *, skip_malformed=True, stats=None):
+            for index, record in enumerate(
+                real(path, skip_malformed=skip_malformed, stats=stats)
+            ):
+                if index >= after:
+                    if stats is not None:
+                        stats.unreadable = "OSError: [Errno 5] Input/output error"
+                    return
+                yield record
+
+        monkeypatch.setattr(reader, "read_records", _partial)
+
+    def test_digest_reports_it_rather_than_calling_the_run_complete(
+        self, tmp_path, monkeypatch,
+    ):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        self._dies_after(monkeypatch, after=3)
+        out = reader.digest(path)
+        assert out["unreadable"]
+        # And it is not reported as a run that finished: the terminal record is
+        # one of the ones that never arrived.
+        assert out["complete"] is False
+
+    def test_excerpt_reports_it_too(self, tmp_path, monkeypatch):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        self._dies_after(monkeypatch, after=3)
+        assert reader.excerpt(path)["unreadable"]
+
+    def test_a_clean_read_reports_nothing(self, tmp_path):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        assert reader.digest(path)["unreadable"] == ""
+        assert reader.excerpt(path)["unreadable"] == ""
+
+
+class TestIdentityComesOffTheNameAndNotTheHeader:
+    """The three fields every lookup filters on, and the rule that they are the
+    name's and the directory's rather than the file body's."""
+
+    def test_a_header_task_id_does_not_relabel_the_row(self, tmp_path):
+        # The defect this pins: `list --task 5000` printed a row labelled "task
+        # 4471", after which `show 4471` found nothing — the listing named a
+        # task the finder could not resolve.
+        path = write_log(
+            tmp_path / "alice" / "2026-08-31T16-00-00-000Z_task-5000-1.jsonl",
+            [_session(task_id=4471, attempt=9), _context(), _user(), _result()],
+        )
+        row = reader.summarize(path)
+        assert row["task_id"] == 5000
+        assert row["attempt"] == 1
+        assert row["header_task_id"] == 4471
+        assert row["header_attempt"] == 9
+
+    def test_an_agreeing_header_reports_no_disagreement(self, tmp_path):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        row = reader.summarize(path)
+        assert row["header_task_id"] is None
+        assert row["header_attempt"] is None
+        assert row["header_user_id"] == ""
+
+    def test_a_file_deleted_between_the_stat_and_the_header_read_says_gone(
+        self, tmp_path, monkeypatch,
+    ):
+        # `read_header` conflates "gone" with "not a transcript" because a
+        # caller needing the difference has already stat'ed. `summarize` is that
+        # caller, and without a re-check an operator listing a tree during a
+        # sweep gets false corruption reports.
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        real = reader.read_header
+
+        def _unlink_then_read(p):
+            # The window itself: the stat above has already succeeded.
+            Path(p).unlink(missing_ok=True)
+            return real(p)
+
+        monkeypatch.setattr(reader, "read_header", _unlink_then_read)
+        row = reader.summarize(path)
+        assert "no longer exists" in row["reason"]
+        assert "header" not in row["reason"]
+        assert row["size"] > 0  # the stat did happen, so this is the race
+
+    def test_a_file_that_really_is_headerless_still_says_so(self, tmp_path):
+        # The control for the arm above: the file exists, so the reason must be
+        # the header rule and not the existence check.
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_context(), _user(), _result()])
+        assert "header" in reader.summarize(path)["reason"]
+
+
+class TestGrepStaysInsideTheConversation:
+    def test_it_never_returns_the_uncapped_result_record(self, tmp_path):
+        # `result_text` is uncapped by the writer because it is the deliverable,
+        # and `max_chars` always keeps its first record whatever that costs — so
+        # a one-character pattern matching a result returned a record of
+        # unbounded size with a cap in force.
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [_session(), _context(), _user(), _assistant(text="ok"),
+             _result(text="q" * 200_000)],
+        )
+        out = reader.excerpt(path, grep="q", max_chars=1000)
+        assert [r["type"] for r in out["records"]] == []
+        assert out["chars"] == 0
+
+    def test_a_dot_pattern_returns_the_conversation_and_nothing_else(
+        self, tmp_path,
+    ):
+        path = full_session(tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl")
+        kinds = {r["type"] for r in reader.excerpt(path, grep=".")["records"]}
+        assert kinds == {"message"}
+
+
+class TestNoneRoots:
+    """The second consumer reads its root out of a `proxy_only` manifest
+    variable, so an unwired or unset one arrives as `None`. The spec requires
+    that path to answer "no transcript", not to fail."""
+
+    def test_the_finders_answer_empty(self):
+        assert reader.find_logs(None, "alice") == []
+        assert reader.find_all_logs(None) == []
+
+    def test_tree_stats_answers_zero(self):
+        assert reader.tree_stats(None).files == 0
+
+    @pytest.mark.parametrize("call", [
+        lambda p: list(reader.read_records(p)),
+        lambda p: reader.read_header(p),
+        lambda p: reader.read_last_record(p),
+        lambda p: reader.summarize(p),
+        lambda p: reader.digest(p),
+        lambda p: reader.excerpt(p),
+    ])
+    def test_a_none_path_degrades(self, call):
+        call(None)
 
 
 class TestRecordText:
