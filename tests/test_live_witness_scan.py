@@ -163,6 +163,70 @@ class TestToolResults:
         frames = iter_frames(_transcript(_assistant_read("toolu_1", _IMAGE_PATH)))
         assert tool_result_content(frames, "toolu_1") is None
 
+    def test_a_bare_image_dict_counts(self):
+        """The CLI's tool-result shape is not pinned by any contract we own, so
+        the scanner takes an image block wherever in the result it sits — as the
+        content itself, or nested a level down."""
+        assert carries_image({"type": "image", "source": {"data": "x"}})
+
+    def test_an_image_nested_under_a_wrapper_key_counts(self):
+        assert carries_image(
+            {"content": [{"type": "image", "source": {"data": "x"}}]}
+        )
+
+    def test_a_result_shaped_like_an_image_but_typed_text_does_not(self):
+        assert not carries_image(
+            {"type": "text", "source": {"media_type": "image/png"}}
+        )
+
+    def test_an_image_type_with_no_payload_does_not_count(self):
+        """The cost of walking the nesting loosely, closed. A text result
+        carrying an image-typed *file descriptor* is not the picture coming
+        back, and a label with no bytes behind it is what that looks like."""
+        assert not carries_image(
+            {
+                "type": "text",
+                "text": "read 1 file",
+                "file": {"type": "image", "media_type": "image/png"},
+            }
+        )
+
+    def test_a_url_or_file_id_payload_counts(self):
+        assert carries_image({"type": "image", "source": {"url": "https://x/y.png"}})
+        assert carries_image({"type": "image", "source": {"file_id": "file_1"}})
+
+
+class TestMalformedFrames:
+    """A frame the CLI shaped differently must read as "nothing found", never
+    as an exception that looks like a broken test."""
+
+    def test_a_string_message_yields_no_calls(self):
+        raw = '{"type": "assistant", "message": "hello"}\n'
+        assert read_calls(iter_frames(raw)) == []
+
+    def test_content_that_is_not_a_list_yields_no_calls(self):
+        raw = '{"type": "assistant", "message": {"content": "hello"}}\n'
+        assert read_calls(iter_frames(raw)) == []
+
+    def test_an_empty_tool_use_id_matches_nothing(self):
+        """`read_calls` returns `""` for a block with no id, and a result block
+        missing its own `tool_use_id` must not be handed back as that call's
+        answer."""
+        raw = (
+            '{"type": "user", "message": {"content": '
+            '[{"type": "tool_result", "content": "whatever"}]}}\n'
+        )
+        assert tool_result_content(iter_frames(raw), "") is None
+
+    def test_a_tool_use_with_no_input_still_reports_the_call(self):
+        """Named, with an empty path, rather than dropped: a `Read` we cannot
+        match is not evidence that the image went unopened."""
+        raw = (
+            '{"type": "assistant", "message": {"content": '
+            '[{"type": "tool_use", "id": "toolu_1", "name": "Read"}]}}\n'
+        )
+        assert read_calls(iter_frames(raw)) == [("toolu_1", "")]
+
 
 class TestSummary:
     def test_the_summary_names_the_frames_and_the_tools(self):

@@ -1345,8 +1345,9 @@ class ClaudeCodeBrain:
             ]
         else:
             # The non-streaming path is where the daemon's own model calls run
-            # — the nightly sleep cycle, shared briefing blocks, four health OCR
-            # paths, the code reviewer, and conversation-context triage — none
+            # — the nightly sleep cycle, shared briefing blocks, three health OCR
+            # paths plus the biomarker explainer, the code reviewer, and
+            # conversation-context triage — none
             # of which has a task row. Without a structured format they were the
             # largest unmeasured spend in the deployment. Triage is the odd one
             # out on frequency: it runs once per conversational task with older

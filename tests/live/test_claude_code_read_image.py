@@ -37,8 +37,15 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("PIL", reason="Pillow not installed")
-from PIL import Image  # noqa: E402
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover — Pillow is a core dependency
+    # Not `importorskip`: that skips at collection, where `ISTOTA_LIVE_TIER=1`
+    # cannot see it, so the run that exists to make this execute would report
+    # "nothing to run". Pillow is core, so a missing one is a broken install and
+    # the flag should say so. Routed through `_unavailable` in the fixture below
+    # like every other reason.
+    Image = None  # type: ignore[assignment]
 
 from istota.brain._types import BrainRequest  # noqa: E402
 from istota.brain.claude_code import (  # noqa: E402
@@ -47,6 +54,7 @@ from istota.brain.claude_code import (  # noqa: E402
 )
 from istota.executor import build_allowed_tools  # noqa: E402
 from istota.image_attachments import prepare_image_attachments  # noqa: E402
+from istota.process_group import kill_process_group  # noqa: E402
 from istota.subscription_usage import resolve_token  # noqa: E402
 
 from .stream_json import (  # noqa: E402
@@ -98,6 +106,8 @@ def _requires_claude_code() -> None:
     probe would run on every `uv run pytest` in every xdist worker, for a test
     the marker has already deselected.
     """
+    if Image is None:
+        _unavailable("Pillow not installed")
     if shutil.which("claude") is None:
         _unavailable("no `claude` on PATH")
     if _AMBIENT_ENV.get("ISTOTA_LIVE_TIER") == "1":
@@ -126,6 +136,22 @@ def _two_region_image(path: Path) -> Path:
 
 
 def _child_env() -> dict[str, str]:
+    """The ambient environment plus the two things `_execute_attempt` sets.
+
+    Both come from `ClaudeCodeBrain._execute_attempt`, which applies them
+    immediately before calling `_build_command`, so a witness that took the
+    argv and not these would be running a configuration the daemon never
+    produces.
+
+    What this deliberately does *not* reproduce is the daemon's own
+    `build_clean_env`: the CLI needs a real `PATH` and `HOME` to find itself and
+    its credential. The consequence is worth knowing before reading a result —
+    the snapshot includes the repository's `.env`, which `tests/conftest.py`
+    loads at import, so a `.env` carrying `ANTHROPIC_BASE_URL` or
+    `ANTHROPIC_AUTH_TOKEN` points this run at a different endpoint than the one
+    the claim is about, and one carrying `ANTHROPIC_API_KEY` satisfies the
+    credential guard above.
+    """
     env = dict(_AMBIENT_ENV)
     # `claude` refuses --dangerously-skip-permissions as root unless an external
     # isolation boundary is signalled — the same thing `ClaudeCodeBrain` does
@@ -133,7 +159,43 @@ def _child_env() -> dict[str, str]:
     geteuid = getattr(os, "geteuid", None)
     if geteuid is not None and geteuid() == 0:
         env.setdefault("IS_SANDBOX", "1")
+    # No advisor is configured on this request, and the brain closes the
+    # settings-file channel whenever that is true — otherwise a host whose
+    # `~/.claude/settings.json` names an `advisorModel` runs one here that the
+    # product structurally disables, at extra paid cost.
+    env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
     return env
+
+
+def _run_cli(cmd: list[str], prompt: str, cwd: Path) -> tuple[int, str, str]:
+    """Run the CLI to completion, or kill its whole process group and say so.
+
+    `subprocess.run`'s timeout kills the direct child only, which for this CLI
+    orphans the tool subprocesses it spawned — the deferred half of ISSUE-257,
+    and the reason the brain's streaming spawn passes `start_new_session=True`.
+    A test that leaves a `claude` running on a developer's machine is worse than
+    one that fails.
+    """
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd),
+        env=_child_env(),
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(prompt, timeout=_TURN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        kill_process_group(process.pid)
+        stdout, stderr = process.communicate()
+        pytest.fail(
+            f"the CLI did not finish inside {_TURN_TIMEOUT_SECONDS}s. "
+            f"{transcript_summary(iter_frames(stdout or ''))}"
+        )
+    return process.returncode, stdout, stderr
 
 
 class TestReadReturnsThePicture:
@@ -160,34 +222,37 @@ class TestReadReturnsThePicture:
         prompt = build_image_prompt(req)
         assert str(image.path) in prompt
 
-        proc = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            cwd=tmp_path,
-            env=_child_env(),
-            timeout=_TURN_TIMEOUT_SECONDS,
-        )
-        frames = iter_frames(proc.stdout)
+        returncode, stdout, stderr = _run_cli(cmd, prompt, tmp_path)
+        frames = iter_frames(stdout)
         assert frames, (
-            f"no stream-json frames (rc={proc.returncode}): "
-            f"{proc.stderr.strip()[:400]}"
+            f"no stream-json frames (rc={returncode}): {stderr.strip()[:400]}"
         )
 
         summary = transcript_summary(frames)
+        # Joined against the run directory before resolving: `Path.resolve()`
+        # anchors a relative path on *this* process's cwd, which is the
+        # repository, not the `cwd=tmp_path` the CLI ran in. The directive names
+        # an absolute path, so a relative `file_path` is unlikely — but the
+        # failure mode is a paid run reporting that the model never opened an
+        # image it did open, and that run cannot be replayed for free.
         reads = [
             (call_id, path) for call_id, path in read_calls(frames)
-            if Path(path or "").resolve() == image.path
+            if path and Path(tmp_path, path).resolve() == image.path
         ]
         assert reads, (
             "the model never called Read on the image the directive named. "
             f"{summary}"
         )
 
-        content = tool_result_content(frames, reads[0][0])
-        assert content is not None, f"the Read call has no tool result. {summary}"
-        assert carries_image(content), (
-            "the Read tool result carried no image block, so the CLI returned "
+        # Any of them, not the first. `reads` is a list because the model may
+        # open the same path twice, and a first attempt that errored followed by
+        # one that worked still settles the claim — pinning `reads[0]` would
+        # make that an expensive flake.
+        results = [tool_result_content(frames, call_id) for call_id, _ in reads]
+        assert any(result is not None for result in results), (
+            f"no Read call on that path has a tool result. {summary}"
+        )
+        assert any(carries_image(result) for result in results), (
+            "no Read tool result carried an image block, so the CLI returned "
             f"the file as text rather than as a picture. {summary}"
         )

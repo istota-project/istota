@@ -114,6 +114,13 @@ _KEEP_NAMES = frozenset({
     "ISTOTA_UPDATE_GOLDEN",
     "ISTOTA_DEVBOX_IMAGE_TAG",
     "ISTOTA_LINUX_TIER",
+    # The `live` tier's counterpart, and kept for the same reason: it is a
+    # harness input naming what this host can do, not istota config. The
+    # live witness happens to read an import-time snapshot rather than
+    # `os.environ`, so scrubbing it changes nothing today — which is
+    # precisely why it would be missed. Every other reader would see the
+    # flag unset, skip, and report the tier as having nothing to run.
+    "ISTOTA_LIVE_TIER",
     # Contains TOKEN and so matches the credential rule, and is not one: it
     # silences the huggingface fork warning, and the `ml` tier is where it gets
     # set. The rule is a substring match by design, so an exception belongs

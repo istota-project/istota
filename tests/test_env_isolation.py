@@ -180,6 +180,7 @@ class TestThePolicy:
             "ISTOTA_IMAGE_TAG",
             "ISTOTA_DEVBOX_IMAGE_TAG",
             "ISTOTA_LINUX_TIER",
+            "ISTOTA_LIVE_TIER",
             "ISTOTA_UPGRADE_FROM",
             "ISTOTA_UPDATE_GOLDEN",
             "ISTOTA_UPGRADE_SHAPES",

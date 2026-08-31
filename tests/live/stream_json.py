@@ -71,7 +71,14 @@ def read_calls(frames: list[dict]) -> list[tuple[str, str]]:
 
 
 def tool_result_content(frames: list[dict], tool_use_id: str) -> Any:
-    """The `content` of the tool result answering `tool_use_id`, or `None`."""
+    """The `content` of the tool result answering `tool_use_id`, or `None`.
+
+    An empty id matches nothing rather than everything: `read_calls` returns
+    `""` for a `tool_use` block with no `id`, and a result block missing its
+    `tool_use_id` would otherwise be handed back as that call's answer.
+    """
+    if not tool_use_id:
+        return None
     for frame in frames:
         if frame.get("type") != "user":
             continue
@@ -84,21 +91,35 @@ def tool_result_content(frames: list[dict], tool_use_id: str) -> Any:
 
 
 def carries_image(content: Any) -> bool:
-    """Whether a tool result's content holds an image block.
+    """Whether a tool result's content holds an image block with pixels in it.
 
     The whole point of the witness: Claude Code documents that reading an image
     returns visual content rather than the file's bytes, and this is what
     distinguishes that from a text result saying the file is binary. Scoped to
-    the tool result's own content so an image block anywhere else in the
+    the tool result's own content, so an image block anywhere else in the
     transcript cannot answer for it.
+
+    An `image`-typed block **with no payload** does not count. The nesting is
+    walked loosely because nothing pins the CLI's tool-result shape for us, and
+    that looseness is exactly what would let a type marker on a file descriptor
+    — `{"type": "text", ..., "file": {"type": "image"}}` — read as sight. A
+    payload is the part a text result cannot have.
     """
     if isinstance(content, dict):
-        if content.get("type") == "image":
+        if content.get("type") == "image" and _has_payload(content):
             return True
         return any(carries_image(value) for value in content.values())
     if isinstance(content, list):
         return any(carries_image(item) for item in content)
     return False
+
+
+def _has_payload(block: dict) -> bool:
+    """Whether an image block carries bytes rather than only a label."""
+    source = block.get("source")
+    if isinstance(source, dict):
+        return bool(source.get("data") or source.get("url") or source.get("file_id"))
+    return bool(source or block.get("data"))
 
 
 def transcript_summary(frames: list[dict]) -> str:
