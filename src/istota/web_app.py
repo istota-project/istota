@@ -7,6 +7,7 @@ SvelteKit frontend served as static files, Python handles auth and API.
 """
 
 import asyncio
+import base64
 import hashlib
 import importlib
 import json
@@ -623,6 +624,11 @@ body {
   display: block;
 }
 :root[data-theme='light'] .mark { filter: invert(1); }
+/* The bot icon is a photograph rather than a silhouette, so it opts out of the
+   inversion above — running one through that filter produces a negative. Same
+   reason `Avatar.svelte` never applies `--sigil-filter`. */
+.mark.icon { border-radius: 1rem; }
+:root[data-theme='light'] .mark.icon { filter: none; }
 h1 {
   margin: 0;
   font-size: 1.35rem;
@@ -740,7 +746,94 @@ _MAIL_ICON = _lucide(
 )
 
 
-def _render_login_page(bot_name: str, version: str) -> str:
+# The mark at the top of both server-rendered cards: the deployment's bot icon
+# when an admin has set one, and the octopus sigil otherwise.
+#
+# The icon is inlined as a `data:` URI rather than reached through a second
+# route. That is **not** a privacy measure and should not be read as one — this
+# same page already serves the favicon and the sigil to an unauthenticated
+# browser off the static mount, and the inlined icon is public by the same
+# token. It is one fewer route for one image on one page, and the icon is
+# deployment branding rather than anything confidential.
+#
+# Memoized on the content hash, so a page load costs one connection and a
+# `SELECT content_hash`, never a BLOB. The connection is not saved by the memo
+# and that is deliberate: the database is what decides which mark is current,
+# and the two branches that depend on it are one line apart. A *replaced* icon
+# misses because the key is the hash. A *cleared* one takes the early return
+# above the memo read, which is the only thing standing between a warm memo and
+# an icon served on the login page after an admin deleted it — so the hash must
+# be queried before the memo is consulted, and
+# `test_clearing_the_icon_reverts_the_login_page_while_the_memo_is_warm` is what
+# holds that ordering against the obvious "check the memo first" optimization.
+#
+# One tuple replaced whole: two threads racing here encode the same bytes from
+# the same row and the rebind is atomic, so a lock would buy a consistency
+# nothing can observe.
+#
+# It runs on a dedicated single worker rather than the default executor, for the
+# reason the doctor deep check and the avatar decode each have one: this is the
+# app's only *unauthenticated* route that touches SQLite, and the default pool
+# is shared with every other `to_thread` caller in a single-process uvicorn — so
+# an anonymous flood against the login page would otherwise contend with the
+# authenticated app for the same bounded threads. Serializing costs nothing
+# worth measuring: a memo hit is one indexed row.
+_login_mark_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="login-mark",
+)
+_LOGIN_SIGIL_MARK = (
+    '<img class="mark sigil" src="/istota/octopus-sigil.webp" alt="" '
+    'width="68" height="72">'
+)
+_login_icon_memo: tuple[str, str] | None = None
+
+
+def _login_page_mark() -> str:
+    """The card's `<img>`: the bot icon inlined, or the sigil.
+
+    Never raises. This runs on the unauthenticated login path and on the
+    sign-in failure path, and a decoration that could take either of those down
+    would be a worse bug than a missing picture.
+    """
+    global _login_icon_memo
+
+    if _config is None:
+        return _LOGIN_SIGIL_MARK
+    try:
+        from . import avatars, db  # noqa: PLC0415
+
+        with db.get_db(_config.db_path) as conn:
+            content_hash = avatars.bot_avatar_hash(conn)
+            if not content_hash:
+                return _LOGIN_SIGIL_MARK
+            memo = _login_icon_memo
+            if memo is not None and memo[0] == content_hash:
+                return memo[1]
+            icon = avatars.get_bot_avatar(conn)
+        if icon is None:
+            return _LOGIN_SIGIL_MARK
+        encoded = base64.b64encode(icon.image).decode("ascii")
+        # `mime` is read back from the column, and `get_bot_avatar` is written
+        # as though that column were untrusted (it tolerates a NULL). Only
+        # `put_bot_avatar` writes it and it binds the literal `NORMALIZED_MIME`,
+        # so nothing shipped can put a quote in there — but this lands in an
+        # `src="…"` attribute on the one page an anonymous browser sees, and the
+        # app has no CSP behind it. Escaped so the guarantee is this line's
+        # rather than a different function's. The base64 needs none: it is
+        # `[A-Za-z0-9+/=]` by construction.
+        mark = (
+            f'<img class="mark icon" '
+            f'src="data:{escape(icon.mime, quote=True)};base64,{encoded}" '
+            f'alt="" width="72" height="72">'
+        )
+        _login_icon_memo = (icon.content_hash, mark)
+        return mark
+    except Exception:
+        logger.debug("bot icon unavailable for the login page", exc_info=True)
+        return _LOGIN_SIGIL_MARK
+
+
+def _render_login_page(bot_name: str, version: str, mark: str) -> str:
     """The unauthenticated landing page: one card, one working way in."""
     name = escape(bot_name)
     return (
@@ -751,7 +844,7 @@ def _render_login_page(bot_name: str, version: str) -> str:
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
         f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
         f'<main class="card">'
-        f'<img class="mark" src="/istota/octopus-sigil.webp" alt="" width="68" height="72">'
+        f'{mark}'
         f'<h1>{name}</h1>'
         f'<p class="tagline">Sign in to continue</p>'
         f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
@@ -767,7 +860,7 @@ def _render_login_page(bot_name: str, version: str) -> str:
 
 
 def _render_login_error_page(
-    bot_name: str, version: str, headline: str, detail: str
+    bot_name: str, version: str, headline: str, detail: str, mark: str
 ) -> str:
     """A login failure the user can act on, in the same card as the login page.
 
@@ -784,7 +877,7 @@ def _render_login_error_page(
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
         f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
         f'<main class="card">'
-        f'<img class="mark" src="/istota/octopus-sigil.webp" alt="" width="68" height="72">'
+        f'{mark}'
         f'<h1>{name}</h1>'
         f'<p class="tagline">{escape(headline)}</p>'
         f'<p class="tagline">{escape(detail)}</p>'
@@ -809,7 +902,10 @@ async def login(request: Request):
         from . import __version__
 
         bot_name = _config.bot_name if _config else "Istota"
-        return HTMLResponse(_render_login_page(bot_name, __version__))
+        mark = await asyncio.get_running_loop().run_in_executor(
+            _login_mark_executor, _login_page_mark,
+        )
+        return HTMLResponse(_render_login_page(bot_name, __version__, mark))
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
 
@@ -871,9 +967,17 @@ async def callback(request: Request):
 
     _bot_name = _config.bot_name if _config else "Istota"
 
-    def _login_error(status: int, headline: str, detail: str) -> HTMLResponse:
+    async def _login_error(status: int, headline: str, detail: str) -> HTMLResponse:
+        # `async` so the mark's one indexed read stays off the event loop, the
+        # same way the login page resolves it. The card is the login card, so
+        # the two must not diverge on what they render at the top.
+        mark = await asyncio.get_running_loop().run_in_executor(
+            _login_mark_executor, _login_page_mark,
+        )
         return HTMLResponse(
-            _render_login_error_page(_bot_name, __version__, headline, detail),
+            _render_login_error_page(
+                _bot_name, __version__, headline, detail, mark,
+            ),
             status_code=status,
         )
 
@@ -890,7 +994,7 @@ async def callback(request: Request):
             "OAuth2 callback state mismatch — session cookie missing or stale "
             "(client=%s)", request.client.host if request.client else "?",
         )
-        return _login_error(
+        return await _login_error(
             400,
             "Sign-in could not be completed",
             "This sign-in link has expired, or your browser did not send the "
@@ -899,7 +1003,7 @@ async def callback(request: Request):
     except OAuthError as e:
         # The provider declined — a cancelled consent, a revoked client.
         logger.warning("OAuth2 callback rejected by provider: %s", e)
-        return _login_error(
+        return await _login_error(
             400,
             "Sign-in was declined",
             "The identity provider did not authorise this sign-in.",
@@ -908,7 +1012,7 @@ async def callback(request: Request):
         # Token-endpoint unreachable or misbehaving. Distinct from the above:
         # retrying may work, but nothing the user did caused it.
         logger.exception("OAuth2 token exchange failed")
-        return _login_error(
+        return await _login_error(
             502,
             "Sign-in is temporarily unavailable",
             "Could not reach the identity provider. Please try again shortly.",
@@ -1281,6 +1385,13 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         "features": features,
         "contact": contact,
         "nextcloud_token": nextcloud_token,
+        # Content hashes for the two identities the client always renders, so
+        # it can build an immutable URL for each without a round trip. A third
+        # party's hash deliberately does not travel here or per message: the
+        # client asks `/avatars/user/{id}` with no version and pays one
+        # conditional request per author per session, which is cheaper than a
+        # field on every row of the byte-budgeted room-event stream.
+        "avatars": _avatar_hashes(username),
     }
 
 
@@ -1810,6 +1921,15 @@ def _admin_storage_section(db_path: Path) -> dict:
         # (standalone) install has no mount, so the frontend hides the row.
         "nextcloud_configured": bool(_config and _config.storage_is_nextcloud),
         "nextcloud_mount_healthy": mount_healthy,
+        # The bot's own Nextcloud account, so the bot-icon control can name the
+        # picture it is *not* changing rather than implying the two are linked.
+        # The app password the daemon holds cannot set an avatar there —
+        # `POST /index.php/avatar` is a session-and-CSRF-guarded web route, not
+        # OCS — so the divergence is permanent and worth stating.
+        "nextcloud_username": (
+            (_config.nextcloud.username or None)
+            if (_config and _config.storage_is_nextcloud) else None
+        ),
     }
 
 
@@ -4733,7 +4853,10 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     `author_label` is an already-sanitized external sender, and both NULL means
     the room owner — which is the correct fallback for a pre-migration row.
     `author` is emitted only when the writer is *not* the viewer, since absence
-    is what tells the client to use its own label.
+    is what tells the client to use its own label. `author_id` rides beside it
+    on that one branch — the label is a display string and the avatar endpoint
+    keys on the user id — so a co-member's turn can be pictured as well as
+    named, and an external sender's turn carries neither an id nor a request.
 
     The label is tested first, so it wins if a writer ever sets both. That is
     the cautious direction and the reason is in the `schema.sql` comment: the
@@ -4801,6 +4924,25 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
         out["author"] = author_label
     elif author_user_id and author_user_id != viewer:
         out["author"] = _display_name_for(author_user_id)
+        # The label names the writer; this is the writer, as the avatar
+        # endpoint keys them. It rides only in this branch, which is the label
+        # rule restated rather than a second one: an `author_label` is an
+        # external sender who is no istota user, so a request built from it
+        # would 404 once per turn, and the viewer's own row is identified by
+        # absence here exactly as it is above — the client holds its own hash
+        # off `/me` and would trade an immutable URL for a bare one.
+        #
+        # The id alone, never the picture's hash: this dict rides the
+        # byte-budgeted room-event stream, and a hash per row buys one saved
+        # 304 per author per session (D13).
+        #
+        # Publishing it is not a grant, and the two are not the same question:
+        # this is a column on a stored row, while `/avatars/user/{id}` asks
+        # `shares_room_with` live. A writer who has since left the room keeps
+        # their id on every historic row and their picture 404s — the chip,
+        # which is the right answer and the reason the endpoint gates for
+        # itself rather than trusting what the payload named.
+        out["author_id"] = author_user_id
 
     # `_row_get` rather than indexing, like the author columns above: a producer
     # that predates the column must degrade to today's rendering, not raise.
@@ -7357,6 +7499,543 @@ async def chat_download_file(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# ---- Avatars ----
+#
+# Four routes: the deployment's bot icon, one user's picture, and the caller's
+# own upload and removal. The store and the decode path are `avatars.py`; what
+# lives here is who may see a face, what a cache may keep, and the two size
+# checks that stand in front of the decoder.
+#
+# **The refused case and the empty case are one answer.** A 403 for "not
+# visible" and a 404 for "no avatar" would let any authenticated caller
+# enumerate the deployment's user list one id at a time, and an avatar is a
+# face. Same rule as message stars: not-found and not-a-member are deliberately
+# indistinguishable. `_avatar_not_found` is the single response object every
+# such branch returns, so the three cases cannot drift apart by editing one.
+#
+# **The cache table, and why branch 5 is not `immutable`:**
+#
+#   1. no stored avatar, or not visible  404  private, max-age=30
+#   2. If-None-Match matches             304  whatever 3/4/5 would have sent
+#   3. `v` absent or stale               200  private, no-cache
+#   4. `v` matches, bot or self          200  private, max-age=31536000, immutable
+#   5. `v` matches, a co-member          200  private, max-age=300
+#
+# Co-membership is a grant that can end — a room torn down, a member dropped —
+# while the self and bot cases cannot. A year-long `immutable` entry for a
+# co-member's face outlives any of that, which would make the authorization
+# predicate unenforceable exactly when it starts mattering. Five minutes is
+# long enough to cover a transcript render and short enough that a change of
+# membership takes effect. Branch 2 re-sends `Cache-Control` because a 304 that
+# omits it leaves the stored entry on whatever freshness it was first cached
+# with, and the three 200 branches do not agree.
+#
+# What the window does *not* claim is that any particular user action ends the
+# grant. On a Talk-origin room it usually does not: `room_dismissals` is a
+# display tombstone and the poll re-adds a dropped `room_members` row, so
+# hiding a shared room does not stop the two people being in that Talk
+# conversation together. `db.shares_room_with` says so at length. The cache
+# rule is the weaker and true one — whatever the predicate answers, a client
+# may hold that answer for five minutes and no longer.
+#
+# Branch 1 is a short negative cache rather than `no-store`: with `no-store` a
+# room holding one avatar-less member costs a 404 on every page load forever.
+#
+# **The shared-device residual, stated rather than left implicit.** `private`
+# excludes shared intermediary caches and says nothing about the browser's own
+# disk cache surviving a logout. On a browser profile two people take turns
+# using, the second can pull the first's own face out of cache with no session.
+# Accepted: it is one person's face on a machine they were just signed into,
+# the same class as the back button showing the last rendered page, and it is
+# bounded to branch 4 and to branch 5's five minutes. If that ever becomes
+# unacceptable the answer is `private, no-store` plus client-side blob URLs,
+# not a longer header.
+#
+# The same header has a second residual, on content rather than access:
+# removing a picture changes what `/me` reports, so nothing new asks for the
+# old URL, but a page still holding a rendered `?v=<old-hash>` — an open tab, a
+# restored session, the bfcache — keeps serving the removed face from disk with
+# no revalidation. Accepted for the same reason and with the same remedy.
+#
+# `Content-Disposition` is deliberately not `attachment`, unlike `/chat/files`:
+# that endpoint serves arbitrary user-supplied bytes, this serves bytes the app
+# itself encoded as WebP one function ago, and it has to render in an `<img>`.
+
+# Multipart envelope allowance on top of the byte cap: a boundary, one part's
+# headers and the trailing CRLFs. Generous, because it only decides when the
+# stream is cut off — the cap that decides what is *stored* is checked again on
+# the file part itself, inside `avatars.normalize`. `_avatar_upload_part` holds
+# the parser to one file and two fields so the envelope cannot outgrow it.
+_AVATAR_MULTIPART_ALLOWANCE = 8192
+
+# **A per-request memory budget, enforced as a one-at-a-time decode.**
+#
+# `avatars.normalize` bounds the decode on the declared pixel count, but that
+# is not the whole peak: Pillow decompresses a PNG's text chunks inside
+# `Image.open`, before any ceiling this app can see, bounded only by Pillow's
+# own `MAX_TEXT_MEMORY` (64 MiB). Measured, a 67 KB PNG of nothing but text
+# chunks peaks near 67 MB and is then accepted as an ordinary avatar. So one
+# upload can cost far more than its 4 MB cap suggests, and the only knobs that
+# would fix it at the source are Pillow module globals shared with the
+# executor's attachment pre-shrink running in another thread — which is exactly
+# why `avatars.py` writes none of them.
+#
+# What the route can bound is how many uploads pay that peak at once. One
+# worker of its own, following the doctor deep-check executor above: an avatar
+# upload is a rare, ~50ms interactive action, so serializing costs nothing
+# worth measuring, and on the default executor a burst would both multiply the
+# peak and pin workers shared with every other `to_thread` caller in a
+# single-process uvicorn.
+_avatar_decode_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="avatar-decode",
+)
+
+
+def _avatar_not_found() -> JSONResponse:
+    """The one answer for every "you get no picture here" branch."""
+    return JSONResponse(
+        {"error": "not found"},
+        status_code=404,
+        headers={
+            "Cache-Control": "private, max-age=30",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _avatar_if_none_match(header: str | None, content_hash: str) -> bool:
+    """Whether a conditional request already holds the current bytes.
+
+    Takes a list, `W/` prefixes and `*`, because a browser sends back what it
+    was given and an intermediary is free to weaken a strong validator.
+    """
+    if not header:
+        return False
+    for candidate in header.split(","):
+        token = candidate.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        if token.strip('"') == content_hash:
+            return True
+    return False
+
+
+def _avatar_response(
+    request: Request,
+    *,
+    content_hash: str,
+    mime: str,
+    image: bytes,
+    version: str,
+    revocable: bool,
+) -> Response:
+    """Branches 2 to 5 of the table above, in that order."""
+    if version and version == content_hash:
+        cache = (
+            "private, max-age=300" if revocable
+            else "private, max-age=31536000, immutable"
+        )
+    else:
+        cache = "private, no-cache"
+    headers = {
+        "Cache-Control": cache,
+        "ETag": f'"{content_hash}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if _avatar_if_none_match(request.headers.get("if-none-match"), content_hash):
+        return Response(status_code=304, headers=headers)
+    # `mime` is read from the column and never sniffed. It can only hold
+    # `NORMALIZED_MIME`, because that is the only thing `normalize` emits.
+    return Response(content=image, media_type=mime, headers=headers)
+
+
+def _load_bot_avatar():
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        return avatars.get_bot_avatar(conn)
+
+
+def _load_visible_user_avatar(viewer: str, subject: str):
+    """The subject's picture, or None when the caller may not have it.
+
+    Not-visible and not-present collapse to one return value here rather than
+    at the route, so no caller can accidentally tell them apart.
+    """
+    from . import avatars, db
+
+    with db.get_db(_config.db_path) as conn:
+        if viewer != subject and not db.shares_room_with(conn, viewer, subject):
+            return None
+        return avatars.get_user_avatar(conn, subject)
+
+
+def _avatar_hashes(username: str) -> dict:
+    """The two content hashes `/me` carries, or nulls.
+
+    Best-effort. `/me` is the identity every page in the app reads, and these
+    two keys are decoration on it: a framework database that predates the
+    avatar migration must cost the decoration, not the route.
+    """
+    if _config is None:
+        return {"user": None, "bot": None}
+    from . import avatars, db
+
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return {
+                "user": avatars.user_avatar_hash(conn, username),
+                "bot": avatars.bot_avatar_hash(conn),
+            }
+    except sqlite3.Error:
+        logger.debug("avatar hashes unavailable for /me", exc_info=True)
+        return {"user": None, "bot": None}
+
+
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    """Read the request body, refusing before it exists in memory.
+
+    Two checks, and neither substitutes for the other. The declared length is
+    what lets the refusal happen before a byte is read; the running total is
+    the enforcement, because the declared length is a claim. The only upstream
+    bound is nginx's `client_max_body_size`, which the deployment renders from
+    the chat attachment limit and sets to 100 MB — so a cap checked on
+    `len(await file.read())` materializes up to that per concurrent request
+    before refusing.
+    """
+    from starlette.requests import ClientDisconnect
+
+    from .avatars import AvatarError
+
+    declared = request.headers.get("content-length")
+    try:
+        length = int(declared)
+    except (TypeError, ValueError):
+        # A multipart upload from a browser always sets it.
+        raise AvatarError(413, "the upload must declare its length") from None
+    if length < 0 or length > limit:
+        raise AvatarError(413, "that upload is too large")
+
+    buf = bytearray()
+    try:
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > limit:
+                # The rest of the stream is not read.
+                raise AvatarError(413, "that upload is too large")
+    except ClientDisconnect:
+        # An upload the user cancels in the picker, or one that dies on a
+        # mobile connection, is the ordinary case rather than the exotic one.
+        # Nothing reaches the caller either way; converting it keeps a
+        # traceback per aborted upload out of the log.
+        raise AvatarError(400, "the upload was interrupted") from None
+    return bytes(buf)
+
+
+async def _avatar_upload_part(request: Request, raw: bytes):
+    """The `file` part of an already-bounded multipart body.
+
+    Nothing here bounds the file part's size, and it does not need to:
+    `max_part_size` is checked only for parts *without* a filename
+    (`starlette/formparsers.py`, inside `if self._current_part.file is None`),
+    so a real upload never sees it. The body is already bounded by
+    `_read_bounded_body` and the part itself by `normalize`. `max_files` and
+    `max_fields` are held to what one upload needs, so the envelope stays
+    inside the allowance the body read grants it.
+    """
+    # Starlette's `UploadFile`, not FastAPI's: FastAPI's is a *subclass* it
+    # substitutes when it does the parsing itself, and this parser is ours, so
+    # an `isinstance` against the subclass refuses every real upload.
+    from python_multipart.exceptions import FormParserError
+    from starlette.datastructures import UploadFile as _UploadedPart
+    from starlette.formparsers import MultiPartException, MultiPartParser
+
+    from .avatars import AvatarError
+
+    async def _one_shot():
+        yield raw
+
+    parser = MultiPartParser(
+        request.headers,
+        _one_shot(),
+        max_files=1,
+        max_fields=2,
+    )
+    try:
+        form = await parser.parse()
+    # `MultiPartException` is Starlette's own and covers the limits above.
+    # `FormParserError` is the underlying parser's, is an unrelated class, and
+    # is what a body that does not match its declared boundary actually raises
+    # — reachable by any authenticated caller, and by a truncated proxy write.
+    # Uncaught it was a 500 with a traceback, carrying none of the `{error}`
+    # shape the client reads.
+    except (MultiPartException, FormParserError) as e:
+        raise AvatarError(400, "that upload is not a valid multipart body") from e
+    try:
+        part = form.get("file")
+        if not isinstance(part, _UploadedPart):
+            raise AvatarError(400, "the upload needs a `file` part")
+        return await part.read(), part.content_type
+    finally:
+        await form.close()
+
+
+async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
+    """A multipart request body → normalized WebP bytes and their sha256.
+
+    Raises `AvatarError`; every route renders that the same way. One caller
+    today, the user's own upload; separated from it so the admin bot-icon
+    upload (Stage 5) takes the two size checks and the decode budget by
+    calling this rather than by reproducing them.
+    """
+    from . import avatars
+    from .avatars import AvatarError
+
+    max_bytes = (_config.web.max_avatar_kb * 1024) if _config else 0
+    if max_bytes <= 0:
+        # `max_avatar_kb = 0` switches uploads off, which is the useful reading
+        # of a zero byte cap and is what the four documentation sites say. The
+        # serving routes are unaffected: an already-stored picture is still
+        # served, and an operator turning uploads off is not asking for every
+        # face in the deployment to disappear.
+        raise AvatarError(503, "avatar uploads are not configured")
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise AvatarError(400, "expected a multipart upload with a `file` part")
+
+    raw = await _read_bounded_body(request, max_bytes + _AVATAR_MULTIPART_ALLOWANCE)
+    part, declared = await _avatar_upload_part(request, raw)
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _avatar_decode_executor,
+        # Resolved at call time so the module attribute is what runs.
+        lambda: avatars.normalize(
+            part, declared_format=declared, max_bytes=max_bytes,
+        ),
+    )
+
+
+@api_router.get("/avatars/bot")
+async def avatar_bot(
+    request: Request,
+    v: str = "",
+    _user: dict = Depends(_require_api_auth),
+):
+    """The deployment's bot icon. Any authenticated caller.
+
+    Behind auth because every other API route is, not because the bytes are
+    secret: the icon is deployment branding, and the login page is meant to
+    render it for an unauthenticated browser (Stage 5) the same way it already
+    serves the sigil and the favicon off the static mount.
+    """
+    if _config is None:
+        return _avatar_not_found()
+    icon = await asyncio.to_thread(_load_bot_avatar)
+    if icon is None:
+        return _avatar_not_found()
+    return _avatar_response(
+        request,
+        content_hash=icon.content_hash,
+        mime=icon.mime,
+        image=icon.image,
+        version=v,
+        revocable=False,
+    )
+
+
+@api_router.get("/avatars/user/{user_id}")
+async def avatar_user(
+    user_id: str,
+    request: Request,
+    v: str = "",
+    user: dict = Depends(_require_api_auth),
+):
+    """One user's picture: the caller's own, or a co-member's.
+
+    Every refusal is `_avatar_not_found`. See the section header for why that
+    is the same answer as "this user has no picture".
+    """
+    if _config is None:
+        return _avatar_not_found()
+    viewer = user["username"]
+    avatar = await asyncio.to_thread(_load_visible_user_avatar, viewer, user_id)
+    if avatar is None:
+        return _avatar_not_found()
+    return _avatar_response(
+        request,
+        content_hash=avatar.content_hash,
+        mime=avatar.mime,
+        image=avatar.image,
+        version=v,
+        # The one revocable grant on this endpoint.
+        revocable=viewer != user_id,
+    )
+
+
+# The four helpers below take `db_path` rather than reading `_config` for
+# themselves, and that is not tidiness: each runs on a worker thread while the
+# route's `_config is None` check ran on the event loop, so a SIGHUP
+# `_reload_config` rebinding the global in between is an `AttributeError` in
+# the worker and a 500 on a request that had already been validated. Resolving
+# the path where the check happens closes the window.
+def _store_user_avatar(
+    db_path: Path, username: str, image: bytes, content_hash: str,
+) -> None:
+    from . import avatars, db
+
+    with db.get_db(db_path) as conn:
+        avatars.put_user_avatar(
+            conn, username, source=avatars.SOURCE_UPLOAD,
+            image=image, content_hash=content_hash,
+        )
+
+
+@api_router.put("/settings/avatar")
+async def settings_upload_avatar(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Replace the caller's own uploaded picture.
+
+    Deliberately takes `request` rather than an `UploadFile` parameter: FastAPI
+    reads and parses the whole body before it solves dependencies, so a
+    declared-length check written as a dependency would run after the thing it
+    is meant to bound had already been spooled.
+    """
+    from . import avatars
+    from .avatars import AvatarError
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    db_path = _config.db_path
+    try:
+        image, digest = await _read_avatar_upload(request)
+    except AvatarError as e:
+        # `ChatFileError`'s shape, not FastAPI's `HTTPException`: the frontend
+        # upload helpers read `body.error`.
+        return JSONResponse({"error": e.message}, status_code=e.status)
+
+    await asyncio.to_thread(
+        _store_user_avatar, db_path, user["username"], image, digest,
+    )
+    logger.info(
+        "avatar uploaded user=%s bytes=%d hash=%s",
+        user["username"], len(image), digest[:12],
+    )
+    return {"hash": digest, "mime": avatars.NORMALIZED_MIME, "bytes": len(image)}
+
+
+def _drop_user_avatar(db_path: Path, username: str) -> bool:
+    from . import avatars, db
+
+    with db.get_db(db_path) as conn:
+        return avatars.delete_user_avatar(conn, username, avatars.SOURCE_UPLOAD)
+
+
+@api_router.delete("/settings/avatar")
+async def settings_delete_avatar(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Remove the caller's uploaded picture, revealing any imported one.
+
+    Only the `upload` row goes. Idempotent: no row is `{"deleted": false}`,
+    not a 404.
+    """
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    deleted = await asyncio.to_thread(
+        _drop_user_avatar, _config.db_path, user["username"],
+    )
+    return {"deleted": deleted}
+
+
+# The deployment's bot icon, set by an admin.
+#
+# These are the first mutating admin routes in this file, and deliberately not
+# a new shape: `briefings/routes.py` already ships three under the same
+# `require_admin` + `verify_origin` pair, and these copy them. The upload takes
+# `_read_avatar_upload` whole rather than reproducing the two size checks and
+# the one-at-a-time decode budget — a second copy of a bound is a second thing
+# to get wrong, and this endpoint's body is as untrusted as the user's own.
+#
+# The icon is deployment-wide and there is one row, so two admins setting it at
+# once resolve as last writer wins. Nothing to merge, so nothing to merge
+# wrongly.
+#
+# Distinct from the bot's Nextcloud Talk avatar, and unable to change it: that
+# one is the bot account's profile picture, and `POST /index.php/avatar` is a
+# session-and-CSRF-guarded web route rather than OCS, while the daemon holds an
+# app password used as HTTP Basic. The admin page says so in a sentence rather
+# than implying the two are linked.
+
+
+def _store_bot_avatar(db_path: Path, image: bytes, content_hash: str) -> None:
+    from . import avatars, db
+
+    with db.get_db(db_path) as conn:
+        avatars.put_bot_avatar(conn, image=image, content_hash=content_hash)
+
+
+@api_router.put("/admin/avatar")
+async def admin_upload_bot_avatar(
+    request: Request,
+    _admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Replace the deployment's bot icon.
+
+    Takes `request` rather than an `UploadFile` parameter for the reason the
+    user's own upload does: FastAPI reads and parses the whole body before it
+    solves dependencies, so a declared-length check written as a dependency
+    would run after the thing it is meant to bound had already been spooled.
+    """
+    from . import avatars
+    from .avatars import AvatarError
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    db_path = _config.db_path
+    try:
+        image, digest = await _read_avatar_upload(request)
+    except AvatarError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status)
+
+    await asyncio.to_thread(_store_bot_avatar, db_path, image, digest)
+    logger.info(
+        "bot icon set by %s bytes=%d hash=%s",
+        _admin["username"], len(image), digest[:12],
+    )
+    return {"hash": digest, "mime": avatars.NORMALIZED_MIME, "bytes": len(image)}
+
+
+def _drop_bot_avatar(db_path: Path) -> bool:
+    from . import avatars, db
+
+    with db.get_db(db_path) as conn:
+        return avatars.delete_bot_avatar(conn)
+
+
+@api_router.delete("/admin/avatar")
+async def admin_delete_bot_avatar(
+    _admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Clear the deployment's bot icon, reverting to the amber initial chip.
+
+    Idempotent: no row is `{"deleted": false}`, not a 404.
+    """
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    deleted = await asyncio.to_thread(_drop_bot_avatar, _config.db_path)
+    if deleted:
+        logger.info("bot icon cleared by %s", _admin["username"])
+    return {"deleted": deleted}
 
 
 # ---- Google Workspace API routes ----

@@ -939,6 +939,37 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Profile pictures. Created here for existing DBs; schema.sql also has both
+    # (with the full commentary) for fresh installs. Deliberately outside the
+    # try/except above: that block swallows OperationalError, and a swallowed
+    # failure here is a daemon that 500s on /me rather than one that says so.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_avatars (
+            user_id      TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            mime         TEXT NOT NULL DEFAULT 'image/webp',
+            content_hash TEXT NOT NULL DEFAULT '',
+            image        BLOB,
+            remote_etag  TEXT NOT NULL DEFAULT '',
+            checked_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, source)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_avatar (
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            mime         TEXT NOT NULL DEFAULT 'image/webp',
+            content_hash TEXT NOT NULL,
+            image        BLOB NOT NULL,
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
     _migrate_processed_emails_uidvalidity(conn)
     _migrate_unified_rooms(conn)
     _migrate_scheduled_transcript_cleanup(conn)
@@ -3658,6 +3689,52 @@ def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> b
     row = conn.execute(
         "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def shares_room_with(conn: sqlite3.Connection, user_a: str, user_b: str) -> bool:
+    """True when both users are members of at least one room in common.
+
+    The visibility predicate for a co-member's avatar. Written now rather than
+    when web rooms gain a second member, because retrofitting an authorization
+    predicate onto a URL clients have already cached is the worse order — and
+    group Talk rooms are already multi-member, so it is not purely future work.
+
+    Wider than "a co-member sees a co-member", and deliberately so rather than
+    by oversight: `_istota_members_for_conversation` seeds `room_members` for
+    every istota user in a Talk conversation the first time the poll registers
+    it, and `ingest.record_inbound` adds any sender. So the real predicate is
+    "anyone who can put A in a Talk room with them can read A's face" — the
+    same access they already have to A's name and presence in Talk. Accepted
+    for a face; a future source with more to disclose must not inherit it
+    unexamined.
+
+    **Membership here, and not what the room list renders.** `room_dismissals`
+    and `rooms.archived` are deliberately not subtracted, though
+    `list_member_rooms` subtracts both. Hiding a room in the web UI is a
+    display decision, not leaving the conversation: the two people are still in
+    that Talk room together, and the poll re-adds a dropped `room_members` row
+    the next time it registers the room — which is what the schema comment on
+    `room_dismissals` says outright, and why the web delete and archive paths
+    pair `remove_room_member` with `dismiss_room`. So a caller must not read a
+    `remove_room_member` on a Talk-origin room as a durable revocation. What is
+    durable is a room that is gone: `delete_web_chat_room` clears its members
+    and no poll re-seeds a web-origin room.
+
+    The consequence for the avatar endpoint is stated where the cache policy
+    is: the five-minute window bounds how long a client may hold whatever this
+    answers, and claims nothing about what ends the grant.
+
+    `idx_room_members_user` covers both sides of the self-join.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM room_members a
+        JOIN room_members b ON a.room_token = b.room_token
+        WHERE a.user_id = ? AND b.user_id = ? LIMIT 1
+        """,
+        (user_a, user_b),
     ).fetchone()
     return row is not None
 

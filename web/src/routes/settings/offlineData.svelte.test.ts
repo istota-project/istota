@@ -32,6 +32,13 @@ const api = vi.hoisted(() => ({
   })),
   updateProfile: vi.fn(async () => ({})),
   disconnectNextcloudToken: vi.fn(async () => ({})),
+  // The Identity card's profile-picture control. The whole module is mocked,
+  // so anything the page (or a primitive it mounts) imports has to be here or
+  // the page throws on load and every assertion below reads as a missing row.
+  uploadAvatar: vi.fn(async () => ({ hash: 'h1', mime: 'image/webp', bytes: 1 })),
+  deleteAvatar: vi.fn(async () => ({ deleted: true })),
+  avatarUrl: vi.fn(() => '/api/avatars/user/alice'),
+  AVATAR_ACCEPT: 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif',
 }));
 vi.mock('$lib/api', () => api);
 

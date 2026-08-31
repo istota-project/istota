@@ -106,6 +106,11 @@ export interface User {
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
+  // Content hashes for the two identities every page renders, so the client
+  // can build an immutable URL for each without a round trip. Null means no
+  // picture is stored — render the fallback and issue no request. Absent on a
+  // server that predates the field.
+  avatars?: { user: string | null; bot: string | null };
 }
 
 export async function disconnectNextcloudToken(): Promise<{ ok: boolean; was_connected: boolean }> {
@@ -292,6 +297,8 @@ export interface AdminStats {
     last_backup: string | null;
     nextcloud_configured: boolean;
     nextcloud_mount_healthy: boolean;
+    /** The bot's own Nextcloud account, for the bot-icon control's copy. */
+    nextcloud_username?: string | null;
   };
   runtime?: {
     mode: 'standalone' | 'server';
@@ -2366,6 +2373,14 @@ export interface ChatHistoryMessage {
   // email mirrored into the room it continues. Absent means the viewer, which
   // is what every user row was assumed to be.
   author?: string;
+  // The writer's istota user id, which is what the avatar endpoint keys on —
+  // `author` is a display label and two people may share one. Set only where
+  // the writer is an istota user who is not the reader, so an external
+  // sender's turn carries a name and no id, and nothing here is requested for
+  // it. The picture's content hash deliberately does not ride along: this row
+  // is on the byte-budgeted room-event stream, and the client pays one
+  // conditional request per author per session instead (D13).
+  author_id?: string;
   // The surface a user row entered from, when it is not one the room itself
   // lives on — today `'email'` alone. Absent is the signal for "from inside
   // this conversation", so a co-member's Talk or web turn carries no key.
@@ -3147,6 +3162,110 @@ export class UploadUnreachableError extends Error {
  */
 export function chatFileUrl(path: string): string {
   return `${base}/api/chat/files?path=${encodeURIComponent(path)}`;
+}
+
+/**
+ * What the file picker offers for a profile picture.
+ *
+ * Mirrors `avatars.ACCEPT_ATTRIBUTE` in `src/istota/avatars.py`, and is
+ * deliberately narrower than `image/*` — that matches TIFF, BMP, AVIF and SVG,
+ * all of which the server refuses, and the user would find out only after
+ * choosing one.
+ */
+export const AVATAR_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif';
+
+/**
+ * Where one identity's picture is served from.
+ *
+ * A plain cookie-authenticated URL to drop into `src`, exactly like
+ * `chatFileUrl`. `version` is a content hash: with it the server answers
+ * `immutable` for the caller's own picture and the bot icon, so every later
+ * render in a transcript is a cache hit with no request. Without it the
+ * answer is `no-cache` plus an `ETag`, which is what a third party's picture
+ * gets — one conditional request per author per session.
+ */
+export function avatarUrl(kind: 'user' | 'bot', userId?: string, version?: string | null): string {
+  // `userId` is optional for the bot branch alone, and nothing in the type
+  // enforces the pairing. Without this, a missing id builds a URL with an
+  // empty last segment, which matches no route at all — so the browser gets
+  // FastAPI's own 404 rather than the one the endpoint sends, and the caller
+  // sees an image that failed with no way to tell why.
+  if (kind === 'user' && !userId) throw new Error('avatarUrl: a user avatar needs a userId');
+  const path =
+    kind === 'bot' ? '/api/avatars/bot' : `/api/avatars/user/${encodeURIComponent(userId!)}`;
+  const query = version ? `?v=${encodeURIComponent(version)}` : '';
+  return `${base}${path}${query}`;
+}
+
+export interface AvatarUpload {
+  /** sha256 of the *normalized* bytes — what `?v` and the ETag carry. */
+  hash: string;
+  mime: string;
+  bytes: number;
+}
+
+/**
+ * PUT one picture as multipart, to whichever avatar endpoint owns it.
+ *
+ * Shaped like `uploadChatAttachment` rather than routed through `apiFetch`,
+ * because every refusal here is one the user has to read: the server sends
+ * `{error}` with a 413 for a file over the cap and a 415 for a format it will
+ * not decode, and `apiFetch` would collapse both into `API error: 413`.
+ */
+async function putAvatar(path: string, file: File): Promise<AvatarUpload> {
+  const form = new FormData();
+  form.append('file', file);
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}${path}`, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      body: form,
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new UploadUnreachableError();
+  }
+  noteTransport(true);
+  if (resp.status === 401) throw new AuthError();
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || `upload failed (${resp.status})`);
+  return data as AvatarUpload;
+}
+
+/** Replace the caller's own profile picture. */
+export async function uploadAvatar(file: File): Promise<AvatarUpload> {
+  return putAvatar('/api/settings/avatar', file);
+}
+
+/**
+ * Remove the caller's uploaded picture, revealing any imported one.
+ *
+ * `{deleted: false}` when there was none — idempotent, not a 404.
+ */
+export async function deleteAvatar(): Promise<{ deleted: boolean }> {
+  return apiFetch('/settings/avatar', { method: 'DELETE' });
+}
+
+/**
+ * Replace the deployment's bot icon. Admin only.
+ *
+ * Deployment-wide and one row, so two admins setting it at once resolve as
+ * last writer wins. It is *not* the bot's Nextcloud Talk avatar and cannot
+ * change it — the daemon holds an app password, and Nextcloud's avatar route
+ * is session-and-CSRF-guarded — which is why the control says so.
+ */
+export async function uploadBotAvatar(file: File): Promise<AvatarUpload> {
+  return putAvatar('/api/admin/avatar', file);
+}
+
+/**
+ * Clear the bot icon, reverting to the amber initial chip.
+ *
+ * `{deleted: false}` when there was none — idempotent, not a 404.
+ */
+export async function deleteBotAvatar(): Promise<{ deleted: boolean }> {
+  return apiFetch('/admin/avatar', { method: 'DELETE' });
 }
 
 const CHAT_ATTACHMENT_PATH = '/chat/attachments';

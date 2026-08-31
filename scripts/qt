@@ -25,19 +25,16 @@
 #     the 39 tests that exercise it sit right there. So any non-Python change
 #     falls back to the full suite rather than being trusted to testmon.
 #
-#   * **One file crashes testmon outright.** `tests/test_devbox_exec_server.py`
-#     imports `docker/devbox/scripts/istota-exec-serve` in-process, and that
-#     program deliberately carries no `.py` suffix (it is on the container's
-#     PATH and invoked by name). testmon's `get_file` does
+#   * **An extensionless source file used to crash testmon outright.**
+#     `tests/test_devbox_exec_server.py` imports
+#     `docker/devbox/scripts/istota-exec-serve` in-process, and that program
+#     deliberately carries no `.py` suffix (it is on the container's PATH and
+#     invoked by name). testmon's `get_file` does
 #     `filename.rsplit(".", 1)[1]` on everything coverage traced, so an
-#     extensionless file raises IndexError and takes down the *whole* run --
-#     INTERNALERROR, exit 3, after every test has already passed. There is no
-#     config for it: testmon builds its Coverage with `config_file=False` and
-#     the line that would honour a coverage `omit` is commented out in its
-#     source. So the file is excluded here and covered by the full run instead.
-#     If another test starts importing an extensionless program, the
-#     INTERNALERROR check below catches it and falls back rather than reporting
-#     a green run that never finished.
+#     extensionless file raised IndexError and took down the *whole* run --
+#     INTERNALERROR, exit 3, after every test had already passed. The shim in
+#     `tests/support/testmon_compat.py` closes that; the INTERNALERROR check
+#     below stays as a backstop, so a future abort never reads as a green run.
 #
 # Usage:
 #   scripts/qt                 # the affected tests
@@ -102,9 +99,6 @@ fi
 # common case is deliberately serial.
 export ISTOTA_DESELECT_TIERS=1
 
-# See the note above: this one file kills the run rather than failing a test.
-excludes=(--ignore=tests/test_devbox_exec_server.py)
-
 # Workers: serial by default. testmon's selection is applied at *run* time and
 # is invisible to `--collect-only` (which reports the whole collected set, not
 # the selected one), so there is no cheap way to size the pool from how much was
@@ -122,15 +116,28 @@ out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 set +e
 uv run pytest --testmon -o addopts= -p no:randomly -q \
-  "${workers[@]}" "${excludes[@]}" "${args[@]+"${args[@]}"}" 2>&1 | tee "$out"
+  "${workers[@]}" "${args[@]+"${args[@]}"}" 2>&1 | tee "$out"
 status=${PIPESTATUS[0]}
 set -e
 
 # An INTERNALERROR means testmon aborted the session -- every test may have
 # passed and the run still means nothing. Never let that read as success.
+#
+# The fallback runs the suite *without* testmon, and that is the whole point:
+# the thing that just aborted cannot be the thing that answers. Falling back to
+# another `--testmon` run reran the same abort, which is how a fresh worktree
+# used to die twice on its first `qt` -- the bootstrap run above is a full
+# `--testmon` run too, so there was nothing left to catch it. The data file is
+# moved aside rather than deleted, since an abort can leave it half-written and
+# the next run should rebuild rather than inherit it.
 if grep -q "INTERNALERROR" "$out"; then
-  echo "qt: testmon aborted the session (INTERNALERROR) -- falling back" >&2
-  run_full
+  echo "qt: testmon aborted the session (INTERNALERROR)" >&2
+  if [ -f "$DATA" ]; then
+    mv -f "$DATA" "$DATA.aborted"
+    echo "qt: moved $DATA aside to $DATA.aborted; the next run rebuilds it" >&2
+  fi
+  echo "qt: rerunning the full suite without testmon" >&2
+  exec scripts/qtest uv run pytest -q "${args[@]+"${args[@]}"}"
 fi
 
 # 5 is pytest's "no tests ran", which here means nothing your change touched.

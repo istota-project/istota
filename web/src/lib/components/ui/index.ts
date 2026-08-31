@@ -6,6 +6,7 @@ export { default as CategoryGroup } from './CategoryGroup.svelte';
 export { default as NavLink } from './NavLink.svelte';
 export { default as HeaderNav } from './HeaderNav.svelte';
 export type { NavItem } from './HeaderNav.svelte';
+export { default as Avatar } from './Avatar.svelte';
 export { default as Chip } from './Chip.svelte';
 export { default as Badge } from './Badge.svelte';
 export { default as StatTile } from './StatTile.svelte';

@@ -219,6 +219,7 @@ istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check in
 istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
 istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping sweep (ISSUE-288, 6h; 0 disables)
 istota_scheduler_sandbox_cache_sweep_interval: 21600 # package-cache sweep (ISSUE-317, 6h; 0 disables). Inert unless a cache root resolves: istota_developer_repos_dir (derived) or istota_security_sandbox_cache_dir (fallback)
+istota_scheduler_avatar_import_interval: 21600 # Nextcloud profile-picture import (6h; 0 disables). Also gated by istota_web_avatar_import_from_nextcloud and by the storage backend being Nextcloud. Six hours rather than daily because a user who has just signed in for the first time sees the initial chip until the next tick
 istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch loop's read scans; a lock past this skips the tick instead of blocking 30s (0 = 30s default)
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
@@ -979,6 +980,19 @@ istota_web_secret_key: ""                # Session signing key (vault); generate
 # "encrypted" retains it in web_user_tokens, encrypted with the web-only key
 # below. NC OAuth2 tokens grant full account access — a deliberate opt-in.
 istota_web_token_storage: "ephemeral"
+# Byte cap on a profile-picture upload, in KB. Checked on the declared
+# Content-Length before the body is read and again on the running total.
+# Distinct from istota_web_chat_max_attachment_mb, which nginx's
+# client_max_body_size is rendered from: that bounds what reaches the process
+# at all, this bounds what the avatar endpoint accepts. 0 switches uploads off
+# (the endpoint answers 503); a stored picture is still served.
+istota_web_max_avatar_kb: 4096
+# Whether the scheduler imports users' Nextcloud profile pictures. Only a
+# *custom* avatar is imported: Nextcloud generates a coloured letter for a user
+# who has set none, and importing that would swap the app's own initial chip for
+# Nextcloud's version of the same idea, indistinguishable afterwards. Inert on a
+# local storage backend. Cadence: istota_scheduler_avatar_import_interval.
+istota_web_avatar_import_from_nextcloud: true
 # Web-only Fernet key (vault); >=32 chars. Rendered into web-secrets.env and
 # loaded only by the web unit, never the scheduler or webhooks units.
 istota_web_token_key: ""
