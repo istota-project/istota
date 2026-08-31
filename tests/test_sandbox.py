@@ -2505,3 +2505,41 @@ class TestSessionLogContainment:
 
         for root in [*read, *write]:
             assert not log_dir.resolve().is_relative_to(root), shape + ": " + str(root)
+
+    def test_the_taskless_protected_list_diverges_only_where_it_says(self, tmp_path):
+        """`mask_protected_paths(config)` substitutes `config.temp_dir` for the
+        per-task workspace, and its docstring names exactly one arrangement where
+        that changes the answer: a `db_path.parent` at `{temp_dir}/{user_id}`.
+
+        Pinned so a change that widens the divergence goes red rather than
+        quietly — a doctor check answering "masked" while `_mask_dir` refuses is
+        the whole failure the shared predicate exists to prevent, and here it is
+        accepted rather than absent.
+        """
+        from istota.executor import mask_protected_paths, mask_shadowed_by
+
+        config = self._ansible_shape(tmp_path)
+        user_temp = Path(config.temp_dir) / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        # The documented case: the candidate *is* one user's workspace.
+        assert mask_shadowed_by(user_temp, mask_protected_paths(config)) == []
+        assert mask_shadowed_by(
+            user_temp, mask_protected_paths(config, user_temp_dir=user_temp),
+        ) != []
+
+        # Every other relationship agrees. An ancestor of the temp dir, the temp
+        # dir itself, and a path strictly below one user's workspace.
+        for candidate in (
+            Path(config.temp_dir).parent,
+            Path(config.temp_dir),
+            user_temp / "deeper",
+            config.db_path.parent,
+        ):
+            taskless = bool(mask_shadowed_by(candidate, mask_protected_paths(config)))
+            per_task = bool(
+                mask_shadowed_by(
+                    candidate, mask_protected_paths(config, user_temp_dir=user_temp),
+                )
+            )
+            assert taskless is per_task, candidate

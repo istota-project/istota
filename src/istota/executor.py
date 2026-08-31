@@ -2248,14 +2248,27 @@ def mask_protected_paths(
     per task; ``doctor`` builds it without one, to answer whether the database
     mask covers a directory on this deployment at all.
 
+    A caller with no task omits both keyword arguments, and each omission is a
+    documented divergence rather than an equivalence.
+
     ``user_temp_dir`` is the per-task workspace and is what the sandbox actually
-    protects. A caller with no task passes nothing and gets ``config.temp_dir``,
-    the *parent* of every per-user workspace, which gives the same answer
-    everywhere the two shapes are distinguishable: ``{temp_dir}/{user}`` is
-    inside a candidate whenever ``{temp_dir}`` is, and the one arrangement where
-    they differ is a ``db_path.parent`` sitting at ``{temp_dir}/{user}`` exactly
-    — a framework database inside one user's workspace, which the sandbox has
-    larger problems with than a mask.
+    protects. Omitting it substitutes ``config.temp_dir``, the *parent* of every
+    per-user workspace, which gives the same answer everywhere the two shapes
+    are distinguishable: ``{temp_dir}/{user}`` is inside a candidate whenever
+    ``{temp_dir}`` is, and the one arrangement where they differ is a
+    ``db_path.parent`` sitting at ``{temp_dir}/{user}`` exactly — a framework
+    database inside one user's workspace, which the sandbox has larger problems
+    with than a mask. ``tests/test_sandbox.py`` pins that case, so a change
+    widening the divergence goes red rather than quietly.
+
+    ``workspace_dir`` is the REPL workspace, and omitting it drops an entry
+    outright. The answers coincide only because ``_validate_workspace_dir``
+    already refuses a workspace overlapping ``db_path.parent`` or
+    ``module_db_root()`` — the two candidates any caller compares against — so a
+    validated workspace is never among the paths a database mask would shadow.
+    That is a dependency on another function's blocklist rather than a property
+    of this one, which is why it is written down here: narrowing that blocklist
+    would reopen the two-consumers gap the extraction exists to close.
     """
     src, venv = _source_and_venv_paths()
     temp = Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)

@@ -4884,9 +4884,18 @@ def _record_session_log_sweep(config: Config, result: SweepResult) -> None:
     Written on every sweep, not only on an eviction, so a ceiling that stopped
     binding stops warning. Failure costs the row and never the tick: this is a
     record of the cleanup, not part of it.
+
+    The write is bounded rather than taking ``get_db``'s 30-second default,
+    because it happens on the dispatch thread once a cleanup tick: losing a
+    diagnostic row is strictly cheaper than holding the loop for half a minute
+    behind a busy worker, which is the trade ``main_loop_read_timeout_ms``
+    already states for the loop's own reads.
     """
     try:
-        with db.get_db(config.db_path) as conn:
+        with db.get_db(
+            config.db_path,
+            busy_timeout_ms=config.scheduler.main_loop_read_timeout_ms,
+        ) as conn:
             db.shared_kv_set(
                 conn,
                 SWEEP_STATE_NAMESPACE,

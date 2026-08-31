@@ -314,8 +314,19 @@ def resolve_session_log_dir(db_path: Path | str | None, configured: str = "") ->
     ``configured`` of some other type takes the default rather than a
     ``TypeError``, because the callers are the task path, a scheduler tick and
     ``doctor``, and none of the three has anywhere to put an exception. A
-    missing ``db_path`` yields the relative ``logs``, which no shipped shape
-    reaches — ``Config.db_path`` carries a default.
+    missing ``db_path`` yields the relative ``logs``.
+
+    **A relative ``db_path`` yields a relative log directory, and the dataclass
+    default is relative.** ``Config.db_path`` defaults to ``data/istota.db``, so
+    a config that sets neither key resolves to ``data/logs``, followed against
+    each process's own working directory — the same property a configured
+    relative ``dir`` has, arrived at without anybody configuring anything. Every
+    shipped installer writes an absolute ``db_path`` (the Ansible template, the
+    Docker render, and ``setup_wizard``'s workspace-derived path), so this is
+    reachable from a hand-written config rather than from a deployment. It costs
+    consistency rather than data: the writer and the sweep both run in the
+    daemon and agree, while ``istota doctor`` from a shell inspects whatever
+    ``data/logs`` means there.
     """
     text = configured.strip() if isinstance(configured, str) else ""
     if text and "\x00" not in text:
@@ -1090,9 +1101,15 @@ def sweep_session_logs(
     it would refuse both a perfectly reasonable ``dir = "/var/log/istota"`` and
     the relative value :func:`resolve_session_log_dir` is required to honour as
     given. What bounds a mis-set root instead is the shape of the walk, and it is
-    narrow on purpose: only ``*.jsonl``, only one level below the root, never
-    through a symlinked entry, and ``rmdir`` only on a directory this sweep found
-    empty and older than the window.
+    worth stating exactly rather than generously, since it is the whole of what
+    the operator is being asked to accept: only ``*.jsonl``, only beneath a
+    **first-level subdirectory** of the root and never a file at the root's own
+    level, at **any depth** within such a subdirectory — :func:`_scan_user_dir`
+    walks a user's tree recursively — never through a symlinked entry at either
+    level, and ``rmdir`` only on a directory this sweep found empty and older
+    than the window. So ``dir = "/var/log"`` reaches every ``*.jsonl`` under
+    every subdirectory of ``/var/log``, however deep, and nothing directly in
+    ``/var/log`` itself.
     """
     root = Path(root)
     deleted_age = deleted_size = dirs_removed = 0

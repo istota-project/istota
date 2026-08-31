@@ -214,10 +214,12 @@ features = []
 #                                 #   whatever you write here as a user's and unlinks the
 #                                 #   *.jsonl files under it. Point it at a directory istota
 #                                 #   owns. Nothing the model writes can reach this setting;
-#                                 #   what bounds the damage of a mis-set one is that the
-#                                 #   sweep only ever touches *.jsonl, one level down, never
-#                                 #   through a symlink, and removes only directories it
-#                                 #   emptied.
+#                                 #   what bounds the damage of a mis-set one is the shape of
+#                                 #   the walk: only *.jsonl, only under a first-level
+#                                 #   subdirectory (never a file at this directory's own
+#                                 #   level) but at ANY depth within one, never through a
+#                                 #   symlink, and rmdir only on a directory the sweep
+#                                 #   itself emptied.
 # retention_days = 14             # age rule, for privacy. Deliberately longer than
 #                                 #   [scheduler] task_retention_days — the log's value is
 #                                 #   that it outlives the task row. 0 = keep for ever by
