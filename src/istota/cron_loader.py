@@ -219,11 +219,60 @@ class CronJob:
     publish_shared_kv_trusted: bool = False
 
 
-def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
-    """
-    Load scheduled job definitions from a user's CRON.md file.
+@dataclass
+class CronDocument:
+    """A user's CRON.md, kept whole rather than reduced to its jobs.
 
-    Returns list of CronJob, or None if file doesn't exist or mount not configured.
+    ``load_cron_jobs`` answers "what jobs does this file define" and throws
+    the rest away, which loses the two facts a writer needs. It cannot tell an
+    **empty** toml fence from a **missing** one — both are ``[]`` — so the
+    sync read "the user deleted their last job" and "this is a seeded
+    template" as the same event and restored the deleted job from the table
+    (ISSUE-369 defect 2). And it keeps no offsets, so every rewrite had to
+    regenerate the whole document, discarding whatever prose the user had put
+    around the fence.
+
+    ``block`` is the toml source inside the first fence, ``None`` when the
+    file has no fence at all. ``block_span`` are its offsets within
+    ``content``, which is what the splicing writer replaces.
+    """
+
+    content: str
+    block: str | None
+    block_span: tuple[int, int] | None
+    jobs: list[CronJob]
+
+
+def _str_field(name: str, user_id: str, field: str, value) -> str:
+    """A TOML string, stripped, or ``""`` with a warning. Never raises.
+
+    Every field here used to be read as ``j.get(field, "").strip()``, which
+    is an ``AttributeError`` for anything that is not a string — and the
+    ``try/except`` around the parse closes before the loop, so ``name = 5``
+    in a CRON.md raised out of the loader into the scheduler's per-user
+    handler, taking every *other* job in that file with it. Warn-and-default,
+    like ``_coerce_bool`` and the three validators beside it.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = shown[:77] + "..."
+    logger.warning(
+        "Job '%s' (user %s): %s must be a TOML string, got %s %s; ignoring it",
+        name or "(unnamed)", user_id, field, type(value).__name__, shown,
+    )
+    return ""
+
+
+def load_cron_document(config, user_id: str) -> "CronDocument | None":
+    """Load a user's CRON.md as a document: the bytes, the fence, the jobs.
+
+    ``None`` for every case the file cannot be read as one — no mount, no
+    file, an unreadable or non-UTF-8 one, or a fence whose TOML does not
+    parse. A caller that gets ``None`` knows nothing about what the user
+    wants and must not write anything back on the strength of it; the
+    previous definitions stay in force.
     """
     if not config.use_mount:
         return None
@@ -238,23 +287,71 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
     if content is None or not content:
         return None
 
+    match = _TOML_BLOCK_RE.search(content)
+    if not match:
+        # A document with no toml fence. Distinct from a fence holding no
+        # jobs, and the whole reason this function exists.
+        return CronDocument(content=content, block=None, block_span=None, jobs=[])
+
+    toml_str = match.group(1)
     try:
-        match = _TOML_BLOCK_RE.search(content)
-        if not match:
-            return []
-        toml_str = match.group(1)
         data = tomli.loads(toml_str)
     except Exception as e:
-        logger.warning("Failed to parse CRON.md for %s: %s", user_id, e)
+        logger.warning(
+            "Failed to parse CRON.md for %s: %s; the previous job definitions "
+            "stay in force", user_id, e,
+        )
         return None
 
+    return CronDocument(
+        content=content,
+        block=toml_str,
+        block_span=match.span(1),
+        jobs=_parse_jobs(data, config, user_id),
+    )
+
+
+def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
+    """
+    Load scheduled job definitions from a user's CRON.md file.
+
+    Returns list of CronJob, or None if file doesn't exist or mount not
+    configured. A thin wrapper over :func:`load_cron_document`, for the
+    callers that want the jobs and nothing else.
+    """
+    doc = load_cron_document(config, user_id)
+    return None if doc is None else doc.jobs
+
+
+def _parse_jobs(data: dict, config, user_id: str) -> list[CronJob]:
+    """Build the ``CronJob`` list from a parsed toml block. Never raises.
+
+    Everything reachable from here is user-authored TOML, so nothing may
+    assume a type: ``jobs`` is whatever the file says it is, an entry in it
+    likewise, and every scalar goes through ``_str_field`` or
+    ``_coerce_bool``. A malformed entry costs itself and no other.
+    """
     jobs = []
-    for j in data.get("jobs", []):
-        name = j.get("name", "").strip()
-        cron = j.get("cron", "").strip()
-        prompt = j.get("prompt", "").strip()
-        command = j.get("command", "").strip()
-        prompt_file = j.get("prompt_file", "").strip()
+    raw_jobs = data.get("jobs", [])
+    if not isinstance(raw_jobs, list):
+        logger.warning(
+            "Ignoring 'jobs' in CRON.md for %s: expected an array of tables, "
+            "got %s", user_id, type(raw_jobs).__name__,
+        )
+        return jobs
+    for j in raw_jobs:
+        if not isinstance(j, dict):
+            logger.warning(
+                "Skipping entry in CRON.md for %s: expected a [[jobs]] table, "
+                "got %s", user_id, type(j).__name__,
+            )
+            continue
+        name = _str_field("", user_id, "name", j.get("name", ""))
+        cron = _str_field(name, user_id, "cron", j.get("cron", ""))
+        prompt = _str_field(name, user_id, "prompt", j.get("prompt", ""))
+        command = _str_field(name, user_id, "command", j.get("command", ""))
+        prompt_file = _str_field(
+            name, user_id, "prompt_file", j.get("prompt_file", ""))
         if not name or not cron:
             logger.warning(
                 "Skipping incomplete job in CRON.md for %s: name=%r cron=%r",
@@ -290,13 +387,13 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
                 name, user_id,
             )
             continue
-        model = j.get("model", "").strip()
-        effort = j.get("effort", "").strip()
+        model = _str_field(name, user_id, "model", j.get("model", ""))
+        effort = _str_field(name, user_id, "effort", j.get("effort", ""))
         if model:
             _validate_model(name, user_id, model)
         if effort:
             _validate_effort(name, user_id, effort)
-        target = j.get("target", "")
+        target = _str_field(name, user_id, "target", j.get("target", ""))
         if target:
             _validate_target(name, user_id, target)
         jobs.append(CronJob(
@@ -306,7 +403,7 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             command=command,
             prompt_file=prompt_file,
             target=target,
-            room=j.get("room", ""),
+            room=_str_field(name, user_id, "room", j.get("room", "")),
             enabled=_coerce_bool(
                 name, user_id, "enabled", j.get("enabled", True), True),
             silent_unless_action=_coerce_bool(
@@ -335,9 +432,22 @@ def _toml_string(key: str, value: str) -> str:
     return f'{key} = "{value}"'
 
 
-def generate_cron_md(jobs: list[CronJob]) -> str:
-    """Generate CRON.md content from a list of CronJob definitions."""
-    lines = ["# Scheduled Jobs", "", "```toml"]
+def render_jobs_block(jobs: list[CronJob]) -> str:
+    """The toml source for a job list: no fence, no header, no document.
+
+    This is the part of CRON.md that is *regenerated*. Everything else in the
+    file — the header, prose above or below the fence, a second fence — is
+    the user's and is spliced around this by ``_write_cron_md`` rather than
+    rebuilt. Ends with a newline when there is anything to render and is
+    empty otherwise, so that the closing fence lands on its own line either
+    way.
+
+    What it cannot preserve is a comment *inside* the fence: the jobs are
+    rendered from the parsed ``CronJob`` list, which never held one. That is
+    the boundary of the fix — outside the fence is kept byte for byte,
+    inside it is regenerated.
+    """
+    lines = []
 
     for i, job in enumerate(jobs):
         if i > 0:
@@ -372,9 +482,20 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
         if job.publish_shared_kv_trusted:
             lines.append("publish_shared_kv_trusted = true")
 
-    lines.append("```")
-    lines.append("")
-    return "\n".join(lines)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def generate_cron_md(jobs: list[CronJob]) -> str:
+    """Generate a whole CRON.md document from a list of CronJob definitions.
+
+    Byte for byte what it always emitted. Used only where there is no
+    existing document to splice into: the one-time migration from the table,
+    and the seeded-template restore. Anywhere a file already exists, the
+    splice in ``_write_cron_md`` is what runs.
+    """
+    return "# Scheduled Jobs\n\n```toml\n" + render_jobs_block(jobs) + "```\n"
 
 
 def _prompt_file_name(name: str) -> str:
@@ -432,8 +553,24 @@ def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) ->
         job.prompt_file = f"{prompts_dir_ref}/{prompt_path.name}"
 
 
-def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
+def _write_cron_md(
+    config,
+    user_id: str,
+    jobs: list[CronJob],
+    doc: "CronDocument | None" = None,
+) -> bool:
     """Write CRON.md, externalizing inline multiline prompts first.
+
+    **With a ``doc``, only the toml block is replaced.** Every other byte of
+    the file the caller read is written back unchanged: the header, a
+    paragraph of the user's own notes above or below the fence, a second
+    toml fence further down. Without one — the migration paths, where there
+    is no document to preserve — it writes ``generate_cron_md`` as before.
+
+    A ``doc`` whose ``block_span`` is ``None`` (a file with no fence at all)
+    also takes the whole-document path: there is nothing to splice into, and
+    the only caller that reaches it has already decided the file is a seeded
+    template.
 
     Through the contained directory and the hardened writer, like every other
     host-side write into `{bot_dir}/config/` (ISSUE-339): `mkdir(parents=True)`
@@ -491,7 +628,12 @@ def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
             user_id, e.errno,
         )
         return False
-    return write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
+    if doc is not None and doc.block_span is not None:
+        start, end = doc.block_span
+        content = doc.content[:start] + render_jobs_block(jobs) + doc.content[end:]
+    else:
+        content = generate_cron_md(jobs)
+    return write_regular_file(config_dir / "CRON.md", content)
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +994,10 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     """
     Update a job's enabled state in the user's CRON.md file.
 
-    Loads all jobs, updates the target job's enabled field, and rewrites the file.
+    Loads the document, updates the target job's enabled field, and splices
+    the regenerated toml block back into it — so a user's own notes around
+    the fence survive a ``!cron disable``.
+
     Returns True if the job was found **and the file now says so**: a refused
     or failed write is False, so a caller that reports success is reporting
     the file's state rather than its own intention (ISSUE-369).
@@ -860,9 +1005,10 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     if not config.use_mount:
         return False
 
-    jobs = load_cron_jobs(config, user_id)
-    if jobs is None:
+    doc = load_cron_document(config, user_id)
+    if doc is None:
         return False
+    jobs = doc.jobs
 
     found = False
     for job in jobs:
@@ -874,7 +1020,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     if not found:
         return False
 
-    if not _write_cron_md(config, user_id, jobs):
+    if not _write_cron_md(config, user_id, jobs, doc):
         return False
     logger.info(
         "%s job '%s' in CRON.md for user %s",
@@ -887,23 +1033,25 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     """
     Remove a job by name from the user's CRON.md file.
 
-    Loads the file, filters out the named job, and rewrites cleanly.
+    Loads the document, filters out the named job, and splices the
+    regenerated toml block back into it, leaving the rest of the file alone.
     Returns True if the job was found **and the file now says so**; a refused
     or failed write is False, like ``update_job_enabled_in_cron_md``.
     """
     if not config.use_mount:
         return False
 
-    jobs = load_cron_jobs(config, user_id)
-    if jobs is None:
+    doc = load_cron_document(config, user_id)
+    if doc is None:
         return False
 
+    jobs = doc.jobs
     original_count = len(jobs)
     jobs = [j for j in jobs if j.name != job_name]
     if len(jobs) == original_count:
         return False  # Job not found
 
-    if not _write_cron_md(config, user_id, jobs):
+    if not _write_cron_md(config, user_id, jobs, doc):
         return False
     logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
     return True

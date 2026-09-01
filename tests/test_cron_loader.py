@@ -15,9 +15,11 @@ from istota.cron_loader import (
     _file_owned_values,
     _validate_model,
     generate_cron_md,
+    load_cron_document,
     load_cron_jobs,
     migrate_db_jobs_to_file,
     remove_job_from_cron_md,
+    render_jobs_block,
     sync_cron_jobs_to_db,
     update_job_enabled_in_cron_md,
 )
@@ -2392,3 +2394,290 @@ class TestSuspensionSurvivesTheSync:
 
             assert self._job_row(conn)["auto_disabled_at"] is None
             assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
+
+
+# ---------------------------------------------------------------------------
+# TestCronDocument
+# ---------------------------------------------------------------------------
+
+
+class TestCronDocument:
+    """The file as a document, not just as a list of jobs.
+
+    Two facts ``load_cron_jobs`` discards and ISSUE-369 needs back: whether
+    there is a toml fence at all, and where in the file it sits.
+    """
+
+    def test_an_empty_fence_is_not_a_missing_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        """The distinction the sync's restore branch turns on.
+
+        Both are zero jobs, and reading them as the same event is what
+        restored a job the user had just deleted (defect 2). The fence is
+        present or it is not, and only the second is a seeded template.
+        """
+        config = make_config_with_mount()
+
+        _write_cron_md(mount_path, "alice", "# Scheduled Jobs\n\n```toml\n```\n")
+        emptied = load_cron_document(config, "alice")
+        assert emptied.block == ""
+        assert emptied.jobs == []
+
+        _write_cron_md(mount_path, "alice", "# Scheduled Jobs\n\nNo config here.\n")
+        seeded = load_cron_document(config, "alice")
+        assert seeded.block is None
+        assert seeded.block_span is None
+        assert seeded.jobs == []
+
+    def test_a_missing_or_unparseable_file_is_no_document(
+        self, mount_path, make_config_with_mount
+    ):
+        """``None`` means "I could not read this", and nothing may be written on it."""
+        config = make_config_with_mount()
+        assert load_cron_document(config, "alice") is None
+
+        _write_cron_md(mount_path, "alice", "```toml\n[[jobs\nbroken\n```\n")
+        assert load_cron_document(config, "alice") is None
+
+    def test_the_block_span_locates_the_block_in_the_file(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        content = """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+```
+"""
+        _write_cron_md(mount_path, "alice", content)
+        doc = load_cron_document(config, "alice")
+        start, end = doc.block_span
+        assert doc.content == content
+        assert doc.content[start:end] == doc.block
+        assert doc.block.startswith("[[jobs]]")
+
+    def test_generate_cron_md_wraps_the_rendered_block(self):
+        """The whole-document form is the block plus a fence, and nothing else.
+
+        Splitting it must not change what the migration paths write, so state
+        the composition rather than trusting the two halves to stay in step.
+        """
+        jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="hello")]
+        assert generate_cron_md(jobs) == (
+            "# Scheduled Jobs\n\n```toml\n" + render_jobs_block(jobs) + "```\n"
+        )
+        assert render_jobs_block([]) == ""
+        assert generate_cron_md([]) == "# Scheduled Jobs\n\n```toml\n```\n"
+
+
+# ---------------------------------------------------------------------------
+# TestARewritePreservesTheDocument
+# ---------------------------------------------------------------------------
+
+
+class TestARewritePreservesTheDocument:
+    """ISSUE-369 defect 2's other half: a rewrite used to eat the file.
+
+    Every writer went through ``generate_cron_md``, which builds a header, a
+    fence and the jobs — so a ``!cron disable`` on a CRON.md with the user's
+    own notes in it returned a document with the notes gone. The toml block
+    is regenerated and spliced back into the bytes that were read.
+    """
+
+    DOC = """\
+# Scheduled Jobs
+
+Notes on why these exist. Keep this paragraph.
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+
+[[jobs]]
+name = "weekly"
+cron = "0 9 * * 1"
+prompt = "Weekly roll-up"
+```
+
+<!-- A trailing comment, and a second fence below. -->
+
+```toml
+# not the jobs block; the first fence wins and this is left alone
+scratch = "keep me"
+```
+"""
+
+    def _read(self, mount_path):
+        return (
+            mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        ).read_text()
+
+    def test_disabling_a_job_preserves_content_outside_the_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", self.DOC)
+
+        assert update_job_enabled_in_cron_md(config, "alice", "daily-check", False)
+
+        after = self._read(mount_path)
+        assert "Notes on why these exist. Keep this paragraph." in after
+        assert "<!-- A trailing comment, and a second fence below. -->" in after
+        assert 'scratch = "keep me"' in after
+        # Everything before and after the first fence, byte for byte.
+        before, sep, rest = self.DOC.partition("```toml\n")
+        assert after.startswith(before + sep)
+        assert after.endswith(rest.split("```", 1)[1])
+        # And the change the caller asked for did land.
+        jobs = load_cron_jobs(config, "alice")
+        assert [(j.name, j.enabled) for j in jobs] == [
+            ("daily-check", False), ("weekly", True),
+        ]
+
+    def test_removing_a_job_preserves_content_outside_the_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", self.DOC)
+
+        assert remove_job_from_cron_md(config, "alice", "weekly")
+
+        after = self._read(mount_path)
+        assert "Notes on why these exist. Keep this paragraph." in after
+        assert 'scratch = "keep me"' in after
+        assert [j.name for j in load_cron_jobs(config, "alice")] == ["daily-check"]
+
+    def test_removing_the_last_job_leaves_an_empty_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        """Not a document with no fence — which the sync reads as a template.
+
+        The two are what ``CronDocument.block`` tells apart, so the writer
+        must not turn one into the other on its way out.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Scheduled Jobs
+
+Kept prose.
+
+```toml
+[[jobs]]
+name = "only-one"
+cron = "0 9 * * *"
+prompt = "Run it"
+```
+""")
+
+        assert remove_job_from_cron_md(config, "alice", "only-one")
+
+        assert self._read(mount_path) == (
+            "# Scheduled Jobs\n\nKept prose.\n\n```toml\n```\n"
+        )
+        doc = load_cron_document(config, "alice")
+        assert doc.block == ""
+        assert doc.jobs == []
+
+    def test_a_migration_still_writes_a_whole_document(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """No document to splice into means the generated one, as before."""
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "from-db", "0 9 * * *", "stuff"),
+            )
+            assert migrate_db_jobs_to_file(conn, config, "alice") is True
+
+        assert self._read(mount_path) == generate_cron_md([
+            CronJob(name="from-db", cron="0 9 * * *", prompt="stuff"),
+        ])
+
+
+# ---------------------------------------------------------------------------
+# TestMalformedTomlDoesNotRaise
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedTomlDoesNotRaise:
+    """The loader's stated contract: nothing here raises at the scheduler.
+
+    The ``try/except`` closes around the TOML *parse*, so everything the loop
+    then read off the parsed data was unguarded — and a CRON.md is
+    user-written, so none of it has a guaranteed type. Each of these used to
+    be an ``AttributeError`` out of ``load_cron_jobs`` into
+    ``_sync_cron_files``' per-user handler, which costs the user every job in
+    the file rather than the one bad entry.
+    """
+
+    def _load(self, mount_path, make_config_with_mount, block):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", f"```toml\n{block}\n```\n")
+        return load_cron_jobs(config, "alice")
+
+    @pytest.mark.parametrize("block", [
+        'jobs = ["notatable"]',
+        'jobs = "notalist"',
+        "jobs = 3",
+        "[jobs]\nname = 'a table, not an array of them'",
+    ])
+    def test_a_jobs_key_that_is_not_an_array_of_tables(
+        self, mount_path, make_config_with_mount, block
+    ):
+        assert self._load(mount_path, make_config_with_mount, block) == []
+
+    def test_a_non_string_scalar_skips_its_own_job_only(
+        self, mount_path, make_config_with_mount
+    ):
+        """``name = 5`` is one bad job, not a failed file."""
+        jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = 5
+cron = "0 9 * * *"
+prompt = "numbered"
+
+[[jobs]]
+name = "fine"
+cron = "0 9 * * *"
+prompt = "ok"
+""")
+        assert [j.name for j in jobs] == ["fine"]
+
+    @pytest.mark.parametrize("field", ["cron", "prompt", "command", "room", "target"])
+    def test_a_non_string_field_warns_and_is_ignored(
+        self, mount_path, make_config_with_mount, caplog, field
+    ):
+        import logging
+
+        # The bad line replaces the field it names rather than repeating it —
+        # a duplicate key is a TOML parse error, which is a different branch.
+        lines = ["[[jobs]]", 'name = "typo"', 'cron = "0 9 * * *"', 'prompt = "ok"']
+        lines = [ln for ln in lines if not ln.startswith(f"{field} =")]
+        lines.append(f'{field} = ["an", "array"]')
+
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(
+                mount_path, make_config_with_mount, "\n".join(lines),
+            )
+
+        assert any(
+            f"{field} must be a TOML string" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+        # `cron` and `prompt` are required, so emptying either drops the job;
+        # the rest keep the job and lose the field.
+        if field in {"cron", "prompt"}:
+            assert jobs == []
+        else:
+            assert len(jobs) == 1
+            assert getattr(jobs[0], field) == ""

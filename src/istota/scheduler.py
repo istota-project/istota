@@ -6623,32 +6623,55 @@ def _sync_cron_files(conn, app_config: Config) -> None:
     """Sync CRON.md files to DB for all configured users."""
     from .cron_loader import (
         _MODULE_JOB_PREFIX,
-        load_cron_jobs,
+        load_cron_document,
         migrate_db_jobs_to_file,
         sync_cron_jobs_to_db,
     )
 
     for user_id in app_config.users:
         try:
-            file_jobs = load_cron_jobs(app_config, user_id)
-            if file_jobs is not None:
+            doc = load_cron_document(app_config, user_id)
+            if doc is not None:
                 # Count only user-defined DB jobs when deciding whether to
                 # migrate-to-file; module-managed jobs don't belong in CRON.md.
                 user_db_jobs = [
                     j for j in db.get_user_scheduled_jobs(conn, user_id)
                     if not j.name.startswith(_MODULE_JOB_PREFIX)
                 ]
-                if not file_jobs and user_db_jobs:
-                    # File exists but empty (e.g. seeded template), DB has jobs —
-                    # write DB jobs into the file instead of wiping them
-                    migrate_db_jobs_to_file(conn, app_config, user_id, overwrite=True)
+                # No toml fence at all, with rows in the table: the seeded
+                # template this branch was written for, so write the rows into
+                # the file rather than wiping them.
+                #
+                # An **empty** fence is not that, and used to reach here too:
+                # both read as zero jobs, so deleting your last job from
+                # CRON.md restored it from the table within the minute and
+                # rewrote the document doing it (ISSUE-369 defect 2). It now
+                # takes the sync path below, where the orphan sweep deletes
+                # the row and the file is left alone.
+                if doc.block is None and user_db_jobs:
+                    if not migrate_db_jobs_to_file(
+                        conn, app_config, user_id, overwrite=True
+                    ):
+                        # Every reason for a False here is a failure: the file
+                        # was read a moment ago, so the mount is configured,
+                        # and `user_db_jobs` is non-empty. The rows are intact
+                        # and the next tick tries again; say so rather than
+                        # leaving a user with a file that never fills in.
+                        logger.warning(
+                            "Could not restore %d scheduled job(s) into CRON.md "
+                            "for %s; the rows are unchanged and the next sync "
+                            "will retry", len(user_db_jobs), user_id,
+                        )
                 else:
                     sync_cron_jobs_to_db(
-                        conn, user_id, file_jobs,
+                        conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
                     )
             else:
-                # No CRON.md — try one-time migration from DB
+                # No CRON.md — try one-time migration from DB. False here is
+                # the ordinary case (nothing to migrate, or the file already
+                # exists), not a failure, so it is not logged; the writer logs
+                # a refused write itself.
                 migrate_db_jobs_to_file(conn, app_config, user_id)
         except Exception as e:
             logger.error("Error syncing CRON.md for %s: %s", user_id, e)
