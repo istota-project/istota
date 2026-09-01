@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Upgrade note:** the same change makes three previously outstanding Docker patches into a restart. An install created before the Nextcloud folder-prefix release, before `[models.roles]` became `[models.aliases]`, or before the tmux brain's failover became explicit picks all three up on its next start. The one thing a restart still cannot do is the Nextcloud side of the first: enabling sharing on the two external mounts, which is an `occ` call and is written out in the Docker deployment guide.
 
+- A one-time scheduled job finishing can no longer stall the whole bot. Removing its entry from `CRON.md` happens on the Nextcloud mount, and it was done while the task still held the database open for writing, so a mount that stopped answering blocked every other part of the bot that needed to write — the job dispatcher, the other running tasks, the web interface, the pollers — until the mount timed out. The file is now written after the database work is finished and released.
+
 - Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
 
 ### Security
