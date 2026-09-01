@@ -38,6 +38,10 @@ command = "df -h / | tail -1"
 
 CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definitions to the `scheduled_jobs` DB table.
 
+Deleting a job from the file deletes it. That includes the last one: a file whose TOML block is empty means you have no jobs, and the sync removes the rows to match. A file with **no** TOML block at all is read as a template instead, and if the table holds jobs they are written into it — which is how a freshly seeded workspace fills in.
+
+Anything that rewrites CRON.md replaces the first TOML block and nothing else. Notes you keep above or below the fence, a second fenced block, the header you rewrote — all of it survives `!cron disable`, the removal of a `once` job and the rest. Comments *inside* the block do not: the jobs are re-rendered from what the loader parsed, which never held them.
+
 ## Job types
 
 There is no `type` field. The loader infers the kind from which of `prompt`, `prompt_file`, or `command` a job sets, and a job that sets more than one is skipped with a warning rather than guessed at.
