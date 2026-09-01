@@ -1438,10 +1438,15 @@ async def cmd_cron(ctx: CommandContext):
             # here makes it `resolved` by the surface that ended the condition.
             cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
             return f"Enabled scheduled job '{job_name}' (failure count reset)."
-        # Fallback: no CRON.md file, update DB directly
+        # Fallback: CRON.md does not say what we asked it to. Either there is
+        # no file (or no such job in it), or the write was refused — the mount
+        # is rclone-backed, so that is a real case, and until ISSUE-369 the
+        # writer swallowed it and reported success here. Update the DB alone
+        # and say the change is not durable, which it is not: the next sync
+        # tick reads the unchanged file and reverts it.
         db.enable_scheduled_job(conn, job.id)
         cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
-        return f"Enabled scheduled job '{job_name}' (failure count reset). Note: no CRON.md file found — change is DB-only and may not persist."
+        return f"Enabled scheduled job '{job_name}' (failure count reset). Note: CRON.md was not updated (no such job in the file, or the write was refused) — change is DB-only and may not persist."
 
     if subcmd == "disable" and job_name:
         job = db.get_scheduled_job_by_name(conn, user_id, job_name)
@@ -1459,10 +1464,11 @@ async def cmd_cron(ctx: CommandContext):
             db.disable_scheduled_job(conn, job.id)
             cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
             return f"Disabled scheduled job '{job_name}'."
-        # Fallback: no CRON.md file, update DB directly
+        # Fallback: as in the enable branch above — no file, no such job in
+        # it, or a refused write.
         db.disable_scheduled_job(conn, job.id)
         cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
-        return f"Disabled scheduled job '{job_name}'. Note: no CRON.md file found — change is DB-only and may not persist."
+        return f"Disabled scheduled job '{job_name}'. Note: CRON.md was not updated (no such job in the file, or the write was refused) — change is DB-only and may not persist."
 
     # Default: list all jobs
     jobs = db.get_user_scheduled_jobs(conn, user_id)

@@ -396,13 +396,23 @@ def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) ->
         job.prompt_file = f"{prompts_dir_ref}/{prompt_path.name}"
 
 
-def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> None:
+def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
     """Write CRON.md, externalizing inline multiline prompts first.
 
     Through the contained directory and the hardened writer, like every other
     host-side write into `{bot_dir}/config/` (ISSUE-339): `mkdir(parents=True)`
     on an unresolved path follows a link at `config/`, and a plain `write_text`
     follows one at `CRON.md`.
+
+    **Returns whether the file now says what the caller asked for**, which is
+    what every caller was already claiming and none of them knew. This runs on
+    an rclone FUSE mount, so a write is a thing that fails — and the three
+    public writers above returned an unconditional ``True``, so ``!cron
+    disable`` reported success, disabled the table row alone, and the next
+    sync tick read the unchanged file and switched the job back on
+    (ISSUE-369). ``False`` for a refused directory or a refused write; the
+    reason is logged here or by ``write_regular_file``, never by the callers,
+    which see one bool.
     """
     from .storage import resolve_user_config_dir, write_regular_file  # noqa: PLC0415
 
@@ -412,9 +422,9 @@ def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> None:
         logger.warning(
             "cron_md_write_refused user=%s reason=config_dir_outside_user_tree", user_id,
         )
-        return
+        return False
     config_dir.mkdir(parents=True, exist_ok=True)
-    write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
+    return write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
 
 
 def sync_cron_jobs_to_db(
@@ -559,7 +569,8 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
         overwrite: If True, overwrite an existing file (used when file exists
                    but is empty/template-only while DB has real jobs).
 
-    Returns True if a file was written.
+    Returns True if a file was written — which now includes the write
+    itself having succeeded, not just having been attempted.
     """
     if not config.use_mount:
         return False
@@ -611,7 +622,8 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))
 
-    _write_cron_md(config, user_id, file_jobs)
+    if not _write_cron_md(config, user_id, file_jobs):
+        return False
     logger.info(
         "Migrated %d DB scheduled job(s) to CRON.md for user %s",
         len(file_jobs), user_id,
@@ -624,7 +636,9 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     Update a job's enabled state in the user's CRON.md file.
 
     Loads all jobs, updates the target job's enabled field, and rewrites the file.
-    Returns True if the job was found and updated.
+    Returns True if the job was found **and the file now says so**: a refused
+    or failed write is False, so a caller that reports success is reporting
+    the file's state rather than its own intention (ISSUE-369).
     """
     if not config.use_mount:
         return False
@@ -643,7 +657,8 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     if not found:
         return False
 
-    _write_cron_md(config, user_id, jobs)
+    if not _write_cron_md(config, user_id, jobs):
+        return False
     logger.info(
         "%s job '%s' in CRON.md for user %s",
         "Enabled" if enabled else "Disabled", job_name, user_id,
@@ -656,7 +671,8 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     Remove a job by name from the user's CRON.md file.
 
     Loads the file, filters out the named job, and rewrites cleanly.
-    Returns True if the job was found and removed.
+    Returns True if the job was found **and the file now says so**; a refused
+    or failed write is False, like ``update_job_enabled_in_cron_md``.
     """
     if not config.use_mount:
         return False
@@ -670,6 +686,7 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     if len(jobs) == original_count:
         return False  # Job not found
 
-    _write_cron_md(config, user_id, jobs)
+    if not _write_cron_md(config, user_id, jobs):
+        return False
     logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
     return True

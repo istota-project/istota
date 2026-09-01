@@ -839,6 +839,55 @@ prompt = "stuff"
             assert job.enabled is True
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_dac
+    async def test_disable_warns_when_the_file_write_is_refused(self, make_config):
+        """The fallback branch is reachable, not just for a missing file.
+
+        ISSUE-369 defect 3: the writer swallowed a failed write and returned
+        True, so this branch could only ever be reached by a CRON.md that was
+        not there. On the rclone mount the daemon actually runs on, a refused
+        write is the commoner case — and the user was told the job was
+        disabled while the file still said otherwise, so the next sync tick
+        switched it back on. `requires_dac` because the refusal is a
+        permission bit and root walks through it.
+        """
+        config = make_config()
+        config_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        cron_path = config_dir / "CRON.md"
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "active-job"
+cron = "0 * * * *"
+prompt = "stuff"
+```
+""")
+        original = cron_path.read_text()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "active-job", "0 * * * *", "stuff"),
+            )
+            config_dir.chmod(0o555)
+            try:
+                result = await cmd_cron(
+                    _ctx(config, conn, "alice", "room1", "disable active-job")
+                )
+            finally:
+                config_dir.chmod(0o755)
+
+        assert "Disabled" in result
+        assert "DB-only" in result
+        # The file is untouched, which is what the warning is about.
+        assert cron_path.read_text() == original
+        with db.get_db(config.db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "active-job")
+            assert job.enabled is False
+
+    @pytest.mark.asyncio
     async def test_enable_nonexistent(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

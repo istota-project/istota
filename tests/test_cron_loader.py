@@ -1294,6 +1294,112 @@ prompt = "test"
 
 
 # ---------------------------------------------------------------------------
+# TestARefusedWriteIsReported
+# ---------------------------------------------------------------------------
+
+
+class TestARefusedWriteIsReported:
+    """The writers report the file's state, not their own intention.
+
+    ISSUE-369 defect 3: ``_write_cron_md`` discarded ``write_regular_file``'s
+    bool and every public writer returned an unconditional ``True``. On the
+    rclone mount this runs on, a failed write then read as success — ``!cron
+    disable`` said it had disabled the job, only the table row changed, and
+    the next sync tick read the unchanged file and switched it back on.
+
+    ``requires_dac`` throughout: the refusal is made of a permission bit, and
+    root bypasses it. Under ``scripts/test-linux.sh`` the write would succeed,
+    every assertion here would be exactly inverted, and the failure would say
+    nothing about the code.
+    """
+
+    @staticmethod
+    def _config_dir(mount_path, user_id="alice"):
+        return mount_path / "Users" / user_id / "istota" / "config"
+
+    @pytest.mark.requires_dac
+    def test_update_job_enabled_reports_a_refused_write(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+```
+""")
+        config_dir = self._config_dir(mount_path)
+        config_dir.chmod(0o555)
+        try:
+            assert update_job_enabled_in_cron_md(
+                config, "alice", "daily-check", False
+            ) is False
+        finally:
+            config_dir.chmod(0o755)
+
+        # And the file really is unchanged, which is the fact the bool now
+        # reports. Without this the test would pass on a writer that returned
+        # False after writing.
+        jobs = load_cron_jobs(config, "alice")
+        assert jobs[0].enabled is True
+
+    @pytest.mark.requires_dac
+    def test_remove_job_reports_a_refused_write(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "keep-this"
+cron = "0 9 * * *"
+prompt = "daily check"
+
+[[jobs]]
+name = "remove-me"
+cron = "30 14 17 2 *"
+prompt = "one-shot"
+once = true
+```
+""")
+        config_dir = self._config_dir(mount_path)
+        config_dir.chmod(0o555)
+        try:
+            assert remove_job_from_cron_md(config, "alice", "remove-me") is False
+        finally:
+            config_dir.chmod(0o755)
+
+        assert [j.name for j in load_cron_jobs(config, "alice")] == [
+            "keep-this", "remove-me",
+        ]
+
+    @pytest.mark.requires_dac
+    def test_migrate_db_jobs_reports_a_refused_write(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        config_dir = self._config_dir(mount_path)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled) "
+                "VALUES (?, ?, ?, ?, 1)",
+                ("alice", "from-db", "0 9 * * *", "stuff"),
+            )
+            conn.commit()
+            config_dir.chmod(0o555)
+            try:
+                assert migrate_db_jobs_to_file(conn, config, "alice") is False
+            finally:
+                config_dir.chmod(0o755)
+
+        assert not (config_dir / "CRON.md").exists()
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — operator CRON.md ``command:`` rows that are pure
 # ``istota-skill <skill> [args...]`` invocations promote to skill-tasks
 # ---------------------------------------------------------------------------
