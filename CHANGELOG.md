@@ -275,6 +275,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `istota doctor`'s report on where native-brain transcripts land no longer claims they are protected on a deployment where nothing protects them. Those transcripts hold the whole assembled prompt, and the check asked whether the sandbox was switched *on* rather than whether it was actually working — so on the shipped Docker stack, where the setting reads on and bubblewrap cannot run, it reported the transcripts covered while every task ran with the daemon's own view of the disk. It now asks the same question the sandbox itself does, and reports every reason that applies rather than stopping at the first, so an operator fixing one is still told about the other. A diagnostic run that is not allowed to probe the machine now says it could not establish that half, rather than assuming it either way.
 
+- The notice shown when the bot switches to a backup brain now sounds like the bot rather than a diagnostic log. It still says which brain failed, why, which backup is running, and whether a pinned model had to be dropped, but quota problems are described as an overheated brain and other failures stay straightforward.
+
 - The Location map now adds new tracker pings and updates its day summary while the page stays open. It also moves to the new day's track after midnight instead of continuing to poll the date from when the page was opened.
 
 - Long attachment names in web chat no longer make the conversation or composer scroll sideways on a phone. Attachment chips now stay within the message column, shorten the visible name with an ellipsis, and keep the staged attachment's remove button in view.

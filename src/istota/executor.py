@@ -970,10 +970,10 @@ def brain_delivers_vision(kind: str, model: str) -> bool | None:
 # user-facing notice. `cooldown` is not a brain stop_reason — it's the executor's
 # own name for the breaker-open path, where no primary call was made at all.
 _FALLBACK_REASON_PHRASES = {
-    "usage_limit": "its usage limit was reached",
-    "not_found": "its CLI is not installed",
-    "transient_api_error": "the provider returned an error",
-    "fallback": "it could not start",
+    "usage_limit": "overheated when it hit its usage limit",
+    "not_found": "is unavailable because I can't find its CLI",
+    "transient_api_error": "is unavailable because its provider returned an error",
+    "fallback": "is unavailable because it couldn't start",
 }
 
 
@@ -991,18 +991,23 @@ def fallback_notice_text(primary_kind, reason, fallback_kind, model, dropped_pin
     event carries it).
     """
     if reason == "cooldown":
-        lead = f"`{primary_kind}` is cooling down after a recent failure."
+        lead = f"My `{primary_kind}` brain is still cooling down after a recent failure."
     else:
-        phrase = _FALLBACK_REASON_PHRASES.get(reason, reason)
-        lead = f"`{primary_kind}` is unavailable — {phrase}."
+        phrase = _FALLBACK_REASON_PHRASES.get(reason)
+        if phrase:
+            lead = f"My `{primary_kind}` brain {phrase}."
+        else:
+            lead = f"My `{primary_kind}` brain is unavailable — {reason}."
     if dropped_pin:
-        return (
-            f"{lead} Continuing on `{fallback_kind}`, which cannot use the "
-            f"pinned `{dropped_pin}`, so its default model runs instead."
+        backup = (
+            f"I'm using my `{fallback_kind}` backup. It can't use the pinned "
+            f"`{dropped_pin}`, so its default model is running instead."
         )
-    if model:
-        return f"{lead} Continuing on `{fallback_kind}` with `{model}`."
-    return f"{lead} Continuing on `{fallback_kind}`."
+    elif model:
+        backup = f"I'm using my `{fallback_kind}` backup with `{model}`."
+    else:
+        backup = f"I'm using my `{fallback_kind}` backup."
+    return f"{lead} {backup} I might say weird stuff, but I'm doing my best."
 
 
 def _build_native_completer(native_config, timeout: float, *, on_usage=None):
