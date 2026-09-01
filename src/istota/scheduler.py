@@ -1896,6 +1896,11 @@ def _execute_skill_task(
 
     env = build_clean_env(config)
     env["ISTOTA_TASK_ID"] = str(task.id)
+    # Set wherever the id is (ISSUE-377). Neither of the scheduler's own paths
+    # writes a session log, but a skill CLI keying off the id has to find the
+    # attempt beside it or fail closed, and "the paths agree" is cheaper to
+    # hold than "these two are the exceptions".
+    env["ISTOTA_TASK_ATTEMPT"] = str(task.attempt_count + 1)
     env["ISTOTA_USER_ID"] = task.user_id
     env["ISTOTA_DEFERRED_DIR"] = str(user_temp_dir)
     env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
@@ -1989,6 +1994,8 @@ def _execute_command_task(
 
     env = build_stripped_env()
     env["ISTOTA_TASK_ID"] = str(task.id)
+    # See ``_execute_skill_task``: the attempt travels with the id (ISSUE-377).
+    env["ISTOTA_TASK_ATTEMPT"] = str(task.attempt_count + 1)
     env["ISTOTA_USER_ID"] = task.user_id
     # Both sibling paths (``_execute_skill_task``, ``executor.execute_task``)
     # export this, and every skill CLI keys its deferred writes off it. Without
