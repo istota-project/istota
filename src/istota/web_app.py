@@ -2396,7 +2396,8 @@ def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:
     rows = conn.execute(
         """
         SELECT id, user_id, name, cron_expression, enabled, last_run_at,
-               last_success_at, consecutive_failures, last_error
+               last_success_at, consecutive_failures, last_error,
+               auto_disabled_at
         FROM scheduled_jobs
         ORDER BY user_id, name
         """,
@@ -2405,8 +2406,14 @@ def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:
     last_errors = []
     active = paused = 0
     for r in rows:
+        # Two columns, two authors: `enabled` is what the user asked for in
+        # CRON.md, `auto_disabled_at` is the scheduler having given up after N
+        # consecutive failures. A job runs only when both say so, so that is
+        # what "active" counts — but both travel in the payload, because the
+        # per-job label distinguishes them and this count cannot.
         enabled = bool(r["enabled"])
-        if enabled:
+        suspended_at = _iso_utc(r["auto_disabled_at"])
+        if enabled and not suspended_at:
             active += 1
         else:
             paused += 1
@@ -2416,6 +2423,7 @@ def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:
             "name": r["name"],
             "cron": r["cron_expression"],
             "enabled": enabled,
+            "auto_disabled_at": suspended_at,
             "last_run_at": _iso_utc(r["last_run_at"]),
             "last_success_at": _iso_utc(r["last_success_at"]),
             "consecutive_failures": r["consecutive_failures"] or 0,

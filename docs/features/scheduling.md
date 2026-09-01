@@ -38,6 +38,13 @@ command = "df -h / | tail -1"
 
 CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definitions to the `scheduled_jobs` DB table.
 
+Deleting a job from the file deletes it. That includes the last one: a file whose TOML block is empty means you have no jobs, and the sync removes the rows to match. Two shapes are not that, and neither deletes anything:
+
+- A file with no TOML block, or one holding only comments, has had no job list written into it. That is what a freshly seeded CRON.md looks like, so if the table holds jobs they are written into the file instead — which is how a workspace whose CRON.md went missing fills back in. Emptying the block by hand but leaving a comment in it lands here too; delete the comment as well if you meant the jobs to go.
+- A file that lists jobs the loader cannot use — a typo in a required key, a `prompt_file` it cannot read — is left alone with a warning in the log, and so are the existing rows. Fix the file and the next tick picks it up.
+
+Rewriting CRON.md replaces the first TOML block and nothing else. Notes you keep above or below the fence, a second fenced block, the header you rewrote — all of it survives `!cron disable`, the removal of a `once` job and the rest. What does not survive is anything inside the block that is not a job the loader accepted: comments there, and a job entry it skipped, are both re-rendered away. The one case that still rewrites the whole file is the seeded-template restore above, which has no job list to splice into.
+
 ## Job types
 
 There is no `type` field. The loader infers the kind from which of `prompt`, `prompt_file`, or `command` a job sets, and a job that sets more than one is skipped with a warning rather than guessed at.
@@ -72,6 +79,8 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
+The five flags — `enabled`, `once`, `silent_unless_action`, `skip_log_channel` and `publish_shared_kv_trusted` — take a bare TOML boolean, `true` or `false`. A quoted `"false"` is a string and a bare `1` is an integer; either one logs a warning and the field takes its default rather than being read for truthiness. `enabled = "false"` used to leave the job running, and `once = "false"` used to delete it after one run.
+
 ## Publishing to shared content
 
 `publish_shared_kv` lets an admin's job write its result where every user's briefings can read it — the escape hatch for shared content the built-in shared-block generator can't produce (it runs tool-less, while a scheduled `prompt` job gets the full sandbox and tools). Shared-KV writes are admin-only: the job's user must pass the writer check, and an unauthorized or failed publish fails loudly (error log, operator alert, and a job-failure increment that the success path withholds). An empty result is a clean skip, leaving the last-known-good value in place.
@@ -80,7 +89,17 @@ Consume the published value with a `shared_block` source on a briefing block. Se
 
 ## Failure handling
 
-Jobs auto-disable after 5 consecutive failures (`scheduled_job_max_consecutive_failures`). Failures reset on success. Disabled jobs can be re-enabled via `!cron enable <name>` in Talk.
+Jobs auto-disable after 5 consecutive failures (`scheduled_job_max_consecutive_failures`). Failures reset on success.
+
+A job stopped that way is *suspended*, which is a different thing from the `enabled = false` you write in CRON.md. Suspension is recorded in `scheduled_jobs.auto_disabled_at`, a column the file cannot express and the sync never writes; `enabled` stays whatever the file says, because the user never asked for the job to stop. A job runs only when it is enabled and not suspended. `!cron` and the admin dashboard render the two apart — `DISABLED` for the first, `SUSPENDED` for the second.
+
+Until this split the sync wrote `enabled` back from CRON.md on every tick, roughly once a minute, so auto-disable did nothing at all for a job defined in a file and a job that failed every run kept running every run.
+
+Three things lift a suspension:
+
+- a successful run;
+- `!cron enable <name>` in Talk, which lifts the suspension, clears the failure count and writes `enabled = true` back into CRON.md;
+- an edit in CRON.md to what the job dispatches — `cron`, `prompt`, `command`, `skill` or `skill_args`. Fixing the thing that was failing is how most people will expect to restart a job, so it counts. Changing `target`, `room`, `model`, `effort` or a flag does not.
 
 ## Catch-up suppression after outages
 
@@ -102,6 +121,6 @@ In Talk, use `!cron` to list, enable, or disable scheduled jobs:
 
 ```
 !cron              # List all jobs with status
-!cron enable NAME  # Re-enable a disabled job
+!cron enable NAME  # Re-enable a disabled job, or lift a suspension
 !cron disable NAME # Disable a job
 ```

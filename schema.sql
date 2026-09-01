@@ -299,6 +299,10 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     consecutive_failures INTEGER DEFAULT 0,
     last_error TEXT,
     last_success_at TEXT,
+    -- When the scheduler suspended this job after N consecutive failures;
+    -- NULL = not suspended. The daemon's column: CRON.md cannot express it
+    -- and the sync never writes it. `enabled` is the user's intent alone.
+    auto_disabled_at TEXT,
     once INTEGER DEFAULT 0,                 -- One-time job: auto-removed after successful execution
     skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
     model TEXT,                             -- Per-job model override; empty = use config default

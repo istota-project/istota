@@ -553,7 +553,7 @@ class TestCronAutoDisable:
 
         with db.get_db(config.db_path) as conn:
             job = db.get_scheduled_job(conn, job_id)
-            assert job.enabled is False
+            assert job.auto_disabled_at is not None
         assert [c["source"] for c in probe.calls] == ["cron_job"]
         assert probe.calls[0]["in_transaction"]
         assert probe.calls[0]["opened_during"] == 0
@@ -613,7 +613,7 @@ class TestCronAutoDisable:
         process_one_task(config)
 
         with db.get_db(config.db_path) as conn:
-            assert db.get_scheduled_job(conn, job_id).enabled is False
+            assert db.get_scheduled_job(conn, job_id).auto_disabled_at is not None
         assert [c["dedup_key"] for c in probe.calls] == [f"job:{job_id}"]
         assert probe.calls[0]["in_transaction"]
         assert probe.calls[0]["opened_during"] == 0
@@ -650,7 +650,7 @@ class TestCronAutoDisable:
         process_one_task(config)
 
         with db.get_db(config.db_path) as conn:
-            assert db.get_scheduled_job(conn, job_id).enabled is False
+            assert db.get_scheduled_job(conn, job_id).auto_disabled_at is not None
         assert [c["dedup_key"] for c in probe.calls] == [f"job:{job_id}"]
         assert probe.calls[0]["in_transaction"]
         assert probe.calls[0]["opened_during"] == 0
@@ -713,9 +713,9 @@ class TestCronAutoDisable:
         process_one_task(config)
 
         with db.get_db(config.db_path) as conn:
-            # The disable itself still happens — only the notification is
+            # The suspension itself still happens — only the notification is
             # withheld, or the test would pass against a job that never tripped.
-            assert db.get_scheduled_job(conn, job_id).enabled is False
+            assert db.get_scheduled_job(conn, job_id).auto_disabled_at is not None
             assert conn.execute(
                 "SELECT COUNT(*) FROM notifications WHERE source = 'cron_job'",
             ).fetchone()[0] == 0

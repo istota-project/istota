@@ -5,17 +5,17 @@ job, write a `task_logs` warning, and tell nobody. A module-prefixed job gets
 rescued on a later sweep; a user's own CRON.md job just stops running, and the
 first sign of it is a briefing that never arrives.
 
-**The close predicate is `consecutive_failures == 0`, not `enabled`.** That
-looks backwards and is not. `sync_cron_jobs_to_db` treats CRON.md as
-authoritative for `enabled` ("file true → DB 1"), and `check_scheduled_jobs`
-calls it on every tick, so a job defined in CRON.md is switched back on within
-one scheduler tick of being auto-disabled — a row watching `enabled` would go
-`stale` minutes after it was raised, leaving the user a push about something the
-panel then denies all knowledge of. The same sync deliberately preserves the
-state columns, so `consecutive_failures` survives it, and every path that really
-does end the condition zeroes the counter: a successful run
-(`reset_scheduled_job_failures`), `!cron enable` (`db.enable_scheduled_job`), and
-the scheduler's module-job rescue. A deleted job has no row to read at all.
+**The close predicate is `auto_disabled_at IS NULL`** — the daemon's own
+column, which is the one that says whether this job is being held back. It is
+not `enabled`: that is the user's intent, authored by CRON.md, and a job the
+user has switched off by hand was never the condition this row is about.
+
+Three things lift a suspension and each of them genuinely ends the condition: a
+successful run (`reset_scheduled_job_failures`), `!cron enable`
+(`db.enable_scheduled_job`), and an edit in CRON.md to what the job dispatches,
+which `sync_cron_jobs_to_db` reads as the user fixing it. That third path is
+worth knowing about here, because it is the one that closes the row with no
+surface having been touched. A deleted job has no row to read at all.
 
 There is no HTTP endpoint that re-enables a job — the verb is `!cron enable
 <name>` in chat, and the panel does not send chat commands. So the view carries
@@ -108,17 +108,17 @@ def is_module_job(job_name: str) -> bool:
 
 
 def should_notify(job_name: str) -> bool:
-    """Whether a disable of this job is worth telling the user about.
+    """Whether a suspension of this job is worth telling the user about.
 
-    **A module job is not.** `_sync_module_jobs` re-enables every disabled
-    `_module.*` row with `consecutive_failures > 0` on an hourly cooldown,
-    unconditionally — it is a retry, not a repair, and its own comment says a
-    genuinely broken row is expected to loop through disable and rescue at that
-    rate. A row here would ride that loop: raised on the disable, marked `stale`
-    on the next panel read after the rescue zeroed the counter, then *reopened*
-    an hour later — and the reopen branch delivers, so a permanently broken
-    module job becomes an hourly push about something the user has no verb to
-    fix. `!cron enable` operates on CRON.md and a module job is not in it.
+    **A module job is not.** `_sync_module_jobs` lifts the suspension on every
+    `_module.*` row on an hourly cooldown, unconditionally — it is a retry, not
+    a repair, and its own comment says a genuinely broken row is expected to
+    loop through suspend and rescue at that rate. A row here would ride that
+    loop: raised on the suspend, marked `stale` on the next panel read after
+    the rescue cleared the column, then *reopened* an hour later — and the
+    reopen branch delivers, so a permanently broken module job becomes an
+    hourly push about something the user has no verb to fix. `!cron enable`
+    operates on CRON.md and a module job is not in it.
 
     The user is not left uninformed by this. A module job that fails for a
     reason they can act on has a source of its own saying so in terms they can
@@ -229,10 +229,10 @@ class CronJobResolver:
                 row.id, row.user_id, job.user_id, job_id,
             )
             return None
-        if (job.consecutive_failures or 0) == 0:
-            # Recovered: a successful run, `!cron enable`, or the module rescue.
-            # See the module docstring for why this is the predicate and
-            # `enabled` is not.
+        if job.auto_disabled_at is None:
+            # The suspension lifted: a successful run, `!cron enable`, or a
+            # definition edit in CRON.md. See the module docstring for why this
+            # is the predicate and `enabled` is not.
             return None
 
         return NotificationView(

@@ -248,7 +248,13 @@ export interface AdminStatsJob {
   user_id: string;
   name: string;
   cron: string;
+  /** What the user asked for in CRON.md. Not on its own whether the job runs. */
   enabled: boolean;
+  /** When the scheduler suspended the job after N consecutive failures, or
+   *  null. The daemon's own column, kept apart from `enabled` because CRON.md
+   *  overwrites that one on every sync tick. A job runs only when it is
+   *  enabled and not suspended. */
+  auto_disabled_at: string | null;
   last_run_at: string | null;
   last_success_at: string | null;
   consecutive_failures: number;

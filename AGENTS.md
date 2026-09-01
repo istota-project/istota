@@ -140,7 +140,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 
 ### Scheduled Jobs (CRON.md)
 
-Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-job `model`/`effort` overrides. Auto-disable after 5 consecutive failures. `skip_log_channel`, `silent_unless_action`, `once = true` supported.
+Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-job `model`/`effort` overrides. Auto-disable after 5 consecutive failures — recorded in `scheduled_jobs.auto_disabled_at`, which the file cannot express and the sync never writes, so CRON.md saying `enabled = true` does not bring a suspended job back. Three things lift it: a successful run, `!cron enable`, and an edit in CRON.md to what the job dispatches (`cron`, `prompt`, `command`, `skill`, `skill_args`). `skip_log_channel`, `silent_unless_action`, `once = true` supported.
 
 ### Heartbeat
 

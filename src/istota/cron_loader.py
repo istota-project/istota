@@ -16,6 +16,11 @@ logger = logging.getLogger("istota.cron_loader")
 
 _TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
 
+# Just the opening marker, on a line of its own. Only used to tell "there is
+# no fence here" from "there is a fence and it was never closed", which the
+# expression above cannot distinguish — both fail to match.
+_TOML_OPENER_RE = re.compile(r"^```toml[^\n]*\n", re.MULTILINE)
+
 # Names with this prefix are managed by module integrations (e.g. money) and
 # are not subject to CRON.md orphan deletion.
 _MODULE_JOB_PREFIX = "_module."
@@ -169,6 +174,34 @@ def _validate_target(name: str, user_id: str, target: str) -> None:
             )
 
 
+def _coerce_bool(name: str, user_id: str, field: str, value, default: bool) -> bool:
+    """A TOML bool, or the default with a warning. Never rejects the job.
+
+    TOML has a real boolean type, so anything else here is a mistake in the
+    file: ``enabled = "false"`` is a truthy string and used to leave the job
+    running, which is the opposite of what was written. ``enabled = 1`` is an
+    integer and gets the same treatment — TOML would have accepted ``true``.
+
+    Warn-and-default rather than reject, matching how ``model``, ``effort``
+    and ``target`` already behave: a typo in ``once`` would otherwise silently
+    drop a job the user can see in their own file.
+    """
+    if isinstance(value, bool):
+        return value
+    # The value is truncated because this runs on the sync tick, once a
+    # minute, for as long as the file says what it says -- and a TOML array
+    # or inline table has no bound on its length. The type is what names the
+    # mistake; the value is there to find it in the file.
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = shown[:77] + "..."
+    logger.warning(
+        "Job '%s' (user %s): %s must be a TOML boolean, got %s %s; using %s",
+        name, user_id, field, type(value).__name__, shown, default,
+    )
+    return default
+
+
 @dataclass
 class CronJob:
     name: str
@@ -191,11 +224,117 @@ class CronJob:
     publish_shared_kv_trusted: bool = False
 
 
-def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
-    """
-    Load scheduled job definitions from a user's CRON.md file.
+@dataclass
+class CronDocument:
+    """A user's CRON.md, kept whole rather than reduced to its jobs.
 
-    Returns list of CronJob, or None if file doesn't exist or mount not configured.
+    ``load_cron_jobs`` answers "what jobs does this file define" and throws
+    the rest away, which loses the two facts a writer needs. It cannot tell an
+    **empty** toml fence from a **missing** one — both are ``[]`` — so the
+    sync read "the user deleted their last job" and "this is a seeded
+    template" as the same event and restored the deleted job from the table
+    (ISSUE-369 defect 2). And it keeps no offsets, so every rewrite had to
+    regenerate the whole document, discarding whatever prose the user had put
+    around the fence.
+
+    ``block`` is the toml source inside the first fence, ``None`` when the
+    file has no fence at all. ``block_span`` are its offsets within
+    ``content``, which is what the splicing writer replaces.
+    ``skipped_entries`` counts the ``[[jobs]]`` tables the parser refused, so
+    a caller can tell "this file lists no jobs" from "this file lists jobs
+    and none of them are usable" — see :meth:`states_no_jobs`.
+    """
+
+    content: str
+    block: str | None
+    block_span: tuple[int, int] | None
+    jobs: list[CronJob]
+    skipped_entries: int = 0
+
+    @property
+    def is_template(self) -> bool:
+        """Nothing has authored a job list here yet.
+
+        **The spec assumed this was ``block is None`` and the shipped
+        template disagrees.** ``storage.CRON_TEMPLATE`` seeds a fence holding
+        five commented-out example lines, so a freshly seeded CRON.md parses
+        to zero jobs with ``block`` set — and reading that as "the user
+        deleted everything" hands the sync's orphan sweep every row that user
+        has. It is not a hypothetical shape: ``ensure_user_directories_v2``
+        re-seeds the file whenever it is absent, and it runs on every task,
+        every inbound email and every scheduler pass, so a CRON.md lost to a
+        mount fault comes back as this and the next tick deletes the
+        schedule it was supposed to protect.
+
+        So the question is lexical rather than semantic — both shapes parse
+        to ``{}``:
+
+        - no fence, or a fence holding **only comments and whitespace**:
+          nothing has been stated, treat it as a template.
+        - a fence holding **nothing at all**: the user's own empty list, and
+          exactly what ``render_jobs_block([])`` writes when the last job is
+          removed. Deleting the last job has to mean deleting it, which is
+          the whole of ISSUE-369 defect 2.
+
+        The residue is that emptying the fence by hand *while leaving a
+        comment in it* still restores from the table. That is the pre-change
+        behaviour for every empty-fence shape, it is the safe direction, and
+        it is one blank line away from the answer the user wanted.
+        """
+        if self.block is None:
+            return True
+        stripped = self.block.strip()
+        if not stripped:
+            return False
+        return all(
+            line.lstrip().startswith("#") for line in stripped.splitlines()
+        )
+
+    @property
+    def states_no_jobs(self) -> bool:
+        """The file says, in as many words, that there are no jobs to run.
+
+        False when every entry it *did* list was refused, which is a
+        different fact and must not authorize the orphan sweep: an
+        unreadable ``prompt_file`` (a mount fault, or a prompts directory the
+        user moved) drops its job at parse time, so a one-job file would
+        otherwise delete the row while the definition sits in the file — and
+        nothing brings it back, because the next tick reads the same file the
+        same way.
+        """
+        return not self.jobs and not self.skipped_entries
+
+
+def _str_field(name: str, user_id: str, field: str, value) -> str:
+    """A TOML string, stripped, or ``""`` with a warning. Never raises.
+
+    Every field here used to be read as ``j.get(field, "").strip()``, which
+    is an ``AttributeError`` for anything that is not a string — and the
+    ``try/except`` around the parse closes before the loop, so ``name = 5``
+    in a CRON.md raised out of the loader into the scheduler's per-user
+    handler, taking every *other* job in that file with it. Warn-and-default,
+    like ``_coerce_bool`` and the three validators beside it.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = shown[:77] + "..."
+    logger.warning(
+        "Job '%s' (user %s): %s must be a TOML string, got %s %s; ignoring it",
+        name or "(unnamed)", user_id, field, type(value).__name__, shown,
+    )
+    return ""
+
+
+def load_cron_document(config, user_id: str) -> "CronDocument | None":
+    """Load a user's CRON.md as a document: the bytes, the fence, the jobs.
+
+    ``None`` for every case the file cannot be read as one — no mount, no
+    file, an unreadable or non-UTF-8 one, or a fence whose TOML does not
+    parse. A caller that gets ``None`` knows nothing about what the user
+    wants and must not write anything back on the strength of it; the
+    previous definitions stay in force.
     """
     if not config.use_mount:
         return None
@@ -210,23 +349,94 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
     if content is None or not content:
         return None
 
+    match = _TOML_BLOCK_RE.search(content)
+    if not match:
+        if _TOML_OPENER_RE.search(content):
+            # An opener with no closer. Not "no fence": the user is halfway
+            # through an edit, or the file was written short, and the jobs
+            # they are typing are in there. Reading it as a template hands it
+            # to the restore branch, which writes a whole fresh document over
+            # the top — so refuse it the way an unparseable fence is refused
+            # and let the next tick find a finished file.
+            logger.warning(
+                "CRON.md for %s opens a toml fence and never closes it; the "
+                "previous job definitions stay in force", user_id,
+            )
+            return None
+        # A document with no toml fence. Distinct from a fence holding no
+        # jobs, and the whole reason this function exists.
+        return CronDocument(content=content, block=None, block_span=None, jobs=[])
+
+    toml_str = match.group(1)
     try:
-        match = _TOML_BLOCK_RE.search(content)
-        if not match:
-            return []
-        toml_str = match.group(1)
         data = tomli.loads(toml_str)
     except Exception as e:
-        logger.warning("Failed to parse CRON.md for %s: %s", user_id, e)
+        logger.warning(
+            "Failed to parse CRON.md for %s: %s; the previous job definitions "
+            "stay in force", user_id, e,
+        )
         return None
 
+    jobs, skipped = _parse_jobs(data, config, user_id)
+    return CronDocument(
+        content=content,
+        block=toml_str,
+        block_span=match.span(1),
+        jobs=jobs,
+        skipped_entries=skipped,
+    )
+
+
+def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
+    """
+    Load scheduled job definitions from a user's CRON.md file.
+
+    Returns list of CronJob, or None if file doesn't exist or mount not
+    configured. A thin wrapper over :func:`load_cron_document`, for the
+    callers that want the jobs and nothing else.
+    """
+    doc = load_cron_document(config, user_id)
+    return None if doc is None else doc.jobs
+
+
+def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
+    """Build the ``CronJob`` list from a parsed toml block. Never raises.
+
+    Everything reachable from here is user-authored TOML, so nothing may
+    assume a type: ``jobs`` is whatever the file says it is, an entry in it
+    likewise, and every scalar goes through ``_str_field`` or
+    ``_coerce_bool``. A malformed entry costs itself and no other.
+
+    Returns the jobs **and how many entries were refused**, which is what
+    lets ``CronDocument.states_no_jobs`` tell an empty job list from a job
+    list nothing survived. The count is derived at the end rather than
+    incremented at each of the six ``continue``s below, so a seventh cannot
+    forget to keep it.
+    """
     jobs = []
-    for j in data.get("jobs", []):
-        name = j.get("name", "").strip()
-        cron = j.get("cron", "").strip()
-        prompt = j.get("prompt", "").strip()
-        command = j.get("command", "").strip()
-        prompt_file = j.get("prompt_file", "").strip()
+    raw_jobs = data.get("jobs", [])
+    if not isinstance(raw_jobs, list):
+        logger.warning(
+            "Ignoring 'jobs' in CRON.md for %s: expected an array of tables, "
+            "got %s", user_id, type(raw_jobs).__name__,
+        )
+        # One refused entry rather than none: the file did state something
+        # under `jobs`, so this must not read as "the user has no jobs" and
+        # authorize the orphan sweep.
+        return jobs, 1
+    for j in raw_jobs:
+        if not isinstance(j, dict):
+            logger.warning(
+                "Skipping entry in CRON.md for %s: expected a [[jobs]] table, "
+                "got %s", user_id, type(j).__name__,
+            )
+            continue
+        name = _str_field("", user_id, "name", j.get("name", ""))
+        cron = _str_field(name, user_id, "cron", j.get("cron", ""))
+        prompt = _str_field(name, user_id, "prompt", j.get("prompt", ""))
+        command = _str_field(name, user_id, "command", j.get("command", ""))
+        prompt_file = _str_field(
+            name, user_id, "prompt_file", j.get("prompt_file", ""))
         if not name or not cron:
             logger.warning(
                 "Skipping incomplete job in CRON.md for %s: name=%r cron=%r",
@@ -262,13 +472,13 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
                 name, user_id,
             )
             continue
-        model = j.get("model", "").strip()
-        effort = j.get("effort", "").strip()
+        model = _str_field(name, user_id, "model", j.get("model", ""))
+        effort = _str_field(name, user_id, "effort", j.get("effort", ""))
         if model:
             _validate_model(name, user_id, model)
         if effort:
             _validate_effort(name, user_id, effort)
-        target = j.get("target", "")
+        target = _str_field(name, user_id, "target", j.get("target", ""))
         if target:
             _validate_target(name, user_id, target)
         jobs.append(CronJob(
@@ -278,18 +488,32 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             command=command,
             prompt_file=prompt_file,
             target=target,
-            room=j.get("room", ""),
-            enabled=j.get("enabled", True),
-            silent_unless_action=j.get("silent_unless_action", False),
-            skip_log_channel=j.get("skip_log_channel", False),
-            once=j.get("once", False),
+            room=_str_field(name, user_id, "room", j.get("room", "")),
+            enabled=_coerce_bool(
+                name, user_id, "enabled", j.get("enabled", True), True),
+            silent_unless_action=_coerce_bool(
+                name, user_id, "silent_unless_action",
+                j.get("silent_unless_action", False), False),
+            skip_log_channel=_coerce_bool(
+                name, user_id, "skip_log_channel",
+                j.get("skip_log_channel", False), False),
+            once=_coerce_bool(
+                name, user_id, "once", j.get("once", False), False),
             model=model,
             effort=effort,
-            publish_shared_kv=str(j.get("publish_shared_kv", "")).strip(),
-            publish_shared_kv_trusted=bool(j.get("publish_shared_kv_trusted", False)),
+            # Through `_str_field` like its neighbours rather than `str()`:
+            # this one names a shared_kv namespace, so `publish_shared_kv = 5`
+            # coerced to the namespace "5" is the one string field where a
+            # silent coercion has a consequence outside the job.
+            publish_shared_kv=_str_field(
+                name, user_id, "publish_shared_kv",
+                j.get("publish_shared_kv", "")),
+            publish_shared_kv_trusted=_coerce_bool(
+                name, user_id, "publish_shared_kv_trusted",
+                j.get("publish_shared_kv_trusted", False), False),
         ))
 
-    return jobs
+    return jobs, len(raw_jobs) - len(jobs)
 
 
 def _toml_string(key: str, value: str) -> str:
@@ -299,9 +523,31 @@ def _toml_string(key: str, value: str) -> str:
     return f'{key} = "{value}"'
 
 
-def generate_cron_md(jobs: list[CronJob]) -> str:
-    """Generate CRON.md content from a list of CronJob definitions."""
-    lines = ["# Scheduled Jobs", "", "```toml"]
+def render_jobs_block(jobs: list[CronJob]) -> str:
+    """The toml source for a job list: no fence, no header, no document.
+
+    This is the part of CRON.md that is *regenerated*. Everything else in the
+    file — the header, prose above or below the fence, a second fence — is
+    the user's and is spliced around this by ``_write_cron_md`` rather than
+    rebuilt. Ends with a newline when there is anything to render and is
+    empty otherwise, so that the closing fence lands on its own line either
+    way.
+
+    What it cannot preserve is anything inside the fence that is not a job
+    the parser accepted: a comment, and a ``[[jobs]]`` table that was skipped
+    (a typo in a key, an unreadable ``prompt_file``). Both are gone after a
+    rewrite, because the jobs are rendered from the parsed ``CronJob`` list
+    and that list never held them. That is the boundary of the fix — outside
+    the fence is kept byte for byte, inside it is regenerated — and it is
+    unchanged from the whole-document rewrite this replaces.
+
+    Two cosmetic limits of the splice, for the same reason: the rendered
+    lines end in ``\\n``, so a CRLF document comes back with LF inside the
+    fence and CRLF around it, and a fence indented inside a list item is
+    re-emitted at column 0. Both still parse and both round-trip, so they are
+    stated rather than handled.
+    """
+    lines = []
 
     for i, job in enumerate(jobs):
         if i > 0:
@@ -336,9 +582,20 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
         if job.publish_shared_kv_trusted:
             lines.append("publish_shared_kv_trusted = true")
 
-    lines.append("```")
-    lines.append("")
-    return "\n".join(lines)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def generate_cron_md(jobs: list[CronJob]) -> str:
+    """Generate a whole CRON.md document from a list of CronJob definitions.
+
+    Byte for byte what it always emitted. Used only where there is no
+    existing document to splice into: the one-time migration from the table,
+    and the seeded-template restore. Anywhere a file already exists, the
+    splice in ``_write_cron_md`` is what runs.
+    """
+    return "# Scheduled Jobs\n\n```toml\n" + render_jobs_block(jobs) + "```\n"
 
 
 def _prompt_file_name(name: str) -> str:
@@ -396,25 +653,210 @@ def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) ->
         job.prompt_file = f"{prompts_dir_ref}/{prompt_path.name}"
 
 
-def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> None:
+def _write_cron_md(
+    config,
+    user_id: str,
+    jobs: list[CronJob],
+    doc: "CronDocument | None" = None,
+) -> bool:
     """Write CRON.md, externalizing inline multiline prompts first.
+
+    **With a ``doc``, only the toml block is replaced.** Every other byte of
+    the file the caller read is written back unchanged: the header, a
+    paragraph of the user's own notes above or below the fence, a second
+    toml fence further down. Without one — the migration paths, where there
+    is no document to preserve — it writes ``generate_cron_md`` as before.
+
+    A ``doc`` whose ``block_span`` is ``None`` (a file with no fence at all)
+    also takes the whole-document path, since there is nothing to splice
+    into. Defensive rather than reached: both document-passing callers return
+    False before the write when the file has no fence, because a document
+    with no fence parses to no jobs and neither of them finds the job it was
+    asked to change.
 
     Through the contained directory and the hardened writer, like every other
     host-side write into `{bot_dir}/config/` (ISSUE-339): `mkdir(parents=True)`
     on an unresolved path follows a link at `config/`, and a plain `write_text`
     follows one at `CRON.md`.
+
+    **Returns whether the file now says what the caller asked for**, which is
+    what every caller was already claiming and none of them knew. This runs on
+    an rclone FUSE mount, so a write is a thing that fails — and
+    ``migrate_db_jobs_to_file``, ``update_job_enabled_in_cron_md`` and
+    ``remove_job_from_cron_md`` below all returned an unconditional ``True``,
+    so ``!cron disable`` reported success, disabled the table row alone, and
+    the next sync tick read the unchanged file and switched the job back on
+    (ISSUE-369).
+
+    **False, never an exception**, which is the contract ``write_regular_file``
+    already states and the reason the two steps in front of it are guarded
+    here. ``write_regular_file`` is safe on its own; the two ``mkdir`` calls
+    that precede it are not, and ``exist_ok`` covers only ``FileExistsError``
+    — a directory that cannot be *created* (an unwritable parent, or the
+    ``ENOTCONN``/``EIO`` a dropped FUSE mount answers with, which is exactly
+    the failure this whole change is about) raised straight through. The
+    scheduler's once-job caller is why that matters: it runs inside an open
+    write transaction that has already deleted the job row, so an exception
+    there rolls the task's own completion back and the one-shot runs a second
+    time — strictly worse than the file being stale.
+
+    One thing survives a ``False``: ``_externalize_multiline_prompts`` writes
+    ``scripts/prompts/*.txt`` and stamps ``job.prompt_file`` before anything is
+    written here, so a refused write leaves a prompt file no CRON.md refers
+    to. Harmless and idempotent (``_write_generated_prompt`` compares content
+    on a collision), but it is not evidence the write landed.
     """
     from .storage import resolve_user_config_dir, write_regular_file  # noqa: PLC0415
 
-    _externalize_multiline_prompts(config, user_id, jobs)
+    try:
+        _externalize_multiline_prompts(config, user_id, jobs)
+    except OSError as e:
+        logger.warning(
+            "cron_md_write_refused user=%s reason=prompt_externalize errno=%s",
+            user_id, e.errno,
+        )
+        return False
     config_dir = resolve_user_config_dir(config, user_id)
     if config_dir is None:
         logger.warning(
             "cron_md_write_refused user=%s reason=config_dir_outside_user_tree", user_id,
         )
-        return
-    config_dir.mkdir(parents=True, exist_ok=True)
-    write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
+        return False
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning(
+            "cron_md_write_refused user=%s reason=config_dir_uncreatable errno=%s",
+            user_id, e.errno,
+        )
+        return False
+    if doc is not None and doc.block_span is not None:
+        start, end = doc.block_span
+        content = doc.content[:start] + render_jobs_block(jobs) + doc.content[end:]
+    else:
+        content = generate_cron_md(jobs)
+    return write_regular_file(config_dir / "CRON.md", content)
+
+
+# ---------------------------------------------------------------------------
+# Column ownership
+#
+# Two authors write a ``scheduled_jobs`` row. The user authors the definition
+# in CRON.md — name, schedule, what to run, where to send it, the flags — and
+# the file is authoritative for all of it. The daemon authors the runtime
+# state, and the table is authoritative for that.
+#
+# The split used to hold by omission: the state columns survived a sync
+# because nobody had put them in the ``updates`` dict. Nothing said so and
+# nothing checked, so the next column added to the table inherited whichever
+# behaviour its author happened to give it. These three sets state the split,
+# the sync writes exactly ``FILE_OWNED_COLUMNS`` on both paths rather than
+# restating the list, and ``TestColumnOwnership`` requires the three to
+# partition ``PRAGMA table_info(scheduled_jobs)`` exactly — so a column added
+# to the table without an owner fails the suite.
+#
+# Two things the sets do not say, and a reader filing a new column needs
+# both. They are about **who wins on a sync tick**, not about who may ever
+# write a column: ``db.disable_scheduled_job`` writes ``enabled`` from the
+# ``!cron disable`` verb, which writes the file in the same breath, so the
+# sync reading it back is the mechanism working rather than an arbitration.
+# The daemon's failure path writes ``auto_disabled_at`` instead and this sync
+# never overwrites it. And they describe this sync alone —
+# ``scheduler._sync_module_jobs`` is a third writer with its own rules for
+# ``_module.*`` rows, which the sync filters out of both the file loop and the
+# orphan sweep.
+# ---------------------------------------------------------------------------
+
+#: Columns CRON.md authors. The sync writes exactly these on every tick.
+FILE_OWNED_COLUMNS = frozenset({
+    "cron_expression",
+    "prompt",
+    "command",
+    "skill",
+    "skill_args",
+    "conversation_token",
+    "output_target",
+    "enabled",
+    "silent_unless_action",
+    "skip_log_channel",
+    "once",
+    "model",
+    "effort",
+    "publish_shared_kv",
+    "publish_shared_kv_trusted",
+})
+
+#: Columns the daemon authors. The sync never writes one *from the file*, and
+#: the two exceptions are resets rather than values out of CRON.md: the
+#: ``last_run_at`` reset on a cron-expression change, and the
+#: ``auto_disabled_at`` / ``consecutive_failures`` / ``last_error`` reset on a
+#: change to what the job dispatches. Both are appended to the SET clause at
+#: their own sites so they read as the deliberate exceptions they are.
+DAEMON_OWNED_COLUMNS = frozenset({
+    "last_run_at",
+    "last_success_at",
+    "consecutive_failures",
+    "last_error",
+    # The scheduler's own disable. CRON.md has no way to express it, which is
+    # correct: it is not the user's fact to state. The sync writes it in one
+    # place only — clearing it when the user edits what the job dispatches, at
+    # its own site below.
+    "auto_disabled_at",
+})
+
+#: Row identity, never updated. ``user_id`` and ``name`` are written once at
+#: insert; ``id`` and ``created_at`` come from the schema's own defaults.
+IDENTITY_COLUMNS = frozenset({"id", "user_id", "name", "created_at"})
+
+#: A change to one of these in CRON.md lifts a scheduler suspension — the user
+#: has edited what the job actually runs, which is the plausible shape of a
+#: fix. Deliberately narrower than ``FILE_OWNED_COLUMNS``; see the site in
+#: :func:`sync_cron_jobs_to_db`. Each name is both a column and the
+#: ``ScheduledJob`` attribute holding it, which is how the comparison there
+#: reads them off the existing row.
+_SUSPENSION_CLEARING_COLUMNS = (
+    "cron_expression",
+    "prompt",
+    "command",
+    "skill",
+    "skill_args",
+)
+
+
+def _file_owned_values(
+    fj: "CronJob",
+    cmd_val: str | None,
+    skill_val: str | None,
+    skill_args_val: str | None,
+) -> dict[str, object]:
+    """What the file now says, for every column CRON.md authors.
+
+    The keys are exactly ``FILE_OWNED_COLUMNS``, which
+    ``test_every_file_owned_column_has_a_value`` is what holds: the sync
+    projects this mapping through that set, so a column declared there and
+    missing here is a ``KeyError`` rather than a column silently written as
+    NULL. That is a test-time guarantee, not a runtime one — at runtime the
+    scheduler's per-user ``except`` would swallow it into one log line.
+    """
+    return {
+        "cron_expression": fj.cron,
+        "prompt": fj.prompt,
+        "command": cmd_val,
+        "skill": skill_val,
+        "skill_args": skill_args_val,
+        "conversation_token": fj.room or None,
+        "output_target": fj.target or None,
+        # The file is authoritative for enabled state, symmetrically:
+        # file false -> 0, file true -> 1.
+        "enabled": 1 if fj.enabled else 0,
+        "silent_unless_action": 1 if fj.silent_unless_action else 0,
+        "skip_log_channel": 1 if fj.skip_log_channel else 0,
+        "once": 1 if fj.once else 0,
+        "model": fj.model or None,
+        "effort": fj.effort or None,
+        "publish_shared_kv": fj.publish_shared_kv or None,
+        "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
+    }
 
 
 def sync_cron_jobs_to_db(
@@ -431,9 +873,17 @@ def sync_cron_jobs_to_db(
     - Existing jobs have definition fields updated (preserving state fields)
     - Orphaned DB jobs (not in file) are deleted
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
+    - a scheduler suspension (``auto_disabled_at``) survives every tick, and is
+      lifted — with the failure count — only when the file changes what the job
+      dispatches
     - command-type jobs are rejected for non-admin users (arbitrary user
       shell-command tasks must remain admin-only)
+
+    Both write paths name exactly ``FILE_OWNED_COLUMNS``, so the daemon's
+    state columns are left alone rather than surviving by omission.
     """
+    # Constant per call; sorted only so the generated clauses are stable.
+    file_columns = sorted(FILE_OWNED_COLUMNS)
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integration (see jobs.py in the
     # respective module package); CRON.md must not touch them.
@@ -455,27 +905,14 @@ def sync_cron_jobs_to_db(
             )
             continue
         cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(fj)
+        # The definition, as the file now states it. Both paths below write
+        # exactly the file-owned columns and name no other, which is what
+        # leaves the daemon's state columns alone.
+        file_values = _file_owned_values(fj, cmd_val, skill_val, skill_args_val)
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state
-            updates = {
-                "cron_expression": fj.cron,
-                "prompt": fj.prompt,
-                "command": cmd_val,
-                "skill": skill_val,
-                "skill_args": skill_args_val,
-                "conversation_token": fj.room or None,
-                "output_target": fj.target or None,
-                "silent_unless_action": 1 if fj.silent_unless_action else 0,
-                "skip_log_channel": 1 if fj.skip_log_channel else 0,
-                "once": 1 if fj.once else 0,
-                "model": fj.model or None,
-                "effort": fj.effort or None,
-                "publish_shared_kv": fj.publish_shared_kv or None,
-                "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
-            }
-            # File is authoritative for enabled state (symmetric sync)
-            updates["enabled"] = 1 if fj.enabled else 0
+            updates = {col: file_values[col] for col in file_columns}
 
             # Reset last_run_at when cron expression changes to prevent
             # catch-up runs for past slots in the new expression
@@ -485,6 +922,51 @@ def sync_cron_jobs_to_db(
                     "Cron expression changed for job '%s' (user %s): "
                     "'%s' -> '%s', resetting last_run_at",
                     fj.name, user_id, existing.cron_expression, fj.cron,
+                )
+
+            # An edit to what the job *dispatches* lifts a suspension. Without
+            # this the split is a worse trap than the bug it fixes: today a
+            # user whose job is failing edits the prompt and it runs again on
+            # the next tick, because the suspension never held. After the
+            # split it would stay suspended silently, and the only way out
+            # would be a chat verb they may not know exists.
+            #
+            # These five fields and no others. Changing `target`, `room`,
+            # `model`, `effort` or a flag is not plausibly a fix for a job
+            # that is failing, and a rule keyed on the dispatch fields is one
+            # a reader can hold without consulting the frozenset.
+            #
+            # Ungated on the row's current state, deliberately, because the
+            # edit is visible for exactly one tick: this same UPDATE writes the
+            # file's values into the row, so on every later tick the two agree
+            # and there is no change left to read. Gating on
+            # `existing.auto_disabled_at` therefore loses the edit whenever the
+            # suspension lands *after* the tick that carried it — an ordinary
+            # sequence, not a tight race, since a task queued against the old
+            # definition can be in flight for minutes: the user fixes the
+            # prompt, the sync writes it, the old run posts failure N, the job
+            # suspends on evidence from a definition that no longer exists, and
+            # the documented remedy is spent. Clearing an already-NULL column
+            # is a no-op, and clearing a suspension written between this read
+            # and this write is the right answer for the same reason.
+            #
+            # The failure count goes with it. The other two lifts both zero it
+            # (`enable_scheduled_job`, `reset_scheduled_job_failures`) and
+            # leaving it would make this one nominal: a job resumed at
+            # `consecutive_failures = max` is re-suspended by its first bad run
+            # afterwards, so the user gets one attempt rather than a working
+            # job. The counter is a count of failures against a definition the
+            # file no longer contains.
+            changed_dispatch = [
+                col for col in _SUSPENSION_CLEARING_COLUMNS
+                if file_values[col] != getattr(existing, col)
+            ]
+            if changed_dispatch and existing.auto_disabled_at:
+                logger.info(
+                    "Lifting suspension on job '%s' (user %s): %s changed in "
+                    "CRON.md (suspended at %s)",
+                    fj.name, user_id, ", ".join(changed_dispatch),
+                    existing.auto_disabled_at,
                 )
 
             if (
@@ -502,6 +984,10 @@ def sync_cron_jobs_to_db(
             values = list(updates.values())
             if cron_changed:
                 set_parts.append("last_run_at = datetime('now')")
+            if changed_dispatch:
+                set_parts.append("auto_disabled_at = NULL")
+                set_parts.append("consecutive_failures = 0")
+                set_parts.append("last_error = NULL")
             set_clause = ", ".join(set_parts)
             values.append(existing.id)
             conn.execute(
@@ -514,29 +1000,14 @@ def sync_cron_jobs_to_db(
                     "Inserting CRON.md job '%s' (user %s) as skill-task: skill=%s",
                     fj.name, user_id, skill_val,
                 )
-            # Insert new job
+            # Insert new job: identity, then every file-owned column. The
+            # daemon-owned columns take their schema defaults.
+            columns = ["user_id", "name", *file_columns]
+            placeholders = ", ".join("?" for _ in columns)
             conn.execute(
-                """INSERT INTO scheduled_jobs
-                   (user_id, name, cron_expression, prompt, command,
-                    skill, skill_args,
-                    conversation_token, output_target, enabled, silent_unless_action,
-                    skip_log_channel, once, model, effort,
-                    publish_shared_kv, publish_shared_kv_trusted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    user_id, fj.name, fj.cron, fj.prompt,
-                    cmd_val,
-                    skill_val, skill_args_val,
-                    fj.room or None, fj.target or None,
-                    1 if fj.enabled else 0,
-                    1 if fj.silent_unless_action else 0,
-                    1 if fj.skip_log_channel else 0,
-                    1 if fj.once else 0,
-                    fj.model or None,
-                    fj.effort or None,
-                    fj.publish_shared_kv or None,
-                    1 if fj.publish_shared_kv_trusted else 0,
-                ),
+                f"""INSERT INTO scheduled_jobs ({", ".join(columns)})
+                    VALUES ({placeholders})""",
+                [user_id, fj.name, *(file_values[col] for col in file_columns)],
             )
 
     # Delete orphaned DB jobs (not in file)
@@ -559,7 +1030,8 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
         overwrite: If True, overwrite an existing file (used when file exists
                    but is empty/template-only while DB has real jobs).
 
-    Returns True if a file was written.
+    Returns True if a file was written — which now includes the write
+    itself having succeeded, not just having been attempted.
     """
     if not config.use_mount:
         return False
@@ -611,7 +1083,8 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))
 
-    _write_cron_md(config, user_id, file_jobs)
+    if not _write_cron_md(config, user_id, file_jobs):
+        return False
     logger.info(
         "Migrated %d DB scheduled job(s) to CRON.md for user %s",
         len(file_jobs), user_id,
@@ -623,15 +1096,21 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     """
     Update a job's enabled state in the user's CRON.md file.
 
-    Loads all jobs, updates the target job's enabled field, and rewrites the file.
-    Returns True if the job was found and updated.
+    Loads the document, updates the target job's enabled field, and splices
+    the regenerated toml block back into it — so a user's own notes around
+    the fence survive a ``!cron disable``.
+
+    Returns True if the job was found **and the file now says so**: a refused
+    or failed write is False, so a caller that reports success is reporting
+    the file's state rather than its own intention (ISSUE-369).
     """
     if not config.use_mount:
         return False
 
-    jobs = load_cron_jobs(config, user_id)
-    if jobs is None:
+    doc = load_cron_document(config, user_id)
+    if doc is None:
         return False
+    jobs = doc.jobs
 
     found = False
     for job in jobs:
@@ -643,7 +1122,8 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     if not found:
         return False
 
-    _write_cron_md(config, user_id, jobs)
+    if not _write_cron_md(config, user_id, jobs, doc):
+        return False
     logger.info(
         "%s job '%s' in CRON.md for user %s",
         "Enabled" if enabled else "Disabled", job_name, user_id,
@@ -655,21 +1135,25 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     """
     Remove a job by name from the user's CRON.md file.
 
-    Loads the file, filters out the named job, and rewrites cleanly.
-    Returns True if the job was found and removed.
+    Loads the document, filters out the named job, and splices the
+    regenerated toml block back into it, leaving the rest of the file alone.
+    Returns True if the job was found **and the file now says so**; a refused
+    or failed write is False, like ``update_job_enabled_in_cron_md``.
     """
     if not config.use_mount:
         return False
 
-    jobs = load_cron_jobs(config, user_id)
-    if jobs is None:
+    doc = load_cron_document(config, user_id)
+    if doc is None:
         return False
 
+    jobs = doc.jobs
     original_count = len(jobs)
     jobs = [j for j in jobs if j.name != job_name]
     if len(jobs) == original_count:
         return False  # Job not found
 
-    _write_cron_md(config, user_id, jobs)
+    if not _write_cron_md(config, user_id, jobs, doc):
+        return False
     logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
     return True

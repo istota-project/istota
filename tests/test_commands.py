@@ -714,6 +714,96 @@ class TestCmdCron:
         assert "3 failures" in result
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled,suspended,expected", [
+        (1, False, "enabled"),
+        (0, False, "DISABLED"),
+        (1, True, "SUSPENDED"),
+        # Both: the user's own intent is the more informative of the two, and
+        # the one they can act on from here.
+        (0, True, "DISABLED"),
+    ])
+    async def test_the_listing_tells_the_three_states_apart(
+        self, make_config, enabled, suspended, expected,
+    ):
+        """`DISABLED` is the user's doing, `SUSPENDED` is the scheduler's.
+
+        They read the same to a user and need different things done about
+        them, so a listing that renders both as "off" is the surface where the
+        two-column split stops being visible.
+        """
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled, auto_disabled_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("alice", "digest", "0 9 * * *", "p", enabled,
+                 "2026-08-30 04:05:06" if suspended else None),
+            )
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+
+        other = {"enabled", "DISABLED", "SUSPENDED"} - {expected}
+        assert expected in result
+        assert not any(word in result for word in other)
+        if expected == "SUSPENDED":
+            assert "2026-08-30 04:05" in result
+
+    @pytest.mark.asyncio
+    async def test_the_user_disable_verb_does_not_set_the_daemon_column(
+        self, make_config,
+    ):
+        """Through the real handler, because this is what a refactor breaks.
+
+        `!cron disable` writes the file and `enabled`; collapsing it onto
+        `suspend_scheduled_job` would put the user's intent in the daemon's
+        column, where the module rescue lifts it an hour later.
+        """
+        config = make_config()
+        cron_path = (
+            config.nextcloud_mount_path / "Users" / "alice" / "istota"
+            / "config" / "CRON.md"
+        )
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text(
+            '```toml\n[[jobs]]\nname = "digest"\ncron = "0 * * * *"\n'
+            'prompt = "stuff"\n```\n'
+        )
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "digest", "0 * * * *", "stuff"),
+            )
+            result = await cmd_cron(
+                _ctx(config, conn, "alice", "room1", "disable digest"),
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+
+        assert "Disabled" in result
+        assert job.enabled is False
+        assert job.auto_disabled_at is None
+
+    @pytest.mark.asyncio
+    async def test_the_enable_verb_lifts_a_suspension(self, make_config):
+        """The converse, and the only verb that writes both columns."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled, "
+                " consecutive_failures, auto_disabled_at) "
+                "VALUES (?, ?, ?, ?, 1, 5, datetime('now'))",
+                ("alice", "digest", "0 * * * *", "stuff"),
+            )
+            await cmd_cron(_ctx(config, conn, "alice", "room1", "enable digest"))
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
+
+        assert job.enabled is True
+        assert job.auto_disabled_at is None
+        assert job.consecutive_failures == 0
+
+    @pytest.mark.asyncio
     async def test_enable_job_updates_file_and_db(self, make_config):
         config = make_config()
         # Write CRON.md with disabled job
@@ -837,6 +927,55 @@ prompt = "stuff"
         with db.get_db(config.db_path) as conn:
             job = db.get_scheduled_job_by_name(conn, "alice", "broken")
             assert job.enabled is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_dac
+    async def test_disable_warns_when_the_file_write_is_refused(self, make_config):
+        """The fallback branch is reachable, not just for a missing file.
+
+        ISSUE-369 defect 3: the writer swallowed a failed write and returned
+        True, so this branch could only ever be reached by a CRON.md that was
+        not there. On the rclone mount the daemon actually runs on, a refused
+        write is the commoner case — and the user was told the job was
+        disabled while the file still said otherwise, so the next sync tick
+        switched it back on. `requires_dac` because the refusal is a
+        permission bit and root walks through it.
+        """
+        config = make_config()
+        config_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        cron_path = config_dir / "CRON.md"
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "active-job"
+cron = "0 * * * *"
+prompt = "stuff"
+```
+""")
+        original = cron_path.read_text()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "active-job", "0 * * * *", "stuff"),
+            )
+            config_dir.chmod(0o555)
+            try:
+                result = await cmd_cron(
+                    _ctx(config, conn, "alice", "room1", "disable active-job")
+                )
+            finally:
+                config_dir.chmod(0o755)
+
+        assert "Disabled" in result
+        assert "DB-only" in result
+        # The file is untouched, which is what the warning is about.
+        assert cron_path.read_text() == original
+        with db.get_db(config.db_path) as conn:
+            job = db.get_scheduled_job_by_name(conn, "alice", "active-job")
+            assert job.enabled is False
 
     @pytest.mark.asyncio
     async def test_enable_nonexistent(self, make_config):

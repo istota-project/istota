@@ -1612,6 +1612,40 @@ class TestAdminStats:
             errs = data["scheduler"]["last_errors"]
             assert any(e["job_name"] == "alice/broken" for e in errs)
 
+    async def test_a_suspended_job_is_not_active(self, tmp_path):
+        """`enabled` alone is not whether a job runs.
+
+        A job the scheduler suspended still has `enabled = 1` — the user never
+        asked for it to stop — so counting that column on its own reports a
+        dead job as active. Both facts travel in the payload, because the
+        per-job label distinguishes them and the counts cannot.
+        """
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO scheduled_jobs
+                  (user_id, name, cron_expression, prompt, enabled,
+                   consecutive_failures, auto_disabled_at)
+                VALUES (?, ?, ?, ?, 1, 5, '2026-05-04 12:00:00')
+                """,
+                ("alice", "suspended", "0 7 * * *", "say hi"),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            sched = resp.json()["scheduler"]
+
+        assert (sched["jobs_active"], sched["jobs_paused"]) == (0, 1)
+        job = sched["jobs"][0]
+        assert job["enabled"] is True
+        assert job["auto_disabled_at"] == "2026-05-04T12:00:00Z"
+
 
 @_needs_web_deps
 class TestAdminBrainStatus:

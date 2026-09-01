@@ -2076,26 +2076,90 @@ class TestCheckBriefingsDST:
 class TestSyncCronFiles:
     """Tests for _sync_cron_files edge cases."""
 
-    def test_empty_file_with_db_jobs_triggers_migration(self, db_path, tmp_path):
-        """When CRON.md exists but is empty and DB has jobs, migrate to file."""
-        from istota.scheduler import _sync_cron_files
-
-        mount = tmp_path / "mount"
-        mount.mkdir()
+    @staticmethod
+    def _cron_config(db_path, tmp_path):
         # Disable on-by-default modules so the test only sees its own job.
-        user = UserConfig(timezone="UTC", disabled_modules=["feeds", "money", "location"])
-        config = Config(
-            db_path=db_path, users={"alice": user},
-            nextcloud_mount_path=mount,
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        user = UserConfig(
+            timezone="UTC", disabled_modules=["feeds", "money", "location"],
+        )
+        return Config(
+            db_path=db_path, users={"alice": user}, nextcloud_mount_path=mount,
         )
 
-        # Create empty CRON.md (like seeded template)
+    @staticmethod
+    def _cron_path(config):
         from istota.storage import get_user_cron_path
-        cron_path = mount / get_user_cron_path("alice", "istota").lstrip("/")
-        cron_path.parent.mkdir(parents=True, exist_ok=True)
-        cron_path.write_text("# Scheduled Jobs\n\n```toml\n```\n")
 
-        # Add a DB job
+        path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_deleting_the_last_job_from_cron_md_deletes_it(self, db_path, tmp_path):
+        """An empty fence is the user deleting their jobs, not a template.
+
+        ISSUE-369 defect 2: this branch treated "the fence holds no jobs" and
+        "there is no fence" as one event, so deleting your last job from
+        CRON.md restored it from the table within the minute — and
+        `generate_cron_md` rebuilt the whole document doing it, taking any
+        prose in the file with it. The row now goes and the file is left
+        exactly as the user wrote it.
+        """
+        from istota.scheduler import _sync_cron_files
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run check"
+```
+""")
+
+        # The row exists because the file put it there, which is the state a
+        # deletion starts from.
+        with db.get_db(db_path) as conn:
+            _sync_cron_files(conn, config)
+            assert [j.name for j in db.get_user_scheduled_jobs(conn, "alice")] == [
+                "daily-check",
+            ]
+
+        emptied = "# Scheduled Jobs\n\nNotes I keep here.\n\n```toml\n```\n"
+        cron_path.write_text(emptied)
+
+        with db.get_db(db_path) as conn:
+            _sync_cron_files(conn, config)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert jobs == []
+        assert cron_path.read_text() == emptied
+
+    def test_the_seeded_template_does_not_delete_the_users_jobs(
+        self, db_path, tmp_path
+    ):
+        """The file the seeder actually writes, through the real sync.
+
+        `storage.CRON_TEMPLATE` carries a toml fence holding commented-out
+        examples, so it parses to zero jobs with the fence present — the
+        shape the first cut of this stage read as "the user deleted
+        everything" and handed to the orphan sweep. `ensure_user_directories_v2`
+        re-seeds the file whenever it is absent and runs on every scheduler
+        pass, so a CRON.md lost to a mount fault comes back as this.
+        """
+        from istota.scheduler import _sync_cron_files
+        from istota.storage import CRON_TEMPLATE
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        cron_path.write_text(CRON_TEMPLATE.format(conversation_token="room1"))
+
         with db.get_db(db_path) as conn:
             conn.execute(
                 """INSERT INTO scheduled_jobs
@@ -2104,16 +2168,129 @@ class TestSyncCronFiles:
                 ("alice", "daily-check", "0 9 * * *", "Run check"),
             )
 
-        # Sync should migrate DB jobs to file, not delete them
+        with db.get_db(db_path) as conn:
+            _sync_cron_files(conn, config)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert [j.name for j in jobs] == ["daily-check"]
+        assert 'name = "daily-check"' in cron_path.read_text()
+
+    def test_a_file_whose_every_job_is_refused_holds_the_rows(
+        self, db_path, tmp_path, caplog
+    ):
+        """No usable jobs is not the same fact as no jobs.
+
+        An unreadable `prompt_file` — a moved prompts directory, a mount
+        fault — drops its job at parse time. Syncing that would delete the
+        row while the definition sits in the file, and nothing would bring it
+        back: the next tick reads the same file the same way.
+        """
+        import logging
+
+        from istota.scheduler import _sync_cron_files
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        original = """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt_file = "Users/alice/istota/scripts/prompts/gone.txt"
+```
+"""
+        cron_path.write_text(original)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "daily-check", "0 9 * * *", "Run check"),
+            )
+
+        with caplog.at_level(logging.WARNING, "istota.scheduler"):
+            with db.get_db(db_path) as conn:
+                _sync_cron_files(conn, config)
+                jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert [j.name for j in jobs] == ["daily-check"]
+        assert cron_path.read_text() == original
+        assert any(
+            "none of them could be read" in r.getMessage() for r in caplog.records
+        )
+
+    def test_a_file_with_no_fence_is_restored_from_the_table(self, db_path, tmp_path):
+        """The seeded-template case the restore branch exists for.
+
+        Narrowing that branch to `doc.block is None` must not remove its
+        reason to exist: a file with no toml fence and rows in the table is
+        still written from the table.
+        """
+        from istota.scheduler import _sync_cron_files
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        cron_path.write_text("# Scheduled Jobs\n\nNo config here.\n")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "daily-check", "0 9 * * *", "Run check"),
+            )
+
         with db.get_db(db_path) as conn:
             _sync_cron_files(conn, config)
             jobs = db.get_user_scheduled_jobs(conn, "alice")
 
         assert len(jobs) == 1
         assert jobs[0].name == "daily-check"
-        # File should now contain the job
-        content = cron_path.read_text()
-        assert 'name = "daily-check"' in content
+        assert 'name = "daily-check"' in cron_path.read_text()
+
+    def test_a_restore_that_could_not_be_written_is_logged(
+        self, db_path, tmp_path, caplog
+    ):
+        """The rows survive a refused restore, so the log is the only signal.
+
+        `migrate_db_jobs_to_file` returns False on a write that did not
+        happen (ISSUE-369 defect 3, stage 1) and this call site discarded it,
+        leaving a user whose CRON.md never fills in and nothing anywhere
+        saying why.
+        """
+        import logging
+
+        from istota.scheduler import _sync_cron_files
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        cron_path.write_text("# Scheduled Jobs\n\nNo config here.\n")
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "daily-check", "0 9 * * *", "Run check"),
+            )
+
+        # `_sync_cron_files` imports the writer per call, so the module
+        # attribute is the seam. The refusal itself is the writer's own
+        # (tests/test_cron_loader.py); what is under test here is that this
+        # caller acts on it.
+        with patch(
+            "istota.cron_loader.migrate_db_jobs_to_file", return_value=False,
+        ) as mock_migrate, caplog.at_level(logging.WARNING, "istota.scheduler"):
+            with db.get_db(db_path) as conn:
+                _sync_cron_files(conn, config)
+                jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert mock_migrate.call_count == 1
+        assert mock_migrate.call_args.kwargs == {"overwrite": True}
+        assert len(jobs) == 1, "a refused write must not cost the rows"
+        assert any("Could not restore" in r.getMessage() for r in caplog.records)
 
     def test_empty_file_no_db_jobs_is_noop(self, db_path, tmp_path):
         """When CRON.md is empty and DB has no jobs, nothing happens."""
@@ -3695,7 +3872,13 @@ class TestScheduledJobFailureTracking:
     @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_auto_disable_after_max_failures(self, mock_arun, mock_exec, db_path, tmp_path):
-        """Job should be auto-disabled after max consecutive failures."""
+        """The failure path suspends the job and leaves the user's column alone.
+
+        `enabled` is what CRON.md authors, and the sync writes it back from the
+        file every tick; writing it here is what made auto-disable a no-op for
+        every file-defined job. The follow-through below is the half this test
+        used to lack.
+        """
         config = self._make_config(db_path, tmp_path, max_failures=2)
 
         with db.get_db(db_path) as conn:
@@ -3719,8 +3902,74 @@ class TestScheduledJobFailureTracking:
 
         with db.get_db(db_path) as conn:
             job = db.get_scheduled_job_by_name(conn, "alice", "flaky-job")
-            assert job.enabled is False
+            assert job.auto_disabled_at is not None
+            assert job.enabled is True, "the user never asked for this job to stop"
             assert job.consecutive_failures == 2
+            assert db.get_enabled_scheduled_jobs(conn) == []
+
+    @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_suspended_job_survives_the_cron_md_sync(
+        self, mock_arun, mock_exec, db_path, tmp_path,
+    ):
+        """The negative control the original auto-disable test lacked.
+
+        Defect 1 end to end, through both modules: a real CRON.md on disk still
+        listing the job, the daemon's own sync reading it, and the job still
+        not firing afterwards. Against the pre-split code the sync writes
+        `enabled = 1` back within the tick and the job runs forever.
+        """
+        from istota.scheduler import _sync_cron_files
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path, max_failures=2)
+        config.users = {"alice": UserConfig()}
+        cron_path = (
+            config.nextcloud_mount_path
+            / get_user_cron_path("alice", "istota").lstrip("/")
+        )
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        original = (
+            '```toml\n[[jobs]]\nname = "flaky-job"\ncron = "0 0 * * *"\n'
+            'prompt = "do stuff"\nenabled = true\n```\n'
+        )
+        cron_path.write_text(original)
+
+        with db.get_db(db_path) as conn:
+            _sync_cron_files(conn, config)
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "flaky-job").id
+            # The sync also seeds the module jobs, one of which queues a
+            # one-shot first-poll task. `process_one_task` takes one task and
+            # would take that one, so clear the queue before filling it.
+            conn.execute("DELETE FROM tasks")
+            task_id = db.create_task(
+                conn, prompt="do stuff", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+            conn.execute(
+                "UPDATE scheduled_jobs SET consecutive_failures = 1 WHERE id = ?",
+                (job_id,),
+            )
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            assert db.get_scheduled_job(conn, job_id).auto_disabled_at is not None
+            # The next tick, against the unchanged file.
+            _sync_cron_files(conn, config)
+            job = db.get_scheduled_job(conn, job_id)
+            assert job.enabled is True, "the file still says the user wants it"
+            assert job.auto_disabled_at is not None, "the file must not lift this"
+            # By name, not by emptiness: the same sync seeds the module jobs,
+            # which are enabled and have every right to be.
+            assert "flaky-job" not in {
+                j.name for j in db.get_enabled_scheduled_jobs(conn)
+            }
+
+        # Byte for byte, not a name count: a full regeneration of a one-job
+        # file also contains the name exactly once, so counting proves nothing.
+        assert cron_path.read_text() == original, "the sync rewrote the file"
 
     @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
@@ -3749,7 +3998,78 @@ class TestScheduledJobFailureTracking:
 
         with db.get_db(db_path) as conn:
             job = db.get_scheduled_job_by_name(conn, "alice", "persistent")
-            assert job.enabled is True  # Not disabled despite 100 failures
+            # Not stopped despite 100 failures, in either column.
+            assert job.enabled is True
+            assert job.auto_disabled_at is None
+
+    @patch("istota.scheduler._post_policy_refusal_alert")
+    @patch(
+        "istota.scheduler.execute_task",
+        return_value=(
+            False,
+            'API Error: 400 {"type":"error","error":'
+            '{"message":"Output blocked by content filtering policy"}}',
+            None,
+            None,
+        ),
+    )
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_policy_refusal_suspends_the_job(
+        self, mock_arun, mock_exec, mock_alert, db_path, tmp_path,
+    ):
+        """The second of the three failure sites. Non-retryable, so one run is
+        enough to reach the threshold with max_failures=1."""
+        config = self._make_config(db_path, tmp_path, max_failures=1)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "refused-job", "0 0 * * *", "do stuff"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='refused-job'"
+            ).fetchone()[0]
+            db.create_task(
+                conn, prompt="do stuff", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            job = db.get_scheduled_job(conn, job_id)
+            assert job.auto_disabled_at is not None
+            assert job.enabled is True
+
+    def test_a_failed_shared_kv_publish_suspends_the_job(self, db_path, tmp_path):
+        """The third site, and the one with no test at all before now.
+
+        Called directly: it is reached from inside `process_one_task`'s write
+        transaction on a publish the user is not authorized to make, which is
+        several layers of setup away from anything this class already builds.
+        """
+        from istota.scheduler import _record_publish_failure
+
+        config = self._make_config(db_path, tmp_path, max_failures=2)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "publisher", "0 0 * * *", "do stuff"),
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "publisher")
+
+            _record_publish_failure(conn, config, None, job, "not authorized")
+            assert db.get_scheduled_job(conn, job.id).auto_disabled_at is None
+
+            _record_publish_failure(conn, config, None, job, "not authorized")
+            after = db.get_scheduled_job(conn, job.id)
+
+        assert after.auto_disabled_at is not None
+        assert after.enabled is True
+        assert after.consecutive_failures == 2
 
 
 # ---------------------------------------------------------------------------
@@ -6840,6 +7160,125 @@ once = true
         jobs = load_cron_jobs(config, "alice")
         assert len(jobs) == 1
         assert jobs[0].name == "keep-this"
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_file_removal_that_did_not_happen_is_logged(
+        self, mock_arun, mock_exec, db_path, tmp_path, caplog
+    ):
+        """The row goes whatever the file does, so a lost removal must be said.
+
+        The table row is deleted before CRON.md is touched, so if the file
+        keeps the job the next sync re-inserts it and a `once = true` job runs
+        a second time. Until ISSUE-369 `remove_job_from_cron_md` returned an
+        unconditional True and could not report a refused write at all, so
+        nothing anywhere said so. Here the job is simply absent from the file,
+        which reaches the same branch without needing a permission bit.
+        """
+        import logging
+
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "keep-this"
+cron = "0 9 * * *"
+prompt = "daily check"
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-901", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-901'"
+            ).fetchone()[0]
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            process_one_task(config)
+
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "reminder-901" in msgs
+        assert "not from CRON.md" in msgs
+        # The row is gone either way — that is what the warning is about.
+        with db.get_db(db_path) as conn:
+            assert db.get_scheduled_job(conn, job_id) is None
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_successful_file_removal_is_not_logged(
+        self, mock_arun, mock_exec, db_path, tmp_path, caplog
+    ):
+        """The control: the same path with the job in the file says nothing.
+
+        Without this the warning test passes on a branch that fires
+        unconditionally, which is the same warning as no warning at all.
+        """
+        import logging
+
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "reminder-902"
+cron = "0 15 20 2 *"
+prompt = "One-time reminder"
+once = true
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-902", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-902'"
+            ).fetchone()[0]
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            process_one_task(config)
+
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "not from CRON.md" not in msgs
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Regular success", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)

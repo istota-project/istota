@@ -2235,9 +2235,9 @@ def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
 def _note_job_auto_disabled(
     conn, job_id: int, fail_count: int,
 ) -> RaiseResult | None:
-    """The inbox row for a scheduled job the scheduler has just switched off.
+    """The inbox row for a scheduled job the scheduler has just suspended.
 
-    Three sites disable a job — the policy-refusal branch, the ordinary failure
+    Three sites suspend a job — the policy-refusal branch, the ordinary failure
     branch, and `_record_publish_failure` — and all three previously wrote a
     `task_logs` warning and told nobody. Each now buffers the result of this and
     hands it to `deliver_pending` after its `with` block closes; the write rides
@@ -2253,8 +2253,8 @@ def _note_job_auto_disabled(
     `write_notification` itself runs in the caller's frame, inside a transaction
     that has just recorded the task as failed and charged the job a failure — so
     an exception escaping would skip `db.get_db`'s commit and roll all of that
-    back, leaving the task stuck `running` and the job enabled. An inbox row is
-    not worth that.
+    back, leaving the task stuck `running` and the job still firing. An inbox
+    row is not worth that.
     """
     try:
         job = db.get_scheduled_job(conn, job_id)
@@ -2917,7 +2917,32 @@ def process_one_task(
                             job.name, job.id,
                         )
                         from .cron_loader import remove_job_from_cron_md
-                        remove_job_from_cron_md(config, task.user_id, job.name)
+                        # `job.user_id`, for the reason stated sixteen lines
+                        # up: the job's owner is who the row was written
+                        # under, and CRON.md belongs to the same person. The
+                        # task's user is normally the same and is not the fact
+                        # being used here.
+                        removed = remove_job_from_cron_md(
+                            config, job.user_id, job.name,
+                        )
+                        if not removed and config.use_mount:
+                            # The table row is already gone, so if the job is
+                            # still in the file it is now the only definition
+                            # and the next sync re-inserts it — a `once = true`
+                            # job that runs a second time. Unchanged behaviour,
+                            # but until ISSUE-369 the writer could not report a
+                            # refused write at all, so nothing said so.
+                            # Guarded on `use_mount` because CRON.md is not the
+                            # source of truth without one and False there is
+                            # the ordinary answer rather than a failure.
+                            logger.warning(
+                                "One-time job '%s' was removed from the table "
+                                "but not from CRON.md for user %s (no CRON.md, "
+                                "no such job in it, or the write was refused); "
+                                "if the job is still in the file the next sync "
+                                "will re-insert it",
+                                job.name, job.user_id,
+                            )
 
         else:
             # Check if we should retry (skip for OOM, cancellation, and policy refusals)
@@ -2982,7 +3007,11 @@ def process_one_task(
                     )
                     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
                     if max_failures > 0 and fail_count >= max_failures:
-                        db.disable_scheduled_job(conn, task.scheduled_job_id)
+                        # The daemon's own column, never `enabled`: CRON.md
+                        # authors that one and the sync writes it back within
+                        # the tick, which is what made auto-disable a no-op for
+                        # every file-defined job.
+                        db.suspend_scheduled_job(conn, task.scheduled_job_id)
                         db.log_task(
                             conn, task_id, "warn",
                             f"Scheduled job auto-disabled after {fail_count} consecutive failures",
@@ -3108,7 +3137,11 @@ def process_one_task(
                     )
                     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
                     if max_failures > 0 and fail_count >= max_failures:
-                        db.disable_scheduled_job(conn, task.scheduled_job_id)
+                        # The daemon's own column, never `enabled`: CRON.md
+                        # authors that one and the sync writes it back within
+                        # the tick, which is what made auto-disable a no-op for
+                        # every file-defined job.
+                        db.suspend_scheduled_job(conn, task.scheduled_job_id)
                         db.log_task(
                             conn, task_id, "warn",
                             f"Scheduled job auto-disabled after {fail_count} consecutive failures",
@@ -4084,7 +4117,7 @@ def _record_publish_failure(
     fail_count = db.increment_scheduled_job_failures(conn, job.id, error)
     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
     if max_failures > 0 and fail_count >= max_failures:
-        db.disable_scheduled_job(conn, job.id)
+        db.suspend_scheduled_job(conn, job.id)
         logger.warning(
             "Scheduled job %d auto-disabled after %d consecutive publish failures",
             job.id, fail_count,
@@ -6600,32 +6633,70 @@ def _sync_cron_files(conn, app_config: Config) -> None:
     """Sync CRON.md files to DB for all configured users."""
     from .cron_loader import (
         _MODULE_JOB_PREFIX,
-        load_cron_jobs,
+        load_cron_document,
         migrate_db_jobs_to_file,
         sync_cron_jobs_to_db,
     )
 
     for user_id in app_config.users:
         try:
-            file_jobs = load_cron_jobs(app_config, user_id)
-            if file_jobs is not None:
+            doc = load_cron_document(app_config, user_id)
+            if doc is not None:
                 # Count only user-defined DB jobs when deciding whether to
                 # migrate-to-file; module-managed jobs don't belong in CRON.md.
                 user_db_jobs = [
                     j for j in db.get_user_scheduled_jobs(conn, user_id)
                     if not j.name.startswith(_MODULE_JOB_PREFIX)
                 ]
-                if not file_jobs and user_db_jobs:
-                    # File exists but empty (e.g. seeded template), DB has jobs —
-                    # write DB jobs into the file instead of wiping them
-                    migrate_db_jobs_to_file(conn, app_config, user_id, overwrite=True)
+                # A file nobody has authored a job list into, with rows in
+                # the table: the seeded template this branch was written for,
+                # so write the rows into the file rather than wiping them.
+                # `is_template` is no fence at all *or* a fence holding only
+                # comments, which is what `storage.CRON_TEMPLATE` seeds; the
+                # docstring on it has the reasoning.
+                #
+                # An **empty** fence is not that, and used to reach here too:
+                # both read as zero jobs, so deleting your last job from
+                # CRON.md restored it from the table within the minute and
+                # rewrote the document doing it (ISSUE-369 defect 2). It now
+                # takes the sync path below, where the orphan sweep deletes
+                # the row and the file is left alone.
+                if doc.is_template and user_db_jobs:
+                    if not migrate_db_jobs_to_file(
+                        conn, app_config, user_id, overwrite=True
+                    ):
+                        # Every reason for a False here is a failure: the file
+                        # was read a moment ago, so the mount is configured,
+                        # and `user_db_jobs` is non-empty. The rows are intact
+                        # and the next tick tries again; say so rather than
+                        # leaving a user with a file that never fills in.
+                        logger.warning(
+                            "Could not restore %d scheduled job(s) into CRON.md "
+                            "for %s; the rows are unchanged and the next sync "
+                            "will retry", len(user_db_jobs), user_id,
+                        )
+                elif not doc.jobs and not doc.states_no_jobs:
+                    # The file lists jobs and the parser could use none of
+                    # them — an unreadable `prompt_file`, a typo in a key.
+                    # Syncing that would orphan-delete every row while the
+                    # definitions sit in the file, and nothing would bring
+                    # them back: the next tick reads the same file the same
+                    # way. Hold, the way an unparseable fence is held.
+                    logger.warning(
+                        "CRON.md for %s lists jobs and none of them could be "
+                        "read; leaving the %d existing scheduled job(s) alone "
+                        "until the file is fixed", user_id, len(user_db_jobs),
+                    )
                 else:
                     sync_cron_jobs_to_db(
-                        conn, user_id, file_jobs,
+                        conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
                     )
             else:
-                # No CRON.md — try one-time migration from DB
+                # No CRON.md — try one-time migration from DB. False here is
+                # the ordinary case (nothing to migrate, or the file already
+                # exists), not a failure, so it is not logged; the writer logs
+                # a refused write itself.
                 migrate_db_jobs_to_file(conn, app_config, user_id)
         except Exception as e:
             logger.error("Error syncing CRON.md for %s: %s", user_id, e)
@@ -6696,36 +6767,73 @@ def _sync_module_jobs(
         wanted = jobs_for_user(module_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
-        # Rescue auto-disabled module rows. Two failure waves stuck rows
-        # in the past:
-        #   1. legacy command-task shape + non-admin user → admin-gate
-        #      ("command-type tasks are admin-only"), fixed by cc0bd54.
-        #   2. migrated skill-task shape, but `claim_task` didn't return
-        #      `skill`/`skill_args` so the task fell through to the LLM
-        #      path with an empty prompt, fixed by 027eb1a.
+        # Rescue suspended module rows. A module job has no `!cron enable`
+        # to run against it — it is not in anybody's CRON.md — so if the
+        # daemon gives up on one, only this retries it.
         #
-        # Wave 1 left a known last_error string we could match. Wave 2's
-        # last_error varies (timeouts, malformed output, …), so we drop
-        # the error-string predicate and trust two structural signals
-        # instead: ``_module.*`` rows have no operator-pause UI, so any
-        # row with ``consecutive_failures > 0`` was auto-disabled rather
-        # than operator-disabled, and the ``last_run_at < now - 1h`` gate
-        # prevents a rescue→fail→rescue loop if a row is genuinely broken
-        # (auto-disable still kicks in within ~25min of rescue at */5;
-        # the 1h cooldown caps the rescue rate).
+        # ``auto_disabled_at IS NOT NULL`` says the *scheduler* stopped this
+        # row, directly. The predicate used to be ``enabled = 0 AND
+        # consecutive_failures > 0``, where the second term was a structural
+        # inference standing in for exactly that ("``_module.*`` rows have no
+        # operator-pause UI, so a failure count means the daemon did it") —
+        # there is now a column that states it, so the inference goes. An
+        # operator who ran ``!cron disable`` on a module row sets `enabled = 0`
+        # with `auto_disabled_at` still NULL and is excluded by construction
+        # rather than by proxy.
+        #
+        # The cooldown moves to `auto_disabled_at` for the same reason: it is
+        # the timestamp the rule was always about. It caps the rescue rate for
+        # a genuinely broken row, which loops through suspend and rescue at
+        # roughly hourly rather than every */5 tick.
         rescued = conn.execute(
             "UPDATE scheduled_jobs "
+            "SET auto_disabled_at = NULL, consecutive_failures = 0, "
+            "    last_error = NULL "
+            "WHERE user_id = ? AND name LIKE ? "
+            "AND auto_disabled_at IS NOT NULL "
+            "AND auto_disabled_at < datetime('now', '-1 hour')",
+            (user_id, f"{module_prefix}%"),
+        ).rowcount
+        if rescued:
+            logger.info(
+                "Lifted the suspension on %d module job(s) for user %s",
+                rescued, user_id,
+            )
+
+        # The legacy arm: a row the *pre-split* code stopped, which wrote
+        # `enabled = 0` and left `auto_disabled_at` NULL because the column did
+        # not exist yet. The migration deliberately backfills nothing — nothing
+        # on a CRON.md row separates an operator disable from an auto-disable —
+        # but that reasoning does not carry here, and without this arm every
+        # `_module.*` row stopped by the running deployment is dead for good:
+        # the arm above cannot see it, the drift branch only rescues the
+        # `command`-shaped rows, the CRON.md sync skips `_module.*` entirely,
+        # `!cron enable` needs a name that is in somebody's file, and
+        # `should_notify` means nobody is ever told.
+        #
+        # So this is today's predicate, kept verbatim for exactly the row shape
+        # today's code produces, plus `auto_disabled_at IS NULL` to scope it to
+        # that shape. The `consecutive_failures > 0` term is the inference the
+        # old rescue always made — a `_module.*` row has no operator-pause UI,
+        # so a failure count means the daemon stopped it — and it is no worse
+        # here than it has been in production for as long as it has shipped.
+        # It cannot fire twice for one row: a rescued row has `enabled = 1` and
+        # no failures, and if it fails again the new code suspends it into the
+        # arm above. Delete this once no deployment predates the split.
+        legacy = conn.execute(
+            "UPDATE scheduled_jobs "
             "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
-            "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
+            "WHERE user_id = ? AND name LIKE ? "
+            "AND enabled = 0 AND auto_disabled_at IS NULL "
             "AND consecutive_failures > 0 "
             "AND (last_run_at IS NULL "
             "     OR last_run_at < datetime('now', '-1 hour'))",
             (user_id, f"{module_prefix}%"),
         ).rowcount
-        if rescued:
+        if legacy:
             logger.info(
-                "Re-enabled %d auto-disabled module job(s) for user %s",
-                rescued, user_id,
+                "Re-enabled %d module job(s) for user %s stopped by pre-split "
+                "code", legacy, user_id,
             )
 
         existing_rows = list(conn.execute(
@@ -6770,10 +6878,12 @@ def _sync_module_jobs(
                         # command-task path and got auto-disabled. The migration
                         # to skill-task shape removes that failure mode, so
                         # rescue the row's enabled/failure state in the same
-                        # update.
+                        # update. `enabled = 1` stays: a row stopped by the old
+                        # code is off in the user's column and nothing else will
+                        # turn it back on.
                         extra_sql = (
                             ", enabled = 1, consecutive_failures = 0, "
-                            "last_error = NULL"
+                            "last_error = NULL, auto_disabled_at = NULL"
                         )
                     conn.execute(
                         "UPDATE scheduled_jobs "

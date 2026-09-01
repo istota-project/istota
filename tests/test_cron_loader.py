@@ -8,12 +8,19 @@ from istota import db
 from istota.config import Config
 from istota.brain import set_alias_overrides
 from istota.cron_loader import (
+    DAEMON_OWNED_COLUMNS,
+    FILE_OWNED_COLUMNS,
+    IDENTITY_COLUMNS,
+    CronDocument,
     CronJob,
+    _file_owned_values,
     _validate_model,
     generate_cron_md,
+    load_cron_document,
     load_cron_jobs,
     migrate_db_jobs_to_file,
     remove_job_from_cron_md,
+    render_jobs_block,
     sync_cron_jobs_to_db,
     update_job_enabled_in_cron_md,
 )
@@ -229,6 +236,121 @@ prompt = "ok"
 
 
 # ---------------------------------------------------------------------------
+# TestBooleanCoercion
+# ---------------------------------------------------------------------------
+
+
+# Every boolean a CRON.md job carries, with the default it falls back to.
+_BOOL_FIELDS = [
+    ("enabled", True),
+    ("silent_unless_action", False),
+    ("skip_log_channel", False),
+    ("once", False),
+    ("publish_shared_kv_trusted", False),
+]
+
+
+class TestBooleanCoercion:
+    """A CRON.md boolean is a TOML boolean or it is the default, with a warning.
+
+    Everything here goes through ``load_cron_jobs`` rather than calling
+    ``_coerce_bool`` directly, because the regression was a call site
+    (``j.get("enabled", True)``) rather than the helper.
+    """
+
+    def _load_one(self, mount_path, config, field, literal):
+        _write_cron_md(mount_path, "alice", f"""\
+```toml
+[[jobs]]
+name = "job"
+cron = "0 9 * * *"
+prompt = "do a thing"
+{field} = {literal}
+```
+""")
+        return load_cron_jobs(config, "alice")
+
+    @pytest.mark.parametrize("field,_default", _BOOL_FIELDS)
+    @pytest.mark.parametrize("literal,expected", [("true", True), ("false", False)])
+    def test_a_toml_boolean_is_taken_as_written(
+        self, field, _default, literal, expected, mount_path,
+        make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, field, literal)
+        assert len(jobs) == 1
+        assert getattr(jobs[0], field) is expected
+        assert not caplog.records
+
+    @pytest.mark.parametrize("field,default", _BOOL_FIELDS)
+    @pytest.mark.parametrize("literal", ['"false"', '"true"', "1", "[]"])
+    def test_anything_else_warns_and_takes_the_default(
+        self, field, default, literal, mount_path, make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, field, literal)
+        # The job survives: a mistyped flag must not drop a job the user can
+        # see in their own file.
+        assert len(jobs) == 1
+        assert getattr(jobs[0], field) is default
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert field in message
+        assert "'job'" in message
+        assert "alice" in message
+
+    def test_enabled_false_as_a_string_warns_instead_of_passing_silently(
+        self, mount_path, make_config_with_mount, caplog,
+    ):
+        """The exact regression: ``enabled = "false"`` is a truthy string.
+
+        The job stays enabled either way — ``True`` is the field's default —
+        so the whole of the fix here is that the user is told, rather than
+        having a job they believe is off run every tick in silence.
+        """
+        config = make_config_with_mount()
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, "enabled", '"false"')
+        assert jobs[0].enabled is True
+        assert "enabled" in caplog.text
+        assert "must be a TOML boolean" in caplog.text
+
+    def test_once_false_as_a_string_no_longer_means_its_opposite(
+        self, mount_path, make_config_with_mount,
+    ):
+        """``once = "false"`` used to delete the job after a single run."""
+        config = make_config_with_mount()
+        jobs = self._load_one(mount_path, config, "once", '"false"')
+        assert jobs[0].once is False
+
+    def test_a_long_value_is_truncated_in_the_warning(
+        self, mount_path, make_config_with_mount, caplog,
+    ):
+        """The warning repeats on every sync tick, so it has to be bounded."""
+        config = make_config_with_mount()
+        literal = "[" + ", ".join(['"padding"'] * 200) + "]"
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, "once", literal)
+        assert jobs[0].once is False
+        assert len(caplog.records) == 1
+        assert len(caplog.records[0].getMessage()) < 200
+
+    def test_enabled_zero_no_longer_disables_a_job_by_accident(
+        self, mount_path, make_config_with_mount,
+    ):
+        """``enabled = 0`` is an integer, not a TOML boolean.
+
+        It used to disable the job through a truthiness read of a value TOML
+        would have accepted as ``false`` had that been meant.
+        """
+        config = make_config_with_mount()
+        jobs = self._load_one(mount_path, config, "enabled", "0")
+        assert jobs[0].enabled is True
+
+
+# ---------------------------------------------------------------------------
 # TestGenerateCronMd
 # ---------------------------------------------------------------------------
 
@@ -400,12 +522,17 @@ class TestSyncCronJobsToDb:
                    VALUES (?, ?, ?, ?, 1, '2026-01-01T00:00:00', 3, 'oops', '2025-12-31T00:00:00')""",
                 ("alice", "j1", "0 9 * * *", "old"),
             )
-        # Same cron, different prompt — state should be preserved
-        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="new")]
+        # Nothing the job dispatches has changed, so every state field stands.
+        # `model` is what moves, so the sync demonstrably ran — the prompt
+        # cannot play that part any more, since editing it is now read as the
+        # user fixing the job and clears the failure state on purpose. See
+        # TestSuspensionSurvivesTheSync for that half.
+        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="old", model="opus")]
         with db.get_db(db_path) as conn:
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
             job = db.get_scheduled_job_by_name(conn, "alice", "j1")
 
+        assert job.model == "opus", "the sync did not run, so nothing was proved"
         assert job.last_run_at == "2026-01-01T00:00:00"
         assert job.consecutive_failures == 3
         assert job.last_error == "oops"
@@ -429,9 +556,12 @@ class TestSyncCronJobsToDb:
         # last_run_at should be reset to now (not the old value)
         assert job.last_run_at != "2026-01-01T00:00:00"
         assert job.last_run_at is not None
-        # Other state fields should be preserved
-        assert job.consecutive_failures == 3
-        assert job.last_error == "oops"
+        # A cron change is also a change to what the job dispatches, so the
+        # failure history charged against the old schedule goes with it.
+        assert job.consecutive_failures == 0
+        assert job.last_error is None
+        # Untouched either way.
+        assert job.last_success_at is None
 
     def test_file_enabled_false_disables_db(self, db_path):
         with db.get_db(db_path) as conn:
@@ -496,6 +626,213 @@ class TestSyncCronJobsToDb:
 
         assert len(alice_jobs) == 1
         assert len(bob_jobs) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestColumnOwnership
+# ---------------------------------------------------------------------------
+
+
+class TestColumnOwnership:
+    """The file/table split, declared in code and held here.
+
+    A ``scheduled_jobs`` row has two authors: CRON.md writes the definition,
+    the daemon writes the runtime state. The split used to hold by omission,
+    so nothing stopped the next column added to the table from being written
+    by whichever author its author happened to think of.
+    """
+
+    def test_column_ownership_partitions_the_table(self, db_path):
+        """The guard rail: every column has exactly one declared owner.
+
+        Read from the real schema rather than a list, so adding a column to
+        ``scheduled_jobs`` fails here until somebody decides who writes it.
+        The oracle is ``schema.sql`` plus the ``ALTER TABLE`` list in
+        ``db.py``, which is what ``init_db`` applies; a column added to a live
+        table from a deploy script alone is out of its reach.
+        """
+        with db.get_db(db_path) as conn:
+            actual = {row["name"] for row in conn.execute("PRAGMA table_info(scheduled_jobs)")}
+
+        # Without this the two set differences below both pass vacuously on a
+        # PRAGMA that returned nothing (a renamed or missing table).
+        assert "cron_expression" in actual and "enabled" in actual
+
+        declared = FILE_OWNED_COLUMNS | DAEMON_OWNED_COLUMNS | IDENTITY_COLUMNS
+        assert actual - declared == set(), (
+            "scheduled_jobs column(s) with no declared owner — add each to "
+            "FILE_OWNED_COLUMNS, DAEMON_OWNED_COLUMNS or IDENTITY_COLUMNS in "
+            "cron_loader.py, and decide whether the sync writes it"
+        )
+        assert declared - actual == set(), (
+            "declared column(s) that scheduled_jobs does not have"
+        )
+        # A partition, not merely a cover: a column claimed by two owners
+        # would satisfy both differences above.
+        assert (
+            len(FILE_OWNED_COLUMNS) + len(DAEMON_OWNED_COLUMNS) + len(IDENTITY_COLUMNS)
+            == len(declared)
+        ), "a column is claimed by more than one owner"
+
+    def test_the_file_owned_value_map_names_no_daemon_column(self):
+        values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
+        assert set(values) & DAEMON_OWNED_COLUMNS == set()
+        assert set(values) & IDENTITY_COLUMNS == set()
+
+    def test_every_file_owned_column_has_a_value(self):
+        """The set is the declaration; the value map has to keep up with it."""
+        values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
+        assert set(values) == FILE_OWNED_COLUMNS
+
+    _DISPATCH_RESET = {"auto_disabled_at", "consecutive_failures", "last_error"}
+
+    @pytest.mark.parametrize("file_cron,file_prompt,cleared", [
+        # The file changed nothing the job dispatches. Every daemon-owned
+        # column survives, suspension included.
+        ("0 9 * * *", "old", set()),
+        # A prompt edit: the suspension and the failure history it was charged
+        # against go, and nothing else moves.
+        ("0 9 * * *", "new", _DISPATCH_RESET),
+        # A cron edit: last_run_at is reset, and the dispatch reset rides along.
+        ("30 9 * * *", "old", _DISPATCH_RESET | {"last_run_at"}),
+    ])
+    def test_the_sync_leaves_every_daemon_owned_column_alone(
+        self, db_path, file_cron, file_prompt, cleared,
+    ):
+        """The behavioural half, over the whole daemon-owned set at once.
+
+        Three legs, because there are exactly two branches where this sync
+        writes a daemon-owned column at all — the cron-expression change that
+        resets ``last_run_at``, and the dispatch-field change that clears the
+        suspension and the failure history charged against the old definition
+        — and those are the branches where a third write would be easiest to
+        add without noticing what else it touches. The first leg is the
+        control: change nothing the job dispatches and neither fires.
+        """
+        state = {
+            "last_run_at": "2026-01-01T00:00:00",
+            "last_success_at": "2025-12-31T00:00:00",
+            "consecutive_failures": 3,
+            "last_error": "oops",
+            "auto_disabled_at": "2026-01-02T00:00:00",
+        }
+        assert set(state) == DAEMON_OWNED_COLUMNS, "seed every daemon-owned column here"
+
+        placeholders = ", ".join("?" for _ in state)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                f"""INSERT INTO scheduled_jobs
+                    (user_id, name, cron_expression, prompt, {", ".join(state)})
+                    VALUES (?, ?, ?, ?, {placeholders})""",
+                ["alice", "j1", "0 9 * * *", "old", *state.values()],
+            )
+
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                # `model` is the witness that the sync ran: it is file-owned,
+                # it differs on every leg, and it is in neither exception set.
+                # The prompt cannot play that part any more, since on two legs
+                # it is deliberately unchanged.
+                [CronJob(name="j1", cron=file_cron, prompt=file_prompt, model="opus")],
+            )
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
+            ).fetchone()
+
+        assert row["model"] == "opus", "the sync did not run, so nothing was proved"
+        survives = set(state) - cleared
+        assert {col: row[col] for col in survives} == {col: state[col] for col in survives}
+        assert (row["last_run_at"] != state["last_run_at"]) is ("last_run_at" in cleared)
+        assert (row["auto_disabled_at"] is None) is ("auto_disabled_at" in cleared)
+        assert (row["consecutive_failures"] == 0) is ("consecutive_failures" in cleared)
+
+    _BOOLEAN_COLUMNS = (
+        "enabled",
+        "silent_unless_action",
+        "skip_log_channel",
+        "once",
+        "publish_shared_kv_trusted",
+    )
+
+    @pytest.mark.parametrize("column", _BOOLEAN_COLUMNS)
+    def test_each_boolean_flag_lands_in_its_own_column(self, db_path, column):
+        """One flag on at a time, because the round-trip below cannot tell
+        the five apart — a set flag is 1 in every one of those columns, so
+        two swapped in the value map would leave it green."""
+        assert set(self._BOOLEAN_COLUMNS) <= FILE_OWNED_COLUMNS
+        flags = {name: name == column for name in self._BOOLEAN_COLUMNS}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="j1", cron="0 9 * * *", prompt="p", **flags)],
+            )
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
+            ).fetchone()
+
+        assert {name: row[name] for name in self._BOOLEAN_COLUMNS} == {
+            name: (1 if name == column else 0) for name in self._BOOLEAN_COLUMNS
+        }
+
+    @pytest.mark.parametrize("path", ["insert", "update"])
+    @pytest.mark.parametrize("command,expected_dispatch", [
+        ("", {"command": None, "skill": None, "skill_args": None}),
+        ("echo hi", {"command": "echo hi", "skill": None, "skill_args": None}),
+        (
+            "istota-skill kv get x",
+            {"command": None, "skill": "kv", "skill_args": '["get", "x"]'},
+        ),
+    ])
+    def test_both_paths_write_every_file_owned_column(
+        self, db_path, path, command, expected_dispatch,
+    ):
+        """Insert and update write the same declared set, with the file's values."""
+        job = CronJob(
+            name="j1",
+            cron="5 4 * * *",
+            prompt="a prompt",
+            command=command,
+            target="talk",
+            room="r1",
+            enabled=False,
+            silent_unless_action=True,
+            skip_log_channel=True,
+            once=True,
+            model="opus",
+            effort="high",
+            publish_shared_kv="ns/key",
+            publish_shared_kv_trusted=True,
+        )
+        expected = {
+            "cron_expression": "5 4 * * *",
+            "prompt": "a prompt",
+            "conversation_token": "r1",
+            "output_target": "talk",
+            "enabled": 0,
+            "silent_unless_action": 1,
+            "skip_log_channel": 1,
+            "once": 1,
+            "model": "opus",
+            "effort": "high",
+            "publish_shared_kv": "ns/key",
+            "publish_shared_kv_trusted": 1,
+            **expected_dispatch,
+        }
+        assert set(expected) == FILE_OWNED_COLUMNS, "expect a value for every file-owned column"
+
+        with db.get_db(db_path) as conn:
+            if path == "update":
+                sync_cron_jobs_to_db(
+                    conn, "alice", [CronJob(name="j1", cron="0 0 * * *", prompt="old")],
+                )
+            sync_cron_jobs_to_db(conn, "alice", [job])
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE user_id = 'alice'"
+            ).fetchall()
+
+        assert len(rows) == 1
+        assert {col: rows[0][col] for col in FILE_OWNED_COLUMNS} == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1294,6 +1631,186 @@ prompt = "test"
 
 
 # ---------------------------------------------------------------------------
+# TestARefusedWriteIsReported
+# ---------------------------------------------------------------------------
+
+
+class TestARefusedWriteIsReported:
+    """The writers report the file's state, not their own intention.
+
+    ISSUE-369 defect 3: ``_write_cron_md`` discarded ``write_regular_file``'s
+    bool and every public writer returned an unconditional ``True``. On the
+    rclone mount this runs on, a failed write then read as success — ``!cron
+    disable`` said it had disabled the job, only the table row changed, and
+    the next sync tick read the unchanged file and switched it back on.
+
+    ``requires_dac`` throughout: the refusal is made of a permission bit, and
+    root bypasses it. Under ``scripts/test-linux.sh`` the write would succeed,
+    every assertion here would be exactly inverted, and the failure would say
+    nothing about the code.
+    """
+
+    @staticmethod
+    def _config_dir(mount_path, user_id="alice"):
+        return mount_path / "Users" / user_id / "istota" / "config"
+
+    @pytest.mark.requires_dac
+    def test_update_job_enabled_reports_a_refused_write(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+```
+""")
+        config_dir = self._config_dir(mount_path)
+        config_dir.chmod(0o555)
+        try:
+            assert update_job_enabled_in_cron_md(
+                config, "alice", "daily-check", False
+            ) is False
+        finally:
+            config_dir.chmod(0o755)
+
+        # And the file really is unchanged, which is the fact the bool now
+        # reports. Without this the test would pass on a writer that returned
+        # False after writing.
+        jobs = load_cron_jobs(config, "alice")
+        assert jobs[0].enabled is True
+
+    @pytest.mark.requires_dac
+    def test_remove_job_reports_a_refused_write(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "keep-this"
+cron = "0 9 * * *"
+prompt = "daily check"
+
+[[jobs]]
+name = "remove-me"
+cron = "30 14 17 2 *"
+prompt = "one-shot"
+once = true
+```
+""")
+        config_dir = self._config_dir(mount_path)
+        config_dir.chmod(0o555)
+        try:
+            assert remove_job_from_cron_md(config, "alice", "remove-me") is False
+        finally:
+            config_dir.chmod(0o755)
+
+        assert [j.name for j in load_cron_jobs(config, "alice")] == [
+            "keep-this", "remove-me",
+        ]
+
+    @pytest.mark.requires_dac
+    def test_migrate_db_jobs_reports_a_refused_write(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        config_dir = self._config_dir(mount_path)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled) "
+                "VALUES (?, ?, ?, ?, 1)",
+                ("alice", "from-db", "0 9 * * *", "stuff"),
+            )
+            conn.commit()
+            config_dir.chmod(0o555)
+            try:
+                assert migrate_db_jobs_to_file(conn, config, "alice") is False
+            finally:
+                config_dir.chmod(0o755)
+
+        assert not (config_dir / "CRON.md").exists()
+
+    @pytest.mark.requires_dac
+    def test_a_config_dir_that_cannot_be_created_is_reported_not_raised(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """The mount failure the whole change is about must not raise.
+
+        ``resolve_user_config_dir`` resolves a directory that does not exist
+        yet — it says so — so the refusal lands on ``mkdir``, where
+        ``exist_ok`` covers ``FileExistsError`` alone. A dropped FUSE mount
+        answers ``ENOTCONN``/``EIO`` there and an unwritable parent answers
+        ``EACCES``; either used to raise straight out of ``_write_cron_md``.
+        The scheduler's once-job caller runs inside an open write transaction
+        that has already deleted the job row, so a raise there costs the
+        task's own completion and the one-shot runs again.
+        """
+        config = make_config_with_mount(db_path=db_path)
+        bot_dir = mount_path / "Users" / "alice" / "istota"
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled) "
+                "VALUES (?, ?, ?, ?, 1)",
+                ("alice", "from-db", "0 9 * * *", "stuff"),
+            )
+            conn.commit()
+            # `config/` does not exist and cannot be made.
+            bot_dir.chmod(0o555)
+            try:
+                assert migrate_db_jobs_to_file(conn, config, "alice") is False
+            finally:
+                bot_dir.chmod(0o755)
+
+        assert not (bot_dir / "config").exists()
+
+    @pytest.mark.requires_dac
+    def test_a_failed_prompt_externalization_is_reported_not_raised(
+        self, mount_path, make_config_with_mount
+    ):
+        """The other unguarded step, on the other subtree.
+
+        A multiline prompt is moved into ``scripts/prompts/`` before CRON.md
+        is written at all, so a refusal there is a second way the writer used
+        to raise — and it is on a different directory from the one the tests
+        above chmod, which is why they could not see it.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", '''\
+```toml
+[[jobs]]
+name = "multiline"
+cron = "0 9 * * *"
+prompt = """First line
+Second line"""
+```
+''')
+        original = (
+            mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        ).read_text()
+        scripts_dir = mount_path / "Users" / "alice" / "istota" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        scripts_dir.chmod(0o555)
+        try:
+            assert update_job_enabled_in_cron_md(
+                config, "alice", "multiline", False
+            ) is False
+        finally:
+            scripts_dir.chmod(0o755)
+
+        assert not (scripts_dir / "prompts").exists()
+        assert (
+            mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        ).read_text() == original
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — operator CRON.md ``command:`` rows that are pure
 # ``istota-skill <skill> [args...]`` invocations promote to skill-tasks
 # ---------------------------------------------------------------------------
@@ -1642,3 +2159,695 @@ prompt = "morning"
 """)
         jobs = load_cron_jobs(config, "alice")
         assert [j.name for j in jobs] == ["daily"]
+
+
+# ---------------------------------------------------------------------------
+# TestSuspensionSurvivesTheSync
+# ---------------------------------------------------------------------------
+
+
+class TestSuspensionSurvivesTheSync:
+    """The composite assertion the old suite structurally could not make.
+
+    Auto-disable lived in `scheduler.py` and the sync lived here, so no test
+    ever ran both halves against one row. The daemon wrote `enabled = 0`, the
+    sync wrote `enabled = 1` back from the file within the tick, and a job
+    that failed every run kept running every run.
+    """
+
+    def _job_row(self, conn, name="digest"):
+        return conn.execute(
+            "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = ?",
+            (name,),
+        ).fetchone()
+
+    def test_a_suspended_job_is_not_re_enabled_by_the_sync(self, db_path):
+        file_jobs = [CronJob(name="digest", cron="0 7 * * *", prompt="summarise")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+            conn.commit()
+
+            # The same file, the next tick. Nothing in it changed.
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == []
+            row = self._job_row(conn)
+            # The user never said to switch it off, so their column still says on.
+            assert row["enabled"] == 1
+            assert row["auto_disabled_at"] is not None
+
+    @pytest.mark.parametrize("file_enabled,expected", [(False, 0), (True, 1)])
+    def test_the_sync_still_writes_enabled_from_the_file(
+        self, db_path, file_enabled, expected,
+    ):
+        """The user's column is still the file's to write, both directions.
+
+        The split narrows who writes `enabled`; it does not stop CRON.md
+        authoring it. `test_file_enabled_false_disables_db` and
+        `test_file_enabled_true_overrides_disabled` cover the same ground
+        through `load_cron_jobs`; this states it against a suspended row, where
+        the two columns are the easiest to confuse for each other.
+        """
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(name="digest", cron="0 7 * * *", prompt="p")],
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="digest", cron="0 7 * * *", prompt="p",
+                         enabled=file_enabled)],
+            )
+            row = self._job_row(conn)
+
+        assert row["enabled"] == expected
+        assert row["auto_disabled_at"] is not None, "the file cannot lift a suspension"
+
+    @pytest.mark.parametrize("base_extra,edit", [
+        ({}, {"cron": "30 7 * * *"}),
+        ({}, {"prompt": "summarise it differently"}),
+        ({}, {"command": "echo hi"}),
+        # `skill` alone: same verb and args, a different skill.
+        ({"command": "istota-skill kv get x"},
+         {"command": "istota-skill feeds get x"}),
+        # `skill_args` alone: same skill, an extra flag.
+        ({"command": "istota-skill kv get x"},
+         {"command": "istota-skill kv get x --json"}),
+    ])
+    def test_a_dispatch_field_change_clears_the_suspension(
+        self, db_path, base_extra, edit,
+    ):
+        """Each of the five, one at a time.
+
+        `command` needs three cases rather than one: an ordinary shell command
+        lands in `command`, while an `istota-skill` line is rewritten into
+        `skill` + `skill_args` by `_resolve_job_dispatch`. Varying those two
+        together would leave a bug that dropped either name from
+        `_SUSPENSION_CLEARING_COLUMNS` green, so the last two cases hold one
+        of them fixed while moving the other.
+        """
+        base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise",
+                **base_extra}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**base)])
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+            db.increment_scheduled_job_failures(conn, job.id, "boom")
+            assert self._job_row(conn)["auto_disabled_at"] is not None
+
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**{**base, **edit})])
+
+            row = self._job_row(conn)
+            assert row["auto_disabled_at"] is None
+            # The count is a count of failures against the definition the file
+            # no longer holds. Left in place, the first bad run afterwards
+            # re-suspends the job and the lift buys the user one attempt.
+            assert row["consecutive_failures"] == 0
+            assert row["last_error"] is None
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
+
+    def test_an_edit_that_lands_before_the_suspension_still_counts(self, db_path):
+        """The ordering the gate got wrong, and why the reset is ungated.
+
+        A task queued against the old definition can be in flight for minutes,
+        so this sequence is ordinary rather than a tight race: the user fixes
+        the prompt, the sync writes it, and only then does the old run post the
+        failure that trips the threshold. The edit is visible for exactly one
+        tick — this same UPDATE makes the file and the row agree — so a lift
+        conditioned on the row already being suspended is spent on a row that
+        was not yet suspended, and no later tick can see the change again.
+
+        Resetting the counter is what actually closes it: the in-flight failure
+        then arrives at 1 rather than at the threshold.
+        """
+        base = {"name": "digest", "cron": "0 7 * * *"}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(**base, prompt="summarise")],
+            )
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "digest").id
+            # Four failures in, one short of a threshold of five.
+            for _ in range(4):
+                db.increment_scheduled_job_failures(conn, job_id, "boom")
+
+            # The user fixes the prompt. Nothing is suspended yet.
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(**base, prompt="summarise, but shorter")],
+            )
+
+            # The in-flight run against the old prompt now reports its failure.
+            fail_count = db.increment_scheduled_job_failures(conn, job_id, "boom")
+
+        assert fail_count == 1, "the old definition's failures still count"
+
+    @pytest.mark.parametrize("edit", [
+        {"target": "email"},
+        {"room": "room2"},
+        {"model": "opus"},
+        {"effort": "high"},
+        {"silent_unless_action": True},
+        {"skip_log_channel": True},
+    ])
+    def test_a_cosmetic_field_change_does_not(self, db_path, edit):
+        """Changing where the output goes, or which model runs it, is not
+        plausibly a fix for a job that fails every time."""
+        base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise"}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**base)])
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**{**base, **edit})])
+            row = self._job_row(conn)
+
+        assert row["auto_disabled_at"] is not None
+        # The edit itself still landed, so the sync demonstrably ran.
+        assert (row["output_target"], row["conversation_token"], row["model"],
+                row["effort"], row["silent_unless_action"],
+                row["skip_log_channel"]) != (None, None, None, None, 0, 0)
+
+    def test_a_reinserted_job_starts_unsuspended(self, db_path):
+        """Orphan-delete then re-insert is not a lift, it is a new row.
+
+        Worth stating because it is the one way a user can clear a suspension
+        without touching a dispatch field — delete the job from CRON.md, let a
+        tick run, put it back — and it is correct rather than a hole: the row
+        the daemon suspended is gone.
+        """
+        job = CronJob(name="digest", cron="0 7 * * *", prompt="summarise")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [job])
+            db.suspend_scheduled_job(
+                conn, db.get_scheduled_job_by_name(conn, "alice", "digest").id,
+            )
+            sync_cron_jobs_to_db(conn, "alice", [])
+            assert self._job_row(conn) is None
+
+            sync_cron_jobs_to_db(conn, "alice", [job])
+            assert self._job_row(conn)["auto_disabled_at"] is None
+
+    def test_the_two_verbs_write_different_columns(self, db_path):
+        """The guard against a later refactor collapsing the db helpers.
+
+        `disable_scheduled_job` is the user saying so and writes their column;
+        `suspend_scheduled_job` is the daemon observing a failure and writes
+        its own. Collapsing them re-creates the original defect exactly.
+        """
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="a", cron="0 7 * * *", prompt="p"),
+                 CronJob(name="b", cron="0 7 * * *", prompt="p")],
+            )
+            db.disable_scheduled_job(
+                conn, db.get_scheduled_job_by_name(conn, "alice", "a").id,
+            )
+            db.suspend_scheduled_job(
+                conn, db.get_scheduled_job_by_name(conn, "alice", "b").id,
+            )
+
+            user_off = self._job_row(conn, "a")
+            daemon_off = self._job_row(conn, "b")
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == []
+
+        assert (user_off["enabled"], user_off["auto_disabled_at"]) == (0, None)
+        assert daemon_off["enabled"] == 1
+        assert daemon_off["auto_disabled_at"] is not None
+
+    @pytest.mark.parametrize("clear", ["enable", "success"])
+    def test_the_other_two_lifts(self, db_path, clear):
+        """`!cron enable` and a successful run, the two paths outside the sync."""
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(name="digest", cron="0 7 * * *", prompt="p")],
+            )
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "digest").id
+            db.suspend_scheduled_job(conn, job_id)
+
+            if clear == "enable":
+                db.enable_scheduled_job(conn, job_id)
+            else:
+                db.reset_scheduled_job_failures(conn, job_id)
+
+            assert self._job_row(conn)["auto_disabled_at"] is None
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
+
+
+# ---------------------------------------------------------------------------
+# TestCronDocument
+# ---------------------------------------------------------------------------
+
+
+class TestCronDocument:
+    """The file as a document, not just as a list of jobs.
+
+    Two facts ``load_cron_jobs`` discards and ISSUE-369 needs back: whether
+    there is a toml fence at all, and where in the file it sits.
+    """
+
+    def test_an_empty_fence_is_not_a_missing_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        """The distinction the sync's restore branch turns on.
+
+        Both are zero jobs, and reading them as the same event is what
+        restored a job the user had just deleted (defect 2). The fence is
+        present or it is not, and only the second is a seeded template.
+        """
+        config = make_config_with_mount()
+
+        _write_cron_md(mount_path, "alice", "# Scheduled Jobs\n\n```toml\n```\n")
+        emptied = load_cron_document(config, "alice")
+        assert emptied.block == ""
+        assert emptied.jobs == []
+
+        _write_cron_md(mount_path, "alice", "# Scheduled Jobs\n\nNo config here.\n")
+        seeded = load_cron_document(config, "alice")
+        assert seeded.block is None
+        assert seeded.block_span is None
+        assert seeded.jobs == []
+
+    def test_a_missing_or_unparseable_file_is_no_document(
+        self, mount_path, make_config_with_mount
+    ):
+        """``None`` means "I could not read this", and nothing may be written on it."""
+        config = make_config_with_mount()
+        assert load_cron_document(config, "alice") is None
+
+        _write_cron_md(mount_path, "alice", "```toml\n[[jobs\nbroken\n```\n")
+        assert load_cron_document(config, "alice") is None
+
+    def test_the_block_span_locates_the_block_in_the_file(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        content = """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+```
+"""
+        _write_cron_md(mount_path, "alice", content)
+        doc = load_cron_document(config, "alice")
+        start, end = doc.block_span
+        assert doc.content == content
+        assert doc.content[start:end] == doc.block
+        assert doc.block.startswith("[[jobs]]")
+
+    def test_generate_cron_md_wraps_the_rendered_block(self):
+        """The whole-document form is the block plus a fence, and nothing else.
+
+        Splitting it must not change what the migration paths write, so state
+        the composition rather than trusting the two halves to stay in step.
+        """
+        jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="hello")]
+        assert generate_cron_md(jobs) == (
+            "# Scheduled Jobs\n\n```toml\n" + render_jobs_block(jobs) + "```\n"
+        )
+        assert render_jobs_block([]) == ""
+        assert generate_cron_md([]) == "# Scheduled Jobs\n\n```toml\n```\n"
+
+
+# ---------------------------------------------------------------------------
+# TestARewritePreservesTheDocument
+# ---------------------------------------------------------------------------
+
+
+class TestARewritePreservesTheDocument:
+    """ISSUE-369 defect 2's other half: a rewrite used to eat the file.
+
+    Every writer went through ``generate_cron_md``, which builds a header, a
+    fence and the jobs — so a ``!cron disable`` on a CRON.md with the user's
+    own notes in it returned a document with the notes gone. The toml block
+    is regenerated and spliced back into the bytes that were read.
+    """
+
+    DOC = """\
+# Scheduled Jobs
+
+Notes on why these exist. Keep this paragraph.
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt = "Run daily check"
+
+[[jobs]]
+name = "weekly"
+cron = "0 9 * * 1"
+prompt = "Weekly roll-up"
+```
+
+<!-- A trailing comment, and a second fence below. -->
+
+```toml
+# not the jobs block; the first fence wins and this is left alone
+scratch = "keep me"
+```
+"""
+
+    def _read(self, mount_path):
+        return (
+            mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        ).read_text()
+
+    def test_disabling_a_job_preserves_content_outside_the_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", self.DOC)
+
+        assert update_job_enabled_in_cron_md(config, "alice", "daily-check", False)
+
+        after = self._read(mount_path)
+        assert "Notes on why these exist. Keep this paragraph." in after
+        assert "<!-- A trailing comment, and a second fence below. -->" in after
+        assert 'scratch = "keep me"' in after
+        # Everything before and after the first fence, byte for byte.
+        before, sep, rest = self.DOC.partition("```toml\n")
+        assert after.startswith(before + sep)
+        assert after.endswith(rest.split("```", 1)[1])
+        # And the change the caller asked for did land.
+        jobs = load_cron_jobs(config, "alice")
+        assert [(j.name, j.enabled) for j in jobs] == [
+            ("daily-check", False), ("weekly", True),
+        ]
+
+    def test_removing_a_job_preserves_content_outside_the_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", self.DOC)
+
+        assert remove_job_from_cron_md(config, "alice", "weekly")
+
+        after = self._read(mount_path)
+        assert "Notes on why these exist. Keep this paragraph." in after
+        assert 'scratch = "keep me"' in after
+        assert [j.name for j in load_cron_jobs(config, "alice")] == ["daily-check"]
+
+    def test_removing_the_last_job_leaves_an_empty_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        """Not a document with no fence — which the sync reads as a template.
+
+        The two are what ``CronDocument.block`` tells apart, so the writer
+        must not turn one into the other on its way out.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Scheduled Jobs
+
+Kept prose.
+
+```toml
+[[jobs]]
+name = "only-one"
+cron = "0 9 * * *"
+prompt = "Run it"
+```
+""")
+
+        assert remove_job_from_cron_md(config, "alice", "only-one")
+
+        assert self._read(mount_path) == (
+            "# Scheduled Jobs\n\nKept prose.\n\n```toml\n```\n"
+        )
+        doc = load_cron_document(config, "alice")
+        assert doc.block == ""
+        assert doc.jobs == []
+
+    def test_a_migration_still_writes_a_whole_document(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """No document to splice into means the generated one, as before."""
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "from-db", "0 9 * * *", "stuff"),
+            )
+            assert migrate_db_jobs_to_file(conn, config, "alice") is True
+
+        assert self._read(mount_path) == generate_cron_md([
+            CronJob(name="from-db", cron="0 9 * * *", prompt="stuff"),
+        ])
+
+
+# ---------------------------------------------------------------------------
+# TestMalformedTomlDoesNotRaise
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedTomlDoesNotRaise:
+    """The loader's stated contract: nothing here raises at the scheduler.
+
+    The ``try/except`` closes around the TOML *parse*, so everything the loop
+    then read off the parsed data was unguarded — and a CRON.md is
+    user-written, so none of it has a guaranteed type. Each of these used to
+    be an ``AttributeError`` out of ``load_cron_jobs`` into
+    ``_sync_cron_files``' per-user handler, which costs the user every job in
+    the file rather than the one bad entry.
+    """
+
+    def _load(self, mount_path, make_config_with_mount, block):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", f"```toml\n{block}\n```\n")
+        return load_cron_jobs(config, "alice")
+
+    @pytest.mark.parametrize("block", [
+        'jobs = ["notatable"]',
+        'jobs = "notalist"',
+        "jobs = 3",
+        "[jobs]\nname = 'a table, not an array of them'",
+    ])
+    def test_a_jobs_key_that_is_not_an_array_of_tables(
+        self, mount_path, make_config_with_mount, block
+    ):
+        assert self._load(mount_path, make_config_with_mount, block) == []
+
+    def test_a_non_string_scalar_skips_its_own_job_only(
+        self, mount_path, make_config_with_mount
+    ):
+        """``name = 5`` is one bad job, not a failed file."""
+        jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = 5
+cron = "0 9 * * *"
+prompt = "numbered"
+
+[[jobs]]
+name = "fine"
+cron = "0 9 * * *"
+prompt = "ok"
+""")
+        assert [j.name for j in jobs] == ["fine"]
+
+    @pytest.mark.parametrize(
+        "field",
+        ["cron", "prompt", "command", "room", "target", "publish_shared_kv"],
+    )
+    def test_a_non_string_field_warns_and_is_ignored(
+        self, mount_path, make_config_with_mount, caplog, field
+    ):
+        import logging
+
+        # The bad line replaces the field it names rather than repeating it —
+        # a duplicate key is a TOML parse error, which is a different branch.
+        lines = ["[[jobs]]", 'name = "typo"', 'cron = "0 9 * * *"', 'prompt = "ok"']
+        lines = [ln for ln in lines if not ln.startswith(f"{field} =")]
+        lines.append(f'{field} = ["an", "array"]')
+
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(
+                mount_path, make_config_with_mount, "\n".join(lines),
+            )
+
+        assert any(
+            f"{field} must be a TOML string" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+        # `cron` and `prompt` are required, so emptying either drops the job;
+        # the rest keep the job and lose the field.
+        if field in {"cron", "prompt"}:
+            assert jobs == []
+        else:
+            assert len(jobs) == 1
+            assert getattr(jobs[0], field) == ""
+
+
+# ---------------------------------------------------------------------------
+# TestATemplateIsNotAnEmptyList
+# ---------------------------------------------------------------------------
+
+
+class TestATemplateIsNotAnEmptyList:
+    """The shipped seed has a fence, which the spec assumed it did not.
+
+    ``storage.CRON_TEMPLATE`` writes a toml fence holding five commented-out
+    example lines, so a freshly seeded CRON.md has ``block`` set and parses
+    to zero jobs. Keying the restore branch on ``block is None`` therefore
+    read the seed as "the user deleted everything" and handed the orphan
+    sweep every row that user had. Reachable without any legacy state:
+    ``ensure_user_directories_v2`` re-seeds the file whenever it is absent,
+    and it runs on every task, every inbound email and every scheduler pass.
+    """
+
+    def test_the_shipped_template_is_a_template(self, make_config_with_mount):
+        from istota.storage import CRON_TEMPLATE
+
+        config = make_config_with_mount()
+        # The real bytes the seeder writes, rather than a hand-written fence.
+        _write_cron_md(
+            config.nextcloud_mount_path, "alice",
+            CRON_TEMPLATE.format(conversation_token="room1"),
+        )
+        doc = load_cron_document(config, "alice")
+        assert doc.block is not None, "the seed does carry a fence"
+        assert doc.jobs == []
+        assert doc.is_template is True
+
+    @pytest.mark.parametrize("block,expected", [
+        ("", False),
+        ("\n\n", False),
+        ("# [[jobs]]\n# name = \"x\"\n", True),
+        ("  # indented comment\n", True),
+        ("[[jobs]]\nname = \"x\"\ncron = \"0 9 * * *\"\nprompt = \"p\"\n", False),
+        ("# a comment\n[[jobs]]\nname = \"x\"\n", False),
+    ])
+    def test_which_blocks_read_as_a_template(self, block, expected):
+        doc = CronDocument(
+            content="", block=block, block_span=(0, 0), jobs=[],
+        )
+        assert doc.is_template is expected
+
+    def test_no_fence_at_all_is_a_template(self):
+        doc = CronDocument(content="", block=None, block_span=None, jobs=[])
+        assert doc.is_template is True
+
+
+# ---------------------------------------------------------------------------
+# TestAnUnusableFileIsHeldRatherThanApplied
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnusableFileIsHeldRatherThanApplied:
+    """"No jobs" and "no *usable* jobs" are different facts.
+
+    Both parse to an empty ``jobs`` list, and only the first is the user
+    saying they want nothing scheduled. A single-job file whose
+    ``prompt_file`` has gone missing is the second, and applying it would
+    delete the row while the definition sits in the file — with nothing to
+    bring it back, since the next tick reads the same file the same way.
+    """
+
+    def _doc(self, mount_path, make_config_with_mount, block):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", f"```toml\n{block}\n```\n")
+        return load_cron_document(config, "alice")
+
+    def test_an_empty_fence_states_no_jobs(
+        self, mount_path, make_config_with_mount
+    ):
+        doc = self._doc(mount_path, make_config_with_mount, "")
+        assert doc.jobs == []
+        assert doc.skipped_entries == 0
+        assert doc.states_no_jobs is True
+
+    @pytest.mark.parametrize("block", [
+        # A required key missing.
+        '[[jobs]]\nname = "broken"\nprompt = "p"',
+        # Both a prompt and a command.
+        '[[jobs]]\nname = "broken"\ncron = "0 9 * * *"\nprompt = "p"\ncommand = "ls"',
+        # Neither.
+        '[[jobs]]\nname = "broken"\ncron = "0 9 * * *"',
+        # A `jobs` key that is not an array of tables at all.
+        'jobs = ["notatable"]',
+        'jobs = "notalist"',
+    ])
+    def test_a_file_whose_jobs_are_all_refused_does_not(
+        self, mount_path, make_config_with_mount, block
+    ):
+        doc = self._doc(mount_path, make_config_with_mount, block)
+        assert doc.jobs == []
+        assert doc.skipped_entries > 0
+        assert doc.states_no_jobs is False
+
+    def test_an_unreadable_prompt_file_is_a_refused_entry(
+        self, mount_path, make_config_with_mount
+    ):
+        """The mount-fault shape, which is the one that matters."""
+        doc = self._doc(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "from-a-file"
+cron = "0 9 * * *"
+prompt_file = "Users/alice/istota/scripts/prompts/gone.txt"
+""")
+        assert doc.jobs == []
+        assert doc.states_no_jobs is False
+
+    def test_a_partly_refused_file_still_states_its_jobs(
+        self, mount_path, make_config_with_mount
+    ):
+        """One bad entry beside a good one is an ordinary sync, as before."""
+        doc = self._doc(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "broken"
+prompt = "no cron"
+
+[[jobs]]
+name = "fine"
+cron = "0 9 * * *"
+prompt = "ok"
+""")
+        assert [j.name for j in doc.jobs] == ["fine"]
+        assert doc.skipped_entries == 1
+        assert doc.states_no_jobs is False
+
+
+# ---------------------------------------------------------------------------
+# TestAnUnclosedFence
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnclosedFence:
+    def test_an_opener_with_no_closer_is_unreadable(
+        self, mount_path, make_config_with_mount, caplog
+    ):
+        """Not "no fence": the jobs being typed are in there.
+
+        ``_TOML_BLOCK_RE`` needs a closing fence, so a half-written file
+        matched nothing and read as a document with no job list — which the
+        sync hands to the restore branch, and that writes a fresh document
+        over the top of what the user was in the middle of writing.
+        """
+        import logging
+
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "half-written"
+cron = "0 9 * * *"
+""")
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            assert load_cron_document(config, "alice") is None
+        assert any("never closes it" in r.getMessage() for r in caplog.records)
+
+    def test_a_closed_fence_is_still_read(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", "```toml\n```\n")
+        assert load_cron_document(config, "alice").block == ""

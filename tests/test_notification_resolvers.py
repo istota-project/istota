@@ -292,11 +292,16 @@ class TestOutboundDraftResolver:
 
 
 def _disabled_job(conn, *, name="nightly-digest", failures=5, user="alice"):
-    """A job in the state the three auto-disable sites leave behind."""
+    """A job in the state the three suspend sites leave behind.
+
+    `enabled` stays 1: the user never asked for this job to stop, and writing
+    their column is what let the next CRON.md sync undo the suspension.
+    """
     conn.execute(
         "INSERT INTO scheduled_jobs "
         "(user_id, name, cron_expression, prompt, enabled, consecutive_failures, "
-        " last_error) VALUES (?, ?, ?, ?, 0, ?, ?)",
+        " last_error, auto_disabled_at) "
+        "VALUES (?, ?, ?, ?, 1, ?, ?, datetime('now'))",
         (user, name, "0 7 * * *", "summarise the news", failures, "boom"),
     )
     job_id = conn.execute(
@@ -342,16 +347,15 @@ class TestCronJobResolver:
     async def test_the_cron_command_closes_the_row(self, config, conn, verb):
         """Both verbs, driven through the real handler.
 
-        `disable` is the one the resolver cannot cover: disabling by hand leaves
-        `consecutive_failures` where it was, so the row would keep telling the
-        user to re-enable a job they have just switched off — forever, since
-        object-backed rows are never age-swept.
+        `disable` is the one the resolver cannot cover: disabling by hand writes
+        the user's column and leaves the scheduler's `auto_disabled_at` where it
+        was, so the row would keep telling the user to re-enable a job they have
+        just switched off — forever, since object-backed rows are never
+        age-swept.
         """
         from istota.commands import CommandContext, cmd_cron
 
         _disabled_job(conn, name="nightly-digest")
-        if verb == "disable":
-            conn.execute("UPDATE scheduled_jobs SET enabled = 1")
 
         result = await cmd_cron(CommandContext(
             config=config, conn=conn, user_id="alice",
@@ -363,7 +367,7 @@ class TestCronJobResolver:
         assert _state(conn, "cron_job") == ("resolved", "web")
 
     def test_a_row_left_open_over_a_recovered_job_goes_stale(self, config, conn):
-        """The backstop: the counter went to zero and nobody closed the row."""
+        """The backstop: the suspension lifted and nobody closed the row."""
         job_id = _disabled_job(conn)
         db.reset_scheduled_job_failures(conn, job_id)
         assert _state(conn, "cron_job") == ("open", None)
@@ -372,24 +376,64 @@ class TestCronJobResolver:
         assert items == [] and total == 0
         assert _state(conn, "cron_job") == ("stale", "system")
 
-    def test_a_cron_md_job_switched_back_on_but_still_failing_stays_open(
-        self, config, conn,
-    ):
-        """`enabled` is not the predicate, and this is why.
+    def test_a_row_stays_open_while_the_job_is_suspended(self, config, conn):
+        """The condition has not ended, so neither has the row.
 
-        `sync_cron_jobs_to_db` treats CRON.md as authoritative for `enabled` and
-        runs every scheduler tick, so a file-defined job is switched back on
-        within a tick of being auto-disabled. A resolver watching `enabled`
-        would close the row minutes after raising it, leaving the user a push
-        the panel then denies all knowledge of. The sync leaves the state
-        columns alone, so the failure count is still there.
+        Stated against a full CRON.md sync tick rather than a hand-written
+        UPDATE, because the tick is what used to end this row prematurely: it
+        writes `enabled` from the file and, before the column split, that was
+        the whole state a resolver could read.
         """
-        job_id = _disabled_job(conn)
-        conn.execute("UPDATE scheduled_jobs SET enabled = 1 WHERE id = ?", (job_id,))
+        from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+
+        _disabled_job(conn)
+        sync_cron_jobs_to_db(
+            conn, "alice",
+            [CronJob(name="nightly-digest", cron="0 7 * * *",
+                     prompt="summarise the news")],
+        )
 
         items, total = store.list_open(config, conn, "alice")
         assert total == 1 and len(items) == 1
         assert _state(conn, "cron_job")[0] == "open"
+
+    def test_a_row_closes_when_the_suspension_lifts(self, config, conn):
+        """The third close path, and the one no surface touches.
+
+        The user edits the prompt in CRON.md; the next sync reads that as a fix
+        and clears `auto_disabled_at`. Nothing calls `resolve_for_job`, so the
+        row closes through the resolver alone — which is exactly what it is for.
+        """
+        from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+
+        _disabled_job(conn)
+        sync_cron_jobs_to_db(
+            conn, "alice",
+            [CronJob(name="nightly-digest", cron="0 7 * * *",
+                     prompt="summarise the news, but shorter")],
+        )
+
+        items, total = store.list_open(config, conn, "alice")
+        assert items == [] and total == 0
+        assert _state(conn, "cron_job")[0] == "stale"
+
+    def test_a_job_the_user_switched_off_by_hand_is_not_the_condition(
+        self, config, conn,
+    ):
+        """`enabled` is not the predicate, in the other direction.
+
+        A job the user disabled has `auto_disabled_at` NULL and is not being
+        held back by anything, so there is nothing here to tell them about. The
+        `!cron disable` verb closes the row itself; this is what happens if it
+        did not.
+        """
+        job_id = _disabled_job(conn)
+        db.reset_scheduled_job_failures(conn, job_id)
+        db.disable_scheduled_job(conn, job_id)
+
+        items, _total = store.list_open(config, conn, "alice")
+        assert items == []
+        assert _state(conn, "cron_job")[0] == "stale"
 
     def test_a_row_for_a_job_that_no_longer_exists_goes_stale(self, config, conn):
         _disabled_job(conn)
@@ -408,10 +452,11 @@ class TestCronJobResolver:
         assert items == []
 
     def test_a_module_job_is_not_worth_notifying_about(self):
-        """`_sync_module_jobs` re-enables these hourly whether or not they work.
+        """`_sync_module_jobs` lifts these suspensions hourly whether or not
+        the job works.
 
-        A row would ride that loop — raised on the disable, `stale` after the
-        rescue zeroed the counter, then *reopened* an hour later, and the reopen
+        A row would ride that loop — raised on the suspend, `stale` after the
+        rescue cleared the column, then *reopened* an hour later, and the reopen
         branch delivers. A permanently broken module job would become an hourly
         push about something with no `!cron enable` to run against it.
         """
