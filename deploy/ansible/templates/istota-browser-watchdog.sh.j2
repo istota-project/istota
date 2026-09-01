@@ -8,7 +8,12 @@
 #   - alerts on every restart, louder on crash-loop
 # The container's Docker HEALTHCHECK targets the lightweight liveness endpoint
 # (:9224/live) so "unhealthy" means actually wedged, not merely busy — a long
-# legitimate browse no longer trips a restart.
+# legitimate browse no longer trips a restart. Its deep tier covers three faults:
+# a dead Chrome process, a live Chrome whose DevTools endpoint has stopped
+# answering, and an API process that can no longer drive a perfectly healthy
+# Chrome (ISSUE-384). Only the third needs a container restart to clear — the
+# poisoned Playwright binding is process-scoped state that killing Chrome does
+# nothing for — so this script is the actor for it, unchanged.
 set -euo pipefail
 
 CONTAINER="{{ istota_namespace }}-browser"

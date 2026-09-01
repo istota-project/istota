@@ -576,6 +576,12 @@ services:
     # unhealthy and get restarted mid-operation (ISSUE-143). The deep tier
     # (?deep=1) also probes Chrome's DevTools endpoint so a wedged-but-alive
     # Chrome reads as unhealthy too (ISSUE-149); a busy browse still passes.
+    # Its third arm reads the CDP heartbeat, so an API process that can no longer
+    # drive a perfectly healthy Chrome reads as unhealthy as well (ISSUE-384).
+    # Nothing here acts on that verdict: `restart: unless-stopped` reacts to
+    # process exit, and the debounced auto-heal actor is the Ansible shape's
+    # cron watchdog. Documented in docs/deployment/docker.md, alongside the
+    # sandbox posture this stack makes the same choice about.
     # A compose healthcheck overrides the image HEALTHCHECK, so this must match it.
     healthcheck:
       test: ["CMD-SHELL", "curl -sf 'http://localhost:9224/live?deep=1' || exit 1"]

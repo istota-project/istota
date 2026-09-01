@@ -12,14 +12,22 @@ import tomli
 from . import db
 from .storage import get_user_scripts_path
 
+# The fence markers (ISSUE-386), and this module is why `toml_fence` states
+# its bounds as loosely as it does: a marker that module does not recognise
+# is not a parse that fails safely *here*. It is a document with no fence,
+# which is `is_template`, and the sync's restore branch then rewrites the
+# user's whole CRON.md from the table (`scheduler._sync_cron_files`).
+#
+# The markers are used directly rather than through
+# `toml_fence.find_toml_block` because this is the one caller that has to
+# tell "no opener" from "an opener with no closer". Only the first may ever
+# reach the fence-less document, and only after the hold guard below has
+# ruled out a fence it could not read.
+from .toml_fence import BACKTICK_RUN_RE as _BACKTICK_RUN_RE
+from .toml_fence import FENCE_CLOSE_RE as _TOML_FENCE_CLOSE_RE
+from .toml_fence import FENCE_OPEN_RE as _TOML_FENCE_OPEN_RE
+
 logger = logging.getLogger("istota.cron_loader")
-
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
-
-# Just the opening marker, on a line of its own. Only used to tell "there is
-# no fence here" from "there is a fence and it was never closed", which the
-# expression above cannot distinguish — both fail to match.
-_TOML_OPENER_RE = re.compile(r"^```toml[^\n]*\n", re.MULTILINE)
 
 # Names with this prefix are managed by module integrations (e.g. money) and
 # are not subject to CRON.md orphan deletion.
@@ -349,25 +357,47 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     if content is None or not content:
         return None
 
-    match = _TOML_BLOCK_RE.search(content)
-    if not match:
-        if _TOML_OPENER_RE.search(content):
-            # An opener with no closer. Not "no fence": the user is halfway
-            # through an edit, or the file was written short, and the jobs
-            # they are typing are in there. Reading it as a template hands it
-            # to the restore branch, which writes a whole fresh document over
-            # the top — so refuse it the way an unparseable fence is refused
-            # and let the next tick find a finished file.
+    opener = _TOML_FENCE_OPEN_RE.search(content)
+    if opener is None:
+        if _BACKTICK_RUN_RE.search(content):
+            # Backticks, but not a marker this module recognises: a fence
+            # indented under a list item, one wrapped in four backticks
+            # because the jobs themselves contain three, one inside a
+            # blockquote, a `see ```toml` in a sentence. Reading any of those
+            # as "the user has authored no jobs" hands the file to the
+            # restore branch, which rewrites the whole document from the
+            # table and takes the user's prose with it. Hold instead. The
+            # cost is a schedule that stops tracking the file until it is
+            # fixed; the alternative is losing the file.
             logger.warning(
-                "CRON.md for %s opens a toml fence and never closes it; the "
-                "previous job definitions stay in force", user_id,
+                "CRON.md for %s has backtick fences but no toml block this "
+                "reader can resolve; the previous job definitions stay in "
+                "force and the file is left alone", user_id,
             )
             return None
         # A document with no toml fence. Distinct from a fence holding no
         # jobs, and the whole reason this function exists.
         return CronDocument(content=content, block=None, block_span=None, jobs=[])
 
-    toml_str = match.group(1)
+    closer = _TOML_FENCE_CLOSE_RE.search(content, opener.end())
+    if closer is None:
+        # An opener with no closer. Not "no fence": the user is halfway
+        # through an edit, or the file was written short, and the jobs
+        # they are typing are in there. Reading it as a template hands it
+        # to the restore branch, which writes a whole fresh document over
+        # the top — so refuse it the way an unparseable fence is refused
+        # and let the next tick find a finished file.
+        logger.warning(
+            "CRON.md for %s opens a toml fence and never closes it; the "
+            "previous job definitions stay in force", user_id,
+        )
+        return None
+
+    # The block is everything between the two marker lines. Neither marker's
+    # own indent is inside it, so a splice through `block_span` writes both
+    # back exactly as the user indented them.
+    block_span = (opener.end(), closer.start())
+    toml_str = content[block_span[0]:block_span[1]]
     try:
         data = tomli.loads(toml_str)
     except Exception as e:
@@ -381,7 +411,7 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     return CronDocument(
         content=content,
         block=toml_str,
-        block_span=match.span(1),
+        block_span=block_span,
         jobs=jobs,
         skipped_entries=skipped,
     )
@@ -516,11 +546,76 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
     return jobs, len(raw_jobs) - len(jobs)
 
 
+# Every character TOML requires an escape for inside a basic string, plus the
+# tab — legal raw, but invisible to whoever opens CRON.md next.
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+    # Not a TOML rule, and no longer the load-bearing guard it was written
+    # as. When ISSUE-385 added this, the fence was closed by the first ```
+    # the reader saw anywhere, so a value holding three backticks truncated
+    # the block mid-string and froze the whole schedule — that failure
+    # arriving through the container rather than the grammar. ISSUE-386 then
+    # anchored both markers to a line of their own, and every value here
+    # renders on one line, so a rendered ``` can no longer begin one.
+    # Kept as defence in depth, since it is one line and it stops either
+    # half's assumption from silently becoming the other's problem. Escaped
+    # as a code point, which ``tomllib`` decodes straight back, so the value
+    # round-trips and only the rendered spelling changes.
+    "`": "\\u0060",
+}
+
+
 def _toml_string(key: str, value: str) -> str:
-    """Format a TOML key-value pair, using triple quotes when needed."""
-    if "\n" in value or '"' in value:
-        return f'{key} = """{value}"""'
-    return f'{key} = "{value}"'
+    """Format a TOML key-value pair as an escaped single-line basic string.
+
+    **Every string field goes through here**, including the ones that used to
+    be interpolated raw (``name``, ``cron``, ``target``, ``room``, ``model``,
+    ``effort``). A basic string interprets backslash escapes, so a value
+    passed through untouched breaks the document three different ways, and
+    only the first is loud (ISSUE-385):
+
+    - an unescaped ``\\`` that is not a valid escape, a raw ``"``, or a raw
+      control character make the line invalid, so ``tomllib`` refuses the
+      whole fence and the user's entire schedule freezes until they repair
+      the file by hand;
+    - a backslash that *is* a valid escape (``\\b``, ``\\t``) parses cleanly and
+      comes back as a different character, so the job silently becomes a
+      different job;
+    - the old triple-quoted branch ate a leading newline, because TOML trims
+      one directly after the opening delimiter.
+
+    That the list is round-tripped rather than merely written is what makes
+    all three destructive: the daemon re-renders every job from the parsed
+    list on any rewrite, so a value typed correctly by hand is destroyed the
+    first time ``!cron disable`` touches the file.
+
+    **One form, not two.** The triple-quoted branch this replaces was not a
+    way out — it has the same escaping rule and failed the same way, and it
+    carried two sub-rules of its own (a run of three quotes, a trailing
+    quote) that are places for a bug to hide. A multiline value now renders
+    on one line with ``\\n`` escapes, which is the whole cost, and it lands
+    almost nowhere: ``_externalize_multiline_prompts`` moves a multiline
+    ``prompt`` into ``scripts/prompts/*.txt`` before any write, so what
+    reaches this with a newline in it is a multiline ``command`` — or, rarely,
+    another field that a hand-written triple-quoted value put an interior
+    newline into, since ``_str_field`` strips the ends and nothing else.
+    """
+    out = []
+    for ch in value:
+        escape = _TOML_ESCAPES.get(ch)
+        if escape is not None:
+            out.append(escape)
+        elif ord(ch) < 0x20 or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return f'{key} = "{"".join(out)}"'
 
 
 def render_jobs_block(jobs: list[CronJob]) -> str:
@@ -553,8 +648,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         if i > 0:
             lines.append("")
         lines.append("[[jobs]]")
-        lines.append(f'name = "{job.name}"')
-        lines.append(f'cron = "{job.cron}"')
+        lines.append(_toml_string("name", job.name))
+        lines.append(_toml_string("cron", job.cron))
         if job.command:
             lines.append(_toml_string("command", job.command))
         elif job.prompt_file:
@@ -562,9 +657,9 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         else:
             lines.append(_toml_string("prompt", job.prompt))
         if job.target:
-            lines.append(f'target = "{job.target}"')
+            lines.append(_toml_string("target", job.target))
         if job.room:
-            lines.append(f'room = "{job.room}"')
+            lines.append(_toml_string("room", job.room))
         if not job.enabled:
             lines.append("enabled = false")
         if job.silent_unless_action:
@@ -574,9 +669,9 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         if job.once:
             lines.append("once = true")
         if job.model:
-            lines.append(f'model = "{job.model}"')
+            lines.append(_toml_string("model", job.model))
         if job.effort:
-            lines.append(f'effort = "{job.effort}"')
+            lines.append(_toml_string("effort", job.effort))
         if job.publish_shared_kv:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
@@ -695,10 +790,17 @@ def _write_cron_md(
     — a directory that cannot be *created* (an unwritable parent, or the
     ``ENOTCONN``/``EIO`` a dropped FUSE mount answers with, which is exactly
     the failure this whole change is about) raised straight through. The
-    scheduler's once-job caller is why that matters: it runs inside an open
-    write transaction that has already deleted the job row, so an exception
-    there rolls the task's own completion back and the one-shot runs a second
-    time — strictly worse than the file being stale.
+    scheduler's once-job caller is why that matters, and ISSUE-387 changed
+    which failure it would cause. It used to run inside the still-open write
+    transaction that had just deleted the job row, so an exception rolled the
+    task's own completion back with it and the one-shot ran a second time. It
+    now runs *after* that transaction has committed, so an exception instead
+    escapes ``process_one_task`` with the task already recorded complete: the
+    result is never delivered to Talk or email, no terminal task event is
+    emitted, and nothing retries. Either way it is strictly worse than the
+    file being stale, which is what the contract exists to guarantee — and the
+    contract is restated on ``remove_job_from_cron_md``, since that is the
+    name the scheduler actually depends on.
 
     One thing survives a ``False``: ``_externalize_multiline_prompts`` writes
     ``scripts/prompts/*.txt`` and stamps ``job.prompt_file`` before anything is
@@ -1139,6 +1241,16 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     regenerated toml block back into it, leaving the rest of the file alone.
     Returns True if the job was found **and the file now says so**; a refused
     or failed write is False, like ``update_job_enabled_in_cron_md``.
+
+    **False, never an exception**, on every path. ``_write_cron_md`` states
+    that contract and explains why it matters; this is the name the scheduler
+    calls, so it is restated here. The two steps in front of that call hold it
+    too: ``load_cron_document`` returns ``None`` for every case the file cannot
+    be read as one (its reader, ``storage.read_user_config_file``, logs a
+    refusal rather than raising), and filtering the job list cannot fail. The
+    scheduler's once-job caller runs after its write transaction has committed
+    (ISSUE-387), so an exception here would leave the task recorded complete
+    and its answer undelivered.
     """
     if not config.use_mount:
         return False

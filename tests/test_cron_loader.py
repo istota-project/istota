@@ -2851,3 +2851,476 @@ cron = "0 9 * * *"
         config = make_config_with_mount()
         _write_cron_md(mount_path, "alice", "```toml\n```\n")
         assert load_cron_document(config, "alice").block == ""
+
+
+# ---------------------------------------------------------------------------
+# TestFenceMarkersAreLineAnchored
+# ---------------------------------------------------------------------------
+
+
+class TestFenceMarkersAreLineAnchored:
+    """A fence marker is a line, not three characters anywhere (ISSUE-386).
+
+    ``_TOML_BLOCK_RE`` anchored neither marker, so the captured block ended
+    at the first backtick run appearing anywhere after the fence opened —
+    inside a comment, inside a string value. Where that landed on a table
+    boundary the capture was *valid TOML holding a subset of the jobs*, so
+    nothing reported a problem and the orphan sweep deleted every row below
+    the truncation as though the user had removed those jobs.
+    """
+
+    def test_a_fence_marker_in_a_comment_does_not_truncate_the_job_list(
+        self, mount_path, make_config_with_mount
+    ):
+        """The silent case: the capture stays valid TOML, so nothing warns."""
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "morning-digest"
+cron = "0 7 * * *"
+prompt = "digest"
+
+# note: paste a fence like ```toml when sharing this file
+[[jobs]]
+name = "evening-sweep"
+cron = "0 20 * * *"
+prompt = "sweep"
+```
+""")
+        doc = load_cron_document(config, "alice")
+        assert [j.name for j in doc.jobs] == ["morning-digest", "evening-sweep"]
+
+    def test_a_fence_marker_inside_a_string_value_does_not_truncate(
+        self, mount_path, make_config_with_mount
+    ):
+        """The loud case: the capture was unterminated and the sync no-oped."""
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "docs"
+cron = "0 9 * * *"
+prompt = "see ```toml in the docs"
+
+[[jobs]]
+name = "later"
+cron = "0 10 * * *"
+prompt = "after"
+```
+""")
+        doc = load_cron_document(config, "alice")
+        assert doc is not None, "an unanchored closer made this unparseable"
+        assert [j.name for j in doc.jobs] == ["docs", "later"]
+        assert doc.jobs[0].prompt == "see ```toml in the docs"
+
+    def test_the_truncated_tail_is_not_orphan_swept(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """The consequence the anchoring exists to prevent.
+
+        The second job's row is deleted on the sync tick and never comes
+        back, because every later read truncates in the same place. The DB
+        is seeded from the same file first, so a failure here is the sweep
+        acting on a partial read rather than a first-sync artefact.
+        """
+        config = make_config_with_mount(db_path=db_path)
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "first"
+cron = "0 7 * * *"
+prompt = "a"
+
+[[jobs]]
+name = "second"
+cron = "0 20 * * *"
+prompt = "b"
+```
+""")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", load_cron_document(config, "alice").jobs
+            )
+            assert [j.name for j in db.get_user_scheduled_jobs(conn, "alice")] == [
+                "first", "second",
+            ]
+
+        # The user adds a note carrying a fence marker. Nothing about their
+        # job list changed.
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "first"
+cron = "0 7 * * *"
+prompt = "a"
+
+# reminder: fence it with ```toml when pasting elsewhere
+[[jobs]]
+name = "second"
+cron = "0 20 * * *"
+prompt = "b"
+```
+""")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", load_cron_document(config, "alice").jobs
+            )
+            assert [j.name for j in db.get_user_scheduled_jobs(conn, "alice")] == [
+                "first", "second",
+            ]
+
+    def test_the_splice_does_not_orphan_the_tail_of_the_real_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        """``block_span`` drives a splice, so a short span duplicates a fence.
+
+        Replacing only up to the truncation point leaves the rest of the
+        user's real fence sitting below the newly rendered one.
+
+        What this can assert is narrower than that, and worth being explicit
+        about: pre-fix the truncated read never finds ``second`` at all, so
+        ``update_job_enabled_in_cron_md`` returns False and no write happens
+        — the orphaned tail is unreachable from here. The first assertion is
+        what fails pre-fix. The rest holds the post-fix property that the
+        rewrite lands as exactly one well-formed fence.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "first"
+cron = "0 7 * * *"
+prompt = "a"
+
+# reminder: fence it with ```toml when pasting elsewhere
+[[jobs]]
+name = "second"
+cron = "0 20 * * *"
+prompt = "b"
+```
+""")
+        assert update_job_enabled_in_cron_md(config, "alice", "second", False) is True
+
+        doc = load_cron_document(config, "alice")
+        assert doc is not None
+        assert [(j.name, j.enabled) for j in doc.jobs] == [
+            ("first", True), ("second", False),
+        ]
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        written = cron_path.read_text()
+        # One opener and one closer. An orphaned tail shows up here as a
+        # third marker; the user's in-block comment is gone either way,
+        # because the splice re-renders the block from the parsed jobs.
+        assert written.count("```") == 2, (
+            "the tail of the real fence was left orphaned below the new one"
+        )
+        assert written.count("[[jobs]]") == 2
+
+    def test_an_info_string_on_the_opener_is_read_the_same_way_by_both(
+        self, mount_path, make_config_with_mount
+    ):
+        """The opener probe accepted one and the block expression did not.
+
+        The two disagreeing is what the opener probe exists to avoid: a
+        well-formed fence was reported as one that never closes, and the
+        jobs in it never synced.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml title="jobs"
+[[jobs]]
+name = "tagged"
+cron = "0 9 * * *"
+prompt = "p"
+```
+""")
+        doc = load_cron_document(config, "alice")
+        assert doc is not None, "read as an opener with no closer"
+        assert [j.name for j in doc.jobs] == ["tagged"]
+
+
+# ---------------------------------------------------------------------------
+# TestAnchoringDidNotNarrowWhatParses
+# ---------------------------------------------------------------------------
+
+
+def _fenced(opener, closer, indent=""):
+    """One job, wrapped in whatever markers the case is about."""
+    body = '[[jobs]]\nname = "a"\ncron = "0 9 * * *"\nprompt = "p"\n'
+    return f"{indent}{opener}\n{body}{indent}{closer}\n"
+
+
+class TestAnchoringDidNotNarrowWhatParses:
+    """Anchoring a marker is only safe if it stays loose about everything else.
+
+    The expression this replaced had no ``^`` at all, so it accepted *any*
+    prefix — which makes almost any bound a narrowing. A narrowing is not a
+    parse that fails safely here: an unrecognised marker means a document
+    with no fence, which is ``is_template``, and the sync's restore branch
+    then rewrites the user's whole CRON.md from the table. Every shape below
+    parsed before and has to go on parsing.
+    """
+
+    @pytest.mark.parametrize("label,content", [
+        # CommonMark stops at three spaces; nothing here does, because a
+        # deeper indent used to parse and losing it costs the file.
+        ("indent-4", _fenced("```toml", "```", indent="    ")),
+        ("indent-8", _fenced("```toml", "```", indent="        ")),
+        ("indent-tab", _fenced("```toml", "```", indent="\t")),
+        # The natural workaround for a job list that contains three
+        # backticks — that is, for exactly the bug this change fixes.
+        ("four-backticks", _fenced("````toml", "````")),
+        ("mixed-lengths", _fenced("````toml", "```")),
+        # A non-breaking space is what a paste from a rendered page leaves.
+        ("nbsp-after-closer", _fenced("```toml", "```\xa0")),
+        ("space-after-closer", _fenced("```toml", "```   ")),
+        # Notepad writes a BOM, and it is not `\\s`.
+        ("bom-before-fence", "﻿" + _fenced("```toml", "```")),
+    ])
+    def test_a_shape_that_parsed_before_still_parses(
+        self, mount_path, make_config_with_mount, label, content
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", content)
+        doc = load_cron_document(config, "alice")
+        assert doc is not None, f"{label}: read as unparseable"
+        assert [j.name for j in doc.jobs] == ["a"], f"{label}: job list lost"
+
+    def test_a_crlf_file_still_closes_its_fence(
+        self, mount_path, make_config_with_mount
+    ):
+        """``$`` under MULTILINE matches before ``\\n``, never before ``\\r``.
+
+        Nothing normalises newlines on the read path — ``read_regular_file``
+        is a bare ``decode("utf-8")`` — so a file written by a Windows client
+        or a web editor arrives with its ``\\r`` intact. Anchoring the closer
+        with a bare ``[ \\t]*$`` made every such file unreadable on every
+        tick, which freezes the schedule *and* kills ``!cron enable`` and
+        ``once = true`` cleanup, both of which return False on a ``None``
+        document.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(
+            mount_path, "alice", _fenced("```toml", "```").replace("\n", "\r\n"),
+        )
+        doc = load_cron_document(config, "alice")
+        assert doc is not None, "the CRLF closer was not recognised"
+        assert [j.name for j in doc.jobs] == ["a"]
+
+    @pytest.mark.parametrize("label,content", [
+        # A marker that is not alone on its line is the ISSUE-386 shape
+        # itself, so it must not be read as a fence — but it must not be
+        # read as *no fence* either.
+        ("prose-before-marker", "see ```toml\n" + '[[jobs]]\nname = "a"\n```\n'),
+        ("blockquoted", "> ```toml\n" + '[[jobs]]\nname = "a"\n> ```\n'),
+        # CommonMark forbids an info string on a closer, and honouring that
+        # is what keeps a ```python line inside a multi-line prompt from
+        # closing the block early.
+        ("decorated-closer", _fenced("```toml", "``` end")),
+    ])
+    def test_a_shape_this_reader_refuses_is_held_rather_than_wiped(
+        self, mount_path, make_config_with_mount, label, content
+    ):
+        """The invariant the destructive branch hangs off.
+
+        ``None`` holds the previous definitions. A ``CronDocument`` whose
+        ``block`` is ``None`` is ``is_template``, and that is what authorizes
+        the restore branch to overwrite the document. A shape this reader
+        cannot resolve must never produce the second.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", content)
+        doc = load_cron_document(config, "alice")
+        assert doc is None, (
+            f"{label}: returned a document, and a fence-less document is "
+            "is_template, which authorizes the restore branch to overwrite"
+        )
+
+    def test_a_file_with_no_backticks_at_all_is_still_a_template(
+        self, mount_path, make_config_with_mount
+    ):
+        """The hold guard must not swallow the branch it guards.
+
+        A genuinely fence-less file is how the seeded template and a file the
+        user has never authored jobs into read, and the restore branch has to
+        go on reaching it.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", "# Scheduled Jobs\n\nNothing yet.\n")
+        doc = load_cron_document(config, "alice")
+        assert doc is not None
+        assert doc.block is None
+        assert doc.is_template is True
+
+    def test_an_unresolvable_fence_does_not_overwrite_the_document(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """The blast radius, driven through the real sync.
+
+        ``_sync_cron_files`` is the only caller that acts on ``is_template``,
+        and what it does is ``migrate_db_jobs_to_file(overwrite=True)`` — the
+        whole file replaced by a generated one, logged at INFO, with the
+        user's prose gone. Asserting on ``doc.jobs`` cannot see that.
+        """
+        from istota.config import UserConfig
+        from istota.scheduler import _sync_cron_files
+
+        config = make_config_with_mount(db_path=db_path)
+        config.users = {"alice": UserConfig()}
+        # A blockquoted fence: a shape this reader deliberately refuses, so
+        # it reaches the hold guard rather than parsing. Picking a shape that
+        # parses would make this test pass without exercising anything.
+        original = (
+            "# My scheduled jobs\n\nNotes I care about keeping.\n\n"
+            + "> ```toml\n"
+            + '> [[jobs]]\n> name = "a"\n> cron = "0 9 * * *"\n> prompt = "p"\n'
+            + "> ```\n"
+        )
+        _write_cron_md(mount_path, "alice", original)
+
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(name="a", cron="0 9 * * *", prompt="p")],
+            )
+            _sync_cron_files(conn, config)
+
+        assert cron_path.read_text() == original, (
+            "the user's CRON.md was rewritten from the table"
+        )
+
+    def test_a_document_of_openers_does_not_wedge_the_scheduler(
+        self, mount_path, make_config_with_mount
+    ):
+        """A combined ``open(.*?)close`` expression is quadratic here.
+
+        Every opener is a fresh start position and each rescans to EOF, so a
+        file with many of them and no closer took 65s at 256 KB — on the
+        scheduler's own tick, with no timeout, blocking every user. The read
+        cap is 16 MB, and CRON.md is user-writable over the mount.
+        """
+        import time
+
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", "```toml\n" * 8000)
+        started = time.monotonic()
+        assert load_cron_document(config, "alice") is None
+        assert time.monotonic() - started < 2.0, "the fence search is superlinear"
+
+
+# ---------------------------------------------------------------------------
+# TestTheRenderedTomlRoundTrips
+# ---------------------------------------------------------------------------
+
+
+class TestTheRenderedTomlRoundTrips:
+    """What ``render_jobs_block`` writes, ``tomllib`` must read back unchanged.
+
+    The job list is round-tripped rather than merely written: the daemon
+    parses CRON.md on every sync tick, and any rewrite (``!cron disable``, a
+    ``once`` job removing itself, the DB restore) re-renders every job from
+    the parsed list. So a value the serializer cannot represent is not a bad
+    render, it is a job destroyed on the next write (ISSUE-385).
+    """
+
+    # Backslashes, quotes, a newline, a tab, a CR, a FF, a NUL, a DEL, a run
+    # of three quotes and a run of three backticks — one value covering every
+    # entry in ``_TOML_ESCAPES`` and both delimiters that can end the block.
+    HOSTILE = 'a\\b"c\nd\te\rf\x0cg\x00h\x7fi"""j```k\\'
+
+    def _round_trip(self, job):
+        import tomllib
+
+        return tomllib.loads(render_jobs_block([job]))["jobs"][0]
+
+    def test_every_rendered_text_field_survives_a_round_trip(self):
+        """Each string field the renderer emits, carrying every hostile character.
+
+        ``command``/``prompt_file``/``prompt`` are mutually exclusive in the
+        renderer's if/elif/else, so they are three cases rather than one job.
+        """
+        base = dict(name="j", cron="0 9 * * *", prompt="hi")
+
+        for field in (
+            "name", "cron", "prompt", "command", "prompt_file",
+            "target", "room", "model", "effort", "publish_shared_kv",
+        ):
+            kwargs = dict(base)
+            kwargs[field] = self.HOSTILE
+            got = self._round_trip(CronJob(**kwargs))
+            assert got[field] == self.HOSTILE, (
+                f"{field} did not survive: {got.get(field)!r}"
+            )
+
+    def test_a_backslash_escape_is_not_reinterpreted(self):
+        r"""``\b`` and ``\t`` are *valid* TOML escapes, so they parse and corrupt.
+
+        This is the half of the defect that never fails loudly: the file stays
+        readable and the job silently becomes a different job. ``grep \bword``
+        came back as a backspace.
+        """
+        for value in (r"a\b", r"a\t", r"a\n", r"grep \d+ log", r"C:\Users\temp"):
+            got = self._round_trip(
+                CronJob(name="j", cron="0 9 * * *", prompt=value))
+            assert got["prompt"] == value
+
+    def test_a_value_opening_with_a_newline_keeps_it(self):
+        """TOML trims a newline directly after ``\"\"\"``, so the old form ate one.
+
+        A statement about the serializer alone. ``_str_field`` strips both ends
+        on the way back in, so the two forms converge at ``load_cron_jobs`` and
+        this is not evidence that leading whitespace survives end to end.
+        """
+        got = self._round_trip(
+            CronJob(name="j", cron="0 9 * * *", prompt="", command="\nls -la"))
+        assert got["command"] == "\nls -la"
+
+    def test_a_regex_prompt_survives_a_disable_rewrite(
+        self, mount_path, make_config_with_mount
+    ):
+        """The reported symptom, through the real seam.
+
+        A prompt holding a regex is typed into CRON.md by hand, parses fine,
+        and is then destroyed the first time ``!cron disable`` re-renders it.
+        """
+        config = make_config_with_mount()
+        prompt = r"grep \d+ /var/log/app.log and say \"done\""
+        _write_cron_md(mount_path, "alice", generate_cron_md([CronJob(
+            name="regex-job", cron="0 9 * * *", prompt=prompt)]))
+
+        assert load_cron_jobs(config, "alice")[0].prompt == prompt
+
+        assert update_job_enabled_in_cron_md(config, "alice", "regex-job", False)
+
+        reloaded = load_cron_jobs(config, "alice")
+        assert len(reloaded) == 1, "the rewrite left CRON.md unparseable"
+        assert reloaded[0].prompt == prompt
+        assert reloaded[0].enabled is False
+
+    def test_a_backtick_run_survives_the_fence_and_the_loader(
+        self, mount_path, make_config_with_mount
+    ):
+        """The container, not the grammar — and read back through the real seam.
+
+        ``_TOML_BLOCK_RE`` closes the block at the first ``` it sees anywhere,
+        so a value holding three backticks used to truncate the fence
+        mid-string: valid TOML, unreadable document, every job frozen. The
+        other tests in this class parse ``render_jobs_block`` with ``tomllib``
+        directly and so never consult the fence at all.
+        """
+        config = make_config_with_mount()
+        prompt = "wrap the output in ``` and mention `ls` once"
+        _write_cron_md(mount_path, "alice", generate_cron_md([CronJob(
+            name="fenced", cron="0 9 * * *", prompt=prompt)]))
+
+        assert load_cron_jobs(config, "alice")[0].prompt == prompt
+
+        assert update_job_enabled_in_cron_md(config, "alice", "fenced", False)
+
+        reloaded = load_cron_jobs(config, "alice")
+        assert len(reloaded) == 1, "the rewrite truncated the fence"
+        assert reloaded[0].prompt == prompt
+        assert reloaded[0].enabled is False

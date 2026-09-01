@@ -175,6 +175,12 @@ Seccomp alone lets bwrap create the user namespace but not mount a procfs inside
 
 The shipped compose file grants neither, deliberately, and the cost is worth reading before you add them. The container runs as root and is not user-namespace remapped, so `systempaths=unconfined` gives container root a writable `/proc/sys`, and `/proc/sys/kernel` is not namespaced — entries like `core_pattern` are a route to running a command on the host. `seccomp:unconfined` separately removes the syscall filter standing between the container and the kernel's whole surface. So the trade is the container-to-host boundary for the task-to-daemon one. On a multi-user deployment that is plausibly the right way round, since without bwrap one user's task can read every other user's data and the credentials besides. On the single-user stack this page is mostly written for, it usually is not. The supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed.
 
+### Nothing acts on the browser container's unhealthy verdict
+
+The browser container's healthcheck is thorough. It probes the liveness endpoint's deep tier, which asks whether the Chrome process is alive, whether Chrome's DevTools endpoint answers, and — since ISSUE-384 — whether the API process can still drive the browser it is reporting on. What this stack does not have is anything that reads the resulting `unhealthy` and does something about it. `restart: unless-stopped` reacts to a process exiting, not to a failing healthcheck, so a container that reports itself wedged stays wedged and stays running.
+
+The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` every minute, restarts after a debounce, and pages if the restarts start looping. There is no equivalent here, and adding one to a compose file is not straightforward — the point of the debounce and the crash-loop guard is that they are judgement, not a restart policy. So this is the same call the sandbox section above makes: bare metal via Ansible is the supported production shape, and this stack states the gap rather than half-closing it. The verdict is still worth reading by hand (`docker compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`) when browsing stops working.
+
 ## Key env vars
 
 | Variable | Purpose |

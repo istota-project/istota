@@ -32,6 +32,7 @@ makes the answer not depend on them.
 from __future__ import annotations
 
 import ipaddress
+import pathlib
 import re
 from pathlib import Path
 
@@ -400,6 +401,54 @@ class TestTheEntrypointStillHonoursThePassword:
             and "VNC_PASSWORD" in str(task["copy"].get("content", ""))
         ]
         assert env_tasks, "nothing writes VNC_PASSWORD into the browser env file"
+
+
+class TestTheCdpHeartbeatKnobsAreReachable:
+    """A setting the container never sees is not a setting (ISSUE-384 review).
+
+    The browser container takes no rendered config file — `browser.env` is a
+    literal `copy:` block in the role, so a variable missing from it cannot be
+    set on the supported production shape at all, and a hand edit on the host is
+    reverted by the next play. These two decide whether the container restarts
+    itself, so "documented but unreachable" is the worst of the options.
+    """
+
+    KNOBS = {
+        "BROWSER_CDP_FAILURE_THRESHOLD": "istota_browser_cdp_failure_threshold",
+        "BROWSER_CDP_FAILURE_WINDOW_S": "istota_browser_cdp_failure_window",
+    }
+
+    @pytest.fixture(scope="class")
+    def browse_api_source(self) -> str:
+        return (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "docker" / "browser" / "browse_api.py"
+        ).read_text()
+
+    @pytest.mark.parametrize("env_var", sorted(KNOBS))
+    def test_the_container_reads_it(self, env_var, browse_api_source):
+        assert env_var in browse_api_source, (
+            f"{env_var} is written by the role but read by nothing"
+        )
+
+    @pytest.mark.parametrize("env_var, var", sorted(KNOBS.items()))
+    def test_the_env_file_carries_it(self, env_var, var):
+        env_tasks = [
+            task
+            for task in _tasks()
+            if "copy" in task
+            and env_var in str(task["copy"].get("content", ""))
+        ]
+        assert env_tasks, f"nothing writes {env_var} into the browser env file"
+        assert var in str(env_tasks[0]["copy"]["content"]), (
+            f"{env_var} is written as a literal rather than from {var}"
+        )
+
+    @pytest.mark.parametrize("var", sorted(KNOBS.values()))
+    def test_the_role_declares_a_default(self, var):
+        assert var in _defaults(), (
+            f"{var} is interpolated by the env file but has no default"
+        )
 
 
 class TestTheseAssertionsCanFail:
