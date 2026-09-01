@@ -37,6 +37,33 @@ MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
 MEMORY_REJECT_PCT = 85  # reject new sessions above this
 MEMORY_EVICT_PCT = 80   # evict oldest idle session above this
 
+# Set by the resource-monitor thread when memory is over MEMORY_EVICT_PCT, and
+# drained by the Flask thread on its next request. The monitor used to evict
+# inline, which meant calling _close_session_unlocked() -- and so
+# chrome.get_context(), page.goto() and page.close() -- from its own thread.
+# Patchright's sync objects are bound to the thread that created them, and
+# touching them from another one wedges the process-global asyncio loop for the
+# life of the process: every later browse returned a Flask HTML 500 while Chrome
+# stayed up and every health probe stayed green (ISSUE-382).
+#
+# What deferring costs, stated plainly rather than waved away: relief is now
+# traffic-gated. A tab that grows on its own -- a running JS timer, a leaking
+# page -- was previously freed within 30s by the monitor and is now freed only
+# when the next request arrives, so an idle container under pressure rides it
+# out and can be OOM-killed by the cgroup instead of shedding a session. That is
+# the accepted trade. A kill is loud, bounded and recovered by
+# `restart: unless-stopped`; the alternative on offer was a silently poisoned
+# process serving 500s for eight hours with every health probe green.
+#
+# _create_session()'s MEMORY_REJECT_PCT check is a backstop only for the path
+# that builds a new session. Requests that supply a session_id never reach it,
+# and it frees nothing in any case -- it refuses work. So it does not make the
+# paragraph above untrue, and it is not offered as the reason deferring is safe.
+#
+# An Event rather than a counter: one pressure report asks for one eviction, and
+# several reports before the next request must not queue several evictions.
+_evict_request = threading.Event()
+
 # Browse watchdog — self-heals a renderer/session wedge the container health
 # check is structurally blind to. Chrome's DevTools endpoint keeps answering
 # during a per-page freeze, so /live?deep=1 stays green and the container
@@ -66,18 +93,30 @@ RENDER_MAX_CHARS = 500000
 # Session helpers
 # ---------------------------------------------------------------------------
 
-def _get_memory_pct():
-    """Return container memory usage percentage, or 0 if unavailable."""
+def _read_container_memory_mb():
+    """Return (current_mb, limit_mb) from the cgroup, either may be None.
+
+    Split out so the monitor's log line and _get_memory_pct read the same two
+    numbers through the same code, and so a test can steer both at once.
+    """
+    current_mb = None
+    limit_mb = None
     try:
         with open("/sys/fs/cgroup/memory.current") as f:
-            current = int(f.read().strip())
+            current_mb = int(f.read().strip()) // (1024 * 1024)
         with open("/sys/fs/cgroup/memory.max") as f:
             v = f.read().strip()
-            limit = int(v) if v != "max" else None
-        if limit:
-            return round(current / limit * 100, 1)
+            limit_mb = int(v) // (1024 * 1024) if v != "max" else None
     except Exception:
         pass
+    return current_mb, limit_mb
+
+
+def _get_memory_pct():
+    """Return container memory usage percentage, or 0 if unavailable."""
+    current_mb, limit_mb = _read_container_memory_mb()
+    if current_mb and limit_mb:
+        return round(current_mb / limit_mb * 100, 1)
     return 0
 
 
@@ -158,6 +197,62 @@ def _close_session_unlocked(session_id):
 def _close_session(session_id):
     with _sessions_lock:
         _close_session_unlocked(session_id)
+
+
+def _note_memory_pressure(pct):
+    """Ask the Flask thread for an eviction. Runs on the monitor thread.
+
+    Touches nothing but an Event, by design -- see _evict_request. Returns True
+    only on the transition into "requested", so a container sitting above the
+    threshold logs once rather than every 30s forever alongside the HIGH MEMORY
+    line that already reports the same condition.
+    """
+    if pct <= MEMORY_EVICT_PCT:
+        return False
+    if _evict_request.is_set():
+        return False
+    _evict_request.set()
+    return True
+
+
+def _drain_evict_request_unlocked():
+    """Evict the oldest session if the monitor asked for one and memory agrees.
+
+    Flask thread only; caller must hold the lock. Returns the evicted session
+    id, or None.
+
+    The memory re-read is what keeps this a deferral rather than a latch. The
+    request carries no expiry and only a request clears it, so without the
+    re-check a transient spike at 03:00 evicts a live session on the first
+    request of the morning at 20% memory — and because every endpoint calls
+    _cleanup_expired() *before* _get_session(), the session it evicts can be the
+    one that request just named, which comes back as "session not found or
+    expired". The old inline eviction could not do that: it only ever ran while
+    the condition was true. Two cgroup reads restore that coupling, and it is
+    the same cost _create_session() already pays a few lines later.
+
+    The flag is cleared on every path, including when memory has recovered: it
+    records "pressure was seen", not "a session is owed". A failed eviction is
+    silent, because _close_session_unlocked swallows the Chrome half by design
+    (the bookkeeping is popped either way, so the dict stays consistent even
+    when the tab survives).
+    """
+    if not _evict_request.is_set():
+        return None
+    _evict_request.clear()
+    if not _sessions:
+        return None
+    pct = _get_memory_pct()
+    if pct <= MEMORY_EVICT_PCT:
+        log.info(
+            "Eviction request dropped — memory back to %.1f%% (threshold %d%%)",
+            pct, MEMORY_EVICT_PCT,
+        )
+        return None
+    oldest = min(_sessions, key=lambda s: _sessions[s]["created_at"])
+    log.warning("Memory at %.1f%% — evicting session %s", pct, oldest)
+    _close_session_unlocked(oldest)
+    return oldest
 
 
 def _evict_expired():
@@ -739,9 +834,17 @@ def health():
 
 
 def _cleanup_expired():
-    """Remove expired sessions."""
+    """Remove expired sessions, and serve any eviction the monitor asked for.
+
+    Called at the top of every endpoint, so this is where the monitor thread's
+    deferred work actually happens -- on the Flask thread, which owns the
+    Patchright connection the eviction has to go through.
+    """
     with _sessions_lock:
         _evict_expired()
+        evicted = _drain_evict_request_unlocked()
+    if evicted:
+        log.info("Evicted session %s before serving this request", evicted)
 
 
 @app.before_request
@@ -801,67 +904,74 @@ def _log_request_end(response):
     return response
 
 
+def _monitor_tick():
+    """One pass of the resource monitor: sample usage, log it, request eviction.
+
+    Split out from the loop below so a test can drive it. That is not cosmetic:
+    the whole of ISSUE-382 lived in this function body, and while it was inline
+    in a `while True: time.sleep(30)` loop nothing could reach it -- so the
+    defect could be reintroduced here with the entire suite still green.
+
+    Runs on the monitor thread, and so must touch no Patchright object, directly
+    or through a helper. `_note_memory_pressure` is the whole of its interaction
+    with session state, by design.
+    """
+    result = subprocess.run(
+        ["ps", "aux"], capture_output=True, text=True, timeout=5,
+    )
+    chrome_rss_kb = 0
+    chrome_count = 0
+    for line in result.stdout.splitlines():
+        if "chrome" in line.lower() and "--type=" in line:
+            chrome_count += 1
+            chrome_rss_kb += int(line.split()[5])
+    chrome_rss_mb = chrome_rss_kb // 1024
+
+    container_mb, limit_mb = _read_container_memory_mb()
+
+    # One source of truth for "what percent are we at". This used to recompute
+    # it from the two numbers above, which is a second copy of _get_memory_pct's
+    # arithmetic that nothing held equal -- and, since the eviction decision is
+    # made from this value and the drain's re-check is made from the other, a
+    # divergence would mean the monitor and the Flask thread disagreeing about
+    # whether the container is under pressure.
+    pct = _get_memory_pct()
+
+    # Request an eviction under memory pressure -- never perform one. Evicting
+    # here would reach Patchright from this thread and wedge the process
+    # (ISSUE-382); the Flask thread drains it in _cleanup_expired() on the next
+    # request.
+    if _note_memory_pressure(pct):
+        log.warning(
+            "Memory at %.1f%% — requesting eviction on the next request", pct,
+        )
+
+    with _sessions_lock:
+        sessions = len(_sessions)
+
+    msg = (
+        f"sessions={sessions} "
+        f"chrome_procs={chrome_count} chrome_rss={chrome_rss_mb}MB "
+        f"container={container_mb}MB/{limit_mb}MB ({pct}%)"
+    )
+    if pct > MEMORY_EVICT_PCT:
+        log.warning("HIGH MEMORY: %s", msg)
+    elif pct > 60:
+        log.info("monitor: %s", msg)
+    else:
+        log.debug("monitor: %s", msg)
+
+
 def _resource_monitor():
-    """Background thread: log usage every 30s, evict sessions under pressure."""
+    """Background thread: log usage every 30s and request eviction under pressure.
+
+    It does not evict. The eviction happens on the Flask thread, in
+    _cleanup_expired(); see _evict_request.
+    """
     while True:
         time.sleep(30)
         try:
-            result = subprocess.run(
-                ["ps", "aux"], capture_output=True, text=True, timeout=5,
-            )
-            chrome_rss_kb = 0
-            chrome_count = 0
-            for line in result.stdout.splitlines():
-                if "chrome" in line.lower() and "--type=" in line:
-                    chrome_count += 1
-                    chrome_rss_kb += int(line.split()[5])
-            chrome_rss_mb = chrome_rss_kb // 1024
-
-            container_mb = None
-            limit_mb = None
-            try:
-                with open("/sys/fs/cgroup/memory.current") as f:
-                    container_mb = int(f.read().strip()) // (1024 * 1024)
-                with open("/sys/fs/cgroup/memory.max") as f:
-                    v = f.read().strip()
-                    limit_mb = int(v) // (1024 * 1024) if v != "max" else None
-            except Exception:
-                pass
-
-            pct = (
-                round(container_mb / limit_mb * 100, 1)
-                if container_mb and limit_mb else 0
-            )
-
-            # Active eviction under memory pressure
-            if pct > MEMORY_EVICT_PCT:
-                with _sessions_lock:
-                    if _sessions:
-                        oldest = min(
-                            _sessions,
-                            key=lambda s: _sessions[s]["created_at"],
-                        )
-                        log.warning(
-                            "Memory at %.1f%% — evicting session %s",
-                            pct, oldest,
-                        )
-                        _close_session_unlocked(oldest)
-
-            with _sessions_lock:
-                sessions = len(_sessions)
-
-            msg = (
-                f"sessions={sessions} "
-                f"chrome_procs={chrome_count} chrome_rss={chrome_rss_mb}MB "
-                f"container={container_mb}MB/{limit_mb}MB ({pct}%)"
-            )
-            if pct > MEMORY_EVICT_PCT:
-                log.warning("HIGH MEMORY: %s", msg)
-            elif pct > 60:
-                log.info("monitor: %s", msg)
-            else:
-                log.debug("monitor: %s", msg)
-
+            _monitor_tick()
         except Exception as e:
             log.debug("monitor error: %s", e)
 

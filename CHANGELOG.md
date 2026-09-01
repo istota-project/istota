@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Web browsing no longer breaks until someone restarts the browser container. When the container ran short of memory it closed the oldest open page from a background thread, which wrecked the machinery it uses to drive the browser; every page fetch after that failed, for hours, while the browser itself stayed up and every health check stayed green. The clean-up now happens on the thread that owns that machinery, and any other thread reaching for it is refused outright instead of quietly breaking it for good.
+
 - Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
 
 ### Security
