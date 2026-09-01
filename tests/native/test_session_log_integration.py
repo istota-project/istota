@@ -209,6 +209,10 @@ class TestTheRecordSequence:
         assert "base_url" not in header
         assert "api_key" not in header
         assert "extra_headers" not in header
+        # ISSUE-378: which of a rerouted attempt's two brain runs this is.
+        # Written on every run, not only a fallback one, so absence means an
+        # old file rather than a primary.
+        assert header["is_fallback"] is False
 
     def test_line_two_is_the_context_record(self, tmp_path):
         record = self._run(tmp_path)[1]
@@ -657,6 +661,32 @@ class TestAttempts:
         # Neither truncated the other.
         for path in files:
             assert _records(path)[-1]["type"] == "result"
+
+
+class TestAFallbackRunSaysSo:
+    """ISSUE-378 — the header carries `is_fallback`, so a transcript can be
+    lined up with the right `task_usage` row.
+
+    A rerouted attempt writes two usage rows against one `attempt`, keyed apart
+    on `is_fallback`. The log had no field saying which of the two brains
+    produced it, so the run whose spend you most want beside its transcript —
+    the one that failed over — was the run you could not pair.
+    """
+
+    def _header(self, tmp_path, **kw) -> dict:
+        root = tmp_path / "logs"
+        provider = MockProvider([_text_turn("ok")])
+        result = _brain(provider, root).execute(_req("hi", tmp_path, **kw))
+        assert result.success is True
+        return _read(root)[0]
+
+    def test_a_fallback_run_is_marked(self, tmp_path):
+        assert self._header(tmp_path, is_fallback=True)["is_fallback"] is True
+
+    def test_a_primary_run_is_marked_too(self, tmp_path):
+        # Recorded on both, not only on the fallback: a field written only
+        # sometimes cannot be told from an old file that never carried it.
+        assert self._header(tmp_path)["is_fallback"] is False
 
 
 # --------------------------------------------------------------------------- #

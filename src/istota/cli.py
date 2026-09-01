@@ -2186,10 +2186,18 @@ def _print_session_header(header: dict, path: Path, row: dict) -> None:
         f"  task {row['task_id']} attempt {row['attempt']} "
         f"user {row['user_id']} source {header.get('source_type') or '-'}"
     )
+    # `is_fallback` comes off `row`, which is where the tri-state lives: a file
+    # written before the field existed says nothing, and printing `fallback=no`
+    # for it would answer a question the run never answered. Printed only when
+    # the file does say — and the affirmative is what an operator is looking
+    # for, since it names which of a rerouted attempt's two `task_usage` rows
+    # this transcript's spend is in (ISSUE-378).
+    fallback = row.get("is_fallback")
+    fallback_note = "" if fallback is None else f" fallback={'yes' if fallback else 'no'}"
     print(
         f"  brain={header.get('brain') or '-'} model={header.get('model') or '-'} "
         f"effort={header.get('effort') or '-'} "
-        f"host={header.get('base_url_host') or '-'}"
+        f"host={header.get('base_url_host') or '-'}{fallback_note}"
     )
     print(f"  started {header.get('ts', '-')}")
     print(f"  file {path} ({_fmt_bytes(row['size'])})")

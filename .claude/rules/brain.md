@@ -1150,11 +1150,47 @@ that never existed. Records are linear — no `id`/`parentId`, because a task
 attempt has no user at the keyboard and resume is a non-goal. Adding the two
 fields later is a `FORMAT_VERSION` bump the reader can absorb.
 
+**`is_fallback` in the header is what pairs a transcript with its spend**
+(ISSUE-378). A reroute after a fresh primary failure runs two brains and writes
+two `task_usage` rows — `attempt_seq` 1 and 2, keyed apart on that table's own
+`is_fallback` column — against a single log `attempt`, because a reroute
+deliberately increments neither `attempt` nor `task.attempt_count` (the
+breaker-cooldown reroute writes one row, still flagged). The file name cannot
+say which run it holds: a run of either brain is filed as
+`task-{id}-{attempt}`, and nothing in the name says which brain wrote it. On
+the shipped `claude_code` → `native` shape that is one transcript against two
+spend rows, and it read as the first of them; the `session_id` suffix is a
+same-millisecond collision guard and is not what distinguishes the two, since
+the name's timestamp already does. The
+field is set on the *request* — `BrainRequest.is_fallback`, written by
+`executor._run_fallback` and by nothing else — rather than derived at the
+header, because the brain has no way to know it was the substitute. It is set
+there and not passed in for the same reason `_ran_fallback` is set at the call
+site: every path reaching `_run_fallback` is a fallback run, including the
+breaker-cooldown one where the primary is never called and there is no primary
+result to infer from.
+
+Written on **every** run, `false` included, so the absence of the key means a
+log from before the field existed rather than a primary run — and
+`session_log_read.summarize` keeps that as a tri-state (`True` / `False` /
+`None`, via `_as_bool_or_none`; a non-boolean claim reads as `None` too, since
+the header is file content). `istota session show` prints `fallback=` only when
+the file answers. **No `FORMAT_VERSION` bump**: an added optional key is
+absorbable in both directions — an old reader ignores it, a new one handles its
+absence — which is the bar that constant states.
+
+What the field gives is an exact join within one attempt and an *ordinal* one
+across a retried task: the log carries `attempt` where `task_usage` carries
+`attempt_seq`, and the two are different counters, so a task that failed over on
+several attempts is paired by ordering both sides rather than by a shared key.
+Carrying `attempt_seq` in the header outright is the open half of ISSUE-378 and
+was left undecided.
+
 One JSON object per line, every record carrying `type` and `ts`:
 
 | `type` | Where it comes from | What it says |
 |---|---|---|
-| `session` | line 1, `open(header)` | `v`, `session_id`, the identity six (`task_id`, `attempt`, `user_id`, `source_type`, `conversation_token`, `is_group_chat`), plus the brain/provider/model/effort/limits header |
+| `session` | line 1, `open(header)` | `v`, `session_id`, the identity six (`task_id`, `attempt`, `user_id`, `source_type`, `conversation_token`, `is_group_chat`), `is_fallback`, plus the brain/provider/model/effort/limits header |
 | `context` | line 2, once | system prompt, its source, tool *names*, and `tools_schema_sha256` over the sorted schema JSON |
 | `message` | `message_end` | the serialized `llm.types` message — user, assistant (with thinking, tool calls, usage, stop reason) or tool result |
 | `compaction` | both compaction paths | `trigger` = `proactive` or `overflow`, `summary`, `tokens_before`, `cut_index`, `messages_dropped`, `image_pinned`, `details`, `recovery_index` |

@@ -548,6 +548,34 @@ class TestShow:
         ) == 1
         assert "task 4471 attempt 0" in capsys.readouterr().err
 
+    def test_a_fallback_run_says_so_on_the_brain_line(self, deployment, capsys):
+        # ISSUE-378. Both runs of a rerouted attempt share a task id and an
+        # attempt, so this line is where an operator learns which `task_usage`
+        # row the transcript in front of them belongs to.
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_session(is_fallback=True), _context(), _user(), _result()])
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        out = capsys.readouterr().out
+        assert "fallback=yes" in out
+
+    def test_a_primary_run_says_no_rather_than_nothing(self, deployment, capsys):
+        cfg, root = deployment
+        path = root / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_session(is_fallback=False), _context(), _user(), _result()])
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        assert "fallback=no" in capsys.readouterr().out
+
+    def test_a_log_from_before_the_field_says_nothing_at_all(self, tree, capsys):
+        # The `tree` fixture's files predate `is_fallback` — `_session()` writes
+        # no such key. `fallback=` must be absent entirely, not rendered `no`:
+        # printing `no` would answer a question the run never answered, which is
+        # the whole reason `summarize` keeps this field tri-state.
+        cfg, root = tree
+        path = root / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        cli.cmd_session_show(_FakeArgs(config=str(cfg), target=str(path)))
+        assert "fallback=" not in capsys.readouterr().out
+
 
 class TestTail:
     def test_it_prints_the_last_records_as_jsonl(self, tree, capsys):

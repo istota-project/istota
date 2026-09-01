@@ -1205,6 +1205,19 @@ class NativeBrain:
         log.open(
             {
                 "brain": BRAIN_KIND,
+                # Which of a rerouted attempt's brain runs this file is
+                # (ISSUE-378). The file name cannot say: a reroute increments
+                # neither the attempt nor the task's `attempt_count`, so a run
+                # of either brain is filed as `task-{id}-{attempt}` and nothing
+                # in the name says which brain wrote it. On the shipped
+                # claude_code -> native shape that leaves exactly one file for
+                # an attempt that produced two `task_usage` rows, and it read
+                # as the first of them. This is the field that pairs the
+                # transcript with the right one, which is keyed apart on the
+                # same flag. Written on every run rather than only on a
+                # fallback, so its absence means a log from before the field
+                # existed and not a primary run.
+                "is_fallback": bool(req.is_fallback),
                 "provider": self._config.provider,
                 "base_url_host": _base_url_host(self._config.base_url),
                 "model": model,
