@@ -5220,6 +5220,82 @@ class TestExecuteSkillTask:
         assert "CALDAV_PASSWORD" not in env
 
 
+    def test_a_nonzero_exit_keeps_the_stdout_envelope(self, db_path, tmp_path):
+        """ISSUE-383: the diagnosis is on stdout, and only stdout has it.
+
+        Skill CLIs print `{"status": "error", "error": "…"}` on stdout and
+        write nothing to stderr. The failure branch read stderr alone, so a
+        cron row recorded the bare string "Exit code 1" and threw away the
+        message the skill had just written — which is what a human reads back
+        out of ``scheduled_jobs.last_error`` via ``!cron`` and the admin Cron
+        pane. Pre-existing for the feeds and money facades, which already exit
+        1 on that envelope.
+        """
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(skill="feeds", skill_args=json.dumps(["list"]))
+
+        def _fake_run(cmd, **kwargs):
+            return MagicMock(
+                returncode=1,
+                stdout='{"status": "error", "error": "feed host refused"}',
+                stderr="",
+            )
+
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
+            success, result = _execute_skill_task(task, config)
+
+        assert success is False
+        assert result == "feed host refused"
+
+    def test_a_nonzero_exit_without_an_envelope_still_reports_stderr(
+        self, db_path, tmp_path,
+    ):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(skill="feeds", skill_args=json.dumps(["list"]))
+
+        def _fake_run(cmd, **kwargs):
+            return MagicMock(returncode=2, stdout="", stderr="Traceback: boom")
+
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
+            success, result = _execute_skill_task(task, config)
+
+        assert success is False
+        assert result == "Traceback: boom"
+
+    def test_a_nonzero_exit_with_neither_names_the_code(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(skill="feeds", skill_args=json.dumps(["list"]))
+
+        def _fake_run(cmd, **kwargs):
+            return MagicMock(returncode=3, stdout="not json", stderr="")
+
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
+            success, result = _execute_skill_task(task, config)
+
+        assert success is False
+        assert result == "Exit code 3"
+
+    def test_an_error_envelope_on_exit_zero_is_still_a_failure(
+        self, db_path, tmp_path,
+    ):
+        # The pre-existing defence in depth, kept: the facades exit 1, but a
+        # skill that prints the envelope and exits 0 must not read as success.
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(skill="feeds", skill_args=json.dumps(["list"]))
+
+        def _fake_run(cmd, **kwargs):
+            return MagicMock(
+                returncode=0,
+                stdout='{"status": "error", "error": "quota exhausted"}',
+                stderr="",
+            )
+
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
+            success, result = _execute_skill_task(task, config)
+
+        assert success is False
+        assert result == "quota exhausted"
+
 class TestGarminSyncInProcess:
     """``_module.health.garmin_sync`` must run in the daemon thread, not in
     a subprocess. The subprocess env strips ``ISTOTA_SECRET_KEY``, which
