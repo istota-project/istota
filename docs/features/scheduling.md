@@ -38,9 +38,12 @@ command = "df -h / | tail -1"
 
 CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definitions to the `scheduled_jobs` DB table.
 
-Deleting a job from the file deletes it. That includes the last one: a file whose TOML block is empty means you have no jobs, and the sync removes the rows to match. A file with **no** TOML block at all is read as a template instead, and if the table holds jobs they are written into it — which is how a freshly seeded workspace fills in.
+Deleting a job from the file deletes it. That includes the last one: a file whose TOML block is empty means you have no jobs, and the sync removes the rows to match. Two shapes are not that, and neither deletes anything:
 
-Anything that rewrites CRON.md replaces the first TOML block and nothing else. Notes you keep above or below the fence, a second fenced block, the header you rewrote — all of it survives `!cron disable`, the removal of a `once` job and the rest. Comments *inside* the block do not: the jobs are re-rendered from what the loader parsed, which never held them.
+- A file with no TOML block, or one holding only comments, has had no job list written into it. That is what a freshly seeded CRON.md looks like, so if the table holds jobs they are written into the file instead — which is how a workspace whose CRON.md went missing fills back in. Emptying the block by hand but leaving a comment in it lands here too; delete the comment as well if you meant the jobs to go.
+- A file that lists jobs the loader cannot use — a typo in a required key, a `prompt_file` it cannot read — is left alone with a warning in the log, and so are the existing rows. Fix the file and the next tick picks it up.
+
+Rewriting CRON.md replaces the first TOML block and nothing else. Notes you keep above or below the fence, a second fenced block, the header you rewrote — all of it survives `!cron disable`, the removal of a `once` job and the rest. What does not survive is anything inside the block that is not a job the loader accepted: comments there, and a job entry it skipped, are both re-rendered away. The one case that still rewrites the whole file is the seeded-template restore above, which has no job list to splice into.
 
 ## Job types
 

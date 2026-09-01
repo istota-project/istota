@@ -2141,6 +2141,87 @@ prompt = "Run check"
         assert jobs == []
         assert cron_path.read_text() == emptied
 
+    def test_the_seeded_template_does_not_delete_the_users_jobs(
+        self, db_path, tmp_path
+    ):
+        """The file the seeder actually writes, through the real sync.
+
+        `storage.CRON_TEMPLATE` carries a toml fence holding commented-out
+        examples, so it parses to zero jobs with the fence present — the
+        shape the first cut of this stage read as "the user deleted
+        everything" and handed to the orphan sweep. `ensure_user_directories_v2`
+        re-seeds the file whenever it is absent and runs on every scheduler
+        pass, so a CRON.md lost to a mount fault comes back as this.
+        """
+        from istota.scheduler import _sync_cron_files
+        from istota.storage import CRON_TEMPLATE
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        cron_path.write_text(CRON_TEMPLATE.format(conversation_token="room1"))
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "daily-check", "0 9 * * *", "Run check"),
+            )
+
+        with db.get_db(db_path) as conn:
+            _sync_cron_files(conn, config)
+            jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert [j.name for j in jobs] == ["daily-check"]
+        assert 'name = "daily-check"' in cron_path.read_text()
+
+    def test_a_file_whose_every_job_is_refused_holds_the_rows(
+        self, db_path, tmp_path, caplog
+    ):
+        """No usable jobs is not the same fact as no jobs.
+
+        An unreadable `prompt_file` — a moved prompts directory, a mount
+        fault — drops its job at parse time. Syncing that would delete the
+        row while the definition sits in the file, and nothing would bring it
+        back: the next tick reads the same file the same way.
+        """
+        import logging
+
+        from istota.scheduler import _sync_cron_files
+
+        config = self._cron_config(db_path, tmp_path)
+        cron_path = self._cron_path(config)
+        original = """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "daily-check"
+cron = "0 9 * * *"
+prompt_file = "Users/alice/istota/scripts/prompts/gone.txt"
+```
+"""
+        cron_path.write_text(original)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "daily-check", "0 9 * * *", "Run check"),
+            )
+
+        with caplog.at_level(logging.WARNING, "istota.scheduler"):
+            with db.get_db(db_path) as conn:
+                _sync_cron_files(conn, config)
+                jobs = db.get_user_scheduled_jobs(conn, "alice")
+
+        assert [j.name for j in jobs] == ["daily-check"]
+        assert cron_path.read_text() == original
+        assert any(
+            "none of them could be read" in r.getMessage() for r in caplog.records
+        )
+
     def test_a_file_with_no_fence_is_restored_from_the_table(self, db_path, tmp_path):
         """The seeded-template case the restore branch exists for.
 

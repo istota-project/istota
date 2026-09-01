@@ -11,6 +11,7 @@ from istota.cron_loader import (
     DAEMON_OWNED_COLUMNS,
     FILE_OWNED_COLUMNS,
     IDENTITY_COLUMNS,
+    CronDocument,
     CronJob,
     _file_owned_values,
     _validate_model,
@@ -2653,7 +2654,10 @@ prompt = "ok"
 """)
         assert [j.name for j in jobs] == ["fine"]
 
-    @pytest.mark.parametrize("field", ["cron", "prompt", "command", "room", "target"])
+    @pytest.mark.parametrize(
+        "field",
+        ["cron", "prompt", "command", "room", "target", "publish_shared_kv"],
+    )
     def test_a_non_string_field_warns_and_is_ignored(
         self, mount_path, make_config_with_mount, caplog, field
     ):
@@ -2681,3 +2685,169 @@ prompt = "ok"
         else:
             assert len(jobs) == 1
             assert getattr(jobs[0], field) == ""
+
+
+# ---------------------------------------------------------------------------
+# TestATemplateIsNotAnEmptyList
+# ---------------------------------------------------------------------------
+
+
+class TestATemplateIsNotAnEmptyList:
+    """The shipped seed has a fence, which the spec assumed it did not.
+
+    ``storage.CRON_TEMPLATE`` writes a toml fence holding five commented-out
+    example lines, so a freshly seeded CRON.md has ``block`` set and parses
+    to zero jobs. Keying the restore branch on ``block is None`` therefore
+    read the seed as "the user deleted everything" and handed the orphan
+    sweep every row that user had. Reachable without any legacy state:
+    ``ensure_user_directories_v2`` re-seeds the file whenever it is absent,
+    and it runs on every task, every inbound email and every scheduler pass.
+    """
+
+    def test_the_shipped_template_is_a_template(self, make_config_with_mount):
+        from istota.storage import CRON_TEMPLATE
+
+        config = make_config_with_mount()
+        # The real bytes the seeder writes, rather than a hand-written fence.
+        _write_cron_md(
+            config.nextcloud_mount_path, "alice",
+            CRON_TEMPLATE.format(conversation_token="room1"),
+        )
+        doc = load_cron_document(config, "alice")
+        assert doc.block is not None, "the seed does carry a fence"
+        assert doc.jobs == []
+        assert doc.is_template is True
+
+    @pytest.mark.parametrize("block,expected", [
+        ("", False),
+        ("\n\n", False),
+        ("# [[jobs]]\n# name = \"x\"\n", True),
+        ("  # indented comment\n", True),
+        ("[[jobs]]\nname = \"x\"\ncron = \"0 9 * * *\"\nprompt = \"p\"\n", False),
+        ("# a comment\n[[jobs]]\nname = \"x\"\n", False),
+    ])
+    def test_which_blocks_read_as_a_template(self, block, expected):
+        doc = CronDocument(
+            content="", block=block, block_span=(0, 0), jobs=[],
+        )
+        assert doc.is_template is expected
+
+    def test_no_fence_at_all_is_a_template(self):
+        doc = CronDocument(content="", block=None, block_span=None, jobs=[])
+        assert doc.is_template is True
+
+
+# ---------------------------------------------------------------------------
+# TestAnUnusableFileIsHeldRatherThanApplied
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnusableFileIsHeldRatherThanApplied:
+    """"No jobs" and "no *usable* jobs" are different facts.
+
+    Both parse to an empty ``jobs`` list, and only the first is the user
+    saying they want nothing scheduled. A single-job file whose
+    ``prompt_file`` has gone missing is the second, and applying it would
+    delete the row while the definition sits in the file — with nothing to
+    bring it back, since the next tick reads the same file the same way.
+    """
+
+    def _doc(self, mount_path, make_config_with_mount, block):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", f"```toml\n{block}\n```\n")
+        return load_cron_document(config, "alice")
+
+    def test_an_empty_fence_states_no_jobs(
+        self, mount_path, make_config_with_mount
+    ):
+        doc = self._doc(mount_path, make_config_with_mount, "")
+        assert doc.jobs == []
+        assert doc.skipped_entries == 0
+        assert doc.states_no_jobs is True
+
+    @pytest.mark.parametrize("block", [
+        # A required key missing.
+        '[[jobs]]\nname = "broken"\nprompt = "p"',
+        # Both a prompt and a command.
+        '[[jobs]]\nname = "broken"\ncron = "0 9 * * *"\nprompt = "p"\ncommand = "ls"',
+        # Neither.
+        '[[jobs]]\nname = "broken"\ncron = "0 9 * * *"',
+        # A `jobs` key that is not an array of tables at all.
+        'jobs = ["notatable"]',
+        'jobs = "notalist"',
+    ])
+    def test_a_file_whose_jobs_are_all_refused_does_not(
+        self, mount_path, make_config_with_mount, block
+    ):
+        doc = self._doc(mount_path, make_config_with_mount, block)
+        assert doc.jobs == []
+        assert doc.skipped_entries > 0
+        assert doc.states_no_jobs is False
+
+    def test_an_unreadable_prompt_file_is_a_refused_entry(
+        self, mount_path, make_config_with_mount
+    ):
+        """The mount-fault shape, which is the one that matters."""
+        doc = self._doc(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "from-a-file"
+cron = "0 9 * * *"
+prompt_file = "Users/alice/istota/scripts/prompts/gone.txt"
+""")
+        assert doc.jobs == []
+        assert doc.states_no_jobs is False
+
+    def test_a_partly_refused_file_still_states_its_jobs(
+        self, mount_path, make_config_with_mount
+    ):
+        """One bad entry beside a good one is an ordinary sync, as before."""
+        doc = self._doc(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "broken"
+prompt = "no cron"
+
+[[jobs]]
+name = "fine"
+cron = "0 9 * * *"
+prompt = "ok"
+""")
+        assert [j.name for j in doc.jobs] == ["fine"]
+        assert doc.skipped_entries == 1
+        assert doc.states_no_jobs is False
+
+
+# ---------------------------------------------------------------------------
+# TestAnUnclosedFence
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnclosedFence:
+    def test_an_opener_with_no_closer_is_unreadable(
+        self, mount_path, make_config_with_mount, caplog
+    ):
+        """Not "no fence": the jobs being typed are in there.
+
+        ``_TOML_BLOCK_RE`` needs a closing fence, so a half-written file
+        matched nothing and read as a document with no job list — which the
+        sync hands to the restore branch, and that writes a fresh document
+        over the top of what the user was in the middle of writing.
+        """
+        import logging
+
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "half-written"
+cron = "0 9 * * *"
+""")
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            assert load_cron_document(config, "alice") is None
+        assert any("never closes it" in r.getMessage() for r in caplog.records)
+
+    def test_a_closed_fence_is_still_read(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", "```toml\n```\n")
+        assert load_cron_document(config, "alice").block == ""

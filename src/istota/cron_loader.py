@@ -16,6 +16,11 @@ logger = logging.getLogger("istota.cron_loader")
 
 _TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
 
+# Just the opening marker, on a line of its own. Only used to tell "there is
+# no fence here" from "there is a fence and it was never closed", which the
+# expression above cannot distinguish — both fail to match.
+_TOML_OPENER_RE = re.compile(r"^```toml[^\n]*\n", re.MULTILINE)
+
 # Names with this prefix are managed by module integrations (e.g. money) and
 # are not subject to CRON.md orphan deletion.
 _MODULE_JOB_PREFIX = "_module."
@@ -235,12 +240,69 @@ class CronDocument:
     ``block`` is the toml source inside the first fence, ``None`` when the
     file has no fence at all. ``block_span`` are its offsets within
     ``content``, which is what the splicing writer replaces.
+    ``skipped_entries`` counts the ``[[jobs]]`` tables the parser refused, so
+    a caller can tell "this file lists no jobs" from "this file lists jobs
+    and none of them are usable" — see :meth:`states_no_jobs`.
     """
 
     content: str
     block: str | None
     block_span: tuple[int, int] | None
     jobs: list[CronJob]
+    skipped_entries: int = 0
+
+    @property
+    def is_template(self) -> bool:
+        """Nothing has authored a job list here yet.
+
+        **The spec assumed this was ``block is None`` and the shipped
+        template disagrees.** ``storage.CRON_TEMPLATE`` seeds a fence holding
+        five commented-out example lines, so a freshly seeded CRON.md parses
+        to zero jobs with ``block`` set — and reading that as "the user
+        deleted everything" hands the sync's orphan sweep every row that user
+        has. It is not a hypothetical shape: ``ensure_user_directories_v2``
+        re-seeds the file whenever it is absent, and it runs on every task,
+        every inbound email and every scheduler pass, so a CRON.md lost to a
+        mount fault comes back as this and the next tick deletes the
+        schedule it was supposed to protect.
+
+        So the question is lexical rather than semantic — both shapes parse
+        to ``{}``:
+
+        - no fence, or a fence holding **only comments and whitespace**:
+          nothing has been stated, treat it as a template.
+        - a fence holding **nothing at all**: the user's own empty list, and
+          exactly what ``render_jobs_block([])`` writes when the last job is
+          removed. Deleting the last job has to mean deleting it, which is
+          the whole of ISSUE-369 defect 2.
+
+        The residue is that emptying the fence by hand *while leaving a
+        comment in it* still restores from the table. That is the pre-change
+        behaviour for every empty-fence shape, it is the safe direction, and
+        it is one blank line away from the answer the user wanted.
+        """
+        if self.block is None:
+            return True
+        stripped = self.block.strip()
+        if not stripped:
+            return False
+        return all(
+            line.lstrip().startswith("#") for line in stripped.splitlines()
+        )
+
+    @property
+    def states_no_jobs(self) -> bool:
+        """The file says, in as many words, that there are no jobs to run.
+
+        False when every entry it *did* list was refused, which is a
+        different fact and must not authorize the orphan sweep: an
+        unreadable ``prompt_file`` (a mount fault, or a prompts directory the
+        user moved) drops its job at parse time, so a one-job file would
+        otherwise delete the row while the definition sits in the file — and
+        nothing brings it back, because the next tick reads the same file the
+        same way.
+        """
+        return not self.jobs and not self.skipped_entries
 
 
 def _str_field(name: str, user_id: str, field: str, value) -> str:
@@ -289,6 +351,18 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
 
     match = _TOML_BLOCK_RE.search(content)
     if not match:
+        if _TOML_OPENER_RE.search(content):
+            # An opener with no closer. Not "no fence": the user is halfway
+            # through an edit, or the file was written short, and the jobs
+            # they are typing are in there. Reading it as a template hands it
+            # to the restore branch, which writes a whole fresh document over
+            # the top — so refuse it the way an unparseable fence is refused
+            # and let the next tick find a finished file.
+            logger.warning(
+                "CRON.md for %s opens a toml fence and never closes it; the "
+                "previous job definitions stay in force", user_id,
+            )
+            return None
         # A document with no toml fence. Distinct from a fence holding no
         # jobs, and the whole reason this function exists.
         return CronDocument(content=content, block=None, block_span=None, jobs=[])
@@ -303,11 +377,13 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
         )
         return None
 
+    jobs, skipped = _parse_jobs(data, config, user_id)
     return CronDocument(
         content=content,
         block=toml_str,
         block_span=match.span(1),
-        jobs=_parse_jobs(data, config, user_id),
+        jobs=jobs,
+        skipped_entries=skipped,
     )
 
 
@@ -323,13 +399,19 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
     return None if doc is None else doc.jobs
 
 
-def _parse_jobs(data: dict, config, user_id: str) -> list[CronJob]:
+def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
     """Build the ``CronJob`` list from a parsed toml block. Never raises.
 
     Everything reachable from here is user-authored TOML, so nothing may
     assume a type: ``jobs`` is whatever the file says it is, an entry in it
     likewise, and every scalar goes through ``_str_field`` or
     ``_coerce_bool``. A malformed entry costs itself and no other.
+
+    Returns the jobs **and how many entries were refused**, which is what
+    lets ``CronDocument.states_no_jobs`` tell an empty job list from a job
+    list nothing survived. The count is derived at the end rather than
+    incremented at each of the six ``continue``s below, so a seventh cannot
+    forget to keep it.
     """
     jobs = []
     raw_jobs = data.get("jobs", [])
@@ -338,7 +420,10 @@ def _parse_jobs(data: dict, config, user_id: str) -> list[CronJob]:
             "Ignoring 'jobs' in CRON.md for %s: expected an array of tables, "
             "got %s", user_id, type(raw_jobs).__name__,
         )
-        return jobs
+        # One refused entry rather than none: the file did state something
+        # under `jobs`, so this must not read as "the user has no jobs" and
+        # authorize the orphan sweep.
+        return jobs, 1
     for j in raw_jobs:
         if not isinstance(j, dict):
             logger.warning(
@@ -416,13 +501,19 @@ def _parse_jobs(data: dict, config, user_id: str) -> list[CronJob]:
                 name, user_id, "once", j.get("once", False), False),
             model=model,
             effort=effort,
-            publish_shared_kv=str(j.get("publish_shared_kv", "")).strip(),
+            # Through `_str_field` like its neighbours rather than `str()`:
+            # this one names a shared_kv namespace, so `publish_shared_kv = 5`
+            # coerced to the namespace "5" is the one string field where a
+            # silent coercion has a consequence outside the job.
+            publish_shared_kv=_str_field(
+                name, user_id, "publish_shared_kv",
+                j.get("publish_shared_kv", "")),
             publish_shared_kv_trusted=_coerce_bool(
                 name, user_id, "publish_shared_kv_trusted",
                 j.get("publish_shared_kv_trusted", False), False),
         ))
 
-    return jobs
+    return jobs, len(raw_jobs) - len(jobs)
 
 
 def _toml_string(key: str, value: str) -> str:
@@ -442,10 +533,19 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
     empty otherwise, so that the closing fence lands on its own line either
     way.
 
-    What it cannot preserve is a comment *inside* the fence: the jobs are
-    rendered from the parsed ``CronJob`` list, which never held one. That is
-    the boundary of the fix — outside the fence is kept byte for byte,
-    inside it is regenerated.
+    What it cannot preserve is anything inside the fence that is not a job
+    the parser accepted: a comment, and a ``[[jobs]]`` table that was skipped
+    (a typo in a key, an unreadable ``prompt_file``). Both are gone after a
+    rewrite, because the jobs are rendered from the parsed ``CronJob`` list
+    and that list never held them. That is the boundary of the fix — outside
+    the fence is kept byte for byte, inside it is regenerated — and it is
+    unchanged from the whole-document rewrite this replaces.
+
+    Two cosmetic limits of the splice, for the same reason: the rendered
+    lines end in ``\\n``, so a CRLF document comes back with LF inside the
+    fence and CRLF around it, and a fence indented inside a list item is
+    re-emitted at column 0. Both still parse and both round-trip, so they are
+    stated rather than handled.
     """
     lines = []
 
@@ -568,9 +668,11 @@ def _write_cron_md(
     is no document to preserve — it writes ``generate_cron_md`` as before.
 
     A ``doc`` whose ``block_span`` is ``None`` (a file with no fence at all)
-    also takes the whole-document path: there is nothing to splice into, and
-    the only caller that reaches it has already decided the file is a seeded
-    template.
+    also takes the whole-document path, since there is nothing to splice
+    into. Defensive rather than reached: both document-passing callers return
+    False before the write when the file has no fence, because a document
+    with no fence parses to no jobs and neither of them finds the job it was
+    asked to change.
 
     Through the contained directory and the hardened writer, like every other
     host-side write into `{bot_dir}/config/` (ISSUE-339): `mkdir(parents=True)`

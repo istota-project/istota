@@ -6638,9 +6638,12 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                     j for j in db.get_user_scheduled_jobs(conn, user_id)
                     if not j.name.startswith(_MODULE_JOB_PREFIX)
                 ]
-                # No toml fence at all, with rows in the table: the seeded
-                # template this branch was written for, so write the rows into
-                # the file rather than wiping them.
+                # A file nobody has authored a job list into, with rows in
+                # the table: the seeded template this branch was written for,
+                # so write the rows into the file rather than wiping them.
+                # `is_template` is no fence at all *or* a fence holding only
+                # comments, which is what `storage.CRON_TEMPLATE` seeds; the
+                # docstring on it has the reasoning.
                 #
                 # An **empty** fence is not that, and used to reach here too:
                 # both read as zero jobs, so deleting your last job from
@@ -6648,7 +6651,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                 # rewrote the document doing it (ISSUE-369 defect 2). It now
                 # takes the sync path below, where the orphan sweep deletes
                 # the row and the file is left alone.
-                if doc.block is None and user_db_jobs:
+                if doc.is_template and user_db_jobs:
                     if not migrate_db_jobs_to_file(
                         conn, app_config, user_id, overwrite=True
                     ):
@@ -6662,6 +6665,18 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                             "for %s; the rows are unchanged and the next sync "
                             "will retry", len(user_db_jobs), user_id,
                         )
+                elif not doc.jobs and not doc.states_no_jobs:
+                    # The file lists jobs and the parser could use none of
+                    # them — an unreadable `prompt_file`, a typo in a key.
+                    # Syncing that would orphan-delete every row while the
+                    # definitions sit in the file, and nothing would bring
+                    # them back: the next tick reads the same file the same
+                    # way. Hold, the way an unparseable fence is held.
+                    logger.warning(
+                        "CRON.md for %s lists jobs and none of them could be "
+                        "read; leaving the %d existing scheduled job(s) alone "
+                        "until the file is fixed", user_id, len(user_db_jobs),
+                    )
                 else:
                     sync_cron_jobs_to_db(
                         conn, user_id, doc.jobs,
