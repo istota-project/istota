@@ -777,6 +777,10 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
     fourteen days and is getting three should be told, not left to infer it from
     a directory listing.
 
+    The writer and the sweep have separate gates. A disabled or unreachable
+    native brain stops new files, but active retention rules still apply to the
+    files already on disk, so either half makes this check relevant.
+
     **The two arms are composed, not raced.** Returning at the first was the
     first draft and it made the retention arm unreachable on precisely the
     deployments that most need it: the standalone shape's mask refusal and an
@@ -785,15 +789,17 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
     actually bound. Both facts land in one result.
     """
     name = "runtime.session_log_dir"
-    if not _native_is_reachable(config):
+    cfg = config.brain.native.session_log
+    native_reachable = _native_is_reachable(config)
+    sweep_enabled = cfg.retention_days > 0 or cfg.max_total_gb > 0
+    if not native_reachable and not sweep_enabled:
         return CheckResult(
             name,
             SKIP,
             "no brain routing reaches the native harness, which is the only "
             "writer of session logs",
         )
-    cfg = config.brain.native.session_log
-    if not cfg.enabled:
+    if not cfg.enabled and not sweep_enabled:
         return CheckResult(
             name, SKIP, "session logs are disabled ([brain.native.session_log] enabled)"
         )
@@ -1336,8 +1342,8 @@ def check_forge_config_drift(config: "Config", probe: bool) -> list[CheckResult]
                 ),
                 remedy=(
                     f"Rewrite config.toml so {name}_bin_path names the installed binary "
-                    f"(a full Ansible play does; the auto-update cron does not, and the "
-                    f"docker entrypoint writes config.toml only onto a fresh volume)."
+                    f"(a full Ansible play does; the auto-update cron does not. On "
+                    f"docker, restarting the istota service re-renders it)."
                 ),
             )
         )

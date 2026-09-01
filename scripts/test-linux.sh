@@ -629,7 +629,7 @@ run_container_tier() {
     # the machine, and the tests skip themselves there rather than taking the
     # whole tier down with them.
     run_in_container sh -c '. /src/scripts/dev/linux-tier-cgroup.sh
-ruff check --output-format concise src tests testbed docker/devbox scripts && exec pytest "$@"' \
+ruff check --output-format concise src tests testbed docker/browser docker/devbox docker/istota scripts && exec pytest "$@"' \
         -- -o cache_dir=/tmp/pytest_cache "${pytest_args[@]}"
 }
 
@@ -705,7 +705,7 @@ run_native_tier() {
     # `uv.lock`, which is a tracked file, so a test run would leave a diff
     # behind. It does not install anything the venv is missing either way —
     # `uv sync --extra test` is the prerequisite, stated in the header.
-    uv run --frozen ruff check --output-format concise src tests testbed docker/devbox scripts
+    uv run --frozen ruff check --output-format concise src tests testbed docker/browser docker/devbox docker/istota scripts
     exec uv run --frozen pytest "${pytest_args[@]}"
 }
 

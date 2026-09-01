@@ -4747,9 +4747,13 @@ class TestExecuteCommandTask:
         assert not written.exists()
 
 
-class TestDeferredDirContract:
-    """ISSUE-233: all three task paths must export the same deferred dir, so a
-    skill CLI behaves identically whichever path invoked it."""
+class _TaskPathEnvHarness:
+    """Config, task and captured-env plumbing shared by the two env contracts.
+
+    Deliberately not ``Test``-prefixed: a subclass of a collected class is
+    collected again, so the two contracts below would each re-run the other's
+    cases — one of which drives a whole ``execute_task``.
+    """
 
     def _config(self, db_path, tmp_path):
         mount = tmp_path / "mount"
@@ -4787,6 +4791,11 @@ class TestDeferredDirContract:
         monkeypatch.setattr("istota.scheduler._run_capture", fake_run)
         target()
         return captured
+
+
+class TestDeferredDirContract(_TaskPathEnvHarness):
+    """ISSUE-233: all three task paths must export the same deferred dir, so a
+    skill CLI behaves identically whichever path invoked it."""
 
     def test_command_and_skill_paths_agree(self, db_path, tmp_path, monkeypatch):
         from istota.executor import get_user_temp_dir
@@ -4826,6 +4835,181 @@ class TestDeferredDirContract:
 
         env = mock_run.call_args[1]["env"]
         assert env["ISTOTA_DEFERRED_DIR"] == str(get_user_temp_dir(config, "alice"))
+
+
+class TestTaskAttemptContract(_TaskPathEnvHarness):
+    """ISSUE-377: every path exporting ``ISTOTA_TASK_ID`` names the attempt too.
+
+    ``tasks transcript`` reads this to decide which log is the one being
+    written right now. It used to derive that from ``attempt_count`` on the
+    row, which the liveness reaper mutates underneath a worker it wrongly
+    believes is dead — so the number has to come from the process's own
+    environment, and a path that sets the id without the attempt turns the
+    verb off for that task rather than answering wrongly.
+
+    Shares ``TestDeferredDirContract``'s harness because the property is the
+    same shape: three task paths that must agree about one variable.
+    """
+
+    def test_command_and_skill_paths_export_the_attempt(
+        self, db_path, tmp_path, monkeypatch
+    ):
+        config = self._config(db_path, tmp_path)
+
+        cmd_env = self._captured_env(
+            monkeypatch,
+            lambda: _execute_command_task(
+                self._task(command="true", attempt_count=2), config,
+            ),
+        )
+        skill_env = self._captured_env(
+            monkeypatch,
+            lambda: _execute_skill_task(
+                self._task(
+                    skill="kv", skill_args='["namespaces"]', attempt_count=2,
+                ),
+                config,
+            ),
+        )
+
+        # `+ 1` because the counter counts *prior* attempts, which is the same
+        # arithmetic the session log's file name uses.
+        assert cmd_env["ISTOTA_TASK_ATTEMPT"] == "3"
+        assert skill_env["ISTOTA_TASK_ATTEMPT"] == "3"
+
+    def _run_brain_path(self, db_path, tmp_path, monkeypatch, attempt_count=0):
+        """Run the LLM path, returning what each of its three consumers saw.
+
+        Three things worth having apart. ``model_env`` is where the variable
+        must **not** be. ``base_env`` is the copy the host-side
+        ``tasks transcript`` actually reads: the proxy takes its own snapshot,
+        which deliberately drops some names, so "it is a superset of the
+        model's" is a property with exceptions rather than an invariant.
+        ``request`` carries the attempt that names the log file, and the
+        exclusion is an equality between that and the environment.
+        """
+        from istota.executor import execute_task, get_user_temp_dir
+
+        config = self._config(db_path, tmp_path)
+        config.bundled_skills_dir = tmp_path / "_empty_bundled"
+        get_user_temp_dir(config, "alice").mkdir(parents=True, exist_ok=True)
+
+        captured = {}
+
+        class FakeProxy:
+            def __init__(self, sock, credential_env, base_env, **kwargs):
+                captured["base_env"] = dict(base_env)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_run(*args, **kwargs):
+            captured["model_env"] = dict(kwargs.get("env") or {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        # `execute_task` does `from .brain import BrainRequest` inside itself,
+        # so the name is resolved on the brain module at call time and that is
+        # where the spy has to go.
+        from istota.brain import BrainRequest as real_request
+
+        def spy_request(*args, **kwargs):
+            request = real_request(*args, **kwargs)
+            captured["request"] = request
+            return request
+
+        # Imported inside ``execute_task`` from ``.skill_proxy``, the same as
+        # ``BrainRequest`` below, so the patch goes on the defining module.
+        monkeypatch.setattr("istota.skill_proxy.SkillProxy", FakeProxy)
+        monkeypatch.setattr("istota.executor.subprocess.run", fake_run)
+        monkeypatch.setattr("istota.brain.BrainRequest", spy_request)
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="test", user_id="alice", source_type="talk",
+            )
+            if attempt_count:
+                conn.execute(
+                    "UPDATE tasks SET attempt_count = ? WHERE id = ?",
+                    (attempt_count, task_id),
+                )
+                conn.commit()
+            execute_task(db.get_task(conn, task_id), config, [], conn=conn)
+
+        return captured
+
+    def test_the_brain_path_hands_the_attempt_to_the_proxy(
+        self, db_path, tmp_path, monkeypatch
+    ):
+        """The LLM path is the one that writes a session log at all."""
+        captured = self._run_brain_path(
+            db_path, tmp_path, monkeypatch, attempt_count=2,
+        )
+
+        assert captured["base_env"]["ISTOTA_TASK_ATTEMPT"] == "3"
+
+    def test_a_first_run_is_attempt_one(self, db_path, tmp_path, monkeypatch):
+        captured = self._run_brain_path(db_path, tmp_path, monkeypatch)
+
+        assert captured["base_env"]["ISTOTA_TASK_ATTEMPT"] == "1"
+
+    def test_the_model_does_not_hold_the_attempt(
+        self, db_path, tmp_path, monkeypatch
+    ):
+        """It is the floor's authority, so it goes to the proxy, not the model.
+
+        ``skill_client._run_direct`` re-execs with the inherited environment on
+        a proxy-off deployment, where a value in the model's own environment is
+        a floor the model can raise above every file. ``ISTOTA_TASK_ID`` is
+        asserted present in the same breath as the control: "the variable is
+        absent" would also be satisfied by an env that carries neither.
+        """
+        captured = self._run_brain_path(
+            db_path, tmp_path, monkeypatch, attempt_count=2,
+        )
+
+        assert "ISTOTA_TASK_ID" in captured["model_env"]
+        assert "ISTOTA_TASK_ATTEMPT" not in captured["model_env"]
+
+    def test_the_environment_and_the_log_file_name_agree(
+        self, db_path, tmp_path, monkeypatch
+    ):
+        """The equality the whole exclusion rests on.
+
+        ``BrainRequest.attempt`` names the session log's file; the environment
+        carries the floor that withholds it. A drift between the two is silent,
+        and the direction it drifts in is the permissive one — a floor above
+        the live file, which hands a run its own transcript again.
+        """
+        captured = self._run_brain_path(
+            db_path, tmp_path, monkeypatch, attempt_count=2,
+        )
+
+        assert captured["base_env"]["ISTOTA_TASK_ATTEMPT"] == str(
+            captured["request"].attempt
+        )
+
+    def test_the_attempt_travels_with_the_id(self, db_path, tmp_path, monkeypatch):
+        """The invariant, stated where a fourth path would trip over it.
+
+        A consumer keying off ``ISTOTA_TASK_ID`` and finding no attempt beside
+        it has to fail closed, so both are asserted **present** rather than
+        merely agreeing about absence — a path setting neither would satisfy
+        that weaker form while being exactly the fourth path this guards.
+        """
+        config = self._config(db_path, tmp_path)
+
+        for build in (
+            lambda: _execute_command_task(self._task(command="true"), config),
+            lambda: _execute_skill_task(
+                self._task(skill="kv", skill_args='["namespaces"]'), config,
+            ),
+        ):
+            env = self._captured_env(monkeypatch, build)
+            assert "ISTOTA_TASK_ID" in env
+            assert "ISTOTA_TASK_ATTEMPT" in env
 
 
 # ---------------------------------------------------------------------------
@@ -9107,7 +9291,7 @@ class TestSessionLogSweepWiring:
 
         assert sweep.call_count == 1
 
-    def test_the_sweep_does_not_run_when_the_feature_is_off(self, tmp_path):
+    def test_the_sweep_still_runs_when_the_feature_is_off(self, tmp_path):
         from istota.scheduler import run_cleanup_checks
 
         config = self._config(tmp_path, enabled=False)
@@ -9115,7 +9299,7 @@ class TestSessionLogSweepWiring:
             sweep.return_value = SweepResult()
             run_cleanup_checks(config)
 
-        assert sweep.call_count == 0
+        assert sweep.call_count == 1
 
     def test_retention_days_zero_still_sweeps_for_the_ceiling(self, tmp_path):
         # The `or` gate, from the age side. An operator who keeps everything
@@ -9145,7 +9329,9 @@ class TestSessionLogSweepWiring:
     def test_both_rules_disabled_sweeps_nothing(self, tmp_path):
         from istota.scheduler import run_cleanup_checks
 
-        config = self._config(tmp_path, retention_days=0, max_total_gb=0)
+        config = self._config(
+            tmp_path, enabled=False, retention_days=0, max_total_gb=0,
+        )
         with patch("istota.scheduler.sweep_session_logs") as sweep:
             sweep.return_value = SweepResult()
             run_cleanup_checks(config)
@@ -9196,16 +9382,18 @@ class TestSessionLogSweepWiring:
         assert not aged.exists()
         assert fresh.exists()
 
-    def test_a_tick_deletes_nothing_when_the_feature_is_off(self, tmp_path):
+    def test_a_tick_deletes_an_aged_log_when_the_feature_is_off(self, tmp_path):
         from istota.scheduler import run_cleanup_checks
 
         config = self._config(tmp_path, enabled=False, retention_days=14)
         root = tmp_path / "data" / "logs"
         aged = self._write_log(root, "alice", "old.jsonl", age_days=900)
+        fresh = self._write_log(root, "alice", "new.jsonl", age_days=1)
 
         run_cleanup_checks(config)
 
-        assert aged.exists()
+        assert not aged.exists()
+        assert fresh.exists()
 
     # -- failure is absorbed ----------------------------------------------
 

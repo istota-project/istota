@@ -96,3 +96,52 @@ def test_nothing_named_there_is_a_shell_script():
             f"{entry} is in extend-include but does not start with a Python "
             f"shebang; ruff would try to parse it as Python"
         )
+
+
+#: The one documented Python lint invocation, as `AGENTS.md` spells it.
+_RUFF_COMMAND = "ruff check --output-format concise "
+
+
+def _documented_ruff_roots() -> set[str]:
+    """The directories AGENTS.md's Verification command hands to ruff."""
+    for line in (REPO / "AGENTS.md").read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_RUFF_COMMAND):
+            return set(stripped[len(_RUFF_COMMAND) :].split())
+    raise AssertionError(
+        "AGENTS.md no longer carries a `ruff check --output-format concise ...` "
+        "line; this guard reads its roots from there"
+    )
+
+
+def test_every_python_file_under_docker_is_inside_the_lint_scope():
+    """`docker/` is where a Python program lands without a lint command.
+
+    `config-diff.py` ships in the istota image beside `entrypoint.sh`, so it is
+    product code that lives outside `src/`. Ruff discovers it by extension, but
+    only if something points ruff at its directory, and the documented command
+    named `docker/devbox` alone. The failure has the same shape as the one this
+    file already guards: the command reports everything passing over a file it
+    never opened.
+    """
+    roots = _documented_ruff_roots()
+    unreached = []
+    for path in sorted((REPO / "docker").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(REPO)
+        if not any(str(relative).startswith(f"{root}/") for root in roots):
+            unreached.append(str(relative))
+
+    assert not unreached, (
+        f"{unreached} are Python files no documented ruff invocation reaches. "
+        f"Add the directory to the command in AGENTS.md (and to the copies in "
+        f"docs/development/testing.md and scripts/test-linux.sh)."
+    )
+
+
+def test_the_documented_roots_scan_found_something_to_check():
+    """The scan above passes on an empty root set or an empty tree."""
+    roots = _documented_ruff_roots()
+    assert {"src", "tests", "docker/devbox", "docker/istota"} <= roots, roots
+    assert list((REPO / "docker").rglob("*.py")), "no Python under docker/ at all"

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Boot the shipped image over an older release's config.toml and database.
 #
-# Three of istota's upgrade shapes never regenerate config.toml, and two of them
-# are how ISSUE-263 reached production: the auto-update cron `git reset --hard`s
-# to main without running Ansible, and a Docker rebuild over a retained volume
-# keeps the config the entrypoint wrote on that volume's *first* boot. Every
-# other tier in this spec renders a fresh config, and a fresh config is current
-# by definition — so none of them can see this.
+# New code against an old config.toml is how ISSUE-263 reached production: the
+# auto-update cron `git reset --hard`s to main without running Ansible, and a
+# Docker rebuild over a retained volume used to keep the config the entrypoint
+# wrote on that volume's *first* boot (ISSUE-368 made that render on every boot,
+# which narrows the Docker case to the window before the container restarts, but
+# does not close it). Every other tier in this spec renders a fresh config, and a
+# fresh config is current by definition — so none of them can see this.
 #
 #   scripts/test-upgrade.sh                                   # near anchor, code shape
 #   scripts/test-upgrade.sh --from-floor --shape volume       # far anchor, before a release

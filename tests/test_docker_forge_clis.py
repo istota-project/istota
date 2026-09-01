@@ -255,12 +255,15 @@ class TestTheResolvedBinaryIsTheOneTheImageShips:
         assert _resolve_real_bin(f"{FORGE_LIB}/glab", "glab") == f"{FORGE_LIB}/glab"
 
     def test_an_upgraded_container_finds_the_shipped_binary(self, monkeypatch):
-        # The regression Mulder caught: the entrypoint writes config.toml only
-        # on a first boot with a fresh volume, so a container upgraded into an
-        # image that ships the binaries still has a [developer] block with no
+        # The regression Mulder caught: the entrypoint wrote config.toml only on
+        # a first boot with a fresh volume, so a container upgraded into an
+        # image that ships the binaries still had a [developer] block with no
         # gh_bin_path. The dataclass default stands, /usr/local/bin/gh does not
         # exist, and the binaries are off PATH — so without the probe below
-        # this resolves to the same broken path as before the fix.
+        # this resolves to the same broken path as before the fix. ISSUE-368
+        # made the render happen on every boot, so a restart now repairs it too;
+        # a container still running from before its upgrade is in exactly this
+        # state, which is why the probe stays.
         monkeypatch.setattr(forge_bin.shutil, "which", lambda _name: None)
         monkeypatch.setattr(
             forge_bin.os.path, "exists", lambda p: p.startswith(FORGE_LIB)

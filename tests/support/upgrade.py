@@ -2,14 +2,18 @@
 
 Layer 4 of the deployment-artifact-verification spec asks one question: does the
 shipped image still work against the state an *earlier* release wrote? Two of
-istota's three upgrade shapes never regenerate `config.toml` —
+istota's three upgrade shapes ran new code against an old `config.toml` —
 
   * the auto-update cron `git reset --hard`s to main every two minutes and runs
     no Ansible at all, so a code-only advance keeps whatever config the last
-    full play wrote;
-  * an operator rebuilding the Docker stack over a retained volume keeps the
+    full play wrote. Still true;
+  * an operator rebuilding the Docker stack over a retained volume kept the
     `config.toml` the entrypoint generated on the volume's *first* boot, which
-    may predate the binaries the new image ships.
+    may predate the binaries the new image ships. ISSUE-368 made that render
+    run on every boot, so this one is now a window rather than a permanent
+    state: it is what the container looks like between the image changing and
+    the container restarting, and it is still where the drift assertions have
+    their subject.
 
 Both are how ISSUE-263 reached production. Neither is observable from a test
 that renders a fresh config, because a fresh config is by definition current.

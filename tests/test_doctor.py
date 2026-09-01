@@ -3454,11 +3454,20 @@ class TestSessionLogDir:
     # -- when it does not apply -------------------------------------------
 
     def test_skips_when_no_routing_reaches_the_native_brain(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path)
+        config = self._config(
+            make_config, tmp_path, retention_days=0, max_total_gb=0,
+        )
         config.brain.kind = "claude_code"
         r = self._run(config)
         assert r.status == SKIP
         assert "native" in r.detail
+
+    def test_checks_retention_when_no_routing_reaches_native(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        config.brain.kind = "claude_code"
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        self._record_sweep(config, still_over=True)
+        assert self._run(config).status == WARN
 
     def test_a_native_fallback_is_not_a_skip(self, make_config, tmp_path):
         # `brain/native.py` builds the writer from `session_log` alone and
@@ -3478,8 +3487,17 @@ class TestSessionLogDir:
         assert self._run(config).status != SKIP
 
     def test_skips_when_the_feature_is_off(self, make_config, tmp_path):
-        r = self._run(self._config(make_config, tmp_path, enabled=False))
+        config = self._config(
+            make_config, tmp_path, enabled=False, retention_days=0, max_total_gb=0,
+        )
+        r = self._run(config)
         assert r.status == SKIP
+
+    def test_checks_retention_when_the_feature_is_off(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path, enabled=False)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        self._record_sweep(config, still_over=True)
+        assert self._run(config).status == WARN
 
     # -- the healthy shape -------------------------------------------------
 

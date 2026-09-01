@@ -7,6 +7,14 @@ set -euo pipefail
 CONFIG_FILE="/data/config/config.toml"
 PROVISION_FLAG="/mnt/shared/.istota-provisioned"
 API_PROVISION_FLAG="/data/config/.api-provisioned"
+# Written once this boot's config is in place, and cleared below before the
+# first long wait. `web` shares the volume and reads config.toml; while the
+# render was gated on first boot it could poll for config.toml itself and never
+# lose, but a render on every boot means that file exists and holds the
+# *previous* boot's values for as long as provisioning takes.
+CONFIG_READY_FLAG="/data/config/.config-current"
+# The web session signing key, persisted so re-rendering does not rotate it.
+WEB_SESSION_SECRET_FILE="/data/config/.web_session_secret"
 NC_URL="${NC_INTERNAL_URL:-http://nextcloud}"
 
 # render-config.sh sits beside this file — /render-config.sh in the image, and
@@ -31,6 +39,9 @@ ENTRYPOINT_DIR="${ENTRYPOINT_DIR%/}"
 # web could cache an empty allowlist and 403 the dashboard until restart.
 ADMINS_FILE="/data/config/admins"
 mkdir -p /data/config
+# Retract the readiness flag before anything that can block. A reader that finds
+# it still there is entitled to assume the config beside it is this boot's.
+rm -f "$CONFIG_READY_FLAG"
 touch "$ADMINS_FILE"
 if [ -n "${USER_NAME:-}" ] && ! grep -qxF "$USER_NAME" "$ADMINS_FILE"; then
     printf '%s\n' "$USER_NAME" >> "$ADMINS_FILE"
@@ -352,184 +363,209 @@ LOCATION_INGEST_TOKEN=${LOCATION_INGEST_TOKEN:-}
 EOF
 
 # --- Generate config ---
+#
+# The render runs on EVERY boot, not only the first (ISSUE-368). It used to sit
+# behind `[ ! -f "$CONFIG_FILE" ]`, and since `config.toml` lives on the
+# `istota_data` named volume that `rebuild.sh` keeps by default, the guard meant
+# `docker/.env` was read exactly once in the life of a deployment. The render
+# expands 170 distinct `ISTOTA_*` variables and is the only path any of them has
+# into the running system, so an operator could change one, rebuild, and get no
+# error, no warning and no change. It also made the flag files lie: with
+# location enabled, dropping `.api-provisioned` regenerates
+# `LOCATION_INGEST_TOKEN` and records it, while the config kept the old one.
+#
+# One file-exists test was standing in for two questions — is there a config to
+# preserve, and are the values in it current. It answered the first, and the
+# three add-if-missing backfill passes that used to sit below it were the answer
+# to the second, each written for one symptom rather than for the class.
+# Rendering every boot answers the second question by construction, and the
+# passes are gone with it: the render writes `log_channel` / `alerts_channel`,
+# `[web]` / `[site]` and the module resources from the same inputs they
+# repaired, so keeping them would mean two writers of the same keys under
+# different rules.
+#
+# What that costs is a hand edit made directly in the volume, which was one of
+# the three documented ways around the bug. `config.toml.prev` keeps the last
+# one, `config-diff.py` names every key the boot changed, and
+# `ISTOTA_CONFIG_RENDER=preserve` is the way out for a deployment that really
+# does hand-maintain the file.
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    # The render lives in render-config.sh, executed rather than sourced. This
-    # file runs `set -euo pipefail`, so a sourced render would inherit `-u` and
-    # abort the whole boot on any unset variable it happened to read; as a
-    # subprocess it fails the render alone. It is also what the image tier and
-    # the lean compose stack call directly, neither of which has a Nextcloud to
-    # provision against.
-    #
-    # Its inputs are the provisioning locals above, which `source
-    # "$PROVISION_FLAG"` and the room-create calls left as shell variables
-    # rather than environment ones. `export` on an unset name is a no-op that
-    # puts nothing in the child environment, so the script's own `:-` defaults
-    # still apply. The full contract is documented in its header.
-    #
-    # In a subshell, because `export` sets the attribute on *this* shell for
-    # good, not for one call — five of these are credentials (the app password,
-    # the OAuth secret, three room and ingest tokens) and they would otherwise
-    # be inherited by the `exec uv run istota-scheduler` at the end of this
-    # file. `build_clean_env` and `build_stripped_env` in executor.py both
-    # happen to filter them out today, but that containment is incidental: it
-    # keys on the substrings PASSWORD/SECRET/TOKEN, and a future credential
-    # named without one of those would ride straight through.
-    #
-    # `set -e` still applies: a subshell exiting non-zero fails the parent.
+CONFIG_RENDER_MODE="${ISTOTA_CONFIG_RENDER:-always}"
+if [ "$CONFIG_RENDER_MODE" != "always" ] && [ "$CONFIG_RENDER_MODE" != "preserve" ]; then
+    echo "[istota] Warning: ISTOTA_CONFIG_RENDER='${CONFIG_RENDER_MODE}' is not 'always' or 'preserve'; rendering." >&2
+    CONFIG_RENDER_MODE="always"
+fi
+
+# The web session signing key is the one value the render invents rather than
+# reads, so re-rendering every boot would mint a new one and drop every
+# logged-in web session (`web_app._resolve_session_secret`). Resolve it here and
+# hand it to the render as an input. Order: what the operator pinned, then what
+# a previous boot persisted, then what an already-rendered config holds — that
+# third arm is the upgrade path, and that config is the only copy an existing
+# deployment has — then a fresh one.
+# `ISTOTA_WEB_SESSION_SECRET_KEY` and nothing else: an unprefixed
+# `WEB_SESSION_SECRET` read from the environment here would outrank the pinned
+# variable, the persisted file and the existing config, under a name documented
+# nowhere as an operator control. That is the trap the comment beside
+# `ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR` in docker-compose.yml describes.
+WEB_SESSION_SECRET="${ISTOTA_WEB_SESSION_SECRET_KEY:-}"
+if [ -z "$WEB_SESSION_SECRET" ] && [ -f "$WEB_SESSION_SECRET_FILE" ]; then
+    WEB_SESSION_SECRET=$(cat "$WEB_SESSION_SECRET_FILE")
+fi
+if [ -z "$WEB_SESSION_SECRET" ] && [ -f "$CONFIG_FILE" ]; then
+    WEB_SESSION_SECRET=$(python3 - "$CONFIG_FILE" <<'PY'
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as handle:
+        value = tomllib.load(handle).get("web", {}).get("session_secret_key")
+except Exception:
+    value = None
+print((value or "").strip())
+PY
+)
+    if [ -n "$WEB_SESSION_SECRET" ]; then
+        echo "[istota] Adopted the web session signing key from the existing ${CONFIG_FILE}."
+    fi
+fi
+if [ -z "$WEB_SESSION_SECRET" ]; then
+    WEB_SESSION_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+fi
+# Persisted beside config.toml on the istota_data volume, 0600, the way
+# /data/.secret_key is. Written whenever it differs from what is stored rather
+# than only when the file is absent: guarding on absence means the *first* value
+# is the one kept for good, so an operator who pins key A, repins to B and then
+# unpins gets A back and drops every logged-in session — which is the failure
+# this file exists to prevent, arriving by the route meant to avoid it.
+if [ "$(cat "$WEB_SESSION_SECRET_FILE" 2>/dev/null || true)" != "$WEB_SESSION_SECRET" ]; then
+    ( umask 077 && printf '%s' "$WEB_SESSION_SECRET" > "$WEB_SESSION_SECRET_FILE" )
+    chmod 600 "$WEB_SESSION_SECRET_FILE"
+fi
+
+# Render to a named destination. The render lives in render-config.sh, executed
+# rather than sourced. This file runs `set -euo pipefail`, so a sourced render
+# would inherit `-u` and abort the whole boot on any unset variable it happened
+# to read; as a subprocess it fails the render alone. It is also what the image
+# tier and the lean compose stack call directly, neither of which has a
+# Nextcloud to provision against.
+#
+# Its inputs are the provisioning locals above, which `source "$PROVISION_FLAG"`
+# and the room-create calls left as shell variables rather than environment
+# ones. `export` on an unset name is a no-op that puts nothing in the child
+# environment, so the script's own `:-` defaults still apply. The full contract
+# is documented in its header.
+#
+# In a subshell, because `export` sets the attribute on *this* shell for good,
+# not for one call — six of these are credentials (the app password, the OAuth
+# secret, the web session signing key, the room tokens and the ingest token) and
+# they would otherwise be inherited by the `exec uv run istota-scheduler` at the
+# end of this file. `build_clean_env` and `build_stripped_env` in executor.py
+# both happen to filter them out today, but that containment is incidental: it
+# keys on the substrings PASSWORD/SECRET/TOKEN, and a future credential named
+# without one of those would ride straight through.
+render_config_to() {
     (
-        export CONFIG_FILE USER_NAME NC_URL APP_PASSWORD BOT_USER \
+        export CONFIG_FILE="$1" \
+            USER_NAME NC_URL APP_PASSWORD BOT_USER \
             USER_DISPLAY_NAME USER_TIMEZONE USER_EMAIL \
             USER_LOG_CHANNEL USER_ALERTS_CHANNEL USER_DISABLED_SKILLS \
             USER_MAX_FOREGROUND_WORKERS USER_MAX_BACKGROUND_WORKERS \
             LOG_TOKEN ALERTS_TOKEN LOCATION_INGEST_TOKEN \
             OAUTH_CLIENT_ID OAUTH_CLIENT_SECRET OAUTH_REDIRECT_URI \
-            WEB_PORT MONARCH_EMAIL MONARCH_PASSWORD
+            WEB_PORT WEB_SESSION_SECRET MONARCH_EMAIL MONARCH_PASSWORD
         "$ENTRYPOINT_DIR/render-config.sh"
     )
+}
+
+# Report by key, never by `diff`: config.toml holds the app password, the OAuth2
+# client secret, the forge tokens and the room tokens, and the container log is
+# the least private place in the deployment. Best-effort — an absent or broken
+# reporter costs the report, not the boot.
+report_config_drift() {
+    [ -f "$ENTRYPOINT_DIR/config-diff.py" ] || return 0
+    python3 "$ENTRYPOINT_DIR/config-diff.py" "$@" || true
+}
+
+# A leftover from a killed `preserve` boot is a second full copy of every
+# credential in config.toml. Removed up front rather than only on the path that
+# creates it, since a deployment that switches back to `always` would otherwise
+# keep one for good.
+rm -f "${CONFIG_FILE}.probe" "${CONFIG_FILE}.probe.partial"
+
+if [ "$CONFIG_RENDER_MODE" = "preserve" ] && [ -f "$CONFIG_FILE" ]; then
+    echo "[istota] ISTOTA_CONFIG_RENDER=preserve — keeping the existing ${CONFIG_FILE}."
+    CONFIG_PROBE="${CONFIG_FILE}.probe"
+    CONFIG_PROBE_ERR="${CONFIG_FILE}.probe.err"
+    # 0077 for the probe: it is a complete second copy of every credential in
+    # config.toml, and it exists only to be compared and deleted.
+    if ( umask 077 && render_config_to "$CONFIG_PROBE" >/dev/null 2>"$CONFIG_PROBE_ERR" ); then
+        report_config_drift "$CONFIG_FILE" "$CONFIG_PROBE" \
+            --label-old "kept" --label-new "from this environment" \
+            --heading "the kept config.toml differs from what this environment renders"
+    else
+        # The reason, not just the fact: render-config.sh tells a missing input
+        # (exit 2) from an ENOSPC from a `set -u` abort by its message, and all
+        # three read identically once stderr is discarded.
+        echo "[istota] Warning: could not render a comparison config; no drift report this boot." >&2
+        sed 's/^/[istota]   /' "$CONFIG_PROBE_ERR" >&2 || true
+    fi
+    rm -f "$CONFIG_PROBE" "${CONFIG_PROBE}.partial" "$CONFIG_PROBE_ERR"
 else
-    echo "[istota] Config already exists, skipping generation."
-
-    # Upgrade path: if a prior config was generated before auto-channel support,
-    # backfill log_channel/alerts_channel under [users.${USER_NAME}] when the
-    # tokens are now available and the keys are absent. Done with a small
-    # python helper so we don't re-parse TOML in shell.
-    if [ -n "${LOG_TOKEN:-}" ] || [ -n "${ALERTS_TOKEN:-}" ]; then
-        python3 - "$CONFIG_FILE" "$USER_NAME" "${LOG_TOKEN:-}" "${ALERTS_TOKEN:-}" <<'PY'
-import sys, re
-path, user, log_tok, alert_tok = sys.argv[1:5]
-text = open(path, "r", encoding="utf-8").read()
-section_re = re.compile(rf"^\[users\.{re.escape(user)}\]\s*$", re.M)
-m = section_re.search(text)
-if not m:
-    sys.exit(0)
-# Find end of section (next [heading] or EOF).
-next_hdr = re.search(r"^\[", text[m.end():], re.M)
-end = m.end() + (next_hdr.start() if next_hdr else len(text) - m.end())
-section = text[m.start():end]
-additions = []
-if log_tok and not re.search(r"^log_channel\s*=", section, re.M):
-    additions.append(f'log_channel = "{log_tok}"')
-if alert_tok and not re.search(r"^alerts_channel\s*=", section, re.M):
-    additions.append(f'alerts_channel = "{alert_tok}"')
-if not additions:
-    sys.exit(0)
-# Insert just before the next heading (or at EOF), preserving trailing newlines.
-insertion = ("\n" if not section.endswith("\n") else "") + "\n".join(additions) + "\n"
-text = text[:end] + insertion + text[end:]
-open(path, "w", encoding="utf-8").write(text)
-print(f"[istota] Backfilled {len(additions)} channel field(s) in {path}", file=sys.stderr)
-PY
+    # One copy of the outgoing file, overwritten each boot. Not a history — the
+    # safety net for the operator who hand-edited the live config while the
+    # render was gated, and the input the drift report reads. 0600 because it
+    # carries the same credentials config.toml does and is a file this change
+    # introduces; config.toml's own mode is left as it was.
+    if [ -f "$CONFIG_FILE" ]; then
+        cp -p "$CONFIG_FILE" "${CONFIG_FILE}.prev"
+        chmod 600 "${CONFIG_FILE}.prev"
     fi
-
-    # Upgrade path #1b: emit a missing [web] / [site] block when the OAuth2
-    # client landed on a later boot. Operators upgrading from versions where
-    # provision-nc.sh's OAuth2 step silently failed (e.g. the pre-Phase-2.1
-    # script that called the nonexistent occ oauth2:add-client) end up with a
-    # config.toml that has no [web] section. Without this, `provision-nc.sh`
-    # could be fixed and re-run but the web service would still 500.
-    if [ -n "${OAUTH_CLIENT_ID:-}" ] && [ -n "${OAUTH_CLIENT_SECRET:-}" ] \
-       && ! grep -q '^\[web\]' "$CONFIG_FILE"; then
-        WEB_NC_EXTERNAL_URL="${ISTOTA_WEB_NC_EXTERNAL_URL:-${NC_URL}}"
-        WEB_SESSION_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-        WEB_SITE_HOSTNAME="${ISTOTA_WEB_SITE_HOSTNAME:-localhost:${WEB_PORT:-8766}}"
-        WEB_REDIRECT_URI="${OAUTH_REDIRECT_URI:-${ISTOTA_WEB_CALLBACK_URL:-http://localhost:${WEB_PORT:-8766}/istota/callback}}"
-        cat >> "$CONFIG_FILE" <<TOML
-
-[web]
-enabled = true
-port = ${WEB_PORT:-8766}
-oauth2_provider = "${WEB_NC_EXTERNAL_URL}"
-oauth2_client_id = "${OAUTH_CLIENT_ID}"
-oauth2_client_secret = "${OAUTH_CLIENT_SECRET}"
-oauth2_token_endpoint = "${NC_URL}/index.php/apps/oauth2/api/v1/token"
-oauth2_userinfo_endpoint = "${NC_URL}/ocs/v2.php/cloud/user?format=json"
-oauth2_redirect_uri = "${WEB_REDIRECT_URI}"
-session_secret_key = "${WEB_SESSION_SECRET}"
-token_storage = "${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}"
-
-[web.chat]
-talk_read_sync_interval = ${ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL:-60}
-
-[site]
-hostname = "${WEB_SITE_HOSTNAME}"
-TOML
-        echo "[istota] Backfilled [web] / [site] in ${CONFIG_FILE} (OAuth2 client=${OAUTH_CLIENT_ID})"
+    # Not a bare command under `set -e`, and the difference is a stack rather
+    # than a boot. The render is atomic (`.partial` + `mv`), so a failure leaves
+    # the previous config *intact and known good* — and before this change that
+    # boot simply skipped the render and started the daemon on it. Aborting here
+    # would turn a transient render failure (ENOSPC, a python3 fault, a future
+    # unguarded `${VAR}`) into a crash loop under `restart: unless-stopped`,
+    # taking `web` and `webhooks` down with it because the readiness flag would
+    # never be published either. So: fall back loudly, and re-render next boot.
+    # A first boot has nothing to fall back to and still fails hard, which is
+    # the behaviour that was always there.
+    if render_config_to "$CONFIG_FILE"; then
+        if [ -f "${CONFIG_FILE}.prev" ]; then
+            report_config_drift "${CONFIG_FILE}.prev" "$CONFIG_FILE" \
+                --label-old "previous boot" --label-new "this boot" \
+                --heading "config.toml changed on this boot"
+        fi
+    elif [ -f "$CONFIG_FILE" ]; then
+        echo "[istota] ERROR: rendering ${CONFIG_FILE} failed. Continuing on the existing" >&2
+        echo "[istota]        config, which is unchanged — every value in docker/.env is" >&2
+        echo "[istota]        therefore as it was on the last boot that rendered cleanly." >&2
+        echo "[istota]        Fix the cause and restart; the next boot re-renders." >&2
+    else
+        echo "[istota] ERROR: rendering ${CONFIG_FILE} failed and there is no previous config." >&2
+        exit 1
     fi
-
-    # Upgrade path #2: when a module is enabled after first config generation
-    # (operator flips ISTOTA_FEEDS_ENABLED / ISTOTA_MONEY_ENABLED /
-    # ISTOTA_LOCATION_ENABLED to true on a subsequent boot), backfill the
-    # corresponding [[users.X.resources]] entry. Without this, the workspace
-    # dirs below would get seeded but the loader would never find a resource
-    # → silent module failure.
-    python3 - "$CONFIG_FILE" "$USER_NAME" \
-        "${ISTOTA_FEEDS_ENABLED:-false}" \
-        "${ISTOTA_MONEY_ENABLED:-false}" \
-        "${MONARCH_EMAIL:-}" "${MONARCH_PASSWORD:-}" \
-        "${ISTOTA_LOCATION_ENABLED:-false}" \
-        "${LOCATION_INGEST_TOKEN:-}" <<'PY'
-import sys, re
-(path, user, feeds_on, money_on, monarch_email, monarch_password,
- location_on, location_token) = sys.argv[1:9]
-
-text = open(path, "r", encoding="utf-8").read()
-
-
-def has_resource(rtype: str) -> bool:
-    """True if [[users.X.resources]] of this type already exists."""
-    pattern = (
-        rf'\[\[users\.{re.escape(user)}\.resources\]\][^\[]*'
-        rf'type\s*=\s*"{re.escape(rtype)}"'
-    )
-    return re.search(pattern, text, re.S) is not None
-
-
-def toml_str(v: str) -> str:
-    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-additions: list[str] = []
-
-if feeds_on == "true" and not has_resource("feeds"):
-    additions.append(
-        f'[[users.{user}.resources]]\n'
-        f'type = "feeds"\n'
-        f'name = "Feeds"'
-    )
-
-if money_on == "true" and not has_resource("money"):
-    block = (
-        f'[[users.{user}.resources]]\n'
-        f'type = "money"\n'
-        f'name = "Money"'
-    )
-    if monarch_email:
-        block += (
-            f'\nmonarch_email = {toml_str(monarch_email)}'
-            f'\nmonarch_password = {toml_str(monarch_password)}'
-        )
-    additions.append(block)
-
-if location_on == "true" and location_token and not has_resource("overland"):
-    additions.append(
-        f'[[users.{user}.resources]]\n'
-        f'type = "overland"\n'
-        f'name = "Location"\n'
-        f'ingest_token = {toml_str(location_token)}'
-    )
-
-if not additions:
-    sys.exit(0)
-
-# Append at EOF — array-of-table entries are order-independent in TOML and
-# can live anywhere after the parent [users.X] table.
-suffix = ("" if text.endswith("\n") else "\n") + "\n" + "\n\n".join(additions) + "\n"
-open(path, "w", encoding="utf-8").write(text + suffix)
-print(f"[istota] Backfilled {len(additions)} module resource(s) in {path}",
-      file=sys.stderr)
-PY
 fi
+
+# Published last, and cleared at the top of this script. `web` and `webhooks`
+# share this volume and read config.toml; waiting on the file's *existence* is
+# what they used to do, and on every boot but the first that is already true
+# while the file still holds the previous boot's values.
+#
+# The flag carries the rendered config's hash rather than being an empty marker,
+# because existence alone does not survive the case it was added for: a reader
+# starting concurrently can test the flag before this script's `rm -f` runs, see
+# the previous boot's, and go. Comparing against the config it is about to read
+# answers correctly in both directions — a stale flag beside a re-rendered config
+# does not match and the reader keeps waiting, while `docker compose restart web`
+# on its own matches at once and does not wait for a boot that is not happening.
+python3 - "$CONFIG_FILE" "$CONFIG_READY_FLAG" <<'PY'
+import hashlib, sys
+config, flag = sys.argv[1], sys.argv[2]
+with open(config, "rb") as handle:
+    digest = hashlib.sha256(handle.read()).hexdigest()
+with open(flag, "w", encoding="utf-8") as handle:
+    handle.write(digest + "\n")
+PY
 
 # --- Module workspace seeding ---
 #

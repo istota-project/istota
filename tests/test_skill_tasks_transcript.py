@@ -510,7 +510,10 @@ class TestCurrentAttemptIsExcluded:
 
         ``executor`` builds the brain request with ``attempt_count + 1``, since
         the counter counts prior attempts — so ``attempt_count = 1`` means
-        attempt 2 is in flight.
+        attempt 2 is in flight. It exports the same number as
+        ``ISTOTA_TASK_ATTEMPT``, which is what the floor reads; the row is here
+        because a running task has one, not because the verb consults it. See
+        ``TestTheFloorIsTheProcesssOwnAttempt`` for why it must not.
         """
         with db.get_db(db_path) as conn:
             task_id = db.create_task(
@@ -541,6 +544,7 @@ class TestCurrentAttemptIsExcluded:
         task_id = self._running_task(db_path, attempt_count=1)
         self._two_attempts(logs, task_id)
         monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "2")
 
         payload, _ = run(["transcript", str(task_id), "--turns"])
 
@@ -555,6 +559,7 @@ class TestCurrentAttemptIsExcluded:
         task_id = self._running_task(db_path, attempt_count=1)
         self._two_attempts(logs, task_id)
         monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "2")
 
         payload, code = run(["transcript", str(task_id), "--attempt", "2"])
 
@@ -580,6 +585,7 @@ class TestCurrentAttemptIsExcluded:
              _assistant(text="IN FLIGHT", stop_reason="end_turn")],
         )
         monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "1")
 
         payload, code = run(["transcript", str(task_id), "--turns"])
 
@@ -587,24 +593,6 @@ class TestCurrentAttemptIsExcluded:
         assert payload["available"] is False
         assert "running now" in payload["reason"]
         assert "IN FLIGHT" not in json.dumps(payload)
-
-    def test_an_unreadable_task_row_fails_closed(self, logs, run, monkeypatch,
-                                                 db_path):
-        """No database path means the running attempt cannot be identified.
-
-        Excluding the whole task costs the earlier-attempt case and never hands
-        a task the log it is writing. The other direction is a loop.
-        """
-        task_id = self._running_task(db_path, attempt_count=1)
-        self._two_attempts(logs, task_id)
-        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
-        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
-
-        payload, code = run(["transcript", str(task_id), "--turns"])
-
-        assert code == 0
-        assert payload["available"] is False
-        assert "ISTOTA_DB_PATH" in payload["reason"]
 
     def test_a_malformed_task_id_says_so_instead_of_blaming_the_run(
         self, logs, run, monkeypatch
@@ -629,6 +617,235 @@ class TestCurrentAttemptIsExcluded:
     def test_no_task_id_at_all_excludes_nothing(self, logs, run, monkeypatch):
         """An operator shell or a heartbeat command is not a run of this user's."""
         monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+
+        payload, _ = run(["transcript", "4471", "--tools"])
+
+        assert payload["available"] is True
+
+
+# --------------------------------------------------------------------------
+# The floor comes off the environment, not off the row (ISSUE-377)
+# --------------------------------------------------------------------------
+
+class TestTheFloorIsTheProcesssOwnAttempt:
+    """``attempt_count`` is shared mutable state; the running attempt is not.
+
+    The liveness reaper releases a task it believes is dead by bumping
+    ``attempt_count``, and it is wrong about that whenever the worker is merely
+    slow rather than gone. A floor derived from the row then names the attempt
+    the *next* worker will run, and the first worker's own live file falls
+    below it — the exact loop the exclusion exists to prevent. The attempt a
+    process is running is a fact about that process, so it is read from the
+    environment the executor set for it.
+    """
+
+    def _task_row(self, db_path, attempt_count):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="slow one", source_type="talk", user_id="alice",
+            )
+            conn.execute(
+                "UPDATE tasks SET attempt_count = ? WHERE id = ?",
+                (attempt_count, task_id),
+            )
+            conn.commit()
+        return task_id
+
+    def _bump(self, db_path, task_id):
+        """What the reaper does to a task it has decided is stuck."""
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET attempt_count = attempt_count + 1 WHERE id = ?",
+                (task_id,),
+            )
+            conn.commit()
+
+    def _live_log(self, logs, task_id, attempt, text):
+        write_log(
+            logs / "alice"
+            / f"2026-08-31T1{attempt}-00-00-000Z_task-{task_id}-{attempt}.jsonl",
+            [_session(task_id=task_id, attempt=attempt), _context(), _user(),
+             _assistant(text=text, stop_reason="end_turn")],
+        )
+
+    def test_a_bumped_row_does_not_expose_the_log_this_process_is_writing(
+        self, logs, run, monkeypatch, db_path
+    ):
+        """The reported failure. Worker A is alive and running attempt 1.
+
+        The reaper decides otherwise and bumps the row, so a row-derived floor
+        is 2 and A's own attempt-1 file sits below it.
+        """
+        task_id = self._task_row(db_path, attempt_count=0)
+        self._live_log(logs, task_id, 1, "MY OWN IN FLIGHT THINKING")
+        self._bump(db_path, task_id)
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "1")
+
+        payload, code = run(["transcript", str(task_id), "--turns"])
+
+        assert code == 0
+        assert payload["available"] is False
+        assert "running now" in payload["reason"]
+        assert "MY OWN IN FLIGHT THINKING" not in json.dumps(payload)
+
+    def test_a_run_reads_neither_its_own_log_nor_a_later_ones(
+        self, logs, run, monkeypatch, db_path
+    ):
+        """A second worker claimed the row and is writing attempt 2.
+
+        From worker A, ``>=`` covers both: its own file at the floor, and the
+        replacement's above it. A run never reads a run that started after it.
+        """
+        task_id = self._task_row(db_path, attempt_count=0)
+        self._live_log(logs, task_id, 1, "WORKER A THINKING")
+        self._bump(db_path, task_id)
+        self._live_log(logs, task_id, 2, "WORKER B THINKING")
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "1")
+
+        payload, code = run(["transcript", str(task_id), "--turns"])
+
+        assert code == 0
+        assert payload["available"] is False
+        body = json.dumps(payload)
+        assert "WORKER A THINKING" not in body
+        assert "WORKER B THINKING" not in body
+
+    def test_the_replacement_can_still_read_the_wrongly_reaped_run(
+        self, logs, run, monkeypatch, db_path
+    ):
+        """The residual, pinned rather than left to be discovered.
+
+        The cut is one-directional by construction: it withholds this run and
+        everything above it, and an attempt *below* the floor is the
+        "my last attempt failed, why" case the verb exists for. Where the
+        reaper was wrong, the attempt below the floor is a run that has not
+        finished — so worker B reads a file worker A is still appending to.
+
+        That is a weaker thing than the loop ISSUE-377 closed. The loop was a
+        run reading its own thinking straight back into its own context and out
+        to its own log; this is a fresh run reading a sibling's, one process
+        removed, and it is the same answer B would get a minute later once A
+        noticed it had lost the row. Closing it needs a liveness signal the
+        attempt number cannot carry — a write-recency window on the file, as
+        ``session_log.sweep_session_logs`` already uses to decide what it may
+        delete — which is a separate decision with its own cost, since it would
+        also withhold an attempt that genuinely finished seconds ago.
+        """
+        task_id = self._task_row(db_path, attempt_count=0)
+        self._live_log(logs, task_id, 1, "WORKER A THINKING")
+        self._bump(db_path, task_id)
+        self._live_log(logs, task_id, 2, "WORKER B THINKING")
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "2")
+
+        payload, _ = run(["transcript", str(task_id), "--turns"])
+
+        assert payload["available"] is True
+        assert payload["attempt"] == 1
+        body = json.dumps(payload)
+        assert "WORKER A THINKING" in body
+        assert "WORKER B THINKING" not in body
+
+    def test_an_earlier_attempt_is_still_readable(
+        self, logs, run, monkeypatch, db_path
+    ):
+        """The control. Excluding the live file must not exclude the useful one.
+
+        A retry reading "my last attempt failed, why" is the whole reason the
+        cut is at an attempt rather than at the task.
+        """
+        task_id = self._task_row(db_path, attempt_count=1)
+        self._live_log(logs, task_id, 1, "first try failed")
+        self._live_log(logs, task_id, 2, "IN FLIGHT THINKING")
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "2")
+
+        payload, _ = run(["transcript", str(task_id), "--turns"])
+
+        assert payload["available"] is True
+        assert payload["attempt"] == 1
+        assert "first try failed" in json.dumps(payload)
+        assert "IN FLIGHT THINKING" not in json.dumps(payload)
+
+    def test_the_row_is_not_consulted_at_all(
+        self, logs, run, monkeypatch, db_path
+    ):
+        """No database path, and the answer is still right.
+
+        The per-call read is gone rather than merely preferred-against, so a
+        verb that used to fail closed without ``ISTOTA_DB_PATH`` now answers.
+        """
+        task_id = self._task_row(db_path, attempt_count=1)
+        self._live_log(logs, task_id, 1, "first try failed")
+        self._live_log(logs, task_id, 2, "IN FLIGHT THINKING")
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", "2")
+        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+
+        payload, _ = run(["transcript", str(task_id), "--turns"])
+
+        assert payload["available"] is True
+        assert payload["attempt"] == 1
+        assert "IN FLIGHT THINKING" not in json.dumps(payload)
+
+    @pytest.mark.parametrize("value", ["", "   ", "two", "0", "-1", "1.0"])
+    def test_an_unusable_attempt_fails_closed_and_names_itself(
+        self, logs, run, monkeypatch, db_path, value
+    ):
+        """A process that cannot say which run it is reads none of that task.
+
+        ``0`` and ``-1`` are in the set because a log's attempt is 1-based, so
+        neither can name a real run — and a floor of ``0`` is the value that
+        means "not my task", which would excuse the whole exclusion.
+        """
+        task_id = self._task_row(db_path, attempt_count=1)
+        self._live_log(logs, task_id, 1, "first try failed")
+        self._live_log(logs, task_id, 2, "IN FLIGHT THINKING")
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.setenv("ISTOTA_TASK_ATTEMPT", value)
+
+        payload, code = run(["transcript", str(task_id), "--turns"])
+
+        assert code == 0
+        assert payload["available"] is False
+        assert "ISTOTA_TASK_ATTEMPT" in payload["reason"]
+        assert "running now" not in payload["reason"]
+        assert "IN FLIGHT THINKING" not in json.dumps(payload)
+
+    def test_a_missing_attempt_fails_closed(
+        self, logs, run, monkeypatch, db_path
+    ):
+        task_id = self._task_row(db_path, attempt_count=1)
+        self._live_log(logs, task_id, 1, "first try failed")
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        monkeypatch.delenv("ISTOTA_TASK_ATTEMPT", raising=False)
+
+        payload, code = run(["transcript", str(task_id), "--turns"])
+
+        assert code == 0
+        assert payload["available"] is False
+        assert "ISTOTA_TASK_ATTEMPT" in payload["reason"]
+        assert "first try failed" not in json.dumps(payload)
+
+    def test_another_task_is_unaffected_by_a_missing_attempt(
+        self, logs, run, monkeypatch
+    ):
+        """Failing closed is scoped to the task in flight, not to the verb.
+
+        ``ISTOTA_TASK_ATTEMPT`` is only consulted once the id has matched, so a
+        run asking about somebody else's finished task never reaches it.
+        """
+        monkeypatch.setenv("ISTOTA_TASK_ID", "9999")
+        monkeypatch.delenv("ISTOTA_TASK_ATTEMPT", raising=False)
 
         payload, _ = run(["transcript", "4471", "--tools"])
 

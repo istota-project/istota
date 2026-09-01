@@ -1225,8 +1225,9 @@ class SessionLogConfig:
     model actually see and do".
 
     Every field is defaulted, so an absent block is the shipping behaviour.
-    ``enabled = false`` is the whole off switch: the writer is constructed with
-    no root and every method is a no-op.
+    ``enabled = false`` switches the writer off: it is constructed with no root
+    and every method is a no-op. The retention sweep still applies to files
+    already on disk until both retention rules are set to zero.
 
     ``dir`` is the one field that is not used as written. Blank — the default —
     resolves to ``{db_path.parent}/logs`` via

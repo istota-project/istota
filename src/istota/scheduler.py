@@ -1896,6 +1896,11 @@ def _execute_skill_task(
 
     env = build_clean_env(config)
     env["ISTOTA_TASK_ID"] = str(task.id)
+    # Set wherever the id is (ISSUE-377). Neither of the scheduler's own paths
+    # writes a session log, but a skill CLI keying off the id has to find the
+    # attempt beside it or fail closed, and "the paths agree" is cheaper to
+    # hold than "these two are the exceptions".
+    env["ISTOTA_TASK_ATTEMPT"] = str(task.attempt_count + 1)
     env["ISTOTA_USER_ID"] = task.user_id
     env["ISTOTA_DEFERRED_DIR"] = str(user_temp_dir)
     env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
@@ -1989,6 +1994,8 @@ def _execute_command_task(
 
     env = build_stripped_env()
     env["ISTOTA_TASK_ID"] = str(task.id)
+    # See ``_execute_skill_task``: the attempt travels with the id (ISSUE-377).
+    env["ISTOTA_TASK_ATTEMPT"] = str(task.attempt_count + 1)
     env["ISTOTA_USER_ID"] = task.user_id
     # Both sibling paths (``_execute_skill_task``, ``executor.execute_task``)
     # export this, and every skill CLI keys its deferred writes off it. Without
@@ -6348,6 +6355,9 @@ def run_cleanup_checks(config: Config) -> None:
     # database is writing to, so without this step nothing on the deployment
     # ever deletes one.
     #
+    # `enabled` controls the writer, not this sweep. A deployment that switches
+    # writing off still needs to retire the transcripts already on disk.
+    #
     # The gate is `or`, not `and`: the age rule and the disk ceiling bound
     # different things and neither implies the other. An operator who sets
     # `retention_days = 0` to keep everything indefinitely still wants the
@@ -6359,7 +6369,7 @@ def run_cleanup_checks(config: Config) -> None:
     # about which brain a given task would route to. A deployment that switched
     # away from native still sweeps the logs native left behind.
     _slog = config.brain.native.session_log
-    if _slog.enabled and (_slog.retention_days > 0 or _slog.max_total_gb > 0):
+    if _slog.retention_days > 0 or _slog.max_total_gb > 0:
         try:
             _sweep = sweep_session_logs(
                 resolve_session_log_dir(config.db_path, _slog.dir),
