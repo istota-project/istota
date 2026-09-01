@@ -22,10 +22,13 @@ here on purpose: a fixture of the whole rendered config would turn every
 deliberate config change into a fixture edit, and the reviewer could not tell an
 intended diff from an accident.
 
-Scope, stated because it is easy to assume otherwise: the three *backfill*
-passes that run in the entrypoint's ``else`` branch — ``log_channel`` /
-``alerts_channel``, ``[web]`` / ``[site]``, and ``user_resources`` — are the
-upgrade-repair path and stayed in ``entrypoint.sh``. Nothing here covers them.
+Scope, stated because it is easy to assume otherwise: this file covers *what*
+the render produces from a set of inputs, never *whether* the entrypoint runs
+it. That decision, and the drift report and the preserved values that come with
+running it on every boot, is ``tests/test_entrypoint_config_stage.py``. The
+three add-if-missing backfill passes this docstring used to describe are gone
+with ISSUE-368 — a render on every boot writes the same keys from the same
+inputs, so they had become a second writer under different rules.
 """
 
 from __future__ import annotations
@@ -463,6 +466,13 @@ class TestTheWebBlock:
         assert web["oauth2_token_endpoint"].startswith("http://nextcloud:80/")
 
     def test_each_run_mints_a_fresh_session_secret(self, tmp_path):
+        """With no caller supplying one — the image tier and the lean stack.
+
+        Under the entrypoint it is an input rather than something minted here,
+        resolved once per boot so a re-render keeps every logged-in session
+        (``test_entrypoint_config_stage.TestWhatARerenderMustNotLose``).
+        """
+
         def secret(where: Path) -> str:
             rendered = tomllib.loads(
                 render(
@@ -475,6 +485,19 @@ class TestTheWebBlock:
             return rendered["web"]["session_secret_key"]
 
         assert secret(tmp_path / "a") != secret(tmp_path / "b")
+
+    def test_a_supplied_session_secret_is_used_verbatim(self, tmp_path):
+        rendered = tomllib.loads(
+            render(
+                tmp_path,
+                **REQUIRED,
+                OAUTH_CLIENT_ID="client-id",
+                OAUTH_CLIENT_SECRET="client-secret",
+                WEB_SESSION_SECRET="handed-over-by-the-entrypoint",
+            ).read_text()
+        )
+
+        assert rendered["web"]["session_secret_key"] == "handed-over-by-the-entrypoint"
 
 
 class TestTheInputContract:
@@ -584,9 +607,8 @@ class TestTheInputContract:
 class TestTheEntrypointStillOwnsWhatItKept:
     """Guards on the seam, not on the script.
 
-    A future edit that re-inlines the render, or that drags a backfill pass into
-    the extracted file, breaks the property Stage 4 was for. Both are cheap to
-    catch by reading the entrypoint.
+    A future edit that re-inlines the render breaks the property Stage 4 was
+    for, and is cheap to catch by reading the entrypoint.
     """
 
     def test_the_entrypoint_calls_the_script_rather_than_inlining_the_render(self):
@@ -764,13 +786,12 @@ class TestTheEntrypointStillOwnsWhatItKept:
             "not meant to be set."
         )
 
-    def test_the_backfill_passes_stayed_in_the_entrypoint(self):
-        entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text()
-        rendered = RENDER_CONFIG.read_text()
-
-        for marker in ("Upgrade path:", "backfill"):
-            assert marker in entrypoint, f"{marker} left the entrypoint"
-        assert "Upgrade path:" not in rendered, "a backfill pass moved into the render"
+    # The backfill passes this class used to hold in place are gone (ISSUE-368).
+    # They were the repair path for a config the render would never rewrite, and
+    # the render now runs on every boot, so all three would be a second writer of
+    # keys the render already produces. What replaced the assertion lives in
+    # `tests/test_entrypoint_config_stage.py::TestTheRenderIsTheOnlyWriter`,
+    # beside the tests for the stage that made them redundant.
 
 
 ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"

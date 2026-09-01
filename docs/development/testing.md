@@ -345,7 +345,7 @@ Two product gaps are held here by named tests rather than fixed, so a fix arrive
 
 ### The upgrade tier's two anchors
 
-`scripts/test-upgrade.sh` boots the current image over an older release's `config.toml` and database. It exists because two of istota's three upgrade shapes never regenerate `config.toml`: the auto-update cron resets to main every two minutes without running Ansible, and a Docker rebuild over a retained volume keeps the config the entrypoint wrote on that volume's first boot. Every other tier renders a fresh config, and a fresh config is current by definition.
+`scripts/test-upgrade.sh` boots the current image over an older release's `config.toml` and database. It exists because the auto-update cron resets to main every two minutes without running Ansible, so an Ansible deployment can run new code against a `config.toml` a month old. Every other tier renders a fresh config, and a fresh config is current by definition. The Docker shape used to be the second case — a rebuild over a retained volume kept the config the entrypoint wrote on that volume's first boot — and since ISSUE-368 it re-renders on every boot, so its `volume` shape now tests a *database* older than the code rather than a config as well. That narrows what the tier is for on that shape; it does not remove it.
 
 - **Near anchor**, the default: the merge-base with the default branch. That is about three days at the current release cadence — close to a no-op as a regression detector on its own, but it is the span the auto-update cron actually crosses, and it is cheap.
 - **Far anchor**: the tag in `scripts/upgrade-floor`, roughly a month back. That file is the statement of how far back an upgrade is supported. Bump it deliberately, and never to make a red run green without reading why it went red.
@@ -416,5 +416,5 @@ For new features:
 3. Run tests to confirm they fail
 4. Implement the feature
 5. Run tests and iterate until all pass
-6. Run `ruff check --output-format concise src tests testbed docker/devbox scripts`, plus the `web/` checks above if the change touched the frontend
+6. Run `ruff check --output-format concise src tests testbed docker/browser docker/devbox docker/istota scripts`, plus the `web/` checks above if the change touched the frontend
 7. Commit

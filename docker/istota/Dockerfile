@@ -150,6 +150,7 @@ RUN mkdir -p /data/db /data/config /data/tmp
 # a config in a volume-less container.
 COPY docker/istota/entrypoint.sh /entrypoint.sh
 COPY docker/istota/render-config.sh /render-config.sh
-RUN chmod +x /entrypoint.sh /render-config.sh
+COPY docker/istota/config-diff.py /config-diff.py
+RUN chmod +x /entrypoint.sh /render-config.sh /config-diff.py
 
 ENTRYPOINT ["/entrypoint.sh"]

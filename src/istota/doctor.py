@@ -1342,8 +1342,8 @@ def check_forge_config_drift(config: "Config", probe: bool) -> list[CheckResult]
                 ),
                 remedy=(
                     f"Rewrite config.toml so {name}_bin_path names the installed binary "
-                    f"(a full Ansible play does; the auto-update cron does not, and the "
-                    f"docker entrypoint writes config.toml only onto a fresh volume)."
+                    f"(a full Ansible play does; the auto-update cron does not. On "
+                    f"docker, restarting the istota service re-renders it)."
                 ),
             )
         )
