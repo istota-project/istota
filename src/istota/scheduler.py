@@ -2910,24 +2910,31 @@ def process_one_task(
                             job.name, job.id,
                         )
                         from .cron_loader import remove_job_from_cron_md
+                        # `job.user_id`, for the reason stated sixteen lines
+                        # up: the job's owner is who the row was written
+                        # under, and CRON.md belongs to the same person. The
+                        # task's user is normally the same and is not the fact
+                        # being used here.
                         removed = remove_job_from_cron_md(
-                            config, task.user_id, job.name,
+                            config, job.user_id, job.name,
                         )
                         if not removed and config.use_mount:
-                            # The table row is already gone, so the file is now
-                            # the only definition and the next sync re-inserts
-                            # it — a `once = true` job that runs a second time.
-                            # Unchanged behaviour, but until ISSUE-369 the
-                            # writer could not report a refused write at all,
-                            # so nothing said so. Guarded on `use_mount`
-                            # because CRON.md is not the source of truth
-                            # without one and False there is the normal answer.
+                            # The table row is already gone, so if the job is
+                            # still in the file it is now the only definition
+                            # and the next sync re-inserts it — a `once = true`
+                            # job that runs a second time. Unchanged behaviour,
+                            # but until ISSUE-369 the writer could not report a
+                            # refused write at all, so nothing said so.
+                            # Guarded on `use_mount` because CRON.md is not the
+                            # source of truth without one and False there is
+                            # the ordinary answer rather than a failure.
                             logger.warning(
                                 "One-time job '%s' was removed from the table "
-                                "but not from CRON.md for user %s (no such job "
-                                "in the file, or the write was refused); the "
-                                "next sync will re-insert it",
-                                job.name, task.user_id,
+                                "but not from CRON.md for user %s (no CRON.md, "
+                                "no such job in it, or the write was refused); "
+                                "if the job is still in the file the next sync "
+                                "will re-insert it",
+                                job.name, job.user_id,
                             )
 
         else:

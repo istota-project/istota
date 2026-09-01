@@ -1398,6 +1398,80 @@ once = true
 
         assert not (config_dir / "CRON.md").exists()
 
+    @pytest.mark.requires_dac
+    def test_a_config_dir_that_cannot_be_created_is_reported_not_raised(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """The mount failure the whole change is about must not raise.
+
+        ``resolve_user_config_dir`` resolves a directory that does not exist
+        yet — it says so — so the refusal lands on ``mkdir``, where
+        ``exist_ok`` covers ``FileExistsError`` alone. A dropped FUSE mount
+        answers ``ENOTCONN``/``EIO`` there and an unwritable parent answers
+        ``EACCES``; either used to raise straight out of ``_write_cron_md``.
+        The scheduler's once-job caller runs inside an open write transaction
+        that has already deleted the job row, so a raise there costs the
+        task's own completion and the one-shot runs again.
+        """
+        config = make_config_with_mount(db_path=db_path)
+        bot_dir = mount_path / "Users" / "alice" / "istota"
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled) "
+                "VALUES (?, ?, ?, ?, 1)",
+                ("alice", "from-db", "0 9 * * *", "stuff"),
+            )
+            conn.commit()
+            # `config/` does not exist and cannot be made.
+            bot_dir.chmod(0o555)
+            try:
+                assert migrate_db_jobs_to_file(conn, config, "alice") is False
+            finally:
+                bot_dir.chmod(0o755)
+
+        assert not (bot_dir / "config").exists()
+
+    @pytest.mark.requires_dac
+    def test_a_failed_prompt_externalization_is_reported_not_raised(
+        self, mount_path, make_config_with_mount
+    ):
+        """The other unguarded step, on the other subtree.
+
+        A multiline prompt is moved into ``scripts/prompts/`` before CRON.md
+        is written at all, so a refusal there is a second way the writer used
+        to raise — and it is on a different directory from the one the tests
+        above chmod, which is why they could not see it.
+        """
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", '''\
+```toml
+[[jobs]]
+name = "multiline"
+cron = "0 9 * * *"
+prompt = """First line
+Second line"""
+```
+''')
+        original = (
+            mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        ).read_text()
+        scripts_dir = mount_path / "Users" / "alice" / "istota" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        scripts_dir.chmod(0o555)
+        try:
+            assert update_job_enabled_in_cron_md(
+                config, "alice", "multiline", False
+            ) is False
+        finally:
+            scripts_dir.chmod(0o755)
+
+        assert not (scripts_dir / "prompts").exists()
+        assert (
+            mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        ).read_text() == original
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — operator CRON.md ``command:`` rows that are pure

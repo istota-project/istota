@@ -406,24 +406,55 @@ def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
 
     **Returns whether the file now says what the caller asked for**, which is
     what every caller was already claiming and none of them knew. This runs on
-    an rclone FUSE mount, so a write is a thing that fails — and the three
-    public writers above returned an unconditional ``True``, so ``!cron
-    disable`` reported success, disabled the table row alone, and the next
-    sync tick read the unchanged file and switched the job back on
-    (ISSUE-369). ``False`` for a refused directory or a refused write; the
-    reason is logged here or by ``write_regular_file``, never by the callers,
-    which see one bool.
+    an rclone FUSE mount, so a write is a thing that fails — and
+    ``migrate_db_jobs_to_file``, ``update_job_enabled_in_cron_md`` and
+    ``remove_job_from_cron_md`` below all returned an unconditional ``True``,
+    so ``!cron disable`` reported success, disabled the table row alone, and
+    the next sync tick read the unchanged file and switched the job back on
+    (ISSUE-369).
+
+    **False, never an exception**, which is the contract ``write_regular_file``
+    already states and the reason the two steps in front of it are guarded
+    here. ``write_regular_file`` is safe on its own; the two ``mkdir`` calls
+    that precede it are not, and ``exist_ok`` covers only ``FileExistsError``
+    — a directory that cannot be *created* (an unwritable parent, or the
+    ``ENOTCONN``/``EIO`` a dropped FUSE mount answers with, which is exactly
+    the failure this whole change is about) raised straight through. The
+    scheduler's once-job caller is why that matters: it runs inside an open
+    write transaction that has already deleted the job row, so an exception
+    there rolls the task's own completion back and the one-shot runs a second
+    time — strictly worse than the file being stale.
+
+    One thing survives a ``False``: ``_externalize_multiline_prompts`` writes
+    ``scripts/prompts/*.txt`` and stamps ``job.prompt_file`` before anything is
+    written here, so a refused write leaves a prompt file no CRON.md refers
+    to. Harmless and idempotent (``_write_generated_prompt`` compares content
+    on a collision), but it is not evidence the write landed.
     """
     from .storage import resolve_user_config_dir, write_regular_file  # noqa: PLC0415
 
-    _externalize_multiline_prompts(config, user_id, jobs)
+    try:
+        _externalize_multiline_prompts(config, user_id, jobs)
+    except OSError as e:
+        logger.warning(
+            "cron_md_write_refused user=%s reason=prompt_externalize errno=%s",
+            user_id, e.errno,
+        )
+        return False
     config_dir = resolve_user_config_dir(config, user_id)
     if config_dir is None:
         logger.warning(
             "cron_md_write_refused user=%s reason=config_dir_outside_user_tree", user_id,
         )
         return False
-    config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning(
+            "cron_md_write_refused user=%s reason=config_dir_uncreatable errno=%s",
+            user_id, e.errno,
+        )
+        return False
     return write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
 
 

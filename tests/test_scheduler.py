@@ -6657,6 +6657,125 @@ once = true
         assert len(jobs) == 1
         assert jobs[0].name == "keep-this"
 
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_file_removal_that_did_not_happen_is_logged(
+        self, mock_arun, mock_exec, db_path, tmp_path, caplog
+    ):
+        """The row goes whatever the file does, so a lost removal must be said.
+
+        The table row is deleted before CRON.md is touched, so if the file
+        keeps the job the next sync re-inserts it and a `once = true` job runs
+        a second time. Until ISSUE-369 `remove_job_from_cron_md` returned an
+        unconditional True and could not report a refused write at all, so
+        nothing anywhere said so. Here the job is simply absent from the file,
+        which reaches the same branch without needing a permission bit.
+        """
+        import logging
+
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "keep-this"
+cron = "0 9 * * *"
+prompt = "daily check"
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-901", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-901'"
+            ).fetchone()[0]
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            process_one_task(config)
+
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "reminder-901" in msgs
+        assert "not from CRON.md" in msgs
+        # The row is gone either way — that is what the warning is about.
+        with db.get_db(db_path) as conn:
+            assert db.get_scheduled_job(conn, job_id) is None
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_successful_file_removal_is_not_logged(
+        self, mock_arun, mock_exec, db_path, tmp_path, caplog
+    ):
+        """The control: the same path with the job in the file says nothing.
+
+        Without this the warning test passes on a branch that fires
+        unconditionally, which is the same warning as no warning at all.
+        """
+        import logging
+
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "reminder-902"
+cron = "0 15 20 2 *"
+prompt = "One-time reminder"
+once = true
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-902", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-902'"
+            ).fetchone()[0]
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            process_one_task(config)
+
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "not from CRON.md" not in msgs
+
     @patch("istota.scheduler.execute_task", return_value=(True, "Regular success", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_non_once_job_not_removed(self, mock_arun, mock_exec, db_path, tmp_path):
