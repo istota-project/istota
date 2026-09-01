@@ -1079,6 +1079,10 @@ def sweep_session_logs(
 ) -> SweepResult:
     """Apply the age rule, then the deployment-wide ceiling. Never raises.
 
+    **One walk of the tree, not one per rule** (ISSUE-379). Sizes and mtimes are
+    collected once and both rules are applied to that result; see the comment
+    on the walk for what the second pass used to buy and what replaces it.
+
     The two rules are independent and the caller's gate must be ``or``:
     ``retention_days = 0`` keeps everything indefinitely by age and still wants
     the disk bound in force, and ``max_total_gb = 0`` drops the bound while the
@@ -1121,36 +1125,111 @@ def sweep_session_logs(
 
     directories, errors = _user_dirs(root)
 
+    # -- one walk, both rules ---------------------------------------------
+    # The two rules used to walk separately, so a tick with `retention_days > 0`
+    # — the shipped default — read the whole tree twice (ISSUE-379). Nobody
+    # notices tens of milliseconds on local disk, but `dir` is a free-form
+    # operator setting with no containment rule, so the cost is a function of a
+    # directory that can be a network mount — paid synchronously on the
+    # scheduler's cleanup tick, which is `briefing_check_interval` and so about
+    # once a minute by default rather than once a night.
+    #
+    # What the second walk bought was accounting: it re-stat'ed, so the byte
+    # totals were the post-age truth for free. Those totals are now kept by
+    # hand as the age rule deletes, which is the whole of what this collapse
+    # costs in complexity, and `TestTheSweepWalksOnce` is what holds the two
+    # halves equal.
+    #
+    # One consequence had to be closed rather than documented, and the first
+    # draft of this comment got it backwards by calling it nested. The ceiling
+    # now reasons about mtimes read *before* the age deletions, so the stale
+    # window is the age pass **prepended to** the eviction loop's own, not
+    # inside it — and `LIVE_WINDOW_SECONDS` bounds which files are at risk, not
+    # how stale the reading is. A native task quiet at scan time and writing
+    # again during the age pass was measured as idle and evicted, where the
+    # second walk had re-stat'ed and spared it. So the eviction loop re-reads
+    # each victim immediately before unlinking it, which costs one `lstat` per
+    # eviction rather than one per file and closes the loop's own pre-existing
+    # half of the same gap.
+    #
+    # What is left is one-directional and safe: a file that *grew* between the
+    # walk and the eviction is still measured at its earlier size, so the tree
+    # is under-counted and the ceiling evicts less rather than more.
+    sizes: dict[Path, int] = {}
+    files: dict[Path, list[_Candidate]] = {}
+    dir_mtimes: dict[Path, float] = {}
+
+    for directory in directories:
+        if retention_days > 0:
+            try:
+                # Read before the deletions: unlinking a file stamps its parent
+                # `now`, and the empty-directory gate below would then never
+                # fire for a directory this sweep emptied. Only the age rule
+                # asks the question, so only the age rule pays the `lstat`.
+                dir_mtimes[directory] = directory.lstat().st_mtime
+            except OSError:
+                errors += 1
+        size, candidates, scan_errors = _scan_user_dir(directory)
+        errors += scan_errors
+        sizes[directory] = size
+        files[directory] = candidates
+
     # -- age, for privacy --------------------------------------------------
     if retention_days > 0:
         cutoff = now - retention_days * _SECONDS_PER_DAY
-        for directory in directories:
-            try:
-                # Read before the deletions: unlinking a file stamps its parent
-                # `now`, and the gate below would then never fire for a
-                # directory this sweep emptied.
-                dir_mtime = directory.lstat().st_mtime
-            except OSError:
-                errors += 1
+        for directory in list(files):
+            if directory not in dir_mtimes:
+                # Its own mtime could not be read, which is the state the
+                # two-walk version skipped the whole age pass in. Its bytes are
+                # still measured, exactly as they were then.
                 continue
 
-            _bytes, candidates, scan_errors = _scan_user_dir(directory)
-            errors += scan_errors
-            for candidate in candidates:
+            kept: list[_Candidate] = []
+            for candidate in files[directory]:
                 if candidate.mtime >= cutoff:
+                    kept.append(candidate)
                     continue
                 try:
                     candidate.path.unlink()
-                    deleted_age += 1
+                except FileNotFoundError:
+                    # Gone before we got to it. Its bytes are off the volume, so
+                    # the running total has to come down and it must not go back
+                    # on the eviction list — there is nothing there to evict.
+                    # The second walk got this free by simply not finding the
+                    # file; keeping the bytes here overstated the tree, and
+                    # because the phantom belongs to one user while
+                    # largest-user-first picks another, it evicted a live file
+                    # of somebody else's to reclaim space that was already free.
+                    # The ceiling loop below has argued this since it was
+                    # written: on a delete path an accounting error that rounds
+                    # toward more deletion is the wrong direction.
+                    #
+                    # Not an error either, and that is a deliberate change from
+                    # the old `except OSError` that swallowed this case. The
+                    # count is rendered as "N path(s) could not be processed",
+                    # and a file already off the volume was processed. The
+                    # ceiling loop already declines to count it; the two rules
+                    # now agree about one event.
+                    sizes[directory] -= candidate.size
+                    continue
                 except OSError as exc:
                     errors += 1
                     logger.debug("session log sweep: cannot remove %s (%s)", candidate.path, exc)
+                    # Back on the list, not off it. The rescan used to put a
+                    # refused unlink in front of the ceiling on its own, and
+                    # dropping it here would exempt the one file the sweep
+                    # already knows it is having trouble with.
+                    kept.append(candidate)
+                    continue
+                deleted_age += 1
+                sizes[directory] -= candidate.size
+            files[directory] = kept
 
             # Only once the directory itself has gone untouched past the
             # window: `open` creates it and writes its first record a moment
             # later, and a tick in between must not rmdir it out from under an
             # in-flight task. Same gate `cleanup_old_temp_files` carries.
-            if dir_mtime < cutoff:
+            if dir_mtimes[directory] < cutoff:
                 try:
                     directory.rmdir()  # only succeeds if empty
                     dirs_removed += 1
@@ -1158,18 +1237,23 @@ def sweep_session_logs(
                     pass
 
     # -- bytes, for the disk ----------------------------------------------
+    # The `is_dir()` probe survives the collapse even though the walk it used to
+    # guard is gone. It is one stat per user directory against a whole rescan,
+    # and it is what keeps a directory that stopped existing during the age pass
+    # — this sweep's own `rmdir`, or anything else removing one — from carrying
+    # its measured bytes into the ceiling as pressure no longer on the volume.
+    # Doing this by bookkeeping off the `rmdir` alone covered the first cause
+    # and not the second.
     total = 0
     per_user: dict[Path, int] = {}
     evictable: dict[Path, list[_Candidate]] = {}
     live_cutoff = now - LIVE_WINDOW_SECONDS
 
-    for directory in directories:
+    for directory, candidates in files.items():
         if not directory.is_dir():
-            continue  # removed by the age pass above
-        size, candidates, scan_errors = _scan_user_dir(directory)
-        errors += scan_errors
-        per_user[directory] = size
-        total += size
+            continue
+        per_user[directory] = sizes[directory]
+        total += sizes[directory]
         # Oldest first within a user, and never a file a run may be writing now.
         evictable[directory] = sorted(
             (c for c in candidates if c.mtime <= live_cutoff),
@@ -1200,6 +1284,30 @@ def sweep_session_logs(
                 break
 
             victim = evictable[heaviest].pop(0)
+
+            # Re-read it immediately before removing it. This candidate's mtime
+            # comes from the single walk, which ran before the age pass, so it
+            # is as stale as the whole sweep — and `LIVE_WINDOW_SECONDS` only
+            # says which files are at risk of that, not how stale the reading
+            # is. A task that was quiet at scan time and has written since is
+            # using this file now. One stat per eviction, not per file.
+            try:
+                fresh_mtime = victim.path.lstat().st_mtime
+            except FileNotFoundError:
+                total -= victim.size
+                per_user[heaviest] -= victim.size
+                continue
+            except OSError as exc:
+                errors += 1
+                logger.debug("session log sweep: cannot stat %s (%s)", victim.path, exc)
+                continue
+            if fresh_mtime > live_cutoff:
+                # Written to since the walk. Off the candidate list and its
+                # bytes stay on the total, so if everything left is live the
+                # loop runs out of candidates and reports `still_over` — which
+                # is the honest answer rather than taking a file in use.
+                continue
+
             try:
                 victim.path.unlink()
             except FileNotFoundError:
@@ -1210,6 +1318,10 @@ def sweep_session_logs(
                 # `bytes_after` describing a tree that no longer existed. On a
                 # delete path an accounting error that rounds toward more
                 # deletion is the wrong direction.
+                #
+                # `victim.size` and never the fresh stat's: the running total was
+                # built from the walk's numbers, so it has to be drained with the
+                # same ones or the two desync.
                 total -= victim.size
                 per_user[heaviest] -= victim.size
                 continue
