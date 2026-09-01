@@ -263,6 +263,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The notice shown when the bot switches to a backup brain now sounds like the bot rather than a diagnostic log. It still says which brain failed, why, which backup is running, and whether a pinned model had to be dropped, but quota problems are described as an overheated brain and other failures stay straightforward.
+
 - The Location map now adds new tracker pings and updates its day summary while the page stays open. It also moves to the new day's track after midnight instead of continuing to poll the date from when the page was opened.
 
 - Long attachment names in web chat no longer make the conversation or composer scroll sideways on a phone. Attachment chips now stay within the message column, shorten the visible name with an ellipsis, and keep the staged attachment's remove button in view.
