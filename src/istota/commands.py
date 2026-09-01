@@ -1433,11 +1433,15 @@ async def cmd_cron(ctx: CommandContext):
 
         if update_job_enabled_in_cron_md(config, user_id, job_name, True):
             db.enable_scheduled_job(conn, job.id)
-            # The counter this resets is the inbox row's close predicate, so the
-            # row would go `stale` on the next panel read either way. Closing it
-            # here makes it `resolved` by the surface that ended the condition.
+            # The suspension this lifts is the inbox row's close predicate, so
+            # the row would go `stale` on the next panel read either way.
+            # Closing it here makes it `resolved` by the surface that ended the
+            # condition.
             cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
-            return f"Enabled scheduled job '{job_name}' (failure count reset)."
+            return (
+                f"Enabled scheduled job '{job_name}' (failure count reset; "
+                "any scheduler suspension lifted)."
+            )
         # Fallback: CRON.md does not say what we asked it to. Three causes,
         # and the message names all three because the user cannot tell them
         # apart from here — no CRON.md at all (the case this branch was
@@ -1459,10 +1463,11 @@ async def cmd_cron(ctx: CommandContext):
         from .notification_resolvers import cron_job as cron_job_source
 
         # Closed here too, and `disable` is the case the resolver cannot cover:
-        # disabling by hand leaves `consecutive_failures` where it was, so an
-        # inbox row raised by an earlier auto-disable would keep telling the
-        # user to re-enable a job they have just switched off on purpose —
-        # forever, since object-backed rows are never age-swept.
+        # disabling by hand writes the user's column and leaves the scheduler's
+        # `auto_disabled_at` where it was, so an inbox row raised by an earlier
+        # suspension would keep telling the user to re-enable a job they have
+        # just switched off on purpose — forever, since object-backed rows are
+        # never age-swept.
         if update_job_enabled_in_cron_md(config, user_id, job_name, False):
             db.disable_scheduled_job(conn, job.id)
             cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
@@ -1479,7 +1484,15 @@ async def cmd_cron(ctx: CommandContext):
 
     lines = [f"**Scheduled jobs ({len(jobs)}):**", ""]
     for job in jobs:
-        status = "enabled" if job.enabled else "DISABLED"
+        # Three states, two columns. `DISABLED` wins over `SUSPENDED` when a
+        # job is both: the user's own intent is the more informative of the
+        # two, and it is the one they can act on from here.
+        if not job.enabled:
+            status = "DISABLED"
+        elif job.auto_disabled_at:
+            status = f"SUSPENDED since {job.auto_disabled_at[:16]}"
+        else:
+            status = "enabled"
         kind = " (cmd)" if job.command else ""
         line = f"- **{job.name}**{kind} `{job.cron_expression}` [{status}]"
         if job.model:

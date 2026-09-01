@@ -82,7 +82,17 @@ Consume the published value with a `shared_block` source on a briefing block. Se
 
 ## Failure handling
 
-Jobs auto-disable after 5 consecutive failures (`scheduled_job_max_consecutive_failures`). Failures reset on success. Disabled jobs can be re-enabled via `!cron enable <name>` in Talk.
+Jobs auto-disable after 5 consecutive failures (`scheduled_job_max_consecutive_failures`). Failures reset on success.
+
+A job stopped that way is *suspended*, which is a different thing from the `enabled = false` you write in CRON.md. Suspension is recorded in `scheduled_jobs.auto_disabled_at`, a column the file cannot express and the sync never writes; `enabled` stays whatever the file says, because the user never asked for the job to stop. A job runs only when it is enabled and not suspended. `!cron` and the admin dashboard render the two apart — `DISABLED` for the first, `SUSPENDED` for the second.
+
+Until this split the sync wrote `enabled` back from CRON.md on every tick, roughly once a minute, so auto-disable did nothing at all for a job defined in a file and a job that failed every run kept running every run.
+
+Three things lift a suspension:
+
+- a successful run;
+- `!cron enable <name>` in Talk, which lifts the suspension, clears the failure count and writes `enabled = true` back into CRON.md;
+- an edit in CRON.md to what the job dispatches — `cron`, `prompt`, `command`, `skill` or `skill_args`. Fixing the thing that was failing is how most people will expect to restart a job, so it counts. Changing `target`, `room`, `model`, `effort` or a flag does not.
 
 ## Catch-up suppression after outages
 
@@ -104,6 +114,6 @@ In Talk, use `!cron` to list, enable, or disable scheduled jobs:
 
 ```
 !cron              # List all jobs with status
-!cron enable NAME  # Re-enable a disabled job
+!cron enable NAME  # Re-enable a disabled job, or lift a suspension
 !cron disable NAME # Disable a job
 ```

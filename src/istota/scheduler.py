@@ -2228,9 +2228,9 @@ def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
 def _note_job_auto_disabled(
     conn, job_id: int, fail_count: int,
 ) -> RaiseResult | None:
-    """The inbox row for a scheduled job the scheduler has just switched off.
+    """The inbox row for a scheduled job the scheduler has just suspended.
 
-    Three sites disable a job — the policy-refusal branch, the ordinary failure
+    Three sites suspend a job — the policy-refusal branch, the ordinary failure
     branch, and `_record_publish_failure` — and all three previously wrote a
     `task_logs` warning and told nobody. Each now buffers the result of this and
     hands it to `deliver_pending` after its `with` block closes; the write rides
@@ -2246,8 +2246,8 @@ def _note_job_auto_disabled(
     `write_notification` itself runs in the caller's frame, inside a transaction
     that has just recorded the task as failed and charged the job a failure — so
     an exception escaping would skip `db.get_db`'s commit and roll all of that
-    back, leaving the task stuck `running` and the job enabled. An inbox row is
-    not worth that.
+    back, leaving the task stuck `running` and the job still firing. An inbox
+    row is not worth that.
     """
     try:
         job = db.get_scheduled_job(conn, job_id)
@@ -3000,7 +3000,11 @@ def process_one_task(
                     )
                     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
                     if max_failures > 0 and fail_count >= max_failures:
-                        db.disable_scheduled_job(conn, task.scheduled_job_id)
+                        # The daemon's own column, never `enabled`: CRON.md
+                        # authors that one and the sync writes it back within
+                        # the tick, which is what made auto-disable a no-op for
+                        # every file-defined job.
+                        db.suspend_scheduled_job(conn, task.scheduled_job_id)
                         db.log_task(
                             conn, task_id, "warn",
                             f"Scheduled job auto-disabled after {fail_count} consecutive failures",
@@ -3126,7 +3130,11 @@ def process_one_task(
                     )
                     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
                     if max_failures > 0 and fail_count >= max_failures:
-                        db.disable_scheduled_job(conn, task.scheduled_job_id)
+                        # The daemon's own column, never `enabled`: CRON.md
+                        # authors that one and the sync writes it back within
+                        # the tick, which is what made auto-disable a no-op for
+                        # every file-defined job.
+                        db.suspend_scheduled_job(conn, task.scheduled_job_id)
                         db.log_task(
                             conn, task_id, "warn",
                             f"Scheduled job auto-disabled after {fail_count} consecutive failures",
@@ -4102,7 +4110,7 @@ def _record_publish_failure(
     fail_count = db.increment_scheduled_job_failures(conn, job.id, error)
     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
     if max_failures > 0 and fail_count >= max_failures:
-        db.disable_scheduled_job(conn, job.id)
+        db.suspend_scheduled_job(conn, job.id)
         logger.warning(
             "Scheduled job %d auto-disabled after %d consecutive publish failures",
             job.id, fail_count,
@@ -6711,35 +6719,36 @@ def _sync_module_jobs(
         wanted = jobs_for_user(module_ctx, user_id)
         wanted_by_name = {j["name"]: j for j in wanted}
 
-        # Rescue auto-disabled module rows. Two failure waves stuck rows
-        # in the past:
-        #   1. legacy command-task shape + non-admin user → admin-gate
-        #      ("command-type tasks are admin-only"), fixed by cc0bd54.
-        #   2. migrated skill-task shape, but `claim_task` didn't return
-        #      `skill`/`skill_args` so the task fell through to the LLM
-        #      path with an empty prompt, fixed by 027eb1a.
+        # Rescue suspended module rows. A module job has no `!cron enable`
+        # to run against it — it is not in anybody's CRON.md — so if the
+        # daemon gives up on one, only this retries it.
         #
-        # Wave 1 left a known last_error string we could match. Wave 2's
-        # last_error varies (timeouts, malformed output, …), so we drop
-        # the error-string predicate and trust two structural signals
-        # instead: ``_module.*`` rows have no operator-pause UI, so any
-        # row with ``consecutive_failures > 0`` was auto-disabled rather
-        # than operator-disabled, and the ``last_run_at < now - 1h`` gate
-        # prevents a rescue→fail→rescue loop if a row is genuinely broken
-        # (auto-disable still kicks in within ~25min of rescue at */5;
-        # the 1h cooldown caps the rescue rate).
+        # ``auto_disabled_at IS NOT NULL`` says the *scheduler* stopped this
+        # row, directly. The predicate used to be ``enabled = 0 AND
+        # consecutive_failures > 0``, where the second term was a structural
+        # inference standing in for exactly that ("``_module.*`` rows have no
+        # operator-pause UI, so a failure count means the daemon did it") —
+        # there is now a column that states it, so the inference goes. An
+        # operator who ran ``!cron disable`` on a module row sets `enabled = 0`
+        # with `auto_disabled_at` still NULL and is excluded by construction
+        # rather than by proxy.
+        #
+        # The cooldown moves to `auto_disabled_at` for the same reason: it is
+        # the timestamp the rule was always about. It caps the rescue rate for
+        # a genuinely broken row, which loops through suspend and rescue at
+        # roughly hourly rather than every */5 tick.
         rescued = conn.execute(
             "UPDATE scheduled_jobs "
-            "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
-            "WHERE user_id = ? AND name LIKE ? AND enabled = 0 "
-            "AND consecutive_failures > 0 "
-            "AND (last_run_at IS NULL "
-            "     OR last_run_at < datetime('now', '-1 hour'))",
+            "SET auto_disabled_at = NULL, consecutive_failures = 0, "
+            "    last_error = NULL "
+            "WHERE user_id = ? AND name LIKE ? "
+            "AND auto_disabled_at IS NOT NULL "
+            "AND auto_disabled_at < datetime('now', '-1 hour')",
             (user_id, f"{module_prefix}%"),
         ).rowcount
         if rescued:
             logger.info(
-                "Re-enabled %d auto-disabled module job(s) for user %s",
+                "Lifted the suspension on %d module job(s) for user %s",
                 rescued, user_id,
             )
 
@@ -6785,10 +6794,12 @@ def _sync_module_jobs(
                         # command-task path and got auto-disabled. The migration
                         # to skill-task shape removes that failure mode, so
                         # rescue the row's enabled/failure state in the same
-                        # update.
+                        # update. `enabled = 1` stays: a row stopped by the old
+                        # code is off in the user's column and nothing else will
+                        # turn it back on.
                         extra_sql = (
                             ", enabled = 1, consecutive_failures = 0, "
-                            "last_error = NULL"
+                            "last_error = NULL, auto_disabled_at = NULL"
                         )
                     conn.execute(
                         "UPDATE scheduled_jobs "

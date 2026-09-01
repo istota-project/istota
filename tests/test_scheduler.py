@@ -3695,7 +3695,13 @@ class TestScheduledJobFailureTracking:
     @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_auto_disable_after_max_failures(self, mock_arun, mock_exec, db_path, tmp_path):
-        """Job should be auto-disabled after max consecutive failures."""
+        """The failure path suspends the job and leaves the user's column alone.
+
+        `enabled` is what CRON.md authors, and the sync writes it back from the
+        file every tick; writing it here is what made auto-disable a no-op for
+        every file-defined job. The follow-through below is the half this test
+        used to lack.
+        """
         config = self._make_config(db_path, tmp_path, max_failures=2)
 
         with db.get_db(db_path) as conn:
@@ -3719,8 +3725,71 @@ class TestScheduledJobFailureTracking:
 
         with db.get_db(db_path) as conn:
             job = db.get_scheduled_job_by_name(conn, "alice", "flaky-job")
-            assert job.enabled is False
+            assert job.auto_disabled_at is not None
+            assert job.enabled is True, "the user never asked for this job to stop"
             assert job.consecutive_failures == 2
+            assert db.get_enabled_scheduled_jobs(conn) == []
+
+    @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_suspended_job_survives_the_cron_md_sync(
+        self, mock_arun, mock_exec, db_path, tmp_path,
+    ):
+        """The negative control the original auto-disable test lacked.
+
+        Defect 1 end to end, through both modules: a real CRON.md on disk still
+        listing the job, the daemon's own sync reading it, and the job still
+        not firing afterwards. Against the pre-split code the sync writes
+        `enabled = 1` back within the tick and the job runs forever.
+        """
+        from istota.scheduler import _sync_cron_files
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path, max_failures=2)
+        config.users = {"alice": UserConfig()}
+        cron_path = (
+            config.nextcloud_mount_path
+            / get_user_cron_path("alice", "istota").lstrip("/")
+        )
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text(
+            '```toml\n[[jobs]]\nname = "flaky-job"\ncron = "0 0 * * *"\n'
+            'prompt = "do stuff"\nenabled = true\n```\n'
+        )
+
+        with db.get_db(db_path) as conn:
+            _sync_cron_files(conn, config)
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "flaky-job").id
+            # The sync also seeds the module jobs, one of which queues a
+            # one-shot first-poll task. `process_one_task` takes one task and
+            # would take that one, so clear the queue before filling it.
+            conn.execute("DELETE FROM tasks")
+            task_id = db.create_task(
+                conn, prompt="do stuff", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+            conn.execute(
+                "UPDATE scheduled_jobs SET consecutive_failures = 1 WHERE id = ?",
+                (job_id,),
+            )
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            assert db.get_scheduled_job(conn, job_id).auto_disabled_at is not None
+            # The next tick, against the unchanged file.
+            _sync_cron_files(conn, config)
+            job = db.get_scheduled_job(conn, job_id)
+            assert job.enabled is True, "the file still says the user wants it"
+            assert job.auto_disabled_at is not None, "the file must not lift this"
+            # By name, not by emptiness: the same sync seeds the module jobs,
+            # which are enabled and have every right to be.
+            assert "flaky-job" not in {
+                j.name for j in db.get_enabled_scheduled_jobs(conn)
+            }
+
+        assert cron_path.read_text().count("flaky-job") == 1, "the file was rewritten"
 
     @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
@@ -3749,7 +3818,78 @@ class TestScheduledJobFailureTracking:
 
         with db.get_db(db_path) as conn:
             job = db.get_scheduled_job_by_name(conn, "alice", "persistent")
-            assert job.enabled is True  # Not disabled despite 100 failures
+            # Not stopped despite 100 failures, in either column.
+            assert job.enabled is True
+            assert job.auto_disabled_at is None
+
+    @patch("istota.scheduler._post_policy_refusal_alert")
+    @patch(
+        "istota.scheduler.execute_task",
+        return_value=(
+            False,
+            'API Error: 400 {"type":"error","error":'
+            '{"message":"Output blocked by content filtering policy"}}',
+            None,
+            None,
+        ),
+    )
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_policy_refusal_suspends_the_job(
+        self, mock_arun, mock_exec, mock_alert, db_path, tmp_path,
+    ):
+        """The second of the three failure sites. Non-retryable, so one run is
+        enough to reach the threshold with max_failures=1."""
+        config = self._make_config(db_path, tmp_path, max_failures=1)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "refused-job", "0 0 * * *", "do stuff"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='refused-job'"
+            ).fetchone()[0]
+            db.create_task(
+                conn, prompt="do stuff", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+
+        process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            job = db.get_scheduled_job(conn, job_id)
+            assert job.auto_disabled_at is not None
+            assert job.enabled is True
+
+    def test_a_failed_shared_kv_publish_suspends_the_job(self, db_path, tmp_path):
+        """The third site, and the one with no test at all before now.
+
+        Called directly: it is reached from inside `process_one_task`'s write
+        transaction on a publish the user is not authorized to make, which is
+        several layers of setup away from anything this class already builds.
+        """
+        from istota.scheduler import _record_publish_failure
+
+        config = self._make_config(db_path, tmp_path, max_failures=2)
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "publisher", "0 0 * * *", "do stuff"),
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "publisher")
+
+            _record_publish_failure(conn, config, None, job, "not authorized")
+            assert db.get_scheduled_job(conn, job.id).auto_disabled_at is None
+
+            _record_publish_failure(conn, config, None, job, "not authorized")
+            after = db.get_scheduled_job(conn, job.id)
+
+        assert after.auto_disabled_at is not None
+        assert after.enabled is True
+        assert after.consecutive_failures == 2
 
 
 # ---------------------------------------------------------------------------

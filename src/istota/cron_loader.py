@@ -514,11 +514,13 @@ def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
 # Two things the sets do not say, and a reader filing a new column needs
 # both. They are about **who wins on a sync tick**, not about who may ever
 # write a column: ``db.disable_scheduled_job`` writes ``enabled`` from the
-# daemon's failure path today, and this sync overwrites it from the file
-# within the tick, which is the arbitration the split exists to end. And they
-# describe this sync alone — ``scheduler._sync_module_jobs`` is a third writer
-# with its own rules for ``_module.*`` rows, which the sync filters out of
-# both the file loop and the orphan sweep.
+# ``!cron disable`` verb, which writes the file in the same breath, so the
+# sync reading it back is the mechanism working rather than an arbitration.
+# The daemon's failure path writes ``auto_disabled_at`` instead and this sync
+# never overwrites it. And they describe this sync alone —
+# ``scheduler._sync_module_jobs`` is a third writer with its own rules for
+# ``_module.*`` rows, which the sync filters out of both the file loop and the
+# orphan sweep.
 # ---------------------------------------------------------------------------
 
 #: Columns CRON.md authors. The sync writes exactly these on every tick.
@@ -549,11 +551,30 @@ DAEMON_OWNED_COLUMNS = frozenset({
     "last_success_at",
     "consecutive_failures",
     "last_error",
+    # The scheduler's own disable. CRON.md has no way to express it, which is
+    # correct: it is not the user's fact to state. The sync writes it in one
+    # place only — clearing it when the user edits what the job dispatches, at
+    # its own site below.
+    "auto_disabled_at",
 })
 
 #: Row identity, never updated. ``user_id`` and ``name`` are written once at
 #: insert; ``id`` and ``created_at`` come from the schema's own defaults.
 IDENTITY_COLUMNS = frozenset({"id", "user_id", "name", "created_at"})
+
+#: A change to one of these in CRON.md lifts a scheduler suspension — the user
+#: has edited what the job actually runs, which is the plausible shape of a
+#: fix. Deliberately narrower than ``FILE_OWNED_COLUMNS``; see the site in
+#: :func:`sync_cron_jobs_to_db`. Each name is both a column and the
+#: ``ScheduledJob`` attribute holding it, which is how the comparison there
+#: reads them off the existing row.
+_SUSPENSION_CLEARING_COLUMNS = (
+    "cron_expression",
+    "prompt",
+    "command",
+    "skill",
+    "skill_args",
+)
 
 
 def _file_owned_values(
@@ -606,6 +627,8 @@ def sync_cron_jobs_to_db(
     - Existing jobs have definition fields updated (preserving state fields)
     - Orphaned DB jobs (not in file) are deleted
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
+    - a scheduler suspension (``auto_disabled_at``) survives every tick, and is
+      lifted only when the file changes what the job dispatches
     - command-type jobs are rejected for non-admin users (arbitrary user
       shell-command tasks must remain admin-only)
 
@@ -654,6 +677,35 @@ def sync_cron_jobs_to_db(
                     fj.name, user_id, existing.cron_expression, fj.cron,
                 )
 
+            # An edit to what the job *dispatches* lifts a suspension. Without
+            # this the split is a worse trap than the bug it fixes: today a
+            # user whose job is failing edits the prompt and it runs again on
+            # the next tick, because the suspension never held. After the
+            # split it would stay suspended silently, and the only way out
+            # would be a chat verb they may not know exists.
+            #
+            # These five fields and no others. Changing `target`, `room`,
+            # `model`, `effort` or a flag is not plausibly a fix for a job
+            # that is failing, and a rule keyed on the dispatch fields is one
+            # a reader can hold without consulting the frozenset.
+            #
+            # Gated on the row already being suspended, which is also what
+            # keeps the UPDATE off a daemon-owned column in every other case:
+            # a suspension written between this read and that write is then
+            # left alone rather than clobbered.
+            changed_dispatch = [
+                col for col in _SUSPENSION_CLEARING_COLUMNS
+                if file_values[col] != getattr(existing, col)
+            ]
+            lift_suspension = bool(changed_dispatch) and bool(existing.auto_disabled_at)
+            if lift_suspension:
+                logger.info(
+                    "Lifting suspension on job '%s' (user %s): %s changed in "
+                    "CRON.md (suspended at %s)",
+                    fj.name, user_id, ", ".join(changed_dispatch),
+                    existing.auto_disabled_at,
+                )
+
             if (
                 skill_val
                 and existing.command
@@ -669,6 +721,8 @@ def sync_cron_jobs_to_db(
             values = list(updates.values())
             if cron_changed:
                 set_parts.append("last_run_at = datetime('now')")
+            if lift_suspension:
+                set_parts.append("auto_disabled_at = NULL")
             set_clause = ", ".join(set_parts)
             values.append(existing.id)
             conn.execute(

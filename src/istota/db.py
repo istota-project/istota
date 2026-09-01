@@ -167,6 +167,9 @@ class ScheduledJob:
     consecutive_failures: int = 0
     last_error: str | None = None
     last_success_at: str | None = None
+    #: When the scheduler suspended this job; None = not suspended. The
+    #: daemon's column, distinct from ``enabled`` (the user's intent).
+    auto_disabled_at: str | None = None
     once: bool = False
     model: str | None = None  # Per-job model override; empty/None = use config default
     effort: str | None = None  # Per-job effort override; empty/None = use config default
@@ -321,6 +324,12 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("consecutive_failures", "INTEGER DEFAULT 0"),
         ("last_error", "TEXT"),
         ("last_success_at", "TEXT"),
+        # cron-enabled-authority-split spec: the daemon's own disable,
+        # kept out of the user-authored `enabled` column the CRON.md sync
+        # overwrites every tick. No backfill — nothing on an existing
+        # `enabled = 0` row separates an operator disable from an
+        # auto-disable, so every existing row starts unsuspended.
+        ("auto_disabled_at", "TEXT"),
         ("once", "INTEGER DEFAULT 0"),
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("model", "TEXT"),
@@ -7554,17 +7563,23 @@ def update_istota_file_task_status(
 
 
 def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
-    """Fetch all enabled scheduled jobs."""
+    """Fetch every scheduled job that may fire.
+
+    The conjunction of the two authors' columns: the user has not switched it
+    off in CRON.md, and the scheduler has not suspended it after N consecutive
+    failures. Nothing arbitrates between them because nothing is stored twice.
+    """
     cursor = conn.execute(
         """
         SELECT id, user_id, name, cron_expression, prompt, command,
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
+               auto_disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
-        WHERE enabled = 1
+        WHERE enabled = 1 AND auto_disabled_at IS NULL
         """
     )
     return [_row_to_scheduled_job(row) for row in cursor.fetchall()]
@@ -7578,6 +7593,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
+               auto_disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
@@ -7608,6 +7624,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         consecutive_failures=row["consecutive_failures"] if "consecutive_failures" in row.keys() else 0,
         last_error=row["last_error"] if "last_error" in row.keys() else None,
         last_success_at=row["last_success_at"] if "last_success_at" in row.keys() else None,
+        auto_disabled_at=row["auto_disabled_at"] if "auto_disabled_at" in row.keys() else None,
         once=bool(row["once"]) if "once" in row.keys() else False,
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
@@ -7657,12 +7674,19 @@ def increment_scheduled_job_failures(
 
 
 def reset_scheduled_job_failures(conn: sqlite3.Connection, job_id: int) -> None:
-    """Reset failure tracking on success."""
+    """Reset failure tracking on success.
+
+    Lifts a suspension too. Unreachable for a suspended job by definition — a
+    suspended job does not fire, so it cannot succeed — but it is the right
+    place for the module rescue and for a job re-enabled by hand that then
+    works.
+    """
     conn.execute(
         """
         UPDATE scheduled_jobs
         SET consecutive_failures = 0, last_error = NULL,
-            last_success_at = datetime('now')
+            last_success_at = datetime('now'),
+            auto_disabled_at = NULL
         WHERE id = ?
         """,
         (job_id,),
@@ -7670,9 +7694,32 @@ def reset_scheduled_job_failures(conn: sqlite3.Connection, job_id: int) -> None:
 
 
 def disable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
-    """Disable a scheduled job."""
+    """Switch a job off on the *user's* behalf — the `!cron disable` verb.
+
+    Its counterpart is :func:`suspend_scheduled_job`, and the two must not be
+    collapsed back into one. This writes `enabled`, which CRON.md authors and
+    the sync overwrites from the file on every tick; that is correct here,
+    because `!cron disable` writes the file in the same breath and the sync
+    then reads back what the user asked for. The daemon's failure path must
+    never come through here: its write would be reverted within the tick,
+    which is the defect the column split exists to end.
+    """
     conn.execute(
         "UPDATE scheduled_jobs SET enabled = 0 WHERE id = ?",
+        (job_id,),
+    )
+
+
+def suspend_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
+    """Stop a job firing on the *scheduler's* behalf, after N failures.
+
+    Leaves `enabled` alone: the user has not said to switch this job off, and
+    saying it for them is what let the next sync tick undo the suspension. Only
+    three things clear it — a successful run, `!cron enable`, and an edit to
+    what the job dispatches in CRON.md.
+    """
+    conn.execute(
+        "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now') WHERE id = ?",
         (job_id,),
     )
 
@@ -7685,6 +7732,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
+               auto_disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
@@ -7706,6 +7754,10 @@ def delete_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
 def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     """Enable a scheduled job, reset failure count, and reset last_run_at to now.
 
+    The one verb that writes both authors' columns, and the only one that
+    should: a person re-enabling a job means "I want this on" and "stop holding
+    it back" at once, so it clears the suspension as well.
+
     Resetting last_run_at prevents the scheduler from treating the re-enable as
     a catch-up opportunity and firing immediately. The next run will occur at the
     next scheduled window after the enable time.
@@ -7714,7 +7766,7 @@ def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
         """
         UPDATE scheduled_jobs
         SET enabled = 1, consecutive_failures = 0, last_error = NULL,
-            last_run_at = datetime('now')
+            last_run_at = datetime('now'), auto_disabled_at = NULL
         WHERE id = ?
         """,
         (job_id,),
@@ -7731,6 +7783,7 @@ def get_scheduled_job_by_name(
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
+               auto_disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs

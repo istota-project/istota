@@ -673,24 +673,33 @@ class TestColumnOwnership:
         values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
         assert set(values) == FILE_OWNED_COLUMNS
 
-    @pytest.mark.parametrize("file_cron,last_run_moves", [
-        ("0 9 * * *", False),
-        ("30 9 * * *", True),
+    @pytest.mark.parametrize("file_cron,file_prompt,cleared", [
+        # The file changed nothing the job dispatches. Every daemon-owned
+        # column survives, suspension included.
+        ("0 9 * * *", "old", set()),
+        # A prompt edit: the suspension lifts and nothing else moves.
+        ("0 9 * * *", "new", {"auto_disabled_at"}),
+        # A cron edit: last_run_at is reset, and the suspension lifts with it.
+        ("30 9 * * *", "old", {"last_run_at", "auto_disabled_at"}),
     ])
     def test_the_sync_leaves_every_daemon_owned_column_alone(
-        self, db_path, file_cron, last_run_moves,
+        self, db_path, file_cron, file_prompt, cleared,
     ):
         """The behavioural half, over the whole daemon-owned set at once.
 
-        Both legs, because the cron-expression change is the one branch that
-        writes a daemon-owned column at all, and so the branch where a fourth
-        write would be easiest to add without noticing what else it touches.
+        Three legs, because there are exactly two branches where this sync
+        writes a daemon-owned column at all — the cron-expression change that
+        resets ``last_run_at``, and the dispatch-field change that lifts a
+        suspension — and those are the branches where a third write would be
+        easiest to add without noticing what else it touches. The first leg is
+        the control: change nothing the job dispatches and neither fires.
         """
         state = {
             "last_run_at": "2026-01-01T00:00:00",
             "last_success_at": "2025-12-31T00:00:00",
             "consecutive_failures": 3,
             "last_error": "oops",
+            "auto_disabled_at": "2026-01-02T00:00:00",
         }
         assert set(state) == DAEMON_OWNED_COLUMNS, "seed every daemon-owned column here"
 
@@ -704,16 +713,23 @@ class TestColumnOwnership:
             )
 
         with db.get_db(db_path) as conn:
-            sync_cron_jobs_to_db(conn, "alice", [CronJob(name="j1", cron=file_cron, prompt="new")])
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                # `model` is the witness that the sync ran: it is file-owned,
+                # it differs on every leg, and it is in neither exception set.
+                # The prompt cannot play that part any more, since on two legs
+                # it is deliberately unchanged.
+                [CronJob(name="j1", cron=file_cron, prompt=file_prompt, model="opus")],
+            )
             row = conn.execute(
                 "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
             ).fetchone()
 
-        assert row["prompt"] == "new", "the sync did not run, so nothing was proved"
-        # last_run_at is reset when the cron expression changes, and only then.
-        survives = set(state) - ({"last_run_at"} if last_run_moves else set())
+        assert row["model"] == "opus", "the sync did not run, so nothing was proved"
+        survives = set(state) - cleared
         assert {col: row[col] for col in survives} == {col: state[col] for col in survives}
-        assert (row["last_run_at"] != state["last_run_at"]) is last_run_moves
+        assert (row["last_run_at"] != state["last_run_at"]) is ("last_run_at" in cleared)
+        assert (row["auto_disabled_at"] is None) is ("auto_disabled_at" in cleared)
 
     _BOOLEAN_COLUMNS = (
         "enabled",
@@ -2127,3 +2143,188 @@ prompt = "morning"
 """)
         jobs = load_cron_jobs(config, "alice")
         assert [j.name for j in jobs] == ["daily"]
+
+
+# ---------------------------------------------------------------------------
+# TestSuspensionSurvivesTheSync
+# ---------------------------------------------------------------------------
+
+
+class TestSuspensionSurvivesTheSync:
+    """The composite assertion the old suite structurally could not make.
+
+    Auto-disable lived in `scheduler.py` and the sync lived here, so no test
+    ever ran both halves against one row. The daemon wrote `enabled = 0`, the
+    sync wrote `enabled = 1` back from the file within the tick, and a job
+    that failed every run kept running every run.
+    """
+
+    def _job_row(self, conn, name="digest"):
+        return conn.execute(
+            "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = ?",
+            (name,),
+        ).fetchone()
+
+    def test_a_suspended_job_is_not_re_enabled_by_the_sync(self, db_path):
+        file_jobs = [CronJob(name="digest", cron="0 7 * * *", prompt="summarise")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+            conn.commit()
+
+            # The same file, the next tick. Nothing in it changed.
+            sync_cron_jobs_to_db(conn, "alice", file_jobs)
+
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == []
+            row = self._job_row(conn)
+            # The user never said to switch it off, so their column still says on.
+            assert row["enabled"] == 1
+            assert row["auto_disabled_at"] is not None
+
+    @pytest.mark.parametrize("file_enabled,expected", [(False, 0), (True, 1)])
+    def test_the_sync_still_writes_enabled_from_the_file(
+        self, db_path, file_enabled, expected,
+    ):
+        """The user's column is still the file's to write, both directions.
+
+        The split narrows who writes `enabled`; it does not stop CRON.md
+        authoring it. `test_file_enabled_false_disables_db` and
+        `test_file_enabled_true_overrides_disabled` cover the same ground
+        through `load_cron_jobs`; this states it against a suspended row, where
+        the two columns are the easiest to confuse for each other.
+        """
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(name="digest", cron="0 7 * * *", prompt="p")],
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="digest", cron="0 7 * * *", prompt="p",
+                         enabled=file_enabled)],
+            )
+            row = self._job_row(conn)
+
+        assert row["enabled"] == expected
+        assert row["auto_disabled_at"] is not None, "the file cannot lift a suspension"
+
+    @pytest.mark.parametrize("edit", [
+        {"cron": "30 7 * * *"},
+        {"prompt": "summarise it differently"},
+        {"command": "echo hi"},
+        {"command": "istota-skill kv get x"},
+    ])
+    def test_a_dispatch_field_change_clears_the_suspension(self, db_path, edit):
+        """Each of the five, one at a time.
+
+        `command` covers two columns: an ordinary shell command lands in
+        `command`, and an `istota-skill` line is rewritten into `skill` +
+        `skill_args` by `_resolve_job_dispatch`, so the last two cases are what
+        reach those columns at all.
+        """
+        base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise"}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**base)])
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+            assert self._job_row(conn)["auto_disabled_at"] is not None
+
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**{**base, **edit})])
+
+            assert self._job_row(conn)["auto_disabled_at"] is None
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
+
+    @pytest.mark.parametrize("edit", [
+        {"target": "email"},
+        {"room": "room2"},
+        {"model": "opus"},
+        {"effort": "high"},
+        {"silent_unless_action": True},
+        {"skip_log_channel": True},
+    ])
+    def test_a_cosmetic_field_change_does_not(self, db_path, edit):
+        """Changing where the output goes, or which model runs it, is not
+        plausibly a fix for a job that fails every time."""
+        base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise"}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**base)])
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+            db.suspend_scheduled_job(conn, job.id)
+
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(**{**base, **edit})])
+            row = self._job_row(conn)
+
+        assert row["auto_disabled_at"] is not None
+        # The edit itself still landed, so the sync demonstrably ran.
+        assert (row["output_target"], row["conversation_token"], row["model"],
+                row["effort"], row["silent_unless_action"],
+                row["skip_log_channel"]) != (None, None, None, None, 0, 0)
+
+    def test_a_reinserted_job_starts_unsuspended(self, db_path):
+        """Orphan-delete then re-insert is not a lift, it is a new row.
+
+        Worth stating because it is the one way a user can clear a suspension
+        without touching a dispatch field — delete the job from CRON.md, let a
+        tick run, put it back — and it is correct rather than a hole: the row
+        the daemon suspended is gone.
+        """
+        job = CronJob(name="digest", cron="0 7 * * *", prompt="summarise")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [job])
+            db.suspend_scheduled_job(
+                conn, db.get_scheduled_job_by_name(conn, "alice", "digest").id,
+            )
+            sync_cron_jobs_to_db(conn, "alice", [])
+            assert self._job_row(conn) is None
+
+            sync_cron_jobs_to_db(conn, "alice", [job])
+            assert self._job_row(conn)["auto_disabled_at"] is None
+
+    def test_the_two_verbs_write_different_columns(self, db_path):
+        """The guard against a later refactor collapsing the db helpers.
+
+        `disable_scheduled_job` is the user saying so and writes their column;
+        `suspend_scheduled_job` is the daemon observing a failure and writes
+        its own. Collapsing them re-creates the original defect exactly.
+        """
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="a", cron="0 7 * * *", prompt="p"),
+                 CronJob(name="b", cron="0 7 * * *", prompt="p")],
+            )
+            db.disable_scheduled_job(
+                conn, db.get_scheduled_job_by_name(conn, "alice", "a").id,
+            )
+            db.suspend_scheduled_job(
+                conn, db.get_scheduled_job_by_name(conn, "alice", "b").id,
+            )
+
+            user_off = self._job_row(conn, "a")
+            daemon_off = self._job_row(conn, "b")
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == []
+
+        assert (user_off["enabled"], user_off["auto_disabled_at"]) == (0, None)
+        assert daemon_off["enabled"] == 1
+        assert daemon_off["auto_disabled_at"] is not None
+
+    @pytest.mark.parametrize("clear", ["enable", "success"])
+    def test_the_other_two_lifts(self, db_path, clear):
+        """`!cron enable` and a successful run, the two paths outside the sync."""
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(name="digest", cron="0 7 * * *", prompt="p")],
+            )
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "digest").id
+            db.suspend_scheduled_job(conn, job_id)
+
+            if clear == "enable":
+                db.enable_scheduled_job(conn, job_id)
+            else:
+                db.reset_scheduled_job_failures(conn, job_id)
+
+            assert self._job_row(conn)["auto_disabled_at"] is None
+            assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]

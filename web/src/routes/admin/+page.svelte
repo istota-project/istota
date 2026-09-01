@@ -370,6 +370,23 @@
     return name.startsWith('_module.');
   }
 
+  /** A job fires only when both of its two authors agree: the user has not
+   *  switched it off in CRON.md, and the scheduler has not suspended it after
+   *  N consecutive failures. Same conjunction the backend counts `jobs_active`
+   *  on and `db.get_enabled_scheduled_jobs` selects on. */
+  function jobRuns(j: AdminStatsJob): boolean {
+    return j.enabled && !j.auto_disabled_at;
+  }
+
+  /** Three states, not two. `paused` is the user's own doing and there is a
+   *  verb for it; `suspended` is the scheduler's, and it says so because the
+   *  two need different things done about them. A job that is both reads as
+   *  `paused`, the more informative of the two. */
+  function jobStatusLabel(j: AdminStatsJob): string {
+    if (!j.enabled) return 'paused';
+    return j.auto_disabled_at ? 'suspended' : 'enabled';
+  }
+
   interface PartitionedJobs {
     regular: AdminStatsJob[];
     moduleJobs: AdminStatsJob[];
@@ -942,8 +959,8 @@
                   </td>
                   <td class="col-cron"><code>{j.cron}</code></td>
                   <td class="col-status">
-                    <span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}></span>
-                    <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
+                    <span class="dot" class:dot-ok={jobRuns(j)} class:dot-mute={!jobRuns(j)}></span>
+                    <span class="status-label">{jobStatusLabel(j)}</span>
                   </td>
                   <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
                   <td class="num col-failures">{j.consecutive_failures}</td>
@@ -987,9 +1004,9 @@
                       </td>
                       <td class="col-cron"><code>{j.cron}</code></td>
                       <td class="col-status">
-                        <span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}
+                        <span class="dot" class:dot-ok={jobRuns(j)} class:dot-mute={!jobRuns(j)}
                         ></span>
-                        <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
+                        <span class="status-label">{jobStatusLabel(j)}</span>
                       </td>
                       <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
                       <td class="num col-failures">{j.consecutive_failures}</td>
