@@ -2851,3 +2851,118 @@ cron = "0 9 * * *"
         config = make_config_with_mount()
         _write_cron_md(mount_path, "alice", "```toml\n```\n")
         assert load_cron_document(config, "alice").block == ""
+
+
+# ---------------------------------------------------------------------------
+# TestTheRenderedTomlRoundTrips
+# ---------------------------------------------------------------------------
+
+
+class TestTheRenderedTomlRoundTrips:
+    """What ``render_jobs_block`` writes, ``tomllib`` must read back unchanged.
+
+    The job list is round-tripped rather than merely written: the daemon
+    parses CRON.md on every sync tick, and any rewrite (``!cron disable``, a
+    ``once`` job removing itself, the DB restore) re-renders every job from
+    the parsed list. So a value the serializer cannot represent is not a bad
+    render, it is a job destroyed on the next write (ISSUE-385).
+    """
+
+    # Backslashes, quotes, a newline, a tab, a CR, a FF, a NUL, a DEL, a run
+    # of three quotes and a run of three backticks — one value covering every
+    # entry in ``_TOML_ESCAPES`` and both delimiters that can end the block.
+    HOSTILE = 'a\\b"c\nd\te\rf\x0cg\x00h\x7fi"""j```k\\'
+
+    def _round_trip(self, job):
+        import tomllib
+
+        return tomllib.loads(render_jobs_block([job]))["jobs"][0]
+
+    def test_every_rendered_text_field_survives_a_round_trip(self):
+        """Each string field the renderer emits, carrying every hostile character.
+
+        ``command``/``prompt_file``/``prompt`` are mutually exclusive in the
+        renderer's if/elif/else, so they are three cases rather than one job.
+        """
+        base = dict(name="j", cron="0 9 * * *", prompt="hi")
+
+        for field in (
+            "name", "cron", "prompt", "command", "prompt_file",
+            "target", "room", "model", "effort", "publish_shared_kv",
+        ):
+            kwargs = dict(base)
+            kwargs[field] = self.HOSTILE
+            got = self._round_trip(CronJob(**kwargs))
+            assert got[field] == self.HOSTILE, (
+                f"{field} did not survive: {got.get(field)!r}"
+            )
+
+    def test_a_backslash_escape_is_not_reinterpreted(self):
+        r"""``\b`` and ``\t`` are *valid* TOML escapes, so they parse and corrupt.
+
+        This is the half of the defect that never fails loudly: the file stays
+        readable and the job silently becomes a different job. ``grep \bword``
+        came back as a backspace.
+        """
+        for value in (r"a\b", r"a\t", r"a\n", r"grep \d+ log", r"C:\Users\temp"):
+            got = self._round_trip(
+                CronJob(name="j", cron="0 9 * * *", prompt=value))
+            assert got["prompt"] == value
+
+    def test_a_value_opening_with_a_newline_keeps_it(self):
+        """TOML trims a newline directly after ``\"\"\"``, so the old form ate one.
+
+        A statement about the serializer alone. ``_str_field`` strips both ends
+        on the way back in, so the two forms converge at ``load_cron_jobs`` and
+        this is not evidence that leading whitespace survives end to end.
+        """
+        got = self._round_trip(
+            CronJob(name="j", cron="0 9 * * *", prompt="", command="\nls -la"))
+        assert got["command"] == "\nls -la"
+
+    def test_a_regex_prompt_survives_a_disable_rewrite(
+        self, mount_path, make_config_with_mount
+    ):
+        """The reported symptom, through the real seam.
+
+        A prompt holding a regex is typed into CRON.md by hand, parses fine,
+        and is then destroyed the first time ``!cron disable`` re-renders it.
+        """
+        config = make_config_with_mount()
+        prompt = r"grep \d+ /var/log/app.log and say \"done\""
+        _write_cron_md(mount_path, "alice", generate_cron_md([CronJob(
+            name="regex-job", cron="0 9 * * *", prompt=prompt)]))
+
+        assert load_cron_jobs(config, "alice")[0].prompt == prompt
+
+        assert update_job_enabled_in_cron_md(config, "alice", "regex-job", False)
+
+        reloaded = load_cron_jobs(config, "alice")
+        assert len(reloaded) == 1, "the rewrite left CRON.md unparseable"
+        assert reloaded[0].prompt == prompt
+        assert reloaded[0].enabled is False
+
+    def test_a_backtick_run_survives_the_fence_and_the_loader(
+        self, mount_path, make_config_with_mount
+    ):
+        """The container, not the grammar — and read back through the real seam.
+
+        ``_TOML_BLOCK_RE`` closes the block at the first ``` it sees anywhere,
+        so a value holding three backticks used to truncate the fence
+        mid-string: valid TOML, unreadable document, every job frozen. The
+        other tests in this class parse ``render_jobs_block`` with ``tomllib``
+        directly and so never consult the fence at all.
+        """
+        config = make_config_with_mount()
+        prompt = "wrap the output in ``` and mention `ls` once"
+        _write_cron_md(mount_path, "alice", generate_cron_md([CronJob(
+            name="fenced", cron="0 9 * * *", prompt=prompt)]))
+
+        assert load_cron_jobs(config, "alice")[0].prompt == prompt
+
+        assert update_job_enabled_in_cron_md(config, "alice", "fenced", False)
+
+        reloaded = load_cron_jobs(config, "alice")
+        assert len(reloaded) == 1, "the rewrite truncated the fence"
+        assert reloaded[0].prompt == prompt
+        assert reloaded[0].enabled is False

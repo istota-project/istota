@@ -516,11 +516,71 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
     return jobs, len(raw_jobs) - len(jobs)
 
 
+# Every character TOML requires an escape for inside a basic string, plus the
+# tab — legal raw, but invisible to whoever opens CRON.md next.
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+    # Not a TOML rule. The fence this TOML lives inside is closed by the first
+    # ``` the reader sees anywhere, so a value holding three backticks
+    # truncates the block mid-string and the whole schedule freezes — the
+    # ISSUE-385 failure, arriving through the container rather than the
+    # grammar. Escaped as a code point, which ``tomllib`` decodes straight
+    # back, so the value round-trips and only the rendered spelling changes.
+    "`": "\\u0060",
+}
+
+
 def _toml_string(key: str, value: str) -> str:
-    """Format a TOML key-value pair, using triple quotes when needed."""
-    if "\n" in value or '"' in value:
-        return f'{key} = """{value}"""'
-    return f'{key} = "{value}"'
+    """Format a TOML key-value pair as an escaped single-line basic string.
+
+    **Every string field goes through here**, including the ones that used to
+    be interpolated raw (``name``, ``cron``, ``target``, ``room``, ``model``,
+    ``effort``). A basic string interprets backslash escapes, so a value
+    passed through untouched breaks the document three different ways, and
+    only the first is loud (ISSUE-385):
+
+    - an unescaped ``\\`` that is not a valid escape, a raw ``"``, or a raw
+      control character make the line invalid, so ``tomllib`` refuses the
+      whole fence and the user's entire schedule freezes until they repair
+      the file by hand;
+    - a backslash that *is* a valid escape (``\\b``, ``\\t``) parses cleanly and
+      comes back as a different character, so the job silently becomes a
+      different job;
+    - the old triple-quoted branch ate a leading newline, because TOML trims
+      one directly after the opening delimiter.
+
+    That the list is round-tripped rather than merely written is what makes
+    all three destructive: the daemon re-renders every job from the parsed
+    list on any rewrite, so a value typed correctly by hand is destroyed the
+    first time ``!cron disable`` touches the file.
+
+    **One form, not two.** The triple-quoted branch this replaces was not a
+    way out — it has the same escaping rule and failed the same way, and it
+    carried two sub-rules of its own (a run of three quotes, a trailing
+    quote) that are places for a bug to hide. A multiline value now renders
+    on one line with ``\\n`` escapes, which is the whole cost, and it lands
+    almost nowhere: ``_externalize_multiline_prompts`` moves a multiline
+    ``prompt`` into ``scripts/prompts/*.txt`` before any write, so what
+    reaches this with a newline in it is a multiline ``command`` — or, rarely,
+    another field that a hand-written triple-quoted value put an interior
+    newline into, since ``_str_field`` strips the ends and nothing else.
+    """
+    out = []
+    for ch in value:
+        escape = _TOML_ESCAPES.get(ch)
+        if escape is not None:
+            out.append(escape)
+        elif ord(ch) < 0x20 or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return f'{key} = "{"".join(out)}"'
 
 
 def render_jobs_block(jobs: list[CronJob]) -> str:
@@ -553,8 +613,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         if i > 0:
             lines.append("")
         lines.append("[[jobs]]")
-        lines.append(f'name = "{job.name}"')
-        lines.append(f'cron = "{job.cron}"')
+        lines.append(_toml_string("name", job.name))
+        lines.append(_toml_string("cron", job.cron))
         if job.command:
             lines.append(_toml_string("command", job.command))
         elif job.prompt_file:
@@ -562,9 +622,9 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         else:
             lines.append(_toml_string("prompt", job.prompt))
         if job.target:
-            lines.append(f'target = "{job.target}"')
+            lines.append(_toml_string("target", job.target))
         if job.room:
-            lines.append(f'room = "{job.room}"')
+            lines.append(_toml_string("room", job.room))
         if not job.enabled:
             lines.append("enabled = false")
         if job.silent_unless_action:
@@ -574,9 +634,9 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         if job.once:
             lines.append("once = true")
         if job.model:
-            lines.append(f'model = "{job.model}"')
+            lines.append(_toml_string("model", job.model))
         if job.effort:
-            lines.append(f'effort = "{job.effort}"')
+            lines.append(_toml_string("effort", job.effort))
         if job.publish_shared_kv:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
