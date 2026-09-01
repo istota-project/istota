@@ -5,12 +5,14 @@ prose explaining the config to the user, with a fenced ```toml code block
 holding the actual configuration. The first toml block is parsed.
 """
 
-import re
 from pathlib import Path
 
 import tomli
 
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
+# Where the fence starts and ends is `toml_fence`'s to say (ISSUE-386). The
+# expression that used to live here anchored neither marker, so a backtick
+# run anywhere after the fence opened ended the block early.
+from ..toml_fence import find_toml_block
 
 
 def read_toml_config(path: Path) -> dict:
@@ -24,11 +26,11 @@ def read_toml_config(path: Path) -> dict:
     """
     text = path.read_text()
     if path.suffix.lower() == ".md":
-        match = _TOML_BLOCK_RE.search(text)
-        if not match:
+        span = find_toml_block(text)
+        if span is None:
             raise ValueError(
                 f"No ```toml code block found in {path}; expected an "
                 f"UPPERCASE.md-style config with the TOML body fenced."
             )
-        text = match.group(1)
+        text = text[span[0]:span[1]]
     return tomli.loads(text)

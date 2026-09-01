@@ -28,19 +28,22 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from .toml_fence import find_toml_block
+
 logger = logging.getLogger(__name__)
 
 # The fenced TOML block in a workspace ``BRIEFINGS.md``. Lifted from the
 # retired ``skills.briefing._load_workspace_briefings``; the import below is
-# the only thing that reads that shape now.
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
+# the only thing that reads that shape now. Where the fence starts and ends
+# is `toml_fence`'s to say (ISSUE-386): the expression that used to live here
+# anchored neither marker, so a backtick run anywhere after the fence opened
+# ended the block early and dropped every entry below it.
 
 # One sentinel per user, in ``_migration_state``. Per user rather than
 # per deployment because a user whose mount was unreadable on the boot that
@@ -364,11 +367,11 @@ def parse_briefings_md(text: str) -> list[dict] | None:
     """
     import tomli
 
-    match = _TOML_BLOCK_RE.search(text)
-    if not match:
+    span = find_toml_block(text)
+    if span is None:
         return []
     try:
-        data = tomli.loads(match.group(1))
+        data = tomli.loads(text[span[0]:span[1]])
     except Exception:
         return None
 
