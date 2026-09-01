@@ -169,6 +169,34 @@ def _validate_target(name: str, user_id: str, target: str) -> None:
             )
 
 
+def _coerce_bool(name: str, user_id: str, field: str, value, default: bool) -> bool:
+    """A TOML bool, or the default with a warning. Never rejects the job.
+
+    TOML has a real boolean type, so anything else here is a mistake in the
+    file: ``enabled = "false"`` is a truthy string and used to leave the job
+    running, which is the opposite of what was written. ``enabled = 1`` is an
+    integer and gets the same treatment — TOML would have accepted ``true``.
+
+    Warn-and-default rather than reject, matching how ``model``, ``effort``
+    and ``target`` already behave: a typo in ``once`` would otherwise silently
+    drop a job the user can see in their own file.
+    """
+    if isinstance(value, bool):
+        return value
+    # The value is truncated because this runs on the sync tick, once a
+    # minute, for as long as the file says what it says -- and a TOML array
+    # or inline table has no bound on its length. The type is what names the
+    # mistake; the value is there to find it in the file.
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = shown[:77] + "..."
+    logger.warning(
+        "Job '%s' (user %s): %s must be a TOML boolean, got %s %s; using %s",
+        name, user_id, field, type(value).__name__, shown, default,
+    )
+    return default
+
+
 @dataclass
 class CronJob:
     name: str
@@ -279,14 +307,22 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             prompt_file=prompt_file,
             target=target,
             room=j.get("room", ""),
-            enabled=j.get("enabled", True),
-            silent_unless_action=j.get("silent_unless_action", False),
-            skip_log_channel=j.get("skip_log_channel", False),
-            once=j.get("once", False),
+            enabled=_coerce_bool(
+                name, user_id, "enabled", j.get("enabled", True), True),
+            silent_unless_action=_coerce_bool(
+                name, user_id, "silent_unless_action",
+                j.get("silent_unless_action", False), False),
+            skip_log_channel=_coerce_bool(
+                name, user_id, "skip_log_channel",
+                j.get("skip_log_channel", False), False),
+            once=_coerce_bool(
+                name, user_id, "once", j.get("once", False), False),
             model=model,
             effort=effort,
             publish_shared_kv=str(j.get("publish_shared_kv", "")).strip(),
-            publish_shared_kv_trusted=bool(j.get("publish_shared_kv_trusted", False)),
+            publish_shared_kv_trusted=_coerce_bool(
+                name, user_id, "publish_shared_kv_trusted",
+                j.get("publish_shared_kv_trusted", False), False),
         ))
 
     return jobs

@@ -72,6 +72,8 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
+The five flags — `enabled`, `once`, `silent_unless_action`, `skip_log_channel` and `publish_shared_kv_trusted` — take a bare TOML boolean, `true` or `false`. A quoted `"false"` is a string and a bare `1` is an integer; either one logs a warning and the field takes its default rather than being read for truthiness. `enabled = "false"` used to leave the job running, and `once = "false"` used to delete it after one run.
+
 ## Publishing to shared content
 
 `publish_shared_kv` lets an admin's job write its result where every user's briefings can read it — the escape hatch for shared content the built-in shared-block generator can't produce (it runs tool-less, while a scheduled `prompt` job gets the full sandbox and tools). Shared-KV writes are admin-only: the job's user must pass the writer check, and an unauthorized or failed publish fails loudly (error log, operator alert, and a job-failure increment that the success path withholds). An empty result is a clean skip, leaving the last-known-good value in place.

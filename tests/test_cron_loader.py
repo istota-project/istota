@@ -229,6 +229,121 @@ prompt = "ok"
 
 
 # ---------------------------------------------------------------------------
+# TestBooleanCoercion
+# ---------------------------------------------------------------------------
+
+
+# Every boolean a CRON.md job carries, with the default it falls back to.
+_BOOL_FIELDS = [
+    ("enabled", True),
+    ("silent_unless_action", False),
+    ("skip_log_channel", False),
+    ("once", False),
+    ("publish_shared_kv_trusted", False),
+]
+
+
+class TestBooleanCoercion:
+    """A CRON.md boolean is a TOML boolean or it is the default, with a warning.
+
+    Everything here goes through ``load_cron_jobs`` rather than calling
+    ``_coerce_bool`` directly, because the regression was a call site
+    (``j.get("enabled", True)``) rather than the helper.
+    """
+
+    def _load_one(self, mount_path, config, field, literal):
+        _write_cron_md(mount_path, "alice", f"""\
+```toml
+[[jobs]]
+name = "job"
+cron = "0 9 * * *"
+prompt = "do a thing"
+{field} = {literal}
+```
+""")
+        return load_cron_jobs(config, "alice")
+
+    @pytest.mark.parametrize("field,_default", _BOOL_FIELDS)
+    @pytest.mark.parametrize("literal,expected", [("true", True), ("false", False)])
+    def test_a_toml_boolean_is_taken_as_written(
+        self, field, _default, literal, expected, mount_path,
+        make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, field, literal)
+        assert len(jobs) == 1
+        assert getattr(jobs[0], field) is expected
+        assert not caplog.records
+
+    @pytest.mark.parametrize("field,default", _BOOL_FIELDS)
+    @pytest.mark.parametrize("literal", ['"false"', '"true"', "1", "[]"])
+    def test_anything_else_warns_and_takes_the_default(
+        self, field, default, literal, mount_path, make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, field, literal)
+        # The job survives: a mistyped flag must not drop a job the user can
+        # see in their own file.
+        assert len(jobs) == 1
+        assert getattr(jobs[0], field) is default
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert field in message
+        assert "'job'" in message
+        assert "alice" in message
+
+    def test_enabled_false_as_a_string_warns_instead_of_passing_silently(
+        self, mount_path, make_config_with_mount, caplog,
+    ):
+        """The exact regression: ``enabled = "false"`` is a truthy string.
+
+        The job stays enabled either way — ``True`` is the field's default —
+        so the whole of the fix here is that the user is told, rather than
+        having a job they believe is off run every tick in silence.
+        """
+        config = make_config_with_mount()
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, "enabled", '"false"')
+        assert jobs[0].enabled is True
+        assert "enabled" in caplog.text
+        assert "must be a TOML boolean" in caplog.text
+
+    def test_once_false_as_a_string_no_longer_means_its_opposite(
+        self, mount_path, make_config_with_mount,
+    ):
+        """``once = "false"`` used to delete the job after a single run."""
+        config = make_config_with_mount()
+        jobs = self._load_one(mount_path, config, "once", '"false"')
+        assert jobs[0].once is False
+
+    def test_a_long_value_is_truncated_in_the_warning(
+        self, mount_path, make_config_with_mount, caplog,
+    ):
+        """The warning repeats on every sync tick, so it has to be bounded."""
+        config = make_config_with_mount()
+        literal = "[" + ", ".join(['"padding"'] * 200) + "]"
+        with caplog.at_level("WARNING", logger="istota.cron_loader"):
+            jobs = self._load_one(mount_path, config, "once", literal)
+        assert jobs[0].once is False
+        assert len(caplog.records) == 1
+        assert len(caplog.records[0].getMessage()) < 200
+
+    def test_enabled_zero_no_longer_disables_a_job_by_accident(
+        self, mount_path, make_config_with_mount,
+    ):
+        """``enabled = 0`` is an integer, not a TOML boolean.
+
+        It used to disable the job through a truthiness read of a value TOML
+        would have accepted as ``false`` had that been meant.
+        """
+        config = make_config_with_mount()
+        jobs = self._load_one(mount_path, config, "enabled", "0")
+        assert jobs[0].enabled is True
+
+
+# ---------------------------------------------------------------------------
 # TestGenerateCronMd
 # ---------------------------------------------------------------------------
 
