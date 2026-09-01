@@ -3,6 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from istota.skills.browse import (
@@ -392,6 +393,7 @@ class TestCmdScreenshot:
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
     def test_screenshot_saves_file(self, mock_url, mock_post, tmp_path):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.headers = {"content-type": "image/png"}
         mock_resp.content = b"\x89PNG fake image data"
         mock_post.return_value = mock_resp
@@ -796,3 +798,566 @@ class TestCmdLinks:
 
         assert result["status"] == "error"
         assert result["error"] == "timeout"
+
+
+def _non_json_response(status_code, body, url="http://test:9223/browse"):
+    """A response whose body is not JSON, the way httpx presents one.
+
+    `resp.json()` raises `ValueError` (json.JSONDecodeError is a subclass) and
+    `resp.text` still holds whatever came back.
+    """
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = body
+    resp.content = body.encode("utf-8") if isinstance(body, str) else body
+    resp.encoding = "utf-8"
+    resp.url = url
+    resp.headers = {"content-type": "text/html"}
+    resp.json.side_effect = json.JSONDecodeError("Expecting value", body or "", 0)
+    return resp
+
+
+FLASK_500 = (
+    "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n"
+    "<h1>Internal Server Error</h1>\n<p>The server encountered an internal error "
+    "and was unable to complete your request.</p>\n"
+)
+
+
+def _run_verb(argv):
+    """Run a verb through the same command table `main` uses."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    commands = {
+        "get": cmd_get,
+        "render": cmd_render,
+        "screenshot": cmd_screenshot,
+        "extract": cmd_extract,
+        "interact": cmd_interact,
+        "links": cmd_links,
+        "close": cmd_close,
+    }
+    return commands[args.command](args)
+
+
+class TestNonJsonResponsesAreReported:
+    """ISSUE-383: a body that will not decode must name the status and the body.
+
+    Before this, every verb called `resp.json()` with no check, the
+    `json.JSONDecodeError` reached `main`'s catch-all, and the whole report was
+    the string "Expecting value: line 1 column 1 (char 0)" — which names no
+    status code, no URL and no part of the body, so a 500 from the container, a
+    502 in front of it and an empty response were indistinguishable.
+    """
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_flask_html_500_names_the_status_and_the_body(self, mock_url, mock_post):
+        mock_post.return_value = _non_json_response(500, FLASK_500)
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert result["status"] == "error"
+        assert "500" in result["error"]
+        assert "Internal Server Error" in result["error"]
+        assert "Expecting value" not in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_request_url_is_named(self, mock_url, mock_post):
+        mock_post.return_value = _non_json_response(
+            502,
+            "<html><body>502 Bad Gateway</body></html>",
+            url="http://test:9223/browse",
+        )
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert "http://test:9223/browse" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_empty_body_says_so(self, mock_url, mock_post):
+        mock_post.return_value = _non_json_response(502, "")
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert result["status"] == "error"
+        assert "502" in result["error"]
+        assert "empty" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_excerpt_is_capped_and_says_it_was(self, mock_url, mock_post):
+        from istota.skills.browse import MAX_BODY_EXCERPT
+
+        mock_post.return_value = _non_json_response(500, "A" * 10000)
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        # The marker is the point: a truncated body that drops it reads as a
+        # complete one, and a length assertion alone cannot see that.
+        excerpt = result["error"].split("not a JSON object: ", 1)[1]
+        assert excerpt == "A" * MAX_BODY_EXCERPT + "…"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unreadable_body_is_not_called_empty(self, mock_url, mock_post):
+        # "empty response" and "40 KB of something unreadable" are different
+        # outages; reporting the second as the first is a false statement.
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.url = "http://test:9223/browse"
+        resp.json.side_effect = ValueError("no")
+        type(resp).content = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("stream consumed")),
+        )
+        mock_post.return_value = resp
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert result["status"] == "error"
+        assert "500" in result["error"]
+        assert "(empty)" not in result["error"]
+        assert "unreadable" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_bogus_charset_still_produces_an_excerpt(self, mock_url, mock_post):
+        resp = _non_json_response(500, "boom")
+        resp.encoding = "utf-42"  # no such codec
+        mock_post.return_value = resp
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert "boom" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_control_characters_do_not_survive_the_excerpt(self, mock_url, mock_post):
+        # The body is whatever the container or an intermediary produced. An
+        # ANSI escape reaching a terminal is why it is not passed through as-is.
+        mock_post.return_value = _non_json_response(
+            500, "boom \x1b[31mRED\x1b[0m \x00 done\r\nnext line",
+        )
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert "\x1b" not in result["error"]
+        assert "\x00" not in result["error"]
+        assert "\n" not in result["error"]
+        assert "RED" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_bidi_and_zero_width_characters_do_not_survive(self, mock_url, mock_post):
+        # U+202E reverses the display order of everything after it, so a body
+        # could otherwise render as a different message inside a line the
+        # model reads as this tool's own diagnostic voice. json.dumps with
+        # ensure_ascii=False emits these raw, so stripping is the only guard.
+        hostile = (
+            "start \u202eesrever\u202c \u200bzero \ufeffbom "
+            "\u2066iso\u2069 end"
+        )
+        mock_post.return_value = _non_json_response(500, hostile)
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        for ch in "\u202e\u202c\u200b\ufeff\u2066\u2069":
+            assert ch not in result["error"], hex(ord(ch))
+        assert "esrever" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_line_separators_are_collapsed(self, mock_url, mock_post):
+        # U+2028/U+2029 are handled by the whitespace collapse rather than by
+        # the control class, which is why the class does not name them.
+        mock_post.return_value = _non_json_response(500, "a\u2028b\u2029c")
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert "\u2028" not in result["error"]
+        assert "\u2029" not in result["error"]
+        assert "a b c" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_json_body_that_is_not_an_object_is_an_error_too(self, mock_url, mock_post):
+        # Well-formed JSON, wrong shape. Every verb calls .get() on what comes
+        # back, so a list reaching them is an AttributeError one frame later.
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = '["unexpected"]'
+        resp.content = b'["unexpected"]'
+        resp.encoding = "utf-8"
+        resp.url = "http://test:9223/browse"
+        resp.json.return_value = ["unexpected"]
+        mock_post.return_value = resp
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert result["status"] == "error"
+        assert "unexpected" in result["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_non_json_503_carries_the_retry_hint(self, mock_url, mock_post):
+        # The message the unreachable `except httpx.HTTPStatusError` branch used
+        # to hold. It fires here now, where it can actually be reached.
+        mock_post.return_value = _non_json_response(503, "<html>503 Service Unavailable</html>")
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert "503" in result["error"]
+        assert "retry" in result["error"].lower()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_apis_own_json_error_body_still_passes_through(self, mock_url, mock_post):
+        # The API reports its own failures as JSON with a non-2xx status, and
+        # those bodies carry the diagnosis. A bare raise_for_status() would
+        # throw them away, which is why the check is on the body, not the status.
+        resp = MagicMock()
+        resp.status_code = 503
+        resp.json.return_value = {
+            "status": "error",
+            "error": "Chrome unavailable: CDP connect failed",
+        }
+        mock_post.return_value = resp
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert result == {
+            "status": "error",
+            "error": "Chrome unavailable: CDP connect failed",
+        }
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["get", "https://example.com"],
+            ["render", "https://example.com"],
+            ["extract", "https://example.com", "--selector", "article"],
+            ["interact", "sess1", "--click", ".btn"],
+            ["links", "https://example.com"],
+            ["links", "https://example.com", "--selector", "nav a"],
+            ["screenshot", "https://example.com"],
+        ],
+    )
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_every_verb_reports_a_non_json_body(self, mock_url, mock_post, mock_delete, argv):
+        # The blast radius: the entry named one verb, the decode call was in all
+        # of them.
+        mock_post.return_value = _non_json_response(500, FLASK_500)
+
+        result = _run_verb(argv)
+
+        assert result["status"] == "error", argv
+        assert "500" in result["error"], argv
+        assert "Expecting value" not in result["error"], argv
+
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_close_reports_a_non_json_body(self, mock_url, mock_delete):
+        mock_delete.return_value = _non_json_response(
+            500, FLASK_500, url="http://test:9223/sessions/sess1",
+        )
+
+        parser = build_parser()
+        result = cmd_close(parser.parse_args(["close", "sess1"]))
+
+        assert result["status"] == "error"
+        assert "500" in result["error"]
+        assert "Expecting value" not in result["error"]
+
+
+class TestMainExitStatus:
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_error_result_exits_one(self, mock_url, mock_post, capsys):
+        # Without this the fix would report a 500 on exit 0, where the unhandled
+        # decode error at least exited 1.
+        mock_post.return_value = _non_json_response(500, FLASK_500)
+
+        with pytest.raises(SystemExit) as exc:
+            main(["get", "https://example.com"])
+        assert exc.value.code == 1
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert "500" in output["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_api_reported_error_exits_one_too(self, mock_url, mock_post, capsys):
+        resp = MagicMock()
+        resp.json.return_value = {"status": "error", "error": "navigation timeout"}
+        mock_post.return_value = resp
+
+        with pytest.raises(SystemExit) as exc:
+            main(["get", "https://example.com"])
+        assert exc.value.code == 1
+
+        assert json.loads(capsys.readouterr().out)["error"] == "navigation timeout"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_ok_result_exits_zero(self, mock_url, mock_post, capsys):
+        resp = MagicMock()
+        resp.json.return_value = {"status": "ok", "title": "Test"}
+        mock_post.return_value = resp
+
+        main(["get", "https://example.com"])
+
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_closed_session_is_not_an_error(self, mock_url, mock_delete, capsys):
+        # Only "error" exits 1. A status naming any other outcome is an answer
+        # rather than a failure, and a caller branching on it would read a
+        # non-zero exit wrong. DELETE /sessions/<id> always answers "closed",
+        # whether or not the session was there.
+        resp = MagicMock()
+        resp.json.return_value = {"status": "closed", "session_id": "sess1"}
+        mock_delete.return_value = resp
+
+        main(["close", "sess1"])
+
+        assert json.loads(capsys.readouterr().out)["status"] == "closed"
+
+
+class TestTheDeadHttpStatusErrorBranchIsGone:
+    def test_nothing_raises_or_handles_an_http_status_error(self):
+        # The `except httpx.HTTPStatusError` arm in `main` was unreachable
+        # because `raise_for_status()` is called nowhere, so its 503 message had
+        # never been printed. Dead code that reads as a working feature; the
+        # message now lives on the reachable path in `_decode`.
+        #
+        # Read structurally rather than as text: the module's prose explains
+        # why raise_for_status() is the wrong tool here, and a substring scan
+        # would fail on the explanation.
+        import ast
+        import inspect
+
+        import istota.skills.browse as browse
+
+        tree = ast.parse(inspect.getsource(browse))
+
+        handled = [
+            ast.unparse(h.type)
+            for h in ast.walk(tree)
+            if isinstance(h, ast.ExceptHandler) and h.type is not None
+        ]
+        assert not any("HTTPStatusError" in name for name in handled), handled
+
+        called = [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        assert "raise_for_status" not in called
+
+
+class TestBareErrorBodiesAreClassified:
+    """The API has two spellings for a reported failure; both must classify.
+
+    `browse_api.py` says `{"status": "error", ...}` for its 500s and 503s, but
+    its argument and lookup failures — nine paths, two of them 500s — say a
+    bare `{"error": ...}` with no `status` key. Every caller here branches on
+    `status`, so before ISSUE-383 those read as successes: `main` exited 0 and
+    `cmd_links` treated one as a page. `cmd_render` rewrote the shape by hand
+    for its own 404, so two verbs disagreed about one server response.
+    """
+
+    @staticmethod
+    def _bare_error(status_code, message):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.url = "http://test:9223/browse"
+        resp.json.return_value = {"error": message}
+        return resp
+
+    @pytest.mark.parametrize(
+        ("argv", "code"),
+        [
+            (["get", "https://example.com"], 400),
+            (["get", "https://example.com", "--session", "gone"], 404),
+            (["render", "https://example.com"], 400),
+            (["extract", "https://example.com", "--selector", "article"], 400),
+            (["interact", "sess1", "--click", ".btn"], 404),
+            (["links", "https://example.com"], 400),
+            (["links", "https://example.com", "--selector", "nav a"], 400),
+        ],
+    )
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_every_verb_classifies_a_bare_error_body(
+        self, mock_url, mock_post, mock_delete, argv, code,
+    ):
+        mock_post.return_value = self._bare_error(code, "url is required")
+
+        result = _run_verb(argv)
+
+        assert result["status"] == "error", argv
+        assert result["error"] == "url is required", argv
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_get_and_render_agree_on_an_expired_session(self, mock_url, mock_post):
+        # One condition, one server response, two verbs. These used to differ:
+        # render rewrote the body and exited 1, get passed it through and
+        # exited 0.
+        body = "session sess1 not found or expired"
+        mock_post.return_value = self._bare_error(404, body)
+
+        parser = build_parser()
+        got = cmd_get(parser.parse_args(["get", "https://example.com", "--session", "sess1"]))
+        rendered = cmd_render(parser.parse_args(["render", "--session", "sess1"]))
+
+        assert got["status"] == rendered["status"] == "error"
+        assert got["error"] == rendered["error"] == body
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_bare_error_exits_one(self, mock_url, mock_post, capsys):
+        mock_post.return_value = self._bare_error(400, "url is required")
+
+        with pytest.raises(SystemExit) as exc:
+            main(["get", "https://example.com"])
+        assert exc.value.code == 1
+
+        assert json.loads(capsys.readouterr().out)["error"] == "url is required"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_body_already_carrying_a_status_is_untouched(self, mock_url, mock_post):
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.json.return_value = {"status": "not_found"}
+        mock_post.return_value = resp
+
+        parser = build_parser()
+        result = cmd_get(parser.parse_args(["get", "https://example.com"]))
+
+        assert result == {"status": "not_found"}
+
+
+class TestScreenshotDoesNotTrustTheContentType:
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_non_200_labelled_as_an_image_is_not_saved(
+        self, mock_url, mock_post, tmp_path,
+    ):
+        # An intermediary answering 502 while labelling it image/png used to
+        # have its error page written to disk as a .png and reported ok.
+        resp = MagicMock()
+        resp.status_code = 502
+        resp.headers = {"content-type": "image/png"}
+        resp.content = b"<html>502 Bad Gateway</html>"
+        mock_post.return_value = resp
+
+        output = tmp_path / "shot.png"
+        parser = build_parser()
+        result = cmd_screenshot(
+            parser.parse_args(["screenshot", "https://example.com", "-o", str(output)]),
+        )
+
+        assert result["status"] == "error"
+        assert "502" in result["error"]
+        assert not output.exists()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_empty_image_body_is_not_a_screenshot(self, mock_url, mock_post, tmp_path):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"content-type": "image/png"}
+        resp.content = b""
+        mock_post.return_value = resp
+
+        output = tmp_path / "shot.png"
+        parser = build_parser()
+        result = cmd_screenshot(
+            parser.parse_args(["screenshot", "https://example.com", "-o", str(output)]),
+        )
+
+        assert result["status"] == "error"
+        assert not output.exists()
+
+
+class TestLinksCleansUpItsSession:
+    @patch("istota.skills.browse.httpx.delete")
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_session_is_closed_when_the_extract_leg_fails(
+        self, mock_url, mock_post, mock_delete,
+    ):
+        # The old code raised out of resp.json() on the second leg, skipping
+        # the cleanup entirely and stranding one of only two browser tabs for
+        # the full session TTL. Returning an error dict runs the delete.
+        browse_resp = MagicMock()
+        browse_resp.json.return_value = {
+            "status": "ok", "url": "https://example.com", "session_id": "sess1", "links": [],
+        }
+        mock_post.side_effect = [browse_resp, _non_json_response(500, FLASK_500)]
+
+        parser = build_parser()
+        result = cmd_links(
+            parser.parse_args(["links", "https://example.com", "--selector", "nav a"]),
+        )
+
+        mock_delete.assert_called_once()
+        assert "sessions/sess1" in mock_delete.call_args[0][0]
+        assert result["status"] == "error"
+        assert "500" in result["error"]
+
+
+class TestTheCatchAllNamesTheFailure:
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_read_timeout_is_not_reported_as_two_bare_words(
+        self, mock_url, mock_post, capsys,
+    ):
+        # httpx's ReadTimeout stringifies to "timed out" and several of its
+        # siblings to "", naming no verb, no URL and no class — the same
+        # defect ISSUE-383 fixed one layer down.
+        mock_post.side_effect = httpx.ReadTimeout("timed out")
+
+        with pytest.raises(SystemExit) as exc:
+            main(["get", "https://example.com"])
+        assert exc.value.code == 1
+
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert "ReadTimeout" in error
+        assert "get" in error
+        assert "http://test:9223" in error
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_exception_with_no_message_still_names_its_class(
+        self, mock_url, mock_post, capsys,
+    ):
+        mock_post.side_effect = httpx.RemoteProtocolError("")
+
+        with pytest.raises(SystemExit):
+            main(["get", "https://example.com"])
+
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert "RemoteProtocolError" in error
+        assert not error.rstrip().endswith(":")

@@ -1834,6 +1834,26 @@ def _run_capture(
     return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
 
+def _skill_error_envelope(stdout: str | None) -> str | None:
+    """The error a skill CLI reported in its stdout envelope, or None.
+
+    Skill CLIs print `{"status": "error", "error": "…"}` on stdout and write
+    nothing to stderr, so both exit paths below have to read stdout to find out
+    what went wrong. Shared between them so they cannot disagree about what
+    counts as a reported failure.
+    """
+    text = (stdout or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("status") != "error":
+        return None
+    return str(parsed.get("error") or "skill reported status=error")
+
+
 def _execute_skill_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
@@ -1950,21 +1970,23 @@ def _execute_skill_task(
     except Exception as e:
         return False, f"Skill execution error: {e}"
 
+    err_msg = _skill_error_envelope(proc.stdout)
     if proc.returncode == 0:
-        result = proc.stdout.strip() if proc.stdout else "(no output)"
         # Module-skill subprocesses (feeds, money) catch their own errors
         # and print `{"status":"error","error":"…"}` while exiting 0;
         # treat that envelope as failure (defense in depth — the facades
         # also call sys.exit(1) on the error envelope).
-        if result.startswith("{"):
-            try:
-                parsed = json.loads(result)
-            except (json.JSONDecodeError, ValueError):
-                parsed = None
-            if isinstance(parsed, dict) and parsed.get("status") == "error":
-                err_msg = parsed.get("error") or "skill reported status=error"
-                return False, str(err_msg)
-        return True, result
+        if err_msg:
+            return False, err_msg
+        return True, proc.stdout.strip() if proc.stdout else "(no output)"
+
+    # A non-zero exit is the *normal* way that same envelope arrives, and the
+    # envelope is on stdout. Reading stderr alone recorded "Exit code 1" and
+    # discarded the diagnosis the skill had just written — which is what a
+    # human reads back out of `scheduled_jobs.last_error` via `!cron` and the
+    # admin Cron pane.
+    if err_msg:
+        return False, err_msg
     error = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
     return False, error
 

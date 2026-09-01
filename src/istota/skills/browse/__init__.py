@@ -22,10 +22,119 @@ import httpx
 
 DEFAULT_API_URL = "http://localhost:9223"
 REQUEST_TIMEOUT = 120.0  # HTTP client timeout (longer than page timeout)
+MAX_BODY_EXCERPT = 400  # chars of an undecodable body to quote back
+MAX_BODY_READ = 8192  # bytes of it to decode in the first place
+
+# Characters that must not reach the excerpt. C0 and C1 cover the ANSI escapes
+# (`\x1b`, and the C1 CSI at `\x9b`). The rest are invisible or reorder what
+# follows them: U+202E and its neighbours reverse display order, so a body
+# could otherwise render as a different message inside a line the model reads
+# as this tool's own voice. U+2028/U+2029 are absent deliberately — the
+# whitespace collapse below already takes them.
+_CONTROL_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]",
+)
 
 
 def get_api_url():
     return os.environ.get("BROWSER_API_URL", DEFAULT_API_URL)
+
+
+def _body_excerpt(resp, limit=MAX_BODY_EXCERPT):
+    """A short, printable slice of a response body we could not decode.
+
+    Returns the excerpt, `""` for a genuinely empty body, or None when the body
+    could not be read at all — the caller renders those three apart, because
+    "empty response" and "40 KB of something unreadable" are different outages
+    and reporting the second as the first is a false statement rather than a
+    missing detail.
+
+    The body is whatever the container or an intermediary produced, so it is
+    untrusted: `_CONTROL_RE` above says what is stripped and why, and runs of
+    whitespace collapse, so a Flask HTML page or a proxy's error page reports
+    as one readable line. Bounded before it is decoded rather than after, so an
+    oversized error page costs one 8 KB copy instead of several full ones.
+    Reading it must not raise, since this runs on the path that reports a
+    failure — decoding with `errors="replace"` off a `bytes` that is already
+    resident is what makes that true rather than hopeful.
+    """
+    try:
+        raw = bytes(resp.content or b"")[:MAX_BODY_READ]
+    except Exception:
+        return None
+    try:
+        text = raw.decode(resp.encoding or "utf-8", errors="replace")
+    except Exception:
+        # A bogus charset in the Content-Type is a LookupError, which is the
+        # intermediary's mistake rather than a reason to report nothing.
+        text = raw.decode("utf-8", errors="replace")
+    text = _CONTROL_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
+def _decode(resp):
+    """Return the endpoint's JSON object, or an error naming what came instead.
+
+    Every verb goes through this. The check is on the *body*, not the status:
+    the API reports its own failures as JSON with a non-2xx status
+    (`{"error": "url is required"}` with 400, `Chrome unavailable` with 503),
+    and those bodies carry the diagnosis, so a `raise_for_status()` would throw
+    away the useful half of the answer.
+
+    What has to be caught is a body that is not a JSON object at all — Flask's
+    default HTML 500 page, a 502 from something in front of the container, an
+    empty or truncated response, or well-formed JSON of the wrong shape, which
+    every caller turns into an `AttributeError` one frame later. Before
+    ISSUE-383 the decode error reached `main`'s catch-all and printed as
+    "Expecting value: line 1 column 1 (char 0)", naming no status, no URL and
+    no part of the body, so an outage could not be told apart from an empty
+    reply without reading the container's logs.
+
+    A body the API *did* report an error in is also normalized here, because
+    the API has two spellings for one thing: its 500s and 503s say
+    `{"status": "error", ...}`, while its argument and lookup failures say a
+    bare `{"error": ...}` with no `status` key at all — nine such paths, two of
+    them 500s. Every caller in this module branches on `status`, so without the
+    stamp the commonest server-side rejection (bad arguments, an expired
+    session) reads as a success: `main` exits 0 and `cmd_links` treats it as a
+    page. It also made two verbs disagree about one server response, since
+    `cmd_render` rewrites that shape by hand for its own 404 and nothing else
+    did. Stamping it here makes that rewrite the general rule.
+    """
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        if data.get("error") and "status" not in data:
+            return {"status": "error", **data}
+        return data
+
+    excerpt = _body_excerpt(resp)
+    if excerpt is None:
+        shown = "(unreadable)"
+    elif not excerpt:
+        shown = "(empty)"
+    else:
+        shown = excerpt
+    try:
+        where = f" for {resp.url}"
+    except Exception:
+        where = ""
+    error = (
+        f"Browser API returned HTTP {resp.status_code}{where} "
+        f"with a body that is not a JSON object: {shown}"
+    )
+    if resp.status_code == 503:
+        # The message the unreachable `except httpx.HTTPStatusError` arm in
+        # `main` used to hold, on a path that can actually be reached. The
+        # API's own 503 is JSON and returns above with a better one.
+        error += " — the browser may be restarting inside the container, retry in a few seconds."
+    return {"status": "error", "error": error}
 
 
 def cmd_get(args):
@@ -48,7 +157,7 @@ def cmd_get(args):
         payload["max_links"] = args.max_links
 
     resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
-    return resp.json()
+    return _decode(resp)
 
 
 def cmd_render(args):
@@ -95,7 +204,7 @@ def cmd_render(args):
             "status": "error",
             "error": "This browser container has no render endpoint — use `browse get` instead.",
         }
-    return resp.json()
+    return _decode(resp)
 
 
 def cmd_screenshot(args):
@@ -112,13 +221,27 @@ def cmd_screenshot(args):
 
     resp = httpx.post(f"{url}/screenshot", json=payload, timeout=REQUEST_TIMEOUT)
 
-    if resp.headers.get("content-type", "").startswith("image/"):
+    # The status is checked as well as the content type, because this is the
+    # one verb that reports success off a body it never parses: an intermediary
+    # answering 502 while labelling it `image/png` used to have its error page
+    # written to disk as a .png and reported `status: ok`. A zero-length body
+    # is refused for the same reason — `size: 0` reads as a screenshot.
+    is_image = resp.headers.get("content-type", "").startswith("image/")
+    if resp.status_code == 200 and is_image and resp.content:
         output = args.output or "/tmp/screenshot.png"
         with open(output, "wb") as f:
             f.write(resp.content)
         return {"status": "ok", "path": output, "size": len(resp.content)}
-    else:
-        return resp.json()
+    if is_image:
+        return {
+            "status": "error",
+            "error": (
+                f"Browser API returned HTTP {resp.status_code} with "
+                f"{len(resp.content)} bytes labelled "
+                f"{resp.headers.get('content-type', 'nothing')} — not a screenshot."
+            ),
+        }
+    return _decode(resp)
 
 
 def cmd_extract(args):
@@ -138,7 +261,7 @@ def cmd_extract(args):
         payload["limit"] = args.limit
 
     resp = httpx.post(f"{url}/extract", json=payload, timeout=REQUEST_TIMEOUT)
-    return resp.json()
+    return _decode(resp)
 
 
 def cmd_interact(args):
@@ -163,7 +286,7 @@ def cmd_interact(args):
     }
 
     resp = httpx.post(f"{url}/interact", json=payload, timeout=REQUEST_TIMEOUT)
-    return resp.json()
+    return _decode(resp)
 
 
 def _links_from_extract(data):
@@ -202,7 +325,7 @@ def cmd_links(args):
         payload = {"selector": args.selector, "timeout": args.timeout}
         payload["session_id"] = args.session
         resp = httpx.post(f"{url}/extract", json=payload, timeout=REQUEST_TIMEOUT)
-        data = resp.json()
+        data = _decode(resp)
         if data.get("status") != "ok":
             return data
         links = _links_from_extract(data)
@@ -216,7 +339,7 @@ def cmd_links(args):
         # Fetch page then extract links from selector
         payload = {"url": args.url, "timeout": args.timeout, "keep_session": False}
         resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
-        browse_data = resp.json()
+        browse_data = _decode(resp)
         if browse_data.get("status") != "ok":
             return browse_data
         session_id = browse_data.get("session_id")
@@ -227,7 +350,7 @@ def cmd_links(args):
         else:
             ext_payload["url"] = args.url
         ext_resp = httpx.post(f"{url}/extract", json=ext_payload, timeout=REQUEST_TIMEOUT)
-        data = ext_resp.json()
+        data = _decode(ext_resp)
         # Clean up session if we got one
         if session_id:
             try:
@@ -249,7 +372,7 @@ def cmd_links(args):
         if args.session:
             payload["session_id"] = args.session
         resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
-        data = resp.json()
+        data = _decode(resp)
         if data.get("status") != "ok":
             return data
         links = data.get("links", [])
@@ -265,7 +388,7 @@ def cmd_close(args):
     """Close a session."""
     url = get_api_url()
     resp = httpx.delete(f"{url}/sessions/{args.session_id}", timeout=30.0)
-    return resp.json()
+    return _decode(resp)
 
 
 def build_parser():
@@ -360,22 +483,35 @@ def main(argv=None):
         result = commands[args.command](args)
         print(json.dumps(result, indent=2, ensure_ascii=False))
     except httpx.ConnectError:
+        # Nothing answered at all, which is a different fact from the container
+        # answering badly and stays a separate message.
         print(json.dumps({
             "status": "error",
             "error": f"Cannot connect to browser API at {get_api_url()}. Is the container running?",
         }))
         sys.exit(1)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 503:
-            print(json.dumps({
-                "status": "error",
-                "error": "Browser is restarting inside the container. Retry in a few seconds.",
-            }))
-        else:
-            print(json.dumps({"status": "error", "error": str(e)}))
-        sys.exit(1)
     except Exception as e:
-        print(json.dumps({"status": "error", "error": str(e)}))
+        # `str(e)` alone is the same defect ISSUE-383 fixed one layer down:
+        # httpx's ReadTimeout stringifies to "timed out" and several of its
+        # siblings to the empty string, naming no verb, no URL and no class.
+        # That is reachable on the ordinary path, since REQUEST_TIMEOUT sits
+        # above the container's own 90s watchdog.
+        detail = str(e).strip()
+        print(json.dumps({
+            "status": "error",
+            "error": (
+                f"browse {args.command} against {get_api_url()} failed: "
+                f"{type(e).__name__}{': ' + detail if detail else ''}"
+            ),
+        }))
+        sys.exit(1)
+
+    # A failure the endpoint reported in a well-formed body is still a failure.
+    # `_decode` turned what used to be an uncaught exception into a return
+    # value, so without this a 500 would report on exit 0 where the decode
+    # error at least exited 1. Only "error" counts: "closed" and "not_found"
+    # are answers.
+    if isinstance(result, dict) and result.get("status") == "error":
         sys.exit(1)
 
 
