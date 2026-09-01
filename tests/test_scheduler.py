@@ -8668,7 +8668,7 @@ class TestSessionLogSweepWiring:
 
         assert sweep.call_count == 1
 
-    def test_the_sweep_does_not_run_when_the_feature_is_off(self, tmp_path):
+    def test_the_sweep_still_runs_when_the_feature_is_off(self, tmp_path):
         from istota.scheduler import run_cleanup_checks
 
         config = self._config(tmp_path, enabled=False)
@@ -8676,7 +8676,7 @@ class TestSessionLogSweepWiring:
             sweep.return_value = SweepResult()
             run_cleanup_checks(config)
 
-        assert sweep.call_count == 0
+        assert sweep.call_count == 1
 
     def test_retention_days_zero_still_sweeps_for_the_ceiling(self, tmp_path):
         # The `or` gate, from the age side. An operator who keeps everything
@@ -8706,7 +8706,9 @@ class TestSessionLogSweepWiring:
     def test_both_rules_disabled_sweeps_nothing(self, tmp_path):
         from istota.scheduler import run_cleanup_checks
 
-        config = self._config(tmp_path, retention_days=0, max_total_gb=0)
+        config = self._config(
+            tmp_path, enabled=False, retention_days=0, max_total_gb=0,
+        )
         with patch("istota.scheduler.sweep_session_logs") as sweep:
             sweep.return_value = SweepResult()
             run_cleanup_checks(config)
@@ -8757,16 +8759,18 @@ class TestSessionLogSweepWiring:
         assert not aged.exists()
         assert fresh.exists()
 
-    def test_a_tick_deletes_nothing_when_the_feature_is_off(self, tmp_path):
+    def test_a_tick_deletes_an_aged_log_when_the_feature_is_off(self, tmp_path):
         from istota.scheduler import run_cleanup_checks
 
         config = self._config(tmp_path, enabled=False, retention_days=14)
         root = tmp_path / "data" / "logs"
         aged = self._write_log(root, "alice", "old.jsonl", age_days=900)
+        fresh = self._write_log(root, "alice", "new.jsonl", age_days=1)
 
         run_cleanup_checks(config)
 
-        assert aged.exists()
+        assert not aged.exists()
+        assert fresh.exists()
 
     # -- failure is absorbed ----------------------------------------------
 

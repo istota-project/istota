@@ -207,7 +207,7 @@ features = []
 # generator reads and compose never passes is silently ignored, which is the
 # documented defect class (ISTOTA_EMAIL_AUTHSERV_ID).
 # [brain.native.session_log]
-# enabled = true                  # false = no writer, no file, no directory, no cost
+# enabled = true                  # false = no new files; retention still sweeps existing ones
 # dir = ""                        # "" resolves to {db_path.parent}/logs — local disk,
 #                                 #   beside istota.db / modules/ / backups/, and behind
 #                                 #   the sandbox's database mask where that mask applies.
