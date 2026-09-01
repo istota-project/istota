@@ -5,15 +5,20 @@ provider modules are tested separately (Phase 1 keeps them as a vendored
 copy of the rss-bridger logic, which already has its own tests).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 pytest.importorskip("feedparser", reason="feeds extra not installed")
 
 from istota.feeds import db as feeds_db
-from istota.feeds.models import FeedRecord
-from istota.feeds.poller import _backoff_interval, poll_due_feeds, poll_feed
+from istota.feeds.models import POLL_CLAIM_SECONDS, FeedRecord
+from istota.feeds.poller import (
+    _backoff_interval,
+    _parse_is_truncated,
+    poll_due_feeds,
+    poll_feed,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -624,3 +629,486 @@ class TestNonImageMediaAttachments:
         assert entries[0].media_url == "https://assets.example.town/media/117/original/clip.mp4"
         assert entries[0].media_type == "video/mp4"
         assert entries[0].image_urls == []
+
+
+# ---------------------------------------------------------------------------
+# membership snapshots + poll claims (ISSUE-388)
+# ---------------------------------------------------------------------------
+
+
+EMPTY_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Example</title></channel></rss>
+"""
+
+# The two documents the completeness gate has to tell apart, and each other's
+# control (ISSUE-388). Both are bozo with the same recognised `version`; the
+# only thing separating them is expat's message, which is why they are literal
+# bodies through the real feedparser rather than a stubbed parse result. A
+# wording change in expat then fails a test instead of silently switching
+# retention off for every imperfect feed, or on for truncated ones.
+#
+# Whole document, one undeclared entity. Every entry is recovered and absence
+# from it is meaningful, so it must count as a complete snapshot. This is the
+# most common defect in feeds in the wild.
+ENTITY_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>Example</title>
+<item><guid>hello-1</guid><title>Hello &nbsp; there</title></item>
+<item><guid>hello-2</guid><title>Second</title></item>
+<item><guid>hello-3</guid><title>Third</title></item>
+</channel>
+</rss>
+"""
+
+# The same feed cut off after its second item. `version` is intact because the
+# root element is at the head; the tail is simply gone. Treating it as complete
+# would make the missing entries historical and age them out.
+TRUNCATED_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>Example</title>
+<item><guid>hello-1</guid><title>Hello</title></item>
+<item><guid>hello-2</guid><title>Second</title></item>
+"""
+
+HTML_ERROR_PAGE = b"<html><body><h1>404 Not Found</h1></body></html>"
+
+TWO_ITEM_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>Example</title>
+<item><guid>one</guid><title>One</title></item>
+<item><guid>two</guid><title>Two</title></item>
+</channel>
+</rss>
+"""
+
+
+def _seed_rss_feed(tmp_path, *, url="https://example.com/feed.xml"):
+    path = tmp_path / "feeds.db"
+    feeds_db.init_db(path)
+    with feeds_db.connect(path) as conn:
+        feed_id = feeds_db.upsert_feed(
+            conn, url=url, title=None, site_url=None,
+            source_type="rss", category_id=None, poll_interval_minutes=30,
+        )
+        conn.commit()
+    return path, feed_id
+
+
+def _make_due(path):
+    with feeds_db.connect(path) as conn:
+        conn.execute(
+            "UPDATE feeds SET next_poll_at = NULL, poll_claimed_until = NULL"
+        )
+        conn.commit()
+
+
+class TestMembershipComplete:
+    def test_a_well_formed_feed_is_a_complete_snapshot(self):
+        resp = _StubResponse(status_code=200, content=SAMPLE_RSS)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.membership_complete is True
+
+    def test_a_well_formed_empty_feed_is_still_complete(self):
+        resp = _StubResponse(status_code=200, content=EMPTY_RSS)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items == []
+        assert result.membership_complete is True
+
+    def test_an_html_error_page_is_not_complete(self):
+        resp = _StubResponse(status_code=200, content=HTML_ERROR_PAGE)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.membership_complete is False
+
+    def test_an_empty_body_is_not_complete(self):
+        resp = _StubResponse(status_code=200, content=b"")
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.membership_complete is False
+
+    def test_a_truncated_document_is_not_complete_but_keeps_its_items(self):
+        """The tail is gone and nothing in the document says so.
+
+        Its entries are still identifiable and still worth refreshing; what it
+        may not do is make the entries it lost look like entries the source
+        dropped.
+        """
+        resp = _StubResponse(status_code=200, content=TRUNCATED_RSS)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.membership_complete is False
+        assert [i.guid for i in result.items] == ["hello-1", "hello-2"]
+
+    def test_an_undeclared_entity_is_still_a_complete_snapshot(self):
+        """The control for the test above, and the reason ``bozo`` alone is not
+        the gate.
+
+        Both documents are bozo with the same recognised version. This one
+        arrived whole with every entry recovered, and it is the commonest
+        defect in real feeds — gating on the raw flag would leave a large,
+        unknowable subset of feeds never establishing a snapshot, and so never
+        pruned by either pass.
+        """
+        resp = _StubResponse(status_code=200, content=ENTITY_RSS)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.membership_complete is True
+        assert [i.guid for i in result.items] == ["hello-1", "hello-2", "hello-3"]
+
+    def test_both_documents_really_are_bozo_with_the_same_version(self):
+        """What the pair above is worth depends on this being true.
+
+        If a feedparser upgrade stopped flagging one of them, or recognised
+        one's version and not the other's, the two tests would still pass while
+        testing nothing about the truncation predicate.
+        """
+        import feedparser
+
+        entity = feedparser.parse(ENTITY_RSS)
+        truncated = feedparser.parse(TRUNCATED_RSS)
+        assert entity.get("version") == truncated.get("version") == "rss20"
+        assert bool(entity.get("bozo")) and bool(truncated.get("bozo"))
+        assert _parse_is_truncated(truncated) is True
+        assert _parse_is_truncated(entity) is False
+
+    def test_a_clean_parse_is_never_truncated(self):
+        import feedparser
+
+        assert _parse_is_truncated(feedparser.parse(SAMPLE_RSS)) is False
+
+    def test_a_flagged_parse_with_nothing_to_inspect_reads_as_truncated(self):
+        """Fails in the safe direction: not advancing a snapshot costs a poll
+        cycle, advancing one wrongly deletes entries."""
+        assert _parse_is_truncated({"bozo": 1}) is True
+        assert _parse_is_truncated({"bozo": 1, "bozo_exception": None}) is True
+
+    def test_a_structurally_invalid_empty_response_stores_no_validators(self):
+        """An error page's ETag must never be stored.
+
+        Storing it turns every later request into a 304 against the error
+        page, so the feed can never recover on its own.
+        """
+        resp = _StubResponse(
+            status_code=200, content=HTML_ERROR_PAGE,
+            headers={"ETag": '"error-page"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.etag is None
+        assert result.last_modified is None
+
+    def test_a_304_is_not_complete(self):
+        resp = _StubResponse(status_code=304)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.not_modified is True
+        assert result.membership_complete is False
+
+    def test_an_http_error_is_not_complete(self):
+        resp = _StubResponse(status_code=503)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.error is not None
+        assert result.membership_complete is False
+
+    def test_a_provider_that_returns_normally_is_complete(self, monkeypatch):
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        monkeypatch.setattr(
+            arena_provider, "fetch", lambda ident, **kw: [FetchedItem(guid="b1")],
+        )
+        feed = FeedRecord(
+            id=2, url="arena:chan", title=None, site_url=None, category_id=None,
+            source_type="arena", etag=None, last_modified=None,
+            last_fetched_at=None, last_error=None, error_count=0,
+            poll_interval_minutes=60, next_poll_at=None,
+        )
+        result = poll_feed(feed)
+        assert result.membership_complete is True
+
+    def test_a_provider_that_rejects_its_payload_is_not_complete(self, monkeypatch):
+        from istota.feeds.providers import tumblr as tumblr_provider
+
+        def _boom(ident, **kw):
+            raise ValueError("tumblr response.posts missing or not a list")
+
+        monkeypatch.setattr(tumblr_provider, "fetch", _boom)
+        feed = FeedRecord(
+            id=3, url="tumblr:blog", title=None, site_url=None, category_id=None,
+            source_type="tumblr", etag=None, last_modified=None,
+            last_fetched_at=None, last_error=None, error_count=0,
+            poll_interval_minutes=60, next_poll_at=None,
+        )
+        result = poll_feed(feed, tumblr_api_key="k")
+        assert result.error is not None
+        assert result.membership_complete is False
+
+
+class TestSnapshotPersistence:
+    def test_a_complete_response_stamps_the_marker_the_entries_and_the_ranks(
+        self, tmp_path,
+    ):
+        path, feed_id = _seed_rss_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        resp = _StubResponse(status_code=200, content=TWO_ITEM_RSS)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=_stub_get_factory(resp), now=now)
+            feed = feeds_db.list_feeds(conn)[0]
+            rows = {
+                r["guid"]: r
+                for r in conn.execute(
+                    "SELECT guid, last_seen_at, document_rank FROM feed_entries"
+                )
+            }
+        assert feed.current_document_at is not None
+        assert {g: r["document_rank"] for g, r in rows.items()} == {"one": 0, "two": 1}
+        # Entries admitted from the response carry exactly the feed's marker.
+        assert {r["last_seen_at"] for r in rows.values()} == {
+            feed.current_document_at
+        }
+
+    def test_a_second_complete_response_advances_the_marker(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        first = _StubResponse(status_code=200, content=TWO_ITEM_RSS)
+        second = _StubResponse(status_code=200, content=SAMPLE_RSS)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(first),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].current_document_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(second),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            rows = {
+                r["guid"]: r["last_seen_at"]
+                for r in conn.execute("SELECT guid, last_seen_at FROM feed_entries")
+            }
+        assert feed.current_document_at > first_marker
+        # Only the guid the second document returned is stamped with it; the
+        # two it dropped keep the older observation and become history.
+        assert rows["hello-1"] == feed.current_document_at
+        assert rows["one"] == first_marker
+        assert rows["two"] == first_marker
+
+    def test_a_valid_empty_response_advances_the_marker_and_touches_no_entry(
+        self, tmp_path,
+    ):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].current_document_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=EMPTY_RSS)
+                ),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            row = conn.execute(
+                "SELECT last_seen_at FROM feed_entries WHERE guid='hello-1'"
+            ).fetchone()
+        assert feed.current_document_at > first_marker
+        assert row["last_seen_at"] == first_marker
+
+    def test_an_incomplete_response_refreshes_without_advancing_the_marker(
+        self, tmp_path,
+    ):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].current_document_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=TRUNCATED_RSS)
+                ),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            row = conn.execute(
+                "SELECT last_seen_at, document_rank FROM feed_entries "
+                "WHERE guid='hello-1'"
+            ).fetchone()
+        assert feed.current_document_at == first_marker
+        # The entry was observed, so it is not a deletion candidate — but it
+        # is now ahead of the marker rather than part of it.
+        assert row["last_seen_at"] > first_marker
+        assert row["document_rank"] == 0
+
+    def test_an_undeclared_entity_response_still_advances_the_marker(
+        self, tmp_path,
+    ):
+        """The consequence the truncation predicate exists for.
+
+        Under a plain ``bozo`` gate this feed would never establish a snapshot,
+        and since the count pass is gated on the same marker, neither retention
+        pass would ever touch it — the growth this change bounds, unbounded,
+        for the commonest defect there is.
+        """
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=ENTITY_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            ranks = {
+                r["guid"]: r["document_rank"]
+                for r in conn.execute("SELECT guid, document_rank FROM feed_entries")
+            }
+        assert feed.current_document_at is not None
+        assert ranks == {"hello-1": 0, "hello-2": 1, "hello-3": 2}
+
+    def test_a_304_preserves_the_marker_and_clears_the_claim(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].current_document_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(_StubResponse(status_code=304)),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.current_document_at == first_marker
+        assert feed.poll_claimed_until is None
+
+    def test_an_error_preserves_the_marker_and_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].current_document_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(_StubResponse(status_code=503)),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.current_document_at == first_marker
+        assert feed.poll_claimed_until is None
+
+    def test_a_rate_limit_preserves_the_marker_and_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].current_document_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn,
+                http_get=_stub_get_factory(
+                    _StubResponse(status_code=429, headers={"Retry-After": "60"})
+                ),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.current_document_at == first_marker
+        assert feed.poll_claimed_until is None
+        assert feed.last_throttled_at is not None
+
+    def test_a_successful_poll_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.poll_claimed_until is None
+
+
+class TestPollClaimsInTheBatch:
+    def test_a_claimed_feed_is_not_fetched(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        calls: list[str] = []
+
+        def _get(url, **kwargs):
+            calls.append(url)
+            return _StubResponse(status_code=200, content=SAMPLE_RSS)
+
+        with feeds_db.connect(path) as claimer:
+            feeds_db.claim_feed_for_poll(claimer, feed_id, now=now)
+
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_get, now=now + timedelta(seconds=5),
+            )
+            entries = feeds_db.list_entries(conn)
+        assert calls == []
+        assert outcomes == []
+        assert entries == []
+
+    def test_a_poll_claims_the_feed_before_fetching_it(self, tmp_path):
+        """The claim is committed before the network call, not after it.
+
+        A second process reading the table mid-fetch is exactly the race this
+        exists for, so the assertion is made from inside the stub.
+        """
+        path, feed_id = _seed_rss_feed(tmp_path)
+        observed: list[str | None] = []
+
+        def _get(url, **kwargs):
+            with feeds_db.connect(path) as other:
+                row = other.execute(
+                    "SELECT poll_claimed_until FROM feeds WHERE id = ?", (feed_id,),
+                ).fetchone()
+            observed.append(row["poll_claimed_until"])
+            return _StubResponse(status_code=200, content=SAMPLE_RSS)
+
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_get,
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+        assert observed and observed[0] is not None
+
+    def test_an_expired_claim_does_not_block_the_next_run(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as claimer:
+            feeds_db.claim_feed_for_poll(claimer, feed_id, now=now)
+        resp = _StubResponse(status_code=200, content=SAMPLE_RSS)
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_stub_get_factory(resp),
+                now=now + timedelta(seconds=POLL_CLAIM_SECONDS + 1),
+            )
+        assert len(outcomes) == 1

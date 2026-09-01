@@ -577,3 +577,52 @@ class TestNeverBlank:
         items = arena_provider.fetch("c")
 
         assert [i.guid for i in items] == ["7"]
+
+
+@pytest.fixture
+def stub_raw(monkeypatch):
+    """Patch ``httpx.get`` with a payload passed through verbatim.
+
+    The ``stub_get`` fixture above always wraps its blocks in a well-formed
+    ``{"data": [...]}``, which is exactly the shape under test here.
+    """
+
+    def _install(payload):
+        def _get(url, params=None, headers=None, timeout=None):
+            return _StubResponse(payload)
+
+        monkeypatch.setattr(arena_provider.httpx, "get", _get)
+
+    return _install
+
+
+class TestPayloadValidation:
+    """A response that is not a block collection must not read as "no blocks".
+
+    ``payload.get("data") or []`` turned every malformed payload into an empty
+    list, indistinguishable from a channel that really is empty. Once absence
+    drives retention, that difference decides whether stored entries are
+    treated as gone (ISSUE-388).
+    """
+
+    def test_a_valid_empty_collection_succeeds(self, stub_raw):
+        stub_raw({"data": [], "meta": {}})
+        assert arena_provider.fetch("c") == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({}, id="data-missing"),
+            pytest.param({"data": None}, id="data-null"),
+            pytest.param({"data": {}}, id="data-object"),
+            pytest.param({"data": 3}, id="data-scalar"),
+            pytest.param({"data": "none"}, id="data-string"),
+            pytest.param([], id="payload-list"),
+            pytest.param("not json", id="payload-string"),
+            pytest.param(None, id="payload-null"),
+        ],
+    )
+    def test_a_malformed_collection_is_rejected(self, stub_raw, payload):
+        stub_raw(payload)
+        with pytest.raises(ValueError):
+            arena_provider.fetch("c")
