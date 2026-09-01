@@ -1,9 +1,18 @@
 """Tests for the native feeds SQLite layer."""
 
+import sqlite3
+
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from istota.feeds import db as feeds_db
-from istota.feeds.models import EntryRecord
+from istota.feeds.models import (
+    DEFAULT_ENTRY_RETENTION_DAYS,
+    DEFAULT_MAX_ENTRIES_PER_FEED,
+    POLL_CLAIM_SECONDS,
+    EntryRecord,
+)
 
 
 class TestInitDb:
@@ -1368,3 +1377,493 @@ class TestImageDedupeWindowSetting:
             feeds_db.set_image_dedupe_window_days(conn, None)
             conn.commit()
             assert feeds_db.get_image_dedupe_window_days(conn) is None
+
+
+# ---------------------------------------------------------------------------
+# schema v8 — observation state, snapshot marker, poll claims (ISSUE-388)
+# ---------------------------------------------------------------------------
+
+
+def _seed_one_feed(tmp_path, *, url="https://example.com/feed.xml"):
+    """A migrated DB with one RSS feed. Returns ``(path, feed_id)``."""
+    path = tmp_path / "feeds.db"
+    feeds_db.init_db(path)
+    with feeds_db.connect(path) as conn:
+        feed_id = feeds_db.upsert_feed(
+            conn, url=url, title=None, site_url=None,
+            source_type="rss", category_id=None, poll_interval_minutes=30,
+        )
+        conn.commit()
+    return path, feed_id
+
+
+def _entry(feed_id, guid, fetched_at, **over):
+    base = dict(
+        id=0, feed_id=feed_id, guid=guid, title=guid, url=None, author=None,
+        content_html=None, content_text=None, image_urls=[], published_at=None,
+        fetched_at=fetched_at,
+    )
+    base.update(over)
+    return EntryRecord(**base)
+
+
+def _rewind_to_v7(path):
+    """Strip every v8 addition from a migrated DB and re-stamp it as v7.
+
+    The same shape the v3→v4 and v5→v6 tests use: rewinding a real DB rather
+    than hand-building one keeps the fixture honest about what production
+    actually holds. The index goes first — SQLite refuses to drop a column an
+    index references.
+
+    ``DROP COLUMN`` edits the stored ``CREATE TABLE`` text and re-parses it,
+    and dropping the table's *physically last* column out of the commented
+    schema this module ships left it unparseable ("incomplete input"). That is
+    why ``feeds`` keeps ``next_poll_at`` last and the v8 columns sit beside the
+    other poll-state ones.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_entries_feed_last_seen_unstarred")
+        conn.execute("ALTER TABLE feed_entries DROP COLUMN last_seen_at")
+        conn.execute("ALTER TABLE feed_entries DROP COLUMN document_rank")
+        conn.execute("ALTER TABLE feeds DROP COLUMN current_document_at")
+        conn.execute("ALTER TABLE feeds DROP COLUMN poll_claimed_until")
+        conn.execute(
+            "DELETE FROM schema_meta WHERE key IN (?, ?, ?)",
+            (
+                feeds_db.ENTRY_RETENTION_DAYS_KEY,
+                feeds_db.MAX_ENTRIES_PER_FEED_KEY,
+                feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY,
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','7')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestSchemaV8Migration:
+    def _v7_db_with_history(self, tmp_path):
+        """A v7 DB holding one feed with live validators and two entries."""
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                _entry(feed_id, "old", "2026-01-01T00:00:00+00:00"),
+                _entry(feed_id, "older", "2025-06-01T00:00:00+00:00"),
+            ])
+            feeds_db.update_feed_fetch_state(
+                conn, feed_id,
+                etag='"v1"', last_modified="Wed, 01 Jan 2026 00:00:00 GMT",
+                last_fetched_at="2026-01-01T00:00:00+00:00",
+                last_error=None, error_count=0,
+                next_poll_at="2030-01-01T00:00:00+00:00",
+            )
+            conn.commit()
+        _rewind_to_v7(path)
+        return path, feed_id
+
+    def test_migration_adds_columns_and_the_partial_index(self, tmp_path):
+        path, _ = self._v7_db_with_history(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            entry_cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")
+            }
+            feed_cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
+            index = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_entries_feed_last_seen_unstarred",),
+            ).fetchone()
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='version'"
+            ).fetchone()["value"]
+
+        assert {"last_seen_at", "document_rank"} <= entry_cols
+        assert {"current_document_at", "poll_claimed_until"} <= feed_cols
+        assert index is not None and "starred = 0" in index["sql"]
+        assert version == "8"
+
+    def test_migration_stamps_one_observation_time_and_no_ranks(self, tmp_path):
+        path, _ = self._v7_db_with_history(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT guid, last_seen_at, document_rank, fetched_at "
+                "FROM feed_entries ORDER BY guid"
+            ).fetchall()
+        assert [r["guid"] for r in rows] == ["old", "older"]
+        stamps = {r["last_seen_at"] for r in rows}
+        assert len(stamps) == 1 and None not in stamps
+        assert all(r["document_rank"] is None for r in rows)
+        # First-fetch ordering is untouched by the migration.
+        assert [r["fetched_at"] for r in rows] == [
+            "2026-01-01T00:00:00+00:00", "2025-06-01T00:00:00+00:00",
+        ]
+
+    def test_migration_clears_validators_and_makes_the_feed_due(self, tmp_path):
+        path, _ = self._v7_db_with_history(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            feed = feeds_db.list_feeds(conn)[0]
+            due = feeds_db.feeds_due_for_poll(
+                conn, now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            )
+        assert feed.etag is None
+        assert feed.last_modified is None
+        assert feed.next_poll_at is None
+        assert feed.current_document_at is None
+        assert feed.poll_claimed_until is None
+        assert [f.id for f in due] == [feed.id]
+
+    def test_migration_stores_explicit_defaults_and_a_ninety_day_grace(
+        self, tmp_path,
+    ):
+        path, _ = self._v7_db_with_history(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            meta = {
+                r["key"]: r["value"]
+                for r in conn.execute("SELECT key, value FROM schema_meta")
+            }
+            stamp = conn.execute(
+                "SELECT last_seen_at FROM feed_entries LIMIT 1"
+            ).fetchone()["last_seen_at"]
+        assert meta[feeds_db.ENTRY_RETENTION_DAYS_KEY] == str(
+            DEFAULT_ENTRY_RETENTION_DAYS
+        )
+        assert meta[feeds_db.MAX_ENTRIES_PER_FEED_KEY] == str(
+            DEFAULT_MAX_ENTRIES_PER_FEED
+        )
+        grace = datetime.fromisoformat(meta[feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY])
+        assert grace - datetime.fromisoformat(stamp) == timedelta(days=90)
+
+    def test_rerunning_init_db_preserves_overrides_ranks_and_grace(self, tmp_path):
+        path, feed_id = self._v7_db_with_history(tmp_path)
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+                (feeds_db.MAX_ENTRIES_PER_FEED_KEY, "10"),
+            )
+            conn.execute("UPDATE feed_entries SET document_rank = 3 WHERE guid='old'")
+            conn.execute(
+                "UPDATE feeds SET current_document_at = ? WHERE id = ?",
+                ("2026-09-01T00:00:00+00:00", feed_id),
+            )
+            conn.commit()
+            before = {
+                r["key"]: r["value"]
+                for r in conn.execute("SELECT key, value FROM schema_meta")
+            }
+            stamps_before = [
+                r["last_seen_at"]
+                for r in conn.execute("SELECT last_seen_at FROM feed_entries")
+            ]
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            after = {
+                r["key"]: r["value"]
+                for r in conn.execute("SELECT key, value FROM schema_meta")
+            }
+            ranks = {
+                r["guid"]: r["document_rank"]
+                for r in conn.execute("SELECT guid, document_rank FROM feed_entries")
+            }
+            stamps_after = [
+                r["last_seen_at"]
+                for r in conn.execute("SELECT last_seen_at FROM feed_entries")
+            ]
+            feed = feeds_db.list_feeds(conn)[0]
+        assert after == before
+        assert ranks["old"] == 3
+        assert stamps_after == stamps_before
+        assert feed.current_document_at == "2026-09-01T00:00:00+00:00"
+
+    def test_a_fresh_database_has_the_columns_and_no_grace_row(self, tmp_path):
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            entry_cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")
+            }
+            feed_cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
+            index = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_entries_feed_last_seen_unstarred",),
+            ).fetchone()
+            keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
+        assert {"last_seen_at", "document_rank"} <= entry_cols
+        assert {"current_document_at", "poll_claimed_until"} <= feed_cols
+        assert index is not None
+        assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY not in keys
+        # A fresh DB resolves the policy from the constants rather than storing
+        # explicit rows, so an operator-visible default is never frozen at
+        # install time.
+        assert feeds_db.ENTRY_RETENTION_DAYS_KEY not in keys
+        assert feeds_db.MAX_ENTRIES_PER_FEED_KEY not in keys
+
+
+class TestPollClaims:
+    def test_claim_succeeds_and_writes_the_lease(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.claim_feed_for_poll(conn, feed_id, now=now) is True
+            feed = feeds_db.list_feeds(conn)[0]
+        expected = (now + timedelta(seconds=POLL_CLAIM_SECONDS)).isoformat()
+        assert feed.poll_claimed_until == expected
+
+    def test_a_live_claim_blocks_a_second_caller(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.claim_feed_for_poll(conn, feed_id, now=now) is True
+        # A genuinely separate connection, as a competing process would be.
+        with feeds_db.connect(path) as other:
+            assert feeds_db.claim_feed_for_poll(
+                other, feed_id, now=now + timedelta(seconds=30),
+            ) is False
+
+    def test_the_claim_commits_so_another_connection_sees_it(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            feeds_db.claim_feed_for_poll(conn, feed_id, now=now)
+            with feeds_db.connect(path) as other:
+                row = other.execute(
+                    "SELECT poll_claimed_until FROM feeds WHERE id = ?", (feed_id,),
+                ).fetchone()
+        assert row["poll_claimed_until"] is not None
+
+    def test_an_expired_claim_can_be_taken_again(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            feeds_db.claim_feed_for_poll(conn, feed_id, now=now)
+            later = now + timedelta(seconds=POLL_CLAIM_SECONDS + 1)
+            assert feeds_db.claim_feed_for_poll(conn, feed_id, now=later) is True
+
+    def test_a_feed_that_is_not_due_cannot_be_claimed(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feeds SET next_poll_at = ? WHERE id = ?",
+                ((now + timedelta(hours=1)).isoformat(), feed_id),
+            )
+            conn.commit()
+            assert feeds_db.claim_feed_for_poll(conn, feed_id, now=now) is False
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.poll_claimed_until is None
+
+    def test_a_naive_clock_is_refused(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            with pytest.raises(ValueError):
+                feeds_db.claim_feed_for_poll(
+                    conn, feed_id, now=datetime(2026, 9, 1, 12, 0),
+                )
+
+    def test_the_due_list_excludes_a_live_claim(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            feeds_db.claim_feed_for_poll(conn, feed_id, now=now)
+            during = feeds_db.feeds_due_for_poll(
+                conn, now=now + timedelta(seconds=10),
+            )
+            after = feeds_db.feeds_due_for_poll(
+                conn, now=now + timedelta(seconds=POLL_CLAIM_SECONDS + 1),
+            )
+        assert during == []
+        assert [f.id for f in after] == [feed_id]
+
+
+class TestObservationState:
+    def test_an_insert_stamps_the_observation_and_leaves_the_rank_null(
+        self, tmp_path,
+    ):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(
+                conn, feed_id, [_entry(feed_id, "a", "2026-09-01T12:00:00+00:00")],
+            )
+            row = conn.execute(
+                "SELECT last_seen_at, document_rank FROM feed_entries WHERE guid='a'"
+            ).fetchone()
+        assert row["last_seen_at"] == "2026-09-01T12:00:00+00:00"
+        assert row["document_rank"] is None
+
+    def test_document_ranks_are_written_when_supplied(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [
+                    _entry(feed_id, "a", "2026-09-01T12:00:00+00:00"),
+                    _entry(feed_id, "b", "2026-09-01T12:00:00+00:00"),
+                ],
+                document_ranks={"a": 0, "b": 1},
+            )
+            ranks = {
+                r["guid"]: r["document_rank"]
+                for r in conn.execute("SELECT guid, document_rank FROM feed_entries")
+            }
+        assert ranks == {"a": 0, "b": 1}
+
+    def test_a_refresh_advances_the_observation_and_holds_the_rank(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [_entry(feed_id, "a", "2026-09-01T12:00:00+00:00")],
+                document_ranks={"a": 4},
+            )
+            conn.execute("UPDATE feed_entries SET status = 'read' WHERE guid='a'")
+            # An incomplete response: the entry is observed again, but nothing
+            # about the feed's window is being asserted, so the rank stands.
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [_entry(
+                    feed_id, "a", "2026-09-02T12:00:00+00:00",
+                    content_html="<p>fuller</p>",
+                )],
+            )
+            row = conn.execute(
+                "SELECT last_seen_at, document_rank, fetched_at, status, "
+                "content_html FROM feed_entries WHERE guid='a'"
+            ).fetchone()
+        assert row["last_seen_at"] == "2026-09-02T12:00:00+00:00"
+        assert row["document_rank"] == 4
+        # First-fetch time and user state are untouched, as before.
+        assert row["fetched_at"] == "2026-09-01T12:00:00+00:00"
+        assert row["status"] == "read"
+        assert row["content_html"] == "<p>fuller</p>"
+
+    def test_a_later_complete_response_replaces_the_rank(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [_entry(feed_id, "a", "2026-09-01T12:00:00+00:00")],
+                document_ranks={"a": 4},
+            )
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [_entry(feed_id, "a", "2026-09-02T12:00:00+00:00")],
+                document_ranks={"a": 0},
+            )
+            row = conn.execute(
+                "SELECT document_rank FROM feed_entries WHERE guid='a'"
+            ).fetchone()
+        assert row["document_rank"] == 0
+
+    def test_a_unique_conflict_loser_still_refreshes_and_stamps(self, tmp_path):
+        """The ``INSERT OR IGNORE`` race branch must not skip the stamp.
+
+        A competing writer inserts the same guid between our lookup and our
+        insert. The old code took ``continue`` there, so the row kept whatever
+        observation state the winner gave it and this poll's content was
+        dropped. The poll claim makes this unreachable on the normal path;
+        ``insert_entries`` still has to be right for a direct caller.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+
+        class _RacingConn:
+            """Delegates to a real connection, inserting a competing row just
+            before ``insert_entries`` issues its own INSERT."""
+
+            def __init__(self, conn, db_path, feed_id):
+                self._conn = conn
+                self._db_path = db_path
+                self._feed_id = feed_id
+                self._fired = False
+
+            def execute(self, sql, parameters=()):
+                if not self._fired and "INSERT OR IGNORE INTO feed_entries" in sql:
+                    self._fired = True
+                    rival = sqlite3.connect(self._db_path)
+                    try:
+                        rival.execute(
+                            "INSERT INTO feed_entries(feed_id, guid, title, "
+                            "fetched_at, status) VALUES (?, ?, ?, ?, 'unread')",
+                            (self._feed_id, "a", "thin",
+                             "2026-08-01T00:00:00+00:00"),
+                        )
+                        rival.commit()
+                    finally:
+                        rival.close()
+                return self._conn.execute(sql, parameters)
+
+        with feeds_db.connect(path) as conn:
+            racing = _RacingConn(conn, path, feed_id)
+            inserted = feeds_db.insert_entries(
+                racing, feed_id,
+                [_entry(
+                    feed_id, "a", "2026-09-01T12:00:00+00:00",
+                    content_html="<p>ours</p>",
+                )],
+                document_ranks={"a": 0},
+            )
+            row = conn.execute(
+                "SELECT last_seen_at, document_rank, content_html, fetched_at "
+                "FROM feed_entries WHERE guid='a'"
+            ).fetchone()
+        # The row was not ours to insert, so it is not counted as new.
+        assert inserted == 0
+        assert row["last_seen_at"] == "2026-09-01T12:00:00+00:00"
+        assert row["document_rank"] == 0
+        assert row["content_html"] == "<p>ours</p>"
+        # The winner's first-fetch time stands.
+        assert row["fetched_at"] == "2026-08-01T00:00:00+00:00"
+
+
+class TestFetchStateSnapshotFields:
+    def _state_kwargs(self):
+        return dict(
+            etag=None, last_modified=None,
+            last_fetched_at="2026-09-01T12:00:00+00:00",
+            last_error=None, error_count=0,
+            next_poll_at="2026-09-01T12:30:00+00:00",
+        )
+
+    def test_omitted_snapshot_arguments_leave_both_columns_alone(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feeds SET current_document_at = ?, poll_claimed_until = ? "
+                "WHERE id = ?",
+                ("2026-08-01T00:00:00+00:00", "2026-09-01T12:05:00+00:00", feed_id),
+            )
+            feeds_db.update_feed_fetch_state(conn, feed_id, **self._state_kwargs())
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.current_document_at == "2026-08-01T00:00:00+00:00"
+        assert feed.poll_claimed_until == "2026-09-01T12:05:00+00:00"
+
+    def test_the_snapshot_marker_and_claim_can_be_written(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feeds SET poll_claimed_until = ? WHERE id = ?",
+                ("2026-09-01T12:05:00+00:00", feed_id),
+            )
+            feeds_db.update_feed_fetch_state(
+                conn, feed_id,
+                current_document_at="2026-09-01T12:00:00+00:00",
+                poll_claimed_until=None,
+                **self._state_kwargs(),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.current_document_at == "2026-09-01T12:00:00+00:00"
+        assert feed.poll_claimed_until is None
