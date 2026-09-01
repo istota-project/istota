@@ -1934,9 +1934,20 @@ def derive_credential_set(skill_index: dict) -> frozenset[str]:
 
 
 # Non-secret env vars the executor itself withholds from Claude, on top of the
-# manifest-declared ``proxy_only`` ones. ISTOTA_DB_PATH is in no skill.md — it
-# is set imperatively for every task — so it has no manifest to carry the flag.
-_EXECUTOR_PROXY_ONLY_VARS = frozenset({"ISTOTA_DB_PATH"})
+# manifest-declared ``proxy_only`` ones. Neither is in any skill.md — both are
+# set imperatively for every task — so neither has a manifest to carry the flag.
+#
+# ISTOTA_TASK_ATTEMPT is here rather than in the model's env because the model
+# has no use for it and `tasks transcript` treats it as authority: it is the
+# floor that withholds the transcript the calling run is still writing, so a
+# value the model could replace is a floor the model could raise above every
+# file. The proxy path was never exposed (`SkillProxy` spawns the CLI from the
+# daemon's own snapshot, taking nothing from the request), but
+# `skill_client._run_direct` re-execs with the *inherited* environment on a
+# proxy-off deployment. Withholding it keeps that shape failing closed, which
+# is exactly what it did before ISSUE-377 by way of ISTOTA_DB_PATH — the floor
+# read the database then, and that path is stripped here too.
+_EXECUTOR_PROXY_ONLY_VARS = frozenset({"ISTOTA_DB_PATH", "ISTOTA_TASK_ATTEMPT"})
 
 
 def derive_proxy_only_set(skill_index: dict) -> frozenset[str]:
@@ -1945,7 +1956,8 @@ def derive_proxy_only_set(skill_index: dict) -> frozenset[str]:
     The third bucket alongside credentials and the clean env: values the
     host-side skill CLI needs but the model must not hold. Today that is the
     database paths — ``ISTOTA_DB_PATH`` plus the ``proxy_only`` vars the health
-    and location manifests declare for their per-user module DBs.
+    and location manifests declare for their per-user module DBs — and
+    ``ISTOTA_TASK_ATTEMPT``, which is authority rather than a path.
 
     Unlike ``derive_credential_set`` this is not per-skill-scoped. These aren't
     secrets, so there is nothing to leak between skills, and scoping them would
@@ -5502,9 +5514,27 @@ def execute_task(
         use_streaming = event_writer is not None
         allowed = build_allowed_tools(is_admin, selected_skills)
 
+        # Which attempt of this task is running, bound once and read twice: it
+        # goes into the environment here and names the session log's file on
+        # the brain request some six hundred lines below. The exclusion that
+        # keeps a task out of the transcript it is writing is an *equality*
+        # between those two, so they are one expression rather than two copies
+        # of `attempt_count + 1` far enough apart to drift unnoticed — and the
+        # direction they would drift in is the permissive one, a floor above
+        # the live file. `+ 1` because the counter records *prior* attempts, so
+        # a first run is attempt 1, as `task_usage.attempt_seq` is.
+        task_attempt = task.attempt_count + 1
+
         env = build_clean_env(config)
         env.update({
             "ISTOTA_TASK_ID": str(task.id),
+            # `tasks transcript` reads this to decide which log is the one being
+            # written right now. The row it used to read that from is bumped by
+            # the liveness reaper underneath a worker the reaper wrongly
+            # believes is dead, which handed that worker its own live
+            # transcript (ISSUE-377). Withheld from the model — see
+            # `_EXECUTOR_PROXY_ONLY_VARS`.
+            "ISTOTA_TASK_ATTEMPT": str(task_attempt),
             "ISTOTA_USER_ID": task.user_id,
             "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
             "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
@@ -6191,8 +6221,12 @@ def execute_task(
             # label, which are named from the raw counter: those are within-run
             # identifiers with no reader outside the process, while an operator
             # reads a log file name against the usage table.
+            #
+            # The same binding as `ISTOTA_TASK_ATTEMPT` above, deliberately: the
+            # floor that withholds a live transcript is an equality between the
+            # two, so re-deriving it here would be a second copy to keep in step.
             task_id=task.id,
-            attempt=task.attempt_count + 1,
+            attempt=task_attempt,
             user_id=task.user_id or "",
             source_type=task.source_type or "",
             conversation_token=task.conversation_token or "",

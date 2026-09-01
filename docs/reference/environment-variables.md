@@ -9,6 +9,7 @@ Set for every task:
 | Variable | Source |
 |---|---|
 | `ISTOTA_TASK_ID` | Task ID |
+| `ISTOTA_TASK_ATTEMPT` | Which attempt of that task is running, 1-based (`attempt_count + 1`), matching the session log's file name. `tasks transcript` reads it to exclude the transcript the calling run is still writing — a fact about the process, so it is fixed in the environment rather than re-read from a row the stuck-task reaper mutates. Handed to skill CLIs via the proxy; never present in the model's own environment, since it is what the exclusion trusts |
 | `ISTOTA_USER_ID` | Task's user ID |
 | `ISTOTA_DB_PATH` | Framework database path. Handed to skill CLIs via the proxy for every user; never present in the model's own environment |
 | `ISTOTA_CONVERSATION_TOKEN` | Talk room token (if set) |

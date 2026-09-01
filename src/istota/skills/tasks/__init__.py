@@ -135,6 +135,11 @@ SESSION_LOG_DIR_VAR = "ISTOTA_SESSION_LOG_DIR"
 # exclusion because the causes and the remedies are different.
 _FLOOR_UNKNOWN = -1
 
+# Which attempt of `ISTOTA_TASK_ID` the calling process is running. Set beside
+# it by every path that sets it, and read here instead of the task row — see
+# `_running_attempt_floor`.
+TASK_ATTEMPT_VAR = "ISTOTA_TASK_ATTEMPT"
+
 
 def setup_env(ctx) -> dict[str, str]:
     """Inject ``ISTOTA_SESSION_LOG_DIR`` for the ``transcript`` verb.
@@ -575,7 +580,7 @@ def _session_log_root():
     return Path(value) if value else None
 
 
-def _running_attempt_floor(user_id: str, task_id: int) -> int:
+def _running_attempt_floor(task_id: int) -> int:
     """The attempt of *task_id* running right now, or ``0`` if that isn't us.
 
     A task reading its own in-flight log is a loop: it reads its own thinking,
@@ -583,20 +588,25 @@ def _running_attempt_floor(user_id: str, task_id: int) -> int:
     the same task are the useful case ("my last attempt failed, why"), so the
     cut is at an attempt number rather than at the task.
 
-    The number is read off the task row rather than guessed from the newest file
-    on disk, because a run whose writer was disabled has no file and the newest
-    one on disk is then an *earlier* attempt that would be excluded for nothing.
-    ``executor`` builds the brain request with ``attempt_count + 1``, since the
-    counter counts prior attempts.
+    **The number comes off the environment, never off the task row** (ISSUE-377).
+    Which attempt a process is running is a fact about that process, fixed when
+    the executor built its environment; ``attempt_count`` is shared mutable
+    state that another thread rewrites. Both the claim path's preamble and
+    ``fail_stuck_locked_running_tasks`` bump it to release a task they have
+    decided is stuck, and that decision is wrong whenever the worker is merely
+    slow rather than gone. A row-derived floor then names the attempt the *next*
+    worker will run, and the live file this process is appending to sits below
+    it — the exact loop the exclusion exists to prevent. The executor exports
+    ``attempt_count + 1``, which is the same arithmetic the session log's file
+    name uses, so the floor and the name agree by construction.
 
-    Anything that leaves the number unknown — no database path, an unreadable
-    row, a task that is not this user's — excludes every attempt of the current
-    task. Failing closed costs the earlier-attempt case and never hands a task
-    the log it is writing.
+    Anything that leaves the number unknown excludes every attempt of the
+    current task. Failing closed costs the earlier-attempt case and never hands
+    a task the log it is writing.
 
-    ``_FLOOR_UNKNOWN`` is the case where even *which* task is running cannot be
-    read, which is the environment being broken rather than a transcript being
-    in flight. It excludes the same set, and it is a distinct value so the
+    ``_FLOOR_UNKNOWN`` is the case where the environment does not say which run
+    this is, which is the environment being broken rather than a transcript
+    being in flight. It excludes the same set, and it is a distinct value so the
     caller's ``reason`` names the actual cause: reported as "the attempt running
     now", one bad variable reads as a transcript that will exist shortly, and
     nobody looks at the environment.
@@ -612,17 +622,18 @@ def _running_attempt_floor(user_id: str, task_id: int) -> int:
         return _FLOOR_UNKNOWN
     if current_id != task_id:
         return 0
-    if not os.environ.get("ISTOTA_DB_PATH"):
-        return _FLOOR_UNKNOWN
     try:
-        from istota import db  # noqa: PLC0415
-
-        with _get_conn() as conn:
-            state = db.get_task_state_for_user(conn, task_id, user_id)
-    except Exception:  # noqa: BLE001 — an unreadable row must fail closed
+        attempt = int(os.environ.get(TASK_ATTEMPT_VAR, ""))
+    except ValueError:
+        # `ValueError` alone: `.get` with a default never returns None, so
+        # there is no `TypeError` to catch. It covers the unset variable (the
+        # `""` default), a non-numeric one, and — past CPython's 4300-digit
+        # ceiling — an absurdly long one.
         return _FLOOR_UNKNOWN
-    count = state.get("attempt_count") if isinstance(state, dict) else None
-    return count + 1 if isinstance(count, int) and count >= 0 else _FLOOR_UNKNOWN
+    # A log's attempt is 1-based, so nothing below 1 names a real run — and 0 is
+    # the value that means "not my task", which would excuse the exclusion
+    # entirely rather than fail it closed.
+    return attempt if attempt >= 1 else _FLOOR_UNKNOWN
 
 
 def _unavailable(task_id: int, reason: str, **extra) -> None:
@@ -682,7 +693,7 @@ def cmd_transcript(args):
             "session transcripts are not available on this deployment",
         )
 
-    floor = _running_attempt_floor(user_id, args.task_id)
+    floor = _running_attempt_floor(args.task_id)
     found = reader.find_logs(root, user_id, task_id=args.task_id)
     readable: list[tuple[object, int]] = []
     for path in found:
@@ -700,7 +711,7 @@ def cmd_transcript(args):
                 args.task_id,
                 "this process cannot tell which run it is, so no attempt of this "
                 "task can be read from inside it — ISTOTA_TASK_ID or "
-                "ISTOTA_DB_PATH is missing or malformed",
+                "ISTOTA_TASK_ATTEMPT is missing or malformed",
             )
         if found and floor:
             _unavailable(
