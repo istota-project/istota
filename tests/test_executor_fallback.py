@@ -888,9 +888,10 @@ class TestFallbackNoticeText:
 
     def test_names_both_brains_and_the_reason(self):
         text = fallback_notice_text("claude_code", "usage_limit", "native", "", None)
-        assert "claude_code" in text
-        assert "native" in text
-        assert "usage limit" in text
+        assert text == (
+            "My `claude_code` brain overheated when it hit its usage limit. "
+            "I'm using my `native` backup. I might say weird stuff, but I'm doing my best."
+        )
 
     def test_names_the_model_when_it_is_known(self):
         text = fallback_notice_text("claude_code", "usage_limit", "native", "vendor/model-x", None)
@@ -906,7 +907,21 @@ class TestFallbackNoticeText:
 
     def test_cooldown_reads_as_cooling_down_not_as_a_fresh_failure(self):
         text = fallback_notice_text("claude_code", "cooldown", "native", "", None)
-        assert "cooling down" in text
+        assert text.startswith("My `claude_code` brain is still cooling down")
+        assert "overheated" not in text
+
+    @pytest.mark.parametrize(
+        ("reason", "plain_language_reason"),
+        [
+            ("not_found", "I can't find its CLI"),
+            ("transient_api_error", "its provider returned an error"),
+            ("fallback", "it couldn't start"),
+        ],
+    )
+    def test_non_quota_failures_are_straightforward(self, reason, plain_language_reason):
+        text = fallback_notice_text("claude_code", reason, "native", "", None)
+        assert plain_language_reason in text
+        assert "overheated" not in text
 
     def test_unknown_reason_passes_through(self):
         text = fallback_notice_text("claude_code", "weird_new_reason", "native", "", None)
