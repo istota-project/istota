@@ -46,6 +46,8 @@ room = "ROOM_TOKEN"
 
 ## Fields
 
+These are TOML basic strings: a backslash or a double quote inside one must be escaped (`\\` and `\"`). An unescaped one makes the whole block unreadable, and every job in the file stops running until it is repaired. Prefer `prompt_file` for anything holding a regex, a Windows path, or quoted text.
+
 - `name`: Unique per user, short identifier (e.g., `daily-report`, `weekly-cleanup`)
 - `cron`: Standard 5-field cron (minute hour day month weekday). Evaluated in the user's configured timezone
 - `prompt`: The full prompt text that will be executed as a task (via Claude Code). Mutually exclusive with `command` and `prompt_file`
