@@ -416,15 +416,27 @@ def cmd_remove(ctx: FeedsContext, url, feed_id) -> None:
 @click.option("--id", "feed_id", type=int, help="Feed id (omit to mark all due)")
 @pass_ctx
 def cmd_refresh(ctx: FeedsContext, feed_id) -> None:
-    """Mark feeds due for the next poll cycle by clearing ``next_poll_at``."""
+    """Mark feeds due for the next poll cycle by clearing ``next_poll_at``.
+
+    The poll claim goes with it. A poll killed mid-run — a skill-task timeout,
+    a container restart — leaves a lease behind, and `feeds_due_for_poll`
+    excludes a feed under one, so clearing only `next_poll_at` would report
+    the feed made due while it stayed unpollable for up to five minutes. This
+    is the one command whose whole purpose is "poll this now", so it is also
+    the manual release for a lease whose process is gone.
+    """
     feeds_db.init_db(ctx.db_path)
     with feeds_db.connect(ctx.db_path) as conn:
         if feed_id:
             cur = conn.execute(
-                "UPDATE feeds SET next_poll_at = NULL WHERE id = ?", (feed_id,),
+                "UPDATE feeds SET next_poll_at = NULL, poll_claimed_until = NULL "
+                "WHERE id = ?",
+                (feed_id,),
             )
         else:
-            cur = conn.execute("UPDATE feeds SET next_poll_at = NULL")
+            cur = conn.execute(
+                "UPDATE feeds SET next_poll_at = NULL, poll_claimed_until = NULL"
+            )
         conn.commit()
     _output(_ok(reset_count=cur.rowcount))
 

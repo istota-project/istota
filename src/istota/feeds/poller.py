@@ -204,11 +204,20 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
         new_etag = resp_headers.get("etag")
         new_last_modified = resp_headers.get("last-modified")
 
-    if not membership_complete and not items:
-        # Never store a validator taken off a document we could not read and
-        # that yielded nothing. An error page's ETag answers every later
-        # request with a 304, and a 304 carries no entries — so the feed could
-        # never establish a snapshot again, and could not recover on its own.
+    if not membership_complete:
+        # Never store a validator taken off a document we could not read
+        # whole. An ETag answers every later request with a 304, and a 304
+        # carries no entries — so the feed could never establish a snapshot
+        # again and could not recover until the publisher happened to change
+        # something.
+        #
+        # This covers a truncated response that *did* yield items, not only
+        # the empty error page the spec names. A truncation happens in
+        # transit, so the ETag is the validator for the full body: storing it
+        # pins the feed at 304 while its stored marker never advances, and a
+        # feed with no marker is exempt from both retention passes — the
+        # unbounded growth this change exists to close. One extra full fetch
+        # is the whole cost of refusing it.
         new_etag = None
         new_last_modified = None
 
@@ -480,6 +489,12 @@ def poll_due_feeds(
     suite and would prove less than asserting on the gaps requested.
     """
     now = now or datetime.now(timezone.utc)
+    # Every timestamp this run writes is compared lexically against another ISO
+    # string — the poll claim across processes, and `last_seen_at` against the
+    # feed's snapshot marker — so a caller's non-UTC clock is converted once
+    # here rather than at each of the four writes.
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc)
     sleep = sleep or time.sleep
     rng = rng or random.Random()
     feeds = feeds_db.feeds_due_for_poll(conn, now=now)

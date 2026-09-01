@@ -1591,6 +1591,135 @@ class TestSchemaV8Migration:
         assert stamps_after == stamps_before
         assert feed.current_document_at == "2026-09-01T00:00:00+00:00"
 
+    def test_a_database_older_than_schema_meta_migrates_all_the_way(self, tmp_path):
+        """v8 is the first migration to write to ``schema_meta``.
+
+        ``_read_schema_version`` returns 1 for a database predating that table,
+        and ``init_db`` runs the whole migration chain *before* ``SCHEMA_SQL``
+        creates it — so a v8 step that assumed the table meant the oldest
+        databases stopped opening at all, through every entry point that calls
+        ``init_db``.
+        """
+        path = tmp_path / "feeds.db"
+        conn = sqlite3.connect(path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE feed_categories (
+                    id INTEGER PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL
+                );
+                CREATE TABLE feeds (
+                    id INTEGER PRIMARY KEY,
+                    url TEXT NOT NULL UNIQUE,
+                    title TEXT, site_url TEXT,
+                    category_id INTEGER REFERENCES feed_categories(id),
+                    source_type TEXT NOT NULL,
+                    etag TEXT, last_modified TEXT, last_fetched_at TEXT,
+                    last_error TEXT,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    poll_interval_minutes INTEGER NOT NULL DEFAULT 30,
+                    next_poll_at TEXT
+                );
+                CREATE TABLE feed_entries (
+                    id INTEGER PRIMARY KEY,
+                    feed_id INTEGER NOT NULL REFERENCES feeds(id),
+                    guid TEXT NOT NULL,
+                    title TEXT, url TEXT, author TEXT,
+                    content_html TEXT, content_text TEXT,
+                    image_urls TEXT, published_at TEXT,
+                    fetched_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'unread',
+                    UNIQUE(feed_id, guid)
+                );
+                INSERT INTO feeds(url, source_type)
+                    VALUES ('https://example.com/feed.xml', 'rss');
+                INSERT INTO feed_entries(feed_id, guid, fetched_at, status)
+                    VALUES (1, 'ancient', '2024-01-01T00:00:00+00:00', 'read');
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='version'"
+            ).fetchone()["value"]
+            row = conn.execute(
+                "SELECT guid, status, last_seen_at FROM feed_entries"
+            ).fetchone()
+            keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
+        assert version == "8"
+        # The row survived every step, keeping its user state.
+        assert row["guid"] == "ancient"
+        assert row["status"] == "read"
+        assert row["last_seen_at"] is not None
+        assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY in keys
+
+    def test_a_rerun_after_a_partial_migration_keeps_real_observations(
+        self, tmp_path,
+    ):
+        """The ``WHERE last_seen_at IS NULL`` guard, exercised.
+
+        ``ALTER TABLE`` autocommits under this driver while the data pass does
+        not, so a crash part-way leaves the columns present, the stamps rolled
+        back and the version still 7 — and the next ``init_db`` runs the
+        migration again over rows that may by then hold real observations.
+        Rewinding only the version reproduces that; the neighbouring
+        idempotence test cannot, because at version 8 the migration never runs.
+        """
+        path, feed_id = self._v7_db_with_history(tmp_path)
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feed_entries SET last_seen_at = ?, document_rank = 2 "
+                "WHERE guid = 'old'",
+                ("2026-09-01T00:00:00+00:00",),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+                (feeds_db.MAX_ENTRIES_PER_FEED_KEY, "10"),
+            )
+            conn.execute(
+                "UPDATE feeds SET current_document_at = ? WHERE id = ?",
+                ("2026-09-01T00:00:00+00:00", feed_id),
+            )
+            conn.commit()
+            grace_before = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                (feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY,),
+            ).fetchone()["value"]
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) "
+                "VALUES ('version','7')"
+            )
+            conn.commit()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            row = conn.execute(
+                "SELECT last_seen_at, document_rank FROM feed_entries "
+                "WHERE guid='old'"
+            ).fetchone()
+            meta = {
+                r["key"]: r["value"]
+                for r in conn.execute("SELECT key, value FROM schema_meta")
+            }
+            feed = feeds_db.list_feeds(conn)[0]
+        # A real observation is never overwritten by the migration clock, and
+        # neither the grace deadline nor a user override is moved.
+        assert row["last_seen_at"] == "2026-09-01T00:00:00+00:00"
+        assert row["document_rank"] == 2
+        assert meta[feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY] == grace_before
+        assert meta[feeds_db.MAX_ENTRIES_PER_FEED_KEY] == "10"
+        # The snapshot marker is a feed's own state, not the migration's.
+        assert feed.current_document_at == "2026-09-01T00:00:00+00:00"
+
     def test_a_fresh_database_has_the_columns_and_no_grace_row(self, tmp_path):
         path, _ = _seed_one_feed(tmp_path)
         with feeds_db.connect(path) as conn:
@@ -1674,6 +1803,56 @@ class TestPollClaims:
                 feeds_db.claim_feed_for_poll(
                     conn, feed_id, now=datetime(2026, 9, 1, 12, 0),
                 )
+
+    def test_a_non_utc_clock_writes_a_lease_another_process_reads_right(
+        self, tmp_path,
+    ):
+        """Aware is not enough — the lease is read back as a lexical string.
+
+        A `+02:00` clock renders 14:00 for the same instant a UTC reader
+        renders 12:00, and `'14…' > '12…'`, so an unconverted lease reads as
+        live for two hours past its end. Westward it reads as already expired
+        and two processes fetch the same feed, which is the race the claim
+        exists to close.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        east = timezone(timedelta(hours=2))
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.claim_feed_for_poll(
+                conn, feed_id, now=now.astimezone(east),
+            ) is True
+            feed = feeds_db.list_feeds(conn)[0]
+            # The same instant a UTC caller would have written.
+            assert feed.poll_claimed_until == (
+                now + timedelta(seconds=POLL_CLAIM_SECONDS)
+            ).isoformat()
+            # And a UTC reader agrees about when it ends.
+            still_held = feeds_db.feeds_due_for_poll(
+                conn, now=now + timedelta(seconds=POLL_CLAIM_SECONDS - 1),
+            )
+            expired = feeds_db.feeds_due_for_poll(
+                conn, now=now + timedelta(seconds=POLL_CLAIM_SECONDS + 1),
+            )
+        assert still_held == []
+        assert [f.id for f in expired] == [feed_id]
+
+    def test_a_non_utc_reader_agrees_about_a_live_claim(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        west = timezone(timedelta(hours=-5))
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            feeds_db.claim_feed_for_poll(conn, feed_id, now=now)
+            during = feeds_db.feeds_due_for_poll(
+                conn, now=(now + timedelta(seconds=10)).astimezone(west),
+            )
+            with feeds_db.connect(path) as other:
+                taken = feeds_db.claim_feed_for_poll(
+                    other, feed_id,
+                    now=(now + timedelta(seconds=10)).astimezone(west),
+                )
+        assert during == []
+        assert taken is False
 
     def test_the_due_list_excludes_a_live_claim(self, tmp_path):
         path, feed_id = _seed_one_feed(tmp_path)
@@ -1768,6 +1947,38 @@ class TestObservationState:
                 "SELECT document_rank FROM feed_entries WHERE guid='a'"
             ).fetchone()
         assert row["document_rank"] == 0
+
+    def test_a_partial_rank_map_does_not_blank_the_guids_it_omits(self, tmp_path):
+        """The gate is the rank, not the presence of a mapping.
+
+        Today's only caller builds the map from exactly the items it passes,
+        so the two readings agree there. A direct caller is the reader this
+        function's race branch is also written for, and for that one a missing
+        guid must leave the stored rank standing rather than erasing it.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [
+                    _entry(feed_id, "a", "2026-09-01T12:00:00+00:00"),
+                    _entry(feed_id, "b", "2026-09-01T12:00:00+00:00"),
+                ],
+                document_ranks={"a": 0, "b": 1},
+            )
+            feeds_db.insert_entries(
+                conn, feed_id,
+                [
+                    _entry(feed_id, "a", "2026-09-02T12:00:00+00:00"),
+                    _entry(feed_id, "b", "2026-09-02T12:00:00+00:00"),
+                ],
+                document_ranks={"a": 5},
+            )
+            ranks = {
+                r["guid"]: r["document_rank"]
+                for r in conn.execute("SELECT guid, document_rank FROM feed_entries")
+            }
+        assert ranks == {"a": 5, "b": 1}
 
     def test_a_unique_conflict_loser_still_refreshes_and_stamps(self, tmp_path):
         """The ``INSERT OR IGNORE`` race branch must not skip the stamp.

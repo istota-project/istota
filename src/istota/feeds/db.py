@@ -20,6 +20,7 @@ from istota.feeds.models import (
     DEFAULT_ENTRY_RETENTION_DAYS,
     DEFAULT_MAX_ENTRIES_PER_FEED,
     POLL_CLAIM_SECONDS,
+    UPGRADE_GRACE_DAYS,
     CategoryRecord,
     EntryRecord,
     FeedRecord,
@@ -335,14 +336,27 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
         )
 
 
-# Keys in `schema_meta`. The two settings are user-facing and reach the API;
-# the third is internal and never does — it is the upgrade grace deadline, and
-# a user who could edit it could turn a safety period into an immediate delete.
-
 # "Say nothing about this column." Distinct from `None`, which for both
 # snapshot columns is a meaningful value the poller writes on purpose.
 UNCHANGED: Any = object()
 
+
+def _utc_iso(when: datetime) -> str:
+    """An aware datetime as a UTC ISO string.
+
+    Every timestamp this module stores is compared lexically against another
+    ISO string, so an offset other than ``+00:00`` sorts by its own local
+    reading rather than the instant it names. Converting is the one place that
+    is prevented; a naive value is left to the caller's own guard, since only
+    the caller knows whether guessing UTC for it is safe.
+    """
+    if when.tzinfo is None:
+        return when.isoformat()
+    return when.astimezone(timezone.utc).isoformat()
+
+# Keys in `schema_meta`. The two settings are user-facing and reach the API;
+# the third is internal and never does — it is the upgrade grace deadline, and
+# a user who could edit it could turn a safety period into an immediate delete.
 ENTRY_RETENTION_DAYS_KEY = "feeds_settings.entry_retention_days"
 MAX_ENTRIES_PER_FEED_KEY = "feeds_settings.max_entries_per_feed"
 ENTRY_PRUNE_NOT_BEFORE_KEY = "feeds_internal.entry_prune_not_before"
@@ -378,7 +392,17 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
     The stamp is guarded on `last_seen_at IS NULL` so a re-run cannot overwrite
     real observations, and the settings rows go in with `INSERT OR IGNORE` so a
     user override is never replaced by a default.
+
+    This is the first migration to write to `schema_meta`, which is why it
+    creates the table rather than assuming it: `_read_schema_version` returns 1
+    for a database predating that table, and `init_db` runs the whole migration
+    chain *before* `SCHEMA_SQL`. Without this, the oldest databases stopped
+    opening at all rather than being migrated.
     """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta ("
+        "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
     if "last_seen_at" not in cols:
         conn.execute("ALTER TABLE feed_entries ADD COLUMN last_seen_at TEXT")
@@ -410,9 +434,7 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
         (MAX_ENTRIES_PER_FEED_KEY, str(DEFAULT_MAX_ENTRIES_PER_FEED)),
         (
             ENTRY_PRUNE_NOT_BEFORE_KEY,
-            (
-                migration_now + timedelta(days=DEFAULT_ENTRY_RETENTION_DAYS)
-            ).isoformat(),
+            (migration_now + timedelta(days=UPGRADE_GRACE_DAYS)).isoformat(),
         ),
     ):
         conn.execute(
@@ -421,7 +443,7 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
         )
     logger.info(
         "feeds_db_retention_grace_opened entries_stamped=%s days=%s",
-        stamped, DEFAULT_ENTRY_RETENTION_DAYS,
+        stamped, UPGRADE_GRACE_DAYS,
     )
 
 
@@ -636,7 +658,11 @@ def feeds_due_for_poll(
     must not take its feed off the air.
     """
     now = now or datetime.now(timezone.utc)
-    iso = now.isoformat()
+    # Both comparisons below are lexical on ISO strings, so an offset other
+    # than +00:00 compares wrong by that offset — eastward a live claim reads
+    # as expired hours early, westward an expired one holds. Every writer here
+    # stores UTC, so a caller's clock is converted rather than trusted.
+    iso = _utc_iso(now)
     rows = conn.execute(
         """
         SELECT * FROM feeds
@@ -672,8 +698,13 @@ def claim_feed_for_poll(
     """
     if now.tzinfo is None:
         raise ValueError("claim_feed_for_poll requires a timezone-aware `now`")
-    iso = now.isoformat()
-    until = (now + timedelta(seconds=lease_seconds)).isoformat()
+    # Aware is not enough: the lease is read back by another process as a
+    # lexical ISO comparison, so a `now` carrying any offset but +00:00 writes
+    # a lease that reader misjudges by exactly that offset — which for an
+    # eastward one means two processes fetching the same feed, the race this
+    # function exists to close.
+    iso = _utc_iso(now)
+    until = _utc_iso(now + timedelta(seconds=lease_seconds))
     cur = conn.execute(
         """
         UPDATE feeds
@@ -952,6 +983,12 @@ def insert_entries(
                 -- when a complete snapshot supplied one, and NULL from an
                 -- incomplete response must not erase the stored value.
                 last_seen_at = COALESCE(?, last_seen_at),
+                -- Gated on the rank itself rather than on the mapping, so a
+                -- caller supplying a partial map cannot blank the rank of a
+                -- guid it left out. The poller passes ranks for exactly the
+                -- items it passes, so the two readings agree there; the
+                -- difference is for a direct caller, which is the same reader
+                -- the race branch above is written for.
                 document_rank = CASE WHEN ? THEN ? ELSE document_rank END
             WHERE id = ?
             """,
@@ -968,7 +1005,7 @@ def insert_entries(
                 item.media_type,
                 item.published_at,
                 seen_at,
-                1 if document_ranks is not None else 0,
+                1 if rank is not None else 0,
                 rank,
                 existing["id"],
             ),

@@ -92,6 +92,12 @@ DEFAULT_SCHEDULED_POLL_LIMIT = 50
 # after it has been read. Never applies to a starred or unread row.
 DEFAULT_ENTRY_RETENTION_DAYS = 90
 
+# How long an upgraded database deletes nothing at all. Deliberately its own
+# constant rather than a reuse of the retention default above: they happen to
+# be the same number, and coupling them would mean lowering the age window
+# silently shortened the safety period an upgrade gets.
+UPGRADE_GRACE_DAYS = 90
+
 # Total stored rows for one feed, stars excepted. Also the size of the window
 # admitted from a complete response, which is what stops a growing archive
 # document reinserting everything the count pass just deleted.

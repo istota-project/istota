@@ -672,6 +672,24 @@ TRUNCATED_RSS = b"""<?xml version="1.0"?>
 <item><guid>hello-2</guid><title>Second</title></item>
 """
 
+# The same pair in Atom. The discriminator is a message from the XML parser
+# rather than anything format-specific, but that is a claim worth holding
+# rather than assuming: without this pair, a wording change reaching only one
+# format would move retention for half the feeds in the reader silently.
+ENTITY_ATOM = b"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Example</title>
+<entry><id>urn:1</id><title>First &nbsp; one</title></entry>
+<entry><id>urn:2</id><title>Second</title></entry>
+</feed>
+"""
+
+TRUNCATED_ATOM = b"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Example</title>
+<entry><id>urn:1</id><title>First</title></entry>
+"""
+
 HTML_ERROR_PAGE = b"<html><body><h1>404 Not Found</h1></body></html>"
 
 TWO_ITEM_RSS = b"""<?xml version="1.0"?>
@@ -795,6 +813,69 @@ class TestMembershipComplete:
         result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
         assert result.etag is None
         assert result.last_modified is None
+
+    def test_a_truncated_response_stores_no_validators_either(self):
+        """The same rule, for a document that did yield items.
+
+        Truncation happens in transit, so the ETag is the validator for the
+        *full* body: storing it pins the feed at 304 while its snapshot marker
+        never advances, and a feed with no marker is exempt from both retention
+        passes. One extra full fetch is the cost of refusing it.
+        """
+        resp = _StubResponse(
+            status_code=200, content=TRUNCATED_RSS,
+            headers={"ETag": '"partial"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items  # the head was readable and is still worth storing
+        assert result.etag is None
+        assert result.last_modified is None
+
+    def test_a_complete_response_does_store_its_validators(self):
+        """The control for the two above: the guard is scoped to a document we
+        could not read, not applied to every response."""
+        resp = _StubResponse(
+            status_code=200, content=ENTITY_RSS,
+            headers={"ETag": '"good"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.etag == '"good"'
+        assert result.last_modified == "Thu, 01 May 2026 12:00:00 GMT"
+
+    def test_a_truncated_atom_document_is_not_complete_either(self):
+        """The predicate is pinned on Atom as well as RSS.
+
+        Same pair, same reasoning: both documents are bozo with the same
+        recognised version, and only the expat message separates them. Without
+        an Atom pair a format-specific change in the message would move
+        retention for half the feeds in the reader with nothing failing.
+        """
+        entity = poll_feed(
+            _rss_feed(),
+            http_get=_stub_get_factory(
+                _StubResponse(status_code=200, content=ENTITY_ATOM)
+            ),
+        )
+        truncated = poll_feed(
+            _rss_feed(),
+            http_get=_stub_get_factory(
+                _StubResponse(status_code=200, content=TRUNCATED_ATOM)
+            ),
+        )
+        assert entity.membership_complete is True
+        assert [i.guid for i in entity.items] == ["urn:1", "urn:2"]
+        assert truncated.membership_complete is False
+        assert [i.guid for i in truncated.items] == ["urn:1"]
+
+    def test_both_atom_documents_are_bozo_with_the_same_version(self):
+        import feedparser
+
+        entity = feedparser.parse(ENTITY_ATOM)
+        truncated = feedparser.parse(TRUNCATED_ATOM)
+        assert entity.get("version") == truncated.get("version") == "atom10"
+        assert bool(entity.get("bozo")) and bool(truncated.get("bozo"))
 
     def test_a_304_is_not_complete(self):
         resp = _StubResponse(status_code=304)
@@ -1099,6 +1180,50 @@ class TestPollClaimsInTheBatch:
                 now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
             )
         assert observed and observed[0] is not None
+
+    def test_a_claim_taken_after_the_due_list_still_skips_the_feed(
+        self, tmp_path, monkeypatch,
+    ):
+        """The interval the in-loop claim exists for, and nothing else covers.
+
+        The test above claims the feed before the run starts, so
+        ``feeds_due_for_poll``'s own filter is what stops it and the
+        ``claim_feed_for_poll`` refusal in the loop could be deleted with the
+        suite still green. Here a rival takes the claim *after* the due SELECT
+        returned the feed — the race between that SELECT and the request, which
+        is the whole reason the second check is there.
+        """
+        path, feed_id = _seed_rss_feed(tmp_path)
+        calls: list[str] = []
+
+        def _get(url, **kwargs):
+            calls.append(url)
+            return _StubResponse(status_code=200, content=SAMPLE_RSS)
+
+        real_due = feeds_db.feeds_due_for_poll
+
+        def _due_then_stolen(conn, now=None):
+            feeds = real_due(conn, now=now)
+            with feeds_db.connect(path) as rival:
+                feeds_db.claim_feed_for_poll(rival, feed_id, now=now)
+            return feeds
+
+        monkeypatch.setattr(feeds_db, "feeds_due_for_poll", _due_then_stolen)
+
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_get,
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            entries = feeds_db.list_entries(conn)
+            feed = feeds_db.list_feeds(conn)[0]
+        assert calls == []
+        assert outcomes == []
+        assert entries == []
+        # The rival's lease is intact — the skip released nothing it did not
+        # take, which is what makes it safe to run two polls at once.
+        assert feed.poll_claimed_until is not None
+        assert feed.last_fetched_at is None
 
     def test_an_expired_claim_does_not_block_the_next_run(self, tmp_path):
         path, feed_id = _seed_rss_feed(tmp_path)
