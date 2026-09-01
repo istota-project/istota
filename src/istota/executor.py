@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -2230,6 +2230,86 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     return targets
 
 
+def _source_and_venv_paths() -> tuple[Path, Path]:
+    """``(src/, .venv)`` for the running install, both of them read-only binds.
+
+    Two callers derive these — the binds themselves and
+    :func:`mask_protected_paths` — and a second copy of the deployed-layout
+    fallback is how they would come to disagree about which directory a mask
+    must not swallow.
+    """
+    istota_src = Path(__file__).resolve().parent.parent  # src/
+    istota_home = istota_src.parent  # project root or install root
+    venv_path = istota_home / ".venv"
+    if not venv_path.exists():
+        # Deployed layout: {istota_home}/src/.venv
+        venv_path = istota_src / ".venv"
+    return istota_src, venv_path
+
+
+def mask_protected_paths(
+    config: Config,
+    *,
+    user_temp_dir: Path | None = None,
+    workspace_dir: Path | None = None,
+) -> list[Path]:
+    """Paths a late tmpfs mask must not shadow, for this config.
+
+    A mask at or above any of these would take away something the task needs —
+    its own workspace, the source tree it runs from, the venv, the mount — and
+    turn a security measure into an outage. ``build_bwrap_cmd`` builds this list
+    per task; ``doctor`` builds it without one, to answer whether the database
+    mask covers a directory on this deployment at all.
+
+    A caller with no task omits both keyword arguments, and each omission is a
+    documented divergence rather than an equivalence.
+
+    ``user_temp_dir`` is the per-task workspace and is what the sandbox actually
+    protects. Omitting it substitutes ``config.temp_dir``, the *parent* of every
+    per-user workspace, which gives the same answer everywhere the two shapes
+    are distinguishable: ``{temp_dir}/{user}`` is inside a candidate whenever
+    ``{temp_dir}`` is, and the one arrangement where they differ is a
+    ``db_path.parent`` sitting at ``{temp_dir}/{user}`` exactly — a framework
+    database inside one user's workspace, which the sandbox has larger problems
+    with than a mask. ``tests/test_sandbox.py`` pins that case, so a change
+    widening the divergence goes red rather than quietly.
+
+    ``workspace_dir`` is the REPL workspace, and omitting it drops an entry
+    outright. The answers coincide only because ``_validate_workspace_dir``
+    already refuses a workspace overlapping ``db_path.parent`` or
+    ``module_db_root()`` — the two candidates any caller compares against — so a
+    validated workspace is never among the paths a database mask would shadow.
+    That is a dependency on another function's blocklist rather than a property
+    of this one, which is why it is written down here: narrowing that blocklist
+    would reopen the two-consumers gap the extraction exists to close.
+    """
+    src, venv = _source_and_venv_paths()
+    temp = Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)
+    protected: list[Path] = [temp.resolve(), src, venv]
+    if workspace_dir is not None:
+        protected.append(Path(workspace_dir))
+    mount = config.nextcloud_mount_path
+    if mount:
+        protected.append(Path(mount).resolve())
+    return protected
+
+
+def mask_shadowed_by(candidate: Path, protected: Iterable[Path]) -> list[Path]:
+    """Which of ``protected`` a tmpfs mask at ``candidate`` would shadow.
+
+    Empty means the mask is safe to emit; anything else is the refusal
+    ``_mask_dir`` logs. Module level and shared rather than a closure, because
+    ``doctor``'s ``runtime.session_log_dir`` check has to ask this exact
+    question. "Is the directory under ``db_path.parent``" is the tempting
+    second copy and it is wrong in the one case that matters: it answers True on
+    the standalone install, where ``db_path.parent`` *is* the workspace and the
+    mask is refused — so the checker would report the property holding while the
+    directory sat outside every mask, which is the ``map_basemap`` two-consumers
+    failure exactly.
+    """
+    return [p for p in protected if p == candidate or p.is_relative_to(candidate)]
+
+
 def sandbox_cache_is_derived(config: Config, user_id: str) -> bool:
     """Whether this user's cache is derived inside their repos subtree.
 
@@ -2716,13 +2796,9 @@ def build_bwrap_cmd(
         _ro_bind(Path(ro_path))
 
     # --- Python venv + source tree (RO) ---
-    # Resolve istota_home from the source tree (src/istota/ -> parent -> parent)
-    istota_src = Path(__file__).resolve().parent.parent  # src/
-    istota_home = istota_src.parent  # project root or install root
-    venv_path = istota_home / ".venv"
-    if not venv_path.exists():
-        # Deployed layout: {istota_home}/src/.venv
-        venv_path = istota_src / ".venv"
+    # Resolve istota_home from the source tree (src/istota/ -> parent -> parent).
+    # Shared with `mask_protected_paths`, which has to name the same two paths.
+    istota_src, venv_path = _source_and_venv_paths()
     _ro_bind(venv_path)
     _ro_bind(istota_src)
 
@@ -3023,11 +3099,9 @@ def build_bwrap_cmd(
     # runs from), turning a security measure into an outage; the standalone
     # layout puts db_path beside the workspace, so this is reachable by
     # configuration rather than only by mistake.
-    _mask_protected: list[Path] = [user_temp_dir.resolve(), istota_src, venv_path]
-    if workspace_resolved is not None:
-        _mask_protected.append(workspace_resolved)
-    if mount:
-        _mask_protected.append(mount)
+    _mask_protected: list[Path] = mask_protected_paths(
+        config, user_temp_dir=user_temp_dir, workspace_dir=workspace_resolved,
+    )
     _masked: list[Path] = []
 
     def _mask_dir(target: Path) -> bool:
@@ -3064,10 +3138,7 @@ def build_bwrap_cmd(
             if candidate not in candidates:
                 candidates.append(candidate)
         for candidate in candidates:
-            shadowed = [
-                p for p in _mask_protected
-                if p == candidate or p.is_relative_to(candidate)
-            ]
+            shadowed = mask_shadowed_by(candidate, _mask_protected)
             if shadowed:
                 logger.error(
                     "Not masking %s: it contains paths the sandbox needs (%s). "
@@ -6068,6 +6139,27 @@ def execute_task(
             ),
             env=env,
             db_path=config.db_path,
+            # Which attempt this is, for the brain's own per-attempt artifacts
+            # (NativeBrain's session log names its file after them). Read off
+            # the task row rather than out of `env`, which is the sandbox
+            # environment.
+            #
+            # `+ 1` because `attempt_count` counts *prior* attempts — the claim
+            # path never touches it, and only a release/retry increments it, so
+            # a first run carries 0 (`scheduler.py`: "attempt_count == 0 is left
+            # alone — a first run has no prior attempt"). The session log's
+            # numbering is 1-based, as `task_usage.attempt_seq` is, so a first
+            # run has to be attempt 1 and a retry attempt 2. This deliberately
+            # disagrees with the task cgroup directory and the tmux session
+            # label, which are named from the raw counter: those are within-run
+            # identifiers with no reader outside the process, while an operator
+            # reads a log file name against the usage table.
+            task_id=task.id,
+            attempt=task.attempt_count + 1,
+            user_id=task.user_id or "",
+            source_type=task.source_type or "",
+            conversation_token=task.conversation_token or "",
+            is_group_chat=bool(task.is_group_chat),
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
             model=brain.resolve_model_name((task.model or "").strip() or config.model),
             effort=_resolve_effort(task, config),

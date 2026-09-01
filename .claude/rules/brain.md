@@ -522,6 +522,21 @@ allowed_ports = [80, 443]
 # extra_blocked_cidrs = []  # operator additions to the private/reserved IP blocklist
 require_url_provenance = false  # only fetch URLs seen in the task (blocks model-fabricated URLs)
 
+[brain.native.session_log]  # per-attempt JSONL transcript (native-only). See "Session logs" below.
+enabled = true              # false = no writer, no file, no directory, no cost — AND no sweep,
+                            #   since step 7b is gated on this too, so transcripts already on
+                            #   disk are then kept for ever and `doctor` SKIPs. Remove them by hand
+dir = ""                    # "" resolves to {db_path.parent}/logs. A value here is used AS GIVEN
+                            #   and is TRUSTED — no containment rule bounds it, and the sweep
+                            #   unlinks *.jsonl under every first-level subdirectory of it
+retention_days = 14         # age rule (privacy). 0 = keep for ever by age; the ceiling still applies
+max_total_gb = 2.0          # size ceiling (disk) across EVERY user summed, 0.5 floor.
+                            #   0 = no ceiling; the age rule still applies. Both at 0 (or
+                            #   enabled = false) means nothing is ever deleted
+max_content_chars = 32768   # per text/thinking block, head+tail. 0 here means NO CAP
+max_args_chars = 8192       # per tool-call arguments object. 0 = no cap
+include_thinking = true     # reasoning traces in the written log (independent of the read verb)
+
 [brain.tmux]           # only used when kind = "tmux_claude". All defaulted —
                        # an empty/absent block reproduces the prototype exactly.
 fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
@@ -1106,6 +1121,272 @@ hardening carries the whole load:
   off) tightens it — only URLs present in the task/prior tool output may be
   fetched — for sensitive deployments; the corpus is threaded onto
   `ToolEnv.web_fetch_url_corpus` only when the knob is on.
+
+### Session logs (native-only, `session/session_log.py`)
+
+Nothing persisted the conversation the native brain holds with the model.
+`tasks.execution_trace` carries tool *labels* and no tool output at all,
+`task_events` carries a capped payload and only when streaming is on, and
+`task_N_prompt.txt` is the input rather than the run — so a native task that
+produced a wrong answer could not be reconstructed. `ClaudeCodeBrain` never had
+that problem: the `claude` CLI writes its own session JSONL and
+`build_bwrap_cmd` binds `projects`/`debug`/`todos` read-write so those
+transcripts survive sandbox exit, so the asymmetry was accidental rather than
+designed. Note that is the *opposite* mount direction from the posture below —
+the CLI's transcripts are bound **into** the sandbox on purpose; istota's are
+bound nowhere. The
+format adapts pi's session store — the same prior art `agent/types.py` already
+cites for `prepareNextTurn` — to istota's unit of work.
+
+**One file per task *attempt*,** at
+`{session_log_dir}/{user_id}/{timestamp}_task-{task_id}-{attempt}.jsonl`, `0600`
+behind a `0700` directory, opened `O_EXCL` so a colliding name (the fallback
+brain rerouting to native within one attempt) is renamed with a short
+`session_id` suffix rather than overwritten. **`attempt` is 1-based**, matching
+`task_usage.attempt_seq`; it is `task.attempt_count + 1`, since that column
+counts *prior* attempts. A retry re-executes the prompt with a fresh message
+list, so two attempts are two runs and merging them would produce a transcript
+that never existed. Records are linear — no `id`/`parentId`, because a task
+attempt has no user at the keyboard and resume is a non-goal. Adding the two
+fields later is a `FORMAT_VERSION` bump the reader can absorb.
+
+One JSON object per line, every record carrying `type` and `ts`:
+
+| `type` | Where it comes from | What it says |
+|---|---|---|
+| `session` | line 1, `open(header)` | `v`, `session_id`, the identity six (`task_id`, `attempt`, `user_id`, `source_type`, `conversation_token`, `is_group_chat`), plus the brain/provider/model/effort/limits header |
+| `context` | line 2, once | system prompt, its source, tool *names*, and `tools_schema_sha256` over the sorted schema JSON |
+| `message` | `message_end` | the serialized `llm.types` message — user, assistant (with thinking, tool calls, usage, stop reason) or tool result |
+| `compaction` | both compaction paths | `trigger` = `proactive` or `overflow`, `summary`, `tokens_before`, `cut_index`, `messages_dropped`, `image_pinned`, `details`, `recovery_index` |
+| `steer` | `_get_steering_messages` | the drained `!steer` text |
+| `nudge` | `_next_budget_nudge` | `phase`, `remaining`, `turns`, `max_turns` |
+| `error` | the `except` clauses in `_execute_sync` | `kind`, `message`, `traceback` |
+| `result` | last line, on any run that produced a `BrainResult` | `success`, `stop_reason`, uncapped `result_text`, `model_used`, `duration_ms`, `usage`, `turns`, `compactions`, `truncated_records` |
+| `serialization_error` | any record that would not serialize | the record type and the error, so one bad object costs that record and not the session |
+
+Both `compaction` triggers write the same field set, with the fields the other
+path cannot fill set to `null`, so a reader never has to know which fired
+before it knows which fields exist. `error` and `result` are both written where
+both apply: `error` says what went wrong, `result` says what the task was told.
+A `BaseException` out of the loop gets the `error` record and no `result`, which
+is what a run that produced no result should look like.
+
+**Wiring is one branch plus the record kinds below, all in `brain/native.py`** —
+`agent/loop.py` and `agent/events.py` are not modified. `emit` gains
+`elif event.type == "message_end": log.message(event.message)`, and that is the
+whole message path: the loop emits `message_end` for every message it *appends*,
+in the order it appended them, across user, assistant and tool-result roles
+alike, including the `run_agent_loop_continue` pass after an overflow recovery
+(measured with a probe, not read). **Do not also hook `turn_end`** — it
+re-carries the same `AssistantMessage` and would double-write every assistant
+turn. The others: `open(header)` once the model and effort resolve, so the
+header can carry them; `context(...)` once the `AgentContext` is built;
+`compaction(...)` from `prepare_next_turn` and from the overflow loop, the
+latter *before* the no-summary check so a failed recovery records
+`summary: null` and explains the failure; `steer`; `nudge`; `error`; and
+`result(...)` once at the end of `_execute_sync` with `close()` in the `finally`.
+`result` is written at one site rather than at each `return BrainResult(...)`
+because three of those returns are inside a `@staticmethod` with no writer in
+scope, and one site downstream of all of them also covers a fifth return added
+later.
+
+**What the loop appends is not everything the model sees.** Compaction
+*replaces* `ctx.messages` wholesale and the loop emits nothing for a
+replacement, so the compaction summary, a pinned image and the `_RECOVERY_NUDGE`
+user message have no `message` record. The `compaction` record stands for the
+first two — which is why it carries the summary text, `image_pinned` and the
+drop count rather than a bare marker — and the recovery nudge is a fixed
+constant that is recorded nowhere. A turn-budget nudge is the same shape: it
+rides `prepare_next_turn`'s returned list into `ctx.messages` only, never into
+`new_messages`, which is why it gets a record of its own. A `steer` record means
+*drained*, not delivered: the loop drains at the end of a turn and injects at
+the top of the next, so an abort in that window is the pre-existing lost-steer
+case, now visible rather than silent.
+
+**The header's redaction rule lives in `native.py`, not in the writer.**
+`SessionLogWriter.open` copies the caller's mapping through minus `type`, `v`
+and `ts`, so keeping `api_key` and `extra_headers` out of it and reducing
+`base_url` to `base_url_host` (an operator can put a token in a URL path)
+belongs to whoever builds the mapping. `prompt_caching` records the *provider's*
+resolved answer rather than the config tri-state, because `make_provider` reads
+`None` as "on for `api.anthropic.com`" and the config field would write `null`
+for every run on the default deployment that cached. `system_prompt_source` is
+derived from the same walk that builds the string, not from
+`custom_system_prompt_path` being set: that file is appended to the built-in
+block rather than replacing it, and a configured path that does not exist
+contributes nothing.
+
+**Two caps keep the artifact bounded.** An `ImageContent` is never written as
+bytes — it serializes as `{media_type, display_name, bytes, sha256}`, where
+`bytes` is the decoded length and the hash still identifies two records as the
+same image. Text is capped per content block at `max_content_chars`, **head and
+tail** rather than head alone, because a truncated build log's tail is where the
+error is; the block keeps `truncated: true` and `chars_total`. Tool-call
+arguments have their own `max_args_chars` and become a marker object over it,
+since a truncated *fragment* of a JSON object is worse than an honest marker.
+The content cap also reaches three strings outside the blocks it was written
+for — the `context` record's system prompt, a `steer`'s text, and both halves of
+an `error` — because each arrives from somewhere the writer does not control.
+`result_text` is the one deliberate exemption, the same reasoning that put
+`result` in `events._UNCAPPED_EVENT_KINDS`. On both caps, `0` means **no cap**,
+not "off" as it does on `retention_days` and `max_total_gb`.
+
+**The writer never raises and never nags.** A task must not fail because a log
+could not be written, so every public method is wrapped; the first failure logs
+one warning, disables the writer and closes the handle, and every later call is
+a no-op — a full disk must not produce one warning per tool call for the rest of
+the day. `SessionLogWriter(root=None)` is the disabled writer, which is how
+`enabled = false` costs nothing and why there is no `if self._log is not None`
+at the call sites. `make_session_log` returns it on **three** conditions, not
+one: the feature is off, `task_id <= 0`, or `user_id` is empty. The last two are
+the same case in practice — a direct brain call is not a task attempt and has
+nothing to name a file after — so the heartbeat's synthetic `id=0` task and
+every non-task caller (sleep cycle, health OCR, briefings, code review, context,
+the REPL) get no transcript. Records are flushed and never `fsync`ed: a daemon that dies
+loses what the OS had buffered, which beats an `fsync` per tool result on the
+loop's hot path. pi makes the same trade.
+
+**Where it lives, and what actually protects it.** The directory
+(`resolve_session_log_dir(db_path, cfg.dir)`, with `dir = ""`) defaults to
+`{db_path.parent}/logs` — local disk, beside `istota.db`, `modules/` and
+`backups/`, never the FUSE mount and never `user_temp_dir` (which is bound
+read-write into every sandbox as `ISTOTA_DEFERRED_DIR`, so a transcript there
+would hand every task the full history of every previous task for that user, and
+the ability to rewrite the record of what it did). That resolves to
+`/srv/app/{namespace}/data/logs` on the Ansible shape and **`/data/db/logs`** on
+Docker, because `render-config.sh` writes `db_path = "/data/db/istota.db"`; the
+plausible-looking `/data/logs` is a *sibling* of `db_path.parent` and therefore
+outside the tmpfs mask, which inverts the property while looking correct.
+
+**The boundary is that nothing binds the directory into any sandbox; the
+database mask is defence in depth behind it.** `build_bwrap_cmd` masks
+`db_path.parent` and `module_db_root()` last, so where a sandbox is built at all
+and `_mask_dir` does not refuse, the logs are behind that mask for free. Three
+shipped shapes, three different answers, and only the first is unconditional:
+
+- **Ansible** — masked. `db_path.parent` is `{istota_home}/data`, which contains
+  no protected path, and bwrap runs unasked as an ordinary user.
+- **Docker** — masked *only if the operator added the two container settings*.
+  The path is right (`/data/db/logs` is under `/data/db`), but the shipped
+  `docker/docker-compose.yml` grants neither `seccomp:unconfined` nor
+  `systempaths=unconfined`, so the bwrap probe fails and `build_bwrap_cmd` hands
+  every command back unwrapped — no sandbox, therefore no mask, and
+  `native_fs_roots` is not applied either since `native_fs_confinement_active`
+  is `effective_sandboxing`. `.claude/rules/testbed.md` and
+  `docs/deployment/docker.md` state the same thing about the databases; the
+  transcripts inherit it.
+- **Standalone** — `_mask_dir` *refuses*. `setup_wizard` puts `db_path`, the
+  workspace and the temp dir all under `~/.istota`, so `mask_shadowed_by` is
+  non-empty and nothing is masked. The logs are unbound rather than masked,
+  joining `modules/` in that condition rather than creating it.
+
+`mask_shadowed_by` and `mask_protected_paths` were lifted out of `_mask_dir`'s
+closure in `executor.py` precisely so `doctor`'s `runtime.session_log_dir` asks
+the sandbox's own question instead of a copy of it; "is the directory under
+`db_path.parent`" answers yes on the standalone shape and would report the
+property holding while the directory sat outside every mask. **That covers the
+path axis and not the availability one**: `_session_log_mask_reason` gates on
+`security.sandbox_enabled` rather than on `effective_sandboxing`, so on a shipped
+Docker stack — flag on, bwrap unavailable — the check reports `OK` and no mask
+finding while nothing is masked. `runtime.bwrap` answers that half separately,
+and until the two are joined this check distinguishes the standalone shape from
+the Ansible one rather than naming every unmasked deployment.
+
+**And "nothing binds it" is a default rather than a guard.** No code in
+`build_bwrap_cmd` knows about this directory; what keeps it out is that
+`security.sandbox_ro_paths` defaults to `[]` and is bound verbatim when it is
+not — the same setting whose old `/srv/app` default is how every database got
+exposed once before. On the standalone shape there is a second route, because
+`nextcloud_mount_path` and `db_path.parent` are the same directory there: a
+`user_resources` row with `resource_path = "logs"` resolves to exactly the
+transcript directory, which both `build_bwrap_cmd` and `native_fs_roots` bind as
+a per-resource mount. `tests/test_sandbox.py::TestSessionLogContainment` pins the
+default shapes — no `sandbox_ro_paths`, no user resources — so widen either and
+nothing goes red.
+
+**An operator-set `dir` is trusted, the way `security.sandbox_cache_dir` is.**
+There is no containment rule bounding it against an ancestor, and that is a
+decision rather than an omission: the root is the whole input, it comes from the
+operator's config file, no model-supplied name is resolved against it, and there
+is no ancestor to bound against that would not refuse both a reasonable
+`/var/log/istota` and the relative value the resolver is required to honour as
+written. What that costs is stated where an operator meets it
+(`config.example.toml`, `SessionLogConfig.dir`, `sweep_session_logs`): the sweep
+treats every first-level subdirectory of whatever `dir` resolves to as a user's
+and unlinks `*.jsonl` at any depth beneath it. Values naming no directory of
+their own (`/`, `.`, `..`, `a/..`) and null bytes are refused; a relative value
+is used as given, so write an absolute path — the daemon, the sweep and an
+`istota` command run from a shell need not share a working directory.
+
+**Retention is two independent rules under an `or` gate**, at
+`run_cleanup_checks` step 7b, and neither implies the other. `retention_days`
+(default 14) bounds how long a transcript is retrievable, which is a privacy
+question; it is deliberately longer than `task_retention_days = 7`, since the
+log's value is that it outlives the task row. `max_total_gb` (default 2.0,
+clamped to a 0.5 floor) bounds how much disk a burst of long agentic tasks can
+take from the filesystem `istota.db` and every module DB are writing to, which
+is an availability question — `sandbox_cache_sweeper` wrote the reasoning first:
+a rule phrased in days either keeps everything or throws away something minutes
+old, because the growth arrives in bursts rather than at a rate. The gate is
+`or` between the two rules because setting one to `0` must not silently disable
+the other.
+
+**The whole gate is `enabled and (retention_days > 0 or max_total_gb > 0)`, and
+the `enabled` conjunct is the half worth stating out loud.** Step 7b is the
+sweep's only caller, so `enabled = false` stops new transcripts *and* stops
+anything ever deleting the ones already written — while `check_session_log_dir`
+returns `SKIP` on the same flag, so `doctor` goes quiet about the directory at
+the same moment. An operator who switches the feature off for privacy reasons
+keeps every transcript already on disk, indefinitely and unreported; the
+directory has to be removed by hand. Setting both limits to `0` has the same
+effect with the feature still on. Whether the sweep should run regardless of
+`enabled` is a live question — the step's own comment already makes the
+analogous argument for brain kind, that a deployment which switched away from
+native still sweeps what native left behind.
+
+The ceiling is **deployment-wide across every user**, because the thing being
+protected is a filesystem and a filesystem has no per-user quota; under a
+per-user ceiling the real limit is `users x ceiling`, a number that appears
+nowhere in the config. Eviction is **largest-user-first, then oldest within that
+user**. Plain global oldest-first is the obvious rule and it inverts the
+outcome: the globally oldest files belong to the *quietest* users precisely
+because they are quiet, so one noisy user would clear everyone else's history to
+make room for their own fresh output. A file stamped inside `LIVE_WINDOW_SECONDS`
+(one hour) is never evicted, and a tree that cannot get under the ceiling
+without touching those reports `still_over` and stops rather than looping.
+Measurement is `st_blocks * 512`, du-style; directory inodes are deliberately
+not counted, since a per-user directory is overhead no eviction can reclaim.
+The sweep writes its outcome to the reserved `_session_log_sweep` KV namespace,
+which is what lets `doctor` warn that the ceiling — not `retention_days` — is
+what is actually binding, and that the configured window is therefore not the
+window in force.
+
+**Reading it back** goes through `session/session_log_read.py`, which is where
+the parsing rules live so its two consumers cannot drift into disagreeing about
+what a transcript says. A file whose line 1 is not a `session` record is
+unreadable and is reported that way rather than rendered; a malformed line in
+the middle is skipped and *counted*; a trailing line with no newline is a live
+write rather than damage. Operators get `istota session list|show|tail|stats`.
+A running task gets `istota-skill tasks transcript <id>` — host-side through the
+skill proxy, never a bind, scoped to `ISTOTA_USER_ID` with no admin override,
+with its own attempt excluded (an earlier attempt of the same task is the useful
+case), thinking off unless asked for, every tool result and error framed in
+`[UNTRUSTED TRANSCRIPT CONTENT …]`, and `--grep` matched **literally** via
+`re.escape` rather than as a regex, because the pattern is model-written and the
+scan runs in the daemon's namespace with a task waiting on it. A missing,
+swept or non-native transcript is `{"available": false, "reason": …}` at exit 0,
+not an error. See `.claude/rules/skills.md` for the verb.
+
+Config lives at `[brain.native.session_log]` (`SessionLogConfig` on
+`NativeBrainConfig`): `enabled`, `dir`, `retention_days`, `max_total_gb`,
+`max_content_chars`, `max_args_chars`, `include_thinking`. **The Docker shape
+gets none of these as environment knobs, deliberately** — a Docker deployment
+runs the shipped defaults. Adding one means adding it to *both*
+`docker/istota/render-config.sh` and `docker/docker-compose.yml`; a variable the
+generator reads and compose never passes is silently ignored, which is the
+`ISTOTA_EMAIL_AUTHSERV_ID` defect class. Ansible templates no block either.
+Native-only by decision: the CLI brains already get a transcript from `claude`,
+and unifying the two formats is separate work with an argument on both sides.
 
 `Config.brain: BrainConfig` follows the dataclass-with-defaults convention.
 `source_type_overrides` maps a task's `source_type` to a brain kind, overriding
