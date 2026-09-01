@@ -12,14 +12,22 @@ import tomli
 from . import db
 from .storage import get_user_scripts_path
 
+# The fence markers (ISSUE-386), and this module is why `toml_fence` states
+# its bounds as loosely as it does: a marker that module does not recognise
+# is not a parse that fails safely *here*. It is a document with no fence,
+# which is `is_template`, and the sync's restore branch then rewrites the
+# user's whole CRON.md from the table (`scheduler._sync_cron_files`).
+#
+# The markers are used directly rather than through
+# `toml_fence.find_toml_block` because this is the one caller that has to
+# tell "no opener" from "an opener with no closer". Only the first may ever
+# reach the fence-less document, and only after the hold guard below has
+# ruled out a fence it could not read.
+from .toml_fence import BACKTICK_RUN_RE as _BACKTICK_RUN_RE
+from .toml_fence import FENCE_CLOSE_RE as _TOML_FENCE_CLOSE_RE
+from .toml_fence import FENCE_OPEN_RE as _TOML_FENCE_OPEN_RE
+
 logger = logging.getLogger("istota.cron_loader")
-
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
-
-# Just the opening marker, on a line of its own. Only used to tell "there is
-# no fence here" from "there is a fence and it was never closed", which the
-# expression above cannot distinguish — both fail to match.
-_TOML_OPENER_RE = re.compile(r"^```toml[^\n]*\n", re.MULTILINE)
 
 # Names with this prefix are managed by module integrations (e.g. money) and
 # are not subject to CRON.md orphan deletion.
@@ -349,25 +357,47 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     if content is None or not content:
         return None
 
-    match = _TOML_BLOCK_RE.search(content)
-    if not match:
-        if _TOML_OPENER_RE.search(content):
-            # An opener with no closer. Not "no fence": the user is halfway
-            # through an edit, or the file was written short, and the jobs
-            # they are typing are in there. Reading it as a template hands it
-            # to the restore branch, which writes a whole fresh document over
-            # the top — so refuse it the way an unparseable fence is refused
-            # and let the next tick find a finished file.
+    opener = _TOML_FENCE_OPEN_RE.search(content)
+    if opener is None:
+        if _BACKTICK_RUN_RE.search(content):
+            # Backticks, but not a marker this module recognises: a fence
+            # indented under a list item, one wrapped in four backticks
+            # because the jobs themselves contain three, one inside a
+            # blockquote, a `see ```toml` in a sentence. Reading any of those
+            # as "the user has authored no jobs" hands the file to the
+            # restore branch, which rewrites the whole document from the
+            # table and takes the user's prose with it. Hold instead. The
+            # cost is a schedule that stops tracking the file until it is
+            # fixed; the alternative is losing the file.
             logger.warning(
-                "CRON.md for %s opens a toml fence and never closes it; the "
-                "previous job definitions stay in force", user_id,
+                "CRON.md for %s has backtick fences but no toml block this "
+                "reader can resolve; the previous job definitions stay in "
+                "force and the file is left alone", user_id,
             )
             return None
         # A document with no toml fence. Distinct from a fence holding no
         # jobs, and the whole reason this function exists.
         return CronDocument(content=content, block=None, block_span=None, jobs=[])
 
-    toml_str = match.group(1)
+    closer = _TOML_FENCE_CLOSE_RE.search(content, opener.end())
+    if closer is None:
+        # An opener with no closer. Not "no fence": the user is halfway
+        # through an edit, or the file was written short, and the jobs
+        # they are typing are in there. Reading it as a template hands it
+        # to the restore branch, which writes a whole fresh document over
+        # the top — so refuse it the way an unparseable fence is refused
+        # and let the next tick find a finished file.
+        logger.warning(
+            "CRON.md for %s opens a toml fence and never closes it; the "
+            "previous job definitions stay in force", user_id,
+        )
+        return None
+
+    # The block is everything between the two marker lines. Neither marker's
+    # own indent is inside it, so a splice through `block_span` writes both
+    # back exactly as the user indented them.
+    block_span = (opener.end(), closer.start())
+    toml_str = content[block_span[0]:block_span[1]]
     try:
         data = tomli.loads(toml_str)
     except Exception as e:
@@ -381,7 +411,7 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     return CronDocument(
         content=content,
         block=toml_str,
-        block_span=match.span(1),
+        block_span=block_span,
         jobs=jobs,
         skipped_entries=skipped,
     )
@@ -526,12 +556,17 @@ _TOML_ESCAPES = {
     "\n": "\\n",
     "\f": "\\f",
     "\r": "\\r",
-    # Not a TOML rule. The fence this TOML lives inside is closed by the first
-    # ``` the reader sees anywhere, so a value holding three backticks
-    # truncates the block mid-string and the whole schedule freezes — the
-    # ISSUE-385 failure, arriving through the container rather than the
-    # grammar. Escaped as a code point, which ``tomllib`` decodes straight
-    # back, so the value round-trips and only the rendered spelling changes.
+    # Not a TOML rule, and no longer the load-bearing guard it was written
+    # as. When ISSUE-385 added this, the fence was closed by the first ```
+    # the reader saw anywhere, so a value holding three backticks truncated
+    # the block mid-string and froze the whole schedule — that failure
+    # arriving through the container rather than the grammar. ISSUE-386 then
+    # anchored both markers to a line of their own, and every value here
+    # renders on one line, so a rendered ``` can no longer begin one.
+    # Kept as defence in depth, since it is one line and it stops either
+    # half's assumption from silently becoming the other's problem. Escaped
+    # as a code point, which ``tomllib`` decodes straight back, so the value
+    # round-trips and only the rendered spelling changes.
     "`": "\\u0060",
 }
 

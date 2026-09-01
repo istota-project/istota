@@ -15,14 +15,18 @@ import httpx
 
 from . import db
 from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
+from .toml_fence import find_toml_block
 
 if TYPE_CHECKING:
     from .config import Config
 
 logger = logging.getLogger("istota.heartbeat")
 
-# Pattern to extract TOML blocks from markdown
-_TOML_BLOCK_RE = re.compile(r"```toml\s*\n(.*?)```", re.DOTALL)
+# Where the fence starts and ends is `toml_fence`'s to say (ISSUE-386). This
+# module used to carry its own copy of an expression that anchored neither
+# marker, so a backtick run anywhere after the fence opened — in a comment,
+# in a string value — ended the block early and every check below that point
+# silently stopped existing.
 
 
 @dataclass
@@ -82,12 +86,12 @@ def load_heartbeat_config(
         return None
 
     # Extract TOML block from markdown
-    match = _TOML_BLOCK_RE.search(content)
-    if not match:
+    span = find_toml_block(content)
+    if span is None:
         logger.debug("No TOML block found in HEARTBEAT.md for %s", user_id)
         return None
 
-    toml_content = match.group(1)
+    toml_content = content[span[0]:span[1]]
     if not toml_content.strip():
         return None
 
