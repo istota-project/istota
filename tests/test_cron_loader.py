@@ -636,6 +636,9 @@ class TestColumnOwnership:
 
         Read from the real schema rather than a list, so adding a column to
         ``scheduled_jobs`` fails here until somebody decides who writes it.
+        The oracle is ``schema.sql`` plus the ``ALTER TABLE`` list in
+        ``db.py``, which is what ``init_db`` applies; a column added to a live
+        table from a deploy script alone is out of its reach.
         """
         with db.get_db(db_path) as conn:
             actual = {row["name"] for row in conn.execute("PRAGMA table_info(scheduled_jobs)")}
@@ -660,7 +663,7 @@ class TestColumnOwnership:
             == len(declared)
         ), "a column is claimed by more than one owner"
 
-    def test_the_sync_never_writes_a_daemon_owned_column(self):
+    def test_the_file_owned_value_map_names_no_daemon_column(self):
         values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
         assert set(values) & DAEMON_OWNED_COLUMNS == set()
         assert set(values) & IDENTITY_COLUMNS == set()
@@ -670,8 +673,19 @@ class TestColumnOwnership:
         values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
         assert set(values) == FILE_OWNED_COLUMNS
 
-    def test_the_sync_leaves_every_daemon_owned_column_alone(self, db_path):
-        """The behavioural half, over the whole daemon-owned set at once."""
+    @pytest.mark.parametrize("file_cron,last_run_moves", [
+        ("0 9 * * *", False),
+        ("30 9 * * *", True),
+    ])
+    def test_the_sync_leaves_every_daemon_owned_column_alone(
+        self, db_path, file_cron, last_run_moves,
+    ):
+        """The behavioural half, over the whole daemon-owned set at once.
+
+        Both legs, because the cron-expression change is the one branch that
+        writes a daemon-owned column at all, and so the branch where a fourth
+        write would be easiest to add without noticing what else it touches.
+        """
         state = {
             "last_run_at": "2026-01-01T00:00:00",
             "last_success_at": "2025-12-31T00:00:00",
@@ -689,16 +703,45 @@ class TestColumnOwnership:
                 ["alice", "j1", "0 9 * * *", "old", *state.values()],
             )
 
-        # Same cron expression, so the one sanctioned write of a daemon-owned
-        # column (the last_run_at reset) does not fire.
         with db.get_db(db_path) as conn:
-            sync_cron_jobs_to_db(conn, "alice", [CronJob(name="j1", cron="0 9 * * *", prompt="new")])
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(name="j1", cron=file_cron, prompt="new")])
             row = conn.execute(
                 "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
             ).fetchone()
 
         assert row["prompt"] == "new", "the sync did not run, so nothing was proved"
-        assert {col: row[col] for col in state} == state
+        # last_run_at is reset when the cron expression changes, and only then.
+        survives = set(state) - ({"last_run_at"} if last_run_moves else set())
+        assert {col: row[col] for col in survives} == {col: state[col] for col in survives}
+        assert (row["last_run_at"] != state["last_run_at"]) is last_run_moves
+
+    _BOOLEAN_COLUMNS = (
+        "enabled",
+        "silent_unless_action",
+        "skip_log_channel",
+        "once",
+        "publish_shared_kv_trusted",
+    )
+
+    @pytest.mark.parametrize("column", _BOOLEAN_COLUMNS)
+    def test_each_boolean_flag_lands_in_its_own_column(self, db_path, column):
+        """One flag on at a time, because the round-trip below cannot tell
+        the five apart — a set flag is 1 in every one of those columns, so
+        two swapped in the value map would leave it green."""
+        assert set(self._BOOLEAN_COLUMNS) <= FILE_OWNED_COLUMNS
+        flags = {name: name == column for name in self._BOOLEAN_COLUMNS}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="j1", cron="0 9 * * *", prompt="p", **flags)],
+            )
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
+            ).fetchone()
+
+        assert {name: row[name] for name in self._BOOLEAN_COLUMNS} == {
+            name: (1 if name == column else 0) for name in self._BOOLEAN_COLUMNS
+        }
 
     @pytest.mark.parametrize("path", ["insert", "update"])
     @pytest.mark.parametrize("command,expected_dispatch", [

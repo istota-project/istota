@@ -510,6 +510,15 @@ def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
 # restating the list, and ``TestColumnOwnership`` requires the three to
 # partition ``PRAGMA table_info(scheduled_jobs)`` exactly — so a column added
 # to the table without an owner fails the suite.
+#
+# Two things the sets do not say, and a reader filing a new column needs
+# both. They are about **who wins on a sync tick**, not about who may ever
+# write a column: ``db.disable_scheduled_job`` writes ``enabled`` from the
+# daemon's failure path today, and this sync overwrites it from the file
+# within the tick, which is the arbitration the split exists to end. And they
+# describe this sync alone — ``scheduler._sync_module_jobs`` is a third writer
+# with its own rules for ``_module.*`` rows, which the sync filters out of
+# both the file loop and the orphan sweep.
 # ---------------------------------------------------------------------------
 
 #: Columns CRON.md authors. The sync writes exactly these on every tick.
@@ -531,10 +540,10 @@ FILE_OWNED_COLUMNS = frozenset({
     "publish_shared_kv_trusted",
 })
 
-#: Columns the daemon authors. The sync must never write these. The one place
-#: it touches one is the ``last_run_at`` reset on a cron-expression change,
-#: which is appended to the SET clause at its own site so it reads as the
-#: deliberate exception it is.
+#: Columns the daemon authors. The sync never writes one from the file: the
+#: single exception is the ``last_run_at`` reset on a cron-expression change,
+#: appended to the SET clause at its own site so it reads as the deliberate
+#: exception it is.
 DAEMON_OWNED_COLUMNS = frozenset({
     "last_run_at",
     "last_success_at",
@@ -542,7 +551,8 @@ DAEMON_OWNED_COLUMNS = frozenset({
     "last_error",
 })
 
-#: Row identity. Written once at insert, never updated.
+#: Row identity, never updated. ``user_id`` and ``name`` are written once at
+#: insert; ``id`` and ``created_at`` come from the schema's own defaults.
 IDENTITY_COLUMNS = frozenset({"id", "user_id", "name", "created_at"})
 
 
@@ -554,9 +564,12 @@ def _file_owned_values(
 ) -> dict[str, object]:
     """What the file now says, for every column CRON.md authors.
 
-    The keys are exactly ``FILE_OWNED_COLUMNS``; the sync projects this
-    mapping through that set, so a column declared without a value here
-    fails loudly rather than being written as NULL.
+    The keys are exactly ``FILE_OWNED_COLUMNS``, which
+    ``test_every_file_owned_column_has_a_value`` is what holds: the sync
+    projects this mapping through that set, so a column declared there and
+    missing here is a ``KeyError`` rather than a column silently written as
+    NULL. That is a test-time guarantee, not a runtime one — at runtime the
+    scheduler's per-user ``except`` would swallow it into one log line.
     """
     return {
         "cron_expression": fj.cron,
