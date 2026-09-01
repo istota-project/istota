@@ -1,11 +1,14 @@
 """Layer 4 — the shipped image over an older release's state.
 
-Three of istota's upgrade shapes never regenerate `config.toml`, and two of
-them are how ISSUE-263 reached production: the auto-update cron `git reset
---hard`s to main without running Ansible, and a Docker rebuild over a retained
-volume keeps the config the entrypoint wrote on that volume's first boot. Every
-other tier in this spec renders a fresh config, and a fresh config is current by
-definition — so none of them can see this.
+New code against an older `config.toml` is how ISSUE-263 reached production: the
+auto-update cron `git reset --hard`s to main without running Ansible, and a
+Docker rebuild over a retained volume used to keep the config the entrypoint
+wrote on that volume's first boot. ISSUE-368 made that render happen on every
+boot, which narrows the Docker case to the window between the image changing and
+the container restarting — the assertions below still have their subject, since
+this tier runs the image with `--entrypoint /bin/sh` and never re-renders the
+planted anchor config. Every other tier renders a fresh config, and a fresh
+config is current by definition — so none of them can see this.
 
 Two shapes, two anchors, because one anchor is not enough:
 

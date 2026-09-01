@@ -147,6 +147,19 @@ services:
       # same directory twice. A literal cannot be outranked by a variable exported
       # in the operator's shell, which is the trap the credential variables hit.
       ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR: "false"
+      # Whether the entrypoint re-renders /data/config/config.toml from this
+      # environment on every boot. "always" (the default) is the only way any
+      # ISTOTA_* value below reaches the daemon after the first boot — the file
+      # is on the istota_data volume and rebuild.sh keeps volumes (ISSUE-368).
+      # "preserve" restores the old skip-if-present behaviour for a deployment
+      # that hand-maintains the file, and logs what it is holding back.
+      ISTOTA_CONFIG_RENDER: ${ISTOTA_CONFIG_RENDER:-always}
+      # Web session cookie signing key. Read *here* as well as in the web
+      # service: this entrypoint resolves the key once per boot and renders it
+      # into config.toml, which is where web reads it from when the variable is
+      # unset. Passing it to web alone left the operator's pinned value unable
+      # to reach the thing that writes it down.
+      ISTOTA_WEB_SESSION_SECRET_KEY: ${ISTOTA_WEB_SESSION_SECRET_KEY:-}
       # Bot identity
       ISTOTA_BOT_NAME: ${ISTOTA_BOT_NAME:-Istota}
       ISTOTA_EMISSARIES_ENABLED: ${ISTOTA_EMISSARIES_ENABLED:-true}
@@ -469,15 +482,26 @@ services:
         # Match the istota service: any file we write to /mnt/shared needs
         # to land mode 664 with group=33 so NC's www-data can edit it back.
         umask 002
-        # Wait for the istota service to generate config.toml. If [web] is
-        # missing (e.g. provisioning failed), the web app stays up but returns
-        # 500 from /login — better than a restart loop.
+        # Wait for the istota service to publish this boot's config. The flag,
+        # not config.toml itself: the istota entrypoint re-renders the config on
+        # every boot (ISSUE-368) and clears the flag before it starts, so on
+        # every boot but the first config.toml exists throughout and holds the
+        # previous boot's values. The flag holds the rendered config's sha256,
+        # and it is compared rather than merely tested for, because this loop
+        # can reach its first iteration before the istota entrypoint has cleared
+        # the previous boot's flag. If [web] is missing (e.g. provisioning
+        # failed), the web app stays up but returns 500 from /login — better
+        # than a restart loop.
+        config_is_current() {
+          [ -f /data/config/.config-current ] && [ -f /data/config/config.toml ] || return 1
+          [ "$$(cat /data/config/.config-current)" = "$$(sha256sum /data/config/config.toml | cut -d' ' -f1)" ]
+        }
         for i in $$(seq 1 60); do
-          [ -f /data/config/config.toml ] && break
+          config_is_current && break
           sleep 2
         done
-        if [ ! -f /data/config/config.toml ]; then
-          echo "[web] ERROR: config.toml not found after 120s — is the istota service running?" >&2
+        if ! config_is_current; then
+          echo "[web] ERROR: config.toml was not published after 120s — is the istota service running?" >&2
           exit 1
         fi
         if ! grep -q '^\[web\]' /data/config/config.toml; then
@@ -581,7 +605,32 @@ services:
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       # Admin allowlist (shared with the istota and web services).
       ISTOTA_ADMINS_FILE: /data/config/admins
-    entrypoint: ["/bin/sh", "-c", "umask 002 && mkdir -p /app/config && ln -sf /data/config/config.toml /app/config/config.toml && exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port ${ISTOTA_WEBHOOKS_PORT:-8765}"]
+    # Waits for this boot's config for the same reason `web` does, and it is the
+    # service that most needs to: `location.ingest_token` is what it validates
+    # every Overland ping against, so binding the previous boot's config means
+    # rejecting the token the operator was just shown, for the life of the
+    # container. Under the pre-ISSUE-368 first-boot-only render this could not
+    # go wrong, because the file never changed.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        umask 002
+        config_is_current() {
+          [ -f /data/config/.config-current ] && [ -f /data/config/config.toml ] || return 1
+          [ "$$(cat /data/config/.config-current)" = "$$(sha256sum /data/config/config.toml | cut -d' ' -f1)" ]
+        }
+        for i in $$(seq 1 60); do
+          config_is_current && break
+          sleep 2
+        done
+        if ! config_is_current; then
+          echo "[webhooks] ERROR: config.toml was not published after 120s — is the istota service running?" >&2
+          exit 1
+        fi
+        mkdir -p /app/config
+        ln -sf /data/config/config.toml /app/config/config.toml
+        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}"
     command: []
     restart: unless-stopped
 

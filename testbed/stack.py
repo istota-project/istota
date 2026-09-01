@@ -94,9 +94,9 @@ FULL_READY_TIMEOUT = 1500
 #:
 #: `web` and `nginx` are deliberately absent from the full shape's tuple, and
 #: not because they do not matter — because they restart-loop through a cold
-#: boot *by design*. `web` polls for `config.toml` for 120 seconds and exits 1
-#: (`docker-compose.yml:422-425`) while `istota` may take up to 600 seconds to
-#: write it, and `nginx` starts before `web` is serving (`depends_on` there is
+#: boot *by design*. `web` polls for `/data/config/.config-current` for 120
+#: seconds and exits 1 while `istota` may take up to 600 seconds to publish it,
+#: and `nginx` starts before `web` is serving (`depends_on` there is
 #: `service_started`, not `service_healthy`) so its startup resolution of the
 #: `web` upstream can fail and take it round again.
 #:
@@ -2309,12 +2309,15 @@ class StackPool:
 
     #: Under `KEEP`, the volumes that are wiped anyway, by unqualified name.
     #:
-    #: `istota_data` holds `/data/config/config.toml`, and `entrypoint.sh:344`
-    #: gates the *entire* render on `[ ! -f "$CONFIG_FILE" ]` — so a kept
-    #: `istota_data` means session 2's env-file is never read and the daemon
-    #: boots pointing at session 1's now-dead scripted-endpoint port. It also
-    #: holds `.api-provisioned`, whose absence is what makes the entrypoint
-    #: re-run room provisioning through the find-by-name recovery path.
+    #: `istota_data` holds the framework database every assertion is read out
+    #: of, so keeping it would make session 2's rows depend on session 1's. It
+    #: also holds `.api-provisioned`, whose absence is what makes the entrypoint
+    #: re-run room provisioning through the find-by-name recovery path. It no
+    #: longer has to go for the *config's* sake: before ISSUE-368 the entire
+    #: render was gated on `[ ! -f "$CONFIG_FILE" ]`, so a kept `istota_data`
+    #: meant session 2's env-file was never read and the daemon booted pointing
+    #: at session 1's now-dead scripted-endpoint port. The render runs every
+    #: boot now, and the two reasons above are enough on their own.
     #: `redis_data` is a cache with nothing in it worth a second of boot time.
     KEEP_WIPES = ("istota_data", "redis_data")
 
@@ -2337,7 +2340,7 @@ class StackPool:
         `nextcloud:30-apache`, not by reasoning). So on a kept volume set the
         hook does not run, the flag never appears, `entrypoint.sh` waits its
         600 seconds and exits 1, and `restart: unless-stopped` does that
-        forever. Wiping `istota_data` alone gets the re-render and the room
+        forever. Wiping `istota_data` alone gets the fresh database and the room
         re-provisioning that wiping `shared_files` was supposed to buy.
 
         The second correction is in `_compose_args_full`: the port has to be
@@ -2377,10 +2380,10 @@ class StackPool:
                 # exit out loud: `-f` already tolerates a missing volume, so a
                 # failure here means one that is still *in use* — a container
                 # from a crashed run, another project holding it. A silently
-                # surviving `istota_data` means the next session's env-file is
-                # never read (the render is gated on config.toml existing) and
-                # its rooms are never re-provisioned, which is a wrong-answer
-                # boot a minute later with nothing in the log.
+                # surviving `istota_data` means the next session reads the
+                # previous one's framework database and never re-provisions its
+                # rooms, which is a wrong-answer boot a minute later with
+                # nothing in the log.
                 logger.warning(
                     "docker volume rm %s exited %s — the next kept session will "
                     "reuse it and may boot a stale configuration.\n%s",

@@ -36,20 +36,29 @@ The image ships `gh` and `glab` under `/usr/local/lib/istota_forge`, deliberatel
 
 Being off `PATH` is a guard against habit, not a boundary — the sandbox binds `/usr` read-only, so an absolute path still reaches the real binary. The boundary is the skill proxy, which keeps the token out of the model's environment.
 
-An upgraded container keeps the `[developer]` block written before the binaries existed, because `config.toml` is generated only when absent and lives in a named volume. Nothing needs editing: the skill probes the install location directly rather than trusting the configured path, so upgrading the container is enough.
+A container still running from before its upgrade keeps the `[developer]` block written before the binaries existed. Nothing needs editing either way: restarting re-renders the block, and the skill also probes the install location directly rather than trusting the configured path.
 
-The config at `/data/config/config.toml` is generated on first start. To change settings after setup:
+## Changing settings
+
+`/data/config/config.toml` is generated from `docker/.env` on every start. Edit the variable and restart:
 
 ```bash
-docker compose exec istota vi /data/config/config.toml
+$EDITOR docker/.env
 docker compose restart istota
+docker compose restart web webhooks   # webhooks only if you run the location profile
 ```
+
+The boot logs every key that changed, so `docker compose logs istota` is where you confirm an edit landed. The outgoing file is kept as `/data/config/config.toml.prev`.
+
+Editing the rendered file directly does not survive a restart — that is the point of rendering it each time, and it is why `docker/.env` is the place to make a change. Values provisioning derives once are not re-derived: the OAuth2 client, the Talk room tokens, the location ingest token and the web session signing key all persist beside the config and are fed back into each render. (The secrets-store key is different again: it lives at `/data/.secret_key` and reaches the daemon through the environment, never through the config.) If you genuinely need to hand-maintain the file, set `ISTOTA_CONFIG_RENDER=preserve`; the boot then keeps it and logs every key that has drifted from `docker/.env`, so the staleness is at least visible.
 
 ## Upgrading an existing deployment
 
-Two things this stack does are first-install only, and both are easy to mistake for "the upgrade did not work". `entrypoint.sh` writes `/data/config/config.toml` only when the file is absent, and it lives on the `istota_data` volume; `provision-nc.sh` is a Nextcloud post-installation hook, so it runs against a fresh instance and never again. A release whose fix is a new config key or a new `occ` call therefore lands on new installs and needs a hand patch on old ones. The CHANGELOG says so where it applies.
+One thing this stack does is first-install only: `provision-nc.sh` is a Nextcloud post-installation hook, so it runs against a fresh instance and never again. A release whose fix is a new `occ` call therefore lands on new installs and needs a hand patch on old ones. The CHANGELOG says so where it applies.
 
-One such patch is outstanding as of the DAV-prefix release. The shared volume reaches Nextcloud as an external storage mount, so the bot's own folder tree puts everything one level below the path the bot was asking for, and sharing is refused on an external mount by default. A fresh install gets both right. An existing one needs, in `/data/config/config.toml`:
+Config keys are no longer in that category. The entrypoint used to write `/data/config/config.toml` only when the file was absent, and it lives on the `istota_data` volume that `rebuild.sh` keeps — so a release adding or renaming a key landed on new installs only, and an operator editing `docker/.env` got no error, no warning and no change (ISSUE-368). The config is rendered on every boot now, so **restarting `istota` is the patch** for the three that used to be listed here: the DAV prefix and share flag below, the `[models.roles]` → `[models.aliases]` rename, and the `tmux_claude` brain's explicit `fallback`. Each is kept below for the half a restart cannot do, and for anyone reading an older CHANGELOG entry that still names it.
+
+As of the DAV-prefix release, the shared volume reaches Nextcloud as an external storage mount, so the bot's own folder tree puts everything one level below the path the bot was asking for, and sharing is refused on an external mount by default. Restarting `istota` renders both keys:
 
 ```toml
 [nextcloud]
@@ -59,7 +68,7 @@ dav_prefix = "Shared Files"
 auto_share_bot_dir = false
 ```
 
-and, in the Nextcloud container, sharing enabled on each of the two mounts the installer created — the one named after the shared volume and the one named after the bot:
+The other half is not a config key and still needs doing by hand: in the Nextcloud container, enable sharing on each of the two mounts the installer created — the one named after the shared volume and the one named after the bot:
 
 ```bash
 docker compose exec -u www-data nextcloud php /var/www/html/occ files_external:list
@@ -68,7 +77,7 @@ docker compose exec -u www-data nextcloud php /var/www/html/occ files_external:o
 
 Restart `istota` afterwards. Without the config keys the `nextcloud` skill's `files` and `share` verbs answer 404 and the bot logs `Failed to share folder` on every boot; without the mount option every share of anything in the workspace is refused.
 
-A second patch is outstanding for any install created before the model-alias rename. `[models.roles]` was renamed to `[models.aliases]` and the old key is now read by nothing, so a config generated under the old name has its per-role map dropped and logs a warning naming the retired key on every process start. In `/data/config/config.toml`:
+An install created before the model-alias rename had `[models.roles]` in its config, which is now read by nothing: the per-role map was dropped and a warning naming the retired key was logged on every process start. A restart renders the current name, which is what you should now see:
 
 ```toml
 # was [models.roles]
@@ -78,9 +87,9 @@ general = "..."
 smart = "..."
 ```
 
-Restart `istota` afterwards. This only changes behaviour if you pointed a role at something other than `ISTOTA_BRAIN_NATIVE_MODEL` — an unmapped role already falls back to the single configured model, so an install that left all three the same loses only the warning.
+This only changes behaviour if you pointed a role at something other than `ISTOTA_BRAIN_NATIVE_MODEL` — an unmapped role already falls back to the single configured model, so an install that left all three the same loses only the warning.
 
-A third patch applies to any install running `ISTOTA_BRAIN_KIND=tmux_claude` that was created before ISSUE-362. That brain used to fail over to `claude_code` with nothing configured; failover is explicit now, for every brain kind. A **new** install gets `fallback = "claude_code"` written in for it, but the config is rendered once and kept, so an existing one keeps a `[brain]` block with no `fallback` key and now has no failover at all — a tmux launch failure or a usage limit fails the task. Every process start logs one INFO line saying so. To restore it, add the key in `/data/config/config.toml`:
+The same goes for any install running `ISTOTA_BRAIN_KIND=tmux_claude` created before ISSUE-362. That brain used to fail over to `claude_code` with nothing configured; failover is explicit now, for every brain kind, and the render writes `fallback = "claude_code"` in for it. An install that has not restarted since keeps a `[brain]` block with no `fallback` key and has no failover at all — a tmux launch failure or a usage limit fails the task — and logs one INFO line per process start saying so. A restart renders:
 
 ```toml
 [brain]
@@ -88,7 +97,7 @@ kind = "tmux_claude"
 fallback = "claude_code"
 ```
 
-Restart `istota` afterwards. Leaving it out is a valid choice now; the notice is there because it was not previously expressible.
+Having no failover is a valid choice now, which is why the INFO line exists; on a `tmux_claude` primary, `ISTOTA_BRAIN_FALLBACK` has to name a different brain to change what gets written, since an unset value there is filled in with `claude_code`.
 
 ## Optional profiles
 

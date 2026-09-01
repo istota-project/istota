@@ -195,4 +195,3 @@ All of it on one developer machine in August 2026 — arm64, 10 cores, Docker De
 - Feeds image dedupe. Its only caller is the authenticated web reader, so a deployed-path scenario cannot reach it until the Svelte components carry `data-testid` hooks.
 - `Probe` cannot read a *module* database, so the feeds scenario asserts through the CLI's own output rather than on rows.
 - Per-session image tags (`istota-test/istota:*`, `istota-test/no-forge:*`, and the full shape's per-project `<project>-istota` and `-web`) are built by every session and removed by nothing. They accumulate; remove them by hand.
-- A second `entrypoint.sh` wart, found while fixing the first: with location enabled, deleting `.api-provisioned` regenerates `LOCATION_INGEST_TOKEN`, but the config render is gated on `config.toml` not existing, so the config keeps the old token and the flag file records one nothing reads. Unreachable from this tier, since the full profile leaves location off.

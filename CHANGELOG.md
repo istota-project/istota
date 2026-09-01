@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On the Docker deployment, editing `docker/.env` and rebuilding now changes what the bot runs. It did not before: the settings file was written on the very first boot and never again, so every one of the 170 settings that file controls was fixed for the life of the install, and changing one produced no error, no warning and no change. The settings file is now written from `docker/.env` on every start, the boot log names every setting that changed, and the outgoing file is kept beside it as `config.toml.prev`. Values worked out once during setup — the Nextcloud login for the web UI, the chat room addresses, the location tracking token, the key that signs web sessions — are carried across rather than made again, so nobody is logged out and no phone stops reporting. If you deliberately hand-edit the settings file inside the container, set `ISTOTA_CONFIG_RENDER=preserve` to keep the old behaviour; the boot then lists every setting that has drifted from `docker/.env` instead of saying nothing.
+
+- **Upgrade note:** the same change makes three previously outstanding Docker patches into a restart. An install created before the Nextcloud folder-prefix release, before `[models.roles]` became `[models.aliases]`, or before the tmux brain's failover became explicit picks all three up on its next start. The one thing a restart still cannot do is the Nextcloud side of the first: enabling sharing on the two external mounts, which is an `occ` call and is written out in the Docker deployment guide.
+
 - Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
 
 ### Security

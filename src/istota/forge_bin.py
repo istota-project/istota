@@ -66,13 +66,15 @@ def resolve_real_bin(configured: str, name: str) -> str:
     is the play that repoints the config, so the two never disagree for longer
     than one run.
 
-    The docker image has the same gap and cannot close it from its side: the
-    entrypoint writes ``config.toml`` only on a first boot with a fresh volume,
-    so a container upgraded into a version whose image ships the binaries still
-    has a ``[developer]`` block that predates them. ``IMAGE_BIN`` is probed for
-    that case — an install shape whose binaries are off PATH by design has no
-    other way to be found, and unlike the Ansible one it cannot be repaired by
-    rerunning anything.
+    The docker image used to have the same gap and could not close it from its
+    side: the entrypoint wrote ``config.toml`` only on a first boot with a fresh
+    volume, so a container upgraded into a version whose image ships the
+    binaries still had a ``[developer]`` block that predated them. ISSUE-368
+    closed that — the entrypoint re-renders on every boot, so a restart is now
+    the repair. ``IMAGE_BIN`` is still probed, because a container that has not
+    been restarted since the upgrade is in exactly the old state, and because an
+    install shape whose binaries are off PATH by design has no other way to be
+    found.
     """
     default = FALLBACK_BIN[name]
     if configured and configured != default:
