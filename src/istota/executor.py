@@ -1435,6 +1435,36 @@ def effective_sandboxing(config: Config) -> bool:
     return bool(config.security.sandbox_enabled and _bwrap_available())
 
 
+def effective_sandboxing_if_known(config: Config) -> bool | None:
+    """`effective_sandboxing`, but only where the answer costs nothing.
+
+    ``None`` means "not established here": the flag is on and the bwrap
+    capability probe has not run in this process, so answering would mean
+    spawning. Every other case is the same answer `effective_sandboxing`
+    gives.
+
+    For a caller that must not spawn — today `doctor`'s
+    ``runtime.session_log_dir`` under ``run_checks(probe=False)``, whose whole
+    subject is a boundary and which therefore must not report a protection it
+    did not verify. It reads the memo rather than declaring ignorance because
+    the memo is usually warm where it matters: the daemon probes at start-up in
+    `_log_startup_status`, so inside that process the answer is free, and
+    saying "not probed" while `_bwrap_checked` holds it would be a statement
+    about the world that is wrong.
+
+    Reads the module global directly rather than calling `_bwrap_available`,
+    which is the point — that function's contract is to probe when it has no
+    cached answer.
+    """
+    if not config.security.sandbox_enabled:
+        # No probe needed and none was ever wanted: the flag alone settles it,
+        # exactly as `effective_sandboxing`'s own short-circuit does.
+        return False
+    if _bwrap_checked is None:
+        return None
+    return bool(_bwrap_checked)
+
+
 def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
     """Whether this bwrap accepts *flag*, probed once per process.
 

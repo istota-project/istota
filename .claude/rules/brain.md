@@ -1285,12 +1285,36 @@ closure in `executor.py` precisely so `doctor`'s `runtime.session_log_dir` asks
 the sandbox's own question instead of a copy of it; "is the directory under
 `db_path.parent`" answers yes on the standalone shape and would report the
 property holding while the directory sat outside every mask. **That covers the
-path axis and not the availability one**: `_session_log_mask_reason` gates on
-`security.sandbox_enabled` rather than on `effective_sandboxing`, so on a shipped
-Docker stack — flag on, bwrap unavailable — the check reports `OK` and no mask
-finding while nothing is masked. `runtime.bwrap` answers that half separately,
-and until the two are joined this check distinguishes the standalone shape from
-the Ansible one rather than naming every unmasked deployment.
+path axis, and the availability one is asked beside it** (ISSUE-381).
+`_session_log_mask_finding` used to gate on `security.sandbox_enabled`, so on a
+shipped Docker stack — flag on, bwrap unavailable — the check reported `OK` and
+no mask finding while nothing was masked at all. It now asks
+`executor.effective_sandboxing` and **reports both counts** rather than the
+first: the two conditions are independent, the standalone install fails both at
+once, and an operator who reads one reason and fixes it would otherwise be told
+nothing about the second. Availability leads the joined reason, because whether
+a mask exists outranks where it would land.
+
+Three things about that arm are easy to get wrong and each was got wrong first.
+It **may not spawn** under `run_checks(probe=False)`, and `effective_sandboxing`
+consults the bwrap capability probe — so it asks `effective_sandboxing_if_known`
+there instead, which reads the process memo `_bwrap_available` fills and returns
+`None` rather than probing. The memo is usually warm where it matters, since the
+daemon probes at start-up in `_log_startup_status`, and reporting "not probed"
+while `_bwrap_checked` holds the answer would be a statement about the world
+that is wrong. An answer it genuinely cannot get is a **third state**, not a
+pass: `_session_log_sandbox_availability` returns `True | False | None`, because
+returning `True` on the unobtainable path reinstated ISSUE-381 in miniature — a
+protection asserted by a function that had just failed to check it. And an
+unestablished answer takes a **different finding prefix** (`_MASK_UNKNOWN`
+rather than `_MASK_EXPOSED`): composed under the old fixed prefix it read "the
+logs are unbound rather than masked — [it] was not probed", asserting the
+exposure in one clause and disclaiming it in the next, on a deployment whose
+mask was fine. This is the one check in the module that will not report `OK`
+under `probe=False`, against a convention where `_binary_status` and
+`check_tmux` return `OK` and `check_subscription_usage` returns `SKIP`; the
+subject here is a boundary, and "fine" from a run that did not look is the
+defect wearing a flag.
 
 **And "nothing binds it" is a default rather than a guard.** No code in
 `build_bwrap_cmd` knows about this directory; what keeps it out is that

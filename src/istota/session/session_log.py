@@ -271,12 +271,17 @@ def resolve_session_log_dir(db_path: Path | str | None, configured: str = "") ->
     disk on every shipped shape (appending JSONL all day to the rclone mount
     would be worse than a WAL database there), it is the state directory that
     already holds ``modules/``, ``backups/`` and ``subscription_usage.json``,
-    and on the Ansible and Docker shapes it is behind the read-only tmpfs
+    and on the Ansible shape it is behind the read-only tmpfs
     ``build_bwrap_cmd`` masks ``db_path.parent`` with. On the standalone shape
-    that mask is refused — ``db_path.parent`` *is* the workspace there — so the
-    logs are merely unbound rather than masked, which the ``doctor`` check
-    reports rather than papers over. The boundary in both cases is that nothing
-    binds the path.
+    that mask is refused — ``db_path.parent`` *is* the workspace there — and on
+    the shipped Docker stack the path is under what the mask would cover but no
+    mask is ever emitted, because that compose file grants neither
+    ``seccomp:unconfined`` nor ``systempaths=unconfined`` and the bwrap probe
+    fails. So on two of the three shapes the logs are merely unbound rather than
+    masked, which the ``doctor`` check reports rather than papers over — both
+    counts of it, since a deployment can fail on availability and on path at
+    once (ISSUE-381). The boundary in every case is that nothing binds the
+    path.
 
     A configured value is used **as given**. Nothing expands ``~`` or resolves
     against a base, matching every other path in ``config.py``; only
