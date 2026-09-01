@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
+
 ### Security
 
 - The files in your workspace's `config/` folder — your memory file, your persona, your scheduled jobs, your monitoring checks, your task list, and the examples the bot keeps up to date there — are read and written by the bot itself, outside the sandbox, where it can see far more of the machine than a task can. A task can write to that folder; that is the feature. What it could also do was put a link there in place of one of those files, or in place of the folder, and the bot followed it: a link at your memory file put the contents of some other file on the machine into the next task's prompt, and a link at the folder turned a memory write into a file of the task's choosing written wherever it liked. Every read and write of that folder now refuses to follow a link out of your own workspace, and refuses anything that is not an ordinary file. A room's shared notes file and your daily memory files get the same treatment, for the same reason.

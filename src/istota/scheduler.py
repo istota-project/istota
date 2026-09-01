@@ -6322,6 +6322,9 @@ def run_cleanup_checks(config: Config) -> None:
     # database is writing to, so without this step nothing on the deployment
     # ever deletes one.
     #
+    # `enabled` controls the writer, not this sweep. A deployment that switches
+    # writing off still needs to retire the transcripts already on disk.
+    #
     # The gate is `or`, not `and`: the age rule and the disk ceiling bound
     # different things and neither implies the other. An operator who sets
     # `retention_days = 0` to keep everything indefinitely still wants the
@@ -6333,7 +6336,7 @@ def run_cleanup_checks(config: Config) -> None:
     # about which brain a given task would route to. A deployment that switched
     # away from native still sweeps the logs native left behind.
     _slog = config.brain.native.session_log
-    if _slog.enabled and (_slog.retention_days > 0 or _slog.max_total_gb > 0):
+    if _slog.retention_days > 0 or _slog.max_total_gb > 0:
         try:
             _sweep = sweep_session_logs(
                 resolve_session_log_dir(config.db_path, _slog.dir),
