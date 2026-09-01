@@ -71,6 +71,16 @@ def test_health():
     r = api("/health")
     check("health returns ok", r.get("status") == "ok", r.get("error", ""))
     check("browser connected", r.get("browser_connected") is True)
+    # /health degrades on a wedged CDP binding as well as a dead Chrome
+    # (ISSUE-384), and that is the failure this whole script is least able to
+    # diagnose from its own output — every verb below returns the same generic
+    # error. Report the counters so the run says which of the two it hit.
+    check(
+        "cdp binding healthy",
+        r.get("cdp_healthy", True) is True,
+        f"{r.get('cdp_consecutive_failures', 0)} consecutive CDP failures: "
+        f"{r.get('cdp_last_error', '')}",
+    )
 
 
 def test_session_lifecycle():

@@ -2609,6 +2609,8 @@
       VNC_PASSWORD={{ istota_browser_vnc_password }}
       BROWSER_VNC_URL={{ istota_browser_vnc_external_url }}
       MAX_BROWSER_SESSIONS={{ istota_browser_max_sessions }}
+      BROWSER_CDP_FAILURE_THRESHOLD={{ istota_browser_cdp_failure_threshold }}
+      BROWSER_CDP_FAILURE_WINDOW_S={{ istota_browser_cdp_failure_window }}
   when: istota_browser_enabled and not istota_web_only
   notify:
     - "restart istota-browser"
