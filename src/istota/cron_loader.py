@@ -695,10 +695,17 @@ def _write_cron_md(
     — a directory that cannot be *created* (an unwritable parent, or the
     ``ENOTCONN``/``EIO`` a dropped FUSE mount answers with, which is exactly
     the failure this whole change is about) raised straight through. The
-    scheduler's once-job caller is why that matters: it runs inside an open
-    write transaction that has already deleted the job row, so an exception
-    there rolls the task's own completion back and the one-shot runs a second
-    time — strictly worse than the file being stale.
+    scheduler's once-job caller is why that matters, and ISSUE-387 changed
+    which failure it would cause. It used to run inside the still-open write
+    transaction that had just deleted the job row, so an exception rolled the
+    task's own completion back with it and the one-shot ran a second time. It
+    now runs *after* that transaction has committed, so an exception instead
+    escapes ``process_one_task`` with the task already recorded complete: the
+    result is never delivered to Talk or email, no terminal task event is
+    emitted, and nothing retries. Either way it is strictly worse than the
+    file being stale, which is what the contract exists to guarantee — and the
+    contract is restated on ``remove_job_from_cron_md``, since that is the
+    name the scheduler actually depends on.
 
     One thing survives a ``False``: ``_externalize_multiline_prompts`` writes
     ``scripts/prompts/*.txt`` and stamps ``job.prompt_file`` before anything is
@@ -1139,6 +1146,16 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     regenerated toml block back into it, leaving the rest of the file alone.
     Returns True if the job was found **and the file now says so**; a refused
     or failed write is False, like ``update_job_enabled_in_cron_md``.
+
+    **False, never an exception**, on every path. ``_write_cron_md`` states
+    that contract and explains why it matters; this is the name the scheduler
+    calls, so it is restated here. The two steps in front of that call hold it
+    too: ``load_cron_document`` returns ``None`` for every case the file cannot
+    be read as one (its reader, ``storage.read_user_config_file``, logs a
+    refusal rather than raising), and filtering the job list cannot fail. The
+    scheduler's once-job caller runs after its write transaction has committed
+    (ISSUE-387), so an exception here would leave the task recorded complete
+    and its answer undelivered.
     """
     if not config.use_mount:
         return False

@@ -2283,6 +2283,84 @@ def _note_job_auto_disabled(
         return None
 
 
+def _remove_once_job_from_cron_md(config: Config, user_id: str, job_name: str) -> None:
+    """Take a completed once-job out of CRON.md, after the task transaction.
+
+    Split out of ``process_one_task`` by ISSUE-387. The write lands on the
+    rclone FUSE mount, and it used to run inside the still-open transaction
+    that had just deleted the job row — so a mount that stopped answering held
+    SQLite's write lock for the whole FUSE timeout and stalled every other
+    framework-DB writer: the dispatch loop, the other workers, the web app,
+    the pollers. The caller buffers ``(user_id, job_name)`` instead and calls
+    this once the ``with`` block has closed.
+
+    **Never raises**, and the move is what made that load-bearing rather than
+    tidy. This runs *after* the commit, so an exception escaping here would
+    leave the task already recorded ``completed`` with everything that
+    finishes it still ahead — the result never delivered, the deferred ops
+    never applied, the terminal event never emitted, and nothing retrying a
+    ``completed`` row. ``remove_job_from_cron_md`` states its own never-raises
+    contract, so the guard is defence in depth: it keeps a future edit to the
+    writer from silently converting a stale file into a lost answer. Same
+    shape as ``deliver_pending``, which contains its own exceptions for the
+    buffer flushed beside this one.
+    """
+    try:
+        from .cron_loader import remove_job_from_cron_md
+
+        removed = remove_job_from_cron_md(config, user_id, job_name)
+        if removed:
+            # Deleting the row and rewriting the file are no longer one step,
+            # and `_sync_cron_files` runs on the main loop every
+            # `briefing_check_interval` treating CRON.md as authoritative. A
+            # sync landing in between reads a file that still names this job
+            # and re-inserts the row the task just deleted — the `once = true`
+            # job that runs a second time, which is exactly what the warning
+            # below exists to report. Before ISSUE-387 the two happened in the
+            # opposite order, so a sync in the window saw a row the file did
+            # not name and deleted it; hoisting the write turned a
+            # self-correcting interleaving into a harmful one, and this closes
+            # it again. The window is not microseconds in the case that
+            # matters: under the hung mount this whole change is about, reads
+            # still answer from cache while the write blocks.
+            #
+            # Safe to delete unconditionally because the file no longer names
+            # the job, so a row under this name can only be that resurrection
+            # — and if the write did *not* land we are in the `else` below,
+            # where the file is still the definition and the row belongs to it.
+            with db.get_db(config.db_path) as conn:
+                resurrected = db.get_scheduled_job_by_name(conn, user_id, job_name)
+                if resurrected is not None:
+                    db.delete_scheduled_job(conn, resurrected.id)
+                    logger.info(
+                        "One-time job '%s' was re-inserted by a cron sync "
+                        "between its deletion and the CRON.md write; deleted "
+                        "again (user=%s job_id=%d)",
+                        job_name, user_id, resurrected.id,
+                    )
+        elif config.use_mount:
+            # The table row is already gone, so if the job is still in the
+            # file it is now the only definition and the next sync re-inserts
+            # it — a `once = true` job that runs a second time. Unchanged
+            # behaviour, but until ISSUE-369 the writer could not report a
+            # refused write at all, so nothing said so. Guarded on `use_mount`
+            # because CRON.md is not the source of truth without one and False
+            # there is the ordinary answer rather than a failure.
+            logger.warning(
+                "One-time job '%s' was removed from the table "
+                "but not from CRON.md for user %s (no CRON.md, "
+                "no such job in it, or the write was refused); "
+                "if the job is still in the file the next sync "
+                "will re-insert it",
+                job_name, user_id,
+            )
+    except Exception:
+        logger.warning(
+            "once_job_cron_md_removal_failed user=%s job=%s",
+            user_id, job_name, exc_info=True,
+        )
+
+
 def process_one_task(
     config: Config, dry_run: bool = False, user_id: str | None = None,
     queue: str | None = None,
@@ -2659,6 +2737,19 @@ def process_one_task(
     # (ISSUE-172).
     stored_assistant_msg_id: int | None = None
 
+    # A once-job whose table row was deleted inside the transaction below, and
+    # whose CRON.md entry therefore still has to go: `(user_id, job_name)`.
+    # Buffered rather than written in place, the same shape as
+    # `notification_results` above. CRON.md is on the rclone mount and the
+    # write followed `delete_scheduled_job`, which is what takes SQLite's
+    # write lock — so a hung mount held that lock for the whole FUSE timeout
+    # and stalled every other framework-DB writer: the dispatch loop, the
+    # other workers, the web app, the pollers (ISSUE-387).
+    # `_remove_once_job_from_cron_md` is the flush, and it owns the two things
+    # the hoist introduced: it cannot raise past an already-committed task,
+    # and it closes the window where a cron sync re-inserts the deleted row.
+    once_job_to_remove: tuple[str, str] | None = None
+
     with db.get_db(config.db_path) as conn:
         if success:
             if is_confirmation_request:
@@ -2916,33 +3007,22 @@ def process_one_task(
                             "One-time job '%s' completed and removed (job_id=%d)",
                             job.name, job.id,
                         )
-                        from .cron_loader import remove_job_from_cron_md
                         # `job.user_id`, for the reason stated sixteen lines
                         # up: the job's owner is who the row was written
                         # under, and CRON.md belongs to the same person. The
                         # task's user is normally the same and is not the fact
                         # being used here.
-                        removed = remove_job_from_cron_md(
-                            config, job.user_id, job.name,
-                        )
-                        if not removed and config.use_mount:
-                            # The table row is already gone, so if the job is
-                            # still in the file it is now the only definition
-                            # and the next sync re-inserts it — a `once = true`
-                            # job that runs a second time. Unchanged behaviour,
-                            # but until ISSUE-369 the writer could not report a
-                            # refused write at all, so nothing said so.
-                            # Guarded on `use_mount` because CRON.md is not the
-                            # source of truth without one and False there is
-                            # the ordinary answer rather than a failure.
-                            logger.warning(
-                                "One-time job '%s' was removed from the table "
-                                "but not from CRON.md for user %s (no CRON.md, "
-                                "no such job in it, or the write was refused); "
-                                "if the job is still in the file the next sync "
-                                "will re-insert it",
-                                job.name, job.user_id,
-                            )
+                        #
+                        # Buffered, not written here — see the declaration and
+                        # `_remove_once_job_from_cron_md`. Nothing else *on
+                        # this thread* reads CRON.md between here and the
+                        # flush, and nothing between them can return or raise,
+                        # so the warning fires on the same runs it did before.
+                        # The main loop is the part that is not unchanged: it
+                        # syncs CRON.md on its own cadence and can now observe
+                        # the row gone while the file still names the job, so
+                        # the flush deletes the row a sync may have put back.
+                        once_job_to_remove = (job.user_id, job.name)
 
         else:
             # Check if we should retry (skip for OOM, cancellation, and policy refusals)
@@ -3159,6 +3239,16 @@ def process_one_task(
     # opens further connections of its own, and a buffer that outlives them is a
     # buffer somebody eventually forgets to flush.
     deliver_pending(config, notification_results)
+
+    # Likewise the once-job's CRON.md removal, buffered above so the mount
+    # write happens with no lock held. It goes after `deliver_pending` rather
+    # than before it, which is a trade rather than an accident: a wedged Talk
+    # send defers the file write (and the deletion is then re-armed by the
+    # next sync until it lands), while the other order would hold every
+    # buffered notice for the FUSE timeout. Neither can lose the *row*
+    # deletion, which is already committed.
+    if once_job_to_remove is not None:
+        _remove_once_job_from_cron_md(config, *once_job_to_remove)
 
     # Emit terminal task events + notify subscribers (brain path only). On a
     # retry-eligible failure the task isn't done — emit nothing terminal; the
