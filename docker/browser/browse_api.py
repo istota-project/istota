@@ -80,6 +80,48 @@ BROWSE_WATCHDOG_POLL_S = int(os.environ.get("BROWSE_WATCHDOG_POLL_S", "5"))
 _inflight = None  # {"path", "url", "started"} for the one in-flight Flask request
 _inflight_lock = threading.Lock()
 
+# CDP heartbeat policy — when a run of failed CDP calls counts as a wedge that
+# only a container restart can clear (ISSUE-384). chrome.py records the evidence;
+# the verdict is here, so tuning how eagerly the container restarts itself does
+# not touch the connection code.
+#
+# Both halves are required, and each rules out a different false positive.
+#
+# The count, because one failure is not a fault. A single connect_cdp() has
+# already retried three times internally, so the default of three consecutive
+# failures is nine failed attempts with no success in between -- and any success
+# resets it, so a container that is serving anything at all never accumulates.
+#
+# The window, because a count on its own never expires. Failures stop when
+# traffic stops, and without a window a burst at 03:00 would hold the verdict red
+# through an idle night and earn a restart for a fault that had already passed.
+#
+# The window's real constraint is detection latency, not the gap between
+# failures. The verdict cannot flicker green between failures -- the count never
+# decays and last_failure only ever advances, so once the count crosses the
+# threshold the age is measured from the most recent failure and the verdict is
+# continuously red. What the window must not be is shorter than the time it takes
+# anything to notice: the image HEALTHCHECK is interval=30s retries=3 (about 90s
+# to `unhealthy`), and the Ansible watchdog then wants 2 consecutive reads at a
+# 1-minute cron (about 120s more). So the floor is roughly 210s, and anything
+# below it makes the arm unreachable rather than merely eager. 900s is that floor
+# with room, which is why it is the default; CDP_WINDOW_FLOOR_S enforces the rest.
+#
+# What the pair deliberately does NOT do is treat the absence of a success as a
+# fault. An idle container makes no CDP calls for hours and is perfectly healthy;
+# only positive evidence of failure counts.
+#
+# THRESHOLD 0 disables the arm, like BROWSE_WATCHDOG_DEADLINE_S above. The window
+# is not an off switch and is clamped rather than honoured at 0, because `age <= 0`
+# is false for any real elapsed time -- so a 0 an operator wrote meaning "no
+# staleness cutoff" would silently disable the arm, the exact opposite.
+CDP_WINDOW_FLOOR_S = 210
+CDP_FAILURE_THRESHOLD = int(os.environ.get("BROWSER_CDP_FAILURE_THRESHOLD", "3"))
+CDP_FAILURE_WINDOW_S = max(
+    CDP_WINDOW_FLOOR_S,
+    int(os.environ.get("BROWSER_CDP_FAILURE_WINDOW_S", "900")),
+)
+
 # Response budgets. Every one of these is a ceiling a caller may lower, not a
 # fixed size: a link-dense hub rendered to markdown legitimately runs past the
 # text-extraction defaults these endpoints shipped with (ISSUE-192), and the old
@@ -180,7 +222,14 @@ def _close_session_unlocked(session_id):
             page = chrome.get_page_by_index(closed_index)
             if not page:
                 return
-            ctx = chrome.get_context()
+            # record=False: this whole block is best-effort teardown behind
+            # `except Exception: pass`, and it runs from _cleanup_expired() at
+            # the top of every endpoint -- including ones that then return 404
+            # without ever making a CDP call of their own, so nothing here can
+            # ever produce a compensating success. Counting it let three
+            # /interact calls with stale session ids restart the container
+            # (ISSUE-384 review).
+            ctx = chrome.get_context(record=False)
             if len(ctx.pages) <= 1:
                 # Last tab — navigate to blank instead of closing
                 page.goto("about:blank", timeout=5000)
@@ -807,7 +856,12 @@ def _get_chrome_diagnostics():
         diag["chrome_running"] = chrome.is_chrome_running()
         diag["cdp_connected"] = chrome.is_cdp_connected()
         if chrome.is_cdp_connected():
-            ctx = chrome.get_context()
+            # record=False: a diagnostics read must not be able to restart the
+            # container it is reporting on. is_cdp_connected() stays True across
+            # recover_wedged_chrome(), so three /health?v=1 polls taken during a
+            # Chrome relaunch would otherwise reach the threshold with no
+            # request having been made (ISSUE-384 review).
+            ctx = chrome.get_context(record=False)
             diag["browser_pages"] = len(ctx.pages)
         diag["browser_connected"] = chrome.is_chrome_running()
     except Exception as e:
@@ -816,15 +870,54 @@ def _get_chrome_diagnostics():
     return diag
 
 
+def _cdp_wedged(now=None):
+    """Whether the CDP heartbeat shows a live wedge (ISSUE-384).
+
+    Reads chrome.py's record -- a dict copy under a leaf lock -- and touches no
+    Patchright machinery, so it is safe from the liveness thread. See the
+    CDP_FAILURE_* comment for why both the count and the window are needed.
+
+    The second element is always the full record, on every path including the
+    disabled one. One shape, so a caller that indexes it cannot raise: an
+    exception here escapes do_GET, the handler answers nothing, `curl -sf`
+    fails, and the switch meant to turn this arm off would cause the restart it
+    exists to prevent.
+    """
+    health = chrome.cdp_health()
+    if CDP_FAILURE_THRESHOLD <= 0:
+        return False, health
+    if health["consecutive_failures"] < CDP_FAILURE_THRESHOLD:
+        return False, health
+    # Monotonic on both sides: chrome.py stamps last_failure with
+    # time.monotonic(), so an NTP step cannot move this age.
+    age = (now if now is not None else time.monotonic()) - health["last_failure"]
+    return age <= CDP_FAILURE_WINDOW_S, health
+
+
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check."""
+    """Health check.
+
+    Reports the CDP heartbeat as well as the Chrome process. Through ISSUE-382
+    this endpoint returned `status: ok` for eight hours while every browse verb
+    500'd, which is what a manual probe gave during the investigation and sent it
+    down the wrong path.
+    """
     with _sessions_lock:
         active = len(_sessions)
     running = chrome.is_chrome_running()
+    wedged, _ = _cdp_wedged()
+    # The counters come straight off the record rather than out of _cdp_wedged,
+    # so an operator who set the threshold to 0 still sees the evidence here.
+    # Switching the arm off means "do not restart the container for this", not
+    # "stop reporting it".
+    cdp = chrome.cdp_health()
     data = {
-        "status": "ok" if running else "degraded",
+        "status": "degraded" if (not running or wedged) else "ok",
         "browser_connected": running,
+        "cdp_healthy": not wedged,
+        "cdp_consecutive_failures": cdp["consecutive_failures"],
+        "cdp_last_error": cdp["last_error"],
         "active_sessions": active,
         "max_sessions": MAX_SESSIONS,
     }
@@ -1000,8 +1093,75 @@ def _resource_monitor():
 # launch window is exempt (`is_launching()`): the process exists but DevTools
 # isn't up yet, so a relaunch must not read as a wedge. The HEALTHCHECK targets
 # the deep tier.
+#
+# The deep tier has a third arm (ISSUE-384). The first two ask about Chrome; both
+# were true for the eight hours of ISSUE-382, when what was dead was this
+# process's own Patchright binding. The third reads the CDP heartbeat chrome.py
+# publishes — a counter and a timestamp, never a Patchright call from this thread,
+# which is the mistake the whole of ISSUE-382 is about.
 
 LIVENESS_PORT = int(os.environ.get("BROWSER_LIVENESS_PORT", "9224"))
+
+
+# Whether the wedge has already been reported. The liveness thread must not
+# block, and logging does: it takes the handler lock and writes to stderr, which
+# is a pipe shared with the Flask thread -- the thread that is by hypothesis
+# wedged. Logging the transition rather than the state bounds that exposure to
+# once per wedge, and it also stops the line repeating every 30s for the rest of
+# the day once the watchdog's crash-loop guard has stopped acting on it. A plain
+# bool: assignment is atomic under the GIL and no reader needs a consistent pair.
+_cdp_wedge_reported = False
+
+
+def _note_cdp_wedge(wedged, cdp):
+    """Log a wedge once when it starts, and once more when it clears."""
+    global _cdp_wedge_reported
+    if wedged and not _cdp_wedge_reported:
+        _cdp_wedge_reported = True
+        log.error(
+            "Liveness: %d consecutive CDP failures with Chrome up and answering "
+            "-- reporting unhealthy so the container is restarted (ISSUE-384). "
+            "Last error: %s",
+            cdp["consecutive_failures"], cdp["last_error"] or "<none recorded>",
+        )
+    elif not wedged and _cdp_wedge_reported:
+        _cdp_wedge_reported = False
+        log.info("Liveness: CDP heartbeat recovered, reporting healthy again")
+
+
+def _probe(deep):
+    """The liveness verdict, as (status, body).
+
+    Module level rather than a method on the handler class so it can be driven
+    directly by a test. ISSUE-382's regression was untestable where it lived —
+    inside a thread loop — and the first version of its test passed with the bug
+    restored; the same trap applies to a probe buried in a nested handler.
+    """
+    # Cheap tier: a subprocess poll(), no Playwright/Flask round-trip.
+    try:
+        alive = chrome.is_chrome_running()
+    except Exception:
+        alive = False
+    if not alive:
+        return 503, b"chrome-down\n"
+    if deep:
+        # Deep tier, arm 1: is the live process actually responsive? Exempt the
+        # launch window (DevTools not up yet) so a relaunch doesn't read as a
+        # wedge.
+        if not chrome.is_launching() and not chrome.devtools_responding(timeout=2):
+            return 503, b"chrome-wedged\n"
+        # Deep tier, arm 2: can this process still drive the browser it is
+        # reporting on? Deliberately not exempted by is_launching(): a relaunch
+        # explains DevTools being absent for a few seconds and explains nothing
+        # about a run of CDP failures that already happened. The browse
+        # watchdog's own Chrome restart puts the container in that window, so
+        # exempting it would blind the probe for exactly as long as a recovery
+        # attempt that cannot fix this fault.
+        wedged, cdp = _cdp_wedged()
+        _note_cdp_wedge(wedged, cdp)
+        if wedged:
+            return 503, b"cdp-wedged\n"
+    return 200, b"ok\n"
 
 
 def _start_liveness_server():
@@ -1020,29 +1180,11 @@ def _start_liveness_server():
             deep = parse_qs(parsed.query).get("deep", ["0"])[0] not in (
                 "0", "", "false",
             )
-            status, body = self._probe(deep)
+            status, body = _probe(deep)
             self.send_response(status)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(body)
-
-        @staticmethod
-        def _probe(deep):
-            # Cheap tier: a subprocess poll(), no Playwright/Flask round-trip.
-            try:
-                alive = chrome.is_chrome_running()
-            except Exception:
-                alive = False
-            if not alive:
-                return 503, b"chrome-down\n"
-            # Deep tier: is the live process actually responsive? Exempt the
-            # launch window (DevTools not up yet) so a relaunch doesn't read as
-            # a wedge.
-            if deep and not chrome.is_launching() and not chrome.devtools_responding(
-                timeout=2,
-            ):
-                return 503, b"chrome-wedged\n"
-            return 200, b"ok\n"
 
         def log_message(self, *args):  # silence per-request stderr spam
             pass

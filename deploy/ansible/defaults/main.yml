@@ -856,6 +856,18 @@ istota_browser_watchdog_ntfy_url: ""          # optional: full ntfy topic URL fo
 istota_browser_watchdog_alert_email: ""       # optional: email address (requires `mail`) for alerts
 istota_browser_daily_restart_cron: "0 5 * * *"  # cron schedule for the proactive daily restart
 
+# The deep liveness probe's CDP arm (ISSUE-384): how many consecutive CDP
+# failures, with Chrome up and answering, make the container report itself
+# unhealthy so the watchdog above restarts it. This is the one fault a Chrome
+# restart cannot clear — the API process's own Patchright binding — so a restart
+# is the only cure and these two decide how eagerly it is reached.
+# Threshold 0 switches the arm off; the counters stay on /health either way.
+# The window is clamped to a 210s floor in the container, because below the
+# healthcheck's own detection latency the arm becomes unreachable rather than
+# merely eager.
+istota_browser_cdp_failure_threshold: 3        # consecutive failures before unhealthy (0 disables)
+istota_browser_cdp_failure_window: 900         # seconds; a failure older than this no longer counts
+
 # Devbox container (per-user persistent dev / network-diagnostics environment).
 # When enabled, one container per entry in istota_devbox_users is brought up
 # via docker-compose. The skill CLI reaches it over the exec transport, on the
