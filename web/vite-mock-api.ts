@@ -1742,9 +1742,9 @@ const mockAdminStats = {
     error: '',
   },
   scheduler: {
-    jobs_total: 5,
+    jobs_total: 6,
     jobs_active: 4,
-    jobs_paused: 1,
+    jobs_paused: 2,
     jobs: [
       {
         id: 1,
@@ -1793,6 +1793,20 @@ const mockAdminStats = {
         last_success_at: new Date(Date.now() - 27 * 60_000).toISOString(),
         consecutive_failures: 1,
         last_error: 'timeout after 30s',
+      },
+      {
+        id: 6,
+        user_id: 'carol',
+        name: 'weekly roundup',
+        cron: '0 18 * * 5',
+        // Switched off by the user in CRON.md, which reads differently from
+        // the suspended row below and must stay in the mock as its own case.
+        enabled: false,
+        auto_disabled_at: null,
+        last_run_at: new Date(Date.now() - 5 * 24 * 3600_000).toISOString(),
+        last_success_at: new Date(Date.now() - 5 * 24 * 3600_000).toISOString(),
+        consecutive_failures: 0,
+        last_error: null,
       },
       {
         id: 5,

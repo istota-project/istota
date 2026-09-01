@@ -3752,10 +3752,11 @@ class TestScheduledJobFailureTracking:
             / get_user_cron_path("alice", "istota").lstrip("/")
         )
         cron_path.parent.mkdir(parents=True, exist_ok=True)
-        cron_path.write_text(
+        original = (
             '```toml\n[[jobs]]\nname = "flaky-job"\ncron = "0 0 * * *"\n'
             'prompt = "do stuff"\nenabled = true\n```\n'
         )
+        cron_path.write_text(original)
 
         with db.get_db(db_path) as conn:
             _sync_cron_files(conn, config)
@@ -3789,7 +3790,9 @@ class TestScheduledJobFailureTracking:
                 j.name for j in db.get_enabled_scheduled_jobs(conn)
             }
 
-        assert cron_path.read_text().count("flaky-job") == 1, "the file was rewritten"
+        # Byte for byte, not a name count: a full regeneration of a one-job
+        # file also contains the name exactly once, so counting proves nothing.
+        assert cron_path.read_text() == original, "the sync rewrote the file"
 
     @patch("istota.scheduler.execute_task", return_value=(False, "boom", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)

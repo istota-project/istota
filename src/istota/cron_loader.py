@@ -542,10 +542,12 @@ FILE_OWNED_COLUMNS = frozenset({
     "publish_shared_kv_trusted",
 })
 
-#: Columns the daemon authors. The sync never writes one from the file: the
-#: single exception is the ``last_run_at`` reset on a cron-expression change,
-#: appended to the SET clause at its own site so it reads as the deliberate
-#: exception it is.
+#: Columns the daemon authors. The sync never writes one *from the file*, and
+#: the two exceptions are resets rather than values out of CRON.md: the
+#: ``last_run_at`` reset on a cron-expression change, and the
+#: ``auto_disabled_at`` / ``consecutive_failures`` / ``last_error`` reset on a
+#: change to what the job dispatches. Both are appended to the SET clause at
+#: their own sites so they read as the deliberate exceptions they are.
 DAEMON_OWNED_COLUMNS = frozenset({
     "last_run_at",
     "last_success_at",
@@ -628,7 +630,8 @@ def sync_cron_jobs_to_db(
     - Orphaned DB jobs (not in file) are deleted
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
     - a scheduler suspension (``auto_disabled_at``) survives every tick, and is
-      lifted only when the file changes what the job dispatches
+      lifted — with the failure count — only when the file changes what the job
+      dispatches
     - command-type jobs are rejected for non-admin users (arbitrary user
       shell-command tasks must remain admin-only)
 
@@ -689,16 +692,32 @@ def sync_cron_jobs_to_db(
             # that is failing, and a rule keyed on the dispatch fields is one
             # a reader can hold without consulting the frozenset.
             #
-            # Gated on the row already being suspended, which is also what
-            # keeps the UPDATE off a daemon-owned column in every other case:
-            # a suspension written between this read and that write is then
-            # left alone rather than clobbered.
+            # Ungated on the row's current state, deliberately, because the
+            # edit is visible for exactly one tick: this same UPDATE writes the
+            # file's values into the row, so on every later tick the two agree
+            # and there is no change left to read. Gating on
+            # `existing.auto_disabled_at` therefore loses the edit whenever the
+            # suspension lands *after* the tick that carried it — an ordinary
+            # sequence, not a tight race, since a task queued against the old
+            # definition can be in flight for minutes: the user fixes the
+            # prompt, the sync writes it, the old run posts failure N, the job
+            # suspends on evidence from a definition that no longer exists, and
+            # the documented remedy is spent. Clearing an already-NULL column
+            # is a no-op, and clearing a suspension written between this read
+            # and this write is the right answer for the same reason.
+            #
+            # The failure count goes with it. The other two lifts both zero it
+            # (`enable_scheduled_job`, `reset_scheduled_job_failures`) and
+            # leaving it would make this one nominal: a job resumed at
+            # `consecutive_failures = max` is re-suspended by its first bad run
+            # afterwards, so the user gets one attempt rather than a working
+            # job. The counter is a count of failures against a definition the
+            # file no longer contains.
             changed_dispatch = [
                 col for col in _SUSPENSION_CLEARING_COLUMNS
                 if file_values[col] != getattr(existing, col)
             ]
-            lift_suspension = bool(changed_dispatch) and bool(existing.auto_disabled_at)
-            if lift_suspension:
+            if changed_dispatch and existing.auto_disabled_at:
                 logger.info(
                     "Lifting suspension on job '%s' (user %s): %s changed in "
                     "CRON.md (suspended at %s)",
@@ -721,8 +740,10 @@ def sync_cron_jobs_to_db(
             values = list(updates.values())
             if cron_changed:
                 set_parts.append("last_run_at = datetime('now')")
-            if lift_suspension:
+            if changed_dispatch:
                 set_parts.append("auto_disabled_at = NULL")
+                set_parts.append("consecutive_failures = 0")
+                set_parts.append("last_error = NULL")
             set_clause = ", ".join(set_parts)
             values.append(existing.id)
             conn.execute(

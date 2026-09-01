@@ -373,14 +373,10 @@ class TestSyncFeedsModuleJobs:
         assert row[5] is None
 
     def test_rescue_does_not_touch_operator_paused_row(self, tmp_path):
-        """An operator pause is `enabled = 0` with `auto_disabled_at` NULL,
-        and the rescue's WHERE excludes it structurally.
+        """`enabled = 0`, no failures, no suspension: nobody's daemon did this.
 
-        This used to be asserted through a proxy — `consecutive_failures = 0`
-        standing in for "no daemon did this" — which meant an operator who
-        paused a row that had already failed a few times got it switched back
-        on under them. Now the row says which author stopped it, so the case
-        is stated directly: failures on the row, and still not rescued.
+        Module rows have no operator-pause UI today, but a direct DB edit or a
+        future surface has to survive both arms of the rescue.
         """
         app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
@@ -389,7 +385,7 @@ class TestSyncFeedsModuleJobs:
             "(user_id, name, cron_expression, prompt, command, skill, "
             "skill_args, enabled, skip_log_channel, consecutive_failures, "
             "last_error, last_run_at, auto_disabled_at) "
-            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 3, 'boom', "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 0, NULL, "
             "datetime('now', '-9 hours'), NULL)",
             ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
              "feeds", '["run-scheduled"]'),
@@ -402,8 +398,98 @@ class TestSyncFeedsModuleJobs:
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()
         assert row[0] == 0
-        assert row[1] == 3
+        assert row[1] == 0
         assert row[2] is None
+
+    def test_the_rescue_does_not_un_pause_a_suspended_operator_paused_row(
+        self, tmp_path,
+    ):
+        """The suspension lifts; the operator's pause does not.
+
+        The primary arm deliberately does not write `enabled`, which is the
+        one thing that would let a retry override somebody's explicit off.
+        """
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 5, 'boom', "
+            "datetime('now', '-9 hours'), datetime('now', '-9 hours'))",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, auto_disabled_at FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] == 0, "the rescue must not override an explicit pause"
+        assert row[1] is None
+
+    def test_the_legacy_arm_rescues_a_row_the_pre_split_code_stopped(
+        self, tmp_path,
+    ):
+        """The upgrade case, and the one that strands a whole deployment.
+
+        A row the running code auto-disabled is `enabled = 0` with
+        `auto_disabled_at` NULL, because the column did not exist when it was
+        written, and the migration backfills nothing. Without the legacy arm
+        the primary arm cannot see it, no other writer reaches a `_module.*`
+        row, and `should_notify` means nobody is told — so every module job
+        stopped on the deployment being upgraded is dead for good.
+        """
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 5, 'boom', "
+            "datetime('now', '-9 hours'), NULL)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures, last_error, auto_disabled_at "
+            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert tuple(row) == (1, 0, None, None)
+        assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == [
+            f"{MODULE_PREFIX}run_scheduled"
+        ]
+
+    def test_the_legacy_arm_keeps_the_old_cooldown(self, tmp_path):
+        """It is today's predicate verbatim, `last_run_at` included, so a row
+        stopped inside the last hour waits like it does now."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 5, 'boom', "
+            "datetime('now', '-10 minutes'), NULL)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert tuple(row) == (0, 5)
 
 
 # ---------------------------------------------------------------------------

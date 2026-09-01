@@ -519,12 +519,17 @@ class TestSyncCronJobsToDb:
                    VALUES (?, ?, ?, ?, 1, '2026-01-01T00:00:00', 3, 'oops', '2025-12-31T00:00:00')""",
                 ("alice", "j1", "0 9 * * *", "old"),
             )
-        # Same cron, different prompt — state should be preserved
-        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="new")]
+        # Nothing the job dispatches has changed, so every state field stands.
+        # `model` is what moves, so the sync demonstrably ran — the prompt
+        # cannot play that part any more, since editing it is now read as the
+        # user fixing the job and clears the failure state on purpose. See
+        # TestSuspensionSurvivesTheSync for that half.
+        file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="old", model="opus")]
         with db.get_db(db_path) as conn:
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
             job = db.get_scheduled_job_by_name(conn, "alice", "j1")
 
+        assert job.model == "opus", "the sync did not run, so nothing was proved"
         assert job.last_run_at == "2026-01-01T00:00:00"
         assert job.consecutive_failures == 3
         assert job.last_error == "oops"
@@ -548,9 +553,12 @@ class TestSyncCronJobsToDb:
         # last_run_at should be reset to now (not the old value)
         assert job.last_run_at != "2026-01-01T00:00:00"
         assert job.last_run_at is not None
-        # Other state fields should be preserved
-        assert job.consecutive_failures == 3
-        assert job.last_error == "oops"
+        # A cron change is also a change to what the job dispatches, so the
+        # failure history charged against the old schedule goes with it.
+        assert job.consecutive_failures == 0
+        assert job.last_error is None
+        # Untouched either way.
+        assert job.last_success_at is None
 
     def test_file_enabled_false_disables_db(self, db_path):
         with db.get_db(db_path) as conn:
@@ -673,14 +681,17 @@ class TestColumnOwnership:
         values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
         assert set(values) == FILE_OWNED_COLUMNS
 
+    _DISPATCH_RESET = {"auto_disabled_at", "consecutive_failures", "last_error"}
+
     @pytest.mark.parametrize("file_cron,file_prompt,cleared", [
         # The file changed nothing the job dispatches. Every daemon-owned
         # column survives, suspension included.
         ("0 9 * * *", "old", set()),
-        # A prompt edit: the suspension lifts and nothing else moves.
-        ("0 9 * * *", "new", {"auto_disabled_at"}),
-        # A cron edit: last_run_at is reset, and the suspension lifts with it.
-        ("30 9 * * *", "old", {"last_run_at", "auto_disabled_at"}),
+        # A prompt edit: the suspension and the failure history it was charged
+        # against go, and nothing else moves.
+        ("0 9 * * *", "new", _DISPATCH_RESET),
+        # A cron edit: last_run_at is reset, and the dispatch reset rides along.
+        ("30 9 * * *", "old", _DISPATCH_RESET | {"last_run_at"}),
     ])
     def test_the_sync_leaves_every_daemon_owned_column_alone(
         self, db_path, file_cron, file_prompt, cleared,
@@ -689,10 +700,11 @@ class TestColumnOwnership:
 
         Three legs, because there are exactly two branches where this sync
         writes a daemon-owned column at all — the cron-expression change that
-        resets ``last_run_at``, and the dispatch-field change that lifts a
-        suspension — and those are the branches where a third write would be
-        easiest to add without noticing what else it touches. The first leg is
-        the control: change nothing the job dispatches and neither fires.
+        resets ``last_run_at``, and the dispatch-field change that clears the
+        suspension and the failure history charged against the old definition
+        — and those are the branches where a third write would be easiest to
+        add without noticing what else it touches. The first leg is the
+        control: change nothing the job dispatches and neither fires.
         """
         state = {
             "last_run_at": "2026-01-01T00:00:00",
@@ -730,6 +742,7 @@ class TestColumnOwnership:
         assert {col: row[col] for col in survives} == {col: state[col] for col in survives}
         assert (row["last_run_at"] != state["last_run_at"]) is ("last_run_at" in cleared)
         assert (row["auto_disabled_at"] is None) is ("auto_disabled_at" in cleared)
+        assert (row["consecutive_failures"] == 0) is ("consecutive_failures" in cleared)
 
     _BOOLEAN_COLUMNS = (
         "enabled",
@@ -2211,31 +2224,82 @@ class TestSuspensionSurvivesTheSync:
         assert row["enabled"] == expected
         assert row["auto_disabled_at"] is not None, "the file cannot lift a suspension"
 
-    @pytest.mark.parametrize("edit", [
-        {"cron": "30 7 * * *"},
-        {"prompt": "summarise it differently"},
-        {"command": "echo hi"},
-        {"command": "istota-skill kv get x"},
+    @pytest.mark.parametrize("base_extra,edit", [
+        ({}, {"cron": "30 7 * * *"}),
+        ({}, {"prompt": "summarise it differently"}),
+        ({}, {"command": "echo hi"}),
+        # `skill` alone: same verb and args, a different skill.
+        ({"command": "istota-skill kv get x"},
+         {"command": "istota-skill feeds get x"}),
+        # `skill_args` alone: same skill, an extra flag.
+        ({"command": "istota-skill kv get x"},
+         {"command": "istota-skill kv get x --json"}),
     ])
-    def test_a_dispatch_field_change_clears_the_suspension(self, db_path, edit):
+    def test_a_dispatch_field_change_clears_the_suspension(
+        self, db_path, base_extra, edit,
+    ):
         """Each of the five, one at a time.
 
-        `command` covers two columns: an ordinary shell command lands in
-        `command`, and an `istota-skill` line is rewritten into `skill` +
-        `skill_args` by `_resolve_job_dispatch`, so the last two cases are what
-        reach those columns at all.
+        `command` needs three cases rather than one: an ordinary shell command
+        lands in `command`, while an `istota-skill` line is rewritten into
+        `skill` + `skill_args` by `_resolve_job_dispatch`. Varying those two
+        together would leave a bug that dropped either name from
+        `_SUSPENSION_CLEARING_COLUMNS` green, so the last two cases hold one
+        of them fixed while moving the other.
         """
-        base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise"}
+        base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise",
+                **base_extra}
         with db.get_db(db_path) as conn:
             sync_cron_jobs_to_db(conn, "alice", [CronJob(**base)])
             job = db.get_scheduled_job_by_name(conn, "alice", "digest")
             db.suspend_scheduled_job(conn, job.id)
+            db.increment_scheduled_job_failures(conn, job.id, "boom")
             assert self._job_row(conn)["auto_disabled_at"] is not None
 
             sync_cron_jobs_to_db(conn, "alice", [CronJob(**{**base, **edit})])
 
-            assert self._job_row(conn)["auto_disabled_at"] is None
+            row = self._job_row(conn)
+            assert row["auto_disabled_at"] is None
+            # The count is a count of failures against the definition the file
+            # no longer holds. Left in place, the first bad run afterwards
+            # re-suspends the job and the lift buys the user one attempt.
+            assert row["consecutive_failures"] == 0
+            assert row["last_error"] is None
             assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == ["digest"]
+
+    def test_an_edit_that_lands_before_the_suspension_still_counts(self, db_path):
+        """The ordering the gate got wrong, and why the reset is ungated.
+
+        A task queued against the old definition can be in flight for minutes,
+        so this sequence is ordinary rather than a tight race: the user fixes
+        the prompt, the sync writes it, and only then does the old run post the
+        failure that trips the threshold. The edit is visible for exactly one
+        tick — this same UPDATE makes the file and the row agree — so a lift
+        conditioned on the row already being suspended is spent on a row that
+        was not yet suspended, and no later tick can see the change again.
+
+        Resetting the counter is what actually closes it: the in-flight failure
+        then arrives at 1 rather than at the threshold.
+        """
+        base = {"name": "digest", "cron": "0 7 * * *"}
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(**base, prompt="summarise")],
+            )
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "digest").id
+            # Four failures in, one short of a threshold of five.
+            for _ in range(4):
+                db.increment_scheduled_job_failures(conn, job_id, "boom")
+
+            # The user fixes the prompt. Nothing is suspended yet.
+            sync_cron_jobs_to_db(
+                conn, "alice", [CronJob(**base, prompt="summarise, but shorter")],
+            )
+
+            # The in-flight run against the old prompt now reports its failure.
+            fail_count = db.increment_scheduled_job_failures(conn, job_id, "boom")
+
+        assert fail_count == 1, "the old definition's failures still count"
 
     @pytest.mark.parametrize("edit", [
         {"target": "email"},

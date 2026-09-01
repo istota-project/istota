@@ -6752,6 +6752,42 @@ def _sync_module_jobs(
                 rescued, user_id,
             )
 
+        # The legacy arm: a row the *pre-split* code stopped, which wrote
+        # `enabled = 0` and left `auto_disabled_at` NULL because the column did
+        # not exist yet. The migration deliberately backfills nothing — nothing
+        # on a CRON.md row separates an operator disable from an auto-disable —
+        # but that reasoning does not carry here, and without this arm every
+        # `_module.*` row stopped by the running deployment is dead for good:
+        # the arm above cannot see it, the drift branch only rescues the
+        # `command`-shaped rows, the CRON.md sync skips `_module.*` entirely,
+        # `!cron enable` needs a name that is in somebody's file, and
+        # `should_notify` means nobody is ever told.
+        #
+        # So this is today's predicate, kept verbatim for exactly the row shape
+        # today's code produces, plus `auto_disabled_at IS NULL` to scope it to
+        # that shape. The `consecutive_failures > 0` term is the inference the
+        # old rescue always made — a `_module.*` row has no operator-pause UI,
+        # so a failure count means the daemon stopped it — and it is no worse
+        # here than it has been in production for as long as it has shipped.
+        # It cannot fire twice for one row: a rescued row has `enabled = 1` and
+        # no failures, and if it fails again the new code suspends it into the
+        # arm above. Delete this once no deployment predates the split.
+        legacy = conn.execute(
+            "UPDATE scheduled_jobs "
+            "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
+            "WHERE user_id = ? AND name LIKE ? "
+            "AND enabled = 0 AND auto_disabled_at IS NULL "
+            "AND consecutive_failures > 0 "
+            "AND (last_run_at IS NULL "
+            "     OR last_run_at < datetime('now', '-1 hour'))",
+            (user_id, f"{module_prefix}%"),
+        ).rowcount
+        if legacy:
+            logger.info(
+                "Re-enabled %d module job(s) for user %s stopped by pre-split "
+                "code", legacy, user_id,
+            )
+
         existing_rows = list(conn.execute(
             "SELECT id, name, cron_expression, command, skill, skill_args, "
             "skip_log_channel "

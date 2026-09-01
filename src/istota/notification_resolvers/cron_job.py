@@ -108,16 +108,17 @@ def is_module_job(job_name: str) -> bool:
 
 
 def should_notify(job_name: str) -> bool:
-    """Whether a disable of this job is worth telling the user about.
+    """Whether a suspension of this job is worth telling the user about.
 
     **A module job is not.** `_sync_module_jobs` lifts the suspension on every
-    `_module.*` row on an hourly cooldown, unconditionally — it is a retry, not a repair, and its own comment says a
-    genuinely broken row is expected to loop through disable and rescue at that
-    rate. A row here would ride that loop: raised on the disable, marked `stale`
-    on the next panel read after the rescue zeroed the counter, then *reopened*
-    an hour later — and the reopen branch delivers, so a permanently broken
-    module job becomes an hourly push about something the user has no verb to
-    fix. `!cron enable` operates on CRON.md and a module job is not in it.
+    `_module.*` row on an hourly cooldown, unconditionally — it is a retry, not
+    a repair, and its own comment says a genuinely broken row is expected to
+    loop through suspend and rescue at that rate. A row here would ride that
+    loop: raised on the suspend, marked `stale` on the next panel read after
+    the rescue cleared the column, then *reopened* an hour later — and the
+    reopen branch delivers, so a permanently broken module job becomes an
+    hourly push about something the user has no verb to fix. `!cron enable`
+    operates on CRON.md and a module job is not in it.
 
     The user is not left uninformed by this. A module job that fails for a
     reason they can act on has a source of its own saying so in terms they can

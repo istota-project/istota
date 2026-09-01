@@ -200,7 +200,7 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
      the classification (`is_permanent_api`) so no "retrying" notice is emitted
    - Retry with backoff if attempts remain (1, 4, 16 min) — skipped for OOM
    - Mark failed permanently, `result` again carrying `task.partial_result`. Both user-facing failure notices append it through `_with_partial_work` — the Talk one and the email-only alert, which is the branch that most needs it since its own comment says `tasks.result` is the only surviving copy there. Below the error, never above it: the first line still has to say the task failed. Not length-capped, because the Talk transport already splits a long body at 30,000 characters and that is what a long *successful* answer does. Only on a *terminal* failure: a task going back through the retry ladder has not finished, so it has no answer to record
-   - Track scheduled job failures, auto-disable after threshold. All three disable sites (this one, the policy-refusal branch, and `_record_publish_failure`) buffer a `cron_job` notification into `notification_results` and let the post-`with` `deliver_pending` send it — the disable used to write a `task_logs` warning and tell nobody. The resolver watches `consecutive_failures`, not `enabled`: `_sync_cron_files` runs every tick and CRON.md is authoritative for `enabled`, so a file-defined job is switched back on within a tick of being auto-disabled while the state columns survive
+   - Track scheduled job failures, auto-disable after threshold. All three disable sites (this one, the policy-refusal branch, and `_record_publish_failure`) buffer a `cron_job` notification into `notification_results` and let the post-`with` `deliver_pending` send it — the disable used to write a `task_logs` warning and tell nobody. All three call `db.suspend_scheduled_job`, which writes `auto_disabled_at` and never `enabled` — CRON.md authors that column and `_sync_cron_files` writes it back from the file every tick, so a daemon disable written there was undone within the tick and auto-disable did nothing at all for a file-defined job. `!cron disable` keeps `db.disable_scheduled_job` and the user's column, because it writes the file in the same breath. The resolver's close predicate is `auto_disabled_at IS NULL`
 7. Deliver results (Talk/email) outside DB context
 
 ## Deferred DB Operations
@@ -478,7 +478,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
 | `processed_emails` | `ProcessedEmail` | id, uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method; `UNIQUE (uidvalidity, email_id)` — a UID is unique only within a folder's UIDVALIDITY (ISSUE-250) |
 | `istota_file_tasks` | `IstotaFileTask` | id, user_id, content_hash, original_line, normalized_content, status, task_id, file_path |
-| `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, silent_unless_action, consecutive_failures, model, effort |
+| `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, auto_disabled_at, silent_unless_action, consecutive_failures, model, effort. `enabled` is the user's intent (CRON.md authors it); `auto_disabled_at` is the scheduler's suspension. A job fires only when `enabled = 1 AND auto_disabled_at IS NULL` |
 | `talk_poll_state` | — | conversation_token, last_known_message_id |
 | `sleep_cycle_state` | — | user_id, last_run_at, last_processed_task_id |
 | `channel_sleep_cycle_state` | — | conversation_token, last_run_at, last_processed_task_id |
@@ -668,8 +668,9 @@ set_briefing_last_run(conn, user_id, briefing_name) -> None
 # Scheduled jobs
 get_enabled_scheduled_jobs(conn) -> list[ScheduledJob]
 increment_scheduled_job_failures(conn, job_id, error) -> int
-reset_scheduled_job_failures(conn, job_id) -> None
-disable_scheduled_job(conn, job_id) -> None
+reset_scheduled_job_failures(conn, job_id) -> None   # also lifts a suspension
+disable_scheduled_job(conn, job_id) -> None          # the user's verb: enabled = 0
+suspend_scheduled_job(conn, job_id) -> None          # the daemon's: auto_disabled_at
 
 # Cleanup
 expire_stale_confirmations(conn, timeout_minutes) -> list[dict]
