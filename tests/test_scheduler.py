@@ -7310,6 +7310,241 @@ once = true
             job = db.get_scheduled_job_by_name(conn, "alice", "daily-job")
             assert job is not None, "Regular job should NOT be deleted on success"
 
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_the_cron_md_write_does_not_hold_the_framework_write_lock(
+        self, mock_arun, mock_exec, db_path, tmp_path
+    ):
+        """CRON.md is on the rclone mount, so its write must not sit inside the
+        task transaction (ISSUE-387).
+
+        `delete_scheduled_job` takes SQLite's write lock, and the removal of
+        the same job from CRON.md used to run before the enclosing `with`
+        block committed. A hung mount then blocked every other framework-DB
+        writer — the dispatch loop, the other workers, the web app, the
+        pollers — for however long the FUSE timeout ran. The probe below is
+        the only thing that tells the two orderings apart: it asks, at the
+        moment the file write happens, whether an unrelated connection can
+        still write, with a busy timeout far shorter than any real caller's.
+        """
+        import sqlite3
+
+        from istota import cron_loader
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "reminder-387"
+cron = "0 15 20 2 *"
+prompt = "One-time reminder"
+once = true
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-387", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-387'"
+            ).fetchone()[0]
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        real_remove = cron_loader.remove_job_from_cron_md
+        probe: dict[str, object] = {}
+
+        def probe_then_remove(cfg, user_id, job_name):
+            other = sqlite3.connect(db_path, timeout=0.2)
+            try:
+                other.execute("UPDATE tasks SET priority = priority")
+                other.commit()
+                probe["writable"] = True
+            except sqlite3.OperationalError as exc:
+                probe["writable"] = False
+                probe["error"] = str(exc)
+            finally:
+                other.close()
+            return real_remove(cfg, user_id, job_name)
+
+        with patch.object(
+            cron_loader, "remove_job_from_cron_md", probe_then_remove
+        ):
+            process_one_task(config)
+
+        assert probe.get("writable") is True, (
+            "another writer was locked out during the CRON.md write: "
+            f"{probe.get('error')}"
+        )
+        # The removal itself still happened, and against the same file.
+        assert cron_loader.load_cron_jobs(config, "alice") == []
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_cron_sync_racing_the_cron_md_write_does_not_resurrect_the_job(
+        self, mock_arun, mock_exec, db_path, tmp_path
+    ):
+        """Hoisting the file write out of the transaction opened a window
+        (ISSUE-387 review).
+
+        The row delete and the CRON.md write are no longer one step. In
+        between, `_sync_cron_files` runs on the main loop with CRON.md as the
+        authority — it reads a file that still names the job and re-inserts
+        the row this task just deleted, which is the `once = true` job that
+        runs a second time. Before the hoist the order was the other way
+        round, so a sync in the window saw a row the file did not name and
+        deleted it. The flush deletes the row again to close it.
+
+        The sync is simulated by re-inserting the row from inside the patched
+        writer, which is exactly where the real one would land.
+        """
+        from istota import cron_loader
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "reminder-387b"
+cron = "0 15 20 2 *"
+prompt = "One-time reminder"
+once = true
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-387b", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-387b'"
+            ).fetchone()[0]
+            db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        real_remove = cron_loader.remove_job_from_cron_md
+
+        def resync_then_remove(cfg, user_id, job_name):
+            # Stand in for `_sync_cron_files` on the main loop: CRON.md still
+            # names the job at this instant, so the sync re-inserts it.
+            with db.get_db(db_path) as conn:
+                conn.execute(
+                    """INSERT INTO scheduled_jobs
+                       (user_id, name, cron_expression, prompt, enabled, once)
+                       VALUES (?, ?, ?, ?, 1, 1)""",
+                    (user_id, job_name, "0 15 20 2 *", "One-time reminder"),
+                )
+            return real_remove(cfg, user_id, job_name)
+
+        with patch.object(
+            cron_loader, "remove_job_from_cron_md", resync_then_remove
+        ):
+            process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            assert db.get_scheduled_job_by_name(conn, "alice", "reminder-387b") is None, (
+                "a once-job re-inserted by a cron sync mid-flush survived, so "
+                "it will run a second time"
+            )
+        assert cron_loader.load_cron_jobs(config, "alice") == []
+
+    @patch("istota.scheduler.execute_task", return_value=(True, "Reminder sent", None, None))
+    @patch("istota.scheduler.asyncio.run", return_value=42)
+    def test_a_raising_cron_md_writer_does_not_abandon_the_completed_task(
+        self, mock_arun, mock_exec, db_path, tmp_path
+    ):
+        """The flush runs after the commit, so it must not raise (ISSUE-387
+        review).
+
+        `remove_job_from_cron_md` states a never-raises contract, but the
+        hoist is what made it load-bearing: an exception here escapes with the
+        task already recorded `completed`, and everything that finishes the
+        task is still ahead — delivery, the deferred-op drain, the terminal
+        event. Nothing retries a `completed` row, so the answer would be lost
+        silently. The flush guards it rather than trusting the contract.
+        """
+        from istota import cron_loader
+        from istota.storage import get_user_cron_path
+
+        config = self._make_config(db_path, tmp_path)
+        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+            "alice", "istota"
+        ).lstrip("/")
+        cron_path.parent.mkdir(parents=True, exist_ok=True)
+        cron_path.write_text("""\
+# Scheduled Jobs
+
+```toml
+[[jobs]]
+name = "reminder-387c"
+cron = "0 15 20 2 *"
+prompt = "One-time reminder"
+once = true
+```
+""")
+
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, once)
+                   VALUES (?, ?, ?, ?, 1, 1)""",
+                ("alice", "reminder-387c", "0 15 20 2 *", "One-time reminder"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE name='reminder-387c'"
+            ).fetchone()[0]
+            task_id = db.create_task(
+                conn,
+                prompt="One-time reminder",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room1",
+                scheduled_job_id=job_id,
+            )
+
+        def boom(cfg, user_id, job_name):
+            raise OSError(107, "Transport endpoint is not connected")
+
+        with patch.object(cron_loader, "remove_job_from_cron_md", boom):
+            result = process_one_task(config)
+
+        # The task still finished: it returned normally and is `completed`.
+        assert result == (task_id, True)
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).status == "completed"
+
 
 # ---------------------------------------------------------------------------
 # TestCleanupOldClaudeLogs
