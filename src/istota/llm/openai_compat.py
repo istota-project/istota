@@ -154,6 +154,19 @@ class OpenAICompatibleProvider:
         # default so a plain-OpenAI / local endpoint never sees the extension.
         self._prompt_caching = prompt_caching
 
+    @property
+    def prompt_caching(self) -> bool:
+        """Whether this provider adds ``cache_control`` breakpoints.
+
+        The *resolved* answer, which is not the same thing as the config field:
+        ``make_provider`` reads a tri-state where ``None`` derives the value
+        from ``base_url``, so on the default deployment the config says ``None``
+        and the wire says on. Read by ``NativeBrain`` for the session log's
+        header, which records what the run actually did rather than what was
+        configured.
+        """
+        return self._prompt_caching
+
     async def aclose(self) -> None:
         """Close the underlying HTTP client (frees pooled sockets/fds). NB-17."""
         await self._client.aclose()

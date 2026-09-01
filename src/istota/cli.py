@@ -3,6 +3,7 @@
 import argparse
 import importlib.metadata
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -1996,6 +1997,545 @@ def cmd_experimental_list(args):
             print(f"  {name}")
 
 
+# --------------------------------------------------------------------------
+# session — the native brain's per-attempt transcripts
+# --------------------------------------------------------------------------
+#
+# The parsing lives in `session/session_log_read.py`, not here: the `tasks
+# transcript` skill verb reads the same files with the same rules, and a second
+# copy in this file is how the two would start disagreeing about what a
+# transcript says. What belongs here is the *rendering* — these four commands
+# are for a person at a terminal, so thinking is shown by default and tool
+# output is printed plainly. The skill verb renders the same data for a model,
+# wrapped in untrusted-content delimiters, which is a different job.
+
+_SESSION_RULE = "─" * 60
+
+
+def _session_root(args):
+    """The resolved log directory, and the config it came from.
+
+    Also the one place every session command passes through, which is why the
+    stdout guard is here. These four print transcript content — arbitrary tool
+    output, in whatever language the run was in — and the reader decodes with
+    ``errors="replace"``, whose own U+FFFD output is not ASCII either. On a
+    single-byte locale (`LC_ALL=en_US.ISO8859-1`; `LC_ALL=C` is safe, PEP 538
+    coerces it) printing any of that raises `UnicodeEncodeError` and turns a
+    readable transcript into a traceback. `repos_relocate.py` sets the precedent
+    and states the reason in the same words.
+    """
+    from .session.session_log import resolve_session_log_dir
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            # A stream somebody replaced with something that is not a
+            # TextIOWrapper — a test's capture buffer, a pipe wrapper. Nothing
+            # to configure, and nothing here is worth failing a command over.
+            pass
+
+    config = load_config(Path(args.config) if args.config else None)
+    root = resolve_session_log_dir(config.db_path, config.brain.native.session_log.dir)
+    return config, Path(root)
+
+
+def _fmt_bytes(size) -> str:
+    value = float(size or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _fmt_mtime(mtime) -> str:
+    import datetime as _dt
+
+    if not mtime:
+        return "-"
+    return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+
+def _resolve_session_target(root: Path, target: str, attempt=None):
+    """A path or a bare task id to one file, or ``None`` with a printed reason.
+
+    A bare task id is what the file-name convention is for: glob
+    ``*_task-{id}-*.jsonl`` across every user directory. Newest first, so with
+    no ``--attempt`` the most recent attempt is what a bare id means.
+
+    A path is tried first, and a target that is *both* a path in the working
+    directory and a valid task id falls through to the id when the file turns
+    out not to be a transcript. Without that, a directory named ``4471`` in
+    whatever shell the operator is standing in silently shadows task 4471 and
+    the failure names the wrong problem.
+    """
+    from .session import session_log_read as slr
+
+    try:
+        candidate = Path(target).expanduser()
+    except (RuntimeError, OSError):
+        # `~nosuchuser/x` — pathlib raises where `os.path.expanduser` hands the
+        # string back unchanged. Not a path, then; try the id.
+        candidate = None
+    task_id = None
+    try:
+        task_id = int(str(target).strip())
+    except (TypeError, ValueError):
+        pass
+
+    if candidate is not None and candidate.exists():
+        if task_id is None or slr.read_header(candidate) is not None:
+            return candidate
+
+    if task_id is None:
+        print(f"No such file: {target}", file=sys.stderr)
+        return None
+
+    found = slr.find_all_logs(root, task_id=task_id)
+    if attempt is not None:
+        found = [
+            p for p in found
+            if (slr.parse_log_name(p.name) or {}).get("attempt") == attempt
+        ]
+    if not found:
+        # `is not None`, not truthiness: attempts are 1-based, so `--attempt 0`
+        # matches nothing and reporting "no log for task N" would name a
+        # different problem from the one the operator has.
+        where = f"task {task_id}"
+        if attempt is not None:
+            where += f" attempt {attempt}"
+        print(f"No session log for {where} under {root}", file=sys.stderr)
+        return None
+    return found[0]
+
+
+def cmd_session_list(args):
+    """List session logs, newest first."""
+    from .session import session_log_read as slr
+
+    _config, root = _session_root(args)
+    # `is None`, not truthiness. `find_logs`' whole contract is that a falsy user
+    # id finds nothing rather than quietly widening to every user, and branching
+    # on truthiness here reaches around it: `-u ""` listed the whole tree. It
+    # does not matter much for an operator already holding the tree — it matters
+    # because this is the first caller and the pattern the skill verb will be
+    # written against, and there the falsy value is `ISTOTA_USER_ID` unset.
+    if args.user is not None:
+        paths = slr.find_logs(root, args.user, task_id=args.task)
+    else:
+        paths = slr.find_all_logs(root, task_id=args.task)
+    if not paths:
+        print(f"No session logs under {root}")
+        return
+
+    limit = args.limit if args.limit and args.limit > 0 else len(paths)
+    print(f"{root}  ({len(paths)} file(s))")
+    for path in paths[:limit]:
+        row = slr.summarize(path)
+        task = row["task_id"] if row["task_id"] is not None else "?"
+        attempt = row["attempt"] if row["attempt"] is not None else "?"
+        if not row["readable"]:
+            state = f"unreadable ({row['reason']})"
+        elif row["complete"]:
+            turns = "" if row["turns"] is None else f" {row['turns']} turns"
+            mark = "" if row["success"] else " FAILED"
+            state = f"{row['stop_reason']}{mark}{turns}"
+        else:
+            # Not the same thing as a failure: the file has no terminal record,
+            # so the run is still going or the daemon died under it.
+            state = "interrupted (no result record)"
+        print(
+            f"  {_fmt_mtime(row['mtime'])}  {row['user_id']:<12} "
+            f"task {task}-{attempt}  {_fmt_bytes(row['size']):>9}  {state}"
+        )
+        print(f"      {row['name']}")
+        _print_identity_disagreements(row)
+
+
+def _print_identity_disagreements(row: dict, indent: str = "      ") -> None:
+    """Say when a file's header disagrees with where and what it is filed as.
+
+    All three identity fields shown are the name's and the directory's, because
+    those are what every lookup filters on — so a header claiming otherwise is a
+    file that did not come from where it sits, and believing it would print a
+    row the finder cannot resolve. Reporting it is not decoration: taking the
+    header's `task_id` made `list --task 5000` print "task 4471", after which
+    `show 4471` found nothing.
+    """
+    for key, label in (
+        ("header_user_id", "user"),
+        ("header_task_id", "task"),
+        ("header_attempt", "attempt"),
+    ):
+        claimed = row.get(key)
+        if claimed in (None, ""):
+            continue
+        actual = row.get(key.replace("header_", "", 1))
+        print(f"{indent}! header claims {label} {claimed} — filed as {actual}")
+
+
+def _print_session_header(header: dict, path: Path, row: dict) -> None:
+    print(f"Session {header.get('session_id', '')}")
+    # The identity line comes off `row`, not off `header`, for the reason
+    # `_print_identity_disagreements` states: the name and the directory are
+    # what every lookup filters on, so they are what an operator has to be shown.
+    # Printing the header's here while `list` printed the name's would have the
+    # two commands disagree about the same file.
+    print(
+        f"  task {row['task_id']} attempt {row['attempt']} "
+        f"user {row['user_id']} source {header.get('source_type') or '-'}"
+    )
+    print(
+        f"  brain={header.get('brain') or '-'} model={header.get('model') or '-'} "
+        f"effort={header.get('effort') or '-'} "
+        f"host={header.get('base_url_host') or '-'}"
+    )
+    print(f"  started {header.get('ts', '-')}")
+    print(f"  file {path} ({_fmt_bytes(row['size'])})")
+    _print_identity_disagreements(row, indent="  ")
+
+
+def _print_blocks(blocks, indent="    ") -> None:
+    # `isinstance`, not `or []`: the content list comes out of `json.loads` and
+    # its type is whatever was on the line. A scalar there was a `TypeError` out
+    # of `session show` on a damaged or foreign file, which is the case this
+    # command exists to be usable on.
+    if not isinstance(blocks, list):
+        if blocks is not None:
+            print(_indent(f"[unreadable content: {type(blocks).__name__}]", indent))
+        return
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            print(_indent(block.get("text", ""), indent))
+        elif kind == "thinking":
+            print(_indent("[thinking] " + (block.get("thinking") or ""), indent))
+        elif kind == "tool_call":
+            print(
+                _indent(
+                    f"[tool_call {block.get('name')} {block.get('id')}] "
+                    f"{json.dumps(block.get('arguments'), ensure_ascii=False)}",
+                    indent,
+                )
+            )
+        elif kind == "image":
+            print(
+                _indent(
+                    f"[image {block.get('display_name') or ''} "
+                    f"{block.get('media_type') or ''} {block.get('bytes')} bytes]",
+                    indent,
+                )
+            )
+        else:
+            print(_indent(json.dumps(block, ensure_ascii=False), indent))
+        if block.get("truncated"):
+            print(_indent(f"… [capped from {block.get('chars_total')} chars]", indent))
+
+
+def _indent(text, prefix) -> str:
+    return "\n".join(prefix + line for line in str(text).splitlines()) or prefix
+
+
+def _print_record(record) -> None:
+    """One conversation record, in the place the run put it.
+
+    A ``message`` is the common case; the other four are mid-run events, and
+    printing them **here rather than as a summary at the end** is the whole
+    point. A steer and a nudge are injections, so a transcript that omits them
+    shows a user turn arriving in the middle of an agent loop with nothing
+    saying where it came from — an operator then reads a steered run as one the
+    model wandered into, or attributes to the user a sentence the turn-budget
+    nudge wrote. Position carries the same weight for the other two: a
+    compaction explains why the model forgot something, and *which two turns it
+    landed between* is the fact, not that it happened.
+    """
+    kind = record.get("type")
+    stamp = record.get("ts", "")
+    if kind == "message":
+        message = record.get("message")
+        if not isinstance(message, dict):
+            print(f"{stamp}  message (unreadable: {type(message).__name__})")
+            return
+        role = message.get("role", "?")
+        if role == "assistant":
+            head = f"assistant ({message.get('stop_reason') or '-'})"
+        elif role == "tool_result":
+            state = "error" if message.get("is_error") else "ok"
+            head = f"tool_result {message.get('tool_name') or '?'} ({state})"
+        else:
+            head = role
+        print(f"{stamp}  {head}")
+        _print_blocks(message.get("content"))
+    elif kind == "steer":
+        # Labelled as an injection rather than as a user message, because that
+        # is what distinguishes it from the turn it is about to become.
+        print(f"{stamp}  steer (injected mid-run)")
+        print(_indent(record.get("text") or "", "    "))
+    elif kind == "nudge":
+        # The framework talking to the model about its own turn budget, not the
+        # user. `remaining` is the number the notice leads with.
+        print(
+            f"{stamp}  nudge ({record.get('phase') or '-'}): "
+            f"{record.get('remaining')} of {record.get('max_turns')} turns remaining"
+        )
+    elif kind == "compaction":
+        print(
+            f"{stamp}  compaction ({record.get('trigger') or '-'}): dropped "
+            f"{record.get('messages_dropped')} messages"
+        )
+        summary = record.get("summary")
+        if summary:
+            print(_indent(summary, "    "))
+    elif kind == "error":
+        print(f"{stamp}  error: {record.get('kind')}: {record.get('message')}")
+    elif kind == "serialization_error":
+        # A record the writer could not serialize. Shown in place because the
+        # only thing it says is "something is missing here", which is a claim
+        # about a position in the run.
+        print(
+            f"{stamp}  serialization error: a {record.get('record_type') or '?'} "
+            f"record was lost ({record.get('error')})"
+        )
+    else:
+        print(f"{stamp}  {kind}")
+
+
+def cmd_session_show(args):
+    """Render one session log as readable text."""
+    from .session import session_log_read as slr
+
+    _config, root = _session_root(args)
+    path = _resolve_session_target(root, args.target, args.attempt)
+    if path is None:
+        return 1
+
+    row = slr.summarize(path)
+    digest = slr.digest(path)
+    if not digest["ok"]:
+        # Unreadable, not partially rendered: a file whose line 1 is not a
+        # header is not a transcript, and guessing at the rest of it is how
+        # somebody else's JSONL gets presented as this task's run.
+        print(f"{path}: {digest['reason']}", file=sys.stderr)
+        return 1
+
+    _print_session_header(digest["header"], path, row)
+
+    out = slr.excerpt(
+        path,
+        thinking=not args.no_thinking,
+        # `--full` turns off the reader's display cap. That is a different cap
+        # from the writer's: the file already holds head-and-tail-truncated
+        # blocks, and nothing here can put back what was never written.
+        max_chars=0 if args.full else args.max_chars,
+    )
+    if not out["ok"]:
+        # `digest` and `excerpt` are two reads of one path and the retention
+        # sweep unlinks under this root on the scheduler's interval, so the file
+        # can go between them. Discarding the reason rendered a header, a result
+        # summary and no conversation at all, exit 0 — a complete-looking run
+        # with nothing in it.
+        print(f"{path}: {out['reason']}", file=sys.stderr)
+        return 1
+    context = digest.get("context")
+    if context:
+        print(f"\n{_SESSION_RULE}")
+        print(
+            f"context  tools: {', '.join(context['tools']) or '-'}  "
+            f"system prompt: {context['system_prompt_chars']} chars"
+            + (f" from {context['system_prompt_source']}"
+               if context["system_prompt_source"] else "")
+        )
+
+    for record in out["records"]:
+        print(f"\n{_SESSION_RULE}")
+        _print_record(record)
+
+    print(f"\n{_SESSION_RULE}")
+    result = digest["result"]
+    if result is None:
+        print("no result record — interrupted run")
+    else:
+        print(
+            f"result: {result['stop_reason']} "
+            f"({'success' if result['success'] else 'failed'}), "
+            f"{result['turns']} turns, {result['duration_ms']} ms"
+        )
+        print(_indent(result["result_text_preview"], "  "))
+
+    notes = []
+    if out["truncated"]:
+        notes.append(
+            f"display capped: {out['records_returned']} of {out['records_total']} "
+            f"records shown (--full for all)"
+        )
+        # The mid-run events are rendered in place, so a cut display can drop
+        # the compaction or the error that explains the whole run. Counting them
+        # from the digest — which reads the file whole — is what keeps the cut
+        # from being a silent one.
+        held = [
+            (len(digest["compactions"]), "compaction"),
+            (len(digest["errors"]), "error"),
+            (digest["steers"], "steer"),
+            (digest["nudges"], "nudge"),
+        ]
+        present = [f"{count} {label}" for count, label in held if count]
+        if present:
+            notes.append("this run also holds " + ", ".join(present) + " record(s)")
+    if digest["serialization_errors"]:
+        notes.append(
+            f"{digest['serialization_errors']} record(s) the writer could not "
+            "serialize"
+        )
+    if digest["malformed"]:
+        notes.append(f"{digest['malformed']} malformed line(s) skipped")
+    if digest["partial_tail"]:
+        notes.append("trailing partial line skipped (session still being written)")
+    if digest["unreadable"]:
+        # The read died partway through — the file went, or the mount did. What
+        # was rendered above is a prefix of the run, and saying nothing here
+        # would present it as the whole of it.
+        notes.append(
+            f"the read stopped early ({digest['unreadable']}) — "
+            "what is shown above is a prefix of the run, not all of it"
+        )
+    for note in notes:
+        print(f"note: {note}")
+    return None
+
+
+def cmd_session_tail(args):
+    """Print the end of a session log, and by default follow it.
+
+    The reader is deliberately not used here. `tail` prints raw JSONL lines and
+    follows by byte offset, so it works on bytes throughout; parsing each line
+    only to re-serialize it would spend the whole file's decode cost to print
+    what was already there, and would put a *second* rule for what a partial
+    trailing line is beside the one the offset arithmetic already implements.
+    """
+    import time as _time
+
+    _config, root = _session_root(args)
+    path = _resolve_session_target(root, args.target, args.attempt)
+    if path is None:
+        return 1
+
+    # One binary read produces both the records to print and the offset to
+    # resume from, and they have to come from the same read. Taking the offset
+    # from a fresh `getsize` after a separate `read_records` pass is wrong twice
+    # over, and both were measured. `read_records` stops *before* an
+    # unterminated trailing line, by contract — a live session always has one —
+    # so an offset past it makes the follow loop print that record's tail as
+    # though it were a whole line, which is the very thing the non-follow half
+    # refuses to do. And any record the writer completes between the end of the
+    # read and the `getsize` sits below the offset and is never printed by
+    # either half.
+    complete, offset = _read_complete_lines(path)
+    if complete is None:
+        return 1
+    lines = [line for line in complete.split(b"\n") if line.strip()]
+    for line in lines[-args.lines:] if args.lines > 0 else lines:
+        print(line.decode("utf-8", "replace"))
+    if args.no_follow:
+        return None
+
+    polls = 0
+    try:
+        while args.poll_limit is None or polls < args.poll_limit:
+            polls += 1
+            try:
+                size = os.path.getsize(path)
+            except (OSError, ValueError) as exc:
+                # Almost always the retention sweep unlinking underneath. The
+                # sibling branch below says so when the file merely shrank;
+                # breaking out in silence here returned 0 with nothing printed,
+                # which to a script and to an operator is indistinguishable from
+                # the session having ended normally.
+                print(f"{path}: {exc}", file=sys.stderr)
+                return 1
+            if size < offset:
+                # Shorter than what we have already read: the file was replaced
+                # or truncated under us — the retention sweep unlinks under this
+                # root on the scheduler's interval. Say so and start over rather
+                # than waiting silently for a size that will never come back.
+                print("note: file truncated or replaced — following from the start")
+                offset = 0
+                continue
+            if size > offset:
+                with open(path, "rb") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+                body, newline, _partial = chunk.rpartition(b"\n")
+                if newline:
+                    for line in body.split(b"\n"):
+                        text = line.decode("utf-8", "replace").strip()
+                        if text:
+                            print(text)
+                    offset += len(body) + 1
+            _time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    return None
+
+
+def _read_complete_lines(path):
+    """``(bytes up to the last newline, byte offset just past it)``.
+
+    Binary, so the offset is the byte count a later `seek` needs: decoding first
+    and measuring the text drifts the moment a replacement character stands in
+    for a multi-byte sequence, and a drifted offset prints fragments. ``(None,
+    0)`` when the file cannot be read at all.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except (OSError, ValueError) as exc:
+        print(f"{path}: {exc}", file=sys.stderr)
+        return None, 0
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return b"", 0
+    return data[:cut], cut + 1
+
+
+def cmd_session_stats(args):
+    """Count and size the session logs, split by user."""
+    import time as _time
+
+    from .session import session_log_read as slr
+
+    config, root = _session_root(args)
+    since = None
+    if args.days and args.days > 0:
+        since = _time.time() - args.days * 86400.0
+    stats = slr.tree_stats(root, since=since)
+
+    window = f" in the last {args.days} day(s)" if since else ""
+    print(f"{root}")
+    print(f"  {stats.files} file(s), {_fmt_bytes(stats.bytes)}{window}")
+    ceiling = config.brain.native.session_log.max_total_gb
+    if ceiling:
+        print(f"  ceiling: {ceiling} GB (deployment-wide, all users)")
+        # Printing the two figures on adjacent lines invites a comparison they
+        # do not support, so the difference is said rather than left to be
+        # discovered. It is two differences: the sweep counts blocks where this
+        # counts content, and the sweep totals every file under a user directory
+        # at any depth where this counts only recognised transcript names one
+        # level down. So this is a floor on what the ceiling sees.
+        print(
+            "  (the sweep measures blocks, and counts every file under a user "
+            "directory — this counts transcripts only, so it reads low)"
+        )
+    if stats.files:
+        print(f"  oldest {_fmt_mtime(stats.oldest)}, newest {_fmt_mtime(stats.newest)}")
+    for user, entry in sorted(
+        stats.per_user.items(), key=lambda kv: (-kv[1]["bytes"], kv[0])
+    ):
+        print(f"  {user:<16} {entry['files']:>5} file(s)  {_fmt_bytes(entry['bytes']):>9}")
+
+
 def main():
     # `istota money <op> …` forwards operational commands verbatim to the money
     # Click tree. argparse REMAINDER can't capture a leading option (e.g.
@@ -2482,6 +3022,77 @@ def main():
     )
     kv_status_parser.add_argument("-u", "--user", required=True, help="User ID")
 
+    # session (with subparsers) — the native brain's per-attempt transcripts
+    session_parser = subparsers.add_parser(
+        "session", help="Native-brain session logs (transcripts)",
+    )
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_action", required=True,
+    )
+
+    session_list_parser = session_subparsers.add_parser(
+        "list", help="List session logs, newest first",
+    )
+    session_list_parser.add_argument("-u", "--user", help="Only this user's logs")
+    session_list_parser.add_argument(
+        "-t", "--task", type=int, help="Only this task id (every attempt)",
+    )
+    session_list_parser.add_argument(
+        "-n", "--limit", type=int, default=20, help="Max rows (0 = all)",
+    )
+
+    session_show_parser = session_subparsers.add_parser(
+        "show", help="Render one session log as readable text",
+    )
+    session_show_parser.add_argument(
+        "target", help="Path to a .jsonl log, or a bare task id",
+    )
+    session_show_parser.add_argument(
+        "--attempt", type=int, help="Which attempt, when the target is a task id",
+    )
+    session_show_parser.add_argument(
+        "--no-thinking", action="store_true", help="Omit thinking blocks",
+    )
+    session_show_parser.add_argument(
+        "--full", action="store_true",
+        help="Show every record (disables the display cap, not the writer's caps)",
+    )
+    session_show_parser.add_argument(
+        "--max-chars", type=int, default=200_000,
+        help="Display cap in characters of record JSON (0 = none)",
+    )
+
+    session_tail_parser = session_subparsers.add_parser(
+        "tail", help="Follow a live session log",
+    )
+    session_tail_parser.add_argument(
+        "target", help="Path to a .jsonl log, or a bare task id",
+    )
+    session_tail_parser.add_argument(
+        "--attempt", type=int, help="Which attempt, when the target is a task id",
+    )
+    session_tail_parser.add_argument(
+        "-n", "--lines", type=int, default=20,
+        help="How many existing records to print first (0 = all)",
+    )
+    session_tail_parser.add_argument(
+        "--no-follow", action="store_true", help="Print and exit rather than following",
+    )
+    session_tail_parser.add_argument(
+        "--interval", type=float, default=0.5, help="Poll interval in seconds",
+    )
+    # Bounded polling, so the follow loop is reachable from a test without one
+    # sitting in a terminal deciding when it has seen enough.
+    session_tail_parser.add_argument("--poll-limit", type=int, default=None,
+                                     help=argparse.SUPPRESS)
+
+    session_stats_parser = session_subparsers.add_parser(
+        "stats", help="Count and size the logs, split by user",
+    )
+    session_stats_parser.add_argument(
+        "--days", type=int, default=0, help="Only files written in the last N days",
+    )
+
     # chat (with subparsers)
     chat_parser = subparsers.add_parser("chat", help="Web chat room maintenance")
     chat_subparsers = chat_parser.add_subparsers(dest="chat_action", required=True)
@@ -2618,6 +3229,18 @@ def main():
             "shared-status": cmd_kv_shared_status,
         }
         kv_commands[args.kv_action](args)
+    elif args.command == "session":
+        session_commands = {
+            "list": cmd_session_list,
+            "show": cmd_session_show,
+            "tail": cmd_session_tail,
+            "stats": cmd_session_stats,
+        }
+        # A handler returning a non-zero code means it: `show` on a target that
+        # resolves to nothing must not exit 0 for a script.
+        rc = session_commands[args.session_action](args)
+        if rc:
+            sys.exit(rc)
     elif args.command == "chat":
         chat_commands = {
             "backfill-history": cmd_chat_backfill_history,

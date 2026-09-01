@@ -1213,6 +1213,70 @@ class WebFetchConfig:
 
 
 @dataclass
+class SessionLogConfig:
+    """Native-brain session transcripts ([brain.native.session_log]).
+
+    One append-only JSONL file per *task attempt*, holding the run the way it
+    happened: the assembled prompt, the system prompt, every assistant turn
+    with its thinking and tool calls, every tool result, every compaction,
+    every injected steer, and a terminal record. `tasks.execution_trace` keeps
+    tool *labels* and no output at all, so a native task that answered wrongly
+    could not be reconstructed; this is the artifact that answers "what did the
+    model actually see and do".
+
+    Every field is defaulted, so an absent block is the shipping behaviour.
+    ``enabled = false`` is the whole off switch: the writer is constructed with
+    no root and every method is a no-op.
+
+    ``dir`` is the one field that is not used as written. Blank — the default —
+    resolves to ``{db_path.parent}/logs`` via
+    :func:`istota.session.session_log.resolve_session_log_dir`, which is local
+    disk on every shipped shape and behind the sandbox's database mask on two
+    of the three. A value set here is taken literally; nothing expands ``~``,
+    matching every other path in this file. A *relative* value is honoured and
+    then followed against each process's own working directory, so an absolute
+    path is what an operator should write; a value naming no directory of its
+    own (``/``, ``.``, ``..``) is refused back to the default, because the
+    resolved directory is what the retention sweep deletes under.
+
+    **Beyond that refusal the value is trusted**, the way
+    ``security.sandbox_cache_dir`` is: the sweep carries no containment rule
+    bounding an operator-set root against an ancestor, so it treats every
+    subdirectory of whatever is written here as a user's and unlinks the
+    ``*.jsonl`` under it. That is settled rather than pending — the reasoning is
+    in :func:`istota.session.session_log.sweep_session_logs`, and
+    ``config.example.toml`` states it beside the setting so an operator meets it
+    before they set one.
+
+    The numbers below are restated from ``session/session_log.py``'s
+    ``DEFAULT_*`` constants rather than imported, so ``config.py`` stays below
+    the session layer in the import graph — it is loaded by the daemon, the web
+    app, the webhook receiver, every CLI invocation and every host-side skill
+    CLI the proxy spawns per call. ``tests/test_config_native_session_log.py``
+    is what holds the two copies equal.
+    """
+
+    enabled: bool = True
+    # "" → {db_path.parent}/logs. See resolve_session_log_dir.
+    dir: str = ""
+    # Age rule, for privacy. 0 keeps everything by age; the ceiling still runs.
+    retention_days: int = 14
+    # Size ceiling, for the disk, across *every* user. 0 drops the ceiling; the
+    # age rule still runs. Clamped to a 0.5 GB floor by the sweep.
+    max_total_gb: float = 2.0
+    # Per text / thinking block, head-and-tail truncated over the cap. 0 here
+    # means NO cap rather than "off" as it does on the two limits above: an
+    # uncapped block is one raw tool result at whatever size it came back.
+    max_content_chars: int = 32768
+    # Per tool-call arguments object, replaced by an honest marker over the
+    # cap. 0 = no cap, as above.
+    max_args_chars: int = 8192
+    # Thinking blocks in the written log. Independent of `tasks transcript`,
+    # where thinking stays off by default behind --thinking.
+    include_thinking: bool = True
+
+
+@dataclass
 class NativeBrainConfig:
     """Settings for the native harness (``brain.kind = "native"``).
 
@@ -1303,6 +1367,9 @@ class NativeBrainConfig:
     # default). Off via ``model_catalog_fetch = false``.
     model_catalog_fetch: bool = True
     model_catalog_cache_ttl_hours: float = 24.0
+    # Per-attempt JSONL transcript of the run ([brain.native.session_log]).
+    # Native-only: the other two brains already get one from the `claude` CLI.
+    session_log: SessionLogConfig = field(default_factory=SessionLogConfig)
 
 
 @dataclass

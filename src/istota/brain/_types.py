@@ -133,6 +133,28 @@ class BrainRequest:
     # ``None`` for direct brain callers that build no task env.
     db_path: Path | None = None
 
+    # Which task attempt this request *is*. Daemon-side facts, passed
+    # explicitly for the same reason ``db_path`` is: ``env`` is the *sandbox*
+    # environment, which carries only what the model may see, and a brain that
+    # read its own identity back out of it would be reading a value the task
+    # can rewrite. Only NativeBrain uses them today — to name and head the
+    # per-attempt session log — and every other brain ignores them.
+    #
+    # The zero defaults are load-bearing rather than filler: a direct brain
+    # call (the sleep cycle, the REPL, a test) has no task behind it, and the
+    # session log declines to open a file for one instead of writing a
+    # ``task-0-0`` that would collide across every such call. ``_run_fallback``
+    # copies the request with ``dataclasses.replace``, which names no other
+    # field, so a reroute carries the identity across untouched — which is what
+    # makes the fallback brain's own log a *second* file for the same attempt
+    # rather than a nameless one.
+    task_id: int = 0
+    attempt: int = 0
+    user_id: str = ""
+    source_type: str = ""
+    conversation_token: str = ""
+    is_group_chat: bool = False
+
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None

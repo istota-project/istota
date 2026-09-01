@@ -492,6 +492,287 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def _session_log_tree(root: Path) -> tuple[int, int]:
+    """``(jsonl file count, bytes)`` in the log tree, du-style.
+
+    ``st_blocks * 512`` because that is what the sweep measures with, and over
+    the same **set** it measures: the per-user directories, which are the
+    first-level subdirectories of the root, at any depth within each. A file
+    sitting directly in the root is in no user's directory, so the sweep's
+    ceiling never sees it and neither does this — otherwise a stray file would
+    inflate the figure reported against the ceiling relative to the figure the
+    ceiling is actually compared with.
+
+    A directory that cannot be read is skipped and its bytes go unreported;
+    saying so in the detail line is the sweep's job (it counts them) and this is
+    a size for an operator to read.
+    """
+    count = 0
+    total = 0
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return 0, 0
+    for entry in entries:
+        try:
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        for dirpath, _dirnames, filenames in os.walk(
+            entry.path, onerror=lambda _e: None, followlinks=False,
+        ):
+            for name in filenames:
+                try:
+                    info = os.lstat(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+                total += info.st_blocks * 512
+                if name.endswith(".jsonl"):
+                    count += 1
+    return count, total
+
+
+def _native_is_reachable(config: "Config") -> bool:
+    """Whether any task on this deployment could run on the native brain.
+
+    Not ``brain.kind == "native"``. A ``claude_code`` primary with ``fallback =
+    "native"`` runs the native harness — and therefore its session-log writer —
+    on every availability failover, and a ``source_type_overrides`` entry does
+    the same for a whole class of task. ``brain/native.py`` builds the writer
+    from ``config.brain.native.session_log`` alone and consults ``kind``
+    nowhere, so a check gated on ``kind`` would SKIP on exactly the mixed-brain
+    deployment nobody would think to look at.
+
+    The scheduler's step 7b makes the stronger version of this argument and
+    consults no brain kind at all, because a directory on disk outlives the
+    routing that filled it. The check keeps a gate only so a deployment that has
+    never run the native brain is not told about a directory it has no reason to
+    have.
+    """
+    brain = config.brain
+    if getattr(brain, "kind", "") == "native":
+        return True
+    if getattr(brain, "fallback", "") == "native":
+        return True
+    overrides = getattr(brain, "source_type_overrides", None) or {}
+    return "native" in overrides.values()
+
+
+def _session_log_mask_reason(config: "Config", log_dir: Path) -> str:
+    """"" when the sandbox's database mask covers ``log_dir``, else why not.
+
+    **This asks ``_mask_dir``'s own question rather than a copy of it.** "Is the
+    resolved directory under ``db_path.parent``" is the tempting predicate and it
+    is wrong in the one case that matters: it answers True on the standalone
+    install, where ``db_path.parent`` *is* the workspace, ``mask_shadowed_by``
+    is non-empty and the mask is refused — so the check would report the
+    property holding while the directory sat outside every mask. That is the
+    ``map_basemap`` two-consumers failure, which is why ``mask_shadowed_by``
+    was lifted out of the sandbox builder's closure instead of restated here.
+
+    Never raises. It runs on the daemon's start-up path, and a config that makes
+    a path comparison throw must come back as a finding.
+    """
+    if not getattr(config.security, "sandbox_enabled", False):
+        # Not "the mask covers it": there is no mask. Reported as its own reason
+        # rather than skipped, because the standalone install ships this way and
+        # the whole point of the check is to say which condition a deployment is
+        # in. `runtime.bwrap` answers a different question — whether bubblewrap
+        # could work here — and SKIPs on the same setting.
+        return (
+            "the sandbox is switched off on this deployment ([security] "
+            "sandbox_enabled), so nothing masks anything"
+        )
+
+    try:
+        from .executor import mask_protected_paths, mask_shadowed_by
+    except Exception:  # pragma: no cover - defensive; executor is always importable
+        return "the sandbox builder could not be consulted"
+
+    if not config.db_path:
+        return "no db_path is configured, so the sandbox masks no database directory"
+
+    try:
+        protected = mask_protected_paths(config)
+        candidates: list[Path] = [Path(config.db_path).parent]
+        try:
+            candidates.append(config.module_db_root())
+        except Exception:  # noqa: BLE001 - a misconfigured module_data_dir raises
+            pass
+
+        refused: list[Path] = []
+        names: list[Path] = []
+        for candidate in candidates:
+            # Both names, exactly as `_mask_dir` emits them: under a symlinked
+            # deployment root a mask lands at one and not the other.
+            for name in (candidate, candidate.resolve()):
+                if name in names:
+                    continue
+                names.append(name)
+                if mask_shadowed_by(name, protected):
+                    refused.append(name)
+                    continue
+                for probe in (log_dir, log_dir.resolve()):
+                    if probe == name or probe.is_relative_to(name):
+                        return ""
+    except OSError as exc:
+        return f"the mask could not be evaluated ({exc})"
+
+    if any(
+        probe == r or probe.is_relative_to(r)
+        for r in refused
+        for probe in (log_dir, log_dir.resolve())
+    ):
+        return (
+            "the sandbox refuses to mask the directory above it because that "
+            "directory contains the workspace or the source tree"
+        )
+    return "it sits outside every directory the sandbox masks"
+
+
+def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
+    """Where native-brain session transcripts land, and what protects them.
+
+    The boundary is that nothing binds the directory into any sandbox; the
+    database mask is defence in depth behind it, and on the standalone install
+    the mask is refused outright. Which of the two a deployment is in is not
+    visible from a config file, so this check says it.
+
+    The second ``WARN`` arm is about retention rather than exposure: when the
+    last sweep evicted by *size*, ``retention_days`` is not the retention in
+    force and the effective window is a function of load. An operator who wanted
+    fourteen days and is getting three should be told, not left to infer it from
+    a directory listing.
+
+    **The two arms are composed, not raced.** Returning at the first was the
+    first draft and it made the retention arm unreachable on precisely the
+    deployments that most need it: the standalone shape's mask refusal and an
+    operator-set ``dir`` are both *permanent* conditions, so a check that
+    returned on either could never go on to say that the ceiling was what
+    actually bound. Both facts land in one result.
+    """
+    name = "runtime.session_log_dir"
+    if not _native_is_reachable(config):
+        return CheckResult(
+            name,
+            SKIP,
+            "no brain routing reaches the native harness, which is the only "
+            "writer of session logs",
+        )
+    cfg = config.brain.native.session_log
+    if not cfg.enabled:
+        return CheckResult(
+            name, SKIP, "session logs are disabled ([brain.native.session_log] enabled)"
+        )
+
+    from .session.session_log import (
+        SWEEP_STATE_KEY,
+        SWEEP_STATE_NAMESPACE,
+        decode_sweep_state,
+        resolve_session_log_dir,
+    )
+
+    log_dir = resolve_session_log_dir(config.db_path, cfg.dir)
+
+    # Writable first: an unwritable directory means no transcript is being
+    # written at all, which outranks anything about who else could read one.
+    if log_dir.exists():
+        if not log_dir.is_dir():
+            return CheckResult(
+                name,
+                FAIL,
+                f"{log_dir} exists but is not a directory",
+                remedy="Move it aside, or point [brain.native.session_log] dir elsewhere.",
+            )
+        if not os.access(log_dir, os.W_OK):
+            return CheckResult(
+                name,
+                FAIL,
+                f"{log_dir} is not writable",
+                remedy=f"chown/chmod {log_dir} so the daemon's user can write to it.",
+            )
+    else:
+        # Nothing creates it until the first native task, so an install that has
+        # not run one is healthy. What matters is whether the parent allows it.
+        parent = log_dir.parent
+        if not (parent.is_dir() and os.access(parent, os.W_OK)):
+            return CheckResult(
+                name,
+                FAIL,
+                f"{log_dir} does not exist and {parent} is not writable",
+                remedy=f"Create {log_dir} and make it writable by the daemon's user.",
+            )
+
+    files, total = _session_log_tree(log_dir)
+    plural = "" if files == 1 else "s"
+    if cfg.max_total_gb > 0 and math.isfinite(cfg.max_total_gb):
+        size = f"{total / 1_073_741_824:.2f} GB of {cfg.max_total_gb:.1f} GB"
+    else:
+        # `isfinite` because the sweep reads a non-finite ceiling as no ceiling
+        # (TOML spells `inf`), and this is the one place the two consumers of
+        # the setting could disagree about what it means to an operator.
+        size = f"{total / 1_073_741_824:.2f} GB, no ceiling configured"
+    observed = f"{log_dir}: {files} file{plural}, {size}"
+
+    findings: list[str] = []
+    remedies: list[str] = []
+
+    reason = _session_log_mask_reason(config, log_dir)
+    if reason:
+        findings.append(f"the logs are unbound rather than masked — {reason}")
+        remedies.append(
+            "Nothing binds the directory into a sandbox, which is the boundary; "
+            "keep [security] sandbox_ro_paths narrow so nothing starts to."
+        )
+
+    # Retention: is the ceiling what is actually reclaiming? Only worth asking
+    # while the sweep is running — with both rules off the scheduler's gate is
+    # false and nothing rewrites the row, so a stale `deleted_size` from before
+    # they were switched off would warn for ever, about a retention rule that no
+    # longer runs at all.
+    if cfg.retention_days > 0 or cfg.max_total_gb > 0:
+        swept = None
+        try:
+            from . import db as _db
+
+            with _db.get_db(config.db_path) as conn:
+                row = _db.shared_kv_get(conn, SWEEP_STATE_NAMESPACE, SWEEP_STATE_KEY)
+            swept = decode_sweep_state(row["value"]) if row else None
+        except Exception:  # noqa: BLE001 - no sweep record is a normal answer
+            swept = None
+        if swept and swept.get("still_over"):
+            # Ahead of `deleted_size` because it is the worse condition: the tree
+            # is over its ceiling and everything left is inside the live window
+            # or could not be removed, so nothing is reclaiming it at all.
+            findings.append(
+                "the last sweep left the tree over its ceiling with nothing it "
+                "could evict"
+            )
+            remedies.append(
+                "Raise [brain.native.session_log] max_total_gb; the tree is over it "
+                "and the sweep has nothing left it is allowed to take."
+            )
+        elif swept and swept.get("deleted_size"):
+            findings.append(
+                f"the last sweep evicted {swept['deleted_size']} file(s) by size, so "
+                f"retention_days = {cfg.retention_days} is not the retention in force"
+            )
+            remedies.append(
+                "Raise [brain.native.session_log] max_total_gb, or lower "
+                "retention_days so the configured window matches what the disk allows."
+            )
+
+    if findings:
+        return CheckResult(
+            name,
+            WARN,
+            f"{observed}; " + "; ".join(findings),
+            remedy=" ".join(remedies),
+        )
+    return CheckResult(name, OK, observed)
+
+
 # The two remedies this check can offer. Both are fixed literals: `detail` and
 # `remedy` are built from these plus a percentage, a duration, a resolver branch
 # name and the configured fallback brain kind — never from the credential, the
@@ -3548,6 +3829,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.framework_db", check_framework_db),
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
+    ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.subscription_usage", check_subscription_usage),
     ("security.skill_proxy", check_skill_proxy),
     ("security.devbox_netfilter", check_devbox_netfilter),
@@ -3585,6 +3867,10 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.framework_db": DEPLOYMENT,
     "runtime.writable_dirs": DEPLOYMENT,
     "runtime.mount_liveness": DEPLOYMENT,
+    # Deployment, not image: it walks a directory on the install's own disk and
+    # reads the last sweep's row out of the framework database, neither of which
+    # a bare `docker run` has.
+    "runtime.session_log_dir": DEPLOYMENT,
     # Deployment, not image: it needs a credential and network egress, neither of
     # which a bare `docker run` has. Not in DEEP_CHECKS — it spawns no namespace.
     "runtime.subscription_usage": DEPLOYMENT,

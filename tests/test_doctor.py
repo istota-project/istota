@@ -3390,3 +3390,339 @@ class TestAvatarImport:
 
         assert not attempts, f"web.avatar_import reached the network: {attempts}"
         assert r.status in (OK, SKIP, WARN)
+
+
+class TestSessionLogDir:
+    """`runtime.session_log_dir` — where the native brain's transcripts land, and
+    whether the sandbox's database mask actually covers them.
+
+    The check must ask `_mask_dir`'s own question rather than a copy of it. "Is
+    the resolved directory under `db_path.parent`" answers True on the
+    standalone install, where the mask is refused — so a checker with its own
+    copy of the rule would report the property holding while the directory sat
+    outside every mask. That is the `map_basemap` two-consumers failure, and the
+    WARN/OK pair below is what proves the predicate is the real one.
+    """
+
+    NAME = "runtime.session_log_dir"
+
+    def _config(self, make_config, tmp_path, **session_log_kwargs):
+        from istota.config import BrainConfig, NativeBrainConfig, SessionLogConfig
+
+        home = tmp_path / "srv"
+        (home / "data").mkdir(parents=True, exist_ok=True)
+        (home / "data" / "istota.db").touch()
+        temp = tmp_path / "tmp" / "istota"
+        temp.mkdir(parents=True, exist_ok=True)
+        return make_config(
+            db_path=home / "data" / "istota.db",
+            temp_dir=temp,
+            brain=BrainConfig(
+                kind="native",
+                native=NativeBrainConfig(
+                    session_log=SessionLogConfig(**session_log_kwargs),
+                ),
+            ),
+        )
+
+    def _run(self, config):
+        return run_checks(config, only=(self.NAME,))[0]
+
+    # -- when it does not apply -------------------------------------------
+
+    def test_skips_when_no_routing_reaches_the_native_brain(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        config.brain.kind = "claude_code"
+        r = self._run(config)
+        assert r.status == SKIP
+        assert "native" in r.detail
+
+    def test_a_native_fallback_is_not_a_skip(self, make_config, tmp_path):
+        # `brain/native.py` builds the writer from `session_log` alone and
+        # consults `brain.kind` nowhere, so a `claude_code` primary with
+        # `fallback = "native"` writes a transcript on every availability
+        # failover. Gating on `kind` SKIPs on exactly the mixed-brain deployment
+        # nobody would think to look at.
+        config = self._config(make_config, tmp_path)
+        config.brain.kind = "claude_code"
+        config.brain.fallback = "native"
+        assert self._run(config).status != SKIP
+
+    def test_a_source_type_override_onto_native_is_not_a_skip(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        config.brain.kind = "claude_code"
+        config.brain.source_type_overrides = {"scheduled": "native"}
+        assert self._run(config).status != SKIP
+
+    def test_skips_when_the_feature_is_off(self, make_config, tmp_path):
+        r = self._run(self._config(make_config, tmp_path, enabled=False))
+        assert r.status == SKIP
+
+    # -- the healthy shape -------------------------------------------------
+
+    def test_ok_on_the_default_directory(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        log_dir = config.db_path.parent / "logs"
+        log_dir.mkdir(parents=True)
+        r = self._run(config)
+        assert r.status == OK
+        assert str(log_dir) in r.detail
+
+    def test_ok_before_the_directory_exists(self, make_config, tmp_path):
+        # Nothing creates it until the first native task, so an install that has
+        # not run one yet is healthy rather than broken.
+        r = self._run(self._config(make_config, tmp_path))
+        assert r.status == OK
+
+    def test_the_ok_line_reports_the_size_against_the_ceiling(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path, max_total_gb=5.0)
+        log_dir = config.db_path.parent / "logs" / "alice"
+        log_dir.mkdir(parents=True)
+        (log_dir / "a.jsonl").write_bytes(b"x" * 4096)
+        r = self._run(config)
+        assert r.status == OK
+        assert "5.0" in r.detail
+        assert "1 file" in r.detail
+
+    # -- the exposures -----------------------------------------------------
+
+    def test_warns_when_the_directory_is_outside_the_masked_one(self, make_config, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        config = self._config(make_config, tmp_path, dir=str(elsewhere))
+        r = self._run(config)
+        assert r.status == WARN
+        assert str(elsewhere) in r.detail
+        assert r.remedy
+
+    def _workspace_shape(self, make_config, tmp_path, *, sandbox_enabled):
+        """`setup_wizard`'s layout: db_path.parent *is* the workspace and the
+        temp dir is inside it, so `_mask_dir` refuses.
+
+        `sandbox_enabled` is passed explicitly in both directions because the
+        two halves are different findings and the review found the test asserting
+        one while naming the other: `setup_wizard` ships `sandbox_enabled = false`,
+        so the shape it writes never reaches the mask reasoning at all.
+        """
+        from istota.config import (
+            BrainConfig,
+            NativeBrainConfig,
+            SecurityConfig,
+            SessionLogConfig,
+        )
+
+        workspace = tmp_path / "istota-home"
+        (workspace / "tmp").mkdir(parents=True)
+        (workspace / "istota.db").touch()
+        return make_config(
+            db_path=workspace / "istota.db",
+            temp_dir=workspace / "tmp",
+            nextcloud_mount_path=workspace,
+            security=SecurityConfig(sandbox_enabled=sandbox_enabled),
+            brain=BrainConfig(
+                kind="native",
+                native=NativeBrainConfig(session_log=SessionLogConfig()),
+            ),
+        )
+
+    def test_warns_on_the_standalone_shape_where_the_mask_is_refused(
+        self, make_config, tmp_path,
+    ):
+        # "Under db_path.parent" answers True here, which is why the check cannot
+        # be written that way.
+        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=True)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "unbound" in r.detail.lower()
+        assert "workspace" in r.detail.lower()
+        assert r.remedy
+
+    def test_warns_when_the_sandbox_is_switched_off_entirely(
+        self, make_config, tmp_path,
+    ):
+        # On a layout whose mask would otherwise be *emitted*, so the only thing
+        # that can produce a finding is the sandbox being off. Writing this
+        # against the workspace shape — which `setup_wizard` really ships, and
+        # which is the tempting way to phrase it — passes on the mask-refusal
+        # reason instead, and stays green with this arm deleted. Measured.
+        from istota.config import SecurityConfig
+
+        config = self._config(make_config, tmp_path)
+        config.security = SecurityConfig(sandbox_enabled=False)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "switched off on this deployment" in r.detail
+        assert r.remedy
+
+    def test_the_standalone_install_as_shipped_warns_on_both_counts(
+        self, make_config, tmp_path,
+    ):
+        # `setup_wizard` writes the workspace layout *and* `sandbox_enabled =
+        # false`, so both conditions hold at once. Whichever reason is reported,
+        # the finding must be there — gating the mask arm on `sandbox_enabled`
+        # made this shape report a plain OK.
+        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=False)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "unbound" in r.detail.lower()
+        assert r.remedy
+
+    def test_the_two_shapes_disagree_which_is_the_point_of_the_check(
+        self, make_config, tmp_path,
+    ):
+        # The pair, side by side: the Ansible shape is OK and the standalone one
+        # WARNs, on a predicate that would answer the same for both if it were
+        # the "under db_path.parent" copy. Both have the sandbox on, so the only
+        # thing separating them is the mask refusal.
+        ansible = self._config(make_config, tmp_path / "a")
+        standalone = self._workspace_shape(
+            make_config, tmp_path / "b", sandbox_enabled=True,
+        )
+        assert self._run(ansible).status == OK
+        assert self._run(standalone).status == WARN
+
+    @pytest.mark.requires_dac
+    def test_fails_on_an_unwritable_directory(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        log_dir = config.db_path.parent / "logs"
+        log_dir.mkdir(parents=True)
+        os.chmod(log_dir, 0o500)
+        try:
+            r = self._run(config)
+        finally:
+            os.chmod(log_dir, 0o700)
+        assert r.status == FAIL
+        assert r.remedy
+
+    # -- the ceiling is what actually binds --------------------------------
+
+    def _record_sweep(self, config, **fields):
+        from istota import db as _db
+        from istota.session.session_log import (
+            SWEEP_STATE_KEY,
+            SWEEP_STATE_NAMESPACE,
+            SweepResult,
+            encode_sweep_state,
+        )
+
+        _db.init_db(config.db_path)
+        with _db.get_db(config.db_path) as conn:
+            _db.shared_kv_set(
+                conn,
+                SWEEP_STATE_NAMESPACE,
+                SWEEP_STATE_KEY,
+                encode_sweep_state(SweepResult(**fields), now=time.time()),
+                "test",
+            )
+
+    def test_warns_when_the_last_sweep_evicted_by_size(self, make_config, tmp_path):
+        # `deleted_size > 0` means the effective retention is a function of load
+        # rather than `retention_days`. An operator who wanted 14 days and is
+        # getting 3 should be told, not left to infer it from a listing.
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        self._record_sweep(config, deleted_size=7)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "retention" in r.detail.lower()
+        assert r.remedy
+
+    def test_a_sweep_that_evicted_only_by_age_is_ok(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        self._record_sweep(config, deleted_age=12)
+        assert self._run(config).status == OK
+
+    def test_still_over_outranks_an_eviction_by_size(self, make_config, tmp_path):
+        # The worse condition: the tree is over its ceiling and everything left
+        # is inside the live window, so nothing is reclaiming it at all. Recorded
+        # by the sweep since Stage 1 and read by nobody until now.
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        self._record_sweep(config, deleted_size=3, still_over=True)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "nothing it could evict" in r.detail
+        assert r.remedy
+
+    def test_the_exposure_and_the_retention_findings_are_composed_not_raced(
+        self, make_config, tmp_path,
+    ):
+        # Returning at the first made the retention arm unreachable on exactly
+        # the deployments that need it: an operator-set `dir` and the standalone
+        # shape are both *permanent* exposure conditions, so the check could
+        # never go on to say the ceiling was what actually bound.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        config = self._config(make_config, tmp_path, dir=str(elsewhere))
+        self._record_sweep(config, deleted_size=4)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "unbound" in r.detail.lower()
+        assert "retention" in r.detail.lower()
+
+    def test_a_stale_row_stops_warning_once_both_sweep_rules_are_off(
+        self, make_config, tmp_path,
+    ):
+        # With both rules off the scheduler's gate is false and nothing rewrites
+        # the row, so a `deleted_size` from before they were switched off would
+        # warn for ever about a rule that no longer runs.
+        config = self._config(make_config, tmp_path, retention_days=0, max_total_gb=0)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        self._record_sweep(config, deleted_size=9)
+        assert self._run(config).status == OK
+
+    def test_an_infinite_ceiling_reads_as_no_ceiling(self, make_config, tmp_path):
+        # TOML spells `inf` and the sweep reads it as no ceiling. This is the one
+        # place the two consumers of the setting could disagree about what an
+        # operator is being told.
+        config = self._config(make_config, tmp_path, max_total_gb=float("inf"))
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = self._run(config)
+        assert "of inf GB" not in r.detail
+        assert "no ceiling configured" in r.detail
+
+    def test_a_stray_file_at_the_root_is_not_counted(self, make_config, tmp_path):
+        # The sweep measures per-user directories, so a file sitting in the root
+        # is in no user's tree and its bytes reach neither `bytes_after` nor the
+        # ceiling. Counting it here would inflate the figure reported *against*
+        # that ceiling.
+        config = self._config(make_config, tmp_path)
+        log_dir = config.db_path.parent / "logs"
+        (log_dir / "alice").mkdir(parents=True)
+        (log_dir / "alice" / "a.jsonl").write_bytes(b"x" * 4096)
+        (log_dir / "stray.jsonl").write_bytes(b"y" * 4096)
+        r = self._run(config)
+        assert "1 file" in r.detail
+
+    def test_a_nested_file_inside_a_user_directory_is_counted(self, make_config, tmp_path):
+        # The other half: the sweep walks a user's tree recursively, so the
+        # measurement has to as well or the two disagree the other way.
+        config = self._config(make_config, tmp_path)
+        nested = config.db_path.parent / "logs" / "alice" / "deep"
+        nested.mkdir(parents=True)
+        (nested / "a.jsonl").write_bytes(b"x" * 4096)
+        assert "1 file" in self._run(config).detail
+
+    def test_an_unreadable_state_row_is_not_a_finding(self, make_config, tmp_path):
+        from istota import db as _db
+        from istota.session.session_log import SWEEP_STATE_KEY, SWEEP_STATE_NAMESPACE
+
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        _db.init_db(config.db_path)
+        with _db.get_db(config.db_path) as conn:
+            _db.shared_kv_set(
+                conn, SWEEP_STATE_NAMESPACE, SWEEP_STATE_KEY, "not json", "test",
+            )
+        assert self._run(config).status == OK
+
+    def test_the_check_never_raises_on_a_broken_config(self, make_config, tmp_path):
+        # It runs on the daemon's start-up path. A `dir` that names a file, not
+        # a directory, must come back as a finding rather than an exception.
+        config = self._config(make_config, tmp_path)
+        blocker = tmp_path / "afile"
+        blocker.write_text("x")
+        config.brain.native.session_log.dir = str(blocker)
+        r = self._run(config)
+        assert r.status in (WARN, FAIL)
