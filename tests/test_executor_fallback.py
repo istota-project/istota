@@ -794,11 +794,11 @@ class TestFallbackIsVisibleOnStreamSurfaces:
         assert result is not None and result.success is True
 
     def test_the_fallback_copy_keeps_the_prepared_images(self, tmp_path):
-        """`_dc.replace` names only model / effort / advisor, so every other
-        field rides across untouched — including `images`. That is what lets the
-        fallback brain make its own vision-capability decision instead of
-        answering an image-bearing task blind, so it is pinned rather than
-        assumed."""
+        """`_dc.replace` names only model / effort / advisor / is_fallback, so
+        every other field rides across untouched — including `images`. That is
+        what lets the fallback brain make its own vision-capability decision
+        instead of answering an image-bearing task blind, so it is pinned rather
+        than assumed."""
         from istota.brain._types import BrainRequest, ImageInput
 
         fb = _FakeBrain("native", BrainResult(True, "answer", stop_reason="completed"))
@@ -879,6 +879,66 @@ class TestFallbackIsVisibleOnStreamSurfaces:
             if e.kind == "text_delta" and "primary-tail" in e.payload.get("text", "")
         ]
         assert after == [], "the primary's abandoned text leaked past the reroute"
+
+
+class TestTheRequestSaysWhichBrainRunItIs:
+    """ISSUE-378 — the fallback run's request is marked, so its artifacts are.
+
+    Both runs of one rerouted attempt carry the same `task_id` and the same
+    `attempt`, because a reroute deliberately does not increment either. The
+    usage table tells them apart on `is_fallback`; without the same flag on the
+    request, nothing a brain writes per attempt can. `NativeBrain`'s session log
+    is the first consumer and the reason the field exists.
+    """
+
+    def test_the_fallback_request_is_marked_as_the_fallback(self, tmp_path):
+        from istota.brain._types import BrainRequest
+
+        fb = _FakeBrain("native", BrainResult(True, "answer", stop_reason="completed"))
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native")
+        task = _make_task(source_type="cli")
+        req = BrainRequest(
+            prompt="p", allowed_tools=[], cwd=tmp_path, env={}, timeout_seconds=60,
+        )
+        assert req.is_fallback is False
+
+        with contextmanager_chain([
+            patch("istota.executor.make_brain", return_value=fb),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+        ]):
+            _run_fallback(config, config.brain, "native", task, req)
+
+        assert fb.received_reqs[0].is_fallback is True
+        # The caller's own request is not mutated — `_dc.replace` copies, and
+        # the primary's result is persisted from that same object afterwards.
+        assert req.is_fallback is False
+
+    def test_a_rerouted_attempt_marks_only_the_second_run(self, tmp_path):
+        """Through `execute_task`, so the primary's request is covered too."""
+        _results, primary, fb, _alerts = _run(
+            tmp_path,
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+        )
+        assert [r.is_fallback for r in primary.received_reqs] == [False]
+        assert [r.is_fallback for r in fb.received_reqs] == [True]
+
+    def test_the_breaker_path_marks_the_run_it_substitutes(self, tmp_path):
+        """The cooldown path runs the fallback with no primary call at all, so
+        a flag derived from "a primary result was held" would read false for
+        every task in the window — the same trap `_ran_fallback` documents."""
+        _results, primary, fb, _alerts = _run(
+            tmp_path,
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+            n_runs=2,
+        )
+        # Task 1 probes the primary and reroutes; task 2 skips it entirely.
+        assert primary.calls == 1
+        assert [r.is_fallback for r in fb.received_reqs] == [True, True]
 
 
 class TestFallbackNoticeText:

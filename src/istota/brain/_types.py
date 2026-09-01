@@ -144,16 +144,27 @@ class BrainRequest:
     # call (the sleep cycle, the REPL, a test) has no task behind it, and the
     # session log declines to open a file for one instead of writing a
     # ``task-0-0`` that would collide across every such call. ``_run_fallback``
-    # copies the request with ``dataclasses.replace``, which names no other
-    # field, so a reroute carries the identity across untouched — which is what
-    # makes the fallback brain's own log a *second* file for the same attempt
-    # rather than a nameless one.
+    # copies the request with ``dataclasses.replace``, which names none of
+    # these, so a reroute carries the identity across untouched — which is what
+    # files the fallback brain's own log against the same attempt rather than a
+    # nameless one, and what leaves ``is_fallback`` below as the only thing in
+    # it that names which brain ran.
     task_id: int = 0
     attempt: int = 0
     user_id: str = ""
     source_type: str = ""
     conversation_token: str = ""
     is_group_chat: bool = False
+
+    # Whether this request *is* the fallback run of a rerouted attempt
+    # (ISSUE-378). Set by ``executor._run_fallback`` and by nothing else: a
+    # reroute deliberately increments neither ``attempt`` nor the task's
+    # ``attempt_count``, so nothing a brain writes per attempt says which of
+    # the two brains it came from. This is the
+    # request-side twin of ``task_usage.is_fallback``, which is what the two
+    # spend rows are keyed apart on, and it exists so a native session log can
+    # be joined to the right one of them. Every other brain ignores it.
+    is_fallback: bool = False
 
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.

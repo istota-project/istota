@@ -552,6 +552,22 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _as_bool_or_none(value: Any) -> bool | None:
+    """A header flag as ``True``/``False``, or ``None`` where the file is silent.
+
+    Three-valued on purpose. A file written before the field existed carries no
+    key at all, and collapsing that to ``False`` would state something the run
+    never said — for ``is_fallback`` it would label every old fallback
+    transcript as the primary and send a reader to the wrong ``task_usage``
+    row. A value of the wrong type is the same silence: the header is file
+    content, and `json.loads` hands back whatever was on the line.
+
+    ``bool`` is checked rather than truthiness because `isinstance(True, int)`
+    is also true, and a header claiming ``1`` is claiming a number.
+    """
+    return value if isinstance(value, bool) else None
+
+
 def _as_path(value: Any) -> Path | None:
     """*value* as a ``Path``, or ``None`` where it is not one to begin with.
 
@@ -588,6 +604,12 @@ def summarize(path: Path | str) -> dict:
     never the header's, because they are what every lookup filters on. A header
     disagreeing with any of the three is reported as ``header_user_id`` /
     ``header_task_id`` / ``header_attempt`` rather than believed.
+
+    ``is_fallback`` is the exception that proves that rule and comes off the
+    header, because the name cannot carry it: both runs of a rerouted attempt
+    are ``task-{id}-{attempt}``, so there is nothing to check the claim against.
+    It is tri-state — ``None`` where the file is silent, which is every log
+    written before the field existed (ISSUE-378).
     """
     path = _as_path(path) or Path("")
     parsed = parse_log_name(path.name) or {}
@@ -607,6 +629,8 @@ def summarize(path: Path | str) -> dict:
         "turns": None,
         "model": "",
         "brain": "",
+        # Tri-state, never a bare False — see `_as_bool_or_none`.
+        "is_fallback": None,
         "header_user_id": "",
         "header_task_id": None,
         "header_attempt": None,
@@ -638,6 +662,12 @@ def summarize(path: Path | str) -> dict:
         value = header.get(key)
         if value is not None:
             row[key] = value
+    # Which run of a rerouted attempt this file is (ISSUE-378). Not an identity
+    # field in the sense the block below means — the name cannot carry it, since
+    # both runs of one reroute are `task-{id}-{attempt}` — so unlike `task_id`,
+    # `attempt` and `user_id` there is nothing to check the header against and
+    # the header is the only source there is.
+    row["is_fallback"] = _as_bool_or_none(header.get("is_fallback"))
 
     # **Three identity fields come off the name and the directory, never off the
     # header, and the rule is one rule.** The name and the directory are what

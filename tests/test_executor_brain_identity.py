@@ -117,14 +117,22 @@ class TestTheIdentityReachesTheBrain:
 class TestTheIdentitySurvivesAFallbackReroute:
     def test_replace_preserves_every_identity_field(self, tmp_path):
         """`_run_fallback` copies a request with `dataclasses.replace(req,
-        model=…, effort=…, advisor=…)`, which names no other field.
+        model=…, effort=…, advisor=…, is_fallback=True)`, which names no
+        identity field.
 
-        That is what makes a fallback native run's session log a *second* file
-        for the same attempt — collision-suffixed — rather than a nameless one,
-        so it is worth an assertion rather than a comment.
+        That is what files a fallback native run's session log against the same
+        attempt rather than a nameless one, so it is worth an assertion rather
+        than a comment. `is_fallback` is the one field the copy is *meant* to
+        change (ISSUE-378) and is asserted as changing, since a reroute whose
+        identity survived but whose marker did not would pass a bare loop over
+        the six.
         """
         req = _run(tmp_path)
-        copied = dataclasses.replace(req, model="other", effort="high", advisor="")
+        copied = dataclasses.replace(
+            req, model="other", effort="high", advisor="", is_fallback=True,
+        )
+        assert req.is_fallback is False
+        assert copied.is_fallback is True
         for field in (
             "task_id",
             "attempt",

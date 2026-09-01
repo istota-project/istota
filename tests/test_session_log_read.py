@@ -499,6 +499,40 @@ class TestSummarize:
         assert row["task_id"] == 4471
         assert row["user_id"] == "alice"
 
+    def test_a_fallback_run_is_reported_as_one(self, tmp_path):
+        # ISSUE-378. Both runs of a rerouted attempt carry the same task id and
+        # the same attempt, so this is the only field in the file that says
+        # which `task_usage` row the transcript belongs to.
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_session(is_fallback=True), _context(), _user(), _result()])
+        assert reader.summarize(path)["is_fallback"] is True
+
+    def test_a_primary_run_is_reported_as_one(self, tmp_path):
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_session(is_fallback=False), _context(), _user(), _result()])
+        assert reader.summarize(path)["is_fallback"] is False
+
+    def test_a_log_written_before_the_field_existed_says_nothing_rather_than_no(
+        self, tmp_path
+    ):
+        # `None`, not `False`. A file predating ISSUE-378 does not record which
+        # brain run it was, and reading its silence as "the primary" would
+        # label every old fallback transcript with the wrong usage row.
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        header = _session()
+        assert "is_fallback" not in header
+        write_log(path, [header, _context(), _user(), _result()])
+        row = reader.summarize(path)
+        assert row["readable"] is True
+        assert row["is_fallback"] is None
+
+    def test_a_non_boolean_claim_is_not_believed(self, tmp_path):
+        # Every field comes off `json.loads`, so its type is whatever was on
+        # the line. The module's rule is that a header is file content.
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_session(is_fallback="yes"), _context(), _result()])
+        assert reader.summarize(path)["is_fallback"] is None
+
 
 class TestDigest:
     def test_it_reports_the_tools_in_order_with_their_status_and_sizes(self, tmp_path):

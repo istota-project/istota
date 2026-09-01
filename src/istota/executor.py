@@ -743,7 +743,14 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
         if fb_brain.model_namespace == "anthropic" and dropped_pin is None
         else ""
     )
-    fb_req = _dc.replace(req, model=fb_model, effort=fb_effort, advisor=fb_advisor)
+    # `is_fallback` marks the run rather than describing the reroute's cause,
+    # which is why it is set here and not passed in: every path that reaches
+    # this function is a fallback run, including the breaker-cooldown one where
+    # no primary was called at all. `_ran_fallback` at the call site is set for
+    # the same reason and draws the same line (ISSUE-378).
+    fb_req = _dc.replace(
+        req, model=fb_model, effort=fb_effort, advisor=fb_advisor, is_fallback=True,
+    )
     if on_start is not None:
         try:
             on_start(fb_model, dropped_pin)
@@ -6205,8 +6212,8 @@ def execute_task(
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.
             # `_run_fallback` copies the request with `dataclasses.replace`,
-            # which names no other field, so a reroute carries these across and
-            # the fallback brain makes its own capability decision.
+            # which does not name this field, so a reroute carries these across
+            # and the fallback brain makes its own capability decision.
             images=image_prep.images,
             streaming=use_streaming,
             on_progress=_on_event if use_streaming else None,
