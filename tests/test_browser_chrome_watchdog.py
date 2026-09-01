@@ -73,6 +73,7 @@ def _reset_chrome_globals():
         chrome._pw = None
         chrome._pw_browser = None
         chrome._pw_context = None
+        chrome._pw_thread_id = None
         chrome._launching = False
 
     _reset()
