@@ -79,6 +79,133 @@ _pw_context = None
 # None means no connection is open, so any thread may claim the next one.
 _pw_thread_id = None
 
+# The CDP heartbeat: what the last CDP-touching call did, and when (ISSUE-384).
+#
+# ISSUE-382's fix made a poisoned Patchright binding a contained error instead of
+# a silent one. It did not make it *visible*: the container's deep liveness probe
+# asks whether the Chrome process is alive and whether Chrome's DevTools endpoint
+# answers, and through the whole of that outage both were true. What was dead was
+# this process's own ability to drive the browser, and nothing measured it. So the
+# one fault that needs a restart was the one nothing detected, and the outage
+# ended at the unrelated 05:00 proactive restart rather than by detection.
+#
+# The probe cannot ask by trying: calling Patchright from the liveness thread is
+# the exact mistake ISSUE-382 is about. So the request thread publishes what
+# happened instead and the probe reads it. Every write here is a plain
+# assignment under a leaf lock -- no Patchright, no I/O, nothing that can block --
+# which is what makes the record readable from any thread when connect_cdp() is
+# not.
+#
+# This module records; it draws no conclusion. The threshold and the staleness
+# window are the probe's policy and live in browse_api, so a change to how
+# aggressively the container restarts itself does not touch the connection code.
+#
+# Only a genuine CDP success clears the failure count. Notably a Chrome restart
+# does not: recover_wedged_chrome() kills and relaunches the browser, which
+# repairs a wedged Chrome and does nothing at all for a poisoned asyncio loop --
+# that state survives for the life of the *process*. Treating a relaunch as
+# recovery would hide the one fault this record exists to expose.
+#
+# Two rules decide what is even eligible to be counted, and both exist because a
+# count is a container restart. Getting either wrong costs a killed browsing
+# session for a container that was working.
+#
+# 1. Only a call the caller cares about. connect_cdp() is reached from teardown
+#    and from diagnostics as well as from a request, and those callers wrap it in
+#    `except Exception: pass` -- a failure there is not evidence that anything a
+#    client asked for went wrong, and those paths can never produce a
+#    compensating success either. `record=False` is how they say so. Three
+#    /interact calls carrying stale session ids used to reach the threshold on
+#    their own, via _cleanup_expired() at the top of every endpoint, and return
+#    404 to the client with nothing having actually failed.
+#
+# 2. Only a failure Chrome does not explain. This is the signature ISSUE-384
+#    actually names: a run of CDP failures *with Chrome alive*. If Chrome is
+#    gone, restarting, or not answering on DevTools, a failed connect says
+#    nothing about this process's binding -- and the probe's first two arms
+#    already cover exactly those three states, so counting them here would only
+#    add a stale count that outlives the condition. The measured case is a
+#    legitimate recovery: recover_wedged_chrome() kills Chrome, the unwinding
+#    request calls _close_session() -> get_context() during the relaunch, and
+#    that used to record a failure for a recovery that worked.
+#
+# What survives both rules is: a request-path CDP call that failed while Chrome
+# was up and answering. That is the ISSUE-382 shape and very little else.
+_cdp_health = {
+    "last_success": 0.0,
+    "last_failure": 0.0,
+    "consecutive_failures": 0,
+    "last_error": "",
+}
+# The two timestamps are time.monotonic(), not wall clock. Nothing renders them
+# -- /health reports the count and the error text, and the probe turns
+# last_failure into an age -- so they are pure in-process durations, and a
+# monotonic clock means an NTP step cannot re-arm a verdict that had aged out or
+# clear a live one early. A backwards step of more than the staleness window did
+# exactly the former.
+#
+# A leaf lock: acquired only around the assignments below and the copy in
+# cdp_health(). cleanup() reaches it while holding _chrome_lock, so the ordering
+# is always _chrome_lock -> _cdp_health_lock and never the reverse; the liveness
+# thread takes this one alone. Nothing that can block is called while it is held
+# -- _chrome_explains_failure() runs before it is taken, because it makes an HTTP
+# call.
+_cdp_health_lock = threading.Lock()
+
+
+def _record_cdp_success():
+    """Note that a CDP call worked. Safe from any thread."""
+    with _cdp_health_lock:
+        _cdp_health["last_success"] = time.monotonic()
+        _cdp_health["consecutive_failures"] = 0
+        _cdp_health["last_error"] = ""
+
+
+def _chrome_explains_failure():
+    """Whether Chrome's own state accounts for a CDP call having failed.
+
+    Down, mid-relaunch, or not answering on DevTools. Each is a condition the
+    liveness probe's first two arms report on their own, and none of them says
+    anything about whether this process's Patchright binding still works.
+
+    Called before the health lock is taken: devtools_responding() is an HTTP
+    call, and holding a lock the liveness thread wants across it is the shape
+    this module exists to avoid.
+    """
+    if not is_chrome_running() or _launching:
+        return True
+    return not devtools_responding(timeout=2)
+
+
+def _record_cdp_failure(error):
+    """Note that a CDP call could not be made. Safe from any thread.
+
+    One call is one failure. connect_cdp() retries internally and this is
+    recorded only once it has given up, so the count is a run of failed
+    *requests* rather than a multiple of the retry setting.
+
+    A failure Chrome explains is recorded but not counted: the error text and
+    the timestamp are useful for diagnosis either way, and the count is what
+    drives a restart. Returns whether it counted, for the caller's logging.
+    """
+    explained = _chrome_explains_failure()
+    with _cdp_health_lock:
+        _cdp_health["last_failure"] = time.monotonic()
+        _cdp_health["last_error"] = str(error)[:500]
+        if not explained:
+            _cdp_health["consecutive_failures"] += 1
+    return not explained
+
+
+def cdp_health():
+    """Snapshot of the CDP heartbeat. Safe from any thread.
+
+    A copy, so a caller cannot mutate the record it is reporting on, and so the
+    fields a verdict is computed from are read as one consistent set.
+    """
+    with _cdp_health_lock:
+        return dict(_cdp_health)
+
 
 def launch_chrome():
     """Launch Chrome directly with debugging port and stealth extension."""
@@ -258,7 +385,7 @@ def is_chrome_running():
     return _chrome_proc is not None and _chrome_proc.poll() is None
 
 
-def _assert_pw_thread(op):
+def _assert_pw_thread(op, record=True):
     """Refuse a Patchright call from a thread that doesn't own the connection.
 
     Inert when nothing is connected: the guard binds an existing connection to
@@ -277,20 +404,39 @@ def _assert_pw_thread(op):
         "thread, or use recover_wedged_chrome() if you only need the OS process.",
         op, threading.current_thread().name, _pw_thread_id,
     )
-    raise RuntimeError(
+    err = RuntimeError(
         f"chrome.{op}() called from thread {threading.current_thread().name!r}, "
         f"which does not own the CDP connection",
     )
+    # A refusal is the other way this class of fault presents, so it feeds the
+    # same heartbeat (ISSUE-384). The reasoning is that a refusal means *this
+    # call could not drive the browser*, which is the question the probe asks --
+    # and when the refused caller is the request thread, it is the permanent
+    # lockout ISSUE-382's own review found (a foreign thread winning the first
+    # connect leaves the Flask thread refused for the life of the process).
+    # Nothing at this raise site can tell that apart from a stray background
+    # caller, and the two need the same answer anyway: only a genuine CDP
+    # success clears the count, so a container still serving requests resets it
+    # continuously and a stray refusal never accumulates on its own.
+    if record:
+        _record_cdp_failure(err)
+    raise err
 
 
-def connect_cdp(retries=3):
+def connect_cdp(retries=3, record=True):
     """Connect Patchright to Chrome via CDP (lazy, idempotent).
 
     Retries on failure because Patchright's driver can crash when
     connecting to pages with complex/navigating frame trees.
+
+    ``record=False`` keeps the outcome out of the CDP heartbeat. Pass it from
+    any caller that treats a failure as nothing -- teardown, eviction,
+    diagnostics -- since the heartbeat drives a container restart and those
+    callers swallow the exception and never produce a compensating success. See
+    the _cdp_health comment.
     """
     global _pw, _pw_browser, _pw_context, _pw_thread_id
-    _assert_pw_thread("connect_cdp")
+    _assert_pw_thread("connect_cdp", record=record)
     if _pw_browser is not None:
         # Verify the existing CDP connection is genuinely live before reusing it.
         # Neither `.contexts` nor is_connected() is reliable here: both read
@@ -306,9 +452,16 @@ def connect_cdp(retries=3):
                 session.detach()
             except Exception:
                 pass
+            # A completed round-trip over the socket is as much evidence that
+            # this process can drive the browser as a fresh connect is. Recorded
+            # even under record=False: a success is never a reason to restart,
+            # so there is no false positive to protect against, and a teardown
+            # that reached the browser is real evidence the binding works.
+            _record_cdp_success()
             return
         except Exception:
             disconnect_cdp()
+    last_error = None
     for attempt in range(retries):
         try:
             # Claim ownership before creating anything, not after: assigning it
@@ -324,8 +477,10 @@ def connect_cdp(retries=3):
             contexts = _pw_browser.contexts
             _pw_context = contexts[0] if contexts else _pw_browser.new_context()
             log.debug("CDP connected")
+            _record_cdp_success()
             return
         except Exception as e:
+            last_error = e
             log.warning(
                 "CDP connect attempt %d/%d failed: %s",
                 attempt + 1, retries, e,
@@ -333,7 +488,17 @@ def connect_cdp(retries=3):
             disconnect_cdp()
             if attempt < retries - 1:
                 time.sleep(1)
-    raise RuntimeError("Failed to connect CDP after retries")
+    # Carry the last attempt's cause into the message. Without it the only thing
+    # a caller ever saw was "Failed to connect CDP after retries", which named
+    # neither the poisoned-loop message nor anything else, and the eight hours of
+    # ISSUE-382 needed a container log read to tell apart from a dead Chrome.
+    err = RuntimeError(f"Failed to connect CDP after {retries} retries: {last_error}")
+    if record and _record_cdp_failure(err):
+        log.error(
+            "CDP failed with Chrome up and answering -- counted against the "
+            "liveness heartbeat (ISSUE-384): %s", err,
+        )
+    raise err
 
 
 def disconnect_cdp():
@@ -345,7 +510,10 @@ def disconnect_cdp():
     without touching Patchright calls recover_wedged_chrome() instead.
     """
     global _pw, _pw_browser, _pw_context, _pw_thread_id
-    _assert_pw_thread("disconnect_cdp")
+    # record=False: this is teardown. It is reached from connect_cdp()'s own
+    # failure paths, from _close_session_unlocked() and from cleanup(), and in
+    # each the caller either records the real outcome itself or does not care.
+    _assert_pw_thread("disconnect_cdp", record=False)
     try:
         if _pw_browser:
             _pw_browser.close()
@@ -373,9 +541,12 @@ def is_cdp_connected():
     return _pw_browser is not None
 
 
-def get_context():
-    """Get the Patchright browser context (connects if needed)."""
-    connect_cdp()
+def get_context(record=True):
+    """Get the Patchright browser context (connects if needed).
+
+    ``record`` passes straight through to connect_cdp(); see the note there.
+    """
+    connect_cdp(record=record)
     return _pw_context
 
 

@@ -833,7 +833,7 @@ silent_unless_action = true       # Only post if something needs attention
 
 - **name** — Unique identifier for the job (e.g., `daily-report`, `weekly-cleanup`)
 - **cron** — Standard 5-field cron expression (minute hour day month weekday)
-- **prompt** — The full prompt text that will be executed as a task
+- **prompt** — The full prompt text that will be executed as a task. A backslash or a double quote must be escaped (`\\\\` and `\\"`), or the whole file stops being read and none of your jobs run — use **prompt_file** for anything long or awkward
 - **target** — Where to deliver results: `"talk"` or `"email"` (omit for no delivery)
 - **room** — Talk conversation token (required when target is `"talk"`)
 - **enabled** — Set to `false` to pause the job (default: true)

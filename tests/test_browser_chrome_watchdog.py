@@ -75,6 +75,14 @@ def _reset_chrome_globals():
         chrome._pw_context = None
         chrome._pw_thread_id = None
         chrome._launching = False
+        # The CDP heartbeat is module state like the rest, and this file's
+        # connect_cdp tests now write to it. Three test files share the `chrome`
+        # singleton inside one xdist worker, so a reset list that omits a global
+        # leaks it to whichever file runs next.
+        chrome._cdp_health.update(
+            last_success=0.0, last_failure=0.0,
+            consecutive_failures=0, last_error="",
+        )
 
     _reset()
     yield

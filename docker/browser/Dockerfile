@@ -74,7 +74,9 @@ EXPOSE 9223 6080
 # restarted mid-operation (ISSUE-143). The liveness thread answers even while
 # Flask is busy. The deep tier (`?deep=1`) also probes Chrome's DevTools endpoint
 # so a wedged-but-alive Chrome (frozen process, hung CDP) reads as unhealthy too,
-# not just a dead process — a busy browse still passes (ISSUE-149).
+# not just a dead process — a busy browse still passes (ISSUE-149). Both of those
+# ask about Chrome; the deep tier's third arm asks whether the API process can
+# still drive it, by reading the CDP heartbeat rather than by trying (ISSUE-384).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -sf "http://localhost:9224/live?deep=1" || exit 1
 
