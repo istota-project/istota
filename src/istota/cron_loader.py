@@ -494,6 +494,91 @@ def _write_cron_md(config, user_id: str, jobs: list[CronJob]) -> bool:
     return write_regular_file(config_dir / "CRON.md", generate_cron_md(jobs))
 
 
+# ---------------------------------------------------------------------------
+# Column ownership
+#
+# Two authors write a ``scheduled_jobs`` row. The user authors the definition
+# in CRON.md — name, schedule, what to run, where to send it, the flags — and
+# the file is authoritative for all of it. The daemon authors the runtime
+# state, and the table is authoritative for that.
+#
+# The split used to hold by omission: the state columns survived a sync
+# because nobody had put them in the ``updates`` dict. Nothing said so and
+# nothing checked, so the next column added to the table inherited whichever
+# behaviour its author happened to give it. These three sets state the split,
+# the sync writes exactly ``FILE_OWNED_COLUMNS`` on both paths rather than
+# restating the list, and ``TestColumnOwnership`` requires the three to
+# partition ``PRAGMA table_info(scheduled_jobs)`` exactly — so a column added
+# to the table without an owner fails the suite.
+# ---------------------------------------------------------------------------
+
+#: Columns CRON.md authors. The sync writes exactly these on every tick.
+FILE_OWNED_COLUMNS = frozenset({
+    "cron_expression",
+    "prompt",
+    "command",
+    "skill",
+    "skill_args",
+    "conversation_token",
+    "output_target",
+    "enabled",
+    "silent_unless_action",
+    "skip_log_channel",
+    "once",
+    "model",
+    "effort",
+    "publish_shared_kv",
+    "publish_shared_kv_trusted",
+})
+
+#: Columns the daemon authors. The sync must never write these. The one place
+#: it touches one is the ``last_run_at`` reset on a cron-expression change,
+#: which is appended to the SET clause at its own site so it reads as the
+#: deliberate exception it is.
+DAEMON_OWNED_COLUMNS = frozenset({
+    "last_run_at",
+    "last_success_at",
+    "consecutive_failures",
+    "last_error",
+})
+
+#: Row identity. Written once at insert, never updated.
+IDENTITY_COLUMNS = frozenset({"id", "user_id", "name", "created_at"})
+
+
+def _file_owned_values(
+    fj: "CronJob",
+    cmd_val: str | None,
+    skill_val: str | None,
+    skill_args_val: str | None,
+) -> dict[str, object]:
+    """What the file now says, for every column CRON.md authors.
+
+    The keys are exactly ``FILE_OWNED_COLUMNS``; the sync projects this
+    mapping through that set, so a column declared without a value here
+    fails loudly rather than being written as NULL.
+    """
+    return {
+        "cron_expression": fj.cron,
+        "prompt": fj.prompt,
+        "command": cmd_val,
+        "skill": skill_val,
+        "skill_args": skill_args_val,
+        "conversation_token": fj.room or None,
+        "output_target": fj.target or None,
+        # The file is authoritative for enabled state, symmetrically:
+        # file false -> 0, file true -> 1.
+        "enabled": 1 if fj.enabled else 0,
+        "silent_unless_action": 1 if fj.silent_unless_action else 0,
+        "skip_log_channel": 1 if fj.skip_log_channel else 0,
+        "once": 1 if fj.once else 0,
+        "model": fj.model or None,
+        "effort": fj.effort or None,
+        "publish_shared_kv": fj.publish_shared_kv or None,
+        "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
+    }
+
+
 def sync_cron_jobs_to_db(
     conn,
     user_id: str,
@@ -510,7 +595,12 @@ def sync_cron_jobs_to_db(
     - enabled logic: file is authoritative (symmetric: file false → DB 0, file true → DB 1)
     - command-type jobs are rejected for non-admin users (arbitrary user
       shell-command tasks must remain admin-only)
+
+    Both write paths name exactly ``FILE_OWNED_COLUMNS``, so the daemon's
+    state columns are left alone rather than surviving by omission.
     """
+    # Constant per call; sorted only so the generated clauses are stable.
+    file_columns = sorted(FILE_OWNED_COLUMNS)
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integration (see jobs.py in the
     # respective module package); CRON.md must not touch them.
@@ -532,27 +622,14 @@ def sync_cron_jobs_to_db(
             )
             continue
         cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(fj)
+        # The definition, as the file now states it. Both paths below write
+        # exactly the file-owned columns and name no other, which is what
+        # leaves the daemon's state columns alone.
+        file_values = _file_owned_values(fj, cmd_val, skill_val, skill_args_val)
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state
-            updates = {
-                "cron_expression": fj.cron,
-                "prompt": fj.prompt,
-                "command": cmd_val,
-                "skill": skill_val,
-                "skill_args": skill_args_val,
-                "conversation_token": fj.room or None,
-                "output_target": fj.target or None,
-                "silent_unless_action": 1 if fj.silent_unless_action else 0,
-                "skip_log_channel": 1 if fj.skip_log_channel else 0,
-                "once": 1 if fj.once else 0,
-                "model": fj.model or None,
-                "effort": fj.effort or None,
-                "publish_shared_kv": fj.publish_shared_kv or None,
-                "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
-            }
-            # File is authoritative for enabled state (symmetric sync)
-            updates["enabled"] = 1 if fj.enabled else 0
+            updates = {col: file_values[col] for col in file_columns}
 
             # Reset last_run_at when cron expression changes to prevent
             # catch-up runs for past slots in the new expression
@@ -591,29 +668,14 @@ def sync_cron_jobs_to_db(
                     "Inserting CRON.md job '%s' (user %s) as skill-task: skill=%s",
                     fj.name, user_id, skill_val,
                 )
-            # Insert new job
+            # Insert new job: identity, then every file-owned column. The
+            # daemon-owned columns take their schema defaults.
+            columns = ["user_id", "name", *file_columns]
+            placeholders = ", ".join("?" for _ in columns)
             conn.execute(
-                """INSERT INTO scheduled_jobs
-                   (user_id, name, cron_expression, prompt, command,
-                    skill, skill_args,
-                    conversation_token, output_target, enabled, silent_unless_action,
-                    skip_log_channel, once, model, effort,
-                    publish_shared_kv, publish_shared_kv_trusted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    user_id, fj.name, fj.cron, fj.prompt,
-                    cmd_val,
-                    skill_val, skill_args_val,
-                    fj.room or None, fj.target or None,
-                    1 if fj.enabled else 0,
-                    1 if fj.silent_unless_action else 0,
-                    1 if fj.skip_log_channel else 0,
-                    1 if fj.once else 0,
-                    fj.model or None,
-                    fj.effort or None,
-                    fj.publish_shared_kv or None,
-                    1 if fj.publish_shared_kv_trusted else 0,
-                ),
+                f"""INSERT INTO scheduled_jobs ({", ".join(columns)})
+                    VALUES ({placeholders})""",
+                [user_id, fj.name, *(file_values[col] for col in file_columns)],
             )
 
     # Delete orphaned DB jobs (not in file)

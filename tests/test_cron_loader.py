@@ -8,7 +8,11 @@ from istota import db
 from istota.config import Config
 from istota.brain import set_alias_overrides
 from istota.cron_loader import (
+    DAEMON_OWNED_COLUMNS,
+    FILE_OWNED_COLUMNS,
+    IDENTITY_COLUMNS,
     CronJob,
+    _file_owned_values,
     _validate_model,
     generate_cron_md,
     load_cron_jobs,
@@ -611,6 +615,149 @@ class TestSyncCronJobsToDb:
 
         assert len(alice_jobs) == 1
         assert len(bob_jobs) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestColumnOwnership
+# ---------------------------------------------------------------------------
+
+
+class TestColumnOwnership:
+    """The file/table split, declared in code and held here.
+
+    A ``scheduled_jobs`` row has two authors: CRON.md writes the definition,
+    the daemon writes the runtime state. The split used to hold by omission,
+    so nothing stopped the next column added to the table from being written
+    by whichever author its author happened to think of.
+    """
+
+    def test_column_ownership_partitions_the_table(self, db_path):
+        """The guard rail: every column has exactly one declared owner.
+
+        Read from the real schema rather than a list, so adding a column to
+        ``scheduled_jobs`` fails here until somebody decides who writes it.
+        """
+        with db.get_db(db_path) as conn:
+            actual = {row["name"] for row in conn.execute("PRAGMA table_info(scheduled_jobs)")}
+
+        # Without this the two set differences below both pass vacuously on a
+        # PRAGMA that returned nothing (a renamed or missing table).
+        assert "cron_expression" in actual and "enabled" in actual
+
+        declared = FILE_OWNED_COLUMNS | DAEMON_OWNED_COLUMNS | IDENTITY_COLUMNS
+        assert actual - declared == set(), (
+            "scheduled_jobs column(s) with no declared owner — add each to "
+            "FILE_OWNED_COLUMNS, DAEMON_OWNED_COLUMNS or IDENTITY_COLUMNS in "
+            "cron_loader.py, and decide whether the sync writes it"
+        )
+        assert declared - actual == set(), (
+            "declared column(s) that scheduled_jobs does not have"
+        )
+        # A partition, not merely a cover: a column claimed by two owners
+        # would satisfy both differences above.
+        assert (
+            len(FILE_OWNED_COLUMNS) + len(DAEMON_OWNED_COLUMNS) + len(IDENTITY_COLUMNS)
+            == len(declared)
+        ), "a column is claimed by more than one owner"
+
+    def test_the_sync_never_writes_a_daemon_owned_column(self):
+        values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
+        assert set(values) & DAEMON_OWNED_COLUMNS == set()
+        assert set(values) & IDENTITY_COLUMNS == set()
+
+    def test_every_file_owned_column_has_a_value(self):
+        """The set is the declaration; the value map has to keep up with it."""
+        values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
+        assert set(values) == FILE_OWNED_COLUMNS
+
+    def test_the_sync_leaves_every_daemon_owned_column_alone(self, db_path):
+        """The behavioural half, over the whole daemon-owned set at once."""
+        state = {
+            "last_run_at": "2026-01-01T00:00:00",
+            "last_success_at": "2025-12-31T00:00:00",
+            "consecutive_failures": 3,
+            "last_error": "oops",
+        }
+        assert set(state) == DAEMON_OWNED_COLUMNS, "seed every daemon-owned column here"
+
+        placeholders = ", ".join("?" for _ in state)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                f"""INSERT INTO scheduled_jobs
+                    (user_id, name, cron_expression, prompt, {", ".join(state)})
+                    VALUES (?, ?, ?, ?, {placeholders})""",
+                ["alice", "j1", "0 9 * * *", "old", *state.values()],
+            )
+
+        # Same cron expression, so the one sanctioned write of a daemon-owned
+        # column (the last_run_at reset) does not fire.
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [CronJob(name="j1", cron="0 9 * * *", prompt="new")])
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
+            ).fetchone()
+
+        assert row["prompt"] == "new", "the sync did not run, so nothing was proved"
+        assert {col: row[col] for col in state} == state
+
+    @pytest.mark.parametrize("path", ["insert", "update"])
+    @pytest.mark.parametrize("command,expected_dispatch", [
+        ("", {"command": None, "skill": None, "skill_args": None}),
+        ("echo hi", {"command": "echo hi", "skill": None, "skill_args": None}),
+        (
+            "istota-skill kv get x",
+            {"command": None, "skill": "kv", "skill_args": '["get", "x"]'},
+        ),
+    ])
+    def test_both_paths_write_every_file_owned_column(
+        self, db_path, path, command, expected_dispatch,
+    ):
+        """Insert and update write the same declared set, with the file's values."""
+        job = CronJob(
+            name="j1",
+            cron="5 4 * * *",
+            prompt="a prompt",
+            command=command,
+            target="talk",
+            room="r1",
+            enabled=False,
+            silent_unless_action=True,
+            skip_log_channel=True,
+            once=True,
+            model="opus",
+            effort="high",
+            publish_shared_kv="ns/key",
+            publish_shared_kv_trusted=True,
+        )
+        expected = {
+            "cron_expression": "5 4 * * *",
+            "prompt": "a prompt",
+            "conversation_token": "r1",
+            "output_target": "talk",
+            "enabled": 0,
+            "silent_unless_action": 1,
+            "skip_log_channel": 1,
+            "once": 1,
+            "model": "opus",
+            "effort": "high",
+            "publish_shared_kv": "ns/key",
+            "publish_shared_kv_trusted": 1,
+            **expected_dispatch,
+        }
+        assert set(expected) == FILE_OWNED_COLUMNS, "expect a value for every file-owned column"
+
+        with db.get_db(db_path) as conn:
+            if path == "update":
+                sync_cron_jobs_to_db(
+                    conn, "alice", [CronJob(name="j1", cron="0 0 * * *", prompt="old")],
+                )
+            sync_cron_jobs_to_db(conn, "alice", [job])
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE user_id = 'alice'"
+            ).fetchall()
+
+        assert len(rows) == 1
+        assert {col: rows[0][col] for col in FILE_OWNED_COLUMNS} == expected
 
 
 # ---------------------------------------------------------------------------
