@@ -625,6 +625,8 @@ the notice is process-scoped rather than per call. Single fallback level only;
 if the fallback is also unavailable the task fails/retries normally. On a dropped
 non-portable pin the successful reply gets a one-line italic model note.
 
+**The cooldown is a deadline, not a duration** (ISSUE-374). `fallback_cooldown_seconds` is the *ceiling*; where the reason is `usage_limit` and the primary is a subscription brain (`claude_code` / `tmux_claude`), the window ends at the quota's own reset instead. `open_primary_breaker` is the one place that decides it, so the in-memory breaker and `brain_availability`'s `expires_at` cannot describe two different windows — the executor's task path and `report_brain_result` both go through it. The reset comes from `subscription_usage.cached_reset_seconds`, which reads the deployment-wide **disk cache only**: no fetch, no credential resolution, no socket on the path a failing task is standing on, which it can afford because `resets_at` is absolute and the cache reader recomputes the countdown against now. `soonest_reset_seconds` takes the earliest *future* window and ignores which one hit its limit — a `stop_reason` does not say, and the asymmetry decides it: too short costs one failed primary attempt and reopens the breaker, too long runs every task in the remainder of the window on a different model. That is the observed failure — a limit hit eleven minutes before the reset held every task on the fallback brain for the remaining forty-nine, with the primary idle and available. Clamped in both directions inside `open`'s lock: never past `opened_at + fallback_cooldown_seconds`, so a wrong reset cannot pin the deployment to its fallback, and never below `MIN_COOLDOWN_SECONDS` (60, itself capped by the cooldown), so a reset seconds away does not produce a breaker that does nothing. `not_found` is excluded — a quota reset says nothing about a missing binary — as is a `native` primary, whose provider has its own quota on its own clock. No cache, a disabled `subscription_usage` or a window that has already reset all fall back to the flat cooldown. A repeat failure inside an open window still never moves the deadline, a later `until` included.
+
 ### Direct-caller availability (ISSUE-181)
 
 The sleep cycle (`memory/sleep_cycle.py:_run_sleep_cycle_brain`) and shared-block
@@ -925,6 +927,34 @@ e.g. the sleep cycle, is untouched):
   `_turn_budget_nudge_message(remaining, phase)` frames the notice as a
   **shrinking** resource ("~N steps remaining", anchoring-resistant), leading with
   absolute remaining, never an upfront allotment.
+- **The ladder runs against whichever budget is scarcer (ISSUE-373).** Turns are
+  not what ends a slow run. With the shipped numbers the ladder fires at turns
+  50, 85 and 95 of a 100-turn cap; which of those a run reaches depends entirely
+  on how long a turn takes, which is a property of the brain and something none
+  of the three limits knew anything about. At 40s/turn a 60-minute clock lands
+  near turn 90 and the last notice is unreachable; at 60s/turn it lands near
+  turn 60 and only the halfway reminder ever fires. `_turns_left_by_clock`
+  converts the time budget into a turn budget from the rolling **median** of the
+  last `_LATENCY_WINDOW` (5) turn latencies — measured turn-end to turn-end, so
+  tool execution counts, since what the estimate answers is how long the next
+  *step* takes — and refuses to answer below `_LATENCY_SAMPLES_MIN` (3) samples,
+  because one slow first turn is a cold connection rather than a pace. The
+  median rather than the mean because turn latency is heavy-tailed: one `npm
+  install` is minutes where its neighbours are seconds, and a mean lets that one
+  sample set the budget. Four 10s turns and one 400s build average to 88s, which
+  collapses a 100-turn cap to 30 and spends the whole ladder in a single turn —
+  and since a crossed threshold is marked fired, nothing fires when the pace
+  recovers and the genuine crossing arrives. The median only moves once most of
+  the window is really slow, which is the condition the estimate describes.
+  `_pick_turn_budget_nudge` then takes `budget = min(max_turns, turns +
+  turns_left_by_clock)` and runs the whole ladder, the early reminder's
+  percentage included, against that. One collapsed budget rather than two
+  parallel ladders: each threshold still fires once whichever resource crossed
+  it, the `fired` keys are unchanged, and the number the model reads is always
+  the steps it actually has. The horizon is the **soft** deadline where one is
+  set — estimating to the hard one would promise steps the loop has already
+  decided not to take. No estimate (no deadline, too few samples) leaves the
+  ladder byte-identical to what it was.
 - **(A) Upfront pacing line — optional flavoring, NON-numeric.**
   `_extract_system_prompt` appends one non-numeric line to the coding-system-prompt
   block ("produce the best deliverable you can rather than leaving the work
@@ -950,8 +980,103 @@ explicitly ("Automatic system notice — not from the user: …") — the mirror
 fold a prior notice into the summary; the count-from-`new_messages` +
 fire-each-threshold-once design keeps re-fire correct, and the gap is bounded
 until the next threshold. The layered posture: optional non-numeric turn-1 line →
-threshold nudge (~50% / ≤15 / ≤5) → hard `max_turns` cap → unmasked `stop_reason`
-+ marker (defects 1–2).
+threshold nudge (~50% / ≤15 / ≤5, or their wall-clock equivalents) → the soft
+deadline → hard `max_turns` cap → unmasked `stop_reason` + marker (defects 1–2).
+
+### The soft deadline (ISSUE-373)
+
+Three limits govern a native run — `max_turns`, the wall clock from
+`scheduler.task_timeout_minutes`, and the nudge ladder — and all three are
+constants chosen against a brain that answers in a couple of seconds. On a slow
+fallback the clock arrives first, and *which* stop wins is what matters:
+`max_turns` and `loop_detected` deliver the model's partial work under a marker,
+while the wall-clock timeout throws all of it away. So a slow brain does not just
+make a run longer, it moves the terminating stop from the one that salvages the
+work to the one that discards it.
+
+`_soft_deadline_stop` is a third stop condition, checked at a turn boundary like
+the other two, firing at `[brain.native] soft_deadline_percent` (default 90) of
+the task timeout. Its `soft_timeout` is in `_PARTIAL_ANSWER_STOP_REASONS`, so
+`_build_result` delivers the last text-bearing turn under a marker and the task
+succeeds — the same treatment `max_turns` gets, and for the same reason: the loop
+chose to end a still-coherent run at a boundary of its own.
+
+**It may only stop a turn that called tools, and it is gated on
+`req.allowed_tools`.** The loop evaluates stop conditions after *every*
+`turn_end`, the final text-only one included, with its own natural exit one check
+away — so an unguarded condition labels a *finished* run `soft_timeout` and
+appends a marker saying it ran out of time, which is the opposite of what
+happened. There is also nothing to rescue there: this stop exists to salvage work
+from a run that would have continued, and a run that stopped on its own has
+already delivered. The `allowed_tools` gate is the same one `budget_nudge_on`
+carries, and for the same reason — the native brain's text-only direct callers
+(the sleep cycle, shared briefing blocks, health OCR, conversation triage) parse
+structured output, and prose appended to their JSON breaks them.
+
+**A soft stop with nothing to save is the hard clock, not a success.**
+`_build_result`'s partial-answer arm makes the marker the whole text and returns
+`success=True`, which for `max_turns` and `loop_detected` is right — both name a
+pathology a retry would only repeat, and the comment there says so. `soft_timeout`
+names *slowness*, which a retry on a fresh budget can legitimately clear, and
+before ISSUE-373 that exact run reached the hard clock and got up to
+`max_attempts` retries. So a `soft_timeout` whose run produced no text at all
+returns the `timeout` shape instead: `success=False`, the same fixed string, no
+`partial_text`. Nothing is lost — the condition being tested is that there was
+no work to preserve.
+
+**A cancel outranks all three stop conditions.** The loop checks `abort` at the
+top of its inner iteration while stop conditions run at the bottom, and
+`_stream_assistant_response` catches only an abort landing mid-*stream* — so an
+abort set during **tool execution** reaches the stop conditions first, and any of
+them firing there converts the cancel into its own reason. All three return
+`success=True`, so the scheduler marks the task `completed`, posts the marker to
+the room as the answer after `!stop` has already said it stopped, indexes the
+turn into memory, and replays the run's deferred ops (`_drain_deferred_ops` gates
+on success alone). Each condition therefore declines while `abort.is_set()`,
+letting the loop's own check end the run as `aborted` on the next iteration. The
+hazard predates the soft deadline for the other two, but the soft deadline widens
+it from one specific turn to the last 10% of every task's budget — which is
+exactly where a long run a user wants to stop lives, and tool execution is where
+that run spends most of its wall clock.
+
+`_PARTIAL_ANSWER_STOP_REASONS` is **derived** from `_PARTIAL_ANSWER_MARKERS`
+rather than declared beside it: `_build_result` subscripts that table unguarded,
+so a fourth stop added to a hand-maintained frozenset alone would raise
+`KeyError` on the result-construction path and turn a salvageable run into an
+exception.
+
+The hard deadline is not replaced, and the remaining 10% is what it still covers:
+a turn that hangs is cut mid-stream and there is no boundary to stop at. That is
+also why `timeout` stays *outside* the partial-answer set — it names a torn turn,
+not a chosen stop — while carrying its own `partial_text` (below) so the work
+survives either way. `soft_deadline_percent` of 0 or ≥ 100 turns it off and the
+hard clock is the only backstop again.
+
+### Partial work on a stop that discards the answer (ISSUE-372)
+
+`BrainResult.partial_text` is the model's last text-bearing turn, carried out of
+a run that ended on `timeout` or `cancelled`. Those two stops returned a fixed
+string — `"Task execution timed out after N minutes"`, `"Cancelled by user"` —
+and dropped everything the model had written; the observed case was 29 minutes
+and 48,516 output tokens of investigation delivered as three words.
+
+The inversion is worth naming: the two stops that fire automatically preserved
+the work, and the two a person is most likely to see destroyed it, on exactly the
+runs long enough for the work to be worth something.
+
+It is a separate field rather than an addition to `result_text` because the
+executor drops `stop_reason` and the scheduler dispatches on `result_text` by
+string match — `result == "Cancelled by user"` is an **exact-equality** match in
+three places, so appending would send a cancelled task back through the retry
+ladder. `result_text` therefore stays byte-identical on both paths and every
+existing match is untouched; the persistence and delivery paths opt in by naming
+the new field (see `.claude/rules/executor.md` and `.claude/rules/scheduler.md`).
+
+Both brains populate it, or the vocabulary splits: `NativeBrain` from the same
+`last_assistant_text` the backstop paths use, `ClaudeCodeBrain` from the last
+`TextEvent` its streaming path already appends to the trace. That path also
+stopped dropping `actions_taken` and `execution_trace` on its cancel and timeout
+returns, which is the ISSUE-183 fix it had never received.
 
 ### Native WebFetch tool (daemon-side, SSRF-hardened)
 

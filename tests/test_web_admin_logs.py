@@ -400,6 +400,34 @@ class TestLogStream:
             )
             assert resp.status_code == 403
 
+    async def test_a_stop_signal_ends_the_stream(self, env):
+        """The tail polls until the client goes away, so on a restart it was
+        cancelled at the graceful-shutdown timeout and the `CancelledError`
+        reached uvicorn's log as a traceback. See `istota.web_shutdown`."""
+        import asyncio
+
+        from istota import web_shutdown
+
+        config, client, cookies = env
+        _log_path(config).write_text(_line("2026-07-31 10:00:00", "INFO", "a", "x"))
+        page = (await client.get("/istota/api/admin/logs/app", cookies=cookies)).json()
+
+        def _stop(check: int) -> None:
+            if check == 2:
+                web_shutdown.begin_shutdown()
+
+        try:
+            # The client never disconnects: only the stop notice can end this.
+            await asyncio.wait_for(
+                _drain_stream(
+                    "app", page["tail_cursor"],
+                    _FakeRequest(disconnect_after=100_000, on_check=_stop),
+                ),
+                timeout=10,
+            )
+        finally:
+            web_shutdown.reset_for_tests()
+
 
 class TestAdminConfig:
     async def test_returns_sectioned_config(self, env):

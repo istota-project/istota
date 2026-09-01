@@ -1347,6 +1347,16 @@ class NativeBrainConfig:
     turn_budget_nudge: bool = True
     turn_budget_nudge_early_percent: int = 50
     turn_budget_nudge_remaining: list[int] = field(default_factory=lambda: [15, 5])
+    # Soft wall-clock deadline (ISSUE-373). The three limits governing a native
+    # run — `max_turns`, `scheduler.task_timeout_minutes` and the nudge ladder —
+    # are all sized against a brain that answers in a couple of seconds. On a
+    # slow fallback the clock arrives first, and the clock is the stop that
+    # *discards* the model's work where `max_turns` delivers it under a marker.
+    # So the loop stops itself at this percentage of the task timeout, on a
+    # stop_reason that preserves the partial answer. The remaining slack is what
+    # the hard deadline still covers: a turn that hangs past the soft stop.
+    # 0 (or >= 100) turns it off and the hard clock is the only backstop again.
+    soft_deadline_percent: int = 90
     # Live model-catalog enrichment from OpenRouter (ISSUE-182). When the brain
     # talks to an OpenRouter endpoint (``base_url`` contains ``openrouter.ai``),
     # it fetches OpenRouter's public model list once per process (disk-cached

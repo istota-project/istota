@@ -1589,6 +1589,7 @@ class ClaudeCodeBrain:
         last_error = ""
         last_trace = None
         last_usage = None
+        last_partial = ""
 
         for attempt in range(API_RETRY_MAX_ATTEMPTS):
             result = self._execute_streaming_once(cmd, req)
@@ -1599,6 +1600,12 @@ class ClaudeCodeBrain:
                 return result
 
             last_trace = result.execution_trace
+            # Carried across attempts for the same reason `last_usage` is: the
+            # cancel return below is built here, outside the attempt, so without
+            # this a `!stop` landing during a backoff discards prose the previous
+            # attempt had already produced (ISSUE-372).
+            if result.partial_text:
+                last_partial = result.partial_text
 
             # Persistent usage/quota limit — reroute (not retry). Precedes the
             # transient check because a quota 429 also matches it.
@@ -1624,6 +1631,7 @@ class ClaudeCodeBrain:
                         result_text="Cancelled by user",
                         stop_reason="cancelled",
                         usage=last_usage,
+                        partial_text=last_partial or None,
                     )
             else:
                 logger.error(
@@ -1637,6 +1645,7 @@ class ClaudeCodeBrain:
             execution_trace=last_trace,
             stop_reason="transient_api_error",
             usage=last_usage,
+            partial_text=last_partial or None,
         )
 
     @staticmethod
@@ -1683,6 +1692,7 @@ class ClaudeCodeBrain:
     ) -> BrainResult:
         actions_descriptions: list[str] = []
         execution_trace: list[dict] = []
+        last_text = ""
         stderr_lines: list[str] = []
 
         # Per-task cgroup (A6), placed from the child rather than moved into
@@ -1859,6 +1869,13 @@ class ClaudeCodeBrain:
                     execution_trace.append(tool_entry)
                 elif isinstance(event, TextEvent):
                     execution_trace.append({"type": "text", "text": event.text})
+                    # The last text-bearing block, for the two stops that
+                    # otherwise deliver a fixed string and discard everything
+                    # the model wrote (ISSUE-372). Tracked here rather than
+                    # recovered from the trace at the return sites so the two
+                    # brains populate `partial_text` from the same thing.
+                    if event.text.strip():
+                        last_text = event.text
                 # ThinkingEvent / TextDeltaEvent / ThinkingDeltaEvent are
                 # intentionally NOT added to execution_trace: reasoning and the
                 # token-level answer deltas are live-stream-only concerns
@@ -1915,7 +1932,10 @@ class ClaudeCodeBrain:
             return BrainResult(
                 success=False,
                 result_text="Cancelled by user",
+                actions_taken=actions_json,
+                execution_trace=trace_json,
                 stop_reason="cancelled",
+                partial_text=last_text or None,
             )
 
         if timed_out.is_set():
@@ -1923,7 +1943,10 @@ class ClaudeCodeBrain:
             return BrainResult(
                 success=False,
                 result_text=f"Task execution timed out after {timeout_min} minutes",
+                actions_taken=actions_json,
+                execution_trace=trace_json,
                 stop_reason="timeout",
+                partial_text=last_text or None,
             )
 
         # A signal death outranks every remaining branch: the process was killed

@@ -1962,6 +1962,40 @@ class TestTaskEventEndpoints:
             assert "event: error" in body
             assert "event: done" in body
 
+    async def test_sse_stream_ends_on_a_stop_signal(self, tmp_path):
+        """A stream tailing a task that is still running polls until the client
+        goes away, so a shutdown could only end it by cancelling it — which
+        reaches uvicorn's log as an `Exception in ASGI application` traceback.
+        See `istota.web_shutdown`."""
+        import asyncio
+
+        from istota import db, web_shutdown
+        from istota.events import EventWriter
+
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "a long one", "alice", source_type="web")
+            db.update_task_status(conn, tid, "running")
+        EventWriter(tid, str(config.db_path)).emit("task_started")
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        try:
+            web_shutdown.begin_shutdown()
+            async with AsyncClient(
+                transport=transport, base_url="https://example.com",
+            ) as client:
+                cookies = await self._login(client, "alice")
+                resp = await asyncio.wait_for(
+                    client.get(
+                        f"/istota/api/chat/tasks/{tid}/stream", cookies=cookies,
+                    ),
+                    timeout=10,
+                )
+                assert resp.status_code == 200
+        finally:
+            web_shutdown.reset_for_tests()
+
     async def test_admin_events_endpoint(self, tmp_path):
         config = self._config_with_admin(tmp_path)
         tid = self._seed_task_with_events(config, user_id="bob")

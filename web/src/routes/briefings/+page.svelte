@@ -182,12 +182,17 @@
     text-align: left;
   }
 
+  /* Sized from the type scale, like the briefing body next door: the h1 was
+	   1.1rem and the paragraph inherited the 1rem body default, so the state a
+	   user meets before their first briefing rendered a step larger than
+	   everything around it. Weight is what still marks the heading. */
   .empty-state {
     max-width: 32rem;
+    font-size: var(--text-base);
   }
 
   .empty-state h1 {
-    font-size: 1.1rem;
+    font-size: var(--text-base);
     margin: 0 0 var(--space-2);
   }
 </style>

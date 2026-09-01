@@ -92,7 +92,7 @@ istota_brain_source_type_overrides:
   heartbeat: native
 ```
 
-The full variable set is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,effort,base_url,extra_headers,context_window,max_turns,max_tokens,model_catalog_fetch,model_catalog_cache_ttl_hours,prompt_caching,bash_spill_full_output,turn_budget_nudge,turn_budget_nudge_early_percent,turn_budget_nudge_remaining,api_key}`, the `istota_brain_native_web_fetch_*` family, and `istota_brain_source_type_overrides`. `istota_brain_native_prompt_caching` defaults to `""` (derive from `base_url`); set it to `true`/`false` only to force.
+The full variable set is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,effort,base_url,extra_headers,context_window,max_turns,max_tokens,model_catalog_fetch,model_catalog_cache_ttl_hours,prompt_caching,bash_spill_full_output,turn_budget_nudge,turn_budget_nudge_early_percent,turn_budget_nudge_remaining,soft_deadline_percent,api_key}`, the `istota_brain_native_web_fetch_*` family, and `istota_brain_source_type_overrides`. `istota_brain_native_prompt_caching` defaults to `""` (derive from `base_url`); set it to `true`/`false` only to force.
 
 !!! warning "The Ansible defaults are not the code defaults"
     Several Ansible variables ship opinionated values rather than mirroring the dataclass:
@@ -132,7 +132,7 @@ The native harness ships its own daemon-side `WebFetch` tool. It runs in the dae
 |---|---|---|
 | `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
-| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary this long before retrying it; 0 disables |
+| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
 The same availability breaker is what the nightly sleep cycle consults before deciding to run at all. Pin `istota_brain_native_model` whenever native is either primary *or* fallback — an empty model id 400s on failover, which is the worst moment to discover it.
 

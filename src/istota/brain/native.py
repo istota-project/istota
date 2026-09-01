@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import re
+import statistics
 import threading
 import time
 from pathlib import Path
@@ -267,7 +268,7 @@ _DOCUMENTED_STOP_REASONS = frozenset(
     {
         "completed", "cancelled", "timeout", "oom", "transient_api_error",
         "usage_limit", "error", "not_found",
-        "max_turns", "loop_detected",
+        "max_turns", "loop_detected", "soft_timeout",
     }
 )
 
@@ -349,7 +350,31 @@ _TRUNCATION_MARKERS = {
 # (see _build_result). Only there may the run fall back to the last text-bearing
 # turn when the final turn produced none — everywhere else that would ship
 # mid-flight narration as a clean answer (ISSUE-211).
-_PARTIAL_ANSWER_STOP_REASONS = frozenset({"max_turns", "loop_detected"})
+#
+# ``soft_timeout`` joins the two backstops rather than the hard ``timeout``
+# because it is the same *kind* of stop: the loop decided to end a run that was
+# still coherent, at a boundary of its own choosing, with the work intact. The
+# hard timeout is the opposite — a turn cut mid-stream — and stays outside
+# (ISSUE-373).
+# The marker each partial-answer stop delivers its text under. This table is the
+# declaration; the frozenset below is derived from it, so a fourth stop added to
+# one cannot go missing from the other — `_build_result` subscripts the table
+# unguarded, and a `KeyError` there turns a salvageable run into an exception on
+# the result-construction path.
+_PARTIAL_ANSWER_MARKERS = {
+    "max_turns": (
+        "(stopped: reached the maximum number of steps without a final answer)"
+    ),
+    "loop_detected": (
+        "(stopped: detected a repeating tool-call loop with no progress)"
+    ),
+    "soft_timeout": (
+        "(stopped: ran out of time before reaching a final answer — this is "
+        "the work as it stood)"
+    ),
+}
+
+_PARTIAL_ANSWER_STOP_REASONS = frozenset(_PARTIAL_ANSWER_MARKERS)
 
 # How a mid-flight steer (`!steer`) is framed when injected as a user turn. The
 # explicit wording tells the model the message is *additive* — a live nudge, not
@@ -411,12 +436,57 @@ def _turn_budget_nudge_message(remaining: int, phase: str) -> UserMessage:
     return UserMessage(content=[TextContent(text=_TURN_BUDGET_FRAME.format(body=body))])
 
 
+# How many recent turn latencies the clock-based estimate averages over, and
+# the fewest it will act on. A rolling window rather than the whole run because
+# pace changes within a task — a long grep phase and a long write phase are not
+# the same speed, and the estimate that matters is the one for the turns still
+# to come.
+_LATENCY_WINDOW = 5
+_LATENCY_SAMPLES_MIN = 3
+
+
+def _turns_left_by_clock(
+    seconds_left: float | None, recent_latencies: list[float]
+) -> int | None:
+    """How many more turns the wall clock has room for, or None if unknowable.
+
+    ISSUE-373: the nudge ladder counts turns, but on a slow brain the constraint
+    that actually ends the run is time. This converts one budget into the other
+    using a rolling mean of recent turn latency, so the ladder can be run
+    against whichever of the two is scarcer.
+
+    Needs at least ``_LATENCY_SAMPLES_MIN`` samples: a single slow first turn
+    (cold connection, a large prompt) is not a pace, and estimating from it
+    would fire the urgent notices on turn 2 of a run with an hour left.
+
+    **The median, not the mean**, because turn latency is heavy-tailed by
+    nature: one `npm install` or one full test run is minutes where its
+    neighbours are seconds. A mean lets that single sample set the budget — four
+    10s turns and one 400s build average to 88s, which collapses a 100-turn cap
+    to 30 and spends the whole nudge ladder on a spike, in one turn, telling the
+    model "~15 steps remain" about a run that then continues for 70 more. The
+    thresholds are marked fired when crossed, so nothing fires again when the
+    pace recovers and the real crossing arrives. The median ignores an outlier
+    and only moves once most of the recent window is genuinely slow, which is
+    the condition the estimate is meant to describe.
+    """
+    if seconds_left is None or not recent_latencies:
+        return None
+    if len(recent_latencies) < _LATENCY_SAMPLES_MIN:
+        return None
+    typical = statistics.median(recent_latencies)
+    if typical <= 0:
+        return None
+    return max(0, int(seconds_left // typical))
+
+
 def _pick_turn_budget_nudge(
     turns: int,
     max_turns: int,
     early_percent: int,
     remaining_levels: list[int],
     fired: set[str],
+    turns_left_by_clock: int | None = None,
 ) -> tuple[int, str] | None:
     """Decide which (if any) budget threshold to surface this turn.
 
@@ -426,17 +496,30 @@ def _pick_turn_budget_nudge(
     later), and each threshold fires at most once. ``turns`` is counted from the
     loop's ``new_messages`` accumulator (monotonic across compaction), so the
     same threshold never re-fires after a context shrink.
+
+    ``turns_left_by_clock`` (ISSUE-373) is the same budget expressed from the
+    wall clock. When it is scarcer than the turn cap it *becomes* the budget:
+    the whole ladder — the early reminder's percentage included — is computed
+    against ``turns + turns_left_by_clock`` rather than against ``max_turns``.
+    Collapsing the two into one effective budget rather than running two ladders
+    keeps each threshold firing once, whichever resource crossed it, and keeps
+    the message honest: the number the model reads is always the number of steps
+    it actually has left. The ``fired`` keys are unchanged, so a threshold
+    crossed on the clock cannot be re-fired later by the turn count.
     """
     if not max_turns or max_turns <= 0:
         return None
-    remaining = max_turns - turns
+    budget = max_turns
+    if turns_left_by_clock is not None:
+        budget = min(budget, turns + turns_left_by_clock)
+    remaining = budget - turns
     # (urgency_rank, key, phase) — lower rank = more urgent (fewer remaining).
     crossed: list[tuple[int, str, str]] = []
     for level in sorted({int(x) for x in remaining_levels}):
         if remaining <= level:
             crossed.append((level, f"remaining:{level}", "late"))
     if 0 < early_percent <= 100:
-        early_turn = -(-max_turns * early_percent // 100)  # ceil
+        early_turn = -(-budget * early_percent // 100)  # ceil
         if turns >= early_turn:
             # Least urgent — sort behind every late level.
             crossed.append((max_turns + 1, "early", "early"))
@@ -1290,6 +1373,15 @@ class NativeBrain:
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
+                    # Turn latency, for the clock-aware nudge (ISSUE-373).
+                    # Measured turn-end to turn-end, so it includes the tool
+                    # execution between them — the question the estimate answers
+                    # is how long the *next* step takes end to end, not how long
+                    # the model spends generating.
+                    _now = time.monotonic()
+                    turn_clock["recent"].append(_now - turn_clock["last"])
+                    turn_clock["last"] = _now
+                    del turn_clock["recent"][:-_LATENCY_WINDOW]
                     last_assistant_stop["value"] = msg.stop_reason or ""
                     # Capture the provider's error text so _build_result can
                     # surface it; the scheduler only sees result_text, and an
@@ -1342,6 +1434,30 @@ class NativeBrain:
                         )
                         pending_text["value"] = None
 
+        # --- the wall clock, computed here rather than at the run site -----
+        # The deadline spans the initial run and every overflow-recovery
+        # continue (see _run_loop_once below). It is derived up here because
+        # three things now read it and all of them are defined before the run:
+        # the turn-budget nudge, the soft-deadline stop condition, and the hard
+        # `asyncio.wait_for` that ends a turn hanging past it.
+        deadline = (
+            time.monotonic() + req.timeout_seconds
+            if req.timeout_seconds and req.timeout_seconds > 0
+            else None
+        )
+        # ISSUE-373: the loop's own stop, a little before the clock's. The gap
+        # is what the hard deadline still covers — a turn that hangs past the
+        # soft stop can only be ended by cutting it mid-stream.
+        pct = self._config.soft_deadline_percent
+        soft_deadline = (
+            deadline - req.timeout_seconds * (100 - pct) / 100
+            if deadline is not None and 0 < pct < 100
+            else None
+        )
+        # Rolling turn latency, for converting the time budget into a turn
+        # budget. Written by the turn_end handler above, read by the nudge.
+        turn_clock: dict = {"last": time.monotonic(), "recent": []}
+
         # --- compaction + turn-budget nudge via prepare_next_turn ---------
         compaction_state = {"summary": None, "details": None}
         # Turn-budget nudge (ISSUE-187 defect 3). Only for tool-bearing tasks with
@@ -1358,19 +1474,30 @@ class NativeBrain:
             if not budget_nudge_on:
                 return None
             turns = sum(1 for m in new_messages if isinstance(m, AssistantMessage))
+            # The run's real end is the soft stop where there is one, so that is
+            # the horizon the estimate is taken against. Estimating to the hard
+            # deadline would promise the model steps the loop has already
+            # decided not to take.
+            horizon = soft_deadline if soft_deadline is not None else deadline
+            by_clock = _turns_left_by_clock(
+                horizon - time.monotonic() if horizon is not None else None,
+                turn_clock["recent"],
+            )
             picked = _pick_turn_budget_nudge(
                 turns,
                 self._config.max_turns,
                 self._config.turn_budget_nudge_early_percent,
                 self._config.turn_budget_nudge_remaining,
                 budget_state["fired"],
+                by_clock,
             )
             if picked is None:
                 return None
             remaining, phase = picked
             logger.debug(
-                "turn_budget_nudge fired remaining=%s phase=%s turns=%s/%s",
-                remaining, phase, turns, self._config.max_turns,
+                "turn_budget_nudge fired remaining=%s phase=%s turns=%s/%s "
+                "by_clock=%s",
+                remaining, phase, turns, self._config.max_turns, by_clock,
             )
             # The nudge is injected via prepare_next_turn's returned list, so it
             # never reaches `new_messages` and never emits `message_end`. Its
@@ -1465,16 +1592,78 @@ class NativeBrain:
         # --- stop conditions ----------------------------------------------
         max_turns = self._config.max_turns
 
+        # A cancel must outrank every graceful stop (ISSUE-372/373). The loop
+        # checks ``abort`` at the *top* of its inner iteration while stop
+        # conditions run at the bottom, and ``_stream_assistant_response``
+        # catches only an abort landing mid-stream — so an abort set during tool
+        # execution reaches the stop conditions first. Any of them firing there
+        # converts the cancel into its own reason, and every one of these three
+        # returns ``success=True``: the scheduler then marks the task
+        # `completed`, posts the marker to the room as the answer after `!stop`
+        # already said it stopped, indexes the turn into memory, and replays the
+        # run's deferred ops (`_drain_deferred_ops` gates on success alone).
+        # Declining here lets the loop's own check win on the next iteration and
+        # end the run as ``aborted``. Tool execution is where a long run spends
+        # most of its wall clock, which is exactly where a user reaches for
+        # `!stop`.
+        def _cancel_outranks() -> bool:
+            return abort.is_set()
+
         async def _max_turns_stop(ctx, new_messages) -> StopDecision:
+            if _cancel_outranks():
+                return StopDecision(stop=False)
             turns = sum(1 for m in new_messages if isinstance(m, AssistantMessage))
             if max_turns and turns >= max_turns:
                 return StopDecision(stop=True, reason="max_turns")
             return StopDecision(stop=False)
 
         async def _loop_detect_stop(ctx, new_messages) -> StopDecision:
+            if _cancel_outranks():
+                return StopDecision(stop=False)
             if detect_repeated_tool_calls(ctx.messages) is not None:
                 return StopDecision(stop=True, reason="loop_detected")
             return StopDecision(stop=False)
+
+        async def _soft_deadline_stop(ctx, new_messages) -> StopDecision:
+            """End a run the wall clock is about to end anyway (ISSUE-373).
+
+            Checked at a turn boundary, which is the point of it: the hard
+            deadline fires mid-turn and its result discards the model's text,
+            while this stops between turns and delivers it under a marker. On a
+            brain slow enough that the clock beats ``max_turns``, this is the
+            difference between an answer and the words "timed out".
+
+            **Only a turn that called tools may be stopped.** The loop evaluates
+            stop conditions after *every* ``turn_end``, the final text-only one
+            included — and that turn is the finished answer, with the natural
+            exit one check away. Firing there labels a completed run
+            ``soft_timeout`` and appends a marker saying it ran out of time,
+            which is the opposite of what happened. There is also nothing to
+            save: this stop exists to rescue work from a run that would have
+            continued, and a run that has stopped on its own has already
+            delivered it.
+
+            Gated on ``req.allowed_tools`` for the same reason ``budget_nudge_on``
+            is: the native brain's text-only direct callers (the sleep cycle,
+            shared briefing blocks, health OCR, conversation triage) parse
+            structured output, and appending prose to their JSON would break
+            them. A single-turn text-only call is exactly the shape the
+            tool-call guard above would also catch, so this is belt and braces.
+            """
+            if _cancel_outranks():
+                return StopDecision(stop=False)
+            if soft_deadline is None or not req.allowed_tools:
+                return StopDecision(stop=False)
+            if time.monotonic() < soft_deadline:
+                return StopDecision(stop=False)
+            last = next(
+                (m for m in reversed(new_messages)
+                 if isinstance(m, AssistantMessage)),
+                None,
+            )
+            if last is None or not last.tool_calls:
+                return StopDecision(stop=False)
+            return StopDecision(stop=True, reason="soft_timeout")
 
         # One capability answer for both consumers: whether a tool result's
         # images render, and whether this task's own attachments become image
@@ -1486,7 +1675,7 @@ class NativeBrain:
             model=model,
             convert_to_llm=self._convert_to_llm,
             prepare_next_turn=prepare_next_turn,
-            stop_conditions=[_max_turns_stop, _loop_detect_stop],
+            stop_conditions=[_max_turns_stop, _loop_detect_stop, _soft_deadline_stop],
             # Independent read-only tools (Read/Grep/Glob/WebFetch, all
             # execution_mode="parallel") run concurrently; any batch containing a
             # mutation (Write/Edit/Bash are sequential) or two calls to the same
@@ -1530,19 +1719,14 @@ class NativeBrain:
                 final_stop["reason"] = event.stop_reason
             await emit(event)
 
-        # Run the loop under a wall-clock deadline shared across the initial run
-        # and every overflow-recovery continue. Without one, a runaway model or a
-        # slow provider could run far past the task timeout; the scheduler would
-        # then reclaim the "stuck" task and a second worker would execute it
-        # concurrently (duplicate output + duplicate deferred-op replay). On
-        # timeout we set ``abort`` first so tools/provider unwind cleanly — the
-        # bash tool polls abort and kills its subprocess — then give a short grace
-        # period before hard-cancelling.
-        deadline = (
-            time.monotonic() + req.timeout_seconds
-            if req.timeout_seconds and req.timeout_seconds > 0
-            else None
-        )
+        # The loop runs under the wall-clock ``deadline`` computed above, shared
+        # across the initial run and every overflow-recovery continue. Without
+        # one, a runaway model or a slow provider could run far past the task
+        # timeout; the scheduler would then reclaim the "stuck" task and a second
+        # worker would execute it concurrently (duplicate output + duplicate
+        # deferred-op replay). On timeout we set ``abort`` first so tools/provider
+        # unwind cleanly — the bash tool polls abort and kills its subprocess —
+        # then give a short grace period before hard-cancelling.
 
         async def _run_loop_once(prompts, ctx) -> tuple[list, bool]:
             """Run one loop pass under the *remaining* shared deadline.
@@ -1556,6 +1740,12 @@ class NativeBrain:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return [], True
+            # Restart the latency clock for this pass. A recovery continue is
+            # preceded by a compaction (a summarization request of its own), and
+            # without this the first turn after it records that work as a turn
+            # latency — deflating the clock estimate and firing the urgent
+            # notices early for the next few turns.
+            turn_clock["last"] = time.monotonic()
             if prompts is not None:
                 coro = run_agent_loop(prompts, ctx, loop_config, emit_wrapped)
             else:
@@ -1711,6 +1901,39 @@ class NativeBrain:
                     usage, cost_reported=_all_turns_costed()
                 ),
                 model_used=model,
+                # The prose the run had produced, kept off result_text so the
+                # scheduler's "timed out" substring match is untouched
+                # (ISSUE-372). The soft deadline above means a slow-but-healthy
+                # run rarely reaches here; this covers the turn that hung.
+                partial_text=last_assistant_text or None,
+            )
+
+        # A soft stop with nothing to save is the hard clock, not a success.
+        # `_build_result`'s partial-answer arm makes the marker the whole text
+        # and returns `success=True`, which for `max_turns` and `loop_detected`
+        # is right — both name a pathology a retry would only repeat, and the
+        # comment there says so. `soft_timeout` names *slowness*, which a retry
+        # on a fresh budget can legitimately clear, and before ISSUE-373 this
+        # exact run reached the hard clock and got up to `max_attempts` of them.
+        # Delivering one parenthetical as a completed answer instead would be a
+        # regression bought with the fix. Nothing is lost by falling through:
+        # there was no work to preserve, which is the condition being tested.
+        if (
+            final_stop["reason"] == "soft_timeout"
+            and not final_turn_text.strip()
+            and not last_assistant_text.strip()
+        ):
+            timeout_min = req.timeout_seconds // 60
+            return BrainResult(
+                success=False,
+                result_text=f"Task execution timed out after {timeout_min} minutes",
+                actions_taken=json.dumps(actions) if actions else None,
+                execution_trace=json.dumps(trace) if trace else None,
+                stop_reason="timeout",
+                usage=usage_types.from_task_usage(
+                    usage, cost_reported=_all_turns_costed()
+                ),
+                model_used=model,
             )
 
         # NB-15: a final answer the model was forced to cut short (output token
@@ -1758,6 +1981,7 @@ class NativeBrain:
             final_stop["reason"], result_text, last_error_message,
             trace, actions, usage, model,
             cost_reported=_all_turns_costed(),
+            partial_text=last_assistant_text,
         )
 
     # --- helpers -----------------------------------------------------------
@@ -1956,7 +2180,7 @@ class NativeBrain:
     @staticmethod
     def _build_result(
         stop_reason, text, error_message, trace, actions, usage, model="",
-        *, cost_reported: bool = False,
+        *, cost_reported: bool = False, partial_text: str = "",
     ) -> BrainResult:
         # Map the loop's agent_end stop_reason to the executor's tag vocabulary.
         # The executor drops stop_reason and the scheduler dispatches purely on
@@ -1975,12 +2199,18 @@ class NativeBrain:
         if stop_reason == "aborted":
             return BrainResult(
                 success=False,
+                # Byte-identical, deliberately: `result == "Cancelled by user"`
+                # is an exact-equality match in three places in the scheduler,
+                # and a cancelled task that stopped matching would go back
+                # through the retry ladder. The work travels beside it instead
+                # (ISSUE-372).
                 result_text="Cancelled by user",
                 actions_taken=actions_json,
                 execution_trace=trace_json,
                 stop_reason="cancelled",
                 usage=usage,
                 model_used=model,
+                partial_text=partial_text or None,
             )
         if stop_reason == "error":
             # Classify the provider error body: a quota/billing exhaustion becomes
@@ -1995,6 +2225,12 @@ class NativeBrain:
                 stop_reason=classified,
                 usage=usage,
                 model_used=model,
+                # Forwarded here too (ISSUE-372). A run that narrates for 25
+                # minutes and then dies on a provider error has lost exactly what
+                # the field exists to keep, and `result_text` is the error, so
+                # there is nowhere else for it to go. The executor gates on
+                # `not success`, which this is.
+                partial_text=partial_text or None,
             )
         # Natural end, or a backstop stop (max_turns / loop_detected). The two
         # backstops are now first-class stop_reasons (see _DOCUMENTED_STOP_REASONS)
@@ -2008,11 +2244,7 @@ class NativeBrain:
             # truncated-by-cap run is never mistaken for a finished one. An
             # empty result keeps the marker as the whole text and avoids a
             # retry storm (retrying a wedged/capped model just wedges again).
-            marker = (
-                "(stopped: reached the maximum number of steps without a final answer)"
-                if stop_reason == "max_turns"
-                else "(stopped: detected a repeating tool-call loop with no progress)"
-            )
+            marker = _PARTIAL_ANSWER_MARKERS[stop_reason]
             result_text = (
                 f"{result_text}\n\n{marker}" if result_text.strip() else marker
             )

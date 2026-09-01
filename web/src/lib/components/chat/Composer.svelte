@@ -1163,7 +1163,7 @@
       {#each attachments as att (attachKey(att))}
         <span class="attach-chip" class:pending={!!att.pendingBlobId}>
           {isAudio(att.name) ? '🎤' : '📎'}
-          {att.name}
+          <span class="attach-name">{att.name}</span>
           <button
             class="attach-x"
             onclick={() => removeAttachment(attachKey(att))}
@@ -1633,6 +1633,7 @@
   .attach-row {
     display: flex;
     flex-wrap: wrap;
+    min-width: 0;
     gap: var(--space-1);
     margin-bottom: var(--space-2);
   }
@@ -1670,6 +1671,8 @@
   .attach-chip {
     display: inline-flex;
     align-items: center;
+    max-width: 100%;
+    min-width: 0;
     gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-secondary);
@@ -1677,6 +1680,13 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     padding: 0.15rem var(--space-2);
+  }
+  .attach-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* Both the in-flight chip and the held-offline one are the same statement —
 	   this file is not on the server — so they read the same. Muted, not
@@ -1687,6 +1697,7 @@
   }
   .attach-x {
     display: inline-flex;
+    flex: 0 0 auto;
     background: none;
     border: none;
     color: var(--text-muted);

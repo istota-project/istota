@@ -198,13 +198,20 @@ Per-task BrainRequest fields the executor populates:
 - `result_file = {user_temp_dir}/task_{task_id}_result.txt`
 
 After `brain.execute()` returns, the executor:
-1. Calls `_compose_full_result(result_text, trace)` on success to reconcile
+1. On a **failure** carrying `BrainResult.partial_text` (ISSUE-372), sets
+   `task.partial_result` — the same post-run hand-off `model_used` uses, and for
+   the same reason: `result_text` is what the scheduler dispatches on (by exact
+   equality for a cancel), so the partial answer cannot travel in it, and
+   widening the four-tuple would touch every caller for a value only the
+   scheduler reads. Nothing is set on success — a successful run's answer *is*
+   `result`, and a second candidate for one column is a bug.
+2. Calls `_compose_full_result(result_text, trace)` on success to reconcile
    the final ResultEvent text against substantial intermediate text blocks
    (CM-aware + terse-result recovery — same logic both brains will need).
-2. On a dropped-pin fallback (see below), appends the visible model note
+3. On a dropped-pin fallback (see below), appends the visible model note
    **after** composition.
-3. Updates the user skills fingerprint when interactive task succeeded.
-4. Returns `(success, result, actions_taken_json, execution_trace_json)` —
+4. Updates the user skills fingerprint when interactive task succeeded.
+5. Returns `(success, result, actions_taken_json, execution_trace_json)` —
    shape unchanged from before the refactor.
 
 ## Brain fallback (availability failover)
@@ -223,9 +230,14 @@ brain when the primary is unavailable. Kept executor-level: brains have no
 - **Trigger set** `{usage_limit, not_found, fallback}` (+ `transient_api_error`
   iff `fallback_on_transient`, **on by default** since ISSUE-212): on a matching `brain_result.stop_reason` with a
   fallback configured, the executor reruns via `_run_fallback`. **Cooldown set**
-  `{usage_limit, not_found}` opens the breaker (`open()` returns True once →
-  `_fire_fallback_alert`, one operator alert). `fallback` is excluded from the
-  cooldown set (tmux keeps being probed per-task); the tmux launch alert
+  `{usage_limit, not_found}` opens the breaker through
+  `open_primary_breaker(primary_kind, cooldown, stop_reason, config=config)`,
+  which returns True once → `_fire_fallback_alert`, one operator alert. That
+  helper also publishes the availability record, so the executor no longer calls
+  `record_unavailable` itself: the two used to be handed `_cooldown`
+  independently, and the window is now a deadline off the quota's reset
+  (ISSUE-374), which only one of them can compute. `fallback` is excluded from
+  the cooldown set (tmux keeps being probed per-task); the tmux launch alert
   (`consume_circuit_open_alert`) is still fired for a `tmux_claude` primary.
   A successful primary run (breaker armed) calls `record_success` to close it.
 - `_run_fallback(config, brain_config, fallback_kind, task, req)` →

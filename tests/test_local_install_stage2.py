@@ -192,10 +192,42 @@ class TestBootstrapChecks:
 # ---------------------------------------------------------------------------
 
 
-class _FakeServer:
+class _FakeTransport:
     def __init__(self):
+        self.aborted = 0
+
+    def abort(self):
+        self.aborted += 1
+
+
+class _FakeConnection:
+    def __init__(self):
+        self.transport = _FakeTransport()
+
+
+class _FakeServerState:
+    def __init__(self, connections=()):
+        self.connections = set(connections)
+
+
+class _FakeServer:
+    """Stands in for ``uvicorn.Server``, including its exit-signal contract.
+
+    ``handle_exit`` is modelled because ``serve.install_force_quit`` wraps it;
+    a double that lacked it would let the wiring be removed silently.
+    """
+
+    def __init__(self, connections=()):
         self.should_exit = False
+        self.force_exit = False
         self.ran = False
+        self.server_state = _FakeServerState(connections)
+
+    def handle_exit(self, sig, frame):
+        if self.should_exit and sig == signal.SIGINT:
+            self.force_exit = True
+        else:
+            self.should_exit = True
 
     def run(self):
         self.ran = True
@@ -268,3 +300,139 @@ class TestRunServe:
         cfg = _standalone_config(tmp_path, init=False)
         with pytest.raises(serve.ServeError, match="setup"):
             serve.run_serve(cfg, host="127.0.0.1", port=8799)
+
+
+# ---------------------------------------------------------------------------
+# Shutting down with a long-lived connection open (SSE)
+# ---------------------------------------------------------------------------
+
+
+class TestGracefulShutdownBound:
+    def test_uvicorn_config_bounds_the_graceful_wait(self, monkeypatch):
+        """uvicorn's default waits for every open connection forever, and the
+        web app's SSE generators poll until the client goes away — so one open
+        browser tab would wedge Ctrl-C."""
+        pytest.importorskip("uvicorn")
+        pytest.importorskip("fastapi")
+        from istota import serve
+
+        monkeypatch.setattr(serve, "_maybe_mount_webhooks", lambda app: None)
+        server = serve.build_uvicorn_server("127.0.0.1", 8799)
+
+        timeout = server.config.timeout_graceful_shutdown
+        assert timeout is not None, "an unbounded graceful shutdown hangs on SSE"
+        assert 0 < timeout <= 30
+
+
+class TestForceQuit:
+    def test_first_interrupt_leaves_connections_alone(self):
+        from istota import serve
+
+        conn = _FakeConnection()
+        server = _FakeServer([conn])
+        serve.install_force_quit(server)
+
+        server.handle_exit(signal.SIGINT, None)
+
+        assert server.should_exit is True
+        assert server.force_exit is False
+        # A graceful shutdown must still let an in-flight response finish.
+        assert conn.transport.aborted == 0
+
+    def test_repeat_interrupt_aborts_open_connections(self):
+        """The second Ctrl-C sets uvicorn's ``force_exit``, which breaks its own
+        wait loops — and then it blocks in ``asyncio.Server.wait_closed()``,
+        which since Python 3.12 waits for the same connections. Aborting the
+        transports is what lets that return."""
+        from istota import serve
+
+        conn = _FakeConnection()
+        server = _FakeServer([conn])
+        serve.install_force_quit(server)
+
+        server.handle_exit(signal.SIGINT, None)
+        server.handle_exit(signal.SIGINT, None)
+
+        assert server.force_exit is True
+        assert conn.transport.aborted == 1
+
+    def test_abort_survives_a_dead_transport(self):
+        from istota import serve
+
+        good = _FakeConnection()
+        broken = _FakeConnection()
+
+        def boom():
+            raise RuntimeError("transport already gone")
+
+        broken.transport.abort = boom
+        server = _FakeServer([broken, good])
+
+        # One bad transport must not strand the rest, on the path whose whole
+        # job is ending a process that is already refusing to end.
+        assert serve.abort_open_connections(server) == 1
+        assert good.transport.aborted == 1
+
+    def test_abort_defers_onto_a_running_loop(self):
+        """Inside a live server the handler runs on the loop's own thread; the
+        abort is queued as ordinary loop work rather than run mid-callback."""
+        import asyncio
+
+        from istota import serve
+
+        conn = _FakeConnection()
+        server = _FakeServer([conn])
+        serve.install_force_quit(server)
+
+        async def _drive():
+            server.handle_exit(signal.SIGINT, None)
+            server.handle_exit(signal.SIGINT, None)
+            # Not yet: the handler scheduled it rather than calling it.
+            assert conn.transport.aborted == 0
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert conn.transport.aborted == 1
+
+        asyncio.run(_drive())
+
+
+class TestSupervisorShutdownNotice:
+    """The stream stop-notice is signal-driven, and this shutdown has no signal.
+
+    `_supervise` sets `should_exit` when the scheduler thread dies. Without
+    raising the notice too, the SSE generators keep polling, uvicorn waits out
+    the whole graceful window and then cancels them — the `CancelledError`
+    traceback the notice exists to remove, on the one path no Ctrl-C reaches.
+    """
+
+    def test_a_dead_scheduler_thread_raises_the_stream_stop_notice(
+        self, tmp_path, monkeypatch,
+    ):
+        import istota.scheduler as sched
+        from istota import serve, web_shutdown
+
+        cfg = _standalone_config(tmp_path)
+
+        def fake_daemon(config, *, install_signal_handlers=True, ready_event=None):
+            if ready_event is not None:
+                ready_event.set()
+            return  # the thread ends, which is what the supervisor watches for
+
+        monkeypatch.setattr(sched, "run_daemon", fake_daemon)
+
+        class _BlockingServer(_FakeServer):
+            def run(self):
+                self.ran = True
+                deadline = time.monotonic() + 10
+                while not self.should_exit and time.monotonic() < deadline:
+                    time.sleep(0.05)
+
+        server = _BlockingServer()
+        monkeypatch.setattr(serve, "build_uvicorn_server", lambda host, port: server)
+        web_shutdown.reset_for_tests()
+        try:
+            serve.run_serve(cfg, host="127.0.0.1", port=8799)
+            assert server.should_exit is True, "the supervisor never tripped"
+            assert web_shutdown.is_shutting_down() is True
+        finally:
+            web_shutdown.reset_for_tests()

@@ -60,6 +60,7 @@ from .brain._fallback import (
     TRIGGER_STOP_REASONS,
     effective_fallback_kind,
     get_availability_breaker,
+    open_primary_breaker,
 )
 from .agent.events import READ_DESCRIPTION_PREFIX
 from .events import EventWriter, random_progress_message
@@ -787,18 +788,25 @@ def _mark_if_exhausted(fb_result):
     )
 
 
-def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason):
+def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason, window):
     """One operator alert when the availability breaker opens for a primary.
 
     ``fallback_kind`` is None on a deployment with no ``[brain] fallback``
     configured, which is a legitimate shape since ISSUE-362. The breaker still
     opens there (the sleep cycle and the shared-block generator read it), so the
     alert still fires — it just can't promise a reroute.
+
+    ``window`` is the seconds actually armed, from the breaker itself, not
+    ``fallback_cooldown_seconds``. The two stopped agreeing in ISSUE-374: the
+    setting is now a ceiling and a usage limit ends at the quota's reset, so
+    reading the config here would page the operator "for 3600s" about a window
+    that ends in eleven minutes. This is the one message whose whole job is to
+    say when the primary comes back.
     """
     try:
         from . import notifications
 
-        cooldown = config.brain.fallback_cooldown_seconds
+        cooldown = int(round(window))
         if fallback_kind is not None:
             what_happens = (
                 f"falling back to {fallback_kind} for {cooldown}s. "
@@ -6333,23 +6341,27 @@ def execute_task(
                         # is separately gated on a fallback existing, so an open
                         # breaker never skips a primary there is nothing to
                         # replace.
-                        opened_breaker = (
-                            _cooldown > 0
-                            and brain_result.stop_reason in COOLDOWN_STOP_REASONS
-                            and _breaker.open(_primary_kind, _cooldown)
-                        )
-                        if opened_breaker:
-                            from .brain_availability import record_unavailable
-
-                            record_unavailable(
-                                config,
+                        #
+                        # The window ends at the quota's reset where one is
+                        # known, not a flat `_cooldown` from the failure
+                        # (ISSUE-374). `open_primary_breaker` owns that and
+                        # publishes the same deadline it armed, so the
+                        # scheduler's breaker and the record the web process
+                        # reads describe one window.
+                        _armed_window = (
+                            open_primary_breaker(
                                 _primary_kind,
+                                _cooldown,
                                 brain_result.stop_reason,
-                                cooldown_seconds=_cooldown,
+                                config=config,
                             )
+                            if brain_result.stop_reason in COOLDOWN_STOP_REASONS
+                            else None
+                        )
+                        if _armed_window is not None:
                             _fire_fallback_alert(
                                 config, task, _primary_kind, _fallback_kind,
-                                brain_result.stop_reason,
+                                brain_result.stop_reason, _armed_window,
                             )
                         if _fallback_kind is not None:
                             logger.error(
@@ -6437,6 +6449,17 @@ def execute_task(
         result = brain_result.result_text
         actions = brain_result.actions_taken
         trace = brain_result.execution_trace
+
+        # What the model had written when a cancel or a timeout ended the run
+        # (ISSUE-372). It rides on the task rather than in the return tuple:
+        # `result_text` is what the scheduler dispatches on — by exact equality
+        # for a cancel — so the partial answer cannot travel in it, and widening
+        # the four-tuple would touch every caller for a value only the scheduler
+        # reads. Same hand-off `model_used` uses two blocks down. Only on a
+        # failure: a successful run's answer *is* `result`, and setting this too
+        # would give the scheduler two candidates for one column.
+        if not success and brain_result.partial_text:
+            task.partial_result = brain_result.partial_text
 
         # Record the model the brain actually used. Prefer the brain's reported
         # value (accurate even when the model was the brain/CLI default); fall
@@ -6594,6 +6617,9 @@ def execute_task_interactive(
         if success:
             db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions, execution_trace=trace)
         else:
-            db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions, execution_trace=trace)
+            db.update_task_status(
+                conn, task_id, "failed", result=task.partial_result, error=result,
+                actions_taken=actions, execution_trace=trace,
+            )
 
         return success, result

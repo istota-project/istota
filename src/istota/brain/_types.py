@@ -238,6 +238,23 @@ class BrainResult:
     # Default False keeps every existing return site behaving as before.
     work_committed: bool = False
 
+    # What the model had written when a stop that discards the answer fired
+    # (ISSUE-372). The `max_turns` / `loop_detected` backstops already deliver
+    # the last text-bearing turn under a marker; the two stops a person is most
+    # likely to see — a wall-clock timeout and a `!stop` cancel — returned a
+    # fixed string and threw 29 minutes of narration away.
+    #
+    # Deliberately a *separate* field rather than an addition to `result_text`:
+    # the executor drops `stop_reason` and the scheduler dispatches on
+    # `result_text` by string match, and cancel is matched by exact equality in
+    # three places (`scheduler.py`). Appending to `result_text` would send a
+    # cancelled task back through the retry ladder. Keeping it separate means
+    # every existing match stays byte-identical and the persistence and
+    # delivery paths opt in by naming this field.
+    #
+    # None when the run produced no text at all, which is not the same as "".
+    partial_text: str | None = None
+
 
 class Brain(Protocol):
     """The single boundary every brain implementation satisfies.
