@@ -559,8 +559,40 @@ def _native_is_reachable(config: "Config") -> bool:
     return "native" in overrides.values()
 
 
-def _session_log_mask_reason(config: "Config", log_dir: Path) -> str:
-    """"" when the sandbox's database mask covers ``log_dir``, else why not.
+# The two ways this check can open a finding, and they are not
+# interchangeable. The first asserts an exposure; the second says the run could
+# not establish whether there is one. Composing an unestablished answer under
+# the first prefix produced a sentence that contradicted itself — "the logs are
+# unbound rather than masked — whether bubblewrap works here was not probed" —
+# and read, on a correctly masked deployment, as a claim the transcripts were
+# exposed.
+_MASK_EXPOSED = "the logs are unbound rather than masked"
+_MASK_UNKNOWN = "whether the logs are masked could not be established"
+
+
+def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> str:
+    """"" when the sandbox's database mask covers ``log_dir``, else the finding.
+
+    Returns the whole finding sentence, prefix included, rather than a bare
+    reason: the prefix depends on which axis produced it, and only this
+    function knows that. See `_MASK_EXPOSED` / `_MASK_UNKNOWN`.
+
+    **Two axes, and both are reported.** Whether a mask is emitted at all, and
+    where it would land if it were. They are independent — the standalone
+    install fails both at once — and neither pre-empts the other, because an
+    operator who reads one reason and fixes it would otherwise be told nothing
+    about the second and would still have unmasked transcripts. Availability
+    leads: whether a mask exists outranks where it would go.
+
+    **The availability axis is ``effective_sandboxing``, not ``sandbox_enabled``**
+    (ISSUE-381). The flag is what the operator asked for; the predicate is what
+    they got, and the two diverge on the shipped Docker stack —
+    ``docker-compose.yml`` grants neither ``seccomp:unconfined`` nor
+    ``systempaths=unconfined``, so the bwrap probe fails, ``build_bwrap_cmd``
+    never runs and no mask is emitted while the flag still reads true. Reading
+    the flag alone reported a tmpfs mask protecting the transcripts on the one
+    multi-user shape where every task runs with the daemon's own filesystem
+    access.
 
     **This asks ``_mask_dir``'s own question rather than a copy of it.** "Is the
     resolved directory under ``db_path.parent``" is the tempting predicate and it
@@ -571,8 +603,47 @@ def _session_log_mask_reason(config: "Config", log_dir: Path) -> str:
     ``map_basemap`` two-consumers failure, which is why ``mask_shadowed_by``
     was lifted out of the sandbox builder's closure instead of restated here.
 
+    The reasons are joined with ``", and "`` rather than a semicolon because
+    the caller joins *findings* with ``"; "``: one separator per nesting level,
+    or a reader cannot tell which clause belongs to which finding.
+
     Never raises. It runs on the daemon's start-up path, and a config that makes
     a path comparison throw must come back as a finding.
+    """
+    reasons: list[str] = []
+    established = False
+
+    available, why = _session_log_sandbox_availability(config, probe)
+    if why:
+        reasons.append(why)
+        established = available is False
+
+    shape = _session_log_mask_shape_reason(config, log_dir)
+    if shape:
+        reasons.append(shape)
+        established = True
+
+    if not reasons:
+        return ""
+    prefix = _MASK_EXPOSED if established else _MASK_UNKNOWN
+    return f"{prefix} — " + ", and ".join(reasons)
+
+
+def _session_log_sandbox_availability(
+    config: "Config", probe: bool,
+) -> tuple[bool | None, str]:
+    """Is a database mask emitted at all on this deployment, and if not, why.
+
+    ``(True, "")`` a mask is emitted; ``(False, reason)`` none is;
+    ``(None, reason)`` the run could not establish which. The third state is
+    the one that earns the tuple: a check whose subject is a boundary must not
+    answer "fine" when it did not look, and must not assert an exposure it did
+    not observe either.
+
+    Never raises: an unobtainable answer is ``None`` with a reason, not an
+    exception and not a quiet ``True``. Returning ``True`` there was the first
+    draft and it reinstated ISSUE-381 in miniature — an answer nobody could get
+    reported as a protection in place, with only a ``logger.debug`` behind it.
     """
     if not getattr(config.security, "sandbox_enabled", False):
         # Not "the mask covers it": there is no mask. Reported as its own reason
@@ -580,11 +651,53 @@ def _session_log_mask_reason(config: "Config", log_dir: Path) -> str:
         # the whole point of the check is to say which condition a deployment is
         # in. `runtime.bwrap` answers a different question — whether bubblewrap
         # could work here — and SKIPs on the same setting.
-        return (
+        return False, (
             "the sandbox is switched off on this deployment ([security] "
             "sandbox_enabled), so nothing masks anything"
         )
 
+    unknown = (
+        None,
+        "whether bubblewrap works here could not be determined, so no mask "
+        "can be confirmed",
+    )
+    try:
+        from .executor import effective_sandboxing, effective_sandboxing_if_known
+
+        # `effective_sandboxing` consults the bwrap capability probe, which
+        # spawns. `probe=False` forbids that, so ask the memo instead — which is
+        # usually warm in the process that matters, since the daemon probes at
+        # start-up. Only a genuinely cold memo is reported as unlooked-at.
+        effective = (
+            effective_sandboxing(config) if probe
+            else effective_sandboxing_if_known(config)
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic must not raise
+        logger.debug("session-log mask: sandbox availability failed", exc_info=True)
+        return unknown
+
+    if effective is None:
+        return None, (
+            "whether bubblewrap works here was not probed on this run, so no "
+            "mask can be confirmed"
+        )
+    if not effective:
+        return False, (
+            "[security] sandbox_enabled is set but bubblewrap does not work "
+            "here (see runtime.bwrap), so every task runs with the daemon's "
+            "own filesystem access and nothing masks anything"
+        )
+    return True, ""
+
+
+def _session_log_mask_shape_reason(config: "Config", log_dir: Path) -> str:
+    """"" when a mask *would* cover ``log_dir``, else why it would not.
+
+    The shape half of `_session_log_mask_finding`: a pure question about the
+    configured paths, asked whether or not a mask is actually emitted. Kept
+    separate so the availability arm above can report alongside it rather than
+    instead of it.
+    """
     try:
         from .executor import mask_protected_paths, mask_shadowed_by
     except Exception:  # pragma: no cover - defensive; executor is always importable
@@ -616,7 +729,12 @@ def _session_log_mask_reason(config: "Config", log_dir: Path) -> str:
                 for probe in (log_dir, log_dir.resolve()):
                     if probe == name or probe.is_relative_to(name):
                         return ""
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not raise
+        # Not `OSError` alone. The sandbox-off shape now reaches this code,
+        # which it never did while the availability arm returned early, so the
+        # set of configs that get here is wider than the one it was written
+        # against — and `mask_protected_paths` resolves paths from a config
+        # file, where a null byte raises `ValueError` rather than `OSError`.
         return f"the mask could not be evaluated ({exc})"
 
     if any(
@@ -635,9 +753,23 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
     """Where native-brain session transcripts land, and what protects them.
 
     The boundary is that nothing binds the directory into any sandbox; the
-    database mask is defence in depth behind it, and on the standalone install
-    the mask is refused outright. Which of the two a deployment is in is not
-    visible from a config file, so this check says it.
+    database mask is defence in depth behind it, and on two shipped shapes there
+    is no mask at all — the standalone install refuses it, and the Docker stack
+    never emits one because the bwrap probe fails there. Which condition a
+    deployment is in is not visible from a config file, so this check says it,
+    and says every one that holds rather than the first.
+
+    **It is the one check in this module that will not report ``OK`` under
+    ``probe=False``**, and that is deliberate rather than an oversight. The
+    module's convention for a probe it may not run is to answer from the
+    filesystem and say so in the ``detail`` while still passing —
+    `_binary_status` and `check_tmux` return ``OK``, `check_subscription_usage`
+    and `check_sandbox_masks` return ``SKIP``. Here the subject *is* a
+    boundary, and the defect being fixed was this check reporting a protection
+    that was not in place; a status an operator reads as "fine" on a run that
+    did not look would be the same defect wearing a flag. It reads the warm
+    probe memo first, so the divergence only bites where the answer is
+    genuinely unavailable.
 
     The second ``WARN`` arm is about retention rather than exposure: when the
     last sweep evicted by *size*, ``retention_days`` is not the retention in
@@ -718,9 +850,9 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
     findings: list[str] = []
     remedies: list[str] = []
 
-    reason = _session_log_mask_reason(config, log_dir)
-    if reason:
-        findings.append(f"the logs are unbound rather than masked — {reason}")
+    mask = _session_log_mask_finding(config, log_dir, probe)
+    if mask:
+        findings.append(mask)
         remedies.append(
             "Nothing binds the directory into a sandbox, which is the boundary; "
             "keep [security] sandbox_ro_paths narrow so nothing starts to."

@@ -3428,6 +3428,29 @@ class TestSessionLogDir:
     def _run(self, config):
         return run_checks(config, only=(self.NAME,))[0]
 
+    @pytest.fixture(autouse=True)
+    def _bwrap_works_here(self, monkeypatch):
+        """Every test in this class runs as if bubblewrap works.
+
+        The check consults `executor.effective_sandboxing`, which is False on
+        any non-Linux host and on a Linux host without a usable bwrap. Without
+        this the whole class would answer on the availability axis on a
+        developer machine and never reach the mask reasoning it exists to pin —
+        and the OK cases would pass or fail depending on who ran them. The
+        tests that are *about* that axis patch it back themselves.
+
+        **Both the function and the memo**, because the check reads each by a
+        different route: `effective_sandboxing` calls the function,
+        `effective_sandboxing_if_known` reads `_bwrap_checked` directly. That
+        global is set once per process and never invalidated, so leaving it
+        alone would make this class's answer depend on whatever ran earlier in
+        the same xdist worker — and the suite runs `-n auto`.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setattr(executor, "_bwrap_checked", True)
+
     # -- when it does not apply -------------------------------------------
 
     def test_skips_when_no_routing_reaches_the_native_brain(self, make_config, tmp_path):
@@ -3566,6 +3589,11 @@ class TestSessionLogDir:
         assert r.status == WARN
         assert "unbound" in r.detail.lower()
         assert r.remedy
+        # Both, by name. "Whichever reason is reported" was as much as the
+        # early-return version could promise; the one shipped shape that fails
+        # both axes is now pinned at both rather than at "some finding".
+        assert "switched off on this deployment" in r.detail
+        assert "workspace" in r.detail.lower()
 
     def test_the_two_shapes_disagree_which_is_the_point_of_the_check(
         self, make_config, tmp_path,
@@ -3580,6 +3608,145 @@ class TestSessionLogDir:
         )
         assert self._run(ansible).status == OK
         assert self._run(standalone).status == WARN
+
+    # -- the availability axis ---------------------------------------------
+
+    def test_warns_when_bubblewrap_does_not_work_on_this_deployment(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The shipped Docker stack: `docker-compose.yml` grants neither
+        # `seccomp:unconfined` nor `systempaths=unconfined`, so the probe fails,
+        # `build_bwrap_cmd` never runs and no mask is emitted — while
+        # `sandbox_enabled` still reads true. On the layout whose mask *would*
+        # cover the directory, so the only thing that can produce a finding here
+        # is the sandbox not actually being in place.
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "unbound" in r.detail.lower()
+        assert "bubblewrap" in r.detail.lower()
+        assert r.remedy
+
+    def test_an_unavailable_sandbox_and_a_refused_mask_are_both_reported(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # Precedent: `test_the_standalone_install_as_shipped_warns_on_both_counts`
+        # below. Neither reason pre-empts the other, because an operator who
+        # reads one and fixes it would otherwise be told nothing about the
+        # second and would still have unmasked transcripts.
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=True)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "bubblewrap" in r.detail.lower()
+        assert "workspace" in r.detail.lower()
+        # Availability leads, on this arm as on the switched-off one. Asserted
+        # here rather than only there because the ordering test below drives the
+        # *pre-existing* branch, so it stays green with this arm deleted.
+        assert r.detail.index("bubblewrap") < r.detail.index("workspace")
+
+    def test_the_availability_reason_is_reported_before_the_mask_shape(
+        self, make_config, tmp_path,
+    ):
+        # Order pinned rather than left to whichever arm happens to run first:
+        # whether a mask exists at all outranks where it would land if it did.
+        config = self._workspace_shape(make_config, tmp_path, sandbox_enabled=False)
+        r = self._run(config)
+        assert r.detail.index("switched off") < r.detail.index("workspace")
+
+    def _recording_probe(self, monkeypatch, *, cached, answer=True):
+        """Stand in for the bwrap probe, recording whether it was invoked.
+
+        The spawn question cannot be asked of `subprocess` here. Two things
+        answer it before a process is created — `_bwrap_available` returns False
+        at its `sys.platform` check on this developer machine, and it memoizes
+        in `_bwrap_checked` after the first call anywhere in the process — so a
+        `subprocess` spy stays empty whether or not the gate exists. Measured:
+        with the `probe` gate deleted, the spy is still empty and this recorder
+        fires.
+        """
+        from istota import executor
+
+        calls: list[str] = []
+
+        def _probe():
+            calls.append("bwrap")
+            return answer
+
+        monkeypatch.setattr(executor, "_bwrap_available", _probe)
+        monkeypatch.setattr(executor, "_bwrap_checked", cached)
+        return calls
+
+    def test_probe_false_does_not_claim_a_mask_it_could_not_verify(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # `probe=False` forbids spawning and the bwrap probe is a spawn, so with
+        # a cold memo the availability axis cannot be answered at all. The cheap
+        # half alone cannot tell the Ansible shape from the Docker one, and
+        # reporting OK there is the defect this check had.
+        calls = self._recording_probe(monkeypatch, cached=None)
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = run_checks(config, only=(self.NAME,), probe=False)[0]
+        assert calls == [], "probe=False invoked the bwrap probe"
+        assert r.status == WARN
+        assert "not probed" in r.detail
+
+    def test_an_unestablished_answer_does_not_assert_that_the_logs_are_unbound(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The finding prefix used to be fixed, so an unanswerable availability
+        # question rendered as "the logs are unbound rather than masked — [it]
+        # was not probed": a sentence asserting the exposure in its first clause
+        # and disclaiming it in the second, on a deployment whose mask is fine.
+        self._recording_probe(monkeypatch, cached=None)
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = run_checks(config, only=(self.NAME,), probe=False)[0]
+        assert "could not be established" in r.detail
+        assert "unbound" not in r.detail.lower()
+
+    def test_probe_false_answers_from_a_warm_memo_rather_than_declining_to_look(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The daemon probes at start-up (`_log_startup_status`), so inside that
+        # process the answer is free. Saying "not probed" while `_bwrap_checked`
+        # holds it is a statement about the world that is wrong — and it would
+        # be the one that mattered, since a warm memo of False is the Docker
+        # shape this issue is about.
+        calls = self._recording_probe(monkeypatch, cached=False)
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = run_checks(config, only=(self.NAME,), probe=False)[0]
+        assert calls == []
+        assert r.status == WARN
+        assert "bubblewrap does not work" in r.detail
+        assert "not probed" not in r.detail
+
+    def test_an_availability_question_that_raises_is_a_finding_not_a_pass(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # Swallowing to `True` reinstated ISSUE-381 in miniature: an answer
+        # nobody could get, reported as a protection in place, with only a debug
+        # line behind it. `effective_sandboxing` catches nothing itself and
+        # `_bwrap_available` catches only OSError and TimeoutExpired.
+        from istota import executor
+
+        def _boom(_config):
+            raise RuntimeError("no answer available")
+
+        monkeypatch.setattr(executor, "effective_sandboxing", _boom)
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "could not be determined" in r.detail
 
     @pytest.mark.requires_dac
     def test_fails_on_an_unwritable_directory(self, make_config, tmp_path):

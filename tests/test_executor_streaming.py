@@ -1461,6 +1461,44 @@ class TestEffectiveSandboxing:
             assert executor.effective_sandboxing(config) is True
 
 
+class TestEffectiveSandboxingIfKnown:
+    """The same answer, but only where it costs nothing (ISSUE-381).
+
+    For `doctor`'s `runtime.session_log_dir` under `run_checks(probe=False)`,
+    which must neither spawn nor report a boundary it did not verify.
+    """
+
+    def test_none_when_the_probe_has_not_run_and_it_does_not_run_it(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.security.sandbox_enabled = True
+        with (
+            patch("istota.executor._bwrap_checked", None),
+            patch("istota.executor._bwrap_available", return_value=True) as probe,
+        ):
+            assert executor.effective_sandboxing_if_known(config) is None
+        # The whole point: it reads the memo, it does not fill it.
+        probe.assert_not_called()
+
+    def test_a_warm_memo_answers_without_probing(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.security.sandbox_enabled = True
+        for cached in (True, False):
+            with (
+                patch("istota.executor._bwrap_checked", cached),
+                patch("istota.executor._bwrap_available", return_value=True) as probe,
+            ):
+                assert executor.effective_sandboxing_if_known(config) is cached
+            probe.assert_not_called()
+
+    def test_a_disabled_sandbox_is_false_rather_than_unknown(self, tmp_path):
+        # The flag alone settles it, so a cold memo is not a reason to withhold
+        # the answer — the same short-circuit `effective_sandboxing` makes.
+        config = _make_config(tmp_path)
+        config.security.sandbox_enabled = False
+        with patch("istota.executor._bwrap_checked", None):
+            assert executor.effective_sandboxing_if_known(config) is False
+
+
 class TestDryRun:
     def test_dry_run_returns_prompt(self, tmp_path):
         """Dry run returns the prompt without executing the task."""

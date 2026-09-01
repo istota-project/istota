@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import stat
 import time
 from datetime import datetime, timedelta, timezone
@@ -1140,6 +1141,288 @@ class TestTheCeiling:
         assert sparse.exists()
         assert result.deleted_size == 0
         assert result.bytes_after < os.lstat(sparse).st_size
+
+
+class TestTheSweepWalksOnce:
+    """One walk per user directory, both rules applied to its result (ISSUE-379).
+
+    The age rule and the ceiling used to walk separately, so every tick with
+    `retention_days > 0` — the shipped default — paid for the whole tree twice,
+    synchronously on the cleanup tick, over a directory an operator can point at
+    a network mount by configuration alone.
+    """
+
+    def _counting_scan(self, monkeypatch):
+        from istota.session import session_log as slog
+
+        scanned: list[str] = []
+        real = slog._scan_user_dir
+
+        def _counted(directory):
+            scanned.append(Path(directory).name)
+            return real(directory)
+
+        monkeypatch.setattr(slog, "_scan_user_dir", _counted)
+        return scanned
+
+    def test_each_user_directory_is_scanned_once_with_both_rules_in_force(
+        self, tmp_path, monkeypatch,
+    ):
+        write_log(tmp_path, "alice", "a.jsonl", age_days=30)
+        write_log(tmp_path, "bob", "b.jsonl", age_days=1)
+        scanned = self._counting_scan(monkeypatch)
+
+        sweep(tmp_path, retention_days=14, max_total_gb=1)
+
+        assert sorted(scanned) == ["alice", "bob"]
+
+    def test_the_single_walk_is_not_bought_by_dropping_one_of_the_rules(
+        self, tmp_path, monkeypatch,
+    ):
+        # The cheap way to make the count above come out right is to stop
+        # running one of the rules. Both still fire on the same tick.
+        aged = write_log(tmp_path, "alice", "aged.jsonl", age_days=90)
+        # Descending, so big[0] is the oldest and therefore the one the
+        # ceiling takes first — the same convention as TestTheCeiling.
+        big = [write_log(tmp_path, "bob", f"{n}.jsonl", age_days=4 - n) for n in range(3)]
+        ceiling = measured(*big[1:])
+        scanned = self._counting_scan(monkeypatch)
+
+        result = sweep(
+            tmp_path, retention_days=14, max_total_gb=ceiling / (1024 ** 3),
+        )
+
+        assert sorted(scanned) == ["alice", "bob"]
+        assert result.deleted_age == 1 and not aged.exists()
+        assert result.deleted_size == 1 and not big[0].exists()
+
+    def test_the_ceiling_measures_the_tree_the_age_rule_left_behind(self, tmp_path):
+        # The second walk used to re-stat, so the byte total was the post-age
+        # truth for free. With one walk the running totals are kept by hand, and
+        # getting that wrong evicts a file to reclaim space the age rule already
+        # reclaimed — an accounting error in the direction of more deletion.
+        aged = write_log(tmp_path, "alice", "aged.jsonl", age_days=90)
+        keep = [write_log(tmp_path, "alice", f"k{n}.jsonl", age_days=2 + n) for n in range(2)]
+        ceiling = measured(*keep)
+
+        result = sweep(
+            tmp_path, retention_days=14, max_total_gb=ceiling / (1024 ** 3),
+        )
+
+        assert not aged.exists()
+        assert all(f.exists() for f in keep)
+        assert result.deleted_age == 1
+        assert result.deleted_size == 0
+        assert result.bytes_after == measured(*keep)
+
+    def test_a_file_the_age_rule_could_not_remove_is_still_evictable_by_size(
+        self, tmp_path,
+    ):
+        # The rescan used to put a failed unlink back in front of the ceiling on
+        # its own. Dropping it from the in-memory list instead would exempt the
+        # one file the sweep already knows it is having trouble with.
+        stuck = write_log(tmp_path, "alice", "stuck.jsonl", age_days=90)
+        keep = write_log(tmp_path, "alice", "keep.jsonl", age_days=2)
+        real_unlink = Path.unlink
+        refused = {"once": True}
+
+        def _refuse_first(self, *args, **kwargs):
+            if self.name == "stuck.jsonl" and refused["once"]:
+                refused["once"] = False
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_unlink(self, *args, **kwargs)
+
+        Path.unlink = _refuse_first
+        try:
+            result = sweep(
+                tmp_path,
+                retention_days=14,
+                max_total_gb=measured(keep) / (1024 ** 3),
+            )
+        finally:
+            Path.unlink = real_unlink
+
+        assert result.deleted_age == 0
+        assert result.errors == 1
+        assert result.deleted_size == 1
+        assert not stuck.exists()
+        assert keep.exists()
+
+    def test_a_directory_the_age_rule_removed_is_not_carried_into_the_ceiling(
+        self, tmp_path,
+    ):
+        # A guard on `dirs_removed` and `bytes_after`, and honestly only that:
+        # a directory the age rule emptied measures zero and holds no
+        # candidates, so carrying it into the ceiling costs nothing and the
+        # `is_dir()` probe below is not what this pins. The test that needs the
+        # probe is the next one, where the directory goes with bytes still in
+        # it. Written first with a 1 GB ceiling, which meant `total > ceiling`
+        # was false and the eviction loop never ran at all; the ceiling here is
+        # the surviving file exactly, so the loop at least executes.
+        departed = write_log(tmp_path, "departed", "old.jsonl", age_days=90)
+        age_dir(departed.parent, 90)
+        live = write_log(tmp_path, "alice", "a.jsonl", age_days=1)
+
+        result = sweep(
+            tmp_path,
+            retention_days=14,
+            max_total_gb=measured(live) / (1024 ** 3),
+        )
+
+        assert not departed.parent.exists()
+        assert result.dirs_removed == 1
+        assert live.exists()
+        assert result.deleted_size == 0
+        assert result.bytes_after == measured(live)
+
+    def test_a_directory_removed_by_something_else_is_not_phantom_pressure(
+        self, tmp_path,
+    ):
+        # The `is_dir()` probe is the one thing kept from the walk this change
+        # removed, and this is the case that needs it. Bookkeeping off the
+        # sweep's own `rmdir` covers a directory *it* emptied and nothing else,
+        # so a user directory that goes away while the age pass runs would keep
+        # its measured bytes as ceiling pressure no longer on the volume.
+        #
+        # The residue is deliberately not a `*.jsonl` file. A stranded log is a
+        # candidate, so the eviction loop's own vanished-file arm subtracts it
+        # and the tree self-heals within the tick; a file the sweep never
+        # deletes is never a candidate and its bytes would stay on the books.
+        write_log(tmp_path, "aaa", "old.jsonl", age_days=90)
+        keep = write_log(tmp_path, "alice", "keep.jsonl", age_days=5)
+        stranger = tmp_path / "bob"
+        stranger.mkdir()
+        (stranger / "blob.bin").write_bytes(b"x" * 4096)
+
+        real_unlink = Path.unlink
+
+        def _remove_the_directory(self, *args, **kwargs):
+            out = real_unlink(self, *args, **kwargs)
+            if self.name == "old.jsonl":
+                shutil.rmtree(stranger)
+            return out
+
+        Path.unlink = _remove_the_directory
+        try:
+            result = sweep(
+                tmp_path,
+                retention_days=14,
+                max_total_gb=measured(keep) / (1024 ** 3),
+            )
+        finally:
+            Path.unlink = real_unlink
+
+        assert keep.exists(), "evicted against pressure that had left the volume"
+        assert result.deleted_size == 0
+        assert result.bytes_after == measured(keep)
+
+    def test_a_file_that_vanished_before_the_age_unlink_costs_nobody_else_a_file(
+        self, tmp_path,
+    ):
+        # The regression the single walk introduced and the review caught. The
+        # second walk simply did not find a file that went away under it, so the
+        # post-age total was right for free. Keeping its bytes on the running
+        # total instead overstates the tree — and because the phantom is one
+        # user's while largest-user-first picks the heaviest, the file that goes
+        # is somebody else's, to reclaim space that was already free.
+        #
+        # The two users are the point: a phantom in the same directory as the
+        # victim is always the oldest candidate there, so it is drained first
+        # and the bug hides. `TestSweepRobustness` pins the same rule on the
+        # ceiling path, where the sweep helper's `retention_days=0` default
+        # meant the age path never inherited it.
+        phantom = write_log(tmp_path, "alice", "vanish.jsonl", age_days=90)
+        theirs = [
+            write_log(tmp_path, "bob", "b1.jsonl", age_days=3),
+            write_log(tmp_path, "bob", "b2.jsonl", age_days=2),
+        ]
+        ceiling = measured(*theirs)
+
+        real_unlink = Path.unlink
+
+        def _already_gone(self, *args, **kwargs):
+            if self.name == "vanish.jsonl":
+                real_unlink(self)
+                raise FileNotFoundError(2, "No such file or directory", str(self))
+            return real_unlink(self, *args, **kwargs)
+
+        Path.unlink = _already_gone
+        try:
+            result = sweep(
+                tmp_path, retention_days=14, max_total_gb=ceiling / (1024 ** 3),
+            )
+        finally:
+            Path.unlink = real_unlink
+
+        assert not phantom.exists()
+        assert all(f.exists() for f in theirs), "evicted a file to free space already free"
+        assert result.deleted_size == 0
+        assert result.bytes_after == measured(*theirs)
+        # A file already off the volume was processed, so it is not a path that
+        # could not be processed. The ceiling path has always said so; the age
+        # path used to disagree about the same event.
+        assert result.errors == 0
+
+    def test_a_log_written_to_during_the_age_pass_is_not_evicted(self, tmp_path):
+        # The candidate mtimes now come from a walk that ran before the age
+        # deletions, so they are as stale as the whole sweep — and
+        # LIVE_WINDOW_SECONDS says which files are at risk of that, not how
+        # stale the reading is. A task quiet at scan time and writing again
+        # during the age pass read as idle and was evicted, where the second
+        # walk re-stat'ed and spared it. The eviction loop re-reads its victim.
+        #
+        # `aaa` sorts first, so its age deletion is what runs while the
+        # in-flight log is written. The in-flight log is the *only* evictable
+        # candidate, which is what makes the assertion discriminating: written
+        # with a second, older file beside it, the loop takes that one first and
+        # never re-reads this one at all.
+        write_log(tmp_path, "aaa", "old.jsonl", age_days=90)
+        inflight = write_log(
+            tmp_path, "alice", "task-live.jsonl",
+            age_days=(LIVE_WINDOW_SECONDS + 120) / 86400.0,
+        )
+
+        real_unlink = Path.unlink
+
+        def _touch_the_live_log(self, *args, **kwargs):
+            out = real_unlink(self, *args, **kwargs)
+            if self.name == "old.jsonl":
+                os.utime(inflight, None)  # the task appends a record
+            return out
+
+        Path.unlink = _touch_the_live_log
+        try:
+            # A one-byte ceiling: everything is over it, so the loop only stops
+            # when it runs out of things it is allowed to take.
+            result = sweep(
+                tmp_path, retention_days=14, max_total_gb=1 / (1024 ** 3),
+            )
+        finally:
+            Path.unlink = real_unlink
+
+        assert inflight.exists(), "evicted a log a run was writing to"
+        assert result.deleted_size == 0
+        # Over its ceiling with nothing it may take is the honest answer, and
+        # the one `doctor` reports.
+        assert result.still_over is True
+
+    @pytest.mark.requires_dac
+    def test_an_unreadable_directory_is_counted_once_rather_than_once_per_rule(
+        self, tmp_path,
+    ):
+        # It was counted twice, because each rule walked and each walk failed.
+        # One path that could not be read is one error, and an operator reading
+        # "2 path(s) could not be processed" for one directory is being told
+        # something false about their tree.
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        os.chmod(locked, 0)
+        try:
+            result = sweep(tmp_path, retention_days=14, max_total_gb=1)
+        finally:
+            os.chmod(locked, stat.S_IRWXU)
+
+        assert result.errors == 1
 
 
 class TestSweepRobustness:
