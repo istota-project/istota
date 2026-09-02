@@ -70,9 +70,12 @@ class TaskStreamAdapter:
         # Stream surfaces (web chat, repl) get the answer text streamed live as
         # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
         # completely untouched — no text_delta rows. Computed once per task.
-        # Imported here, not at module scope: the name is patched through
-        # ``istota.transport.registry`` by the fallback suite, so the lookup has
-        # to happen at call time.
+        # Imported here, not at module scope. The reason is a *test* constraint
+        # rather than a cycle — ``transport.registry`` imports only ``._types``,
+        # so a module-scope import would resolve cleanly — but two suites patch
+        # this name through ``istota.transport.registry``, and a name bound at
+        # import time would make both patches inert while the tests still
+        # passed. Moving it up means re-pointing those patch targets.
         from .transport.registry import task_is_stream_surface
 
         self.is_stream_surface = task_is_stream_surface(config, task)
@@ -103,7 +106,7 @@ class TaskStreamAdapter:
         # ``stream_text_gate_chars`` (0 disables — deltas stream immediately,
         # legacy behaviour); the ``stream_gate:`` telemetry below records every
         # flush / discard so the value can be tuned against production.
-        self.delta_gate_chars = config.scheduler.stream_text_gate_chars
+        self._delta_gate_chars = config.scheduler.stream_text_gate_chars
         self._delta_buf: list[str] = []
         self._delta_chars = 0
         self._delta_last_flush = time.monotonic()
@@ -162,11 +165,11 @@ class TaskStreamAdapter:
             # the narration ceiling. Crucially NO time-based flush here —
             # that was the race that leaked narration. A tool boundary
             # before the ceiling discards the buffer; crossing it unlocks.
-            if self._delta_chars >= self.delta_gate_chars:
+            if self._delta_chars >= self._delta_gate_chars:
                 self._delta_unlocked = True
                 logger.debug(
                     "stream_gate: unlocked at %d chars (task %s, gate=%d)",
-                    self._delta_chars, self.task.id, self.delta_gate_chars,
+                    self._delta_chars, self.task.id, self._delta_gate_chars,
                 )
                 self.flush_deltas()
             return
@@ -206,7 +209,7 @@ class TaskStreamAdapter:
                 logger.debug(
                     "stream_gate: discarded %d chars of held narration at a "
                     "tool boundary (task %s, gate=%d)",
-                    held, self.task.id, self.delta_gate_chars,
+                    held, self.task.id, self._delta_gate_chars,
                 )
             self._delta_buf.clear()
             self._delta_chars = 0

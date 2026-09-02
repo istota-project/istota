@@ -189,13 +189,17 @@ class TestOrdering:
         writer = RecordingWriter()
         adapter = make_adapter(task, writer, gate_chars=10)
 
-        adapter.on_event(ThinkingDeltaEvent(thinking="thought"))
-        adapter.on_event(TextDeltaEvent(text="substantial answer"))
+        # Both buffers have to be non-empty when the boundary arrives, or the
+        # two flushes are no-ops on their empty-buffer guards and the assertion
+        # holds whichever order they run in.
+        adapter._delta_unlocked = True
+        adapter._thinking_buf.append("thought")
+        adapter._delta_buf.append("substantial answer")
         adapter.on_event(ToolUseEvent(tool_name="Read", description="Read f"))
 
         # The reasoning chip settles first, so its rows keep a lower seq than
         # any trailing answer text.
-        assert writer.kinds()[:2] == ["thinking", "text_delta"]
+        assert writer.kinds() == ["thinking", "text_delta", "tool_start"]
 
     def test_finish_flushes_thinking_before_deltas(self, task):
         writer = RecordingWriter()
@@ -245,16 +249,21 @@ class TestFailuresDoNotPropagate:
 class TestNoEventWriter:
     def test_every_method_is_a_no_op(self, task):
         adapter = make_adapter(task, None, gate_chars=0)
+        # Seeded, so the assertions below are about `on_event` never buffering
+        # rather than about the constructor's initial state.
+        adapter._delta_buf.append("seed")
+        adapter._thinking_buf.append("seed")
 
         adapter.on_event(TextDeltaEvent(text="answer"))
         adapter.on_event(ThinkingDeltaEvent(thinking="reasoning"))
         adapter.on_event(ToolUseEvent(tool_name="Read", description="Read f"))
         adapter.flush_thinking()
-        adapter.settle_at_tool_boundary()
         adapter.finish()
 
-        assert adapter._delta_buf == []
-        assert adapter._thinking_buf == []
+        # Nothing was appended and nothing raised. The seeds survive because
+        # every flush returns on the missing writer.
+        assert adapter._delta_buf == ["seed"]
+        assert adapter._thinking_buf == ["seed"]
 
     def test_the_settle_still_runs_without_a_writer(self, task):
         """The reroute settle is about the daemon's own buffers, not the notice.
@@ -263,6 +272,12 @@ class TestNoEventWriter:
         not, so it must reset the gate rather than refuse on a missing writer.
         `on_event` returns early with no writer, so nothing ever reaches these
         buffers in that state — they are seeded here to make the reset visible.
+
+        Held-narration branch only, and deliberately so: the unlocked branch
+        delegates to `flush_deltas`, which returns on the missing writer before
+        it clears anything, so there the gate resets and the buffer does not.
+        That asymmetry is in the pre-extraction code and is unreachable — a
+        writer-less task buffers nothing to begin with.
         """
         adapter = make_adapter(task, None, gate_chars=10)
         adapter._delta_buf.append("held narration")

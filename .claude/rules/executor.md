@@ -14,7 +14,7 @@ def execute_task(
     event_writer: "events.EventWriter | None" = None,
 ) -> tuple[bool, str, str | None, str | None]:
 ```
-The old `on_progress: Callable[[str], None]` parameter is gone (task-event-streaming spec). The scheduler builds an `EventWriter`, subscribes consumers, and passes it; the executor emits `task_started` then adapts the brain's widened `StreamEvent` stream to `TaskEvent`s via `_on_brain_event` → `event_writer.emit(...)`. `None` on dry-run / CLI paths.
+The old `on_progress: Callable[[str], None]` parameter is gone (task-event-streaming spec). The scheduler builds an `EventWriter`, subscribes consumers, and passes it; the executor emits `task_started` then adapts the brain's widened `StreamEvent` stream to `TaskEvent`s via `executor_stream.TaskStreamAdapter`, one instance per task, whose `on_event` calls `event_writer.emit(...)`. `None` on dry-run / CLI paths.
 Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths. `execution_trace` is a JSON array of interleaved `{"type": "tool", "text": "..."}` and `{"type": "text", "text": "..."}` events, or `None`. A `tool` entry additionally carries `"raw": "<verbatim command>"` for Bash calls (the literal command, untruncated; `_tool_invocation` in `agent/events.py`) so the sleep cycle can distil playbooks that quote the real invocation rather than the paraphrased description (ISSUE-174 fix 1). Additive — consumers that read `text`/`type` are unaffected.
 
 ### Flow
@@ -213,7 +213,7 @@ Per-task BrainRequest fields the executor populates:
   spec, Stage 3).
 - `custom_system_prompt_path = config/system-prompt.md` when `custom_system_prompt = true`
 - `streaming = event_writer is not None`
-- `on_progress = _on_brain_event`: closure that maps the widened `StreamEvent`
+- `on_progress = stream.on_event`: `executor_stream.TaskStreamAdapter`, which maps the widened `StreamEvent`
   union to `TaskEvent`s on the `EventWriter` — `ToolUseEvent`→`tool_start`,
   `ToolEndEvent`→`tool_end`, `ToolProgressEvent`→`tool_progress`,
   `TextEvent`→`progress_text`, `ContextManagementEvent`→`context_management`.
