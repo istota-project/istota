@@ -1395,8 +1395,13 @@ def _failover_notice(stream, event_writer, reason, *, primary_kind, fallback_kin
 
     Both reroute paths hand the same notice to the stream; only the
     reason differs (a fresh primary failure vs. the breaker already
-    being open). Returns None when there is no stream to notify, so
-    `_run_fallback` skips the hook entirely.
+    being open). Returns None when there is no **event writer**, so
+    `_run_fallback` skips the hook entirely — the gate is the writer
+    rather than the stream, which matters now that the two arrive as
+    separate arguments instead of one adapter wrapping one writer. A
+    stream with no writer has buffered nothing either (`on_event`
+    returns at its own `event_writer is None`), so the skipped settle
+    costs nothing.
     """
     if event_writer is None:
         return None
@@ -1459,6 +1464,14 @@ def run_with_failover(
     The caller owns the ``ExitStack`` around this call: the skill and network
     proxies must be live for the primary call, the reroute and the fallback
     call alike.
+
+    ``brain_config`` is the *identity* source (which brain ran, which one
+    catches it) and ``config.brain`` is the *policy* source: the cooldown and
+    ``fallback_on_transient`` are read off the latter, as they were when this
+    was inline. The two agree today because ``execute_task`` derives
+    ``brain_config`` from ``config.brain`` with ``dataclasses.replace``, which
+    carries both fields across. A future per-source-type override that varied
+    either one would have to change this function, not just its caller.
     """
     _primary_kind = brain_config.kind
     _fallback_kind = effective_fallback_kind(brain_config)

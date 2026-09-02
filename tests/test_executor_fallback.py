@@ -21,6 +21,7 @@ from istota.executor import (
     execute_task,
     fallback_notice_text,
 )
+from istota.executor_stream import TaskStreamAdapter
 
 # Reuse the streaming test harness (config/task/patches).
 from tests.test_executor_streaming import (
@@ -939,6 +940,121 @@ class TestTheRequestSaysWhichBrainRunItIs:
         # Task 1 probes the primary and reroutes; task 2 skips it entirely.
         assert primary.calls == 1
         assert [r.is_fallback for r in fb.received_reqs] == [True, True]
+
+
+class TestTheOutcomeReachesThePersistedUsageRows:
+    """The wiring `run_with_failover` created, witnessed through `execute_task`.
+
+    The failover used to set `_ran_fallback` and `_usage_effort` as locals the
+    persist call read directly; they now travel as `FailoverOutcome` fields the
+    caller unpacks. That unpacking is a step that can be got wrong — crossing
+    two fields would leave every existing test green, since the suites above
+    assert on the `BrainRequest` rather than on what gets recorded.
+    """
+
+    def _persist_calls(self, tmp_path, **kw):
+        calls = []
+
+        def _record(config, conn, task_id, usage, **kwargs):
+            calls.append(kwargs)
+
+        with patch("istota.executor._persist_task_usage", side_effect=_record):
+            _run(tmp_path, **kw)
+        return calls
+
+    def test_a_reroute_records_two_rows_and_flags_only_the_second(self, tmp_path):
+        calls = self._persist_calls(
+            tmp_path,
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+        )
+
+        assert len(calls) == 2
+        # The primary row is written without the flag at all (it defaults off),
+        # and the fallback row carries it.
+        assert calls[0].get("is_fallback", False) is False
+        assert calls[1]["is_fallback"] is True
+        assert calls[0]["stop_reason"] == "usage_limit"
+        assert calls[1]["stop_reason"] == "completed"
+
+    def test_the_second_rows_effort_is_the_fallbacks_own_resolution(self, tmp_path):
+        # `usage_effort` exists precisely because the fallback re-resolves
+        # effort in its own namespace, so recording `req.effort` on that row
+        # would name a setting the fallback never used.
+        calls = self._persist_calls(
+            tmp_path,
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+            task_model="smart",
+            fallback_resolve_alias_map={"smart": ("fb-smart-model", "high")},
+        )
+
+        assert len(calls) == 2
+        assert calls[1]["effort"] == "high"
+        # The primary row keeps the request's own effort, which is what
+        # described the attempt that actually ran there.
+        assert calls[1]["effort"] != calls[0]["effort"]
+
+    def test_a_clean_primary_records_one_unflagged_row(self, tmp_path):
+        calls = self._persist_calls(
+            tmp_path,
+            primary_result=BrainResult(
+                True, "primary answer", stop_reason="completed"
+            ),
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["is_fallback"] is False
+
+
+class TestExecuteTaskSurvivesAFailoverRaise:
+    """The property the extraction rests on.
+
+    `execute_task` now binds six locals off the returned `FailoverOutcome`
+    instead of assigning them as the block progressed, so a raise out of
+    `run_with_failover` leaves all six unbound. That is only safe because every
+    reader sits after the call and the outer handler touches none of them —
+    a fact nothing asserted until this test.
+    """
+
+    def test_a_raising_brain_returns_the_error_and_still_finishes_the_stream(
+        self, tmp_path
+    ):
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="")
+        config.security.sandbox_enabled = False
+
+        class _Exploding(_FakeBrain):
+            def execute(self, req):
+                raise RuntimeError("the brain went away")
+
+        primary = _Exploding("claude_code", None)
+        finishes = []
+
+        with contextmanager_chain(_patch_executor() + [
+            patch("istota.executor.make_brain", return_value=primary),
+            patch("istota.executor._native_with_user_key",
+                  side_effect=lambda nc, *a, **k: nc),
+            patch.object(
+                TaskStreamAdapter, "finish",
+                side_effect=lambda self=None: finishes.append(True),
+                autospec=False,
+            ),
+        ]):
+            task = _make_task(source_type="cli")
+            success, result, actions, trace = execute_task(
+                task, config, [], event_writer=_writer(task, config),
+            )
+
+        assert success is False
+        assert "the brain went away" in result
+        # The `finally` still drained the buffers on the way out — an
+        # UnboundLocalError on one of the six would have replaced this
+        # message with a different one.
+        assert result.startswith("Execution error:")
+        assert finishes == [True]
 
 
 class TestFallbackNoticeText:

@@ -469,6 +469,29 @@ class TestTheStreamHandOffAtAReroute:
         assert touched == ["thinking", "settle"]
         assert writer.kinds().count("brain_fallback") == 1
 
+    def test_a_none_stream_with_a_writer_still_emits_the_notice(self, tmp_path):
+        # `execute_task` always builds an adapter, so this pairing has no
+        # production caller — but the signature admits `stream=None`, and the
+        # guard that makes it survivable is new code the move introduced.
+        # Without a case for it the guard is the one line in this stage
+        # covered by nothing.
+        writer = RecordingWriter()
+
+        outcome, _, fallback = run(
+            tmp_path,
+            primary_result=BrainResult(
+                False, "over quota", stop_reason="usage_limit"
+            ),
+            stream=None,
+            event_writer=writer,
+        )
+
+        assert fallback.calls == 1
+        assert outcome.ran_fallback is True
+        # The notice is about the reroute, not about the buffers, so it still
+        # goes out with no adapter to settle.
+        assert "brain_fallback" in writer.kinds()
+
     def test_a_notice_that_raises_does_not_cost_the_reroute(self, tmp_path):
         config = _make_config(tmp_path)
         task = _make_task()

@@ -275,9 +275,11 @@ exactly like a tool call, so it settles the buffers — `flush_thinking()` then
 `settle_at_tool_boundary()`, in that order — before emitting the banner, or an
 unflushed primary tail opens the fallback's answer. Two asymmetries: the settle
 runs even when `emit_once` dedupes the banner away (it is about the daemon's
-own buffers, not the sentence), and with no `event_writer` the function returns
-`None` so `_run_fallback` skips the hook entirely — there is nothing buffered
-to settle there either.
+own buffers, not the sentence), and the gate is the **writer**, not the stream:
+with no `event_writer` the function returns `None` and `_run_fallback` skips the
+hook entirely. Nothing is lost there, because `TaskStreamAdapter.on_event`
+returns at its own `event_writer is None` before either buffer is appended to,
+so a writerless stream has buffered nothing to settle.
 
 - `_fallback_kind = effective_fallback_kind(brain_config)` (`brain/_fallback.py`);
   `_cooldown = config.brain.fallback_cooldown_seconds`; `_breaker =
