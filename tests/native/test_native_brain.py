@@ -2,10 +2,12 @@
 
 import asyncio
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1192,3 +1194,114 @@ class TestFactory:
         # aliases (see test_native_resolution.py).
         brain = NativeBrain(NativeBrainConfig(model="qwen-x"), provider=object())
         assert brain.resolve_model_name("opus") == "opus"
+
+
+class TestClaudeRuntimeEnvDoesNotReachTheTools:
+    """ISSUE-390: the Claude runtime credential stops at the native profile.
+
+    ``build_clean_env`` sets ``CLAUDE_CODE_OAUTH_TOKEN`` for every task whatever
+    brain will run it, and ``_build_tools`` is where that env crosses into
+    NativeBrain's tools. Nothing on this path reads it — the provider key comes
+    from the config — so the only thing it can do here is come back out of a
+    Bash call as a ``ToolResultMessage`` addressed to whatever provider native
+    is pointed at.
+    """
+
+    def _bash(self, req):
+        return next(
+            t for t in _brain(MockProvider([]))._build_tools(req)
+            if t.schema.name == "Bash"
+        )
+
+    def _req_with_env(self, tmp_path, **extra):
+        req = _req("hi", tmp_path, tools=["Bash"])
+        # PATH is needed for real here: ``create_subprocess_exec`` resolves the
+        # bare name ``bash`` through the PATH of the env it is handed, not the
+        # parent's.
+        req.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **extra}
+        return req
+
+    def test_bash_cannot_read_the_token_and_still_sees_everything_else(self, tmp_path):
+        """Through the real seam: build the tools, then ask bash what it holds."""
+        req = self._req_with_env(
+            tmp_path,
+            CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests",
+            ISTOTA_USER_ID="alice",
+        )
+        out = asyncio.run(
+            self._bash(req).execute(
+                "c",
+                {
+                    "command": 'echo "tok=[${CLAUDE_CODE_OAUTH_TOKEN:-EMPTY}] '
+                               'uid=[${ISTOTA_USER_ID:-EMPTY}]"'
+                },
+                None,
+                None,
+            )
+        )
+        text = out.content[0].text
+        assert "tok=[EMPTY]" in text
+        assert "sk-ant-oat-fake-for-tests" not in text
+        # The strip is the named set and nothing wider — the rest of the task
+        # env is what makes the tools work at all.
+        assert "uid=[alice]" in text
+
+    def test_the_requests_own_env_is_left_alone(self, tmp_path):
+        """The copy matters as much as the strip.
+
+        The same mapping is ``req.env``, which ``ClaudeCodeBrain`` hands to the
+        ``claude`` CLI and which ``_run_fallback`` carries across a reroute with
+        ``dataclasses.replace`` without rebuilding it. Stripping in place would
+        take the credential away from the brain that needs it, on the deployment
+        where that token is the only credential there is.
+        """
+        req = self._req_with_env(
+            tmp_path, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests"
+        )
+        self._bash(req)
+        assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake-for-tests"
+
+    def test_an_env_of_nothing_but_the_token_does_not_become_inheritance(
+        self, tmp_path
+    ):
+        """The seam's own failure mode, which the helper's tests cannot see.
+
+        Stripping the only entry leaves `{}`, and `{} or None` is `None` —
+        which `ToolEnv` reads as "inherit the parent environment". The parent is
+        the daemon, whose environment is where `build_clean_env` read the token
+        from, so that collapse would hand the child the whole daemon env and
+        every credential in it. The strip has to make the env emptier, never
+        wider.
+        """
+        from istota.session.tools import ToolEnv
+
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-fake-for-tests"}
+        seen = {}
+        real = ToolEnv
+
+        def _record(**kwargs):
+            seen.update(kwargs)
+            return real(**kwargs)
+
+        with patch("istota.session.tools.ToolEnv", _record):
+            self._bash(req)
+        assert seen["subprocess_env"] == {}
+
+    def test_no_env_at_all_still_means_inherit(self, tmp_path):
+        """The other side of the same line: an absent env is not the same
+        instruction as an emptied one, and this path must not change."""
+        from istota.session.tools import ToolEnv
+
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = {}
+        seen = {}
+        real = ToolEnv
+
+        def _record(**kwargs):
+            seen.update(kwargs)
+            return real(**kwargs)
+
+        with patch("istota.session.tools.ToolEnv", _record):
+            self._bash(req)
+        assert seen["subprocess_env"] is None
