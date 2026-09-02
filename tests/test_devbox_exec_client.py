@@ -767,8 +767,14 @@ class TestTheClientIsACopyableLeaf:
     def test_it_runs_from_a_copy_with_only_the_protocol_module_beside_it(
         self, server, tmp_path
     ):
-        """What `{dev_bin}` looks like: two files in a directory, and no istota
-        package to import from."""
+        """What `{dev_bin}` looks like: two files in a directory.
+
+        The `PYTHONPATH`/`PYTHONHOME` strip is a leftover and says nothing on
+        its own — `istota` is importable in both environments this runs in, off
+        an editable install on a developer host and off a path entry in the
+        Linux tier's venv (ISSUE-398). The test below it is the discriminating
+        one: copy the client without its sibling and it must fail.
+        """
         dev_bin = tmp_path / "dev_bin"
         dev_bin.mkdir()
         shutil.copy2(CLIENT, dev_bin / CLIENT.name)

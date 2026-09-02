@@ -48,10 +48,10 @@ def _installed_version() -> str:
     """The installed distribution's version, or a placeholder.
 
     `importlib.metadata.version` raises `PackageNotFoundError` when istota is
-    importable but not installed — running straight off a source tree on
-    `PYTHONPATH`, which is what `scripts/test-linux.sh` does. That raise
-    happened while *building the parser*, so it took down every command rather
-    than only `--version`.
+    importable but not installed — the Linux tier's image, which reaches the
+    source through a path entry in its venv and so has no distribution metadata
+    for the package (ISSUE-398). That raise happened while *building the
+    parser*, so it took down every command rather than only `--version`.
     """
     try:
         return importlib.metadata.version("istota")

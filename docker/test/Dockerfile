@@ -45,8 +45,8 @@ COPY pyproject.toml uv.lock ./
 # --no-install-project: `istota` is a hatchling package with no
 # `[tool.uv] package = false`, so a plain sync would try to build the root
 # project and fail — src/ is not in the build context at this point. The source
-# arrives at run time via the bind mount, and pythonpath = ["src"] makes it
-# importable.
+# arrives at run time via the bind mount, and the .pth written below is what
+# makes it importable. See that step for why pythonpath is not enough.
 #
 # Extras: `all` minus the two heavy ones. `memory-search` pulls torch and
 # sentence-transformers and `whisper` pulls faster-whisper, av and onnxruntime
@@ -66,6 +66,58 @@ COPY pyproject.toml uv.lock ./
 # to be in it by proxy (via `docs` and `whisper`); they are test dependencies
 # and now live in the `dev` group, which `--group dev` below installs.
 RUN uv sync --frozen --no-install-project --group dev --extra test
+
+# ...and then put the project itself on that venv's import path, pointing at
+# where the source arrives at run time (ISSUE-398).
+#
+# **The import path, and deliberately nothing else.** This writes no
+# `.dist-info` and no console scripts, so it is weaker than the `uv sync` a
+# deployment runs: `importlib.metadata.version("istota")` still raises here —
+# `cli._installed_version` is the fallback that exists for it — and
+# `istota-skill` is still absent from this image, so anything resolving the
+# package by console-script name rather than as
+# `[sys.executable, "-m", "istota.…"]` does not work in the tier and never did.
+# What it fixes is importability, which is the whole of what was broken.
+#
+# Written by hand because the two halves happen at different times: `uv sync`
+# cannot install a project whose source is not in the build context, and the
+# source is not in the build context because the point of the tier is to test
+# the developer's checkout rather than a copy baked into a layer. A real
+# install would bake that copy and shadow the bind, so the tier would report on
+# code nobody edited.
+#
+# `pythonpath = ["src", "."]` in pyproject.toml is NOT a substitute, and
+# assuming it was cost 47 failures on a clean `main`. That setting mutates
+# `sys.path` inside the pytest process and reaches no child of it — and the
+# native brain spawns `[sys.executable, "-m", "istota.tool_server"]` with the
+# *task* env, which `build_clean_env` builds from PATH, HOME and
+# PYTHONUNBUFFERED. Neither the ini setting nor a `-e PYTHONPATH` on the
+# `docker run` reaches that spawn, so every native task in the tier died at the
+# handshake with `ModuleNotFoundError: No module named 'istota'`.
+# `tests/test_security.py::TestTheTaskEnvCanImportIstota` is what states the
+# contract now, and it runs inside the tier.
+#
+# `/src/src` is the checkout bind in `scripts/test-linux.sh`'s `run_in_container`
+# (`-v "$REPO_ROOT:/src:ro"`), which is the only thing making this path true.
+# Change it there and change it here. A .pth line naming a directory that does
+# not exist is ignored in silence, so an image run without the bind behaves
+# exactly as it did.
+#
+# `sysconfig` names the directory rather than `site.getsitepackages()[0]`
+# indexing into it: that list's order is not contracted and a patched
+# interpreter returns several entries, so an index picks the right one here and
+# could pick a `dist-packages` a venv never scans on a different base image —
+# writing the file, exiting 0, and resurfacing as the same 47
+# ModuleNotFoundErrors. The assertions are what make that a build failure
+# instead: the target has to be a directory `site` actually scans, and the file
+# has to be there afterwards.
+RUN /venv/bin/python -c "\
+import pathlib, site, sysconfig; \
+target = pathlib.Path(sysconfig.get_paths()['purelib']); \
+assert str(target) in site.getsitepackages(), (target, site.getsitepackages()); \
+entry = target / '_istota_src.pth'; \
+entry.write_text('/src/src\n'); \
+assert entry.read_text() == '/src/src\n', entry"
 
 # ruff is in [dependency-groups] dev as of ISSUE-301 and so already arrives in
 # /venv above. Keeping the tool install anyway is deliberate: /root/.local/bin
