@@ -557,6 +557,15 @@ services:
       dockerfile: Dockerfile
     container_name: istota-browser
     platform: ${BROWSER_PLATFORM:-linux/amd64}
+    # PID 1 in this image is `su` (entrypoint.sh ends with `exec su … python`),
+    # which installs no SIGCHLD handler and reaps no orphan. Chrome's renderer,
+    # GPU, zygote and crashpad processes are children of the browser process, so
+    # every hard kill of it reparents them here — 43 zombies accumulated in 40
+    # minutes of production before ISSUE-394. The API now kills Chrome's whole
+    # process group and waits on it, which is the fix; this is the backstop for
+    # whatever still escapes, since a container without an init has no reaper at
+    # all and the pids cgroup limit is finite.
+    init: true
     profiles:
       - browser
     ports:

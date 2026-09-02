@@ -123,6 +123,14 @@ def _reset_module_globals():
             last_success=0.0, last_failure=0.0,
             consecutive_failures=0, last_error="",
         )
+        # The wedge-recovery record is module state like the rest, and this file
+        # drives recover_wedged_chrome(). Left unreset it accumulates across
+        # tests until the deep probe's fourth arm (ISSUE-394) answers
+        # `wedge-loop` for every case here that expects `ok`.
+        chrome._launch_generation = 0
+        with chrome._wedge_lock:
+            chrome._wedge_recoveries.clear()
+        browse_api._wedge_loop_reported = False
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
 

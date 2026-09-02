@@ -83,6 +83,12 @@ def _reset_chrome_globals():
             last_success=0.0, last_failure=0.0,
             consecutive_failures=0, last_error="",
         )
+        # Same reason: the launch generation and the wedge-recovery record
+        # (ISSUE-394) are module state, and this file drives both restart and
+        # recover paths that write them.
+        chrome._launch_generation = 0
+        with chrome._wedge_lock:
+            chrome._wedge_recoveries.clear()
 
     _reset()
     yield
