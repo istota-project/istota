@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -56,6 +55,21 @@ class CheckResult:
     healthy: bool
     message: str
     details: dict | None = None
+    #: What this failure *is*, for a check that can name its own failing parts.
+    #:
+    #: `should_alert`'s cooldown rate-limits a standing failure; it never ends
+    #: one. That is right for a check whose failure is a fact about the world
+    #: worth repeating — a `url-health` site that is still down an hour later —
+    #: and wrong for one whose failure set includes conditions documented as
+    #: the normal state of a deployment, which is what `self-check` became when
+    #: it started rendering the doctor registry. A check that sets this is
+    #: saying "an unchanged answer is not news": it pages when the signature
+    #: changes and stays quiet while it does not.
+    #:
+    #: `None` — the default, and what all five other check types leave it — is
+    #: exactly today's behaviour, which is why this is safe to add here rather
+    #: than in a `self-check`-only branch of `should_alert`.
+    alert_signature: str | None = None
 
 
 def _get_mount_path(config: "Config", path: str) -> Path:
@@ -638,103 +652,150 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
     return CheckResult(healthy=True, message="No overdue or upcoming deadlines")
 
 
+#: Registry checks the heartbeat does not run, each with the reason it is out.
+#: Follows `scheduler.SWEEP_SKIPPED_CHECKS`' precedent as a module constant with
+#: its reasons written beside the entries rather than in a commit message.
+#:
+#: What every entry has in common is a cost that multiplies by something the
+#: heartbeat multiplies by. `self-check` is per user *and* per check definition,
+#: on a cadence each user chooses in their own `HEARTBEAT.md`, and it is not
+#: admin-gated — `run_check` gates only `shell-command`. So a check costing one
+#: spawn per configured user, or reaching past a `--version`, is a check this
+#: path must not run.
+#:
+#: **What this list is not for, now that the thread question is settled.** The
+#: spec that unified this handler onto the registry argued the cost was already
+#: paid, because `scheduler.check_doctor` runs the same registry hourly with
+#: `probe=True`. That was true of the *work* and false of the *thread*, and the
+#: gap was real: `check_heartbeats` ran synchronously on the dispatch loop,
+#: holding one write transaction for the whole sweep, so this handler blocked
+#: dispatch for as long as the registry took, once per user. Both halves are
+#: fixed where they belonged rather than here — the sweep is spawned through
+#: `_spawn_background_check` and commits per check — so `web.basemap`
+#: (network), `runtime.mount_liveness` (a FUSE stat) and `config.skill_overlays`
+#: (a mount walk) are deliberately **not** skipped: they are slow, and slow is
+#: no longer the thing that hurts. What still belongs here is a check whose cost
+#: is paid per *user* when the answer is deployment-wide, or one that owns its
+#: own cadence elsewhere.
+_SELF_CHECK_SKIPPED = (
+    # A `PRAGMA quick_check` over the whole framework database. `check_db_health`
+    # owns that on a daily cadence, and `SWEEP_SKIPPED_CHECKS` excludes it from
+    # the hourly sweep for the same reason — more strongly here, since a
+    # heartbeat can be configured to run more often than hourly.
+    "runtime.framework_db",
+    # An HTTPS GET behind its own TTL and its own deployment-wide disk cache.
+    # Its cadence is not this one's to override.
+    "runtime.subscription_usage",
+    # One exec-transport socket connection per configured user.
+    "developer.container",
+    # Spawns `iptables`.
+    "security.devbox_netfilter",
+)
+
+
 def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckResult:
-    """
-    Run system health diagnostics (mirrors !check command).
+    """Run the doctor registry and report its verdict.
 
     Config fields:
-        execution_test: Whether to run Claude CLI invocation test (default: True)
+        execution_test: whether to run the live model invocation (default: True)
+
+    This used to be a hand-rolled copy of `commands.cmd_check` — the same five
+    probes in the same order, drifting from doctor's registry and from the other
+    copy. All five are registry checks now, so this handler selects and renders
+    and asserts nothing of its own.
+
+    Four things about the call are decisions rather than defaults:
+
+    ``execution_test`` selects ``live``, not ``deep``. It gates exactly one
+    thing today — the live model invocation — and ``live`` is exactly one thing.
+    Mapping it to ``deep`` would have widened ``execution_test = false`` from
+    "spawn nothing" to "run the whole registry", and ``true`` to "also build a
+    namespace". The key keeps its name, its default and its meaning.
+
+    ``deep`` is therefore never passed. A namespace spawn on a per-user,
+    per-check cadence multiplies by both; ``security.sandbox_effective`` answers
+    the availability question from the warm memo at no cost, which is what this
+    path actually needs.
+
+    ``probe`` stays True. ``probe=False`` would map neatly onto the old
+    ``shutil.which`` calls, but it would make ``live=True`` self-contradictory.
+    :data:`_SELF_CHECK_SKIPPED` names the ones whose cost multiplies badly
+    instead. The sweep that calls this runs on a background thread and commits
+    per check, so a slow check here costs its own wall time and nothing else;
+    that was not true when this handler was written, and the constant's first
+    paragraph records what changed.
+
+    And it redacts before anything leaves. `scheduler` and `web_app` both do;
+    this path delivers to a user and had no reason to be the exception.
+
+    **An admin is told which checks failed; everyone else gets the count.** The
+    same disclosure boundary `commands.cmd_check` draws, drawn here for the same
+    reason and by the same mechanism, because this handler reaches the same
+    audience: ``run_check`` admin-gates only ``shell-command``, and
+    ``check_heartbeats`` runs each user's own ``HEARTBEAT.md`` and delivers the
+    message to that user. A registry ``detail`` is not a per-user fact —
+    ``config.skill_overlays`` labels overlays ``{user_id}/{filename}`` across
+    every user's tree, ``developer.repos_layout`` names the namespaces filed on
+    disk, and ``runtime.model_execution`` names the admin it probed as. An
+    allowlist of safe check names is rejected here for the reason the spec
+    rejects it there: a second list to keep in step with a registry that grows,
+    where a check whose detail widens later leaks with nothing going red.
+
+    Naming the failures is what makes an admin's alert actionable, and a count
+    alone would be a regression on what this reported before — so the narrowing
+    is only for the audience that could not act on the names anyway.
+
+    ``user_id`` is now read only for that gate. The probe itself resolves the
+    deployment's own user (``doctor._probe_user``), which is a deliberate
+    narrowing recorded there; it is not a per-user knob to restore.
     """
-    from .executor import SandboxProfile, build_bwrap_cmd, build_model_cli_env
+    from . import doctor
 
-    failures = []
-
-    # 1. Claude binary
-    if not shutil.which("claude"):
-        failures.append("Claude binary not found in PATH")
-
-    # 2. Sandbox (bwrap) — only if sandbox enabled
-    if config.security.sandbox_enabled and not shutil.which("bwrap"):
-        failures.append("bwrap not found in PATH (sandbox enabled)")
-
-    # 3. DB health
     try:
-        with db.get_db(config.db_path) as conn:
-            conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
-    except Exception as e:
-        failures.append(f"Database error: {e}")
-
-    # 4. Recent task failure rate (last hour)
-    try:
-        with db.get_db(config.db_path) as conn:
-            stats = conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-                FROM tasks
-                WHERE created_at > datetime('now', '-1 hour')
-                """,
-            ).fetchone()
-            completed = stats[0] or 0
-            failed = stats[1] or 0
-            if failed > 0 and failed >= completed:
-                failures.append(
-                    f"High failure rate: {failed} failed vs {completed} completed in last hour"
-                )
-    except Exception as e:
-        failures.append(f"Task stats error: {e}")
-
-    # 5. Claude execution test (optional, default enabled)
-    if check.config.get("execution_test", True):
-        try:
-            cmd = [
-                "claude", "-p", "Run: echo healthcheck-ok",
-                "--allowedTools", "Bash",
-                "--output-format", "text",
-            ]
-
-            env = build_model_cli_env(config)
-
-            if config.security.sandbox_enabled:
-                fake_task = db.Task(
-                    id=0, status="running", source_type="cli",
-                    user_id=user_id, prompt="healthcheck",
-                    conversation_token="",
-                )
-                try:
-                    with db.get_db(config.db_path) as conn:
-                        user_resources = db.get_user_resources(conn, user_id)
-                except Exception:
-                    user_resources = []
-                user_temp = config.temp_dir / user_id
-                user_temp.mkdir(parents=True, exist_ok=True)
-                is_admin = config.is_admin(user_id)
-                # CLAUDE: the command this wraps is `claude -p`, which needs
-                # its own binary, its credential and its state directory.
-                cmd = build_bwrap_cmd(
-                    cmd, config, fake_task, is_admin, user_resources, user_temp,
-                    profile=SandboxProfile.CLAUDE,
-                )
-
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, env=env,
-            )
-            if "healthcheck-ok" not in result.stdout:
-                failures.append("Claude execution test: 'healthcheck-ok' not in output")
-        except subprocess.TimeoutExpired:
-            failures.append("Claude execution test timed out (30s)")
-        except Exception as e:
-            failures.append(f"Claude execution test error: {e}")
-
-    if failures:
+        results = doctor.redact(
+            doctor.run_checks(
+                config,
+                live=bool(check.config.get("execution_test", True)),
+                skip=_SELF_CHECK_SKIPPED,
+            ),
+            config,
+        )
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not page a user
+        # Both scheduler callers wrap this same pair and return no results
+        # (`run_startup_checks`, `check_doctor`), because `run_checks` is not
+        # exception-proof end to end: a check returning a non-iterable escapes
+        # the per-check `try`, and `redact` is outside it entirely. `run_check`'s
+        # blanket handler would catch this, but it renders as an unhealthy
+        # result, so a defect in doctor would alert every user with a
+        # `self-check` rather than being logged for an operator.
+        logger.error("heartbeat self-check could not run doctor: %s", exc, exc_info=True)
         return CheckResult(
-            healthy=False,
-            message="; ".join(failures),
-            details={"failures": failures},
+            healthy=True,
+            message="the health registry could not be run; see the daemon log",
+            details={"failures": [], "summary": "registry unavailable"},
         )
 
-    return CheckResult(healthy=True, message="All self-checks passed")
+    healthy, summary = doctor.verdict(results)
+    failures = doctor.failing(results)
+    if config.is_admin(user_id):
+        message = "; ".join(f"{r.name}: {r.detail}" for r in failures) or summary
+    else:
+        message = summary
+    return CheckResult(
+        healthy=healthy,
+        message=message,
+        # Not delivered to the user — nothing in `heartbeat` or `scheduler`
+        # reads it — so the names are safe here whatever the gate above said.
+        details={"failures": [r.name for r in failures], "summary": summary},
+        # Sorted, and the names alone: `run_checks` walks the registry in
+        # declaration order, so a check inserted between two failing ones would
+        # otherwise change the signature and page every user about a failure set
+        # that had not changed. The `detail` is deliberately excluded for the
+        # same reason — several carry a count or a path that moves on its own.
+        # Empty stays None rather than "": a healthy run has nothing to
+        # suppress, and `should_alert` returns False for it long before this.
+        alert_signature="|".join(sorted(r.name for r in failures)) or None,
+    )
 
 
 # Handler dispatch table
@@ -785,6 +846,30 @@ def run_check(
         )
 
 
+#: How long an unchanged failure set stays suppressed before it is reported
+#: again. Deliberately far longer than any `default_cooldown_minutes` and still
+#: finite: see the gate in `should_alert` for the two cases that need the floor.
+MAX_SIGNATURE_SUPPRESSION_HOURS = 24
+
+
+def _within_suppression_window(last_alert_at: str | None) -> bool:
+    """Whether the recorded alert is recent enough to still suppress a repeat.
+
+    An unparseable or absent timestamp reads as *outside* the window, so the
+    alert goes out. Failing towards a duplicate page rather than towards
+    silence is the only safe direction for a gate whose whole job is to
+    withhold notifications.
+    """
+    if not last_alert_at:
+        return False
+    try:
+        last = datetime.fromisoformat(last_alert_at)
+    except (ValueError, TypeError):
+        return False
+    elapsed = (datetime.now(ZoneInfo("UTC")).replace(tzinfo=None) - last).total_seconds()
+    return elapsed < MAX_SIGNATURE_SUPPRESSION_HOURS * 3600
+
+
 def should_alert(
     conn,
     user_id: str,
@@ -798,11 +883,37 @@ def should_alert(
 
     Returns False if:
     - Check is healthy
+    - The failure set is unchanged since the last delivered alert and that
+      alert is within `MAX_SIGNATURE_SUPPRESSION_HOURS` (`alert_signature`)
     - Within cooldown period
     - Within quiet hours
     """
     if result.healthy:
         return False
+
+    # A failure that has not changed since the last alert is not news. Only a
+    # check that named what it is failing on gets to make that claim; every
+    # other type leaves `alert_signature` None and keeps the cooldown-only
+    # behaviour below.
+    #
+    # Bounded by `MAX_SIGNATURE_SUPPRESSION_HOURS`, which is what makes this a
+    # rate limit rather than an off switch. The signature is the failing
+    # *names*, so a condition that is getting worse without changing which
+    # checks fail — a disk at 20% and the same disk at 0.5% — produces the same
+    # string; and `_dispatch` reports success when any one destination
+    # succeeded, so a user routed to two surfaces whose second leg failed would
+    # otherwise never see a retry. Neither is worth a page every cooldown, and
+    # both are worth one a day. The window is cleared outright on recovery, so
+    # this only ever governs a failure that is still standing.
+    if result.alert_signature is not None:
+        state = db.get_heartbeat_state(conn, user_id, check.name)
+        if state and state.last_alert_signature == result.alert_signature:
+            if _within_suppression_window(state.last_alert_at):
+                logger.debug(
+                    "Skipping alert for %s/%s: unchanged failure set (%s)",
+                    user_id, check.name, result.alert_signature,
+                )
+                return False
 
     # Check quiet hours
     if is_quiet_hours(user_tz, settings.quiet_hours):
@@ -906,13 +1017,41 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                 conn, user_id, check.name,
                 last_check_at=True,
             )
+            # Commit each write as it is made, rather than once at the end of
+            # the sweep. `get_db` is in Python's legacy implicit-transaction
+            # mode, so this write opens the daemon's single SQLite write
+            # transaction and — with no commit before the loop's next
+            # iteration — held it across every remaining check, `_check_self`'s
+            # whole doctor registry among them: process spawns, a socket per
+            # configured service and an optional live model call. That was
+            # tolerable only while the sweep ran on the dispatch loop and
+            # nothing else could be writing; off the loop it becomes lock
+            # contention against the loop and the workers, who then wait out
+            # `get_db`'s busy timeout. It also has to be released before
+            # `send_heartbeat_alert` below, which opens its own connection to
+            # this database on the web and Talk legs — a second connection
+            # under a held write lock is the busy-timeout deadlock
+            # `notification_store` documents, and it would land on the delivery
+            # path of the alert this sweep exists to send.
+            #
+            # Nothing here needs sweep-wide atomicity: each row is one check's
+            # own state. The gain is also durability — the sweep runs on a
+            # daemon thread now, which a shutdown kills without joining, and an
+            # uncommitted `last_alert_at` for an alert already delivered means
+            # a duplicate page on the next start.
+            conn.commit()
 
             if check_result.healthy:
                 db.update_heartbeat_state(
                     conn, user_id, check.name,
                     last_healthy_at=True,
                     reset_errors=True,
+                    # Recovery forgets what the last alert was about, so the
+                    # same failure recurring next month is news again rather
+                    # than being suppressed for ever by a stale signature.
+                    clear_alert_signature=True,
                 )
+                conn.commit()
             else:
                 # Check if we should alert
                 if should_alert(conn, user_id, check, check_result, settings, user_tz):
@@ -939,6 +1078,12 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                         db.update_heartbeat_state(
                             conn, user_id, check.name,
                             last_alert_at=True,
+                            # Only a *delivered* alert records its signature.
+                            # Recording one for a send that reached nobody would
+                            # suppress every later page for the same condition —
+                            # `notification_store.last_delivered_at` draws the
+                            # same line for the same reason.
+                            last_alert_signature=check_result.alert_signature,
                         )
                     else:
                         db.update_heartbeat_state(
@@ -946,5 +1091,6 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                             last_error_at=True,
                             increment_errors=True,
                         )
+                    conn.commit()
 
     return checked_users

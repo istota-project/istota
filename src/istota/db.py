@@ -364,6 +364,18 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Column already dropped or doesn't exist
 
+    # Heartbeat state: what the last alert was about, so a standing failure
+    # pages once rather than once per cooldown for ever. Nullable and read as
+    # "no signature recorded", so an upgraded database is simply a deployment
+    # whose next alert establishes one.
+    for col, col_type in [
+        ("last_alert_signature", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE heartbeat_state ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
     # Processed emails migrations
     for col, col_type in [
         ("routing_method", "TEXT"),
@@ -3959,6 +3971,46 @@ def add_room_binding(
     )
 
 
+def replace_room_binding(
+    conn: sqlite3.Connection,
+    room_token: str,
+    surface: str,
+    surface_ref: str,
+    *,
+    expected_ref: str | None,
+) -> bool:
+    """Point a room's binding at a different ref. Compare-and-set; returns
+    whether the write landed.
+
+    `add_room_binding` is `INSERT OR IGNORE` and stays that way: it is called on
+    every inbound poll by three writers, and an `ON CONFLICT DO UPDATE` there
+    would let a stale or misrouted inbound rewrite a good binding. Replacement
+    is a separate verb with one caller — the promote path, which has established
+    that the bound conversation is gone (ISSUE-401).
+
+    `expected_ref` is what the caller saw when it looked: `None` for no binding
+    at all, otherwise the ref it read. A binding that changed in between is left
+    alone and False comes back. That matters because the caller's check and its
+    write are separated by an OCS round trip that creates a conversation, so two
+    concurrent promotes can interleave — and the loser overwriting the winner
+    would point the room at a conversation the winner is not using, on top of
+    the orphan it already made.
+    """
+    if expected_ref is None:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
+            "VALUES (?, ?, ?)",
+            (room_token, surface, surface_ref),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE room_bindings SET surface_ref = ? "
+            "WHERE room_token = ? AND surface = ? AND surface_ref = ?",
+            (surface_ref, room_token, surface, expected_ref),
+        )
+    return cur.rowcount > 0
+
+
 def get_room_binding(
     conn: sqlite3.Connection, room_token: str, surface: str,
 ) -> RoomBinding | None:
@@ -4320,6 +4372,73 @@ def set_message_external_id(
         "UPDATE messages SET external_ids = ? WHERE id = ?",
         (json.dumps(current), message_id),
     )
+
+
+def clear_stale_talk_delivery_token(
+    conn: sqlite3.Connection, room_token: str, stale_ref: str,
+) -> int:
+    """Drop `tasks.talk_delivery_token` where it still names a Talk conversation
+    that is gone. Returns how many rows changed.
+
+    The other half of a rebind (ISSUE-401). `talk_channel_for_task`'s rung 0
+    returns this column **absolutely**, before the binding is ever consulted, so
+    a task carrying it keeps delivering to the dead conversation no matter what
+    the binding now says. Clearing it drops those tasks to rung 1, which is the
+    repaired binding.
+
+    Scoped to non-terminal tasks in this room whose value is exactly the ref
+    being replaced: a finished task's column is a record of where its answer
+    went and is not rewritten, and a task naming some other conversation is not
+    this room's problem to fix.
+    """
+    cur = conn.execute(
+        "UPDATE tasks SET talk_delivery_token = NULL "
+        "WHERE conversation_token = ? AND talk_delivery_token = ? "
+        "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
+        (room_token, stale_ref),
+    )
+    return cur.rowcount
+
+
+def clear_room_external_ids(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> int:
+    """Drop one surface's recorded ids for every message in a room. Returns how
+    many rows changed.
+
+    The counterpart to a binding being repointed (ISSUE-401). A surface id is a
+    claim that this message exists over there, and it is only meaningful
+    relative to the conversation the binding named when it was written — Talk
+    message ids are per-conversation and start low, so after a rebind a stale
+    id does not merely fail to resolve, it can name a *different* message in
+    the new conversation. `get_message_external_id` feeds a web reply's Talk
+    `replyTo`, so keeping them would attach replies to whatever happens to
+    share the number.
+
+    A read-modify-write per row rather than one `json_remove`, matching
+    `set_message_external_id` above; the row count is bounded by one room's
+    stamped messages and this runs on a rare, explicit user action.
+    """
+    rows = conn.execute(
+        "SELECT id, external_ids FROM messages "
+        "WHERE room_token = ? AND external_ids IS NOT NULL",
+        (room_token,),
+    ).fetchall()
+    changed = 0
+    for r in rows:
+        try:
+            ext = json.loads(r["external_ids"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(ext, dict) or surface not in ext:
+            continue
+        del ext[surface]
+        conn.execute(
+            "UPDATE messages SET external_ids = ? WHERE id = ?",
+            (json.dumps(ext) if ext else None, r["id"]),
+        )
+        changed += 1
+    return changed
 
 
 def user_turn_has_external_id(
@@ -8270,6 +8389,10 @@ class HeartbeatState:
     last_healthy_at: str | None
     last_error_at: str | None
     consecutive_errors: int
+    #: The failing set the last alert was about, for a check type that names
+    #: one. None for every other type, and on a row written before the column
+    #: existed.
+    last_alert_signature: str | None = None
 
 
 def get_heartbeat_state(
@@ -8281,7 +8404,8 @@ def get_heartbeat_state(
     cursor = conn.execute(
         """
         SELECT user_id, check_name, last_check_at, last_alert_at,
-               last_healthy_at, last_error_at, consecutive_errors
+               last_healthy_at, last_error_at, consecutive_errors,
+               last_alert_signature
         FROM heartbeat_state
         WHERE user_id = ? AND check_name = ?
         """,
@@ -8298,6 +8422,7 @@ def get_heartbeat_state(
         last_healthy_at=row["last_healthy_at"],
         last_error_at=row["last_error_at"],
         consecutive_errors=row["consecutive_errors"],
+        last_alert_signature=row["last_alert_signature"],
     )
 
 
@@ -8312,6 +8437,8 @@ def update_heartbeat_state(
     last_error_at: bool = False,
     reset_errors: bool = False,
     increment_errors: bool = False,
+    last_alert_signature: str | None = None,
+    clear_alert_signature: bool = False,
 ) -> None:
     """
     Update heartbeat state fields.
@@ -8319,6 +8446,15 @@ def update_heartbeat_state(
     Pass True for timestamp fields to set them to now.
     Pass reset_errors=True to reset consecutive_errors to 0.
     Pass increment_errors=True to increment consecutive_errors.
+
+    ``last_alert_signature`` records what the alert just sent was *about*;
+    ``clear_alert_signature`` forgets it. They are two parameters rather than
+    one nullable value because ``None`` already means "leave it alone" for
+    every other field here, and a recovery has to be able to say "forget it"
+    without that reading as "don't touch it" — otherwise a deployment that
+    broke, was fixed, and broke the same way again would never page a second
+    time. Passing both is a caller error and the clear wins, since it is the
+    safer of the two: it can only cause an extra alert, never a missing one.
     """
     # Ensure row exists first
     conn.execute(
@@ -8344,6 +8480,11 @@ def update_heartbeat_state(
         updates.append("consecutive_errors = 0")
     if increment_errors:
         updates.append("consecutive_errors = consecutive_errors + 1")
+    if clear_alert_signature:
+        updates.append("last_alert_signature = NULL")
+    elif last_alert_signature is not None:
+        updates.append("last_alert_signature = ?")
+        params.append(last_alert_signature)
 
     if updates:
         params.extend([user_id, check_name])

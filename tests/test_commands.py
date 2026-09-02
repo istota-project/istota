@@ -1,6 +1,8 @@
 """Tests for !command dispatch system."""
 
 import json
+import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,7 +21,7 @@ from istota.commands import (
 )
 from istota.brain import BrainConfig, make_brain, set_alias_overrides
 from istota.brain.claude_code import DEFAULT_ALIASES, HAIKU, OPUS, SONNET
-from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
+from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
 
 # The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
 # suite, so a doctor sweep on a laptop cannot read the real keychain or reach the
@@ -83,6 +85,23 @@ def _ctx(config, conn, user_id="alice", conversation_token="room1", args="",
         conversation_token=conversation_token, args=args,
         surface=surface, registry=registry,
     )
+
+
+class _RecordingConn:
+    """A real connection that writes `"commit"` into a shared list when it is
+    committed, so a handler's ordering can be asserted rather than only the
+    fact of a commit. Everything else is delegated."""
+
+    def __init__(self, conn, order):
+        self._conn = conn
+        self._order = order
+
+    def commit(self):
+        self._order.append("commit")
+        return self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 # =============================================================================
@@ -1516,170 +1535,256 @@ class TestCmdSkills:
 
 
 class TestCmdCheck:
-    @pytest.mark.asyncio
-    async def test_all_pass_no_sandbox(self, make_config):
-        """All fast checks pass, sandbox disabled, Claude execution passes."""
-        config = make_config(security=SecurityConfig(sandbox_enabled=False))
-        with db.get_db(config.db_path) as conn:
-            # Create a completed task in the last hour
-            t = db.create_task(conn, prompt="test", user_id="alice", source_type="cli")
-            db.update_task_status(conn, t, "completed")
+    """`!check` renders `doctor.run_checks` and asserts nothing of its own.
 
-            AsyncMock()
-            with (
-                patch("istota.commands.shutil.which", return_value="/usr/local/bin/claude"),
-                patch("istota.commands.subprocess.run") as mock_run,
-            ):
-                # First call: claude --version; Second call: Claude execution
-                mock_run.side_effect = [
-                    MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
-                    MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
-                ]
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+    Every case patches `doctor.run_checks` and reads the call, rather than
+    running the registry: what the checks do is `tests/test_doctor.py`'s job,
+    and the three properties that matter here are which flags the command asks
+    for, what it does before it blocks, and what a non-admin is shown.
+    """
 
-        assert "Claude binary: PASS" in result
-        assert "Sandbox: skipped" in result
-        assert "Database: PASS" in result
-        assert "Recent tasks (1h):" in result
-        assert "1 completed" in result
-        assert "Claude + Bash: PASS" in result
+    def _result(self, name, status, detail="detail", remedy=""):
+        from istota.doctor import CheckResult as DoctorResult
+
+        return DoctorResult(name, status, detail, remedy=remedy)
+
+    def _clean(self):
+        from istota.doctor import OK, SKIP
+
+        return [
+            self._result("runtime.platform", OK, "linux"),
+            self._result("runtime.bwrap", SKIP, "sandbox disabled"),
+        ]
 
     @pytest.mark.asyncio
-    async def test_claude_not_found(self, make_config):
-        config = make_config()
+    async def test_an_admin_gets_the_whole_registry_fenced(self, make_config):
+        """`render_text`'s alignment is the information, and posted as markdown
+        its two-space indents collapse into one paragraph. Hence the fence."""
+        config = make_config(admin_users=["alice"])
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            with (
-                patch("istota.commands.shutil.which", return_value=None),
-                patch("istota.commands.subprocess.run") as mock_run,
-            ):
-                # Only the execution check runs subprocess
-                mock_run.return_value = MagicMock(
-                    stdout="healthcheck-ok", stderr="", returncode=0,
-                )
+            with patch("istota.doctor.run_checks", return_value=self._clean()):
                 result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
-        assert "Claude binary: **FAIL**" in result
-        assert "not found in PATH" in result
+        assert result.startswith("**Health Check**\n\n```\n")
+        assert result.endswith("\n```")
+        assert "runtime.platform" in result
+        assert "runtime.bwrap" in result
 
     @pytest.mark.asyncio
-    async def test_sandbox_enabled_bwrap_found(self, make_config):
-        config = make_config()
-        config.security = SecurityConfig(sandbox_enabled=True)
+    async def test_an_admin_asks_for_live_and_not_deep(self, make_config):
+        """The resolved open question, pinned.
+
+        `live=True` restores the execution test the hand-rolled probe ran.
+        `deep=True` is deliberately absent: the web chat client aborts the very
+        POST that runs this inline at 30s (`web/src/lib/api.ts`), and the Talk
+        path runs dispatch on the process-global loop inside the poll batch's
+        open write transaction. A second 30-second check does not fit either.
+        Asserted as an absence, because a later tidy-up adding it back would
+        otherwise go unnoticed until an admin's `!check` started timing out.
+        """
+        config = make_config(admin_users=["alice"])
+        calls = {}
+
+        def fake_run_checks(cfg, **kwargs):
+            calls["kwargs"] = kwargs
+            return self._clean()
 
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
+            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
+                await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
-            def which_side_effect(name):
-                return f"/usr/bin/{name}"
-
-            with (
-                patch("istota.commands.shutil.which", side_effect=which_side_effect),
-                patch("istota.commands.subprocess.run") as mock_run,
-            ):
-                mock_run.side_effect = [
-                    MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
-                    MagicMock(stdout="bubblewrap 0.8.0", stderr="", returncode=0),
-                    MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
-                ]
-                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
-
-        assert "Sandbox (bwrap): PASS" in result
+        assert calls["kwargs"]["live"] is True
+        assert calls["kwargs"].get("deep", False) is False
 
     @pytest.mark.asyncio
-    async def test_sandbox_enabled_bwrap_missing(self, make_config):
-        config = make_config()
-        config.security = SecurityConfig(sandbox_enabled=True)
+    async def test_a_non_admin_gets_one_line_and_neither_flag(self, make_config):
+        config = make_config(admin_users=["boss"])
+        calls = {}
+
+        def fake_run_checks(cfg, **kwargs):
+            calls["kwargs"] = kwargs
+            return self._clean()
 
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-
-            def which_side_effect(name):
-                if name == "bwrap":
-                    return None
-                return f"/usr/bin/{name}"
-
-            with (
-                patch("istota.commands.shutil.which", side_effect=which_side_effect),
-                patch("istota.commands.subprocess.run") as mock_run,
-            ):
-                mock_run.side_effect = [
-                    MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
-                    MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
-                ]
+            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
                 result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
-        assert "Sandbox (bwrap): **FAIL**" in result
+        assert calls["kwargs"].get("live", False) is False
+        assert calls["kwargs"].get("deep", False) is False
+        assert "```" not in result
+        assert "OK" in result
+        assert "1 ok" in result
+        # One line of content under the header, not a registry.
+        body = result.split("\n\n", 1)[1]
+        assert "\n" not in body, f"the non-admin arm rendered more than a line: {body!r}"
 
     @pytest.mark.asyncio
-    async def test_execution_timeout(self, make_config):
-        import subprocess as real_subprocess
+    async def test_a_non_admin_is_told_when_something_failed(self, make_config):
+        from istota.doctor import FAIL
 
-        config = make_config()
+        config = make_config(admin_users=["boss"])
+        results = self._clean() + [self._result("web.static", FAIL, "missing")]
+
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-
-            def run_side_effect(*args, **kwargs):
-                cmd = args[0] if args else kwargs.get("args", [])
-                # Anywhere in argv, not at argv[0]: this config leaves the
-                # sandbox enabled, so on a host with a working bwrap the
-                # execution probe is `bwrap … -- claude -p …` and an argv[0]
-                # match never fires. The check then reports a wrong answer
-                # instead of a timeout, and only on Linux.
-                if "claude" in cmd and "-p" in cmd:
-                    raise real_subprocess.TimeoutExpired(cmd, 30)
-                return MagicMock(stdout="claude 1.0.0", stderr="", returncode=0)
-
-            with (
-                patch("istota.commands.shutil.which", return_value="/usr/bin/claude"),
-                patch("istota.commands.subprocess.run", side_effect=run_side_effect),
-            ):
+            with patch("istota.doctor.run_checks", return_value=results):
                 result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
-        assert "timed out" in result
+        assert "PROBLEMS" in result
+        assert "1 fail" in result
 
     @pytest.mark.asyncio
-    async def test_execution_wrong_output(self, make_config):
-        config = make_config(security=SecurityConfig(sandbox_enabled=False))
+    async def test_a_non_admin_is_told_no_cross_user_facts(self, make_config):
+        """The reason for the split.
+
+        The whole registry is a different thing from the five lines a non-admin
+        used to get. `runtime.subscription_usage` reports plan utilization,
+        which `cmd_usage` deliberately withholds from a non-admin;
+        `config.skill_overlays` labels overlays by user id across users;
+        `developer.*` describes other people's trees. `redact` covers
+        configured credential values, not cross-user facts.
+        """
+        from istota.doctor import OK, WARN
+
+        config = make_config(admin_users=["boss"])
+        results = [
+            self._result(
+                "runtime.subscription_usage", WARN, "session window at 91% utilization"
+            ),
+            self._result(
+                "config.skill_overlays", OK, "bob: 2 overlays; carol: 1 overlay"
+            ),
+        ]
+
         with db.get_db(config.db_path) as conn:
-            AsyncMock()
-            with (
-                patch("istota.commands.shutil.which", return_value="/usr/bin/claude"),
-                patch("istota.commands.subprocess.run") as mock_run,
-            ):
-                mock_run.side_effect = [
-                    MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
-                    MagicMock(stdout="something else", stderr="error msg", returncode=1),
-                ]
+            with patch("istota.doctor.run_checks", return_value=results):
                 result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
-        assert "Claude + Bash: **FAIL**" in result
-        assert "stderr: error msg" in result
+        assert "91%" not in result
+        assert "utilization" not in result
+        assert "bob" not in result
+        assert "carol" not in result
+        assert "runtime.subscription_usage" not in result
 
     @pytest.mark.asyncio
-    async def test_high_failure_rate_warning(self, make_config):
-        config = make_config()
-        with db.get_db(config.db_path) as conn:
-            # Create more failures than successes
-            for _ in range(3):
-                t = db.create_task(conn, prompt="fail", user_id="alice", source_type="cli")
-                db.update_task_status(conn, t, "failed", error="boom")
-            t = db.create_task(conn, prompt="ok", user_id="alice", source_type="cli")
-            db.update_task_status(conn, t, "completed")
+    async def test_an_admin_does_see_those_details(self, make_config):
+        """The control for the case above: without it, a non-admin assertion
+        about an absent string passes against a command that renders nothing at
+        all."""
+        from istota.doctor import WARN
 
-            AsyncMock()
-            with (
-                patch("istota.commands.shutil.which", return_value="/usr/bin/claude"),
-                patch("istota.commands.subprocess.run") as mock_run,
-            ):
-                mock_run.side_effect = [
-                    MagicMock(stdout="claude 1.0.0", stderr="", returncode=0),
-                    MagicMock(stdout="healthcheck-ok", stderr="", returncode=0),
-                ]
+        config = make_config(admin_users=["alice"])
+        results = [
+            self._result(
+                "runtime.subscription_usage", WARN, "session window at 91% utilization"
+            )
+        ]
+
+        with db.get_db(config.db_path) as conn:
+            with patch("istota.doctor.run_checks", return_value=results):
                 result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
 
-        assert "3 failed" in result
-        assert "warning: high failure rate" in result
+        assert "91% utilization" in result
+
+    @pytest.mark.asyncio
+    async def test_the_admin_render_redacts(self, make_config):
+        """`render_text` takes `secrets` and redacts internally, so the command
+        passes `config_secrets` rather than calling `redact` as well."""
+        from istota.config import NextcloudConfig
+        from istota.doctor import FAIL
+
+        config = make_config(
+            admin_users=["alice"],
+            nextcloud=NextcloudConfig(
+                url="https://cloud.example.com",
+                username="bot",
+                app_password="s3cr3t-app-password",
+            ),
+        )
+        results = [
+            self._result("web.static", FAIL, "upstream said s3cr3t-app-password")
+        ]
+
+        with db.get_db(config.db_path) as conn:
+            with patch("istota.doctor.run_checks", return_value=results):
+                result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "s3cr3t-app-password" not in result
+        assert "web.static" in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("user_id", ["alice", "nobody"])
+    async def test_it_commits_before_it_blocks(self, make_config, user_id):
+        """Both arms, since both block.
+
+        The Talk poller wraps its whole batch in one write transaction and
+        hands `dispatch` that connection already mid-write, so holding its lock
+        across a multi-second probe stalls every other writer in the daemon on
+        its busy timeout. `cmd_usage` does the same thing for the same reason.
+
+        The ordering is the assertion, not the fact of a commit: a commit that
+        happens after the probe is the bug wearing a label.
+        """
+        config = make_config(admin_users=["alice"])
+        order = []
+
+        with db.get_db(config.db_path) as conn:
+            recording = _RecordingConn(conn, order)
+
+            def fake_run_checks(cfg, **kwargs):
+                order.append("run_checks")
+                return self._clean()
+
+            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
+                await cmd_check(_ctx(config, recording, user_id, "room1", ""))
+
+        assert order == ["commit", "run_checks"], (
+            f"expected the caller's transaction committed before the probe, got {order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_connection_that_will_not_commit_is_not_fatal(self, make_config):
+        """A connection we could not commit is the caller's problem, not a
+        reason to refuse a read-only report."""
+        config = make_config(admin_users=["alice"])
+
+        class _Broken:
+            def commit(self):
+                raise sqlite3.OperationalError("cannot commit - no transaction is active")
+
+        with patch("istota.doctor.run_checks", return_value=self._clean()):
+            result = await cmd_check(_ctx(config, _Broken(), "alice", "room1", ""))
+
+        assert "runtime.platform" in result
+
+    @pytest.mark.asyncio
+    async def test_a_null_connection_is_tolerated(self, make_config):
+        """`ctx.conn` is typed non-optional and `cmd_usage` still guards for
+        None, because a surface can build a context without one."""
+        config = make_config(admin_users=["alice"])
+
+        with patch("istota.doctor.run_checks", return_value=self._clean()):
+            result = await cmd_check(_ctx(config, None, "alice", "room1", ""))
+
+        assert "runtime.platform" in result
+
+    @pytest.mark.asyncio
+    async def test_it_runs_the_registry_off_the_event_loop(self, make_config):
+        """`run_checks` is entirely synchronous and this coroutine runs on the
+        loop that polls every Talk conversation. `cmd_usage`'s own comment
+        names this command's bare `subprocess.run` as what it is not doing."""
+        config = make_config(admin_users=["alice"])
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def fake_run_checks(cfg, **kwargs):
+            seen["thread"] = threading.get_ident()
+            return self._clean()
+
+        with db.get_db(config.db_path) as conn:
+            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
+                await cmd_check(_ctx(config, conn, "alice", "room1", ""))
+
+        assert seen["thread"] != loop_thread
 
     @pytest.mark.asyncio
     async def test_help_includes_check(self, make_config):

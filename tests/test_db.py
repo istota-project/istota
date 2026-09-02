@@ -2575,3 +2575,65 @@ class TestBusyTimeoutParam:
         # connect(timeout=30.0) => busy_timeout 30000; not overridden.
         with db.get_db(db_path) as conn:
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
+class TestHeartbeatAlertSignatureMigration:
+    """`heartbeat_state.last_alert_signature` reaches an existing database.
+
+    The column carries the transition gate that stops a standing failure paging
+    once per cooldown for ever. A deployment upgrading into it has a
+    `heartbeat_state` table already, so the additive migration is the only thing
+    that puts the column there — `schema.sql`'s `CREATE TABLE IF NOT EXISTS` is
+    a no-op against it, which is the trap this test exists for.
+    """
+
+    def _legacy_db(self, path):
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            """
+            CREATE TABLE heartbeat_state (
+                user_id TEXT NOT NULL,
+                check_name TEXT NOT NULL,
+                last_check_at TEXT,
+                last_alert_at TEXT,
+                last_healthy_at TEXT,
+                last_error_at TEXT,
+                consecutive_errors INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, check_name)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO heartbeat_state (user_id, check_name, last_alert_at) "
+            "VALUES ('alice', 'self', datetime('now'))"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_the_column_is_added_to_an_existing_table(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        self._legacy_db(path)
+
+        db.init_db(path)
+
+        conn = sqlite3.connect(str(path))
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(heartbeat_state)")}
+        conn.close()
+        assert "last_alert_signature" in cols
+
+    def test_the_pre_existing_row_reads_as_no_signature(self, tmp_path):
+        """Not as an empty string, which would suppress a real first alert.
+
+        A row written before the column existed has never had an alert
+        attributed to it, so it must compare unequal to every signature a check
+        can produce.
+        """
+        path = tmp_path / "legacy.db"
+        self._legacy_db(path)
+        db.init_db(path)
+
+        with db.get_db(path) as conn:
+            state = db.get_heartbeat_state(conn, "alice", "self")
+
+        assert state is not None
+        assert state.last_alert_signature is None

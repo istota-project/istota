@@ -694,6 +694,70 @@ class TestTheComposedSystemPromptInTheStack:
         )
 
 
+class TestDoctorAnswersFromInsideTheStack:
+    """Two registry checks, run by the shipped CLI in the shipped image.
+
+    `security.sandbox_effective` is asserted **`ok`**, not `fail`, and the
+    positive direction is the point. Both container shapes carry
+    `seccomp:unconfined` *and* `systempaths=unconfined`
+    (`docker/docker-compose.test.yml`, `testbed/compose/testbed.yml`), so bwrap
+    genuinely works here; only the shipped `docker/docker-compose.yml`, which no
+    tier boots, produces the `FAIL` this check was added for. What that buys is
+    the tier's control that the check answers from a real namespace probe rather
+    than from `security.sandbox_enabled` — the flag reads true on both stacks
+    and on the shipped one, so a check reading the flag would say `ok` on all
+    three and the one deployment it exists to catch would go unreported.
+
+    It is also the doctor-level statement of what `TestTheDatabaseMasks` above
+    observes from inside a task. If that class passes and this says the sandbox
+    is not effective, the check is wrong rather than the deployment.
+
+    `runtime.task_failure_rate` is here because it is the other check this stage
+    pointed the two hand-rolled probes at, it is reachable from the shallow
+    registry, and running it inside the image is what proves it opens a real
+    database rather than skipping past a path that is not there.
+    """
+
+    def _report(self, stack) -> dict:
+        # Unscoped: both checks are DEPLOYMENT-scoped, so `--scope image` — what
+        # every other doctor assertion in this tier uses — filters them out
+        # before they are ever invoked, and the lookup below would KeyError.
+        return {check["name"]: check for check in stack.doctor()}
+
+    def test_the_sandbox_is_effective_here(self, stack):
+        report = self._report(stack)
+
+        assert "security.sandbox_effective" in report, (
+            "the check produced no result at all — it is not registered, or it "
+            f"is not DEPLOYMENT-scoped\n--- doctor ---\n{sorted(report)}"
+        )
+        check = report["security.sandbox_effective"]
+        assert check["status"] == "ok", (
+            "bwrap is installed here and the compose file grants both "
+            "`seccomp:unconfined` and `systempaths=unconfined`, so a namespace "
+            "must be creatable. A `fail` means the grants did not reach the "
+            "container; a `skip` means the rendered config switched the sandbox "
+            f"off.\n--- check ---\n{check}\n--- daemon logs ---\n{stack.logs(60)}"
+        )
+
+    def test_the_task_failure_rate_check_reaches_the_database(self, stack):
+        report = self._report(stack)
+
+        assert "runtime.task_failure_rate" in report, (
+            "the check produced no result at all — it is not registered, or it "
+            f"is not DEPLOYMENT-scoped\n--- doctor ---\n{sorted(report)}"
+        )
+        check = report["runtime.task_failure_rate"]
+        assert check["status"] == "ok", (
+            "a `skip` means the check could not find the framework database at "
+            "the path the rendered config names; a `fail` means the `tasks` "
+            "table is missing or the query raised; a `warn` means this session "
+            "really did fail more tasks than it completed in the last hour, "
+            "which is a failure of whatever ran before this, not of the check."
+            f"\n--- check ---\n{check}\n--- daemon logs ---\n{stack.logs(60)}"
+        )
+
+
 # --------------------------------------------------------------------------
 # One tool server, one namespace, for the whole attempt
 # --------------------------------------------------------------------------
