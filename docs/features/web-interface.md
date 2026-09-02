@@ -186,7 +186,7 @@ A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, an
 | `/istota/api/settings/*` | Per-user preferences, connected services, per-module settings |
 | `/istota/api/admin/*` | Admin dashboard aggregates (stats, logs, config view) — allowlist-gated |
 | `/istota/api/chat/rooms` | Room CRUD (list/create); `PATCH /chat/rooms/{id}` renames; `DELETE` hard-deletes |
-| `/istota/api/chat/rooms/{id}/promote` | Create a Talk conversation for a web-origin room and bind them |
+| `/istota/api/chat/rooms/{id}/promote` | Create a Talk conversation for a web-origin room and bind them, or replace a binding whose conversation was deleted |
 | `/istota/api/chat/rooms/{id}/read` · `/chat/rooms/read-all` | Mark read cursors |
 | `/istota/api/chat/rooms/{id}/messages` | Message history + send |
 | `/istota/api/chat/messages` | Cross-room message query |

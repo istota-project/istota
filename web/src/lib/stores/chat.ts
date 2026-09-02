@@ -3306,11 +3306,41 @@ function createSession(): ChatSession {
   }
 
   async function promoteRoom(id: number) {
+    // Doubles as the repair path for a room whose Talk conversation was deleted
+    // (ISSUE-401), so the outcome has to be reported rather than assumed: three
+    // of the five statuses change nothing, and one of those is the server
+    // telling the user their existing link is fine.
     try {
-      const updated = await promoteChatRoom(id);
-      rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
+      const { status, room } = await promoteChatRoom(id);
+      if (room) rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...room } : x)));
+      if (status === 'ok') {
+        notifySuccess('This room is now open in Nextcloud Talk.', { key: 'chat:promote' });
+      } else if (status === 'reconnected') {
+        notifySuccess('Reconnected — this room has a fresh Talk conversation.', {
+          key: 'chat:promote',
+        });
+      } else if (status === 'live') {
+        notifyWarning('This room is already connected to a Talk conversation.', {
+          key: 'chat:promote',
+        });
+      } else if (status === 'bot_removed') {
+        notifyWarning(
+          'That Talk conversation still exists, but Istota was removed from it. Add it back in Nextcloud.',
+          { key: 'chat:promote' },
+        );
+      } else if (status === 'unreachable') {
+        notifyError("Couldn't reach Nextcloud to check the existing Talk link. Try again.", {
+          key: 'chat:promote',
+        });
+      } else {
+        // `raced` carries the winner's room when it can, so the merge above has
+        // already corrected the token this client was showing.
+        notifyWarning('Another request connected this room to Talk first.', {
+          key: 'chat:promote',
+        });
+      }
     } catch {
-      notifyError("Couldn't open this room in Talk.");
+      notifyError("Couldn't open this room in Talk.", { key: 'chat:promote' });
     }
   }
 
