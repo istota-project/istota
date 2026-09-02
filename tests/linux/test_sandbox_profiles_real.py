@@ -137,9 +137,14 @@ def _sentinel_probe(claude_home):
             f'stat {_q(path)} >/dev/null 2>&1 && echo "{label}_STAT_OK" '
             f'|| echo "{label}_STAT_FAIL"'
         )
+        # `echo` with the body in a substitution, never `… | sed -e "s/^/L=/"`.
+        # sed is line-oriented: given *zero* input lines it emits nothing at
+        # all rather than an empty labelled line, so the absent-file case —
+        # which is the whole NATIVE assertion — produced no marker and
+        # `"{label}_BODY=;" in out` was false for every label. Measured:
+        # `printf '' | sed -e 's/^/X=/'` writes no bytes.
         parts.append(
-            f'cat {_q(path)} 2>/dev/null | tr -d "\\n" | '
-            f'sed -e "s/^/{label}_BODY=/" -e "s/$/;/"'
+            f'echo "{label}_BODY=$(cat {_q(path)} 2>/dev/null | tr -d "\\n");"'
         )
     # A write into the tmpfs base, which under CLAUDE is a writable mount and
     # under NATIVE is not in the namespace at all.

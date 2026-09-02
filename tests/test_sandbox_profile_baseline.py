@@ -20,10 +20,24 @@ several of them decided by the host rather than by the code. A golden captured
 on one machine matches on that machine. A differential run matches everywhere.
 
 **If this file stops loading its baseline it must not quietly pass.** It skips
-only when git itself cannot answer — a source tree with no `.git`, which is how
-the test image is built — and says so. A baseline that loads but whose
-`build_bwrap_cmd` already takes a `profile` means the sha is wrong and the
-comparison is the new code against itself; that is a failure, not a skip.
+on exactly one condition — there is no `.git` at the repo root, which is how the
+test image is built — and fails on every other way of not getting the blob. A
+shallow clone and a rewritten history both leave a repository that *has* a
+`.git` and cannot answer, and treating those as a skip is how the whole
+comparison goes unrun on a host that should have made it. A baseline that loads
+but whose `build_bwrap_cmd` already takes a `profile` fails too: the sha is
+wrong and the comparison is the new code against itself.
+
+**Lifecycle — read this before "fixing" a failure here.** The equality is
+against a *frozen* plan, so the first legitimate change to the generic mount
+plan breaks it, and there is no newer sha to move the pin to: every commit from
+the split onward has `profile` in the signature. That is intended. This is a
+one-shot regression guard for one change, not a permanent contract, and the two
+correct responses to it going red are (a) the change was not meant to alter the
+plan, so fix the change, or (b) it was, in which case review the new plan on its
+own merits and **delete this file in the same commit**. Do not weaken the
+equality to make it pass; a differential guard that tolerates a difference is
+not one.
 """
 
 import subprocess
@@ -38,6 +52,7 @@ import pytest
 from istota import db
 from istota.config import Config, DeveloperConfig, SecurityConfig
 from istota.executor import SandboxProfile, build_bwrap_cmd
+from tests.test_sandbox import _ops, _touches_claude
 
 #: The commit immediately before the `SandboxProfile` split, i.e. the last one
 #: whose `build_bwrap_cmd` emitted the Claude runtime block unconditionally.
@@ -53,17 +68,26 @@ def _load_baseline():
     resolve, and ``__file__`` is what makes `_source_and_venv_paths` derive the
     same venv and source tree the live module does.
     """
+    # The one skippable condition, checked before anything is spawned: a source
+    # tree with no history at all. Everything past this point is a repository
+    # that should be able to answer, so a failure to answer is a failure.
+    if not (_REPO_ROOT / ".git").exists():  # pragma: no cover
+        pytest.skip("no .git at the repo root, so there is no baseline to load")
     try:
         blob = subprocess.run(
             ["git", "show", f"{BASELINE_SHA}:src/istota/executor.py"],
             cwd=_REPO_ROOT, capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
-        pytest.skip(f"git cannot be run here, so the baseline is unreachable: {exc}")
+        pytest.fail(f"git is present but could not be run: {exc}")
     if blob.returncode != 0:  # pragma: no cover
-        pytest.skip(
-            "the baseline blob is not in this checkout "
-            f"({BASELINE_SHA[:12]}): {blob.stderr.strip()[:200]}"
+        # A shallow clone (`--depth 1`) and a rewritten history both land here,
+        # and both used to read as a skip — which is the comparison silently not
+        # happening on a host that has the repository in front of it.
+        pytest.fail(
+            f"the baseline blob {BASELINE_SHA[:12]} is not reachable in this "
+            f"checkout (shallow clone? rewritten history?): "
+            f"{blob.stderr.strip()[:200]}"
         )
 
     name = "istota._executor_pre_profile_split"
@@ -270,10 +294,19 @@ class TestTheClaudeProfileReproducesThePreSplitArgv:
     ):
         """The other direction, stated against the baseline rather than against
         the new CLAUDE plan: NATIVE introduces nothing that was not already
-        emitted before the split.
+        emitted before the split, and changes nothing either.
 
         A change that hardened one path while adding a *new* mount to the other
         would pass every assertion above.
+
+        Operation by operation, not `set(native) <= set(before)`. That subset
+        form reads as strict and is not: `--bind` and `--ro-bind` both appear in
+        the baseline argv, and so does every path the NATIVE plan keeps, so a
+        plan that *downgraded* `--ro-bind X X` to `--bind X X` satisfies it —
+        and the one re-bind where that matters is `.developer`, whose whole
+        purpose is that the credential-fetch scripts cannot be replaced. The
+        length check does not catch it either, since the removed Claude block
+        makes the argv shorter on its own.
         """
         config, user_temp = _layout(tmp_path)
         with patch("istota.executor._bwrap_available", return_value=True), \
@@ -286,5 +319,11 @@ class TestTheClaudeProfileReproducesThePreSplitArgv:
                 profile=SandboxProfile.NATIVE,
             )
 
-        assert set(native) <= set(before)
-        assert len(native) < len(before)
+        generic = [op for op in _ops(before) if not _touches_claude(op, claude_home)]
+        assert generic == _ops(native)
+        # Non-vacuous in the other direction: something really was removed.
+        assert len(_ops(before)) > len(generic)
+        # And the `.developer` re-bind is one of the operations being compared,
+        # so the downgrade above is inside the assertion rather than beside it.
+        dev = str((user_temp / ".developer").resolve())
+        assert ("--ro-bind", dev, dev) in _ops(native)

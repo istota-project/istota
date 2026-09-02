@@ -2086,6 +2086,21 @@ class NativeBrain:
             # `claude` CLI's namespace, credential and all, and this brain's
             # Bash tool has no business in it (ISSUE-389). `None` where the
             # caller built no task env, which is the unsandboxed posture.
+            #
+            # **This closes the mount route to that credential and not the
+            # environment one**, which is worth knowing before reading the
+            # profile split as a boundary. `executor.build_clean_env` copies
+            # `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's environment into
+            # `req.env` for every brain; no skill manifest declares it, so
+            # neither `derive_credential_set` nor `derive_proxy_only_set`
+            # splits it out; and `subprocess_env` below is what Bash hands its
+            # child. So `echo "$CLAUDE_CODE_OAUTH_TOKEN"` still returns the
+            # subscription token, on the shape where the Ansible role writes it
+            # into the unit's EnvironmentFile. Pre-existing rather than
+            # introduced by the split, and left alone here deliberately: which
+            # variables a brain may pass to a tool subprocess is a separate
+            # decision from which paths a namespace holds, and it reaches every
+            # brain and every direct caller.
             sandbox_wrap=req.native_sandbox_wrap,
             subprocess_env=req.env or None,
             bash_timeout_seconds=max(1, req.timeout_seconds),
