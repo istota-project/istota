@@ -1293,6 +1293,230 @@ class TestSkillProxy:
         assert results["security.skill_proxy.forge_posture"].status == SKIP
 
 
+class TestSandboxCredentials:
+    """`security.sandbox_credentials` — ISSUE-396.
+
+    `load_config` warns on the sandbox-on/proxy-off pairing (ISSUE-393), but the
+    boot log is read once at install. The Health pane and `istota doctor` are
+    the surfaces an operator returns to, and before this check they reported the
+    pairing as a bare `SKIP` on `security.skill_proxy` carrying only a
+    restatement of the setting.
+
+    The class holds two things apart: that the finding fires at all, and that it
+    keeps firing on the shape where the sandbox turns out not to be in force —
+    which is the shape a check written around `effective_sandboxing` would most
+    naturally go quiet on, and the one where the operator has neither half of
+    what they asked for.
+    """
+
+    NAME = "security.sandbox_credentials"
+
+    def _config(self, make_config, *, sandbox, proxy):
+        from istota.config import SecurityConfig
+
+        return make_config(
+            security=SecurityConfig(
+                sandbox_enabled=sandbox, skill_proxy_enabled=proxy
+            )
+        )
+
+    def _run(self, config, **kwargs):
+        return run_checks(config, only=(self.NAME,), **kwargs)[0]
+
+    @pytest.fixture
+    def bwrap_works(self, monkeypatch):
+        """Answer the availability axis rather than letting the host answer it.
+
+        `effective_sandboxing` is False on any non-Linux host, so without this
+        every "sandbox in force" case would take the bwrap-unavailable branch on
+        a developer machine. Both the function's probe and the memo
+        `effective_sandboxing_if_known` reads, since the check reaches them by
+        two routes and the memo is a process global the suite's other tests
+        also set — see `TestSessionLogDir._bwrap_works_here`.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setattr(executor, "_bwrap_checked", True)
+
+    # -- the regression assertion ------------------------------------------
+
+    def test_the_pairing_warns_and_names_the_credentials(
+        self, make_config, bwrap_works
+    ):
+        """The finding ISSUE-396 was filed for.
+
+        Before the check existed this name produced no result at all, so the
+        `only=` run came back empty and the indexing below raised — which is
+        the negative control for the whole class.
+        """
+        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+
+        assert r.status == WARN
+        assert "every configured service credential" in r.detail
+        assert "readable by the model" in r.detail
+
+    def test_the_warning_carries_a_remedy(self, make_config, bwrap_works):
+        """`TestRegistry.test_warn_and_fail_carry_a_remedy` cannot see this one.
+
+        That guard runs over `_dev_config`, which leaves the proxy on, so this
+        WARN never fires under it. A finding an operator cannot act on is a
+        line of noise, and the image tier asserts the same property over
+        `--scope image`, which this check is deliberately outside of.
+        """
+        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+
+        assert r.remedy.strip()
+        assert "skill_proxy_enabled" in r.remedy
+
+    # -- and the shapes it must stay quiet on ------------------------------
+
+    def test_both_switches_off_is_silent(self, make_config):
+        """The single-user install's deliberate trust decision.
+
+        `setup_wizard` writes the pair. The task then runs unconfined as the
+        daemon user and can read `config.toml`, the secrets database or
+        `/proc/<daemon>/environ`, so removing a variable from its environment
+        is decorative rather than a boundary. ISSUE-393 put this shape out of
+        scope for the warning and it is out of scope here for the same reason.
+        """
+        r = self._run(self._config(make_config, sandbox=False, proxy=False))
+
+        assert r.status == SKIP
+        assert "unconfined by design" in r.detail
+
+    def test_the_proxy_being_on_is_ok_not_a_warning(self, make_config):
+        # No `bwrap_works`: this branch returns before anything reaches
+        # `executor`, and taking the fixture would imply an availability
+        # dependency the code does not have.
+        r = self._run(self._config(make_config, sandbox=True, proxy=True))
+
+        assert r.status == OK
+        assert "injected per call" in r.detail
+
+    def test_the_sandbox_being_off_skips_even_with_the_proxy_on(self, make_config):
+        r = self._run(self._config(make_config, sandbox=False, proxy=True))
+
+        assert r.status == SKIP
+
+    # -- the in-force clause, which is a clause and not a condition --------
+
+    def test_it_says_the_sandbox_is_in_force(self, make_config, bwrap_works):
+        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+
+        assert "the sandbox is in force" in r.detail
+
+    def test_it_still_warns_where_bubblewrap_does_not_work(
+        self, make_config, monkeypatch
+    ):
+        """The shape a check gated on `effective_sandboxing` would go quiet on.
+
+        The shipped Docker stack grants neither `seccomp:unconfined` nor
+        `systempaths=unconfined`, so the probe fails and every task runs
+        unconfined while `sandbox_enabled` still reads true. The credentials are
+        in the task environment on the strength of `skill_proxy_enabled` alone
+        — `_split_credential_env` runs only inside the proxy branch of
+        `execute_task` — so the finding is established whatever bubblewrap does,
+        and the operator there has neither half of what they configured.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+
+        assert r.status == WARN
+        assert "every configured service credential" in r.detail
+        assert "runtime.bwrap" in r.detail
+
+    def test_an_unprobed_run_says_the_sandbox_state_is_unestablished(
+        self, make_config, monkeypatch
+    ):
+        """`probe=False` with a cold memo must not assert either answer.
+
+        `runtime.session_log_dir` set the precedent: a check whose subject is a
+        boundary may not report a protection it did not look for. Here only the
+        clause is in doubt — the WARN itself still stands.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_checked", None)
+        r = self._run(
+            self._config(make_config, sandbox=True, proxy=False), probe=False
+        )
+
+        assert r.status == WARN
+        assert "unestablished" in r.detail
+
+    def test_a_broken_availability_lookup_still_warns(self, make_config, monkeypatch):
+        """A diagnostic must not raise, and must not lose its finding either."""
+        from istota import executor
+
+        def _boom(config):
+            raise RuntimeError("probe exploded")
+
+        monkeypatch.setattr(executor, "effective_sandboxing", _boom)
+        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+
+        assert r.status == WARN
+        assert "every configured service credential" in r.detail
+        assert "unestablished" in r.detail
+
+    # -- what registration must not change ---------------------------------
+
+    def test_it_does_not_collide_with_the_load_config_warning(self, make_config):
+        """`tests/test_config.py` filters `caplog` on the warning's opening phrase.
+
+        The two messages say nearly the same thing, so the doctor detail naming
+        the settings in the same order would be a substring of that filter. It
+        breaks nothing while this check stays off the config-load path, but it
+        would turn those filters from an assertion into an `any(...)` over two
+        records the day it moved onto it.
+        """
+        r = self._run(self._config(make_config, sandbox=True, proxy=False))
+
+        assert "sandbox_enabled with skill_proxy_enabled = false" not in r.detail
+        # Both settings still named, so an operator greps either one and finds it.
+        assert "skill_proxy_enabled" in r.detail
+        assert "sandbox_enabled" in r.detail
+
+    def test_it_is_deployment_scoped(self):
+        """`--scope image` must not select it.
+
+        The image tier asserts no check fails and every WARN carries a remedy
+        over `doctor --scope image`. This reports a posture an operator chose in
+        a rendered config, which is not a property of the image.
+        """
+        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
+
+    def test_it_does_not_run_inside_load_config(self):
+        """Two reasons, both consequences of `CONFIG_LOAD_CHECKS` being hot.
+
+        It reaches `istota.executor` for the bwrap probe, which
+        `TestConfigLoadPathStaysCheap` forbids on that path; and
+        `_validate_forge_clis` logs every WARN those checks return, which would
+        print this finding beside the ISSUE-393 warning already emitted a few
+        lines above it, on every `load_config`.
+        """
+        from istota.config import CONFIG_LOAD_CHECKS
+
+        assert self.NAME not in CONFIG_LOAD_CHECKS
+
+    def test_the_skill_proxy_check_is_unchanged(self, make_config):
+        """ISSUE-396 considered widening the existing SKIP and rejected it.
+
+        A `SKIP` reads as "not applicable here", which is the wrong status for a
+        live exposure. The finding moved to a result of its own instead, and
+        this pins that the old one kept its status rather than being quietly
+        repurposed.
+        """
+        config = self._config(make_config, sandbox=True, proxy=False)
+        results = _by_name(run_checks(config, only=("security.skill_proxy",)))
+
+        assert results["security.skill_proxy"].status == SKIP
+        assert self.NAME not in results
+
+
 class TestForgeGating:
     """Every `developer.*` check inherits today's gating. Without this, a
     tokenless developer-skill deployment goes from silent to alerting."""

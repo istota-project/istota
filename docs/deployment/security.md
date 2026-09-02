@@ -210,3 +210,5 @@ enabled = true
 allow_pypi = true
 extra_hosts = []
 ```
+
+The startup warning is read once at install. `istota doctor --only security.sandbox_credentials` reports the same pairing on demand, and the admin Health pane shows it as a standing `WARN` — with the bwrap probe's answer attached, so it says whether the sandbox you asked for is actually in force. Both switches off together is the single-user install's deliberate trust decision and is reported as a `SKIP`, not a warning.

@@ -3172,7 +3172,11 @@ def load_config(config_path: Path | None = None) -> Config:
         # half of the message is true on that shape too — the variables are in
         # the task environment either way — and an operator who asked for a
         # sandbox is the right person to tell. `doctor` is where the difference
-        # between asked-for and in-force gets reported.
+        # between asked-for and in-force gets reported: the
+        # `security.sandbox_credentials` check says the same thing with the
+        # bwrap probe's answer attached (ISSUE-396). It is deliberately not in
+        # `CONFIG_LOAD_CHECKS`, so this warning stays the only one on this path
+        # rather than being logged a second time by `_validate_forge_clis`.
         if config.security.sandbox_enabled and not config.security.skill_proxy_enabled:
             logger.warning(
                 "[security] sandbox_enabled with skill_proxy_enabled = false: "
