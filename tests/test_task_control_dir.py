@@ -221,6 +221,64 @@ class TestEnsure:
         assert second == first
         assert (second / "kept").read_text() == "x"
 
+    def test_it_is_idempotent_under_real_concurrency(self, control_config):
+        """Idempotent *concurrently*, not merely when called twice in a row.
+
+        Stage 1 asserted the claim sequentially, which is the cheap half:
+        every level already existed by the time the second call ran, so no
+        two callers were ever inside `mkdir` at once. Stage 2b is where the
+        second caller arrives — `_build_module_briefing_prompt` calls this
+        again underneath `execute_task` — and the shape that matters is two
+        *tasks of one user* on two worker threads, which share the control
+        root and the per-user level and race to create both.
+
+        A barrier rather than a plain thread start: without it the threads
+        serialize on interpreter startup and the test passes against an
+        implementation that is not safe at all.
+        """
+        import threading
+
+        users = ("alice", "bob")
+        task_ids = (1, 2, 3, 4)
+        workers = [(u, t) for u in users for t in task_ids for _ in range(3)]
+        barrier = threading.Barrier(len(workers))
+        results: dict[int, Path] = {}
+        failures: list[BaseException] = []
+        lock = threading.Lock()
+
+        def _run(index: int, user_id: str, task_id: int) -> None:
+            try:
+                barrier.wait(timeout=10)
+                path = ensure_task_control_dir(control_config, user_id, task_id)
+                # Write from inside the race, so a level re-created by a
+                # neighbour after this one returned would lose the file.
+                (path / f"witness_{index}").write_text("x")
+            except BaseException as exc:  # noqa: BLE001
+                with lock:
+                    failures.append(exc)
+            else:
+                with lock:
+                    results[index] = path
+
+        threads = [
+            threading.Thread(target=_run, args=(i, u, t))
+            for i, (u, t) in enumerate(workers)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert not failures, f"concurrent callers raised: {failures!r}"
+        assert len(results) == len(workers)
+        for index, (user_id, task_id) in enumerate(workers):
+            expected = get_task_control_dir(control_config, user_id, task_id)
+            assert results[index] == expected
+            assert (expected / f"witness_{index}").read_text() == "x"
+            assert _mode(expected) == 0o700
+            assert _mode(expected.parent) == 0o700
+        assert _mode(control_config.temp_dir / CONTROL_DIR_NAME) == 0o700
+
     @pytest.mark.parametrize("level", ["control", "user", "task"])
     def test_it_re_asserts_the_mode_on_an_existing_directory(
         self, control_config, level

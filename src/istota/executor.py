@@ -5837,13 +5837,32 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
         return None  # no blocks after migration → task fails (quiet retry)
 
     # Stash per-block provenance for the scheduler's archive write.
+    #
+    # In the control directory rather than the model's working directory, for
+    # the reason every framework-authored per-task file is there: the daemon
+    # writes it and the daemon reads it back. The old location was per *user*
+    # and bound read-write into the sandbox, so a concurrent task of the same
+    # user could plant a dangling symlink at a not-yet-started task's filename
+    # and redirect this write, which `write_text` would have followed.
+    #
+    # `ensure_task_control_dir` rather than threading the path through
+    # `build_deferred_briefing_prompt`: it is idempotent, and `execute_task`
+    # created this exact directory a few dozen lines above the call that
+    # reaches here. A second call is one `mkdir(exist_ok=True)` and three mode
+    # assertions per briefing task, against a parameter on two signatures with
+    # one caller between them.
+    #
+    # Still best-effort, and the `RuntimeError` this can now raise is caught
+    # by the same `except`: the archive works with empty `block_meta`. The
+    # *reader* swallows its own failure identically
+    # (`scheduler._maybe_archive_briefing`), which is why both ends moved in
+    # one commit and why the test asserts the archived provenance is
+    # non-empty rather than that the archive ran.
     try:
         import json as _json
 
-        user_temp_dir = get_user_temp_dir(config, task.user_id)
-        user_temp_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = user_temp_dir / f"task_{task.id}_briefing_meta.json"
-        meta_path.write_text(_json.dumps({
+        control_dir = ensure_task_control_dir(config, task.user_id, task.id)
+        _write_control_file(control_dir / "briefing_meta.json", _json.dumps({
             "briefing_name": task.briefing_name,
             "block_meta": assembled.block_meta,
         }))
