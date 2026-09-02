@@ -13,17 +13,28 @@ Nothing in `src/` reads the leaf yet; the equivalence tests that pin each
 converted site against the literal it replaces are their own stage.
 """
 
+import dataclasses
+import inspect
+import re
+
 import pytest
 
 from istota import surfaces
 from istota.config import Config
-from istota.transport import make_registry
+from istota.transport import make_registry, registry as registry_module
 from istota.transport.registry import _surface_for_source_type
 
-# Every `tasks.source_type` the product writes. Kept explicit rather than
-# derived, because the point of the enumeration is to state what the twelve are
-# and check each one; a list generated from the same place the code reads would
-# assert nothing.
+# The source types the spec enumerates, and the set the readers are checked
+# total over. Explicit rather than derived, because the point of the
+# enumeration is to state what they are and check each one; a list generated
+# from the same place the code reads would assert nothing.
+#
+# Eleven of these are values `tasks.source_type` actually holds. `playbook` is
+# not — every `playbook` literal in `src/` is a `memory_chunks.source_type`
+# (`executor._recall_playbooks`, `memory/sleep_cycle.py`) and no `create_task`
+# call passes it. It is kept because an extra unrecognised value costs one
+# parametrized case and must answer None either way; the spec's own list has
+# the same error and Stage 7 is where that gets corrected.
 SHIPPED_SOURCE_TYPES = (
     "briefing", "cli", "doctor", "email", "heartbeat", "istota_file",
     "playbook", "repl", "scheduled", "subtask", "talk", "web",
@@ -111,8 +122,61 @@ class TestTheTable:
                 assert facts.room_role == "member", name
 
     def test_the_records_are_frozen(self):
-        with pytest.raises(Exception):
-            surfaces.SURFACES["talk"].room_role = "guest"  # type: ignore[misc]
+        # The record is bound outside the `raises` block on purpose: with the
+        # subscript inside it, removing the `talk` key satisfies the assertion
+        # with a KeyError and the test passes without ever exercising
+        # `frozen=True`. Narrowed to FrozenInstanceError for the same reason.
+        facts = surfaces.SURFACES["talk"]
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            facts.room_role = "guest"  # type: ignore[misc]
+
+    def test_a_record_cannot_be_half_filled(self):
+        # No defaults on the dataclass: an empty record would satisfy the
+        # key-coverage tests below while answering "not a room surface" at every
+        # converted site, which is the exact failure those tests exist to catch.
+        with pytest.raises(TypeError):
+            surfaces.SurfaceRoomFacts()  # type: ignore[call-arg]
+
+
+class TestTheTwoPredicatesAreSeparateReads:
+    """Every shipped surface answers `is_room_member` and `is_room_view` the
+    same way, so nothing above distinguishes them — a change routing one
+    through the other would keep the whole file green. These are the only
+    assertions that prove they read different fields, which is what the
+    scheduler's confirmation gate depends on being true.
+    """
+
+    def test_a_member_with_no_view_is_not_a_room_view(self, monkeypatch):
+        # Asserted before the patch rather than after it in a test of its own:
+        # `SURFACES` is a mutable global every reader resolves per call, so a
+        # row leaked by an earlier test follows the worker. A separate
+        # "it was cleaned up" test would pass trivially whenever it ran first
+        # or landed on another xdist worker.
+        assert "imaginary" not in surfaces.SURFACES
+        monkeypatch.setitem(
+            surfaces.SURFACES, "imaginary",
+            surfaces.SurfaceRoomFacts(
+                room_role="member", room_view=None, user_turn_mirror=None,
+            ),
+        )
+        assert surfaces.is_room_member("imaginary") is True
+        assert surfaces.is_room_view("imaginary") is False
+
+    def test_a_guest_with_an_external_view_is_a_room_view(self, monkeypatch):
+        # The shape the spec's open question 2 asks about — "may create a room"
+        # and "may write a turn into one" as two bits rather than an enum. No
+        # surface is this today; the readers must still answer it apart.
+        assert "imaginary" not in surfaces.SURFACES
+        monkeypatch.setitem(
+            surfaces.SURFACES, "imaginary",
+            surfaces.SurfaceRoomFacts(
+                room_role="guest", room_view="external",
+                user_turn_mirror="attributed",
+            ),
+        )
+        assert surfaces.is_room_member("imaginary") is False
+        assert surfaces.is_room_view("imaginary") is True
+        assert surfaces.user_turn_mirror("imaginary") == "attributed"
 
 
 class TestTheReadersAreTotal:
@@ -199,6 +263,22 @@ class TestTheTableCoversTheRegistry:
         config.email.enabled = True
         registry = make_registry(config)
         assert set(registry.names()) == set(surfaces.SURFACES)
+
+    def test_every_transport_make_registry_assigns_has_a_record(self):
+        # The test above cannot see a transport added behind a *new* config
+        # flag: it would be absent from `registry.names()` under this config and
+        # absent from SURFACES, and the equality would stay green while a
+        # deployed surface answered "not a room surface" at every converted
+        # site. `.claude/rules/transport.md` names Matrix as the designed-for
+        # next one. So read the assignments out of `make_registry`'s own source,
+        # the shape `tests/test_lint_scope.py` uses to keep a hand list honest.
+        source = inspect.getsource(registry_module.make_registry)
+        assigned = set(re.findall(r'transports\[["\'](\w+)["\']\]\s*=', source))
+        assert assigned, "found no transport assignments — the regex has rotted"
+        missing = assigned - set(surfaces.SURFACES)
+        assert not missing, (
+            f"transports with no record in surfaces.SURFACES: {sorted(missing)}"
+        )
 
     def test_a_disabled_transport_does_not_change_the_static_answer(self):
         # The whole reason the table is static rather than registry-derived:

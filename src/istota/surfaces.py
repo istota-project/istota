@@ -32,6 +32,28 @@ a surface is bidirectional for a room when (1) is not ``None`` and (2) is not
 ``None``. A ``sync`` flag would let an operator ask for states no surface can
 implement.
 
+**Two questions that look like these and are not, so a converter does not
+reach for the wrong reader.** ``db._CONVERSATIONAL_SOURCE_TYPES`` is
+``("talk", "web")`` — the same members as ``room_role == "member"`` — and gates
+the caught-up dual-read. Its own comment says email is excluded *on purpose*
+and that "Mirroring is not the criterion; guaranteed completeness is": the
+store holds email turns only from ISSUE-136 forward, so counting them would pin
+a room to the legacy path forever. Collapsing it into a reader here would be
+this module's own mistake committed one question further along. And
+``db.TRANSCRIPT_SURFACE_FILTER`` asks which surfaces' user rows the transcript
+renders — ``('web', 'talk', 'email')``, a set whose domain is ``source_type``
+values rather than surface names, and which must track a migration DELETE
+holding a fourth value no surface table will ever have. Both stay literals.
+
+**The key space is registry surface names only.** ``room`` and ``stream`` are
+names in the *destination grammar* (``parse_output_target`` yields
+``Destination("room", <token>)``), not surfaces, so they have no record here and
+every reader answers False for them. That matters at exactly one converted
+site: ``routing._room_for_destination`` dispatches on ``surface == "room"``
+first, and a member check placed ahead of that dispatch would drop every
+``room:<token>`` destination — the descriptor ISSUE-247 exists for. The leaf
+can replace that function's terminal ``else`` arm, never its dispatch.
+
 **Why the table is static, and why that is not a cosmetic detail.**
 ``routing._room_view`` reads the same fact through a config-built registry and
 deliberately collapses "not a room view" with "surface not resolvable" — a
@@ -57,6 +79,17 @@ Every reader takes ``object`` rather than ``str``, because callers pass values
 straight off database rows, and answers the conservative value for anything it
 does not recognise: an unknown surface is not a member, not a view and has no
 mirror mode. Nothing here raises.
+
+"Conservative" means *not a room surface*, and the lookup is exact — no
+trimming, no case folding — so ``"Talk"`` and ``"talk "`` answer the same as a
+name nobody has heard of. That is the safe direction at six of the seven sites
+this feeds. It is not at the seventh: ``web_app._user_row_display`` reads the
+predicate **negated**, to mark a row as foreign to the room, so a damaged
+``messages.origin_surface`` there would render a genuine Talk turn as an
+external message. The column is written verbatim from ``task.source_type`` and
+no writer transforms it, which is why this is a note rather than a ``strip()``
+— normalizing would answer for a value the product cannot currently produce,
+and quietly accept one it should not.
 
 stdlib-only leaf: it imports nothing from the package. ``transport`` imports
 ``db`` at module level, so anything both ``transport`` and ``db``'s callers
@@ -96,30 +129,59 @@ class SurfaceRoomFacts:
     failure, not a routing one.
     """
 
-    room_role: RoomRole | None = None
-    room_view: RoomView | None = None
-    user_turn_mirror: UserTurnMirror | None = None
+    room_role: RoomRole | None
+    room_view: RoomView | None
+    user_turn_mirror: UserTurnMirror | None
 
 
-# Every surface name `transport.make_registry` can produce. A surface missing
-# from here is not an error — every reader answers conservatively — but a test
-# requires the registry's names and these keys to agree, so adding a transport
-# without filling in a record fails rather than silently answering "not a room
-# surface" at seven call sites.
+# Every surface name `transport.make_registry` can produce, and only those: the
+# keys are transport names, never the destination-grammar names noted above.
+# Two tests hold the table against the registry — one over the names a
+# fully-enabled registry produces, one over the assignments in `make_registry`'s
+# own source, because the first cannot see a transport added behind a new config
+# flag. `SurfaceRoomFacts` takes no defaults so a record cannot be half-filled:
+# an empty one satisfies a key check while answering "not a room surface" at
+# every converted site, which is the failure the coverage tests exist to stop.
+#
+# Deliberately a plain mutable dict rather than a `MappingProxyType`, because
+# the model conversion's negative control removes `talk`'s row to prove the
+# converted sites read this table rather than a stale literal. Mutate it only
+# through `monkeypatch`: every reader resolves this global per call, so a direct
+# mutation leaks into every later test in the same worker.
 SURFACES: dict[str, SurfaceRoomFacts] = {
     "talk": SurfaceRoomFacts(
         room_role="member", room_view="external", user_turn_mirror="as_user",
     ),
-    "web": SurfaceRoomFacts(room_role="member", room_view="canonical"),
-    # Guest: an email threaded back into a room joins that room's transcript
-    # and never mints one. No room view — see the durable-place test above.
-    "email": SurfaceRoomFacts(room_role="guest"),
-    "ntfy": SurfaceRoomFacts(),
-    "istota_file": SurfaceRoomFacts(),
-    "repl": SurfaceRoomFacts(),
+    "web": SurfaceRoomFacts(
+        room_role="member", room_view="canonical", user_turn_mirror=None,
+    ),
+    # Guest: an email threaded back into a room joins that room's transcript and
+    # never mints one. No room view — see the durable-place test above.
+    #
+    # Two literals in `db.py` cover the same names for a different question, and
+    # neither is derived from this row: `TRANSCRIPT_SURFACE_FILTER`'s
+    # `('web', 'talk', 'email')` asks which surfaces' user rows the transcript
+    # renders, and the DELETE in `_migrate_nonconversational_transcript_cleanup`
+    # has to stay in step with it. That question's domain is `source_type`
+    # values rather than surface names, so it stays where it is. The two sets
+    # being equal today is a coincidence, not a derivation.
+    "email": SurfaceRoomFacts(
+        room_role="guest", room_view=None, user_turn_mirror=None,
+    ),
+    "ntfy": SurfaceRoomFacts(
+        room_role=None, room_view=None, user_turn_mirror=None,
+    ),
+    "istota_file": SurfaceRoomFacts(
+        room_role=None, room_view=None, user_turn_mirror=None,
+    ),
+    "repl": SurfaceRoomFacts(
+        room_role=None, room_view=None, user_turn_mirror=None,
+    ),
 }
 
-_NO_FACTS = SurfaceRoomFacts()
+_NO_FACTS = SurfaceRoomFacts(
+    room_role=None, room_view=None, user_turn_mirror=None,
+)
 
 
 def _facts(surface: object) -> SurfaceRoomFacts:
@@ -147,9 +209,20 @@ def room_view(surface: object) -> str | None:
 def is_room_member(surface: object) -> bool:
     """True when this surface creates and owns rooms.
 
-    The workhorse: six of the seven converted sites ask this. A ``guest``
-    surface answers False, which is the point — email writes into a room it
-    finds and never registers, binds, renames or joins one.
+    The workhorse, but **not for every site that gates on a surface name**, and
+    the difference is the one a converter has to get right. A ``guest`` surface
+    answers False, which is the point at the ownership sites — email writes into
+    a room it finds and never registers, binds, renames or joins one.
+
+    It is the wrong reader wherever the question is "may this surface put a
+    ``role='user'`` row in a room at all", which admits email:
+    ``commands._TRANSCRIPT_SURFACES`` is ``("web", "talk", "email")`` and gates
+    ``_record_confirm_exchange``, so reading this predicate there would stop an
+    email ``!confirm`` recording its exchange — and that row is a durable
+    authorization record. The neighbouring ``!steer`` write really is
+    ``("talk", "web")`` and really does ask this. Two writes in one file, two
+    questions; the spec's conversion table calls both of them ownership and is
+    wrong about the first.
     """
     return _facts(surface).room_role == "member"
 
