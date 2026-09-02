@@ -749,6 +749,45 @@ class TestCmdCron:
             assert "2026-08-30 04:05" in result
 
     @pytest.mark.asyncio
+    async def test_the_listing_says_when_the_user_switched_a_job_off(
+        self, make_config,
+    ):
+        """Symmetric with the SUSPENDED render, and the column's only human
+        reader — otherwise `disabled_at` is write-only and an operator still
+        cannot tell their own disable from the daemon's."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled, disabled_at) "
+                "VALUES (?, ?, ?, ?, 0, ?)",
+                ("alice", "digest", "0 9 * * *", "p", "2026-08-30 04:05:06"),
+            )
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "DISABLED since 2026-08-30 04:05" in result
+        assert "SUSPENDED" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_listing_claims_no_author_for_an_unstamped_disable(
+        self, make_config,
+    ):
+        """A row that predates the column, or was switched off some other way.
+        It must stay a bare DISABLED rather than inventing a time."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled) "
+                "VALUES (?, ?, ?, ?, 0)",
+                ("alice", "digest", "0 9 * * *", "p"),
+            )
+            result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "DISABLED]" in result
+        assert "since" not in result
+
+    @pytest.mark.asyncio
     async def test_the_user_disable_verb_does_not_set_the_daemon_column(
         self, make_config,
     ):
@@ -782,6 +821,91 @@ class TestCmdCron:
         assert "Disabled" in result
         assert job.enabled is False
         assert job.auto_disabled_at is None
+
+    @pytest.mark.asyncio
+    async def test_the_user_disable_verb_records_that_the_user_did_it(
+        self, make_config,
+    ):
+        """ISSUE-392. `enabled = 0` alone does not say who wrote it.
+
+        A `_module.*` row has no CRON.md entry, so the module sync's legacy
+        rescue arm is left inferring the author from the failure count — and
+        that inference reads a user's disable as the daemon's. `disabled_at`
+        is the fact the arm reads instead.
+        """
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, skill, skill_args, "
+                " enabled, consecutive_failures) "
+                "VALUES (?, ?, ?, '', ?, ?, 1, 3)",
+                ("alice", "_module.feeds.run_scheduled", "*/5 * * * *",
+                 "feeds", '["run-scheduled"]'),
+            )
+            result = await cmd_cron(
+                _ctx(config, conn, "alice", "room1",
+                     "disable _module.feeds.run_scheduled"),
+            )
+            job = db.get_scheduled_job_by_name(
+                conn, "alice", "_module.feeds.run_scheduled",
+            )
+
+        assert job.enabled is False
+        assert job.auto_disabled_at is None
+        assert job.disabled_at is not None
+        # A module row is in nobody's CRON.md, so the fallback branch's
+        # "may not persist" note would be the opposite of true here.
+        assert "Disabled module job" in result
+        assert "may not persist" not in result
+
+    @pytest.mark.asyncio
+    async def test_enabling_a_module_job_does_not_warn_about_cron_md(
+        self, make_config,
+    ):
+        """The converse of the branch above, and the same misleading note."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, skill, skill_args, "
+                " enabled, consecutive_failures, disabled_at) "
+                "VALUES (?, ?, ?, '', ?, ?, 0, 3, datetime('now'))",
+                ("alice", "_module.feeds.run_scheduled", "*/5 * * * *",
+                 "feeds", '["run-scheduled"]'),
+            )
+            result = await cmd_cron(
+                _ctx(config, conn, "alice", "room1",
+                     "enable _module.feeds.run_scheduled"),
+            )
+            job = db.get_scheduled_job_by_name(
+                conn, "alice", "_module.feeds.run_scheduled",
+            )
+
+        assert job.enabled is True
+        assert job.disabled_at is None
+        assert "Enabled module job" in result
+        assert "may not persist" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_enable_verb_clears_the_user_disable_record(
+        self, make_config,
+    ):
+        """The converse: a running job must not carry a stale disable stamp."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled, "
+                " disabled_at) "
+                "VALUES (?, ?, ?, ?, 0, datetime('now'))",
+                ("alice", "digest", "0 * * * *", "stuff"),
+            )
+            await cmd_cron(_ctx(config, conn, "alice", "room1", "enable digest"))
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+
+        assert job.enabled is True
+        assert job.disabled_at is None
 
     @pytest.mark.asyncio
     async def test_the_enable_verb_lifts_a_suspension(self, make_config):

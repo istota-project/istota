@@ -372,6 +372,51 @@ class TestSyncFeedsModuleJobs:
         assert row[4] is None
         assert row[5] is None
 
+    def test_the_command_shape_migration_does_not_undo_a_user_disable(
+        self, tmp_path,
+    ):
+        """The second path that writes `enabled = 1` over a module row.
+
+        `legacy_command` drift fires unconditionally and used to rescue the
+        row's enabled state along with migrating its shape, which is ISSUE-392
+        through a narrower door. The shape migration is still wanted — only the
+        rescue is the user's to refuse — so the row comes out skill-shaped and
+        still off.
+        """
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', ?, NULL, NULL, 1, 1, 6, ?, "
+            "datetime('now', '-10 minutes'), datetime('now', '-10 minutes'))",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "FEEDS_USER=alice istota-skill feeds run-scheduled",
+             "command-type tasks are admin-only"),
+        )
+        conn.commit()
+        job = db.get_scheduled_job_by_name(
+            conn, "alice", f"{MODULE_PREFIX}run_scheduled",
+        )
+        db.disable_scheduled_job(conn, job.id)
+        conn.commit()
+
+        _sync_feeds_module_jobs(conn, app_config)
+
+        row = conn.execute(
+            "SELECT command, skill, enabled, disabled_at FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert row[0] is None, "the shape migration must still happen"
+        assert row[1] == "feeds"
+        assert row[2] == 0, "the migration undid the user's disable"
+        # Nothing may leave a row enabled with the stamp still on it, so the
+        # gate has to hold rather than the stamp being cleared alongside.
+        assert row[3] is not None
+
     def test_rescue_does_not_touch_operator_paused_row(self, tmp_path):
         """`enabled = 0`, no failures, no suspension: nobody's daemon did this.
 
@@ -490,6 +535,112 @@ class TestSyncFeedsModuleJobs:
             ("alice", f"{MODULE_PREFIX}%"),
         ).fetchone()
         assert tuple(row) == (0, 5)
+
+    def test_the_legacy_arm_does_not_undo_a_user_disable(self, tmp_path):
+        """ISSUE-392. `!cron disable` on a module row has to stick.
+
+        `disable_scheduled_job` used to write `enabled = 0` and nothing else,
+        so on a row that had already failed the result was byte for byte the
+        state the legacy arm was written to rescue, and the user's off switch
+        was reverted on the first sync tick past the cooldown, indefinitely.
+        The verb now stamps `disabled_at` and the arm reads it to tell the two
+        apart.
+        """
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1, 3, 'boom', "
+            "datetime('now', '-9 hours'), NULL)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        job = db.get_scheduled_job_by_name(
+            conn, "alice", f"{MODULE_PREFIX}run_scheduled",
+        )
+        db.disable_scheduled_job(conn, job.id)
+        conn.commit()
+
+        _sync_feeds_module_jobs(conn, app_config)
+
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures FROM scheduled_jobs "
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
+        ).fetchone()
+        assert row[0] == 0, "the legacy arm undid the user's disable"
+        # Discriminating: `enabled == 0` alone is also what a sync that did
+        # nothing at all leaves behind (a missing feeds extra, an unresolvable
+        # user, a module-gating miss). The arm zeroes the failure count when it
+        # fires, so an untouched count is evidence the sync ran and declined.
+        assert row[1] == 3
+
+    def test_a_user_disable_stays_off_across_repeated_sync_ticks(self, tmp_path):
+        """The arm's comment claimed it could not fire twice for one row. It
+        can: the user disables again and the arm rescues again. Pinned over
+        several ticks so a fix that only delays the revert reads as red."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1, 5, 'boom', "
+            "datetime('now', '-9 hours'), NULL)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        job = db.get_scheduled_job_by_name(
+            conn, "alice", f"{MODULE_PREFIX}run_scheduled",
+        )
+        db.disable_scheduled_job(conn, job.id)
+        conn.commit()
+
+        for _ in range(3):
+            _sync_feeds_module_jobs(conn, app_config)
+            row = conn.execute(
+                "SELECT enabled, consecutive_failures FROM scheduled_jobs "
+                "WHERE user_id = ? AND name = ?",
+                ("alice", f"{MODULE_PREFIX}run_scheduled"),
+            ).fetchone()
+            assert row[0] == 0
+            # As above: an untouched failure count separates a sync that
+            # declined from a sync that never reached this row.
+            assert row[1] == 5
+
+    def test_the_legacy_arm_still_reaches_a_pre_split_row_with_no_disabled_at(
+        self, tmp_path,
+    ):
+        """`disabled_at` is not backfilled, so every row that existed before
+        the upgrade has it NULL — which is exactly the set the arm exists for.
+        The new term must not strand them.
+        """
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at, disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 0, 1, 5, 'boom', "
+            "datetime('now', '-9 hours'), NULL, NULL)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT enabled, consecutive_failures FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()
+        assert tuple(row) == (1, 0)
 
 
 # ---------------------------------------------------------------------------

@@ -170,6 +170,10 @@ class ScheduledJob:
     #: When the scheduler suspended this job; None = not suspended. The
     #: daemon's column, distinct from ``enabled`` (the user's intent).
     auto_disabled_at: str | None = None
+    #: When ``!cron disable`` last switched this job off; None = it has not.
+    #: Records the *author* of an ``enabled = 0``, which that column cannot
+    #: carry on its own. Only meaningful while ``enabled`` is False.
+    disabled_at: str | None = None
     once: bool = False
     model: str | None = None  # Per-job model override; empty/None = use config default
     effort: str | None = None  # Per-job effort override; empty/None = use config default
@@ -330,6 +334,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # `enabled = 0` row separates an operator disable from an
         # auto-disable, so every existing row starts unsuspended.
         ("auto_disabled_at", "TEXT"),
+        # ISSUE-392: the user's counterpart to the column above — when
+        # `!cron disable` last switched this job off. No backfill, for the
+        # same reason: an existing `enabled = 0` row does not say who wrote
+        # it. That ambiguity is what the module sync's legacy rescue arm
+        # exists to resolve, and backfilling either strands the rows it was
+        # written for or claims a user disabled something they did not.
+        ("disabled_at", "TEXT"),
         ("once", "INTEGER DEFAULT 0"),
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("model", "TEXT"),
@@ -7575,7 +7586,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               auto_disabled_at,
+               auto_disabled_at, disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
@@ -7593,7 +7604,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               auto_disabled_at,
+               auto_disabled_at, disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
@@ -7625,6 +7636,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         last_error=row["last_error"] if "last_error" in row.keys() else None,
         last_success_at=row["last_success_at"] if "last_success_at" in row.keys() else None,
         auto_disabled_at=row["auto_disabled_at"] if "auto_disabled_at" in row.keys() else None,
+        disabled_at=row["disabled_at"] if "disabled_at" in row.keys() else None,
         once=bool(row["once"]) if "once" in row.keys() else False,
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
@@ -7703,9 +7715,19 @@ def disable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     then reads back what the user asked for. The daemon's failure path must
     never come through here: its write would be reverted within the tick,
     which is the defect the column split exists to end.
+
+    It also stamps `disabled_at`, which is not bookkeeping: `enabled = 0` says
+    a job is off and does not say who said so, and on a `_module.*` row that
+    is load-bearing. Those rows are in nobody's CRON.md, so the module sync's
+    legacy rescue arm had nothing to read but the failure count and inferred
+    the author from it — reading a user's disable of a job that had already
+    failed as the daemon's, and re-enabling it on the next tick past the
+    cooldown, indefinitely (ISSUE-392). The stamp is the fact that inference
+    was standing in for.
     """
     conn.execute(
-        "UPDATE scheduled_jobs SET enabled = 0 WHERE id = ?",
+        "UPDATE scheduled_jobs "
+        "SET enabled = 0, disabled_at = datetime('now') WHERE id = ?",
         (job_id,),
     )
 
@@ -7732,7 +7754,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               auto_disabled_at,
+               auto_disabled_at, disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
@@ -7761,12 +7783,17 @@ def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     Resetting last_run_at prevents the scheduler from treating the re-enable as
     a catch-up opportunity and firing immediately. The next run will occur at the
     next scheduled window after the enable time.
+
+    `disabled_at` goes with them: it records that the user's disable verb was
+    used, and a running job carrying that stamp would be a lie to whoever reads
+    the column next.
     """
     conn.execute(
         """
         UPDATE scheduled_jobs
         SET enabled = 1, consecutive_failures = 0, last_error = NULL,
-            last_run_at = datetime('now'), auto_disabled_at = NULL
+            last_run_at = datetime('now'), auto_disabled_at = NULL,
+            disabled_at = NULL
         WHERE id = ?
         """,
         (job_id,),
@@ -7783,7 +7810,7 @@ def get_scheduled_job_by_name(
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               auto_disabled_at,
+               auto_disabled_at, disabled_at,
                once, model, effort, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs

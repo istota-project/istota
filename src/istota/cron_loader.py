@@ -30,7 +30,9 @@ from .toml_fence import FENCE_OPEN_RE as _TOML_FENCE_OPEN_RE
 logger = logging.getLogger("istota.cron_loader")
 
 # Names with this prefix are managed by module integrations (e.g. money) and
-# are not subject to CRON.md orphan deletion.
+# are not subject to CRON.md orphan deletion. Imported by `scheduler` and by
+# `commands` (the `!cron` verbs), which have to answer for such a row without
+# reaching for the file it is by definition absent from.
 _MODULE_JOB_PREFIX = "_module."
 
 # Effort levels accepted by Claude Code's --effort flag. Loose check — warn,
@@ -889,11 +891,13 @@ FILE_OWNED_COLUMNS = frozenset({
 })
 
 #: Columns the daemon authors. The sync never writes one *from the file*, and
-#: the two exceptions are resets rather than values out of CRON.md: the
-#: ``last_run_at`` reset on a cron-expression change, and the
+#: the three exceptions are resets rather than values out of CRON.md: the
+#: ``last_run_at`` reset on a cron-expression change, the
 #: ``auto_disabled_at`` / ``consecutive_failures`` / ``last_error`` reset on a
-#: change to what the job dispatches. Both are appended to the SET clause at
-#: their own sites so they read as the deliberate exceptions they are.
+#: change to what the job dispatches, and the ``disabled_at`` reset when the
+#: file says ``enabled = true``, which retracts a ``!cron disable``. All three
+#: are appended to the SET clause at their own sites so they read as the
+#: deliberate exceptions they are.
 DAEMON_OWNED_COLUMNS = frozenset({
     "last_run_at",
     "last_success_at",
@@ -904,6 +908,15 @@ DAEMON_OWNED_COLUMNS = frozenset({
     # place only — clearing it when the user edits what the job dispatches, at
     # its own site below.
     "auto_disabled_at",
+    # The `!cron disable` verb's own record (ISSUE-392). Filed here rather
+    # than beside `enabled` because these sets are about who wins on a sync
+    # tick and not about who may write a column: CRON.md has no way to say
+    # "the verb did this", so the sync must not write it from the file. It
+    # clears it in one place — with `enabled = 1`, at its own site below —
+    # because a running job carrying a disable stamp is a lie to whoever reads
+    # the column next. A file-authored disable is deliberately *not* stamped:
+    # that fact is already recorded in the file.
+    "disabled_at",
 })
 
 #: Row identity, never updated. ``user_id`` and ``name`` are written once at
@@ -1086,6 +1099,15 @@ def sync_cron_jobs_to_db(
             values = list(updates.values())
             if cron_changed:
                 set_parts.append("last_run_at = datetime('now')")
+            if file_values["enabled"]:
+                # The third deliberate exception, and a reset rather than a
+                # value out of the file: `disabled_at` records that the
+                # `!cron disable` verb switched this job off, so a file that
+                # now says `enabled = true` has retracted it. Leaving the
+                # stamp on a running job would misreport who last stopped it.
+                # Unconditional because clearing an already-NULL column is a
+                # no-op, which is cheaper than reading the row to find out.
+                set_parts.append("disabled_at = NULL")
             if changed_dispatch:
                 set_parts.append("auto_disabled_at = NULL")
                 set_parts.append("consecutive_failures = 0")
