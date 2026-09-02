@@ -1561,14 +1561,16 @@ async def api_encounter_extract(
     def _run():
         import tempfile
 
+        from istota.executor import daemon_work_dir
         from istota.health.encounter_ocr import extract_from_file
 
-        tmp_dir = (
-            Path(config.temp_dir)
-            if config is not None and getattr(config, "temp_dir", None)
-            else Path(tempfile.gettempdir())
-        )
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        # One level below `config.temp_dir`, not the shared root: that is the
+        # directory the OCR sandbox binds read-write, and the root is bound by
+        # nothing (ISSUE-397). `daemon_work_dir` creates it, and falls back to
+        # the shared root when the user id names no directory under it. The
+        # root itself is `config.temp_dir`, or the system temp dir when no
+        # config reached this route — a separate condition, not a second step.
+        tmp_dir = daemon_work_dir(config, ctx.user_id)
         with tempfile.NamedTemporaryFile(
             dir=tmp_dir, suffix=suffix or ".bin", delete=False,
         ) as tmp:
@@ -2434,6 +2436,7 @@ async def api_immunization_extract(
     def _run():
         import tempfile
 
+        from istota.executor import daemon_work_dir
         from istota.health.immunization_ocr import extract_from_file
 
         with health_db.connect(ctx.db_path) as conn:
@@ -2442,12 +2445,11 @@ async def api_immunization_extract(
         # through store_document into {uploads_dir}/documents/, so a crash
         # between write and unlink here can't leak a file next to the
         # confirmed panel sources.
-        tmp_dir = (
-            Path(config.temp_dir)
-            if config is not None and getattr(config, "temp_dir", None)
-            else Path(tempfile.gettempdir())
-        )
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        #
+        # One level below `config.temp_dir`, not the shared root: that is the
+        # directory the OCR sandbox binds read-write, and the root is bound by
+        # nothing (ISSUE-397).
+        tmp_dir = daemon_work_dir(config, ctx.user_id)
         with tempfile.NamedTemporaryFile(
             dir=tmp_dir, suffix=suffix or ".bin", delete=False,
         ) as tmp:

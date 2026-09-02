@@ -467,6 +467,12 @@ class TestParseAndBulkRoutes:
         # Path must NOT be under uploads_dir, and SHOULD be under temp_dir.
         uploads_parent = Path(ctx.uploads_dir).resolve()
         assert uploads_parent not in captured["path"].resolve().parents
+        # ISSUE-397: one level below temp_dir, not the shared root. That is the
+        # directory the OCR sandbox binds read-write; the root is bound at no
+        # path, so a copy written there is one the model cannot open.
+        assert captured["path"].resolve().parent == (
+            configured_tmp / ctx.user_id
+        ).resolve()
 
 
 class TestDashboardAndSummary:

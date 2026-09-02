@@ -251,9 +251,10 @@ def _call_brain(
     ``read_path`` is the document a vision-mode prompt names by absolute path.
     Passing it is what grants the ``Read`` tool, and it is simultaneously the
     only path ``Read`` may touch — the two travel together so that granting the
-    tool without a root is not expressible. See ``health/ocr.py:_call_brain``
-    for the full reasoning, including what confinement does not cover on a
-    ``claude_code`` deployment (ISSUE-395).
+    tool without a root is not expressible. ``sandbox_wrap`` is the other half:
+    the Claude brains ignore those roots and take their boundary from
+    bubblewrap instead. See ``health/ocr.py:_call_brain`` for the full
+    reasoning (ISSUE-395, ISSUE-397).
     """
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
@@ -271,12 +272,30 @@ def _call_brain(
     # Imported here rather than at module scope: `executor` imports
     # `briefings.generate`, and a top-level import from any of these callers
     # risks closing a cycle back through it.
-    from istota.executor import build_model_cli_env, persist_brain_usage
+    from istota.executor import (
+        build_daemon_sandbox,
+        build_model_cli_env,
+        persist_brain_usage,
+    )
 
+    sandbox = build_daemon_sandbox(
+        config, user_id, extra_ro_binds=[read_path] if read_path else None
+    )
+    if sandbox.refused and read_path:
+        # Fail closed. A namespace was wanted and could not be built, and the
+        # tool grant below is only safe inside one — on the Claude brains it is
+        # the CLI's whole default toolset, confined by nothing else. Better no
+        # extraction than an unconfined one: the caller renders "extraction
+        # unavailable, add the rows by hand", which is a recoverable answer.
+        logger.warning(
+            "health_imm_ocr_sandbox_refused user_id=%r — not granting Read "
+            "outside a namespace", user_id,
+        )
+        return None
     req = BrainRequest(
         prompt=prompt,
         allowed_tools=["Read"] if read_path else [],
-        cwd=Path(getattr(config, "temp_dir", None) or "/tmp"),
+        cwd=sandbox.work_dir,
         # Not `dict(os.environ)`: this is a daemon-side call with no task
         # behind it, so nothing has stripped the master Fernet key, the
         # Nextcloud app password, the mail passwords or the forge tokens
@@ -284,6 +303,10 @@ def _call_brain(
         # daemon-side model spawn that is not a task (ISSUE-232).
         env=build_model_cli_env(config),
         fs_read_roots=[read_path] if read_path else None,
+        # The Claude brains' filesystem boundary (ISSUE-397). `NativeBrain`
+        # reads `native_sandbox_wrap` and not this one, and is confined by the
+        # roots above instead.
+        sandbox_wrap=sandbox.wrap,
         timeout_seconds=180,
         model=model,
         streaming=False,

@@ -428,8 +428,9 @@ rather than bytes. `build_image_prompt` prepends one of two sections to
   paths), never a gap to fill: the tool set is not enabled implicitly, which is
   the split `health/ocr.py` already settled with its own
   `allowed_tools=["Read"] if read_path` line — where the same value also
-  supplies `fs_read_roots`, so the tool grant and its confinement travel
-  together (ISSUE-395).
+  supplies `fs_read_roots` and the document bound into the request's
+  `sandbox_wrap`, so the tool grant and its confinement travel together
+  (ISSUE-395, ISSUE-397).
 
 The tmux brain puts the same section in `prompt.txt` via `prompt_file_text`,
 ahead of the original request, because it submits one buffer per run and a
@@ -667,14 +668,29 @@ These six sites (plus the executor and conversation-context triage) are also
 the nine `BrainRequest` construction sites the advisor-model spec enumerates.
 All six build their env from `executor.build_model_cli_env` (ISSUE-395 — they
 used to pass `dict(os.environ)`, handing the model the master Fernet key, the
-Nextcloud app password and every service token) and still run unsandboxed, so
-— unlike the executor, whose sandbox only RO-binds the host's
-`~/.claude/settings.json` — they read the daemon user's **real** settings file
-directly. Any Claude Code setting that
-changes model behaviour (`advisorModel` is the first one Istota has taken a
-position on) is inherited here too unless a brain neutralises it structurally;
-see `.claude/rules/executor.md` § Environment Variable Mapping and "Model
-identity" below.
+Nextcloud app password and every service token).
+
+**Three of them are sandboxed and the rest are not, and the split is the tool
+grant.** The OCR extractors pass `executor.build_daemon_sandbox(config,
+user_id, extra_ro_binds=[document])` as `sandbox_wrap` (ISSUE-397); the others
+grant no tool and stay unwrapped. That split is not cosmetic: a
+non-empty `allowed_tools` is what makes `build_claude_cli_flags` add
+`--dangerously-skip-permissions` with no `--allowedTools` allowlist at all, so
+the CLI gets its whole default toolset — and both Claude brains ignore
+`fs_read_roots`, taking their filesystem boundary from bubblewrap alone. Until
+that wrap went in, an OCR extraction ran `Bash` and `Write` host-side as the
+daemon user on the default deployment.
+
+(The roster below is spelled "six" here and in `.claude/rules/executor.md` and
+names seven modules. The count is wrong in both; the roster is what to read.)
+
+The ones that stay unwrapped — unlike the executor, whose sandbox only
+RO-binds the host's `~/.claude/settings.json` — read the daemon user's **real**
+settings file directly. Any Claude Code setting that changes model behaviour
+(`advisorModel` is the first one Istota has taken a position on) is inherited
+there unless a brain neutralises it structurally; see
+`.claude/rules/executor.md` § Environment Variable Mapping and "Model identity"
+below.
 
 ### Fallback-compatibility posture registry (ISSUE-181, Problem 3)
 
