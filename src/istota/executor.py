@@ -1714,23 +1714,59 @@ def build_clean_env(config: Config) -> dict[str, str]:
     return env
 
 
-def build_model_cli_env(config: Config) -> dict[str, str]:
-    """Build the env for a daemon-side `claude` spawn that is not a task.
+#: What a daemon-side model call needs from the daemon's own environment in
+#: order to *reach* the provider, beyond what `build_clean_env` allowlists.
+#:
+#: Split into three groups because they fail differently, not for tidiness.
+#: The proxy triple is tested for **presence**, never truthiness: `NO_PROXY=`
+#: is meaningfully empty (it blanks an inherited exemption list), the same
+#: reading `tool_server._PROXY_ENV_VARS` takes of the same three names.
+_MODEL_CLI_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+                         "https_proxy", "http_proxy", "no_proxy")
+#: Where the CLI's TLS trust store is, on a deployment terminating TLS at its
+#: own proxy. Without these the request fails at the handshake.
+_MODEL_CLI_TLS_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+                       "REQUESTS_CA_BUNDLE")
+#: Where the provider *is*, on a gateway deployment, and how to authenticate
+#: to it. `ANTHROPIC_API_KEY` is the long-standing member of this group.
+_MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                            "ANTHROPIC_BASE_URL")
 
-    The context-triage completion and the healthcheck execution test both
-    shell out to `claude` outside `BrainRequest`, so neither gets the
-    per-task env `execute_task()` assembles. They still need exactly what
-    `build_clean_env` allowlists plus the CLI's own credential: the OAuth
-    token comes through `build_clean_env`, and `ANTHROPIC_API_KEY` is
-    inherited here so an API-key deployment authenticates too. Everything
-    else in the daemon environment — the master Fernet key, the Nextcloud
-    app password, every configured service token — stays out.
+
+def build_model_cli_env(config: Config) -> dict[str, str]:
+    """Build the env for a daemon-side model call that is not a task.
+
+    Used by every call that reaches a model outside `execute_task` — the
+    `!check` / self-check execution test and conversation-context triage,
+    which spawn or wrap the `claude` CLI directly, and the six modules that
+    build a `BrainRequest` of their own (the three OCR extractors, the
+    biomarker explainer, the nightly sleep cycle, shared briefing blocks and
+    the code-review agents). The rule rather than the roster: if it sends a
+    prompt to a model and there is no task behind it, its env comes from here.
+
+    It is `build_clean_env`'s allowlist plus the names below. Everything else
+    in the daemon environment — the master Fernet key, the Nextcloud app
+    password, every configured service token — stays out.
+
+    **The extra names are a regression fix, not a widening** (ISSUE-395).
+    These calls all run in the daemon's own network namespace: they build no
+    `--unshare-net` and no CONNECT bridge, so unlike a task they get no
+    `HTTPS_PROXY` pointing at one. They used to pass `dict(os.environ)` and so
+    inherited the daemon's proxy, CA-bundle and gateway settings by accident.
+    Narrowing the env without carrying those forward would have left a
+    proxy-only or gateway deployment unable to reach the provider at all, from
+    six call sites at once, with the failure surfacing as a connect error
+    nowhere near this function.
+
+    An operator's own `security.passthrough_env_vars` entry wins: those are
+    applied by `build_clean_env` and are only filled in here when absent.
     """
     env = build_clean_env(config)
-    if not env.get("ANTHROPIC_API_KEY"):
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if api_key:
-            env["ANTHROPIC_API_KEY"] = api_key
+    for name in (*_MODEL_CLI_PROXY_VARS, *_MODEL_CLI_TLS_VARS,
+                 *_MODEL_CLI_ENDPOINT_VARS):
+        # Presence, not truthiness — see `_MODEL_CLI_PROXY_VARS`.
+        if name not in env and name in os.environ:
+            env[name] = os.environ[name]
     return env
 
 

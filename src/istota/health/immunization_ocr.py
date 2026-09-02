@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -245,8 +244,17 @@ def _parse_llm_response(raw: str) -> tuple[list[dict], int]:
 
 
 def _call_brain(
-    prompt: str, config, *, allow_read: bool = False, user_id: str = ""
+    prompt: str, config, *, read_path: Path | None = None, user_id: str = ""
 ) -> str | None:
+    """Run the extraction prompt through the active brain.
+
+    ``read_path`` is the document a vision-mode prompt names by absolute path.
+    Passing it is what grants the ``Read`` tool, and it is simultaneously the
+    only path ``Read`` may touch — the two travel together so that granting the
+    tool without a root is not expressible. See ``health/ocr.py:_call_brain``
+    for the full reasoning, including what confinement does not cover on a
+    ``claude_code`` deployment (ISSUE-395).
+    """
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
     except ImportError as e:
@@ -260,11 +268,22 @@ def _call_brain(
     except Exception as e:  # noqa: BLE001
         logger.warning("health_imm_ocr_brain_init_failed error=%s", e)
         return None
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import build_model_cli_env, persist_brain_usage
+
     req = BrainRequest(
         prompt=prompt,
-        allowed_tools=["Read"] if allow_read else [],
+        allowed_tools=["Read"] if read_path else [],
         cwd=Path(getattr(config, "temp_dir", None) or "/tmp"),
-        env=dict(os.environ),
+        # Not `dict(os.environ)`: this is a daemon-side call with no task
+        # behind it, so nothing has stripped the master Fernet key, the
+        # Nextcloud app password, the mail passwords or the forge tokens
+        # (ISSUE-395). `build_model_cli_env` is the existing answer for a
+        # daemon-side model spawn that is not a task (ISSUE-232).
+        env=build_model_cli_env(config),
+        fs_read_roots=[read_path] if read_path else None,
         timeout_seconds=180,
         model=model,
         streaming=False,
@@ -274,10 +293,6 @@ def _call_brain(
     except Exception as e:  # noqa: BLE001
         logger.warning("health_imm_ocr_brain_failed error=%s", e)
         return None
-    # Imported here rather than at module scope: `executor` imports
-    # `briefings.generate`, and a top-level import from any of these callers
-    # risks closing a cycle back through it.
-    from istota.executor import persist_brain_usage
 
     # One call per uploaded document, with no task row behind it.
     persist_brain_usage(
@@ -324,7 +339,7 @@ def extract_from_file(
     else:
         prompt = _build_vision_prompt(source_path, refs)
         response = _call_brain(
-            prompt, config, allow_read=True, user_id=user_id
+            prompt, config, read_path=source_path, user_id=user_id
         )
 
     if not response:

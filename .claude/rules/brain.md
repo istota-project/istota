@@ -427,7 +427,9 @@ rather than bytes. `build_image_prompt` prepends one of two sections to
   tool list is a caller's policy decision (the sleep cycle, the health OCR
   paths), never a gap to fill: the tool set is not enabled implicitly, which is
   the split `health/ocr.py` already settled with its own
-  `allowed_tools=["Read"] if allow_read` line.
+  `allowed_tools=["Read"] if read_path` line — where the same value also
+  supplies `fs_read_roots`, so the tool grant and its confinement travel
+  together (ISSUE-395).
 
 The tmux brain puts the same section in `prompt.txt` via `prompt_file_text`,
 ahead of the original request, because it submits one buffer per run and a
@@ -663,9 +665,12 @@ raises it, then the next probe succeeds and closes the breaker.
 
 These six sites (plus the executor and conversation-context triage) are also
 the nine `BrainRequest` construction sites the advisor-model spec enumerates.
-All six build their env from `dict(os.environ)` and run unsandboxed, so — unlike the executor, whose
-sandbox only RO-binds the host's `~/.claude/settings.json` — they read the
-daemon user's **real** settings file directly. Any Claude Code setting that
+All six build their env from `executor.build_model_cli_env` (ISSUE-395 — they
+used to pass `dict(os.environ)`, handing the model the master Fernet key, the
+Nextcloud app password and every service token) and still run unsandboxed, so
+— unlike the executor, whose sandbox only RO-binds the host's
+`~/.claude/settings.json` — they read the daemon user's **real** settings file
+directly. Any Claude Code setting that
 changes model behaviour (`advisorModel` is the first one Istota has taken a
 position on) is inherited here too unless a brain neutralises it structurally;
 see `.claude/rules/executor.md` § Environment Variable Mapping and "Model

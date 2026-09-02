@@ -191,11 +191,19 @@ def _run_sleep_cycle_brain(
         )
         return False, ""
 
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these
+    # callers risks closing a cycle back through it.
+    from istota.executor import build_model_cli_env
+
     req = BrainRequest(
         prompt=prompt,
         allowed_tools=[],
         cwd=Path(config.temp_dir) if config.temp_dir else Path("/tmp"),
-        env=dict(os.environ),
+        # Not `dict(os.environ)`: a daemon-side model call with no task behind
+        # it, so nothing has stripped the master Fernet key, the Nextcloud app
+        # password, the mail passwords or the forge tokens (ISSUE-395).
+        env=build_model_cli_env(config),
         timeout_seconds=_SLEEP_CYCLE_TIMEOUT_SECONDS,
         model=make_brain(config.brain).resolve_model_name(model),
         streaming=False,

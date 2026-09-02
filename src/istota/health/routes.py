@@ -1573,7 +1573,10 @@ async def api_encounter_extract(
             dir=tmp_dir, suffix=suffix or ".bin", delete=False,
         ) as tmp:
             tmp.write(raw)
-            tmp_path = Path(tmp.name)
+            # Resolved, like `ocr._resolve_source_file`: this path becomes the
+            # request's `fs_read_roots` entry as well as the path named in the
+            # prompt, and `ToolEnv` compares realpaths (ISSUE-395).
+            tmp_path = Path(tmp.name).resolve()
         try:
             return extract_from_file(
                 tmp_path, mime, config=config, user_id=ctx.user_id
@@ -2449,7 +2452,10 @@ async def api_immunization_extract(
             dir=tmp_dir, suffix=suffix or ".bin", delete=False,
         ) as tmp:
             tmp.write(raw)
-            tmp_path = Path(tmp.name)
+            # Resolved, like `ocr._resolve_source_file`: this path becomes the
+            # request's `fs_read_roots` entry as well as the path named in the
+            # prompt, and `ToolEnv` compares realpaths (ISSUE-395).
+            tmp_path = Path(tmp.name).resolve()
         try:
             return extract_from_file(
                 tmp_path, mime, refs, config=config, user_id=ctx.user_id

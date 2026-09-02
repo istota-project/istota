@@ -191,8 +191,8 @@ class TestExtractFromPanel:
         assert (panel.ocr_text or "").startswith("Hemoglobin")
 
     def test_extraction_vision_mode_for_image(self, ctx):
-        # Image source: pdftotext is bypassed; we go straight to vision mode
-        # with allow_read=True.
+        # Image source: pdftotext is bypassed; we go straight to vision mode,
+        # naming the document as the one path Read may touch (ISSUE-395).
         pid = _seed_image_source(ctx)
         with health_db.connect(ctx.db_path) as conn:
             panel = health_db.get_panel(conn, pid)
@@ -202,8 +202,8 @@ class TestExtractFromPanel:
         )
         captured: dict = {}
 
-        def _fake_brain(prompt, config, *, allow_read=False, user_id=""):
-            captured["allow_read"] = allow_read
+        def _fake_brain(prompt, config, *, read_path=None, user_id=""):
+            captured["read_path"] = read_path
             captured["prompt"] = prompt
             return fake_response
 
@@ -211,7 +211,7 @@ class TestExtractFromPanel:
             result = health_ocr.extract_from_panel(ctx, panel)
 
         assert result["mode"] == "vision"
-        assert captured["allow_read"] is True
+        assert captured["read_path"] == health_ocr._resolve_source_file(ctx, panel)
         # Vision prompt references the source path so the brain knows what
         # to Read.
         assert "Read the lab report" in captured["prompt"]
