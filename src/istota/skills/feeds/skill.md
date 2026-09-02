@@ -41,7 +41,7 @@ OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provide
 | Variable | Description |
 |---|---|
 | `FEEDS_USER` | Istota user id (set by the executor) |
-| `TUMBLR_API_KEY` | Tumblr API v2 key (optional). Can also be set via `extra.tumblr_api_key` on the user's `[[resources]] type = "feeds"` entry — context value wins, env var is a fallback for the migration window when the production deploy still has the key in the bridger systemd unit. |
+| `TUMBLR_API_KEY` | Tumblr API v2 key (optional). Stored per user in the encrypted secrets store under service `feeds`, key `tumblr_api_key` — set it with `istota secret ensure -u USER --service feeds --key tumblr_api_key --value ...` or from the feeds settings page. The manifest resolves it (`from: secret`) and the skill proxy injects it here, so this variable is what the skill reads; a `TUMBLR_API_KEY` in the daemon's own environment is the declared fallback when nothing is stored. |
 
 ## Notes
 
