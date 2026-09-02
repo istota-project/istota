@@ -25,6 +25,7 @@ Run with `scripts/test-linux.sh`. Carries the `linux` marker.
 """
 
 import asyncio
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -613,6 +614,22 @@ class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
 
     _TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"
 
+    def _spawn_env(self, user_temp, **extra):
+        """A minimal spawn env that can still start the server.
+
+        `PYTHONPATH` is carried through when the harness set one: this tier's
+        image installs the dependencies but not the project, so `istota` is
+        importable only from it. A deployment installs the package into the
+        venv and needs nothing here — but a spawn env that omits it starts no
+        server at all, and the handshake failure that follows looks exactly
+        like the boundary failure this class exists to detect.
+        """
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(user_temp), **extra}
+        pythonpath = os.environ.get("PYTHONPATH")
+        if pythonpath:
+            env["PYTHONPATH"] = pythonpath
+        return env
+
     def _ask(self, layout, task, user_temp, spawn_env):
         async def _go():
             async with _Session(layout, task, user_temp, env=spawn_env) as server:
@@ -624,10 +641,7 @@ class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
     def test_a_bash_child_cannot_read_it_from_the_servers_environ(
         self, layout, task, user_temp
     ):
-        out = self._ask(
-            layout, task, user_temp,
-            {"PATH": "/usr/bin:/bin", "HOME": str(user_temp)},
-        )
+        out = self._ask(layout, task, user_temp, self._spawn_env(user_temp))
         assert "PARENT_ENV=ABSENT" in out
         # Without this the absence above is a fact about some other process.
         assert "istota.tool_server" in out
@@ -642,11 +656,7 @@ class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
         """
         out = self._ask(
             layout, task, user_temp,
-            {
-                "PATH": "/usr/bin:/bin",
-                "HOME": str(user_temp),
-                self._TOKEN: "sk-ant-oat-fake-for-tests",
-            },
+            self._spawn_env(user_temp, **{self._TOKEN: "sk-ant-oat-fake-for-tests"}),
         )
         assert "PARENT_ENV=PRESENT" in out
         assert "istota.tool_server" in out

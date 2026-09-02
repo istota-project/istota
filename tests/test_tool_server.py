@@ -355,6 +355,52 @@ class TestFailure:
                 startup_timeout=5.0,
             )
 
+    async def test_the_startup_timeout_names_what_the_server_said(self, tmp_path):
+        """The branch a hung server takes, which reports only the timeout.
+
+        Deterministic where the death branches are not: whether a server that
+        dies at once produces EOF (whose `ToolServerError` already carries
+        `_death_reason`'s stderr tail) or a socket reset (which does not) is a
+        race between our write and its exit. This one always hangs, so it
+        always takes the timeout path.
+        """
+        with pytest.raises(remote_mod.ToolServerError) as caught:
+            await start_tool_server(
+                _hello(tmp_path),
+                sandbox_wrap=lambda cmd: [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; "
+                    "sys.stderr.write('DISTINCTIVE-CAUSE-ON-STDERR\\n'); "
+                    "sys.stderr.flush(); time.sleep(30)",
+                ],
+                startup_timeout=1.0,
+            )
+        message = str(caught.value)
+        assert "did not become ready" in message, message
+        assert "DISTINCTIVE-CAUSE-ON-STDERR" in message, message
+
+    async def test_abandon_reports_the_status_even_with_a_silent_stderr(
+        self, tmp_path
+    ):
+        """`_abandon` directly, because it is the piece both failure branches
+        share and the only one that can be driven deterministically.
+
+        Nothing on stderr is the common case — bwrap exits 1 for most mount
+        failures without a word — so the status has to carry on its own rather
+        than the detail collapsing to an empty string.
+        """
+        server = await start_tool_server(_hello(tmp_path))
+        try:
+            server._proc.kill()
+            await asyncio.wait_for(server._proc.wait(), timeout=5)
+            detail = await remote_mod._abandon(server)
+        finally:
+            with contextlib.suppress(Exception):
+                await server.aclose()
+        assert detail, "a dead server must produce some detail"
+        assert "exit" in detail, detail
+
 
 class TestAnOversizedResultCostsTheCallOnly:
     async def test_a_result_over_the_frame_cap_is_an_error_result(self, tmp_path):
