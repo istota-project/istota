@@ -5,15 +5,23 @@ provider modules are tested separately (Phase 1 keeps them as a vendored
 copy of the rss-bridger logic, which already has its own tests).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 pytest.importorskip("feedparser", reason="feeds extra not installed")
 
 from istota.feeds import db as feeds_db
-from istota.feeds.models import FeedRecord
-from istota.feeds.poller import _backoff_interval, poll_due_feeds, poll_feed
+from istota.feeds.models import (
+    MIN_ENTRIES_PER_FEED,
+    POLL_CLAIM_SECONDS,
+    FeedRecord,
+)
+from istota.feeds.poller import (
+    _backoff_interval,
+    poll_due_feeds,
+    poll_feed,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -624,3 +632,682 @@ class TestNonImageMediaAttachments:
         assert entries[0].media_url == "https://assets.example.town/media/117/original/clip.mp4"
         assert entries[0].media_type == "video/mp4"
         assert entries[0].image_urls == []
+
+
+# ---------------------------------------------------------------------------
+# observation marker + poll claims (ISSUE-388)
+# ---------------------------------------------------------------------------
+
+
+# A well-formed feed that legitimately holds nothing. It returns no item, so
+# it does not advance the marker — the same answer the error page below gets,
+# and deliberately so: the two are indistinguishable without the completeness
+# reasoning this design removed, and keeping history is the safe reading.
+EMPTY_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Example</title></channel></rss>
+"""
+
+# Served at HTTP 200 with `bozo` False, parsing cleanly into zero entries. If
+# a response like this advanced the marker, one proxy error would make a
+# whole feed's history age-eligible at once.
+HTML_ERROR_PAGE = b"<html><body><h1>404 Not Found</h1></body></html>"
+
+TWO_ITEM_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>Example</title>
+<item><guid>one</guid><title>One</title></item>
+<item><guid>two</guid><title>Two</title></item>
+</channel>
+</rss>
+"""
+
+
+def _seed_rss_feed(tmp_path, *, url="https://example.com/feed.xml"):
+    path = tmp_path / "feeds.db"
+    feeds_db.init_db(path)
+    with feeds_db.connect(path) as conn:
+        feed_id = feeds_db.upsert_feed(
+            conn, url=url, title=None, site_url=None,
+            source_type="rss", category_id=None, poll_interval_minutes=30,
+        )
+        conn.commit()
+    return path, feed_id
+
+
+def _make_due(path):
+    with feeds_db.connect(path) as conn:
+        conn.execute(
+            "UPDATE feeds SET next_poll_at = NULL, poll_claimed_until = NULL"
+        )
+        conn.commit()
+
+
+class TestTheObservationMarker:
+    """``feeds.last_items_seen_at`` advances when, and only when, a response
+    returned at least one identifiable item."""
+
+    def test_a_response_carrying_items_advances_it_and_stamps_each_entry(
+        self, tmp_path,
+    ):
+        path, _ = _seed_rss_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        resp = _StubResponse(status_code=200, content=TWO_ITEM_RSS)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=_stub_get_factory(resp), now=now)
+            feed = feeds_db.list_feeds(conn)[0]
+            rows = {
+                r["guid"]: r["last_seen_at"]
+                for r in conn.execute("SELECT guid, last_seen_at FROM feed_entries")
+            }
+        assert feed.last_items_seen_at is not None
+        # Every entry the response returned carries exactly the feed's marker,
+        # which is what protects it from the age pass.
+        assert set(rows) == {"one", "two"}
+        assert set(rows.values()) == {feed.last_items_seen_at}
+
+    def test_a_second_response_advances_it_and_stamps_only_what_it_returned(
+        self, tmp_path,
+    ):
+        path, _ = _seed_rss_feed(tmp_path)
+        first = _StubResponse(status_code=200, content=TWO_ITEM_RSS)
+        second = _StubResponse(status_code=200, content=SAMPLE_RSS)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(first),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(second),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            rows = {
+                r["guid"]: r["last_seen_at"]
+                for r in conn.execute("SELECT guid, last_seen_at FROM feed_entries")
+            }
+        assert feed.last_items_seen_at > first_marker
+        assert rows["hello-1"] == feed.last_items_seen_at
+        # The two the second response did not return keep the older stamp, and
+        # are the only rows the age pass can reach.
+        assert rows["one"] == first_marker
+        assert rows["two"] == first_marker
+
+    def test_a_valid_empty_response_does_not_advance_it(self, tmp_path):
+        """A genuinely empty feed keeps its history.
+
+        The cost is stated in the spec: such a feed is never age-pruned and is
+        bounded by the maximum alone. That is the safe direction.
+        """
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=EMPTY_RSS)
+                ),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            row = conn.execute(
+                "SELECT last_seen_at FROM feed_entries WHERE guid='hello-1'"
+            ).fetchone()
+        assert feed.last_items_seen_at == first_marker
+        assert row["last_seen_at"] == first_marker
+
+    def test_an_html_error_page_does_not_advance_it(self, tmp_path):
+        """The control the whole rule rests on.
+
+        The assertion is on the marker itself, not on "no entry was inserted"
+        — that is equally true of a legitimately empty feed, so it cannot tell
+        the two apart, and only the marker says whether a feed's stored history
+        just became age-eligible on the strength of a proxy error.
+        """
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=HTML_ERROR_PAGE)
+                ),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            row = conn.execute(
+                "SELECT last_seen_at FROM feed_entries WHERE guid='hello-1'"
+            ).fetchone()
+        # The response was a 200 that parsed without complaint, so nothing
+        # upstream of the marker rule refused it.
+        assert outcomes[0][1].error is None
+        assert outcomes[0][1].items == []
+        assert feed.last_items_seen_at == first_marker
+        assert row["last_seen_at"] == first_marker
+
+    def test_a_304_preserves_it_and_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(_StubResponse(status_code=304)),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.last_items_seen_at == first_marker
+        assert feed.poll_claimed_until is None
+
+    def test_an_error_preserves_it_and_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(_StubResponse(status_code=503)),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.last_items_seen_at == first_marker
+        assert feed.poll_claimed_until is None
+
+    def test_a_rate_limit_preserves_it_and_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            first_marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn,
+                http_get=_stub_get_factory(
+                    _StubResponse(status_code=429, headers={"Retry-After": "60"})
+                ),
+                now=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.last_items_seen_at == first_marker
+        assert feed.poll_claimed_until is None
+        assert feed.last_throttled_at is not None
+
+    def test_a_provider_response_advances_it(self, tmp_path, monkeypatch):
+        """A provider that returned normally validated its own payload, and a
+        non-empty list is an ordinary response carrying items."""
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="arena:chan", title=None, site_url=None,
+                source_type="arena", category_id=None, poll_interval_minutes=60,
+            )
+            conn.commit()
+        monkeypatch.setattr(
+            arena_provider, "fetch", lambda ident, **kw: [FetchedItem(guid="b1")],
+        )
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+            row = conn.execute(
+                "SELECT last_seen_at FROM feed_entries WHERE guid='b1'"
+            ).fetchone()
+        assert feed.last_items_seen_at is not None
+        assert row["last_seen_at"] == feed.last_items_seen_at
+
+    def test_a_provider_that_rejects_its_payload_does_not_advance_it(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.feeds.providers import arena as arena_provider
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="arena:chan", title=None, site_url=None,
+                source_type="arena", category_id=None, poll_interval_minutes=60,
+            )
+            conn.execute(
+                "UPDATE feeds SET last_items_seen_at = ? WHERE id = ?",
+                ("2026-08-01T00:00:00+00:00", feed_id),
+            )
+            conn.commit()
+
+        def _boom(ident, **kw):
+            raise ValueError("arena data missing or not a list")
+
+        monkeypatch.setattr(arena_provider, "fetch", _boom)
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert outcomes[0][1].error is not None
+        assert feed.last_items_seen_at == "2026-08-01T00:00:00+00:00"
+        assert feed.poll_claimed_until is None
+
+    def test_a_successful_poll_clears_the_claim(self, tmp_path):
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_stub_get_factory(
+                    _StubResponse(status_code=200, content=SAMPLE_RSS)
+                ),
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.poll_claimed_until is None
+
+
+class TestPollClaimsInTheBatch:
+    def test_a_claimed_feed_is_not_fetched(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        calls: list[str] = []
+
+        def _get(url, **kwargs):
+            calls.append(url)
+            return _StubResponse(status_code=200, content=SAMPLE_RSS)
+
+        with feeds_db.connect(path) as claimer:
+            feeds_db.claim_feed_for_poll(claimer, feed_id, now=now)
+
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_get, now=now + timedelta(seconds=5),
+            )
+            entries = feeds_db.list_entries(conn)
+        assert calls == []
+        assert outcomes == []
+        assert entries == []
+
+    def test_a_poll_claims_the_feed_before_fetching_it(self, tmp_path):
+        """The claim is committed before the network call, not after it.
+
+        A second process reading the table mid-fetch is exactly the race this
+        exists for, so the assertion is made from inside the stub.
+        """
+        path, feed_id = _seed_rss_feed(tmp_path)
+        observed: list[str | None] = []
+
+        def _get(url, **kwargs):
+            with feeds_db.connect(path) as other:
+                row = other.execute(
+                    "SELECT poll_claimed_until FROM feeds WHERE id = ?", (feed_id,),
+                ).fetchone()
+            observed.append(row["poll_claimed_until"])
+            return _StubResponse(status_code=200, content=SAMPLE_RSS)
+
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(
+                conn, http_get=_get,
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+        assert observed and observed[0] is not None
+
+    def test_a_claim_taken_after_the_due_list_still_skips_the_feed(
+        self, tmp_path, monkeypatch,
+    ):
+        """The interval the in-loop claim exists for, and nothing else covers.
+
+        The test above claims the feed before the run starts, so
+        ``feeds_due_for_poll``'s own filter is what stops it and the
+        ``claim_feed_for_poll`` refusal in the loop could be deleted with the
+        suite still green. Here a rival takes the claim *after* the due SELECT
+        returned the feed — the race between that SELECT and the request, which
+        is the whole reason the second check is there.
+        """
+        path, feed_id = _seed_rss_feed(tmp_path)
+        calls: list[str] = []
+
+        def _get(url, **kwargs):
+            calls.append(url)
+            return _StubResponse(status_code=200, content=SAMPLE_RSS)
+
+        real_due = feeds_db.feeds_due_for_poll
+
+        def _due_then_stolen(conn, now=None):
+            feeds = real_due(conn, now=now)
+            with feeds_db.connect(path) as rival:
+                feeds_db.claim_feed_for_poll(rival, feed_id, now=now)
+            return feeds
+
+        monkeypatch.setattr(feeds_db, "feeds_due_for_poll", _due_then_stolen)
+
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_get,
+                now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            )
+            entries = feeds_db.list_entries(conn)
+            feed = feeds_db.list_feeds(conn)[0]
+        assert calls == []
+        assert outcomes == []
+        assert entries == []
+        # The rival's lease is intact — the skip released nothing it did not
+        # take, which is what makes it safe to run two polls at once.
+        assert feed.poll_claimed_until is not None
+        assert feed.last_fetched_at is None
+
+    def test_an_expired_claim_does_not_block_the_next_run(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path)
+        now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as claimer:
+            feeds_db.claim_feed_for_poll(claimer, feed_id, now=now)
+        resp = _StubResponse(status_code=200, content=SAMPLE_RSS)
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=_stub_get_factory(resp),
+                now=now + timedelta(seconds=POLL_CLAIM_SECONDS + 1),
+            )
+        assert len(outcomes) == 1
+
+
+class TestConditionalValidators:
+    """An ETag off a document that is not a feed must not be stored.
+
+    A liveness rule rather than a retention one, and it is scoped as narrowly
+    as the marker rule beside it: nothing here judges whether a response was
+    complete. A 200 that yielded no items *and* that the parser did not
+    recognise as a feed at all is the case — an HTML error page — and storing
+    its validator answers every later request with a 304, so the feed stops
+    updating with `last_error` clear and nothing saying why.
+    """
+
+    def test_an_html_error_page_stores_no_validators(self):
+        resp = _StubResponse(
+            status_code=200, content=HTML_ERROR_PAGE,
+            headers={"ETag": '"error-page"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items == []
+        assert result.etag is None
+        assert result.last_modified is None
+
+    def test_a_genuinely_empty_feed_keeps_its_conditional_get(self):
+        """The control, and the reason the guard is not "no items".
+
+        An empty feed is a feed. Refusing its validator would cost it a full
+        body fetch on every poll, for ever, to no purpose.
+        """
+        resp = _StubResponse(
+            status_code=200, content=EMPTY_RSS,
+            headers={"ETag": '"empty-but-real"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items == []
+        assert result.etag == '"empty-but-real"'
+        assert result.last_modified == "Thu, 01 May 2026 12:00:00 GMT"
+
+    def test_an_ordinary_response_stores_its_validators(self):
+        resp = _StubResponse(
+            status_code=200, content=SAMPLE_RSS,
+            headers={"ETag": '"good"'},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.etag == '"good"'
+
+
+class TestPollDueFeedsClock:
+    def test_a_naive_clock_is_refused(self, tmp_path):
+        """A naive stamp sorts below every `+00:00` one in the same column, so
+        a poll would write entries whose observation reads as older than the
+        marker written in the same transaction."""
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            with pytest.raises(ValueError):
+                poll_due_feeds(
+                    conn,
+                    http_get=_stub_get_factory(
+                        _StubResponse(status_code=200, content=SAMPLE_RSS)
+                    ),
+                    now=datetime(2026, 9, 1, 12, 0),
+                )
+            assert feeds_db.list_entries(conn) == []
+
+
+class TestAdmission:
+    """``plan_admission`` caps one response at the same budget the count pass
+    enforces, so a response larger than the maximum has no tail to churn."""
+
+    def _feed(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path, url="arena:chan")
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feeds SET source_type = 'arena' WHERE id = ?", (feed_id,),
+            )
+            conn.commit()
+        return path, feed_id
+
+    def _poll_with(self, path, guids, *, when, monkeypatch):
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        monkeypatch.setattr(
+            arena_provider, "fetch",
+            lambda ident, **kw: [FetchedItem(guid=g, title=g) for g in guids],
+        )
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, now=when)
+
+    def test_a_response_larger_than_the_maximum_admits_only_the_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        path, _ = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 5)
+            conn.commit()
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            guids = [
+                r["guid"]
+                for r in conn.execute("SELECT guid FROM feed_entries ORDER BY guid")
+            ]
+        # Source order, so the first five blocks of the page.
+        assert guids == ["b00", "b01", "b02", "b03", "b04"]
+
+    def test_repeating_that_response_inserts_nothing_and_resurrects_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        path, _ = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 5)
+            conn.commit()
+        page = [f"b{i:02d}" for i in range(12)]
+        self._poll_with(
+            path, page, when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            conn.execute("UPDATE feed_entries SET status = 'read'")
+            conn.commit()
+        self._poll_with(
+            path, page, when=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT guid, status FROM feed_entries ORDER BY guid"
+            ).fetchall()
+        assert [r["guid"] for r in rows] == ["b00", "b01", "b02", "b03", "b04"]
+        assert {r["status"] for r in rows} == {"read"}
+
+    def _star(self, path, feed_id, guid):
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                "last_seen_at, status, starred) "
+                "VALUES (?, ?, ?, ?, ?, 'read', 1)",
+                (feed_id, guid, guid, "2026-08-01T00:00:00+00:00",
+                 "2026-08-01T00:00:00+00:00"),
+            )
+            conn.commit()
+
+    def test_a_returned_star_is_always_admitted_and_the_budget_is_floored(
+        self, tmp_path, monkeypatch,
+    ):
+        """At or below ``MIN_ENTRIES_PER_FEED`` the floor *is* the maximum.
+
+        So a star takes nothing off the budget and the feed goes over the
+        maximum by its stars instead — which is where stars already sat by
+        design, and is what stops a feed whose stars fill its maximum from
+        going permanently inert.
+        """
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 3)
+            conn.commit()
+        self._star(path, feed_id, "b09")
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT guid, last_seen_at FROM feed_entries ORDER BY guid"
+            ).fetchall()
+            feed = feeds_db.list_feeds(conn)[0]
+        # The star is refreshed whatever its position in the page, and the
+        # unstarred budget is the floored 3 rather than 3 - 1.
+        assert [r["guid"] for r in rows] == ["b00", "b01", "b02", "b09"]
+        assert {r["last_seen_at"] for r in rows} == {feed.last_items_seen_at}
+
+    def test_stars_consume_the_total_above_the_floor(
+        self, tmp_path, monkeypatch,
+    ):
+        """Where the maximum is above the floor, stars do come off it."""
+        cap = MIN_ENTRIES_PER_FEED + 5
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, cap)
+            conn.commit()
+        for guid in ("b57", "b58", "b59"):
+            self._star(path, feed_id, guid)
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(60)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            guids = [
+                r["guid"]
+                for r in conn.execute("SELECT guid FROM feed_entries ORDER BY guid")
+            ]
+        # 55 - 3 stars = 52 unstarred items in source order, plus the three
+        # stars the page returned.
+        assert guids == [f"b{i:02d}" for i in range(52)] + ["b57", "b58", "b59"]
+
+    def test_a_feed_whose_stars_fill_its_maximum_still_admits_the_floor(
+        self, tmp_path, monkeypatch,
+    ):
+        """Otherwise the budget is zero for good and the feed stores nothing.
+
+        Nothing surfaces that state, so the feed looks like a source that has
+        stopped publishing rather than a setting that has stopped working.
+        """
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 3)
+            conn.commit()
+        for i in range(4):
+            self._star(path, feed_id, f"kept{i}")
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            guids = [
+                r["guid"]
+                for r in conn.execute(
+                    "SELECT guid FROM feed_entries WHERE starred = 0 ORDER BY guid"
+                )
+            ]
+        assert guids == ["b00", "b01", "b02"]
+
+    def test_a_maximum_of_zero_admits_every_identifiable_item(
+        self, tmp_path, monkeypatch,
+    ):
+        path, _ = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM feed_entries"
+            ).fetchone()["c"]
+        assert count == 12
+
+    def test_plan_admission_drops_unidentifiable_and_duplicate_items(
+        self, tmp_path,
+    ):
+        from istota.feeds import retention
+        from istota.feeds.models import FetchedItem
+
+        path, feed_id = self._feed(tmp_path)
+        items = [
+            FetchedItem(guid=""),
+            FetchedItem(guid="a"),
+            FetchedItem(guid="a", title="second copy"),
+            FetchedItem(guid="b"),
+        ]
+        with feeds_db.connect(path) as conn:
+            admitted = retention.plan_admission(
+                conn, feed_id, items, max_entries_per_feed=10,
+            )
+        assert [i.guid for i in admitted] == ["a", "b"]
+        # The first occurrence wins: a later copy is the same entry, and
+        # taking it would make the window depend on write order.
+        assert admitted[0].title is None

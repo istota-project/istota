@@ -61,6 +61,7 @@ from istota.feeds.models import (
     retry_after_from_headers,
     provider_identifier,
 )
+from istota.feeds.retention import plan_admission, resolve_max_entries_per_feed
 from istota.feeds.providers import arena as arena_provider
 from istota.feeds.providers import tumblr as tumblr_provider
 from istota.feeds.sanitize import (
@@ -169,6 +170,20 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
         # httpx Headers — case-insensitive get
         new_etag = resp_headers.get("etag")
         new_last_modified = resp_headers.get("last-modified")
+
+    if not items and not (parsed.get("version") or ""):
+        # A document that yielded nothing and is not a feed at all — an HTML
+        # error page at HTTP 200 is the case, and it parses cleanly. Storing
+        # its ETag answers every later request with a 304, so the feed stops
+        # updating with `last_error` clear and nothing anywhere saying why,
+        # until the publisher happens to change something.
+        #
+        # This is a liveness guard, not the completeness test this stage
+        # removed: it asks only what the marker rule asks — did the response
+        # return anything — plus whether the parser recognised a feed at all,
+        # so a legitimately empty feed keeps its conditional GET.
+        new_etag = None
+        new_last_modified = None
 
     feed_meta = parsed.get("feed", {}) or {}
     return FetchResult(
@@ -379,6 +394,19 @@ def poll_due_feeds(
     suite and would prove less than asserting on the gaps requested.
     """
     now = now or datetime.now(timezone.utc)
+    # Every timestamp this run writes is compared lexically against another ISO
+    # string — the poll claim across processes, and `last_seen_at` against the
+    # feed's observation marker — so a caller's non-UTC clock is converted once
+    # here rather than at each of the four writes.
+    if now.tzinfo is None:
+        # Refused here rather than left to `claim_feed_for_poll`, which already
+        # raises on one, so the message names the entry point the caller
+        # actually used. A naive stamp is not merely unconverted: it sorts
+        # *below* every `+00:00` string in the same column, so a poll would
+        # write entries whose `last_seen_at` reads as older than the marker it
+        # wrote in the same transaction — its own entries, age-deletable.
+        raise ValueError("poll_due_feeds requires a timezone-aware `now`")
+    now = now.astimezone(timezone.utc)
     sleep = sleep or time.sleep
     rng = rng or random.Random()
     feeds = feeds_db.feeds_due_for_poll(conn, now=now)
@@ -406,6 +434,24 @@ def poll_due_feeds(
                         break
                     paced_seconds += wait
                     sleep(wait)
+
+        # Claim the feed immediately before its fetch and after any pacing
+        # sleep — a claim taken before the sleep, or before the budget break
+        # above, would hold a feed nobody went on to fetch (ISSUE-388). The
+        # due list already excluded a claimed feed; this closes the interval
+        # between that SELECT and this request, which is where a manual poll
+        # and the scheduled one actually collide. A refusal is an ordinary
+        # skip: the other process is fetching it, and its result is the one
+        # that should decide the feed's observation state.
+        claim_now = now + timedelta(seconds=time.monotonic() - started)
+        if not feeds_db.claim_feed_for_poll(conn, feed.id, now=claim_now):
+            logger.info(
+                "poll_due_feeds feed_id=%s skipped: claimed by another poll",
+                feed.id,
+            )
+            continue
+        # Recorded after the claim, so a skipped feed does not pace the run
+        # against a request that was never issued.
         last_request_at[host] = time.monotonic()
 
         result = poll_feed(feed, tumblr_api_key=tumblr_api_key, http_get=http_get)
@@ -464,6 +510,10 @@ def _persist_poll(
             # left it recorded nowhere, so a run turned away on every feed
             # reported a clean poll that happened to find nothing.
             last_throttled_at=fetched_iso,
+            # `last_items_seen_at` is deliberately not named: a throttle
+            # returned no items, so the last observation stands and every
+            # stored entry keeps its protection.
+            poll_claimed_until=None,
         )
         conn.commit()
         return 0
@@ -484,11 +534,39 @@ def _persist_poll(
             # Preserved: an error says nothing about whether the throttle that
             # preceded it has cleared.
             last_throttled_at=feed.last_throttled_at,
+            # Same as above: an error returned no items, so the observation
+            # marker is left alone and only the claim is released.
+            poll_claimed_until=None,
         )
         conn.commit()
         return 0
 
-    if not result.not_modified and result.items:
+    if result.not_modified:
+        returned: list[FetchedItem] = []
+        admitted: list[FetchedItem] = []
+    else:
+        # Identifiable items, first occurrence of a duplicated guid only. This
+        # is what the marker rule reads: whether the response returned
+        # anything, which `plan_admission`'s own output cannot answer — a feed
+        # whose stars fill its maximum admits nothing from a response that
+        # returned plenty.
+        seen: set[str] = set()
+        returned = []
+        for item in result.items:
+            if not item.guid or item.guid in seen:
+                continue
+            seen.add(item.guid)
+            returned.append(item)
+        # Admission is about the maximum and nothing else — nothing is refused
+        # on age, because age deletion is already churn-proof through the
+        # most-recent-response clause. It runs on any response carrying items,
+        # since it is not a judgement about the document.
+        admitted = plan_admission(
+            conn, feed.id, returned,
+            max_entries_per_feed=resolve_max_entries_per_feed(conn),
+        )
+
+    if admitted:
         records = [
             EntryRecord(
                 id=0,
@@ -508,13 +586,35 @@ def _persist_poll(
                 fetched_at=fetched_iso,
                 status="unread",
             )
-            for item in result.items
-            if item.guid
+            for item in admitted
         ]
         new_count = feeds_db.insert_entries(conn, feed.id, records)
 
+    # Everything the response returned was observed, whether or not admission
+    # had room to store it. Admission is a decision about the per-feed maximum;
+    # `last_seen_at` is a record of what the source is still handing over, and
+    # conflating the two would leave a returned-but-unadmitted entry looking
+    # like history — age-deleted, which frees budget, which lets the next
+    # response re-admit it as unread. That is the churn the design forbids.
+    if returned:
+        admitted_guids = {item.guid for item in admitted}
+        feeds_db.mark_entries_seen(
+            conn, feed.id,
+            [item.guid for item in returned if item.guid not in admitted_guids],
+            seen_at=fetched_iso,
+        )
+
     interval = max(feed.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES)
     next_poll = _schedule(now, interval, jitter_fraction, rng)
+    # The marker moves only for a response that returned at least one
+    # identifiable item, and it is exactly the timestamp those entries were
+    # stamped with — that identity is what protects them from the age pass. A
+    # 304, or a body that parsed to nothing (an HTML error page does), returned
+    # no item, so it leaves the marker where it was and every stored entry
+    # stays protected.
+    marker_at: object = feeds_db.UNCHANGED
+    if returned:
+        marker_at = fetched_iso
     feeds_db.update_feed_fetch_state(
         conn, feed.id,
         etag=result.etag if not result.not_modified else feed.etag,
@@ -528,6 +628,8 @@ def _persist_poll(
         # Cleared: a fetch that got through is the throttle having lifted, so
         # the column means "throttled now" rather than "throttled once".
         last_throttled_at=None,
+        last_items_seen_at=marker_at,
+        poll_claimed_until=None,
     )
     conn.commit()
     return new_count

@@ -37,7 +37,6 @@ import pytest
 from istota import task_cgroup
 from istota.brain._types import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain
-from istota.session.tools import ToolEnv, make_bash_tool
 
 
 @pytest.fixture(autouse=True)
@@ -382,33 +381,62 @@ class TestClaudeCodeBrainPlacesBeforeExec:
         assert verify.call_args.args[1] == cgroup
 
 
-class TestNativeBashPlacesBeforeExec:
-    """The same window, on the brain that spawns one child per Bash call.
+class TestTheToolServerIsPlacedBeforeExec:
+    """The same window, on the native brain — which now has exactly one child.
 
-    Under bwrap this path forks exactly the way the other one does, so the
-    post-hoc write it used to do left the real command outside the cgroup too.
+    It used to have one per Bash call, each placed from its own `preexec_fn`;
+    the placement moved with the containment when the tools moved into a single
+    per-attempt server. Everything the server forks — every Bash command, and
+    everything those commands background — is a member by inheritance, which is
+    the property the per-call form could never have for the processes bwrap
+    forked during namespace setup (ISSUE-285).
     """
 
     @pytest.mark.asyncio
-    async def test_the_command_is_placed_from_the_child_side_of_the_fork(
+    async def test_the_server_places_itself_from_the_child_side_of_the_fork(
         self, tmp_path, cgroup
     ):
-        env = ToolEnv(cwd=tmp_path, task_cgroup=cgroup)
-        result = await make_bash_tool(env).execute(
-            "c1", {"command": "echo placed"}, None, None
-        )
+        from istota.session.tools import hello_payload, start_tool_server
 
-        assert "placed" in result.content[0].text
-        assert (cgroup / "cgroup.procs").read_text().strip() == "0"
+        server = await start_tool_server(
+            hello_payload(
+                cwd=tmp_path, subprocess_env=None, read_roots=None, write_roots=None,
+                write_denied_roots=(), deferred_dir=None, bash_timeout_seconds=30,
+                max_output_bytes=30_000, max_read_lines=2000, max_read_bytes=25_000_000,
+                bash_spill_full_output=True,
+            ),
+            task_cgroup_path=cgroup,
+        )
+        try:
+            # `0`, not a pid: the child writes itself in from `preexec_fn`,
+            # before it execs, so everything it goes on to fork inherits the
+            # group. A pid here would mean the parent moved it after the fact,
+            # which is the ordering that left the real work outside the cgroup.
+            assert (cgroup / "cgroup.procs").read_text().strip() == "0"
+        finally:
+            await server.aclose()
 
     @pytest.mark.asyncio
-    async def test_a_command_still_runs_when_the_cgroup_is_gone(self, tmp_path):
-        env = ToolEnv(cwd=tmp_path, task_cgroup=tmp_path / "gone")
-        result = await make_bash_tool(env).execute(
-            "c1", {"command": "echo survived"}, None, None
-        )
+    async def test_the_server_still_starts_when_the_cgroup_is_gone(self, tmp_path):
+        """Containment is best-effort; losing it must never cost the task its
+        tools. The directory does not exist, so `placement` yields None and the
+        spawn is byte-identical to a deployment with no `Delegate=`."""
+        from istota.session.tools import hello_payload, start_tool_server
 
-        assert "survived" in result.content[0].text
+        server = await start_tool_server(
+            hello_payload(
+                cwd=tmp_path, subprocess_env=None, read_roots=None, write_roots=None,
+                write_denied_roots=(), deferred_dir=None, bash_timeout_seconds=30,
+                max_output_bytes=30_000, max_read_lines=2000, max_read_bytes=25_000_000,
+                bash_spill_full_output=True,
+            ),
+            task_cgroup_path=tmp_path / "gone",
+        )
+        try:
+            result = await server.call("Bash", "c", {"command": "echo survived"}, None, None)
+            assert "survived" in result.content[0].text
+        finally:
+            await server.aclose()
 
 
 # ---------------------------------------------------------------------------

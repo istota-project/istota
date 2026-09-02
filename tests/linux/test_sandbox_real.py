@@ -36,7 +36,7 @@ import pytest
 
 from istota import db
 from istota.config import SecurityConfig
-from istota.executor import _bwrap_available, build_bwrap_cmd
+from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
 
 pytestmark = pytest.mark.linux
 
@@ -171,16 +171,24 @@ def _q(path):
     return shlex.quote(str(path))
 
 
-def run_probe(script, config, task, user_temp, *, is_admin=False, **kwargs):
+def run_probe(script, config, task, user_temp, *, is_admin=False,
+              profile=SandboxProfile.CLAUDE, **kwargs):
     """Run `sh -c script` inside the real sandbox and return the result.
 
     Fails the test rather than returning if bwrap declined to build a command:
     `build_bwrap_cmd` returns *cmd unchanged* when the sandbox is unavailable,
     so a probe that silently ran on the host would pass every assertion below
     that expects something to be missing.
+
+    ``profile`` defaults to CLAUDE, which is what the assertions in this file
+    were written against — every one of them is about the generic half of the
+    plan (the masks, the per-user binds), which both profiles emit identically.
+    `test_sandbox_profiles_real.py` is where the difference is probed, and it
+    reuses this helper with ``profile=SandboxProfile.NATIVE``.
     """
     cmd = build_bwrap_cmd(
-        ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp, **kwargs,
+        ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
+        profile=profile, **kwargs,
     )
     assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60)

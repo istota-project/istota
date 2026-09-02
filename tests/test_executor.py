@@ -4096,6 +4096,7 @@ class TestWorkspaceDirBwrap:
         user_temp.mkdir(parents=True)
         cmd = executor.build_bwrap_cmd(
             ["claude"], cfg, task, True, [], user_temp, workspace_dir=ws,
+            profile=executor.SandboxProfile.CLAUDE,
         )
         joined = " ".join(cmd)
         # chdir targets the workspace, and the workspace is bound RW.
@@ -4115,6 +4116,7 @@ class TestWorkspaceDirBwrap:
         with pytest.raises(ValueError):
             executor.build_bwrap_cmd(
                 ["claude"], cfg, task, True, [], user_temp, workspace_dir=ssh_dir,
+                profile=executor.SandboxProfile.CLAUDE,
             )
 
     def test_validate_workspace_rejects_source_tree(self, tmp_path):

@@ -1,6 +1,7 @@
 """NativeBrain — the Brain-protocol adapter over the three-layer stack."""
 
 import asyncio
+import contextlib
 import json
 import os
 import threading
@@ -411,10 +412,24 @@ class TestProviderLifecycle:
 
 
 class TestFsConfinement:
-    """NB-1: fs_read_roots/fs_write_roots thread into the file tools' ToolEnv."""
+    """NB-1: the request's roots reach the tools that enforce them.
+
+    The tools moved into `istota.tool_server`, so the seam under test moved
+    with them: `BrainRequest` → `NativeBrain._hello_payload` → the `hello`
+    frame → `tool_server.build_env` → `ToolEnv`. These drive that translation
+    directly rather than through a subprocess, which keeps the file fast and
+    keeps the assertion on the plumbing; `tests/test_tool_server.py` runs the
+    same refusals through a real server over a real socket, and
+    `tests/linux/test_tool_server_real.py` is where an outside path is asserted
+    *absent* rather than refused.
+    """
 
     def _tool(self, brain, req, name):
-        return next(t for t in brain._build_tools(req) if t.schema.name == name)
+        from istota.session.tools import build_default_tools
+        from istota.tool_server import build_env
+
+        env = build_env(brain._hello_payload(req))
+        return next(t for t in build_default_tools(env) if t.schema.name == name)
 
     def test_roots_confine_read_tool(self, tmp_path):
         ws = tmp_path / "ws"
@@ -435,9 +450,8 @@ class TestFsConfinement:
         assert "workspace" in blocked.content[0].text.lower()
 
     def test_write_denied_roots_thread_through_to_the_tools(self, tmp_path):
-        """The seam the executor actually uses: BrainRequest → _build_tools →
-        ToolEnv. Dropping either plumbing line leaves the ToolEnv-level tests
-        green, so this is where the carve-out is proven to arrive."""
+        """Dropping either plumbing line leaves the ToolEnv-level tests green,
+        so this is where the carve-out is proven to arrive."""
         ws = tmp_path / "ws"
         carve = ws / ".developer"
         carve.mkdir(parents=True)
@@ -478,6 +492,85 @@ class TestFsConfinement:
         write = self._tool(_brain(MockProvider([])), req, "Write")
         asyncio.run(write.execute("c", {"file_path": "rel.txt", "content": "x"}, None, None))
         assert (ws / "rel.txt").read_text() == "x"
+
+    def test_none_means_none_rather_than_an_empty_allowlist(self, tmp_path):
+        """The one translation with two plausible spellings and only one right
+        answer. `read_roots=None` is *unconfined*; `read_roots=()` refuses
+        every path. JSON has no tuple, so both would arrive as a list unless
+        `None` is carried as `null` — and an unconfined dev machine that
+        started refusing every read would look like a broken tool rather than
+        like a bad translation."""
+        from istota.tool_server import build_env
+
+        brain = _brain(MockProvider([]))
+        unconfined = build_env(brain._hello_payload(_req("hi", tmp_path, tools=["Read"])))
+        assert unconfined.read_roots is None and unconfined.confined is False
+
+        req = _req("hi", tmp_path, tools=["Read"])
+        req.fs_read_roots = [tmp_path]
+        req.fs_write_roots = [tmp_path]
+        confined = build_env(brain._hello_payload(req))
+        assert confined.read_roots == (tmp_path,) and confined.confined is True
+
+
+class TestADeadToolServerFailsTheAttempt:
+    """Which of two terminal states a broken sandbox produces, and which a
+    stopped task produces, when the two are indistinguishable from the socket.
+
+    A dead tool server sets the loop's abort, and the loop reports an abort as
+    `aborted`, which `_build_result` turns into "Cancelled by user" — a
+    success-shaped state the scheduler neither retries nor reports. So the
+    failure check has to outrank it. But `!stop` and the web cancel endpoint
+    *kill the recorded worker_pid's process group*, which is now the tool
+    server, so a genuine cancellation also produces a dead server — and there
+    the cancellation has to outrank the failure back. Both orderings are here
+    because each is the other's control.
+
+    A stand-in server rather than a killed one: what is under test is the
+    ordering in `_execute_async`, and `tests/test_tool_server.py` is where a
+    real process is killed and the recorded text is checked.
+    """
+
+    class _DeadServer:
+        failure = "the tool server exited (exit 2)"
+        tools: list[str] = []
+
+        async def aclose(self):
+            return None
+
+        async def call(self, *a, **kw):  # pragma: no cover - never reached
+            raise AssertionError("the model in this test calls no tool")
+
+    def _run(self, tmp_path, monkeypatch, cancelled: bool):
+        async def _fake_start(self, req, abort):
+            return TestADeadToolServerFailsTheAttempt._DeadServer()
+
+        monkeypatch.setattr(NativeBrain, "_start_tool_server", _fake_start)
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="done")], stop_reason="end_turn")]
+        )
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.cancel_check = (lambda: cancelled)
+        return _brain(provider).execute(req)
+
+    def test_a_broken_sandbox_fails_the_attempt(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, cancelled=False)
+
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert "tool server" in result.result_text
+        # Not the cancel wording, which the scheduler matches by exact equality
+        # and neither retries nor reports.
+        assert result.result_text != "Cancelled by user"
+
+    def test_a_stopped_task_still_reports_as_cancelled(self, tmp_path, monkeypatch):
+        """`!stop` kills the group the recorded pid leads, so the server dies
+        *because* the user stopped the task. Reporting that as a failed attempt
+        would put the task the user just stopped back on the retry ladder."""
+        result = self._run(tmp_path, monkeypatch, cancelled=True)
+
+        assert result.stop_reason == "cancelled"
+        assert result.result_text == "Cancelled by user"
 
 
 class TestErrorAndStops:
@@ -1200,51 +1293,129 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
     """ISSUE-390: the Claude runtime credential stops at the native profile.
 
     ``build_clean_env`` sets ``CLAUDE_CODE_OAUTH_TOKEN`` for every task whatever
-    brain will run it, and ``_build_tools`` is where that env crosses into
-    NativeBrain's tools. Nothing on this path reads it — the provider key comes
-    from the config — so the only thing it can do here is come back out of a
+    brain will run it. Nothing on the native path reads it — the provider key
+    comes from the config — so the only thing it can do is come back out of a
     Bash call as a ``ToolResultMessage`` addressed to whatever provider native
     is pointed at.
+
+    The tools moved into a server process (the tool-server stage), which gives
+    the credential **two** carriers rather than one: the ``hello`` frame's
+    ``subprocess_env``, which is what a Bash child is handed, and the env the
+    server process itself is spawned with. Stripping only the first leaves the
+    token in the server's own environment inside the namespace, where a Bash
+    child at the same uid in the same PID namespace reads it straight out of
+    ``/proc/<server-pid>/environ``. Both are asserted here; the ``/proc`` route
+    itself needs a real namespace and is in ``tests/linux/``.
     """
 
-    def _bash(self, req):
-        return next(
-            t for t in _brain(MockProvider([]))._build_tools(req)
-            if t.schema.name == "Bash"
-        )
+    def _env(self, **extra):
+        # PATH is needed for real: ``create_subprocess_exec`` resolves the bare
+        # name ``bash`` through the PATH of the env it is handed.
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **extra}
 
     def _req_with_env(self, tmp_path, **extra):
         req = _req("hi", tmp_path, tools=["Bash"])
-        # PATH is needed for real here: ``create_subprocess_exec`` resolves the
-        # bare name ``bash`` through the PATH of the env it is handed, not the
-        # parent's.
-        req.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **extra}
+        req.env = self._env(**extra)
         return req
 
-    def test_bash_cannot_read_the_token_and_still_sees_everything_else(self, tmp_path):
-        """Through the real seam: build the tools, then ask bash what it holds."""
+    def test_the_hello_frame_carries_no_token_and_everything_else(self, tmp_path):
         req = self._req_with_env(
             tmp_path,
             CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests",
             ISTOTA_USER_ID="alice",
         )
-        out = asyncio.run(
-            self._bash(req).execute(
-                "c",
+        hello = _brain(MockProvider([]))._hello_payload(req)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in hello["subprocess_env"]
+        # The strip is the named set and nothing wider — the rest of the task
+        # env is what makes the tools work at all.
+        assert hello["subprocess_env"]["ISTOTA_USER_ID"] == "alice"
+
+    async def test_bash_cannot_read_the_token_and_still_sees_everything_else(
+        self, tmp_path
+    ):
+        """End to end through a real server, which is where it actually matters."""
+        from tests.test_tool_server import _call, _text
+
+        req = self._req_with_env(
+            tmp_path,
+            CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests",
+            ISTOTA_USER_ID="alice",
+        )
+        brain = _brain(MockProvider([]))
+        # The production spawn, not a hand-assembled one: an earlier version of
+        # this test built the server itself and passed
+        # `env=without_claude_runtime_env(req.env)`, which made the test apply
+        # the fix it was meant to be checking. `_start_tool_server` is what the
+        # loop calls, so a strip removed from it now fails here.
+        server = await brain._start_tool_server(req, asyncio.Event())
+        try:
+            result = await _call(
+                server,
+                "Bash",
                 {
                     "command": 'echo "tok=[${CLAUDE_CODE_OAUTH_TOKEN:-EMPTY}] '
                                'uid=[${ISTOTA_USER_ID:-EMPTY}]"'
                 },
-                None,
-                None,
             )
-        )
-        text = out.content[0].text
+        finally:
+            await server.aclose()
+        text = _text(result)
         assert "tok=[EMPTY]" in text
         assert "sk-ant-oat-fake-for-tests" not in text
-        # The strip is the named set and nothing wider — the rest of the task
-        # env is what makes the tools work at all.
         assert "uid=[alice]" in text
+
+    def test_the_server_process_is_not_spawned_holding_the_token(self, tmp_path):
+        """The second carrier, and the one the hello-frame strip does not cover.
+
+        A Bash child gets an explicit env and so does not inherit this one, but
+        it runs at the same uid in the same PID namespace as the server and can
+        read ``/proc/<server-pid>/environ``. ``merge_proxy_env`` is a second
+        route out of the same place: it answers a ``None`` ``subprocess_env``
+        with ``dict(os.environ)``.
+        """
+        req = self._req_with_env(
+            tmp_path, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests"
+        )
+        seen = {}
+
+        async def _record(hello, **kwargs):
+            seen.update(kwargs)
+            seen["hello"] = hello
+            raise RuntimeError("stop here; the spawn env is what we came for")
+
+        brain = _brain(MockProvider([]))
+        with patch("istota.session.tools.start_tool_server", _record):
+            with contextlib.suppress(Exception):
+                asyncio.run(brain._start_tool_server(req, asyncio.Event()))
+
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in (seen["env"] or {})
+        assert seen["env"]["PATH"]
+        # The other carrier, recorded on the same call: neither may hold it.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in (seen["hello"]["subprocess_env"] or {})
+
+    def test_an_empty_task_env_does_not_become_the_daemons(self, tmp_path):
+        """The spawn's `or {}`, which is a bigger hole than the one it guards.
+
+        `create_subprocess_exec(env=None)` inherits, and what it would inherit
+        is the daemon's environment — the secret key, the mail passwords, every
+        forge token — placed inside the namespace where the model's own Bash
+        child reads it back off `/proc`. Failing closed is the right direction
+        here, so an empty task env spawns an empty server env.
+        """
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = {}
+        seen = {}
+
+        async def _record(hello, **kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("stop here")
+
+        brain = _brain(MockProvider([]))
+        with patch("istota.session.tools.start_tool_server", _record):
+            with contextlib.suppress(Exception):
+                asyncio.run(brain._start_tool_server(req, asyncio.Event()))
+
+        assert seen["env"] == {}, "an empty task env must not spawn an inheriting server"
 
     def test_the_requests_own_env_is_left_alone(self, tmp_path):
         """The copy matters as much as the strip.
@@ -1258,7 +1429,7 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
         req = self._req_with_env(
             tmp_path, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests"
         )
-        self._bash(req)
+        _brain(MockProvider([]))._hello_payload(req)
         assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake-for-tests"
 
     def test_an_env_of_nothing_but_the_token_does_not_become_inheritance(
@@ -1273,35 +1444,15 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
         every credential in it. The strip has to make the env emptier, never
         wider.
         """
-        from istota.session.tools import ToolEnv
-
         req = _req("hi", tmp_path, tools=["Bash"])
         req.env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-fake-for-tests"}
-        seen = {}
-        real = ToolEnv
-
-        def _record(**kwargs):
-            seen.update(kwargs)
-            return real(**kwargs)
-
-        with patch("istota.session.tools.ToolEnv", _record):
-            self._bash(req)
-        assert seen["subprocess_env"] == {}
+        hello = _brain(MockProvider([]))._hello_payload(req)
+        assert hello["subprocess_env"] == {}
 
     def test_no_env_at_all_still_means_inherit(self, tmp_path):
         """The other side of the same line: an absent env is not the same
         instruction as an emptied one, and this path must not change."""
-        from istota.session.tools import ToolEnv
-
         req = _req("hi", tmp_path, tools=["Bash"])
         req.env = {}
-        seen = {}
-        real = ToolEnv
-
-        def _record(**kwargs):
-            seen.update(kwargs)
-            return real(**kwargs)
-
-        with patch("istota.session.tools.ToolEnv", _record):
-            self._bash(req)
-        assert seen["subprocess_env"] is None
+        hello = _brain(MockProvider([]))._hello_payload(req)
+        assert hello["subprocess_env"] is None

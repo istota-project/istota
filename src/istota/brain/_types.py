@@ -109,7 +109,28 @@ class BrainRequest:
     # Wraps a command list (e.g. for bubblewrap sandboxing). The brain
     # builds its raw command, then calls sandbox_wrap(cmd) before exec
     # if provided. Returning the cmd unchanged is the no-op default.
+    #
+    # This one is the *Claude* profile: the namespace it builds carries the
+    # `claude` CLI's own runtime state — its binary directory, its installed
+    # versions, its lock directory, its credential and its session logs —
+    # because the process being wrapped is that CLI. ClaudeCodeBrain and
+    # TmuxClaudeBrain read it; nothing else should.
     sandbox_wrap: Callable[[list[str]], list[str]] | None = None
+
+    # The same sandbox under the *native* profile: istota's own code is the
+    # outer process, so the namespace has no Claude runtime block, no
+    # credential and no system-prompt bind (`executor.SandboxProfile`). Read by
+    # NativeBrain, for the commands its Bash tool runs.
+    #
+    # **Two fields rather than one field plus a profile argument**, and the
+    # reason is structural rather than stylistic. `executor._run_fallback`
+    # copies the request with `dataclasses.replace(req, model=…, effort=…,
+    # advisor=…, is_fallback=True)`, which names neither of these — so on the
+    # shipped `claude_code -> native` reroute a single wrap field would carry
+    # the Claude profile straight into NativeBrain, handing the model's Bash
+    # tool the credential the split exists to withhold (ISSUE-389). Two names
+    # each carry across harmlessly, because each brain reads only its own.
+    native_sandbox_wrap: Callable[[list[str]], list[str]] | None = None
 
     # Filesystem confinement for in-process file tools (NativeBrain only; NB-1).
     # ClaudeCodeBrain / TmuxClaudeBrain ignore these — their tools run inside

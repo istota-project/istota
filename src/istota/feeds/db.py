@@ -11,12 +11,17 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from istota.feeds.image_dedupe import entry_seen_ts
 from istota.feeds.models import (
+    DEFAULT_ENTRY_RETENTION_DAYS,
+    DEFAULT_MAX_ENTRIES_PER_FEED,
+    MIN_ENTRIES_PER_FEED,
+    POLL_CLAIM_SECONDS,
+    UPGRADE_GRACE_DAYS,
     CategoryRecord,
     EntryRecord,
     FeedRecord,
@@ -30,7 +35,7 @@ from istota.feeds.sanitize import image_identity
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 SCHEMA_SQL = """
@@ -51,6 +56,17 @@ CREATE TABLE IF NOT EXISTS feeds (
     last_modified TEXT,
     last_fetched_at TEXT,
     last_throttled_at TEXT,
+    -- Poll time of the most recent response that returned at least one item
+    -- (ISSUE-388). An entry stamped with exactly this value was in that
+    -- response and is never age-deleted; an older stamp means it was not.
+    -- NULL means no response has ever returned an item here, so nothing about
+    -- the feed's entries is deletable. Deliberately says nothing about whether
+    -- the response was complete, well-formed or a full page.
+    last_items_seen_at TEXT,
+    -- Lease held by the process currently fetching this feed. Bounded, so a
+    -- process that dies mid-fetch delays the feed by the lease rather than
+    -- stranding it.
+    poll_claimed_until TEXT,
     last_error TEXT,
     error_count INTEGER NOT NULL DEFAULT 0,
     poll_interval_minutes INTEGER NOT NULL DEFAULT 30,
@@ -89,6 +105,12 @@ CREATE TABLE IF NOT EXISTS feed_entries (
     status TEXT NOT NULL DEFAULT 'unread',
     starred INTEGER NOT NULL DEFAULT 0,
     starred_at TEXT,
+    -- The most recent poll time at which this entry was itself observed in a
+    -- response (ISSUE-388). Distinct from `fetched_at`, which is the first
+    -- sighting, never moves and is the retention clock: this column answers
+    -- the churn question instead — was the entry in the feed's most recent
+    -- response, in which case it is never age-deleted.
+    last_seen_at TEXT,
     UNIQUE(feed_id, guid)
 );
 
@@ -98,6 +120,24 @@ CREATE INDEX IF NOT EXISTS idx_entries_published
     ON feed_entries(published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_entries_starred
     ON feed_entries(starred) WHERE starred = 1;
+-- Partial on `starred = 0` because every retention pass excludes stars before
+-- it does anything else, so the index holds only rows a prune can reach.
+CREATE INDEX IF NOT EXISTS idx_entries_feed_last_seen_unstarred
+    ON feed_entries(feed_id, last_seen_at)
+    WHERE starred = 0;
+-- `fetched_at` is the retention clock, and both passes rank on it. Partial
+-- like its neighbour, so the age pass — which ranks a feed's whole contents,
+-- stars included, because the floor counts every stored row — cannot use it
+-- at all. The count pass, which looks at unstarred rows only, scans it as a
+-- covering index and takes the partition from it, but still sorts: the index
+-- is `(feed_id, fetched_at)` ascending and the window wants `fetched_at DESC,
+-- id ASC`, so `EXPLAIN QUERY PLAN` reports a temp b-tree for the last two
+-- terms. A `(feed_id, fetched_at DESC, id)` index would remove that sort and
+-- is deliberately not added here: schema v8's index set is what the migration
+-- shipped, and a third one is its own change.
+CREATE INDEX IF NOT EXISTS idx_entries_feed_fetched_unstarred
+    ON feed_entries(feed_id, fetched_at)
+    WHERE starred = 0;
 
 -- Normalised image keys per entry, for the reader's cross-entry image
 -- suppression (ISSUE-162). Derived data: rebuildable from feed_entries at
@@ -308,6 +348,122 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
         )
 
 
+# "Say nothing about this column." Distinct from `None`, which for both the
+# observation marker and the poll claim is a meaningful value the poller
+# writes on purpose.
+UNCHANGED: Any = object()
+
+
+def _utc_iso(when: datetime) -> str:
+    """An aware datetime as a UTC ISO string.
+
+    Every timestamp this module stores is compared lexically against another
+    ISO string, so an offset other than ``+00:00`` sorts by its own local
+    reading rather than the instant it names. Converting is the one place that
+    is prevented; a naive value is left to the caller's own guard, since only
+    the caller knows whether guessing UTC for it is safe.
+    """
+    if when.tzinfo is None:
+        return when.isoformat()
+    return when.astimezone(timezone.utc).isoformat()
+
+# Keys in `schema_meta`. The two settings are user-facing and reach the API;
+# the third is internal and never does — it is the upgrade grace deadline, and
+# a user who could edit it could turn a safety period into an immediate delete.
+ENTRY_RETENTION_DAYS_KEY = "feeds_settings.entry_retention_days"
+MAX_ENTRIES_PER_FEED_KEY = "feeds_settings.max_entries_per_feed"
+ENTRY_PRUNE_NOT_BEFORE_KEY = "feeds_internal.entry_prune_not_before"
+
+
+def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """Add the retention observation columns and open the upgrade grace period
+    (ISSUE-388).
+
+    Three nullable columns, the partial indexes, and then a data pass, because
+    the columns alone would leave every existing row unclassifiable — and
+    worse, with the count pass having no age predicate of its own, deletable
+    the day the feature ships.
+
+    The pass does four things, and each is one half of a pair:
+
+    * **Stamp every entry** with one shared observation time. It is not true
+      that the source returned each of them at that instant; what it records is
+      that this deployment has no earlier evidence, and the marker below is
+      what stops that being read as evidence of anything. `fetched_at` is
+      deliberately not touched: it is the retention clock, and rewriting it
+      would reset every entry's age to the upgrade date.
+    * **Leave `last_items_seen_at` null.** Age pruning requires a non-null
+      marker and `last_seen_at < last_items_seen_at`, so until a feed completes
+      one post-upgrade fetch that returns an item, none of its rows are
+      deletable. A feed that never polls again keeps everything.
+    * **Clear the conditional validators** and make every feed due. A stored
+      ETag would answer the first post-upgrade poll with a 304, which carries
+      no entry list and so can never advance the marker. The next poll has to
+      fetch a full body.
+    * **Write the grace deadline.** An observation timestamp alone cannot stop
+      the count pass, which has no age predicate. This row does, for both
+      passes, for ninety days.
+
+    The stamp is guarded on `last_seen_at IS NULL` so a re-run cannot overwrite
+    real observations, and the settings rows go in with `INSERT OR IGNORE` so a
+    user override is never replaced by a default.
+
+    This is the first migration to write to `schema_meta`, which is why it
+    creates the table rather than assuming it: `_read_schema_version` returns 1
+    for a database predating that table, and `init_db` runs the whole migration
+    chain *before* `SCHEMA_SQL`. Without this, the oldest databases stopped
+    opening at all rather than being migrated.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta ("
+        "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+    if "last_seen_at" not in cols:
+        conn.execute("ALTER TABLE feed_entries ADD COLUMN last_seen_at TEXT")
+
+    feed_cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
+    if "last_items_seen_at" not in feed_cols:
+        conn.execute("ALTER TABLE feeds ADD COLUMN last_items_seen_at TEXT")
+    if "poll_claimed_until" not in feed_cols:
+        conn.execute("ALTER TABLE feeds ADD COLUMN poll_claimed_until TEXT")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entries_feed_last_seen_unstarred "
+        "ON feed_entries(feed_id, last_seen_at) WHERE starred = 0"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entries_feed_fetched_unstarred "
+        "ON feed_entries(feed_id, fetched_at) WHERE starred = 0"
+    )
+
+    migration_now = datetime.now(timezone.utc)
+    stamp = migration_now.isoformat()
+    stamped = conn.execute(
+        "UPDATE feed_entries SET last_seen_at = ? WHERE last_seen_at IS NULL",
+        (stamp,),
+    ).rowcount
+    conn.execute(
+        "UPDATE feeds SET etag = NULL, last_modified = NULL, next_poll_at = NULL"
+    )
+    for key, value in (
+        (ENTRY_RETENTION_DAYS_KEY, str(DEFAULT_ENTRY_RETENTION_DAYS)),
+        (MAX_ENTRIES_PER_FEED_KEY, str(DEFAULT_MAX_ENTRIES_PER_FEED)),
+        (
+            ENTRY_PRUNE_NOT_BEFORE_KEY,
+            (migration_now + timedelta(days=UPGRADE_GRACE_DAYS)).isoformat(),
+        ),
+    ):
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
+            (key, value),
+        )
+    logger.info(
+        "feeds_db_retention_grace_opened entries_stamped=%s days=%s",
+        stamped, UPGRADE_GRACE_DAYS,
+    )
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
@@ -315,6 +471,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (5, _migrate_v4_to_v5),
     (6, _migrate_v5_to_v6),
     (7, _migrate_v6_to_v7),
+    (8, _migrate_v7_to_v8),
 ]
 
 
@@ -510,18 +667,73 @@ def list_feeds(conn: sqlite3.Connection) -> list[FeedRecord]:
 def feeds_due_for_poll(
     conn: sqlite3.Connection, now: datetime | None = None,
 ) -> list[FeedRecord]:
-    """Return feeds whose ``next_poll_at`` is in the past (or null)."""
+    """Return feeds whose ``next_poll_at`` is in the past (or null).
+
+    A feed under a live poll claim is excluded: another process is fetching it
+    right now, and a second fetch would race that one's membership write
+    (ISSUE-388). An expired claim is no claim — a process that died mid-fetch
+    must not take its feed off the air.
+    """
     now = now or datetime.now(timezone.utc)
-    iso = now.isoformat()
+    # Both comparisons below are lexical on ISO strings, so an offset other
+    # than +00:00 compares wrong by that offset — eastward a live claim reads
+    # as expired hours early, westward an expired one holds. Every writer here
+    # stores UTC, so a caller's clock is converted rather than trusted.
+    iso = _utc_iso(now)
     rows = conn.execute(
         """
         SELECT * FROM feeds
-        WHERE next_poll_at IS NULL OR next_poll_at <= ?
+        WHERE (next_poll_at IS NULL OR next_poll_at <= ?)
+          AND (poll_claimed_until IS NULL OR poll_claimed_until <= ?)
         ORDER BY (next_poll_at IS NULL) DESC, next_poll_at ASC, id ASC
         """,
-        (iso,),
+        (iso, iso),
     ).fetchall()
     return [_row_to_feed(r) for r in rows]
+
+
+def claim_feed_for_poll(
+    conn: sqlite3.Connection,
+    feed_id: int,
+    *,
+    now: datetime,
+    lease_seconds: int = POLL_CLAIM_SECONDS,
+) -> bool:
+    """Take a short exclusive lease on one feed. ``True`` when we got it.
+
+    One conditional update, committed before the caller's network call, so a
+    competing process sees the claim rather than fetching the same feed. It
+    succeeds only when the feed is due and its claim is null or expired — the
+    same two predicates :func:`feeds_due_for_poll` filters on, restated here
+    because the interval between that SELECT and the fetch is precisely the
+    race this closes.
+
+    Deliberately *not* a database lock: the fetch takes up to 30 seconds and
+    nothing may hold a SQLite write transaction across network I/O. The cost of
+    that choice is the lease — a process that exits unexpectedly leaves one,
+    and the feed waits it out.
+    """
+    if now.tzinfo is None:
+        raise ValueError("claim_feed_for_poll requires a timezone-aware `now`")
+    # Aware is not enough: the lease is read back by another process as a
+    # lexical ISO comparison, so a `now` carrying any offset but +00:00 writes
+    # a lease that reader misjudges by exactly that offset — which for an
+    # eastward one means two processes fetching the same feed, the race this
+    # function exists to close.
+    iso = _utc_iso(now)
+    until = _utc_iso(now + timedelta(seconds=lease_seconds))
+    cur = conn.execute(
+        """
+        UPDATE feeds
+        SET poll_claimed_until = ?
+        WHERE id = ?
+          AND (next_poll_at IS NULL OR next_poll_at <= ?)
+          AND (poll_claimed_until IS NULL OR poll_claimed_until <= ?)
+        """,
+        (until, feed_id, iso, iso),
+    )
+    conn.commit()
+    return bool(cur.rowcount)
 
 
 def update_feed_fetch_state(
@@ -540,27 +752,42 @@ def update_feed_fetch_state(
     discovered_title: str | None = None,
     discovered_site_url: str | None = None,
     last_throttled_at: str | None = None,
+    # Sentinel-backed rather than `None`-defaulted, because `None` is a real
+    # value for both: clearing the claim is what every handled outcome does,
+    # and only a response that returned an item may advance the marker. A
+    # caller that says nothing must leave both columns exactly as they are —
+    # an error path defaulting the marker to NULL would discard every entry's
+    # protection on the first 500 (ISSUE-388).
+    last_items_seen_at: Any = UNCHANGED,
+    poll_claimed_until: Any = UNCHANGED,
 ) -> None:
     """Persist the outcome of a single poll attempt."""
+    sets = [
+        "etag = ?",
+        "last_modified = ?",
+        "last_fetched_at = ?",
+        "last_error = ?",
+        "error_count = ?",
+        "next_poll_at = ?",
+        "title = COALESCE(?, title)",
+        "site_url = COALESCE(?, site_url)",
+        "last_throttled_at = ?",
+    ]
+    params: list[Any] = [
+        etag, last_modified, last_fetched_at, last_error,
+        error_count, next_poll_at, discovered_title,
+        discovered_site_url, last_throttled_at,
+    ]
+    if last_items_seen_at is not UNCHANGED:
+        sets.append("last_items_seen_at = ?")
+        params.append(last_items_seen_at)
+    if poll_claimed_until is not UNCHANGED:
+        sets.append("poll_claimed_until = ?")
+        params.append(poll_claimed_until)
+    params.append(feed_id)
     conn.execute(
-        """
-        UPDATE feeds
-        SET etag = ?,
-            last_modified = ?,
-            last_fetched_at = ?,
-            last_error = ?,
-            error_count = ?,
-            next_poll_at = ?,
-            title = COALESCE(?, title),
-            site_url = COALESCE(?, site_url),
-            last_throttled_at = ?
-        WHERE id = ?
-        """,
-        (
-            etag, last_modified, last_fetched_at, last_error,
-            error_count, next_poll_at, discovered_title,
-            discovered_site_url, last_throttled_at, feed_id,
-        ),
+        f"UPDATE feeds SET {', '.join(sets)} WHERE id = ?",
+        tuple(params),
     )
 
 
@@ -639,7 +866,375 @@ def set_image_dedupe_window_days(
         )
 
 
+def _get_int_setting(conn: sqlite3.Connection, key: str) -> int | None:
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?", (key,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_int_setting(conn: sqlite3.Connection, key: str, value: int | None) -> None:
+    if value is None:
+        conn.execute("DELETE FROM schema_meta WHERE key = ?", (key,))
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            (key, str(int(value))),
+        )
+
+
+def get_entry_retention_days(conn: sqlite3.Connection) -> int | None:
+    """Read the user-set age window in days. ``None`` if unset or malformed.
+
+    ``0`` is a real value meaning "no age pruning", distinct from unset (which
+    falls back to :data:`istota.feeds.models.DEFAULT_ENTRY_RETENTION_DAYS`).
+    """
+    return _get_int_setting(conn, ENTRY_RETENTION_DAYS_KEY)
+
+
+def set_entry_retention_days(conn: sqlite3.Connection, days: int | None) -> None:
+    """Set or clear the age window. ``None`` deletes the stored row."""
+    _set_int_setting(conn, ENTRY_RETENTION_DAYS_KEY, days)
+
+
+def get_max_entries_per_feed(conn: sqlite3.Connection) -> int | None:
+    """Read the user-set per-feed maximum. ``None`` if unset or malformed."""
+    return _get_int_setting(conn, MAX_ENTRIES_PER_FEED_KEY)
+
+
+def set_max_entries_per_feed(conn: sqlite3.Connection, count: int | None) -> None:
+    """Set or clear the per-feed maximum. ``None`` deletes the stored row."""
+    _set_int_setting(conn, MAX_ENTRIES_PER_FEED_KEY, count)
+
+
+def get_entry_prune_not_before(conn: sqlite3.Connection) -> str | None:
+    """The upgrade grace deadline, or ``None`` on a database that has none.
+
+    Internal: written once by the v7-to-v8 migration and never exposed through
+    the API, because a user who could edit it could turn a safety period into
+    an immediate delete.
+    """
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        (ENTRY_PRUNE_NOT_BEFORE_KEY,),
+    ).fetchone()
+    return None if row is None else row["value"]
+
+
+def clear_entry_prune_not_before(conn: sqlite3.Connection) -> None:
+    """Drop the grace row. Called only after both passes have succeeded, in
+    their own transaction, so a rolled-back prune keeps its grace."""
+    conn.execute(
+        "DELETE FROM schema_meta WHERE key = ?", (ENTRY_PRUNE_NOT_BEFORE_KEY,),
+    )
+
+
+def _effective_floor(min_entries_per_feed: int, max_entries_per_feed: int) -> int:
+    """The floor a feed is actually held at.
+
+    The ceiling wins where a user set one below the floor: an explicit
+    instruction to store at most twenty entries must not be overridden by a
+    default that says fifty. With no ceiling there is nothing to clamp
+    against, so the constant stands.
+    """
+    floor = max(min_entries_per_feed, 0)
+    if max_entries_per_feed > 0:
+        return min(floor, max_entries_per_feed)
+    return floor
+
+
+def budget_floor(max_entries_per_feed: int) -> int:
+    """The floor under a feed's unstarred budget, and the only place
+    :data:`MIN_ENTRIES_PER_FEED` is read for the maximum.
+
+    One place because the count pass and admission must delete and refuse the
+    same rows or they take turns: the pass needs it as a bound SQL value and
+    :func:`unstarred_budget` needs it in Python, and a second reading of the
+    constant is how the two start disagreeing.
+
+    ``0`` is *no maximum*, and it disables this clamp with it — a floor of
+    fifty under a ceiling that does not exist would be a bound nobody asked
+    for. That is where this parts company with :func:`_effective_floor`, whose
+    caller is the age pass: there the constant stands with no ceiling, because
+    a quiet feed still has to keep something.
+    """
+    if max_entries_per_feed <= 0:
+        return 0
+    return _effective_floor(MIN_ENTRIES_PER_FEED, max_entries_per_feed)
+
+
+def unstarred_budget(max_entries_per_feed: int, starred_count: int) -> int:
+    """How many unstarred rows one feed may hold under its maximum.
+
+    Stars sit outside the ceiling by design, so they come off the total first
+    — and the remainder is floored at ``min(MIN_ENTRIES_PER_FEED,
+    max_entries_per_feed)``, which is load-bearing rather than tidiness. Without
+    it a feed whose stars reach the maximum gets a budget of zero
+    *permanently*: the count pass deletes every unstarred row, unread and
+    in-response alike, ``plan_admission`` then admits nothing ever again, and
+    the feed goes silently inert with only ``protected_excess_entries`` hinting
+    at it. Reserving room beneath the stars breaks no promise the setting
+    makes: such a feed is over its maximum either way, and the difference is
+    only whether it still works.
+
+    One consequence, stated because it surprises: at or below the floor the
+    effective floor *is* the maximum, so stars take nothing off the budget
+    there and a feed with twenty stars and a maximum of twenty stores twenty
+    unstarred rows as well.
+
+    A maximum of ``0`` disables the limit and both clamps with it; both callers
+    short-circuit before here, and the ``0`` returned on that path is what a
+    budget under a ceiling that does not exist is worth.
+    """
+    if max_entries_per_feed <= 0:
+        return 0
+    return max(
+        max_entries_per_feed - max(starred_count, 0),
+        budget_floor(max_entries_per_feed),
+    )
+
+
+def _changes(conn: sqlite3.Connection) -> int:
+    """Rows the last statement changed.
+
+    ``cursor.rowcount`` is ``-1`` for a statement prefixed by ``WITH`` under
+    this driver, so a caller adding those up silently reports a negative
+    deletion count. ``SELECT changes()`` is read immediately after the delete
+    instead, and is never negative.
+    """
+    return int(conn.execute("SELECT changes()").fetchone()[0])
+
+
+def prune_entries_by_age(
+    conn: sqlite3.Connection,
+    *,
+    before_iso: str,
+    min_entries_per_feed: int,
+    max_entries_per_feed: int,
+) -> tuple[int, int]:
+    """Delete read and removed entries past the age cutoff. ``(deleted, held)``.
+
+    A row goes only when every one of these holds:
+
+    * it is not starred;
+    * it is read or removed — an unread row is never aged out;
+    * its ``fetched_at`` is older than ``before_iso``. That is the clock: when
+      the entry entered *this reader*, not when the source published it;
+    * its feed has a non-null ``last_items_seen_at`` — no response has ever
+      returned an item there otherwise, so nothing is known and it fails
+      closed;
+    * its own ``last_seen_at`` is non-null and older than that marker, so it
+      was **not** in the most recent response. This is the churn guard: we
+      never delete something the feed has just handed us, so the feed cannot
+      hand it back;
+    * and deleting it would not take its feed below the effective floor.
+
+    Rows are ranked newest ``fetched_at`` first across *every* stored row for
+    the feed, not only the deletable ones, so a feed holding fifty unread rows
+    has plenty of history and does lose its old read ones. ``held`` counts the
+    candidates the floor spared — reported rather than inferred, because
+    without it a quiet feed and a feed with nothing to prune produce identical
+    output. Does not commit.
+
+    The tie-break is ``id ASC`` and it is load-bearing rather than arbitrary:
+    every entry of one poll is stored with that poll's single ``fetched_at``,
+    so a whole batch ties and the second key decides all of it.
+    ``insert_entries`` writes in source order, so the lowest rowid is the item
+    the response listed first — the newest content on any ordinary feed.
+    ``id DESC`` therefore protected the *tail* of each response and deleted its
+    head, which is both backwards and out of step with ``plan_admission``,
+    which keeps the head.
+    """
+    floor = _effective_floor(min_entries_per_feed, max_entries_per_feed)
+    ranked = """
+        WITH ranked AS (
+            SELECT
+                e.id AS id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.feed_id
+                    ORDER BY e.fetched_at DESC, e.id ASC
+                ) AS rn,
+                (
+                    e.starred = 0
+                    AND e.status IN ('read', 'removed')
+                    AND e.fetched_at < :before
+                    AND f.last_items_seen_at IS NOT NULL
+                    AND e.last_seen_at IS NOT NULL
+                    AND e.last_seen_at < f.last_items_seen_at
+                ) AS candidate
+            FROM feed_entries e
+            JOIN feeds f ON f.id = e.feed_id
+        )
+    """
+    params = {"before": before_iso, "floor": floor}
+    # Counted before the delete, and from the same expression, so the two
+    # numbers describe one population rather than two.
+    held = int(conn.execute(
+        ranked + "SELECT COUNT(*) FROM ranked WHERE candidate AND rn <= :floor",
+        params,
+    ).fetchone()[0])
+    conn.execute(
+        ranked
+        + "DELETE FROM feed_entries WHERE id IN ("
+        "SELECT id FROM ranked WHERE candidate AND rn > :floor)",
+        params,
+    )
+    return _changes(conn), held
+
+
+def prune_entries_to_feed_cap(
+    conn: sqlite3.Connection,
+    *,
+    max_entries_per_feed: int,
+) -> tuple[int, int, int]:
+    """Trim each feed to its maximum. ``(deleted, feeds_over, protected)``.
+
+    The maximum applies to *total* stored rows for one feed, with stars as the
+    only exemption, so a feed's unstarred budget is what the maximum leaves
+    after its stars — floored, see :func:`unstarred_budget`.
+
+    **One ordering, no tiers, and read state is not part of it.** An earlier
+    draft kept unread rows ahead of read ones here. Because admission ranks by
+    source order and this pass then re-ranked by read state, the two disagreed:
+    a feed near its maximum could have *in-response read* rows trimmed while
+    older out-of-response unread rows were kept, and the next poll re-admitted
+    the trimmed ones as unread — churn every poll, for good. Ranking by
+    recency alone makes this pass delete exactly what admission refuses, which
+    is what lets it carry no most-recent-response clause of its own. It cannot
+    carry one: a maximum lowered below a feed's own window would be
+    unenforceable if every row in the window were undeletable.
+
+    That agreement is with the **last observed** response order, and the
+    residual is worth naming rather than leaving inside the word "exactly".
+    This pass ranks stored rows by ``fetched_at`` and rowid, which record the
+    order of the poll that stored them; admission ranks the response in front
+    of it. A source that reorders its window between polls therefore moves rows
+    across the boundary, and one that moves back in can be deleted here and
+    handed back as unread — the shape the age pass closes with its in-response
+    clause, which a ceiling cannot carry for the reason above. What a
+    reordering source costs is deleting *more* than admission refuses; nothing
+    is stored and immediately trimmed, since both ends compute one budget.
+
+    Unread rows lose nothing they should keep. The *age* pass exempts them
+    absolutely, which is where "don't throw away what I haven't read" belongs;
+    this is the hard ceiling and nothing else. The cost, stated plainly: on a
+    feed at its ceiling an old unread entry can be dropped ahead of a newer
+    read one.
+
+    The tie-break is ``id ASC``, for the reason ``prune_entries_by_age`` states
+    at length, and the tie is the common case rather than a corner: one poll's
+    entries all share that poll's ``fetched_at``, so a whole batch ties and the
+    tie-break alone decides it. Insertion follows source order, so the lowest
+    rowid is the item the response listed first — which is what admission
+    keeps. Under ``id DESC`` this pass kept the tail instead, so it deleted
+    exactly the entries the next response would hand back.
+
+    The floor on *rows* is deliberately not honoured here. It guards against an
+    *age* rule emptying a quiet feed; a feed over its configured maximum is by
+    definition not empty, and honouring it would make a maximum below fifty
+    unenforceable. The floor on the *budget* is a different quantity and does
+    apply.
+
+    A feed can finish above the maximum two ways, and the reported overage is
+    the plain difference rather than either cause: its stars, which are never
+    deleted, and the floor under its budget, which holds unstarred rows a
+    star-consumed budget would have taken. Reported rather than guessing that
+    a starred row is safe to delete. ``0`` disables the pass entirely. Does not
+    commit.
+    """
+    if max_entries_per_feed <= 0:
+        return 0, 0, 0
+    conn.execute(
+        """
+        WITH stars AS (
+            SELECT feed_id, COUNT(*) AS n FROM feed_entries
+            WHERE starred = 1 GROUP BY feed_id
+        ),
+        ranked AS (
+            SELECT
+                e.id AS id,
+                e.feed_id AS feed_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.feed_id
+                    ORDER BY e.fetched_at DESC, e.id ASC
+                ) AS rn
+            FROM feed_entries e
+            WHERE e.starred = 0
+        )
+        DELETE FROM feed_entries WHERE id IN (
+            SELECT r.id FROM ranked r
+            LEFT JOIN stars s ON s.feed_id = r.feed_id
+            WHERE r.rn > MAX(:cap - COALESCE(s.n, 0), :floor)
+        )
+        """,
+        {
+            "cap": max_entries_per_feed,
+            # The same expression `unstarred_budget` applies in Python, in the
+            # one form SQL can take it: the per-feed star count is only known
+            # inside the statement, so the floor crosses as a bound value.
+            "floor": budget_floor(max_entries_per_feed),
+        },
+    )
+    deleted = _changes(conn)
+    over = conn.execute(
+        """
+        SELECT COUNT(*) AS feeds, COALESCE(SUM(n - :cap), 0) AS excess FROM (
+            SELECT COUNT(*) AS n FROM feed_entries
+            GROUP BY feed_id HAVING n > :cap
+        )
+        """,
+        {"cap": max_entries_per_feed},
+    ).fetchone()
+    return deleted, int(over["feeds"]), int(over["excess"])
+
+
 # -- entries ------------------------------------------------------------------
+
+
+# SQLite's own host-parameter limit is far higher, but one response can be
+# arbitrarily large and a single over-long IN list would fail the whole poll.
+_PARAM_CHUNK = 400
+
+
+def mark_entries_seen(
+    conn: sqlite3.Connection,
+    feed_id: int,
+    guids: Iterable[str],
+    *,
+    seen_at: str,
+) -> int:
+    """Record that this feed's response returned these guids. Never inserts.
+
+    The counterpart to the observation stamp ``insert_entries`` writes, for the
+    entries a response returned and admission did **not** store — everything
+    past the per-feed budget. Being returned is what protects a row from the
+    age pass, and admission is a decision about the maximum rather than about
+    what was observed, so an entry the source is still handing over must not be
+    left looking like history because the feed is full (ISSUE-388).
+
+    Without it the two rules fight: the age pass deletes those rows, that frees
+    budget, admission then re-admits the same guids from the next response as
+    fresh unread rows, and a read entry resurfaces every retention period.
+    """
+    wanted = [g for g in guids if g]
+    if not wanted or not seen_at:
+        return 0
+    updated = 0
+    for start in range(0, len(wanted), _PARAM_CHUNK):
+        chunk = wanted[start:start + _PARAM_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"UPDATE feed_entries SET last_seen_at = ? "
+            f"WHERE feed_id = ? AND guid IN ({placeholders})",
+            (seen_at, feed_id, *chunk),
+        )
+        updated += max(cur.rowcount, 0)
+    return updated
 
 
 def insert_entries(
@@ -670,11 +1265,20 @@ def insert_entries(
 
     A field the feed stopped sending never erases one we hold — a thinner
     later fetch can only degrade the card, so the richer value wins.
+
+    ``last_seen_at`` moves on every insert and every refresh, taken from the
+    incoming record's ``fetched_at`` — the poll clock, not the stored
+    first-sighting. It is the entry-level half of the most-recent-response
+    clause: an entry whose stamp equals its feed's ``last_items_seen_at`` was
+    in the latest response and is never age-deleted (ISSUE-388).
     """
     inserted = 0
     refreshed = 0
     for item in items:
         image_json = json.dumps(item.image_urls) if item.image_urls else None
+        # '' would compare as a timestamp older than every real one, so an
+        # unstamped hand-built record must read as "never observed" instead.
+        seen_at = item.fetched_at or None
         existing = conn.execute(
             "SELECT id, image_urls, published_at, fetched_at FROM feed_entries "
             "WHERE feed_id = ? AND guid = ?",
@@ -687,9 +1291,10 @@ def insert_entries(
                 INSERT OR IGNORE INTO feed_entries(
                     feed_id, guid, title, url, author, content_html,
                     content_text, image_urls, embed_url, file_url,
-                    media_url, media_type, published_at, fetched_at, status
+                    media_url, media_type, published_at, fetched_at, status,
+                    last_seen_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feed_id,
@@ -707,21 +1312,35 @@ def insert_entries(
                     item.published_at,
                     item.fetched_at,
                     item.status,
+                    seen_at,
                 ),
             )
-            # OR IGNORE still applies: a concurrent poll may have inserted the
-            # same guid between the SELECT and here.
-            if not cur.rowcount:
+            if cur.rowcount:
+                inserted += 1
+                _index_entry_images(
+                    conn,
+                    entry_id=cur.lastrowid,
+                    image_urls=item.image_urls or [],
+                    published_at=item.published_at,
+                    fetched_at=item.fetched_at,
+                )
                 continue
-            inserted += 1
-            _index_entry_images(
-                conn,
-                entry_id=cur.lastrowid,
-                image_urls=item.image_urls or [],
-                published_at=item.published_at,
-                fetched_at=item.fetched_at,
-            )
-            continue
+            # OR IGNORE still applies: a concurrent poll may have inserted the
+            # same guid between the SELECT and here. Reload and take the
+            # refresh path rather than skipping — skipping leaves the row with
+            # whatever observation state the winner gave it, and this response
+            # is evidence the source still returns the entry. The poll claim
+            # makes this unreachable on the normal path; a direct caller has
+            # no claim, so the function has to stay correct without one.
+            existing = conn.execute(
+                "SELECT id, image_urls, published_at, fetched_at FROM feed_entries "
+                "WHERE feed_id = ? AND guid = ?",
+                (feed_id, item.guid),
+            ).fetchone()
+            if existing is None:
+                # The winner rolled back, or something deleted the row again.
+                # Nothing to refresh and nothing was inserted.
+                continue
 
         # COALESCE(NULLIF(?, ''), col) is the "never overwrite with nothing"
         # rule: an absent field arrives as NULL and an empty one as '', and
@@ -739,7 +1358,12 @@ def insert_entries(
                 file_url     = COALESCE(NULLIF(?, ''), file_url),
                 media_url    = COALESCE(NULLIF(?, ''), media_url),
                 media_type   = COALESCE(NULLIF(?, ''), media_type),
-                published_at = COALESCE(NULLIF(?, ''), published_at)
+                published_at = COALESCE(NULLIF(?, ''), published_at),
+                -- The observation moves on any sighting. A record carrying no
+                -- stamp at all (a hand-built one) leaves the stored value
+                -- standing rather than blanking it, which would read as
+                -- "never observed" and make the row undeletable for good.
+                last_seen_at = COALESCE(?, last_seen_at)
             WHERE id = ?
             """,
             (
@@ -754,6 +1378,7 @@ def insert_entries(
                 item.media_url,
                 item.media_type,
                 item.published_at,
+                seen_at,
                 existing["id"],
             ),
         )
@@ -1087,6 +1712,14 @@ def _row_to_feed(row: sqlite3.Row) -> FeedRecord:
         # a row read before the v6 migration in a mixed-version test.
         last_throttled_at=(
             row["last_throttled_at"] if "last_throttled_at" in row.keys() else None
+        ),
+        # Same `.keys()` guard, same reason: a row read before the v8 migration
+        # in a mixed-version test carries neither column.
+        last_items_seen_at=(
+            row["last_items_seen_at"] if "last_items_seen_at" in row.keys() else None
+        ),
+        poll_claimed_until=(
+            row["poll_claimed_until"] if "poll_claimed_until" in row.keys() else None
         ),
     )
 

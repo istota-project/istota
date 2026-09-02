@@ -33,6 +33,7 @@ from istota.feeds.models import (
     default_poll_interval_for,
     detect_source_type,
 )
+from istota.feeds.retention import resolve_max_entries_per_feed
 from istota.feeds.sanitize import image_identity
 
 
@@ -455,10 +456,17 @@ async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
             feeds = feeds_db.list_feeds(conn)
             default_interval = feeds_db.get_default_poll_interval(conn)
             image_dedupe_window = feeds_db.get_image_dedupe_window_days(conn)
+            retention_days = feeds_db.get_entry_retention_days(conn)
+            max_entries = feeds_db.get_max_entries_per_feed(conn)
             total_entries = feeds_db.count_entries(conn)
             unread = feeds_db.count_entries(conn, status="unread")
         cfg = _config_payload_from_db(
-            cats, feeds, default_interval, image_dedupe_window,
+            cats,
+            feeds,
+            default_interval,
+            image_dedupe_window,
+            entry_retention_days=retention_days,
+            max_entries_per_feed=max_entries,
         )
         diagnostics = {
             "total_feeds": len(feeds),
@@ -605,26 +613,91 @@ def _validate_feeds_config(cfg: dict) -> str | None:
             return "each category must be an object"
         if not str(c.get("slug") or "").strip():
             return "every category needs a non-empty slug"
-    settings = cfg.get("settings") or {}
+    raw_settings = cfg.get("settings")
+    # Checked before the truthiness gate below, because a *falsy* non-dict —
+    # `[]`, `0`, `""`, `false` — otherwise collapses to `{}` and skips
+    # validation entirely, and `_apply_config_to_db` reads the payload the same
+    # way and clears every stored setting on a 200. That silently turns an
+    # `entry_retention_days` of 0 ("never prune") back into the 90-day default,
+    # which is deletion switched on. `null` still means absent, as it did.
+    if raw_settings is not None and not isinstance(raw_settings, dict):
+        return "settings must be an object"
+    settings = raw_settings or {}
     if settings:
-        if not isinstance(settings, dict):
-            return "settings must be an object"
         interval = settings.get("default_poll_interval_minutes")
         if interval is not None and not isinstance(interval, int):
             return "settings.default_poll_interval_minutes must be int"
-        window = settings.get("image_dedupe_window_days")
-        if window is not None:
-            # bool is an int subclass — reject it explicitly so a stray true
-            # doesn't silently become a 1-day window.
-            if isinstance(window, bool) or not isinstance(window, int):
-                return "settings.image_dedupe_window_days must be int"
-            if window < 0:
-                return "settings.image_dedupe_window_days must be >= 0"
+        for key in (
+            "image_dedupe_window_days",
+            "entry_retention_days",
+            "max_entries_per_feed",
+        ):
+            err = _non_negative_int(settings, key)
+            if err:
+                return err
     return None
 
 
+# A thousand years of days, and far more entries than any feed holds. The
+# ceiling is about what the code can express rather than what a user might
+# want: above roughly 739,000 the age cutoff `now - timedelta(days=N)`
+# overflows `datetime`, and a maximum at or above 2**63 cannot be bound as a
+# SQLite integer. Either raises out of `prune_feeds` on *every* run, so the
+# daily `_module.feeds.prune` job fails until it auto-disables after five
+# consecutive failures — retention then stops for that user, permanently, with
+# nothing on any surface saying why. Anyone wanting more than this means "no
+# limit", which is what 0 already says.
+MAX_RETENTION_SETTING = 365_000
+
+
+def _non_negative_int(settings: dict, key: str) -> str | None:
+    """Validate one optional non-negative integer setting.
+
+    ``bool`` is an ``int`` subclass, so it is rejected explicitly: a stray
+    ``true`` would otherwise be stored as ``1`` — a one-day retention window,
+    or a one-entry-per-feed maximum, either of which deletes almost everything
+    on the next prune. ``0`` is a real value on all three settings and is
+    accepted.
+    """
+    value = settings.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"settings.{key} must be int"
+    if value < 0:
+        return f"settings.{key} must be >= 0"
+    if value > MAX_RETENTION_SETTING:
+        return f"settings.{key} must be <= {MAX_RETENTION_SETTING}"
+    return None
+
+
+def _optional_count(settings: dict, key: str) -> int | None:
+    """Read one optional count. Absent or blank clears it; ``0`` is a value.
+
+    Clearing the stored row *is* how a setting returns to its constant, so the
+    blank and unparseable branches below must never be reached by a value the
+    user meant as a number. They are not: `_validate_feeds_config` answers 400
+    to a blank string and to every non-int before this runs, which leaves only
+    absent and `null` arriving here from the route. The branches stay for a
+    direct caller, which has no validator in front of it.
+    """
+    raw = settings.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _config_payload_from_db(
-    cats, feeds, default_interval, image_dedupe_window=None,
+    cats,
+    feeds,
+    default_interval,
+    image_dedupe_window=None,
+    *,
+    entry_retention_days=None,
+    max_entries_per_feed=None,
 ) -> dict:
     """Project DB rows to the wire shape the settings page expects."""
     cat_by_id = {c.id: c for c in cats}
@@ -633,6 +706,12 @@ def _config_payload_from_db(
         settings["default_poll_interval_minutes"] = default_interval
     if image_dedupe_window is not None:
         settings["image_dedupe_window_days"] = image_dedupe_window
+    # Omitted when unset, so the page shows its placeholder default rather
+    # than a number the user never chose.
+    if entry_retention_days is not None:
+        settings["entry_retention_days"] = entry_retention_days
+    if max_entries_per_feed is not None:
+        settings["max_entries_per_feed"] = max_entries_per_feed
     feed_payload: list[dict] = []
     for f in feeds:
         entry: dict = {"url": f.url}
@@ -667,6 +746,12 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
     categories_removed = 0
 
     with feeds_db.connect(ctx.db_path) as conn:
+        settings_payload = payload.get("settings") or {}
+        # Read before anything is written: the comparison below is between the
+        # maximum the feeds were last polled under and the one they will be
+        # polled under next.
+        old_max_entries = resolve_max_entries_per_feed(conn)
+
         slug_to_id: dict[str, int] = {}
         payload_slugs: set[str] = set()
         for c in payload.get("categories") or []:
@@ -709,12 +794,21 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
 
         # 0 is meaningful here ("never suppress"), so only an absent/blank
         # value clears the setting back to the default window.
-        window_raw = (payload.get("settings") or {}).get("image_dedupe_window_days")
-        try:
-            window = None if window_raw in (None, "") else int(window_raw)
-        except (TypeError, ValueError):
-            window = None
-        feeds_db.set_image_dedupe_window_days(conn, window)
+        feeds_db.set_image_dedupe_window_days(
+            conn, _optional_count(settings_payload, "image_dedupe_window_days"),
+        )
+
+        # Same rule for both retention settings: an absent key clears the
+        # stored row back to the constant, and 0 is stored as "off".
+        feeds_db.set_entry_retention_days(
+            conn, _optional_count(settings_payload, "entry_retention_days"),
+        )
+        feeds_db.set_max_entries_per_feed(
+            conn, _optional_count(settings_payload, "max_entries_per_feed"),
+        )
+        max_entries_changed = (
+            resolve_max_entries_per_feed(conn) != old_max_entries
+        )
 
         payload_urls: set[str] = set()
         for f in payload.get("feeds") or []:
@@ -763,6 +857,36 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
             if cat.slug not in payload_slugs:
                 feeds_db.delete_category(conn, cat.slug)
                 categories_removed += 1
+
+        if max_entries_changed:
+            # A new maximum only takes effect through a response carrying
+            # items, and a conditional request answered 304 carries none — so
+            # a raised maximum would sit unused until the feed happened to
+            # publish. Clearing the validators with the schedule makes the
+            # next poll fetch a full body once, which is what lets admission
+            # fill the new budget. The age window needs no such reset: it
+            # deletes on a stored clock and inserts nothing.
+            #
+            # The validators go on every feed, because clearing them costs a
+            # throttled feed nothing: it only decides what the *next* request
+            # asks for, whenever that turns out to be.
+            #
+            # The schedule does not. `next_poll_at` on a throttled or erroring
+            # feed is a standoff that ISSUE-347 put there, and that issue's
+            # stated invariant is that a 429 never schedules sooner than a
+            # success would. A settings save is user-triggered and repeatable,
+            # so clearing it there hands the user a way to stampede a host that
+            # has just turned us away, one save at a time. Those feeds keep
+            # their backoff and pick the new budget up at their own next poll,
+            # which is late rather than wrong.
+            #
+            # `_migrate_v7_to_v8` clears the schedule unconditionally and is
+            # right to: it runs once per upgrade, not once per click.
+            conn.execute("UPDATE feeds SET etag = NULL, last_modified = NULL")
+            conn.execute(
+                "UPDATE feeds SET next_poll_at = NULL "
+                "WHERE last_throttled_at IS NULL AND error_count = 0"
+            )
 
         conn.commit()
 

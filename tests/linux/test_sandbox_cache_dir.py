@@ -53,6 +53,7 @@ from istota import db
 from istota.config import DeveloperConfig, SecurityConfig
 from istota.executor import (
     SANDBOX_CACHE_ROOT_NAME,
+    SandboxProfile,
     _bwrap_available,
     _bwrap_supports_disable_userns,
     build_bwrap_cmd,
@@ -138,6 +139,7 @@ def _device_probe(path):
 def _run_probe(script, config, task, user_temp):
     cmd = build_bwrap_cmd(
         ["/bin/sh", "-c", script], config, task, False, [], user_temp,
+        profile=SandboxProfile.CLAUDE,
     )
     assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -337,6 +339,7 @@ class TestTheCacheBindSymlinkRace:
     def _build(config, task, user_temp, script, *, is_admin):
         cmd = build_bwrap_cmd(
             ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
+            profile=SandboxProfile.CLAUDE,
         )
         assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
         return cmd

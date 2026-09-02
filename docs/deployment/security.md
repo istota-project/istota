@@ -197,8 +197,10 @@ Handlers and the shared envelope helper (`_load_deferred_json`) live in `schedul
 [security]
 sandbox_enabled = true
 skill_proxy_enabled = true   # needed wherever sandbox_enabled is true; turning it
-                             # off with the sandbox on warns at startup and leaves
-                             # skill commands with nothing to read
+                             # off with the sandbox on warns at startup, leaves every
+                             # configured credential in the task environment where the
+                             # model can read it, and leaves skill commands with
+                             # nothing to read
 skill_proxy_timeout = 300
 passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths = []        # extra RO binds for co-located services; keep narrow

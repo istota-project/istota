@@ -139,7 +139,7 @@ class TestClaudeRuntimeEnvIsNotInTheProxyBaseEnv:
     so neither `derive_credential_set` nor `derive_proxy_only_set` takes it out,
     and it rode into every host-side skill CLI. Those run unsandboxed as the
     daemon user, and the model reaches them through the same Bash tool the
-    `_build_tools` strip cleaned. Nothing there reads it: no skill invokes the
+    `NativeBrain` strips cleaned. Nothing there reads it: no skill invokes the
     `claude` binary.
     """
 

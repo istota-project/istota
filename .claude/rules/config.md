@@ -316,10 +316,19 @@ sandbox_cache_sweep_enabled: bool = True   # bound what the per-user caches grow
 sandbox_cache_max_gb: float = 10.0         # per user; clamped to a 1 GiB floor
 network: NetworkConfig = NetworkConfig()
 ```
-`skill_proxy_enabled` is **required wherever `sandbox_enabled` is true**: the DB
-directories are masked out of the sandbox, so a skill CLI that can't reach the
-proxy has nothing to open and `skill_client._run_direct` refuses (on
-`ISTOTA_SANDBOXED`) rather than failing as a missing table.
+`skill_proxy_enabled` is **required wherever `sandbox_enabled` is true**, for two
+reasons, and the load-time warning names both (ISSUE-393). The quiet one is
+credentials: `_split_credential_env` removes the manifest-declared sensitive vars
+only inside the proxy branch of `execute_task`, so with the proxy off they stay
+in the environment handed to the model — and with a sandbox on that is a real
+boundary they now sit inside, which is the opposite of what switching a sandbox
+on is for. The loud one is databases: the DB directories are masked out of the
+sandbox, so a skill CLI that can't reach the proxy has nothing to open and
+`skill_client._run_direct` refuses (on `ISTOTA_SANDBOXED`) rather than failing as
+a missing table. Both switches **off** together is a different shape and is not
+warned about: `setup_wizard` writes that pair for the single-user install, the
+task then runs unconfined as the daemon user, and there is no boundary for an env
+var to cross.
 
 `sandbox_ro_paths` defaults to `[]` and is now **parsed from TOML** — it never
 was, so every deployment silently ran the hardcoded old default (`["/srv/app"]`)

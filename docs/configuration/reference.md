@@ -226,7 +226,7 @@ These need `Delegate=` and `DelegateSubgroup=supervisor` on the scheduler unit, 
 | Setting | Default | Description |
 |---|---|---|
 | `sandbox_enabled` | `true` | Bubblewrap filesystem isolation (Linux only) |
-| `skill_proxy_enabled` | `true` | Credential proxy via Unix socket. Required wherever `sandbox_enabled` is true — the databases are masked out of the sandbox, so a skill CLI that can't reach the proxy refuses rather than reading nothing |
+| `skill_proxy_enabled` | `true` | Credential proxy via Unix socket. Required wherever `sandbox_enabled` is true, for two reasons. Turning it off leaves every configured service credential in the task environment, readable by the model from inside the sandbox rather than injected per call — the quiet cost, and the one that undoes what the sandbox is for. It also leaves skill CLIs running inside the sandbox, where the databases they read are masked out, so a CLI that can't reach the proxy refuses rather than reading nothing |
 | `skill_proxy_timeout` | `300` | Proxy command timeout (seconds) |
 | `passthrough_env_vars` | `["LANG", "LC_ALL", "LC_CTYPE", "TZ"]` | Extra env vars for subprocess |
 | `sandbox_ro_paths` | `[]` | Extra RO bind-mounts in the sandbox, for co-located services. Keep entries narrow — a broad path sweeps in whatever lives under it. The DB directories are masked after this list either way |

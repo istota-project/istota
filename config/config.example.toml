@@ -332,9 +332,12 @@ features = []
 # [security]
 # sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
 # skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation).
-#                                  # Required wherever sandbox_enabled is true: the databases are
-#                                  # masked out of the sandbox, so a skill CLI that can't reach the
-#                                  # proxy has nothing to read and refuses rather than guessing.
+#                                  # Required wherever sandbox_enabled is true, for two reasons.
+#                                  # Off, every configured service credential stays in the task
+#                                  # environment where the model can read it from inside the
+#                                  # sandbox, instead of being injected per call. And the databases
+#                                  # are masked out of the sandbox, so a skill CLI that can't reach
+#                                  # the proxy has nothing to read and refuses rather than guessing.
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds)
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 # sandbox_ro_paths = []            # extra RO bind-mounts in sandbox, for co-located services the

@@ -2067,6 +2067,26 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
     only under ``deep=True``. What it asserts is what argv assertions
     structurally cannot: that the database directories are empty and unwritable
     *inside* the namespace, rather than that the right flags were passed.
+
+    **It probes under the NATIVE profile, and that narrows what it covers.**
+    The masks and the system binds it reads are part of the generic plan and
+    identical under both profiles, so its verdict is unchanged — that much is
+    pinned by ``tests/test_doctor.py::TestSandboxMasksUsesTheNativeProfile``.
+    What it stops doing is exercising whether the *CLAUDE* argv can be built at
+    all on this host. bwrap exits before running anything on a bad mount
+    operation, and the CLAUDE-only binds have a recorded failure of exactly
+    that kind: a config directory under ``db_path.parent`` shadows the
+    system-prompt bind, which is how narrowing ``sandbox_ro_paths`` to ``[]``
+    made every task on a ``custom_system_prompt`` install exit with "System
+    prompt file not found". A host in that state now passes this check while
+    every claude_code task fails.
+
+    What still covers it live is the heartbeat's ``self-check`` and ``!check``,
+    both of which build a CLAUDE sandbox and run the CLI through it — but both
+    are opt-in, where this ran on every ``--deep``. The tier that covers it
+    unconditionally is ``tests/linux/test_sandbox_profiles_real.py``. Probing
+    both profiles here would restore it for two subprocesses; that is a
+    deliberate omission rather than an oversight.
     """
     if not probe:
         # The contract is unconditional: probe=False forbids spawning. Checked
@@ -2094,7 +2114,7 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
         import tempfile
 
         from . import db
-        from .executor import build_bwrap_cmd
+        from .executor import SandboxProfile, build_bwrap_cmd
 
         # Both directories `build_bwrap_cmd` masks, not just the framework one —
         # the message says "directories" and `module_db_root()` is the one that
@@ -2139,6 +2159,12 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
                 is_admin=False,
                 user_resources=[],
                 user_temp_dir=Path(user_temp),
+                # NATIVE, because this probe execs `/bin/sh` and not the
+                # `claude` CLI — there is no reason for a diagnostic to build a
+                # namespace holding the subscription credential. The masks it
+                # asserts on are part of the generic plan and identical under
+                # both profiles, so the verdict is unchanged.
+                profile=SandboxProfile.NATIVE,
             )
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=DEEP_TIMEOUT, check=False

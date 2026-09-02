@@ -58,7 +58,23 @@ def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[Fetche
     resp.raise_for_status()
     data = resp.json()
 
-    posts = data.get("response", {}).get("posts", [])
+    # A payload that is not a post collection must not read as "no posts"
+    # (ISSUE-388). The old `.get("response", {}).get("posts", [])` turned every
+    # malformed shape — an error object, a captcha page decoded as JSON, an
+    # API change — into an empty list indistinguishable from a blog with
+    # nothing on it, so a broken API reported a clean poll: `last_error`
+    # cleared, the ordinary cadence kept, and nothing saying the blog had
+    # stopped arriving. Raised instead; `poll_feed` turns it into the ordinary
+    # error result, which backs off and advances no observation state.
+    if not isinstance(data, dict):
+        raise ValueError("tumblr payload is not a JSON object")
+    response = data.get("response")
+    if not isinstance(response, dict):
+        raise ValueError("tumblr payload has no `response` object")
+    posts = response.get("posts")
+    if not isinstance(posts, list):
+        raise ValueError("tumblr `response.posts` is missing or not a list")
+
     items: list[FetchedItem] = []
 
     for post in posts:

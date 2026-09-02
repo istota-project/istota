@@ -1,6 +1,7 @@
 """Phase 2 — Bash tool: output capture, exit codes, timeout, abort, streaming."""
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
@@ -39,19 +40,32 @@ class TestBash:
         result = await _run(make_bash_tool(_env(tmp_path)), {"command": "ls"})
         assert "marker.txt" in _text(result)
 
-    async def test_sandbox_wrap_applied(self, tmp_path):
+    async def test_the_argv_is_the_pipefail_shell_and_nothing_wraps_it(self, tmp_path):
+        """This tool no longer wraps anything, and that is the seam change
+        rather than a simplification: it runs inside `istota.tool_server`,
+        which is itself the process bubblewrap wrapped once for the attempt.
+        A per-call wrap here would nest bubblewrap inside a namespace built
+        with `--unshare-user --disable-userns`, which fails every command.
+
+        `pipefail` is still on the argv, because `[exit code: N]` is a claim
+        about whether the command worked and without it a pipeline reports its
+        last stage.
+        """
         seen = {}
 
-        def _wrap(cmd):
-            seen["cmd"] = cmd
-            return cmd  # no-op passthrough
+        async def _fake_exec(*cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            seen["kwargs"] = kwargs
+            raise OSError("not actually spawning")
 
-        env = _env(tmp_path)
-        env.sandbox_wrap = _wrap
-        await _run(make_bash_tool(env), {"command": "echo hi"})
-        # The wrap receives the shell argv whole, `pipefail` included — the
-        # option has to be inside the sandbox, not applied to the wrapper.
+        with patch("asyncio.create_subprocess_exec", _fake_exec):
+            await _run(make_bash_tool(_env(tmp_path)), {"command": "echo hi"})
+
         assert seen["cmd"] == ["bash", "-o", "pipefail", "-c", "echo hi"]
+        # No `preexec_fn` either: cgroup membership is inherited at fork from
+        # the server, which the daemon placed before it could fork (ISSUE-285).
+        assert seen["kwargs"].get("preexec_fn") is None
+        assert "task_cgroup" not in seen["kwargs"]
 
     async def test_streaming_on_update(self, tmp_path):
         updates = []
@@ -265,48 +279,20 @@ class TestBashProcessHandling:
         assert mtime1 == mtime2, "subprocess survived cancellation"
 
 
-class TestBashTaskCgroup:
-    """A6 — the Bash tool places each child it spawns in the task's cgroup.
-
-    NativeBrain never calls ``on_pid``: it has no single long-lived child for
-    the executor to place. So without this, the brain that runs a task's test
-    suite would be the one brain per-task containment silently skipped, and
-    nothing would say so. These run a real subprocess against a fake cgroup
-    directory under ``tmp_path``.
+class TestBashDoesNotContainItself:
+    """The three per-call placement tests that used to live here are gone, and
+    their claim moved rather than being dropped: the process this tool runs in
+    is placed in the task cgroup from `preexec_fn` at spawn
+    (`tests/test_task_cgroup_placement.py::TestTheToolServerIsPlacedBeforeExec`),
+    and every command below it is a member by being forked from there. The
+    kernel-level version of that inheritance is
+    `tests/linux/test_tool_server_lifecycle.py`.
     """
 
-    async def test_places_the_child_pid_in_the_task_cgroup(self, tmp_path):
-        cg = tmp_path / "task-5"
-        cg.mkdir()
-        # The kernel makes this file; `placement` opens it without O_CREAT, so a
-        # fixture that leaves it out is not a cgroup as far as the module cares.
-        (cg / "cgroup.procs").write_text("")
-        env = _env(tmp_path, task_cgroup=cg)
-
-        result = await _run(make_bash_tool(env), {"command": "echo placed"})
-
-        assert "placed" in _text(result)
-        # `0`, not a pid: the child writes itself in from `preexec_fn`, before it
-        # execs, so everything it goes on to fork inherits the group (ISSUE-285).
-        # A pid here would mean the parent moved it after the fact, which is the
-        # ordering that left the real work outside the cgroup.
-        assert (cg / "cgroup.procs").read_text().strip() == "0"
-
-    async def test_writes_nothing_when_no_cgroup_was_created(self, tmp_path):
-        # The fail-open path: no `Delegate=` on the deployment, so the executor
-        # handed down None and the command must run exactly as it always did.
-        env = _env(tmp_path)
-
-        result = await _run(make_bash_tool(env), {"command": "echo fine"})
+    async def test_it_writes_no_cgroup_procs_of_its_own(self, tmp_path):
+        # The fail-open path this file used to test is now structural: there is
+        # no field to read a cgroup from, so there is nothing to fail open.
+        result = await _run(make_bash_tool(_env(tmp_path)), {"command": "echo fine"})
 
         assert "fine" in _text(result)
         assert not (tmp_path / "cgroup.procs").exists()
-
-    async def test_a_command_still_runs_when_placement_fails(self, tmp_path):
-        # Containment is best-effort; losing it must never cost the task its
-        # command. The directory here does not exist, so the write raises.
-        env = _env(tmp_path, task_cgroup=tmp_path / "gone")
-
-        result = await _run(make_bash_tool(env), {"command": "echo survived"})
-
-        assert "survived" in _text(result)
