@@ -279,8 +279,6 @@ def prune_feeds(
         # first DML statement, which would leave the reads before it outside
         # the transaction the deletes commit.
         conn.isolation_level = None
-        retention_days = resolve_retention_days(conn)
-        max_entries = resolve_max_entries_per_feed(conn)
 
         deleted_by_age = 0
         deleted_by_cap = 0
@@ -291,6 +289,17 @@ def prune_feeds(
         deferred: str | None = None
 
         conn.execute("BEGIN IMMEDIATE")
+
+        # Read the policy *inside* the transaction, not before it. `PUT
+        # /config` writes both settings, so a save landing between a read out
+        # here and the `BEGIN` would have this run delete under a value that is
+        # no longer stored — including the case that matters, a user setting
+        # `entry_retention_days = 0` to switch age pruning off and having one
+        # more pass delete on 90 days anyway. `BEGIN IMMEDIATE` takes the write
+        # lock, so reading after it puts the policy and the deletes it
+        # authorizes in the same serialized view.
+        retention_days = resolve_retention_days(conn)
+        max_entries = resolve_max_entries_per_feed(conn)
         try:
             raw_grace = feeds_db.get_entry_prune_not_before(conn)
             grace: datetime | None = None
