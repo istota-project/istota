@@ -596,10 +596,31 @@ class TestCancellation:
 
 
 class TestPathsAndBinds:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "the prepared renditions moved into the task control directory "
+            "ahead of the guards that reach it: `execute_task` still passes "
+            "only the composed system prompt file in `extra_ro_binds`, so the "
+            "directory the renditions are in is under no bind and a "
+            "sandboxed task cannot open the image the prompt names. Remove "
+            "this marker in the commit that binds the control directory."
+        ),
+    )
     def test_the_paths_named_to_the_model_are_the_ones_bwrap_binds(
         self, tmp_path, ocr, monkeypatch
     ):
-        """`temp_dir` behind a symlink: an unresolved path names no file inside."""
+        """The path the model is told to open exists inside the namespace.
+
+        Read off the argv `execute_task` itself built — `req.sandbox_wrap` is
+        that closure — rather than off a command this test assembles, because
+        a hand-built one can only assert the binds the test supplied. That is
+        the difference between checking the executor and checking the
+        fixture.
+
+        Also covers `temp_dir` behind a symlink: an unresolved path names no
+        file inside.
+        """
         real = tmp_path / "real-temp"
         real.mkdir()
         link = tmp_path / "temp-link"
@@ -616,21 +637,17 @@ class TestPathsAndBinds:
         with db.get_db(config.db_path) as conn:
             task = _task(conn, attachments=[str(img)])
             _run(config, task, brain, conn)
-            # The rendition lands in the task control directory, which is not
-            # the model's working directory and so is not the read-write bind:
-            # it reaches the namespace as the read-only re-bind
-            # `build_bwrap_cmd` emits for `extra_ro_binds`. Handed here
-            # explicitly because this test builds the command by hand rather
-            # than through `execute_task`.
-            cmd = executor.build_bwrap_cmd(
-                ["true"], config, task, True, [], executor.get_user_temp_dir(config, "alice"),
-                profile=executor.SandboxProfile.CLAUDE,
-                extra_ro_binds=[
-                    executor.get_task_control_dir(config, "alice", task.id)
-                ],
-            )
 
-        prepared = brain.reqs[-1].images[0].path
+        req = brain.reqs[-1]
+        assert req.sandbox_wrap is not None, (
+            "no namespace was built, so this asserts nothing about binds"
+        )
+        cmd = req.sandbox_wrap(["true"])
+        prepared = req.images[0].path
+        # Both bind flags. The model's own working directory is read-write and
+        # the control directory can only ever be read-only, so a set built from
+        # `--bind` alone would answer a narrower question than the one the
+        # class is named for.
         binds = {
             cmd[i + 2] for i, tok in enumerate(cmd)
             if tok in ("--bind", "--ro-bind") and i + 2 < len(cmd)

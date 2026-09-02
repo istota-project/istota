@@ -4299,3 +4299,55 @@ class TestImagePreparationWritesIntoTheControlDirectory:
         assert not out_dir.is_relative_to(
             get_user_temp_dir(config, "alice").resolve()
         )
+
+
+class TestAnUnusableControlDirectoryFailsTheTask:
+    """Fail-closed, and *how* it fails closed.
+
+    A task whose control directory cannot be created has nowhere to put its
+    standing instructions, so it must not run — but raising out of
+    `execute_task` is not the way to say so. `process_one_task` has no handler
+    of its own, so the exception reaches the worker's catch-all, which logs and
+    moves on with the row still `running`: the task is then recovered only by
+    the stuck-worker sweep, minutes later, with the reason nowhere but the
+    daemon log. Returning the failure keeps the ordinary accounting and puts
+    the path in front of whoever asked.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            skills_dir=tmp_path / "_empty_skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+        )
+
+    def test_a_control_root_that_is_a_file_fails_the_task_by_return(self, tmp_path):
+        from istota.executor import CONTROL_DIR_NAME, execute_task
+
+        config = self._make_config(tmp_path)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        # A real corrupt-state case rather than a patched one: `O_DIRECTORY`
+        # is what refuses it, several layers below the assertion.
+        (config.temp_dir / CONTROL_DIR_NAME).write_text("not a directory\n")
+
+        with patch("istota.executor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt="hi", user_id="alice", source_type="talk",
+                )
+                task = db.get_task(conn, task_id)
+                success, result, actions, trace = execute_task(
+                    task, config, [], conn=conn, use_context=False,
+                )
+
+        assert success is False
+        assert (actions, trace) == (None, None)
+        assert CONTROL_DIR_NAME in result, result
+        # And the model was never reached: a task that cannot hold its own
+        # standing instructions must not run without them.
+        assert not mock_run.called

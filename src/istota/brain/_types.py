@@ -102,7 +102,7 @@ class BrainRequest:
     custom_system_prompt_path: Path | None = None
 
     # Istota's own composed standing instructions, written by the executor to
-    # `task_<id>_system_prompt.txt` in the task temp dir. The system half of
+    # `system_prompt.txt` in the task's control directory. The system half of
     # `executor.ComposedPrompt`: identity, execution constraints, emissaries,
     # persona, accessible resources, tool descriptions, rules, response
     # guidelines, the skills changelog and the eager skill bodies.

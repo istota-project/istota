@@ -768,13 +768,16 @@ class TestWhatTheBrainIsHanded:
         assert temp.is_dir()
         assert not list(temp.glob("task_*_prompt.txt"))
         assert not list(temp.glob("task_*_system_prompt.txt"))
-        # And nothing in the control directory either. It is created above the
-        # dry-run return, unconditionally, so its *existence* pins nothing —
-        # its emptiness is what says both writes are still downstream of the
-        # return.
+        # And neither half in the control directory. It is created above the
+        # dry-run return, unconditionally, so its *existence* pins nothing.
+        # The two filenames rather than emptiness: image preparation also runs
+        # above the return and creates `attachments/` on its first write, so a
+        # dry run of a task carrying an image would fail an emptiness check for
+        # a reason that has nothing to do with the property named here.
         control = executor.get_task_control_dir(config, task.user_id, task.id)
         assert control.is_dir()
-        assert list(control.iterdir()) == []
+        assert not (control / "prompt.txt").exists()
+        assert not (control / "system_prompt.txt").exists()
 
     def test_the_sandbox_wrap_carries_the_composed_file_as_a_ro_bind(
         self, tmp_path,

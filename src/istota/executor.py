@@ -312,16 +312,28 @@ def _make_cancel_check(config: Config, task_id: int) -> "Callable[[], bool]":
     return _check
 
 
-def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list[Path]:
+def image_bind_roots(
+    config: Config, task: db.Task, user_temp_dir: Path,
+    control_dir: Path | None = None,
+) -> list[Path]:
     """The roots an image attachment can live under and still be openable.
 
     `build_bwrap_cmd` binds the user temp dir plus `{mount}/Users/{user}`,
-    `{mount}/Talk` and `{mount}/Channels/{token}` — and nothing else. The
+    `{mount}/Talk` and `{mount}/Channels/{token}`, and re-binds the task
+    control directory read-only after all of them — and nothing else. The
     scheduler's nc-data fallback hands out `/mnt/nc-data/<user>/files/Talk/...`,
     which is under none of them, so a small in-limits screenshot arriving that
     way would be named in the Claude Code directive and be unreadable. Naming
     the roots here is what lets `prepare_image_attachments` copy such a file in
     even when it needs no resize and no conversion.
+
+    `control_dir` is where the prepared renditions are *written*, and it is in
+    this list to keep an invariant rather than to decide a copy: `_within_binds`
+    tests the source, so nothing today reaches it. The output directory has
+    always been inside `bind_roots` — it used to be, via `user_temp_dir` — and a
+    destination outside the roots the same call is told about is the shape of a
+    later copy loop or a second-pass rendition landing somewhere unreadable.
+    `user_temp_dir` stays: source attachments still arrive there.
 
     Resolved, because `_bind` resolves its source and uses the *resolved* path
     as the in-namespace destination: on a deployment where `temp_dir` sits
@@ -329,6 +341,8 @@ def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list
     the namespace, and every `Read` fails.
     """
     roots = [user_temp_dir]
+    if control_dir is not None:
+        roots.append(control_dir)
     mount = config.nextcloud_mount_path
     if mount:
         mount = Path(mount)
@@ -608,6 +622,39 @@ def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
             ) from exc
         return control_dir
     return control_dir
+
+
+def _write_control_file(path: Path, text: str) -> None:
+    """Write one framework-authored file: `O_NOFOLLOW`, `O_TRUNC`, mode 0600.
+
+    Both prompt halves go through here so the rule is stated once. `O_TRUNC`
+    is what makes a retry of the same task overwrite rather than append; 0600
+    because these hold the persona, the user's own overlays, their email
+    address, their retrieved memory and their request, and no other local
+    account has any reason to read them.
+
+    ``O_NOFOLLOW`` is belt-and-braces since the files moved out of the
+    model-writable directory — see the call sites — and it is kept because a
+    guard dropped on the strength of a property held somewhere else is the one
+    nobody notices the loss of.
+
+    The descriptor is closed by hand only on the path where ``os.fdopen``
+    itself raises: it takes ownership when it returns, so closing after a
+    successful call would be a double close, and a double close on a
+    long-running daemon closes whatever fd the number was reused for.
+    """
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(text)
 
 
 class DaemonSandbox(NamedTuple):
@@ -5841,16 +5888,34 @@ def execute_task(
     # subdirectory of `temp_dir` — `.control` included — unlinks files past
     # `temp_file_retention_days` and only `rmdir`s a directory that is empty
     # *and* itself past that window, which is the age gate an in-flight task
-    # needs. A cleanup callback here would also be wrong rather than merely
+    # needs. The accepted cost is that unlinking the last file updates the
+    # directory's own mtime, so a leaf survives about two retention windows
+    # rather than one and the tree carries an inode per task in between —
+    # bounded, self-clearing, and on the volume that sweep already manages.
+    # A cleanup callback here would also be wrong rather than merely
     # redundant: the briefing metadata is read by the *scheduler*, after this
     # function has returned, inside a bare `except Exception`, so deleting it
     # on the way out would lose every briefing's per-block provenance silently.
     #
     # Fail-closed. A task with no resolvable control directory has nowhere to
     # put its standing instructions, and falling back to the model-writable
-    # directory is the exposure this exists to remove — so
-    # `ensure_task_control_dir` raises and the task fails.
-    control_dir = ensure_task_control_dir(config, task.user_id, task.id)
+    # directory is the exposure this exists to remove.
+    #
+    # Failed rather than raised, though. Nothing between here and
+    # `UserWorker.run`'s catch-all handles an exception — `process_one_task`
+    # has no handler of its own — so a raise leaves the row `running` with its
+    # heartbeat stopped, recovered only by the stuck-worker sweep
+    # `scheduler.worker_stuck_minutes` later, three times over, with the
+    # reason nowhere but the daemon log. The conditions are deterministic
+    # (a level that is not a directory, one owned by another account, an
+    # unresolvable user id), so retrying at all is generous; doing it slowly
+    # and anonymously is not. Returning the failure keeps the normal
+    # accounting and puts the path and the reason in front of whoever asked.
+    try:
+        control_dir = ensure_task_control_dir(config, task.user_id, task.id)
+    except RuntimeError as exc:
+        logger.error("Task %s: %s", task.id, exc)
+        return False, str(exc), None, None
 
     # Build resources: merge config-defined resources with dynamic DB resources
     user_config = config.get_user(task.user_id)
@@ -5922,7 +5987,7 @@ def execute_task(
         # replacing the user's own file path with a temp one in the prompt —
         # on the standalone single-user shape, for every image.
         bind_roots=(
-            image_bind_roots(config, task, user_temp_dir)
+            image_bind_roots(config, task, user_temp_dir, control_dir)
             if effective_sandboxing(config)
             else None
         ),
@@ -6422,13 +6487,7 @@ def execute_task(
     # sit every later task of that user could read it for the length of the
     # retention window.
     prompt_file = control_dir / "prompt.txt"
-    _fd = os.open(
-        prompt_file,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-        0o600,
-    )
-    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-        _f.write(prompt)
+    _write_control_file(prompt_file, prompt)
 
     # The system half, and the file the brain is handed by path.
     #
@@ -6474,13 +6533,7 @@ def execute_task(
     # the per-user email address, and there is no reason for it to be readable
     # by other local accounts.
     system_prompt_file = control_dir / "system_prompt.txt"
-    _fd = os.open(
-        system_prompt_file,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-        0o600,
-    )
-    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-        _f.write(composed.system)
+    _write_control_file(system_prompt_file, composed.system)
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"

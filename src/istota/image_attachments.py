@@ -331,7 +331,16 @@ def prepare_image_attachments(
     The caller names it, because where a framework-authored file may live is
     the caller's question: `execute_task` passes a directory under the
     daemon-owned task control directory, which no task can write and no other
-    task can read. Created on first write, not here.
+    task can read.
+
+    Two consequences of that the caller owns. **Uniqueness**: `_out_path`
+    disambiguates by attachment index and sanitized stem and no longer by task
+    id, so two tasks handed one directory would overwrite each other's
+    renditions. And the **mode**: the directory is created on first write with
+    `mkdir(parents=True)` under the ambient umask, and a rendition is whatever
+    Pillow or `shutil` writes, so what keeps a user's photo unreadable to other
+    local accounts is the mode of the directory above — 0700, asserted by
+    `executor.ensure_task_control_dir` — and not the mode of these files.
 
     `bind_roots` is what the sandbox can see. An accepted image whose *resolved*
     source lies under none of them is copied into `out_dir` even
@@ -779,11 +788,15 @@ def _to_output_mode(decoded, output_format: str, *, flatten: bool, Image):
 
 
 def _out_path(out_dir: Path, index: int, source: Path, output_format: str, *, ocr: bool) -> Path:
-    """`{index}_{stem}[.ocr].{ext}` under the task's own temp directory.
+    """`{index}_{stem}[.ocr].{ext}` in the directory the caller named.
 
     The index prefix is what keeps two paths sharing a stem apart — `photo.jpg`
     beside `photo.png`, or the same `IMG_1234.jpg` from two directories. The
     stem is sanitized because it is a sender-supplied filename.
+
+    Unique within one `out_dir` and no further: the `task_{id}` component went
+    with the derivation, so keeping two tasks' renditions apart is done by
+    handing each its own directory, which is the caller's job.
     """
     stem = _UNSAFE_STEM_CHARS.sub("_", source.stem).strip("._") or "image"
     suffix = ".ocr" if ocr else ""

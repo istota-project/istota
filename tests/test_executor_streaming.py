@@ -1544,7 +1544,10 @@ class TestDryRun:
         # control directory), the check below would pass forever while testing
         # nothing.
         assert control.is_dir()
-        assert list(control.iterdir()) == []
+        # The two filenames rather than emptiness: image preparation runs above
+        # the dry-run return too and creates `attachments/` on its first write.
+        assert not (control / "prompt.txt").exists()
+        assert not (control / "system_prompt.txt").exists()
         # The per-user directory holds neither half any more, so a glob there
         # would pass whatever the dry-run return did.
         user_temp = get_user_temp_dir(config, task.user_id)
