@@ -46,6 +46,18 @@ class EmailTransport:
         supports_progress_ack=False,
         supports_typing=False,
         max_message_length=None,
+        # An email thread is not a room view, and the test that makes this
+        # principled rather than a special case is whether there is a durable,
+        # addressable place a person opens to read the whole conversation *that
+        # we can write into*. A Talk room, yes. An email thread, no — it is
+        # reconstructed from messages scattered across mailboxes we do not own.
+        room_view=None,
+        # Guest, not member: mail threaded back into a room joins that room's
+        # transcript (`record_inbound`'s `mirror_only` path) and never mints,
+        # binds, renames or un-archives one. ISSUE-136's "existence, never
+        # creation" rule is this value, and it is what stops mail the bot merely
+        # receives from putting rooms in anyone's sidebar.
+        inbound_room_role="guest",
     )
 
     def __init__(self, config: "Config"):

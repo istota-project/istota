@@ -136,6 +136,43 @@ class TransportCapabilities:
     coincidence of having exactly one room-view stream surface — a surface that
     is one but not the other is what the split exists to keep correct.
 
+    ``inbound_room_role`` is the *inbound* half of the room model, and the one
+    ``room_view`` above says nothing about: what an arriving message on this
+    surface does to the room registry.
+
+    - ``"member"`` — an inbound message registers the room, binds the surface,
+      adds membership, renames from the surface and un-archives (talk, web).
+    - ``"guest"`` — an inbound message joins an existing room's transcript and
+      never mints one. Email, and ISSUE-136's "existence, never creation" rule
+      is exactly this value.
+    - ``None`` — never a room turn at all (ntfy, istota_file, repl).
+
+    ``user_turn_mirror`` says how an *external* room view carries a turn
+    authored on another surface: ``"as_user"`` posts it as the author where an
+    author credential is available and degrades to an attributed repost where
+    it is not (Talk — today's ladder exactly, ``web_app._mirror_web_turn_as_user``
+    at ingest and ``scheduler._format_mirror_user_repost`` at delivery when the
+    external-id stamp is absent), ``"attributed"`` a surface that can only ever
+    repost under the bot's own identity, ``None`` no mirror. It is a refinement
+    of ``room_view == "external"`` rather than an independent axis: a surface
+    that is not an external room view is never a fan-out target, so the field
+    means nothing there. **It does not carry the body policy** — the shipped
+    behaviour is keyed on the ``(origin, destination)`` pair, and an
+    email-origin repost carries sender and subject and never the body (see
+    `.claude/rules/transport.md`). A third-surface implementer reading
+    ``as_user`` off this field and posting an external correspondent's raw body
+    into a room would be committing a content-safety failure, not a routing one.
+
+    All three room fields are also declared, per surface name, in the
+    ``istota.surfaces`` leaf, which is what a caller with no ``Config`` and no
+    instantiated transport reads — ``web_app._user_row_display`` and the
+    scheduler's confirmation gate ask what role a surface *plays*, not whether
+    this deployment has one running. The declaration stays here because
+    somebody adding a surface is looking at the transport class;
+    ``tests/test_surface_capability_agreement.py`` holds the two in step. The
+    leaf spells ``inbound_room_role`` as ``room_role``, since it has no outbound
+    half to distinguish it from.
+
     ``user_routable`` marks a surface as one a user can deliberately point
     traffic at (a briefing output, a default destination, an alert route). The
     self-routing surfaces are False: ``istota_file`` only ever delivers back to
@@ -154,6 +191,12 @@ class TransportCapabilities:
     user_routable: bool = True           # can a user select it as a destination
     # Room view + where that view's transcript lives; None = not a room view.
     room_view: Literal["external", "canonical"] | None = None
+    # What an inbound message here does to the room registry; None = never a
+    # room turn. `istota.surfaces` spells this one `room_role`.
+    inbound_room_role: Literal["member", "guest"] | None = None
+    # How an external room view carries a turn authored elsewhere; None = it
+    # carries none. Meaningless unless `room_view == "external"`.
+    user_turn_mirror: Literal["as_user", "attributed"] | None = None
 
 
 @dataclass(frozen=True)
