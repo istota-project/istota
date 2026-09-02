@@ -16,6 +16,7 @@ here as well as there, and these cases become the record of it.
 import json
 
 from tests.live.stream_json import (
+    answer_text,
     carries_image,
     iter_frames,
     read_calls,
@@ -241,3 +242,67 @@ class TestSummary:
 
     def test_no_tools_says_so_rather_than_rendering_empty(self):
         assert "tools called: none" in transcript_summary(iter_frames(_transcript()))
+
+
+class TestAnswerText:
+    """The scanning half of `test_claude_code_append_system_prompt.py`.
+
+    That witness decides whether the composed system prompt reached the model
+    by looking for a sentinel in what the model said. Which frames count as
+    "said" is a judgement this file holds, because getting it wrong reports the
+    system channel as broken (or intact) for a reason that is not about the
+    product.
+    """
+
+    def test_assistant_text_and_the_result_frame_are_both_read(self):
+        raw = _transcript(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ISTOTA-SYS-ABC123"}],
+                },
+            },
+            {"type": "result", "subtype": "success", "result": "final rendering"},
+        )
+        answer = answer_text(iter_frames(raw))
+        assert "ISTOTA-SYS-ABC123" in answer
+        assert "final rendering" in answer
+
+    def test_the_result_frame_alone_still_answers(self):
+        """A version that emits no assistant text must not read as silence."""
+        raw = _transcript(
+            {"type": "result", "subtype": "success", "result": "ISTOTA-SYS-ABC123"}
+        )
+        assert "ISTOTA-SYS-ABC123" in answer_text(iter_frames(raw))
+
+    def test_a_tool_argument_is_not_something_the_model_said(self):
+        """The one that keeps the witness honest.
+
+        A sentinel the model merely echoed into a tool call is not the model
+        obeying an instruction it was given. Folding `input` in would let a
+        `Grep` for the token count as an answer.
+        """
+        raw = _transcript(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Grep",
+                            "input": {"pattern": "ISTOTA-SYS-ABC123"},
+                        }
+                    ],
+                },
+            }
+        )
+        assert "ISTOTA-SYS-ABC123" not in answer_text(iter_frames(raw))
+
+    def test_a_non_string_result_is_dropped_rather_than_stringified(self):
+        # Not through `_transcript`, which appends a successful result frame of
+        # its own — the assertion here is that this frame contributes nothing.
+        raw = json.dumps({"type": "result", "subtype": "error", "result": {"a": 1}})
+        assert answer_text(iter_frames(raw)) == ""

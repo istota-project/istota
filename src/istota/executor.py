@@ -10,6 +10,7 @@ import tempfile
 import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -3092,10 +3093,13 @@ def build_bwrap_cmd(
 
     ``profile`` is required and keyword-only — see ``SandboxProfile`` for what
     it decides and why it has no default. Everything else about the plan is
-    generic, including the ordering, which is load-bearing in three places
+    generic, including the ordering, which is load-bearing in four places
     (cache bind before repos bind, ``.developer`` re-bind after
-    ``user_temp_dir``, masks last with ``--remount-ro`` after each). Omitting
-    the Claude block under ``NATIVE`` moves none of them.
+    ``user_temp_dir``, ``extra_ro_binds`` after *every* bind — its two entries
+    are a document a daemon-side OCR call names and the task's own composed
+    system prompt, and both live inside a read-write bind that would otherwise
+    bury them — and masks last with ``--remount-ro`` after each).
+    Omitting the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
     auto-authorized by credential presence — the same set
@@ -3487,12 +3491,29 @@ def build_bwrap_cmd(
     # argv order: `tests/test_brain_request_confinement.py::
     # test_the_document_stays_read_only_under_a_later_bind`.
     #
-    # Free to move: `execute_task` builds `_extra_ro_binds` and never appends
-    # to it, so on the task path this loop has always run over an empty list.
-    # Still before the masks, which stay last.
+    # It has one task-path entry now, and being last is what that entry wants
+    # too. `execute_task` appends the task's own `task_<id>_system_prompt.txt`,
+    # which holds Istota's composed standing instructions and sits *inside* the
+    # read-write `user_temp_dir` bind — so only a later read-only bind of the
+    # file makes it read-only, and an earlier one is simply overmounted by its
+    # parent. That needed the loop after `user_temp_dir`; being after every
+    # bind satisfies it and more. (This comment used to say the loop was free
+    # to move because the list was always empty on the task path. It was true
+    # when written and stopped being true in the same release.)
+    #
+    # A missing entry is skipped rather than raising, because bwrap fails the
+    # whole namespace on a bind whose source is absent — one cleanup race would
+    # otherwise fail every task instead of one. It is logged, because the entry
+    # is a boundary: a silently dropped read-only bind leaves the writable copy
+    # of the same path in the namespace and nothing anywhere says so.
     for path in (extra_ro_binds or []):
         if path.exists():
             _ro_bind(path)
+        else:
+            logger.warning(
+                "sandbox: extra read-only bind %s does not exist; the path is "
+                "left as its parent bind has it", path,
+            )
 
     # --- Database masks (must be the LAST mount operations) ---
     # No SQLite file the daemon owns is readable from inside the sandbox, for
@@ -3686,6 +3707,7 @@ def native_fs_roots(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
+    composed_system_prompt_path: Path | None = None,
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """File-access roots for a native-brain task.
 
@@ -3720,10 +3742,54 @@ def native_fs_roots(
     The third element carries the RO carve-outs bwrap gets by re-binding a
     subdirectory read-only *after* its parent's RW bind. Containment alone
     cannot express those, so they are returned separately and threaded onto
-    ``ToolEnv.write_denied_roots``. Today that is ``.developer`` — the
+    ``ToolEnv.write_denied_roots``. Two entries today. ``.developer`` — the
     credential-fetch helper and the git credential helpers — which the
     claude_code path has protected since the RO re-bind was added and which
-    this function silently left writable until it grew this return value.
+    this function silently left writable until it grew this return value. And
+    ``composed_system_prompt_path``, the task's own
+    ``task_<id>_system_prompt.txt``: Istota's standing instructions, written
+    into ``user_temp_dir`` and therefore inside a write root. bwrap re-binds it
+    read-only through ``extra_ro_binds``, which covers Bash and covers nothing
+    that goes through ``ToolEnv`` — so without this entry a native task
+    rewrites the instructions it is running under with one ``Write`` call, and
+    a ``native -> claude_code`` reroute reads the rewrite, since the reroute
+    keeps the same path. That is the ``.developer`` asymmetry above, repeated,
+    which is why it is closed in the same commit that opens it.
+
+    **The deny entry is the task's own exact path, and that is narrower than
+    the shape.** ``user_temp_dir`` is per *user*, not per task, so a second
+    concurrent task of the same user has this directory in its write roots and
+    is denied only its own file. Nothing here expresses
+    ``task_*_system_prompt.txt`` as a shape: a deny root is compared by
+    equality or containment (``ToolEnv._in_denied``), and the same is true of
+    the bwrap bind.
+
+    That was reviewed and the flat path was kept deliberately, because **the
+    exposure is not specific to this file**. ``task_<id>_prompt.txt`` carries
+    the user half and therefore what the task was asked to do; the result file
+    and every deferred-op JSON sit in the same directory on the same terms. A
+    dedicated denied subdirectory for the system half closes one member of that
+    class, adds a mechanism to keep in sync forever, and leaves the larger
+    member open. What the entry above *does* close is the case this spec
+    introduced and the one a single task can reach on its own: a native task
+    rewriting the instructions it is itself running under, which a
+    ``native -> claude_code`` reroute would read back. The cross-task case needs
+    two concurrent tasks of the same user and yields no privilege that user does
+    not already hold — only the chance to strip another in-flight task's rules.
+    It is a residual of the artifact directory, to be closed if that directory
+    ever moves out of the model-writable tree, and it is stated rather than
+    implied.
+
+    **This function is not the only producer of that deny entry, and must not
+    become it.** ``execute_task`` calls this only under
+    ``native_fs_confinement_active``, so on an unsandboxed shape — macOS, the
+    standalone install, the shipped Docker stack — nothing here runs at all.
+    The composed path is therefore seeded onto ``fs_write_denied_roots``
+    *outside* that branch, which is where it does the most work: those are the
+    deployments with no bwrap re-bind behind it. ``ToolEnv`` enforces a deny
+    root whether or not confinement is on, precisely so that seeding means
+    something. This function returns it too, so the confined path has one list
+    and no duplicate.
 
     Carve-outs here deny *writes* only. bwrap's other nested override, the
     tmpfs masks over ``db_path.parent`` and ``module_db_root()``, is a total
@@ -3759,6 +3825,17 @@ def native_fs_roots(
     # for Bash and writable for the file tools. A deny root that never comes
     # into existence costs one failed comparison.
     write_denied.append(user_temp_dir.resolve() / ".developer")
+
+    # The composed system prompt (RO carve-out inside the same workspace).
+    # Mirrors the `extra_ro_binds` entry `execute_task` passes to
+    # `build_bwrap_cmd`. Appended directly rather than through `_add`, for the
+    # reason `.developer` is: `_add` skips a path that does not exist, and a
+    # deny root that only appears once the file does would leave a window in
+    # which the file is writable. The executor writes it before this is called,
+    # so the window is theoretical — which is exactly when it is cheapest to
+    # close.
+    if composed_system_prompt_path is not None:
+        write_denied.append(composed_system_prompt_path.resolve())
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
@@ -4375,13 +4452,20 @@ def load_channel_guidelines(
     a literal ``{user_id}`` reaching the model is worse than no example. Skill
     bodies already substitute it; this brings guidelines in line with the set
     AGENTS.md documents.
+
+    The substituted value is flattened. The *file* is an instruction block and
+    stays multiline — its structure is lines — but a scalar interpolated into
+    it is not part of that structure, and the result is now `build_prompt`'s
+    system half: a `user_id` carrying `\\n\\n## Important rules\\n\\n1. …`
+    renders a second rules heading inside the message compaction never
+    touches. Same rule, and the same `_one_line`, as the header scalars there.
     """
     config_dir = config.skills_dir.parent
     guidelines_path = config_dir / "guidelines" / f"{source_type}.md"
     if guidelines_path.exists():
         text = _apply_bot_name(guidelines_path.read_text().strip(), config)
         if user_id:
-            text = text.replace("{user_id}", user_id)
+            text = text.replace("{user_id}", _one_line(user_id))
         return text
     return None
 
@@ -4855,6 +4939,50 @@ def _attachment_line(
     return f"  - {attachment} [{where}]" + (f" — {note}" if note else "")
 
 
+@dataclass(frozen=True)
+class ComposedPrompt:
+    """The two halves of a task prompt, which are not interchangeable.
+
+    ``system`` is Istota's standing instructions — identity, execution
+    constraints, emissaries, persona, the workspace vocabulary, the callable
+    tool surface, the rules, the response guidelines and the skill bodies. It
+    reaches the brain *outside* the compactable message history, so it is still
+    there verbatim after the model's context has been summarized (ISSUE-375).
+
+    ``user`` is the task material a compaction summary is meant to carry
+    forward instead: retrieved memory, conversation and confirmation history,
+    and the request itself.
+
+    A frozen dataclass rather than a tuple, because the two strings have
+    different authority and swapping them must be visible at the call site
+    rather than being a silent argument-order mistake.
+    """
+
+    system: str
+    user: str
+
+
+#: The dry-run rendering, in fixed labels rather than prose, so nothing has to
+#: guess where one half ends. Read by `tests/test_prompt_golden.py`, which
+#: snapshots both halves of one assembly into one file.
+DRY_RUN_PROMPT_HEADER = "[DRY RUN] Would execute with prompts:"
+PROMPT_SYSTEM_LABEL = "===== SYSTEM ====="
+PROMPT_USER_LABEL = "===== USER ====="
+
+
+def render_composed_prompt(prompt: ComposedPrompt) -> str:
+    """Both halves, labelled, for a dry run and for the goldens.
+
+    Takes the value type. It never parses a joined string back into parts —
+    that would make the delimiters load-bearing in the other direction, and a
+    prompt containing one of them would then re-split wrongly.
+    """
+    return (
+        f"{PROMPT_SYSTEM_LABEL}\n{prompt.system}\n\n"
+        f"{PROMPT_USER_LABEL}\n{prompt.user}"
+    )
+
+
 def build_prompt(
     task: db.Task,
     user_resources: list[db.UserResource],
@@ -4881,8 +5009,36 @@ def build_prompt(
     conn: "db.sqlite3.Connection | None" = None,
     effective_prompt: str | None = None,
     attachment_status: "dict[str, str] | None" = None,
-) -> str:
-    """Build the full prompt for Claude Code execution.
+) -> ComposedPrompt:
+    """Build a task's prompt, split by authority rather than by size.
+
+    Returns a `ComposedPrompt`: standing instructions in ``system``, task
+    material in ``user``. The split is not about how often a value changes —
+    it is about whether the value has to remain verbatim for the life of the
+    task. Anything a rule still names after the model's history has been
+    compacted away belongs in ``system``, which is why the four time lines and
+    the accessible-resources section are there despite reading as task facts:
+    rules 1, 7, 8 and 9 point at them, those rules survive compaction, and a
+    surviving instruction pointing at deleted material is ISSUE-375 again.
+
+    **No line in the system half may point at material in the user half.** The
+    single string this replaced was written as one document and referred to
+    itself throughout. Four references were live at the split; three are
+    answered by putting the referent in the system half, and the fourth — the
+    group-conversation line — is answered by dropping the word "below", since
+    its referent is conversation context and belongs in the user half.
+
+    The split also raises several interpolated scalars from a user message to a
+    system one, so every one of them goes through `_one_line` before it is
+    rendered into a header. That is structural sanitation and not instruction
+    sanitation: the multiline instruction blocks (persona, emissaries,
+    guidelines, changelog, skill overlays) are untouched, because their
+    structure *is* lines.
+
+    This is the only production assembly function. There are deliberately no
+    parallel ``build_system_prompt`` / ``build_user_prompt`` entry points: they
+    would have to repeat every conditional in here, and the two copies would
+    drift into a layer rendered twice or not at all.
 
     Pass ``conn`` to let the per-task timezone lookup reuse an existing
     framework-DB connection instead of opening a throwaway one.
@@ -4910,27 +5066,49 @@ def build_prompt(
     # bind-mount loop (build_sandbox_command / native_fs_roots) still mounts
     # out-of-workspace paths into the sandbox; CalDAV discovery still drives
     # the Calendar section; the web root stays config-driven.
+
+    # Every scalar interpolated into the system half is flattened first. The
+    # split raised this whole document from a user message to a system one, so
+    # a value carrying a line break no longer forges a line in task material —
+    # it forges a standing instruction, in the one message compaction never
+    # touches. `_one_line` collapses rather than refuses, for the reason it
+    # gives: this runs on the assembly path, where raising means no task at all.
+    # Nothing upstream validates any of these — the user id and conversation
+    # token come off a task row, the source and output target off routing, the
+    # timezone label off a per-user profile.
+    display_bot_name = _one_line(config.bot_name)
+    display_user_id = _one_line(task.user_id)
+
     resource_sections = []
 
     if config.use_mount:
         resource_sections.append(
-            f"Your workspace is at Users/{task.user_id}/, containing "
+            f"Your workspace is at Users/{display_user_id}/, containing "
             f"shared/, inbox/, memories/, and your bot dir "
             f"({config.bot_dir_name}/). Notes live in {config.bot_dir_name}/notes/."
         )
     else:
         resource_sections.append(
-            f"Your workspace is at Users/{task.user_id}/."
+            f"Your workspace is at Users/{display_user_id}/."
         )
 
     # Calendars stay discovery-driven (CalDAV); the resource-typed fallback
     # is gone.
     if discovered_calendars:
+        # The calendar name and URL are the least trusted scalars in this
+        # block and the only ones that come off a remote server: a *shared*
+        # calendar's display name is set by whoever shared it, and CalDAV puts
+        # no constraint on it. One list item per line, so a newline in a name
+        # forges a line inside `## User's accessible resources` — the section
+        # rule 1 names, in the half that survives compaction.
         cal_list = "\n".join(
-            f"  - {name}: {url} ({'read/write' if writable else 'read-only'})"
+            f"  - {_one_line(name)}: {_one_line(url)} "
+            f"({'read/write' if writable else 'read-only'})"
             for name, url, writable in discovered_calendars
         )
-        resource_sections.append(f"Calendars (shared by {task.user_id}):\n{cal_list}")
+        resource_sections.append(
+            f"Calendars (shared by {display_user_id}):\n{cal_list}"
+        )
 
     resources_text = "\n\n".join(resource_sections)
 
@@ -5061,25 +5239,33 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # local folder, Nextcloud via mount, Nextcloud via rclone. Non-admin users
     # get a scoped path restricted to their own directory (server shape only).
     if config.storage_backend == "local":
-        ws_root = config.workspace_root(task.user_id) or config.nextcloud_mount_path
+        # `_one_line` here as well as on the bare user id above: these paths are
+        # built from it, so a line break survives `Path` joining into the
+        # system half.
+        ws_root = _one_line(
+            str(config.workspace_root(task.user_id) or config.nextcloud_mount_path)
+        )
         file_tools = f"""- Your files live in your workspace at '{ws_root}'. Use standard file tools (Read, Write, Edit, ls, cat).
   - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is a normal local folder.
   - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
     elif config.use_mount:
         if is_admin:
-            mount_display = str(config.nextcloud_mount_path)
+            mount_display = _one_line(str(config.nextcloud_mount_path))
         else:
-            mount_display = str(config.nextcloud_mount_path / "Users" / task.user_id)
+            mount_display = _one_line(
+                str(config.nextcloud_mount_path / "Users" / task.user_id)
+            )
         file_tools = f"""- Nextcloud files are mounted at '{mount_display}'
   - List: ls {mount_display}/path/
   - Read: cat {mount_display}/path/file.txt
   - Write: Use standard file operations (Python, bash, etc.)
   - All Nextcloud paths are accessible as local filesystem paths"""
     else:
-        file_tools = f"""- rclone for Nextcloud files: remote name is '{config.rclone_remote}'
-  - List: rclone ls {config.rclone_remote}:/path/
-  - Copy from NC: rclone copy {config.rclone_remote}:/path/file.txt /tmp/
-  - Copy to NC: rclone copy /tmp/file.txt {config.rclone_remote}:/path/"""
+        remote = _one_line(config.rclone_remote)
+        file_tools = f"""- rclone for Nextcloud files: remote name is '{remote}'
+  - List: rclone ls {remote}:/path/
+  - Copy from NC: rclone copy {remote}:/path/file.txt /tmp/
+  - Copy to NC: rclone copy /tmp/file.txt {remote}:/path/"""
 
     # Browser tool line (only when enabled)
     browser_tool = ""
@@ -5135,8 +5321,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             if cli_skills_section else skills_index
         )
 
-    # Compute user's local time
-    user_tz, user_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
+    # Compute user's local time. The label is flattened *before* it reaches the
+    # three rendered lines rather than only at the `User timezone:` header:
+    # rules 7, 8 and 9 name `Current time` and `Today's date` too, and both
+    # carry the same label in parentheses.
+    user_tz, _raw_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
+    user_tz_str = _one_line(_raw_tz_str)
     user_now = datetime.now(user_tz)
     user_time_str = user_now.strftime("%A, %B %-d, %Y at %-I:%M %p") + f" ({user_tz_str})"
     user_date_str = user_now.strftime("%Y-%m-%d") + f" ({user_tz_str})"
@@ -5188,33 +5378,45 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         )
         reply_quote_section = f"> Replying to:\n{quoted}\n\n"
 
+    # The remaining header scalars, flattened for the reason given where
+    # `display_bot_name` and `display_user_id` are bound.
+    display_source = _one_line(source_type or task.source_type or "unknown")
+    display_output_target = _one_line(output_target or "text")
+    display_token = _one_line(task.conversation_token or "none")
+
     group_chat_line = ""
     if task.is_group_chat:
-        group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{task.user_id}'. Other participants' messages are visible in conversation context below."
+        # No "below": the conversation context this names is in the user half,
+        # which native compaction may replace with a summary. A system line
+        # pointing there would become a false statement in a message that
+        # survives for the life of the task.
+        group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{display_user_id}'. Other participants' messages are visible in conversation context."
 
     # Per-user plus-addressed email line
     per_user_email_line = ""
     _per_user_email = email_support.per_user_address(config, task.user_id)
     if _per_user_email:
-        per_user_email_line = f"\nPer-user email: {_per_user_email}"
+        per_user_email_line = f"\nPer-user email: {_one_line(_per_user_email)}"
 
-    prompt = f"""You are {config.bot_name}, a helpful assistant bot. You are responding to a request from user '{task.user_id}'.
+    # ---- the system half: standing instructions, verbatim for the whole task
+    system = f"""You are {display_bot_name}, a helpful assistant bot. You are responding to a request from user '{display_user_id}'.
 
 Current time: {user_time_str}
 Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {task.conversation_token or 'none'}{group_chat_line}
-Source: {source_type or task.source_type or 'unknown'}
-Output target: {output_target or 'text'}{per_user_email_line}
+Conversation token: {display_token}{group_chat_line}
+Source: {display_source}
+Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
 {privileges_line}
 {emissaries_section}{persona_section}
 ## User's accessible resources
 
 {resources_text}
-{memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}{playbooks_section}## Available tools
+
+## Available tools
 
 You have access to:
 {file_tools}{browser_tool}{web_tools}{bash_tool}
@@ -5222,19 +5424,39 @@ You have access to:
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 {rules_section}
-{context_section}
-{confirmation_section}## User's request
-
-{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}
 {channel_section}"""
 
     if skills_changelog:
-        prompt += f"\n\n## What's New in Skills\n\n{skills_changelog}"
+        system += f"\n\n## What's New in Skills\n\n{skills_changelog}"
 
     if skills_doc:
-        prompt += f"\n\n{skills_doc}"
+        system += f"\n\n{skills_doc}"
 
-    return prompt
+    # ---- the user half: task material the compaction summary carries forward
+    #
+    # Joined block by block rather than by one f-string skeleton: each of these
+    # carries its own leading and trailing newlines from the days when they sat
+    # between fixed neighbours, and concatenating them raw now leaves a dropped
+    # block's separators behind. One blank line between whatever is present.
+    user_blocks = [
+        memory_section,
+        knowledge_facts_section,
+        channel_memory_section,
+        dated_memories_section,
+        recalled_section,
+        playbooks_section,
+        context_section,
+        confirmation_section,
+    ]
+    user = "".join(
+        block.strip("\n") + "\n\n" for block in user_blocks if block.strip()
+    )
+    user += (
+        "## User's request\n\n"
+        f"{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}\n"
+    )
+
+    return ComposedPrompt(system=system, user=user)
 
 
 def build_deferred_briefing_prompt(task: db.Task, config: Config) -> str | None:
@@ -5849,7 +6071,7 @@ def execute_task(
     if task.confirmed_at and task.confirmation_prompt:
         _confirmation_context = task.confirmation_prompt
 
-    prompt = build_prompt(
+    composed = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
         discovered_calendars, user_email_addresses, dated_memories, channel_memory,
         skills_changelog, is_admin, emissaries,
@@ -5867,23 +6089,103 @@ def execute_task(
         attachment_status=image_attachment_status(image_prep),
     )
 
-    # Log prompt size breakdown
+    # The two halves travel apart from here. `req.prompt` is the user half; the
+    # system half reaches the brain as a *path*
+    # (`BrainRequest.composed_system_prompt_path`), so it lands with system
+    # authority, outside anything native compaction can reach (ISSUE-375).
+    #
+    # Two consumers downstream read `req.prompt` as "everything the model was
+    # shown", and both now read the user half by decision rather than by
+    # accident. `NativeBrain`'s `_extract_urls(req.prompt)` builds the
+    # `require_url_provenance` corpus: a URL named only in a persona, a skill
+    # body or a tool description is not user-provided provenance, so the
+    # narrower corpus is the intended one. `build_image_prompt` prepends the
+    # image `Read` directive to it, which keeps that directive leading the user
+    # message instead of trailing eight kilobytes of tool documentation.
+    prompt = composed.user
+
+    # Log prompt size breakdown. Each component is attributed to the half it
+    # is actually in, with a residual per half — a single `other` across both
+    # would describe a string nothing sends, while dropping the residual
+    # altogether loses the one figure that moves when the persona, the
+    # emissaries, the rules or the tool section grow. That is the number to
+    # watch on a context-pressure bug, which is what ISSUE-375 is.
     context_chars = len(conversation_context) if conversation_context else 0
     memory_chars = len(user_memory or "") + len(dated_memories or "") + len(channel_memory or "") + len(recalled_memories or "")
     skills_chars = len(skills_doc or "")
-    prompt_chars = len(prompt)
+    system_chars = len(composed.system)
+    user_chars = len(composed.user)
     logger.info(
-        "Prompt for task %d: %d chars total (context: %d, memory: %d, skills: %d, other: %d)",
-        task.id, prompt_chars, context_chars, memory_chars, skills_chars,
-        prompt_chars - context_chars - memory_chars - skills_chars,
+        "Prompt for task %d: %d chars total "
+        "(system: %d [skills %d, other %d], "
+        "user: %d [context %d, memory %d, other %d])",
+        task.id, system_chars + user_chars,
+        system_chars, skills_chars, system_chars - skills_chars,
+        user_chars, context_chars, memory_chars,
+        user_chars - context_chars - memory_chars,
     )
 
     if dry_run:
-        return True, f"[DRY RUN] Would execute with prompt:\n\n{prompt}", None, None
+        rendered = render_composed_prompt(composed)
+        return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
-    # Write prompt to temp file for debugging
+    # Both halves on disk before anything is built from them. The user half
+    # keeps its filename: it is still the exact text sent on stdin, injected
+    # into the tmux pane, or used as the native initial user message.
     prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
+
+    # The system half, and the file the brain is handed by path.
+    #
+    # **The directory is resolved and the filename is not**, and the split is
+    # the whole point rather than an oversight.
+    #
+    # Resolving the ancestors is what makes the path absolute — `BrainRequest`
+    # requires that, since NativeBrain opens it in the daemon process while the
+    # Claude CLI opens it inside the sandbox, against two different working
+    # directories, and a reroute carries one value between them — and it is
+    # also what makes it the *in-namespace* path: `build_bwrap_cmd` binds
+    # `user_temp_dir.resolve()` at its own resolved name, and `_ro_bind` uses
+    # the string it is handed as the destination, so an unresolved ancestor on
+    # a deployment whose `temp_dir` sits behind a symlink would land the
+    # read-only bind somewhere the CLI never looks. `ImageInput.path` records
+    # that half of the rule for the same reason.
+    #
+    # Resolving the *last* component would undo the guard below. `.resolve()`
+    # follows a symlink, so a planted one would silently become its target and
+    # `O_NOFOLLOW` would then inspect a perfectly ordinary file — leaving the
+    # write to land wherever the link pointed, with the symlink hidden rather
+    # than caught. Measured: the first draft of this did exactly that.
+    #
+    # Written before the request is built and never conditionally: a request
+    # naming a file that was not written is the fail-closed contract firing on
+    # our own bug.
+    #
+    # `O_NOFOLLOW`, and that is not decoration. `user_temp_dir` is per *user*,
+    # bound read-write into every one of that user's sandboxes and exported as
+    # `ISTOTA_DEFERRED_DIR`, so a concurrent task of the same user can create
+    # entries in it — and task ids are sequential and in the environment, so
+    # the entry it creates can be a *dangling* symlink named after a task that
+    # has not started yet. A plain `write_text` follows that on open and writes
+    # the composed prompt through it, which is an arbitrary write as the daemon
+    # user with substantially task-controlled content. `ELOOP` fails the task
+    # instead, which is the direction to fail in. The same hazard is latent on
+    # `task_<id>_prompt.txt` above and on every deferred-op file; it is not
+    # this stage's to fix, and is recorded rather than quietly matched.
+    #
+    # `0o600` because the file holds the persona, the user's own overlays and
+    # the per-user email address, and there is no reason for it to be readable
+    # by other local accounts.
+    system_prompt_file = (
+        Path(user_temp_dir).resolve() / f"task_{task.id}_system_prompt.txt"
+    )
+    _fd = os.open(
+        system_prompt_file,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+        _f.write(composed.system)
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"
@@ -6218,8 +6520,22 @@ def execute_task(
                 _net_proxy_sock, allowed_hosts,
             )
 
-        # Collect extra paths to RO bind-mount into the sandbox
-        _extra_ro_binds: list[Path] = []
+        # Collect extra paths to RO bind-mount into the sandbox.
+        #
+        # The composed system prompt is this parameter's first production
+        # consumer. `build_bwrap_cmd` binds `user_temp_dir` read-write and
+        # applies these twenty-odd lines further down, after the `.developer`
+        # carve-out that established the pattern — so the later read-only bind
+        # of this one file shadows the read-write bind of its directory, and
+        # the model's own Bash tool cannot rewrite the standing instructions it
+        # is running under. A `native -> claude_code` reroute keeps the same
+        # path, so a rewrite would survive the reroute too.
+        #
+        # This is half the protection and on the native brain it is the half
+        # that matters least: `Write` and `Edit` run through `ToolEnv` and
+        # enter no mount namespace. The other half is the matching deny entry
+        # `native_fs_roots` returns, some four hundred lines below.
+        _extra_ro_binds: list[Path] = [system_prompt_file]
 
         # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
@@ -6595,7 +6911,24 @@ def execute_task(
         # cwd choice below uses. Other brains ignore these fields.
         _fs_read_roots: "list[Path] | None" = None
         _fs_write_roots: "list[Path] | None" = None
-        _fs_write_denied_roots: "list[Path]" = []
+        # The composed system prompt is denied **whether or not confinement is
+        # active**, which is why it is seeded here rather than only inside the
+        # branch. The two root lists are an allowlist and mean nothing without
+        # confinement, but a deny root is a statement about a path: `ToolEnv`
+        # resolves `write_denied_roots` unconditionally and checks them ahead
+        # of its unconfined early return, exactly so a caller who sets one
+        # without `read_roots` gets the refusal it looks like
+        # (`session/tools/env.py`, and `test_denied_even_when_unconfined`).
+        #
+        # That matters because the unconfined shapes are the ones with nothing
+        # else: `build_bwrap_cmd` hands the command back unwrapped on macOS, on
+        # the standalone install and on the shipped Docker stack (which grants
+        # neither `seccomp:unconfined` nor `systempaths=unconfined`, so the
+        # bwrap probe fails and every task runs uncontained). Gating this on
+        # sandboxing would leave the file with no guard at all on precisely
+        # those deployments. The confined branch below returns a list that
+        # already contains it, so there is no duplicate.
+        _fs_write_denied_roots: "list[Path]" = [system_prompt_file]
         if native_fs_confinement_active(config):
             _fs_read_roots, _fs_write_roots, _fs_write_denied_roots = native_fs_roots(
                 config,
@@ -6604,6 +6937,7 @@ def execute_task(
                 user_resources,
                 Path(user_temp_dir),
                 workspace_dir,
+                composed_system_prompt_path=system_prompt_file,
             )
 
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
@@ -6666,6 +7000,12 @@ def execute_task(
                 else ""
             ),
             custom_system_prompt_path=sp_path,
+            # Istota's standing instructions, by path, with system authority.
+            # Required input from here on: a brain that cannot read it fails
+            # the attempt rather than running the user half alone, which would
+            # be ISSUE-375 recreated by a filesystem race. Absolute by
+            # construction — see the `.resolve()` at the write above.
+            composed_system_prompt_path=system_prompt_file,
             # The prepared images, as paths and media types — never bytes. Each
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.

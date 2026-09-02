@@ -45,7 +45,7 @@ class TestBuildPromptSkillsIndex:
             _task(), [], config,
             cli_skills_text="- Skill CLI tools\n  - `istota-skill foo` — does foo",
             skills_index="- Available skills (load on demand)...\n  - developer: Git",
-        )
+        ).system
         assert "Available skills (load on demand)" in prompt
         assert "developer: Git" in prompt
         # Comes after the CLI tools line.
@@ -53,7 +53,7 @@ class TestBuildPromptSkillsIndex:
 
     def test_index_omitted_when_none(self, tmp_path):
         config = self._config(tmp_path)
-        prompt = build_prompt(_task(), [], config, cli_skills_text="- Skill CLI tools")
+        prompt = build_prompt(_task(), [], config, cli_skills_text="- Skill CLI tools").system
         assert "load on demand" not in prompt
 
 

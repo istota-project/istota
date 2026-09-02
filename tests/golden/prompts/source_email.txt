@@ -1,3 +1,4 @@
+===== SYSTEM =====
 You are Istota, a helpful assistant bot. You are responding to a request from user 'alice'.
 
 Current time: <TIME>
@@ -22,6 +23,7 @@ PERSONA TEXT for Istota.
 ## User's accessible resources
 
 Your workspace is at Users/alice/, containing shared/, inbox/, memories/, and your bot dir (istota/). Notes live in istota/notes/.
+
 ## Available tools
 
 You have access to:
@@ -69,10 +71,6 @@ You have access to:
 9. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now".
 10. Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper.
 
-## User's request
-
-Summarize what changed in my notes this week.
-
 
 ## Response format (email)
 
@@ -88,3 +86,8 @@ workspace=<TMP>/mount/Users/alice
 storage=Nextcloud
 scripts=<TMP>/mount/Users/alice/istota/scripts
 user=alice
+
+===== USER =====
+## User's request
+
+Summarize what changed in my notes this week.

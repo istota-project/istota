@@ -15,6 +15,13 @@ from __future__ import annotations
 import pytest
 
 from istota import cli, db
+from istota.executor import (
+    DRY_RUN_PROMPT_HEADER,
+    PROMPT_SYSTEM_LABEL,
+    PROMPT_USER_LABEL,
+    ComposedPrompt,
+    render_composed_prompt,
+)
 
 
 class _Args:
@@ -49,7 +56,14 @@ def cli_env(monkeypatch, make_config, db_path):
 
     def _execute_task(task, cfg, resources, **kwargs):
         calls.append({"task": task, "kwargs": kwargs})
-        return True, "[DRY RUN] Would execute with prompt:\n\nassembled prompt", None, None
+        # Built through the product's own renderer rather than pasted as a
+        # literal: the CLI's job is to print what the executor returned, and a
+        # stub carrying a stale format would keep asserting that while the real
+        # dry run printed something else.
+        rendered = render_composed_prompt(
+            ComposedPrompt(system="assembled system half", user="assembled user half")
+        )
+        return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
     monkeypatch.setattr(cli, "execute_task", _execute_task)
     return config, calls
@@ -70,11 +84,21 @@ class TestDryRunPersistsNothing:
         cli.cmd_task(_Args(dry_run=True, execute=True))
         assert _task_rows(db_path) == []
 
-    def test_dry_run_prints_the_assembled_prompt(self, cli_env, capsys):
+    def test_dry_run_prints_both_labelled_halves(self, cli_env, capsys):
+        """The prompt is two strings now, and both have to reach the operator.
+
+        Printing only one half would look like a working dry run — the output
+        is still a screenful of prompt — while hiding exactly the layer the
+        reader came to check.
+        """
         cli.cmd_task(_Args(dry_run=True))
         out = capsys.readouterr().out
-        assert "[DRY RUN] Would execute with prompt:" in out
-        assert "assembled prompt" in out
+        assert DRY_RUN_PROMPT_HEADER in out
+        assert PROMPT_SYSTEM_LABEL in out
+        assert PROMPT_USER_LABEL in out
+        assert "assembled system half" in out
+        assert "assembled user half" in out
+        assert out.index(PROMPT_SYSTEM_LABEL) < out.index(PROMPT_USER_LABEL)
         assert "Task created:" not in out
 
     def test_dry_run_asks_the_executor_for_a_dry_run(self, cli_env):

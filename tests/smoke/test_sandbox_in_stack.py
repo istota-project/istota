@@ -244,3 +244,183 @@ class TestTheDatabaseMasks:
             "view either, so the assertion above is not about the sandbox\n"
             f"{result.stdout}"
         )
+
+
+# --------------------------------------------------------------------------
+# The composed system prompt, read from inside a live task in the shipped image
+# --------------------------------------------------------------------------
+
+#: A string that exists only in the system half of the composed prompt
+#: (`executor.build_rules_section`). Grepped for inside the task and looked for
+#: in the endpoint's `role: system` message, which is what ties the file on
+#: disk to what the model was actually sent.
+COMPOSED_SENTINEL = "## Important rules"
+
+#: Carried in the submitted request, so it is in the *user* half. The probe
+#: proves it is absent from the system file: the split is only worth anything
+#: if each half holds one thing.
+REQUEST_SENTINEL = "SMOKE_COMPOSED_REQUEST_SENTINEL"
+
+#: `ISTOTA_DEFERRED_DIR` is the task temp dir and `ISTOTA_TASK_ID` names the
+#: task, both already in the sandbox environment — so this is the executor's
+#: own naming convention read back from inside the namespace rather than a
+#: path this test invented.
+#:
+#: Four facts, and each one is needed. `composed=` says the standing
+#: instructions are on disk where the brain was told to find them.
+#: `request_in_system=` says the user half did not leak into the permanent
+#: message. `append=` is the boundary: the file lives inside the task's own
+#: read-write temp directory, so only the later `--ro-bind` makes it refuse.
+#: And `sibling=` is the control for that one — without it a refusal is
+#: equally consistent with the whole directory having been made read-only,
+#: which would break every task rather than protect one file.
+SYSPROMPT_PROBE = f"""
+COMPOSED="$ISTOTA_DEFERRED_DIR/task_${{ISTOTA_TASK_ID}}_system_prompt.txt"
+SIBLING="$ISTOTA_DEFERRED_DIR/sysprompt-sibling-probe.txt"
+echo SYSPROMPT_PROBE_BEGIN
+echo "path=$COMPOSED"
+if [ -f "$COMPOSED" ]; then echo "exists=yes"; else echo "exists=no"; fi
+if grep -qF '{COMPOSED_SENTINEL}' "$COMPOSED" 2>/dev/null; then
+  echo "composed=present"
+else
+  echo "composed=absent"
+fi
+if grep -qF '{REQUEST_SENTINEL}' "$COMPOSED" 2>/dev/null; then
+  echo "request_in_system=yes"
+else
+  echo "request_in_system=no"
+fi
+if echo tampered >> "$COMPOSED" 2>/dev/null; then
+  echo "append=accepted"
+else
+  echo "append=refused"
+fi
+if echo probe > "$SIBLING" 2>/dev/null; then
+  echo "sibling=writable"
+  rm -f "$SIBLING"
+else
+  echo "sibling=refused"
+fi
+echo SYSPROMPT_PROBE_END
+"""
+
+SYSPROMPT_SCRIPT = [
+    {
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "name": "Bash",
+                "arguments": {"command": SYSPROMPT_PROBE},
+            }
+        ]
+    },
+    {"text": "I looked at the composed system prompt"},
+]
+
+
+def marked_block(stack, begin: str, end: str, what: str) -> str:
+    """The marked region of the endpoint transcript, or a readable failure."""
+    transcript = stack.endpoint.transcript()
+    start = transcript.find(begin)
+    stop = transcript.find(end, start + 1)
+    if start < 0 or stop < 0:
+        raise AssertionError(
+            f"{what} never reached the model, so the Bash tool did not run or "
+            "its result was not sent back — this says nothing about the "
+            "property either way\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
+    return transcript[start:stop]
+
+
+class TestTheComposedSystemPromptInTheStack:
+    """`task_<id>_system_prompt.txt`, observed from inside a live task.
+
+    Istota's standing instructions travel to the brain as a file so they land
+    with system authority rather than as the first user message, which native
+    compaction summarizes away (ISSUE-375). The file is written into the task's
+    own read-write temp directory and re-bound read-only on top of it, which is
+    a property no unit test can observe: the default suite patches
+    `_bwrap_available` and asserts argv.
+
+    Read the four probe answers together. Any one of them passes in states the
+    others refuse — `append=refused` alone is equally true of a directory that
+    was made read-only wholesale, and `composed=present` alone is equally true
+    of a file nothing bound at all.
+    """
+
+    @pytest.mark.script(SYSPROMPT_SCRIPT)
+    def test_the_composed_file_is_readable_but_not_writable(self, stack):
+        task_id = stack.submit(
+            f"{REQUEST_SENTINEL} look at your own system prompt file"
+        )
+        stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
+        observed = marked_block(
+            stack,
+            "SYSPROMPT_PROBE_BEGIN",
+            "SYSPROMPT_PROBE_END",
+            "the composed system prompt probe's output",
+        )
+
+        assert "exists=yes" in observed, (
+            "the executor wrote no composed system prompt for this task, or it "
+            "is not at the path the brain was given\n"
+            f"--- probe ---\n{observed}\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
+        assert "composed=present" in observed, (
+            "the file exists but carries none of Istota's standing "
+            f"instructions\n--- probe ---\n{observed}"
+        )
+        assert "request_in_system=no" in observed, (
+            "the user's request is inside the system file, which would make "
+            f"task material permanent rather than summarizable\n"
+            f"--- probe ---\n{observed}"
+        )
+        assert "append=refused" in observed, (
+            "the model can append to its own standing instructions — the "
+            "later `--ro-bind` is missing, or bwrap was skipped entirely "
+            "(check the daemon log for `Sandbox enabled but bubblewrap "
+            f"unavailable`)\n--- probe ---\n{observed}"
+        )
+        assert "sibling=writable" in observed, (
+            "a sibling file in the same directory is not writable either, so "
+            "the refusal above is a read-only task directory rather than the "
+            f"one-file carve-out\n--- probe ---\n{observed}"
+        )
+
+    @pytest.mark.script(SYSPROMPT_SCRIPT)
+    def test_each_half_reached_the_model_on_its_own_channel(self, stack):
+        """The other end of the handoff, from the endpoint's own view.
+
+        The probe says what is on disk. This says what was sent — and the two
+        together are the claim, because a file with the right contents that
+        reached the model as a user message is the defect wearing a label.
+        """
+        task_id = stack.submit(
+            f"{REQUEST_SENTINEL} look at your own system prompt file"
+        )
+        stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
+
+        systems = stack.endpoint.messages_by_role("system")
+        users = stack.endpoint.messages_by_role("user")
+
+        assert any(COMPOSED_SENTINEL in text for text in systems), (
+            "no system message carried Istota's standing instructions, so the "
+            "composed file was not passed with system authority\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
+        assert any(REQUEST_SENTINEL in text for text in users), (
+            "the request never reached a user message\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
+        # The user turn carries the request and not the instructions. Asserted
+        # against the *first* user message rather than all of them: a tool
+        # result echoing the probe command is also a message, and it quotes
+        # both sentinels by construction.
+        first_user = users[0]
+        assert REQUEST_SENTINEL in first_user
+        assert COMPOSED_SENTINEL not in first_user, (
+            "the standing instructions are still on the user turn, where "
+            "compaction summarizes them away — the flip did not happen"
+        )

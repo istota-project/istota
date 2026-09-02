@@ -1499,8 +1499,14 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
     known_filenames.update(
         f"task_{task.id}_{suffix}.json" for suffix in _KNOWN_ARTIFACT_SUFFIXES
     )
-    # Static task-scoped files written by the executor itself.
+    # Static task-scoped files written by the executor itself. The two prompt
+    # halves are separate artifacts under the same convention: `_prompt.txt` is
+    # the user turn and `_system_prompt.txt` is Istota's standing instructions,
+    # which also reach the brain as a path. Both are overwritten per attempt,
+    # neither is a deferred op, and an unrecognised one would log a warning on
+    # every single task.
     known_filenames.add(f"task_{task.id}_prompt.txt")
+    known_filenames.add(f"task_{task.id}_system_prompt.txt")
     known_filenames.add(f"task_{task.id}_result.txt")
 
     suspicious: list[Path] = []

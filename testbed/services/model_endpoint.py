@@ -228,6 +228,33 @@ class ScriptedEndpoint(HttpStub):
                 parts.append(str(message.get("content")))
         return "\n".join(parts)
 
+    def messages_by_role(self, role: str) -> list[str]:
+        """Every message of one role, across every request, in request order.
+
+        `transcript()` flattens the roles away, and some claims are *about* the
+        role a string arrived on — a system prompt that reached the model as a
+        user message is a different thing from one that did not, and the two
+        are indistinguishable in the flattened view.
+
+        Takes the lock and snapshots, for the reason `transcript()` does: the
+        daemon's own pollers keep creating tasks after a scenario's
+        `wait_for_task` returns, so handler threads may still be appending.
+        Never raises on a malformed body, for the reason `tool_results` does.
+        """
+        with self._lock:
+            bodies = list(self.requests)
+        out: list[str] = []
+        for body in bodies:
+            messages = body.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                if message.get("role") == role:
+                    out.append(str(message.get("content")))
+        return out
+
     def tool_results(self) -> list[str]:
         """What each Bash call printed, one entry per call, in call order.
 

@@ -4,30 +4,43 @@ The executor (`executor.py`) is responsible for assembling prompts, building the
 
 ## Prompt assembly
 
-The prompt is built in a specific order, each section adding context for Claude:
+`build_prompt()` returns a `ComposedPrompt` — a frozen dataclass with two strings, `system` and `user`. The split is by authority rather than by size: the question is whether a layer has to remain verbatim for the life of the task. Standing instructions go to `system` and reach the model outside the message history; task material goes to `user`, which is the model's first turn and the only half a native compaction may summarize.
 
-1. **Header**: role definition, user_id, current datetime, task_id, conversation_token, and a line stating the database is reachable only through skill CLIs — the path itself is deliberately not in the prompt
+**System half** — standing instructions:
+
+1. **Header**: role definition, user_id, current datetime, task_id, conversation_token, source, output target, the per-user email address, a line stating the database is reachable only through skill CLIs — the path itself is deliberately not in the prompt — and the task's privileges
 2. **Emissaries**: constitutional principles from `config/emissaries.md` (skipped for briefings)
 3. **Persona**: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings)
 4. **Workspace layout**: one static line describing the workspace, plus any CalDAV-discovered calendars. The Resources sunset replaced the enumerated Folders / TODO Files / Notes / Reminders sections with that single line
-5. **User memory**: `USER.md` content (skipped for briefings)
-6. **Knowledge graph facts**: relevance-filtered entity-relationship triples from `knowledge_facts` table, capped by `max_knowledge_facts` (skipped for briefings)
-7. **Channel memory**: `CHANNEL.md` content (when `conversation_token` is set)
-8. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`)
-9. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
-10. **Learned playbooks**: `_recall_playbooks()` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated / `skip_memory` tasks)
-11. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
-12. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
-13. **Conversation context**: previous messages (selected by the context module)
-14. **Confirmation context**: previous bot output for confirmed actions — interpolated after the conversation context, immediately before the request
-15. **Request**: the actual prompt text + file attachments
-16. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
-17. **Skills changelog**: "what's new" if skills updated since last interaction
-18. **Skills documentation**: concatenated skill `.md` files, selectively loaded
+5. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
+6. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
+7. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
+8. **Skills changelog**: "what's new" if skills updated since last interaction
+9. **Skills documentation**: concatenated skill `.md` files, selectively loaded
+
+**User half** — task material:
+
+1. **User memory**: `USER.md` content (skipped for briefings)
+2. **Knowledge graph facts**: relevance-filtered entity-relationship triples from `knowledge_facts` table, capped by `max_knowledge_facts` (skipped for briefings)
+3. **Channel memory**: `CHANNEL.md` content (when `conversation_token` is set)
+4. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`)
+5. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
+6. **Learned playbooks**: `_recall_playbooks()` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated / `skip_memory` tasks)
+7. **Conversation context**: previous messages (selected by the context module)
+8. **Confirmation context**: previous bot output for confirmed actions — interpolated after the conversation context, immediately before the request
+9. **Request**: the actual prompt text + file attachments
+
+Before the split all of this travelled as one string in the model's first user turn. The native brain's first compaction therefore replaced Istota's identity, rules, tool surface and skill bodies with a model-written summary, and the task carried on for hours without them (ISSUE-375). Two consequences of the classification are worth knowing. The workspace layout and the four time lines are in the system half despite reading as task facts, because rules 1, 7, 8 and 9 name them and those rules survive compaction — an instruction pointing at deleted material is the same bug in a smaller frame. And `## Response format` now permanently precedes `## User's request`, where it used to follow it; the guidelines are instructions and travel with the instructions.
+
+A dry run prints both halves under fixed `===== SYSTEM =====` and `===== USER =====` labels and returns before writing anything. A real run writes the user half to `task_{id}_prompt.txt` and the system half to `task_{id}_system_prompt.txt`, both under the per-user task temp directory.
 
 ## Brain invocation
 
-Once the prompt and env are built, the executor composes a `BrainRequest` and calls `make_brain(config.brain).execute(req)`. The request bundles the prompt, allowed tools, working directory (`config.temp_dir`), env, timeout (`task_timeout_minutes * 60`), model/effort overrides, optional custom system prompt path (when `custom_system_prompt` is enabled), and the callbacks the brain needs: `on_progress`, `cancel_check`, `on_pid`, and `sandbox_wrap` (a closure that wraps the brain's raw cmd in bubblewrap when the sandbox is enabled — the brain itself stays sandbox-agnostic).
+Once the prompt and env are built, the executor composes a `BrainRequest` and calls `make_brain(config.brain).execute(req)`. The request bundles the prompt — the **user half only** — allowed tools, working directory (`config.temp_dir`), env, timeout (`task_timeout_minutes * 60`), model/effort overrides, `composed_system_prompt_path` (the system file just written), an optional custom system prompt path (when `custom_system_prompt` is enabled), and the callbacks the brain needs: `on_progress`, `cancel_check`, `on_pid`, and `sandbox_wrap` (a closure that wraps the brain's raw cmd in bubblewrap when the sandbox is enabled — the brain itself stays sandbox-agnostic).
+
+The two system paths are separate channels with different owners. `composed_system_prompt_path` is Istota's own, generated per task, and **required**: a brain must not skip it because the file went missing, because that would run the task with the user half alone. `custom_system_prompt_path` is the operator's, and stays optional — a configured file that no longer exists is omitted rather than failing the attempt. Each backend keeps its own override position: `NativeBrain` composes built-in coding block, then Istota's file, then the operator's, into `AgentContext.system_prompt`, which compaction never touches; the Claude Code backends pass the operator file with `--system-prompt-file` (which replaces the CLI's default harness prompt) and Istota's file with `--append-system-prompt-file` (which does not). A direct text-only brain caller — the sleep cycle, shared-block synthesis, health OCR, the code reviewer — passes no composed path at all and is unchanged.
+
+The system file is guarded twice, because two tool families reach it by different routes. `build_bwrap_cmd` re-binds that exact path read-only after the read-write bind of the task temp directory, which covers every sandboxed child including the native `Bash` tool. And `native_fs_roots` returns it as a write-deny root, which covers the native file tools — they run against `ToolEnv` and enter no mount namespace, so without it a native task could rewrite the instructions it is running under with one `Write` call. The deny root is seeded whether or not the sandbox is active, since the unsandboxed shapes are the ones with no bind behind it.
 
 The brain returns a `BrainResult` carrying `(success, result_text, actions_taken, execution_trace, stop_reason)`. The executor then runs result composition (see below) and downstream cleanup (malformed-output detection, deferred file processing).
 
@@ -40,7 +53,7 @@ claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow \
 
 (The three streaming flags are appended only when the executor asked for streaming.)
 
-with optional `--model`, `--effort`, and `--system-prompt-file` flags. `--system-prompt-file` names `config/system-prompt.md`, which the CLI opens itself, from inside the sandbox — so `build_bwrap_cmd` binds that one file read-only. It is the only config-directory file the sandbox sees; everything else in there (emissaries, persona, guidelines, skill bodies) reaches the model as prompt text the daemon read, and `config.toml` stays out. Tool-bearing tasks run with `--dangerously-skip-permissions` and no `--allowedTools` allowlist — the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. See [brain](brain.md) for the full implementation.
+with optional `--model`, `--effort`, `--system-prompt-file` and `--append-system-prompt-file` flags. `--system-prompt-file` names `config/system-prompt.md`, which the CLI opens itself, from inside the sandbox — so `build_bwrap_cmd` binds that one file read-only. It is the only config-directory file the sandbox sees; everything else in there (emissaries, persona, guidelines, skill bodies) reaches the model as prompt text the daemon read, and `config.toml` stays out. `--append-system-prompt-file` names Istota's composed system half, which the CLI also opens from inside the sandbox and which is bound read-only the same way. The append form rather than the replace form, because replacing would discard Claude Code's default harness prompt on the default deployment, where no operator file is configured. Tool-bearing tasks run with `--dangerously-skip-permissions` and no `--allowedTools` allowlist — the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. See [brain](brain.md) for the full implementation.
 
 ## Environment variables
 
