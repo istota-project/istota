@@ -1,6 +1,7 @@
 """Claude Code execution wrapper."""
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -391,55 +392,112 @@ def get_task_control_dir(
     containment equality :func:`get_user_repos_dir` and :func:`daemon_work_dir`
     use, both halves of it, because truthiness alone lets ``.``, ``..`` and an
     absolute component through and the lexical half alone lets a symlink
-    through. Also refuses a ``user_id`` equal to :data:`CONTROL_DIR_NAME`:
-    :func:`get_user_temp_dir` is a plain join, so a user of that name would
-    put its scratch directory exactly where the control root goes. A leading
-    dot is not a legal user id anywhere one is produced; the refusal is
-    explicit rather than relying on that.
+    through. Also refuses a ``user_id`` that *casefolds* to
+    :data:`CONTROL_DIR_NAME`: :func:`get_user_temp_dir` is a plain join, so a
+    user of that name would put its model-writable scratch directory exactly
+    where the control root goes, and on a case-insensitive filesystem
+    ``.Control`` is that same directory — the equality has to be case-folded
+    or the guard is defeated by the shift key on every developer host. A
+    leading dot is not a legal user id anywhere one is produced; the refusal
+    is explicit rather than relying on that.
 
-    ``task_id`` is interpolated as given. ``task_0`` — the heartbeat's
-    synthetic task — is a legal directory name and needs no special case.
+    **The refusal covers a corrupt control root too, and that is why the two
+    reasons are logged apart.** ``root`` is deliberately *not* resolved, so a
+    symlink planted at ``.control`` makes ``candidate.resolve()`` resolve
+    through it and the equality fails — the right answer, since resolving the
+    root would instead accept the planted symlink and hand back a path outside
+    the tree altogether. But the fault there is a symlink the daemon owns the
+    parent of, not a bad user id, and a message blaming the user id sends an
+    operator looking in the wrong place.
 
-    Does not create anything. Never raises.
+    ``task_id`` is coerced with ``int()`` before it is interpolated, and that
+    is a containment check rather than tidiness: the equality above covers the
+    ``user_id`` component and stops there, ``PurePath`` does not collapse
+    ``..``, and the kernel resolves it at ``mkdir``. A ``task_id`` of
+    ``"1/../../.."`` would otherwise name a directory outside the user's
+    subtree, which is the one thing this function exists to prevent. Today's
+    callers pass ``task.id`` off a SQLite row and the heartbeat's synthetic
+    ``0``, so it is unreachable now and would be reached the first time a
+    caller takes the id from a deferred-op JSON or a CLI argument — the same
+    reason the notification resolvers coerce ``object_id``. ``task_0`` is a
+    legal directory name and needs no special case.
+
+    Does not create anything. Never raises — not for a hostile ``user_id`` and
+    not for one of the wrong type, which is why the join is inside the ``try``
+    and ``TypeError`` is caught beside ``OSError`` and ``ValueError``.
     """
     temp_dir = getattr(config, "temp_dir", None)
-    if not temp_dir or not user_id or user_id == CONTROL_DIR_NAME:
+    if not temp_dir or not user_id:
+        return None
+    if isinstance(user_id, str) and user_id.casefold() == CONTROL_DIR_NAME.casefold():
         return None
     try:
         root = Path(temp_dir).resolve() / CONTROL_DIR_NAME
-    except (OSError, ValueError):
-        return None
-    candidate = root / user_id
-    try:
+        candidate = root / user_id
         # Two checks, because neither catches the other's cases. The lexical
         # one refuses a component that never became a child (`.` is dropped by
         # `PurePath`, an absolute one replaces the root, a nested one goes
         # deeper); the resolved one refuses `..` and every symlink, which are
-        # children by name and somewhere else on disk.
+        # children by name and somewhere else on disk — including a symlink at
+        # the control root itself, which is a different fault and is reported
+        # as one below.
         contained = candidate.parent == root and candidate.resolve() == root / user_id
-    except (OSError, ValueError):
-        contained = False
-    if not contained:
+        leaf = f"task_{int(task_id)}"
+    except (OSError, ValueError, TypeError):
         logger.warning(
-            "task control dir: %s does not resolve to the subtree named by "
-            "user id %r; not using it. A symlink or a path component in the "
-            "user id would reach outside that user's own control directory.",
-            candidate, user_id,
+            "task control dir: cannot name a directory under %s for user id "
+            "%r, task id %r; not using it.",
+            temp_dir, user_id, task_id,
         )
         return None
-    return candidate / f"task_{task_id}"
+    if not contained:
+        # Two reasons, one refusal. Which one it is decides where an operator
+        # looks, so they are not collapsed into a single sentence.
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            logger.warning(
+                "task control dir: %s is not a directory the daemon owns "
+                "(a symlink or a non-directory is in its place); refusing to "
+                "use it for user id %r.",
+                root, user_id,
+            )
+        else:
+            logger.warning(
+                "task control dir: %s does not resolve to the subtree named "
+                "by user id %r; not using it. A symlink or a path component "
+                "in the user id would reach outside that user's own control "
+                "directory.",
+                candidate, user_id,
+            )
+        return None
+    return candidate / leaf
 
 
 def _ensure_control_level(path: Path, *, parents: bool) -> None:
-    """One level of the control directory: a real directory, owned, at 0700.
+    """One level of the control directory: a real directory, ours, at 0700.
 
     ``Path.mkdir(exist_ok=True)`` swallows ``FileExistsError`` whenever
     ``is_dir()`` says yes, and ``is_dir()`` follows a symlink — so a symlink
     pointing at a directory sails straight through the create, and a plain
     ``os.chmod`` afterwards would follow it too. ``O_NOFOLLOW | O_DIRECTORY``
-    is what refuses both that and a regular file, and ``fchmod`` then acts on
-    the descriptor rather than on the name, so the mode lands on the inode
-    that was opened or on nothing at all.
+    is what refuses both that and a regular file (and a FIFO, which would
+    otherwise block the open), and ``fchmod`` then acts on the descriptor
+    rather than on the name, so the mode lands on the inode that was opened or
+    on nothing at all.
+
+    **The uid is checked on the same descriptor**, before the mode is set. A
+    directory type check alone says the level is a directory, not that it is
+    *ours*: ``Config.temp_dir`` defaults to ``/tmp/istota``, whose parent is
+    world-writable and sticky, so on a host where the daemon has not run yet
+    any local account can pre-create a level and the tree meant to be
+    unreadable by the model lands somewhere another user owns. The fd is
+    already in hand, so ``fstat`` costs nothing, and it fails closed. What
+    this cannot cover is a symlink at ``temp_dir`` *itself*: that is resolved
+    before any of this runs, and the operator's configured root is trusted as
+    given here exactly as ``security.sandbox_cache_dir`` is. The shipped
+    deployment shapes put it under a directory the daemon owns
+    (``{istota_home}/tmp`` under Ansible, ``/data/tmp`` under Docker); the
+    ``/tmp`` default is a single-host convenience and not a shape this
+    directory's guarantee is claimed on.
 
     The mode is re-asserted on every call because ``mkdir(exist_ok=True)``
     leaves an existing directory's mode alone: a directory created under a
@@ -453,6 +511,12 @@ def _ensure_control_level(path: Path, *, parents: bool) -> None:
         path.mkdir(mode=0o700, parents=parents)
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        owner = os.fstat(fd).st_uid
+        if owner != os.geteuid():
+            raise PermissionError(
+                errno.EPERM,
+                f"directory is owned by uid {owner}, not by the daemon",
+            )
         os.fchmod(fd, 0o700)
     finally:
         os.close(fd)
@@ -470,38 +534,79 @@ def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
 
     All three levels are created and mode-asserted, not just the last: the
     control root and the per-user level are what keep one user's control files
-    out of another's reach, and ``mkdir(parents=True)`` would create both with
-    the ambient umask. A level that is a symlink or a regular file raises
-    rather than being worked around — the daemon owns the shared temp root, so
-    that is a corrupt-state check rather than a boundary, and it costs one
-    syscall.
+    out of another's reach, and ``mkdir(parents=True)`` applies its ``mode``
+    to the leaf only, creating every intermediate with the ambient umask.
+
+    **Two mechanisms refuse a corrupt level, and which one covers which case
+    is not what it looks like.** A *symlink* at the control root or at the
+    per-user level is refused by :func:`get_task_control_dir`, whose
+    containment equality resolves through both — this function is never
+    reached. A *regular file* at those same levels is not, because
+    ``Path.resolve()`` is non-strict and returns the lexical path even when an
+    ancestor is not a directory, so the equality holds and it arrives here for
+    ``O_DIRECTORY`` to refuse with ENOTDIR. And the whole ``task_{id}`` level
+    arrives here whatever is at it, since the resolver deliberately leaves the
+    last component unresolved — which makes ``O_NOFOLLOW`` the sole guard for
+    a symlink there, and nowhere else. Removing it turns exactly that one case
+    red, which is what the negative control in
+    ``tests/test_task_control_dir.py`` records. The mode and ownership
+    assertions apply at all three levels.
 
     Idempotent: a retry of the same task reuses the same directory, which is
     what makes it safe for ``execute_task`` to call unconditionally and for
     ``_build_module_briefing_prompt`` to call again underneath it.
+
+    **One retry, and it is for the sweep rather than for flakiness.**
+    ``cleanup_old_temp_files`` recurses into every subdirectory of
+    ``temp_dir`` — ``.control`` included, since ``iterdir`` yields dotted
+    entries — and ``rmdir``s any empty directory past
+    ``temp_file_retention_days``. Neither ``mkdir`` on an existing directory
+    nor ``fchmod`` updates an mtime, so a per-user level left empty and idle
+    stays a valid candidate *while* this function is walking down through it,
+    and the second level's ``mkdir(parents=False)`` then raises
+    ``FileNotFoundError`` and fails a task for a directory that was collected
+    underneath it. The retry restarts from the top so every level is
+    re-created and re-asserted; ``parents=True`` on the lower levels would
+    have papered over it while recreating the levels above with the ambient
+    umask instead of 0700.
 
     The message names the path and never the contents of anything found there.
     """
     control_dir = get_task_control_dir(config, user_id, task_id)
     if control_dir is None:
         raise RuntimeError(
-            f"cannot name a task control directory for user {user_id!r}: "
-            f"the user id is empty or does not resolve to a child of "
-            f"{getattr(config, 'temp_dir', None)}/{CONTROL_DIR_NAME}"
+            f"cannot name a task control directory for user {user_id!r}, "
+            f"task {task_id!r}: the user id is empty, is not a child of "
+            f"{getattr(config, 'temp_dir', None)}/{CONTROL_DIR_NAME}, or that "
+            f"directory is not one the daemon owns"
         )
     user_level = control_dir.parent
     root = user_level.parent
-    # The shared temp root itself may not exist yet, so the control root takes
-    # `parents=True`. That creates the temp root with the ambient umask, which
-    # is what `daemon_work_dir` does for the per-user directories beside it —
-    # the root is shared and 0700 there would be wrong.
-    for level, parents in ((root, True), (user_level, False), (control_dir, False)):
+    # The shared temp root may not exist yet, so the control root takes
+    # `parents=True` — the same posture `daemon_work_dir` takes for the
+    # per-user directories beside it. `mkdir` applies its mode to the leaf
+    # only, so this creates `temp_dir` with the ambient umask and `.control`
+    # itself at 0700.
+    levels = ((root, True), (user_level, False), (control_dir, False))
+    for attempt in (1, 2):
         try:
-            _ensure_control_level(level, parents=parents)
+            for level, parents in levels:
+                _ensure_control_level(level, parents=parents)
+        except FileNotFoundError as exc:
+            # A level was collected under us between two iterations. Start
+            # again once; a second occurrence is not a sweep race.
+            if attempt == 2:
+                raise RuntimeError(
+                    f"task control directory {control_dir} kept disappearing "
+                    f"while it was being created: {exc.strerror or exc}"
+                ) from exc
+            continue
         except OSError as exc:
             raise RuntimeError(
-                f"task control directory {level} is unusable: {exc.strerror or exc}"
+                f"task control directory {level} is unusable: "
+                f"{exc.strerror or exc}"
             ) from exc
+        return control_dir
     return control_dir
 
 

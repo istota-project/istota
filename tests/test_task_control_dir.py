@@ -14,9 +14,11 @@ level can fail to be a real directory gets its own case as well.
 import os
 import stat
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from istota import executor
 from istota.config import Config
 from istota.executor import (
     CONTROL_DIR_NAME,
@@ -39,6 +41,23 @@ def control_config(tmp_path):
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def _refused_by(error: RuntimeError) -> str:
+    """Which of the two mechanisms produced this ``RuntimeError``.
+
+    ``ensure_task_control_dir`` raises for two unrelated reasons and the
+    distinction is the whole point of several cases below: the resolver
+    returning ``None`` (its containment equality resolved through a bad level)
+    versus ``_ensure_control_level`` refusing an inode it opened. A bare
+    ``pytest.raises(RuntimeError)`` cannot tell them apart, which is how a
+    parametrization ends up claiming to exercise a guard that ran in one of
+    its three cases.
+    """
+    text = str(error)
+    if text.startswith("cannot name a task control directory"):
+        return "resolver"
+    return "ensure"
 
 
 class TestThePathShape:
@@ -114,6 +133,43 @@ class TestTheFourRefusals:
         # control root itself.
         assert get_task_control_dir(control_config, ".", 1) is None
 
+    @pytest.mark.parametrize("user_id", [".Control", ".CONTROL"])
+    def test_it_refuses_the_control_name_whatever_its_case(
+        self, control_config, user_id
+    ):
+        # A case-sensitive equality is defeated by the shift key on any
+        # case-insensitive filesystem — where `{temp}/.CONTROL`, the
+        # model-writable scratch directory `get_user_temp_dir` would hand that
+        # user, *is* the control root.
+        assert get_task_control_dir(control_config, user_id, 1) is None
+
+    @pytest.mark.parametrize("task_id", ["1/../../..", "../escape", "1/nested"])
+    def test_it_refuses_a_task_id_that_would_escape(self, control_config, task_id):
+        # The containment equality covers the `user_id` component and stops
+        # there, `PurePath` does not collapse `..`, and the kernel resolves it
+        # at `mkdir`. `int()` is what keeps the last component a leaf.
+        assert get_task_control_dir(control_config, "alice", task_id) is None
+
+    def test_a_task_id_that_is_a_numeric_string_is_accepted_as_a_number(
+        self, control_config
+    ):
+        # The coercion is a containment check, not a type check: a caller
+        # handing over "42" means task 42 and gets task_42, not task_"42".
+        assert get_task_control_dir(control_config, "alice", "42") == (
+            get_task_control_dir(control_config, "alice", 42)
+        )
+
+    @pytest.mark.parametrize("user_id", [5, b"alice", object()])
+    def test_it_never_raises_on_a_user_id_of_the_wrong_type(
+        self, control_config, user_id
+    ):
+        # "Never raises" is the contract, and `Path.__truediv__` raises
+        # `TypeError` rather than one of the two the join used to catch.
+        assert get_task_control_dir(control_config, user_id, 1) is None
+
+    def test_it_never_raises_on_a_user_id_carrying_a_nul(self, control_config):
+        assert get_task_control_dir(control_config, "ali\x00ce", 1) is None
+
     def test_it_refuses_a_user_id_that_is_a_symlink_out_of_the_root(
         self, control_config
     ):
@@ -185,15 +241,39 @@ class TestEnsure:
         assert _mode(widened) == 0o700
 
     def test_it_raises_when_the_user_id_does_not_resolve(self, control_config):
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as excinfo:
             ensure_task_control_dir(control_config, "..", 1)
+
+        assert _refused_by(excinfo.value) == "resolver"
+
+    def test_it_leaves_the_shared_temp_root_alone(self, control_config):
+        # `mkdir` applies its mode to the leaf only, so 0700 lands on
+        # `.control` and the shared root keeps whatever mode it had. Pinned
+        # because nothing else in this file asserts anything about the root,
+        # so a later change that tightened it would go unnoticed either way.
+        os.chmod(control_config.temp_dir, 0o755)
+
+        ensure_task_control_dir(control_config, "alice", 1)
+
+        assert _mode(control_config.temp_dir) == 0o755
+
+    def test_it_creates_the_shared_temp_root_when_it_is_missing(self, tmp_path):
+        # `parents=True` on the first level exists for this: nothing
+        # guarantees the daemon has written to `temp_dir` before the first
+        # task of a boot.
+        config = Config(
+            db_path=tmp_path / "data" / "istota.db",
+            temp_dir=tmp_path / "temp" / "nested",
+            skills_dir=tmp_path / "skills",
+        )
+
+        control_dir = ensure_task_control_dir(config, "alice", 1)
+
+        assert control_dir.is_dir()
+        assert _mode(control_dir.parent.parent) == 0o700
 
     @pytest.mark.parametrize("level", ["control", "user", "task"])
     def test_it_raises_when_a_level_is_a_symlink(self, control_config, level):
-        # `Path.mkdir(exist_ok=True)` swallows `FileExistsError` whenever
-        # `is_dir()` says yes, and `is_dir()` follows a symlink — so a symlink
-        # to a directory sails through the create and only `O_NOFOLLOW`
-        # catches it.
         root = control_config.temp_dir / CONTROL_DIR_NAME
         elsewhere = control_config.temp_dir.parent / "elsewhere"
         elsewhere.mkdir()
@@ -206,8 +286,65 @@ class TestEnsure:
             (root / "alice").mkdir(parents=True)
             (root / "alice" / "task_1").symlink_to(elsewhere)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as excinfo:
             ensure_task_control_dir(control_config, "alice", 1)
+
+        # Which mechanism refused matters, and a bare `raises(RuntimeError)`
+        # cannot tell them apart. The resolver's containment equality resolves
+        # *through* the control root and the user level, so those two never
+        # reach `_ensure_control_level` at all; only `task_1` gets that far,
+        # because the resolver deliberately leaves the last component
+        # unresolved. Pinning the producer is what stops this file reporting
+        # three cases of a guard that runs in one of them.
+        assert _refused_by(excinfo.value) == (
+            "resolver" if level in ("control", "user") else "ensure"
+        )
+
+    def test_only_the_task_level_depends_on_o_nofollow(self, control_config):
+        # The companion to the case above, stated as a property rather than
+        # left implicit in the parametrization: the negative control that
+        # deletes `O_NOFOLLOW` turns the task level red and the other two
+        # stay green, because a different mechanism already covered them.
+        root = control_config.temp_dir / CONTROL_DIR_NAME
+        (root / "alice").mkdir(parents=True)
+        elsewhere = control_config.temp_dir.parent / "elsewhere"
+        elsewhere.mkdir()
+        (root / "alice" / "task_1").symlink_to(elsewhere)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            ensure_task_control_dir(control_config, "alice", 1)
+
+        assert _refused_by(excinfo.value) == "ensure"
+        # And the symlink target was not touched: `fchmod` acts on the
+        # descriptor, and the open never happened.
+        assert _mode(elsewhere) != 0o700
+
+    def test_it_raises_on_a_dangling_symlink_at_the_task_level(self, control_config):
+        # A different path through `_ensure_control_level` from the
+        # symlink-to-a-directory case: `mkdir` still raises `FileExistsError`
+        # (the name exists), and the open fails ELOOP rather than ENOTDIR.
+        root = control_config.temp_dir / CONTROL_DIR_NAME
+        (root / "alice").mkdir(parents=True)
+        (root / "alice" / "task_1").symlink_to(
+            control_config.temp_dir / "nothing-here"
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            ensure_task_control_dir(control_config, "alice", 1)
+
+        assert _refused_by(excinfo.value) == "ensure"
+
+    def test_it_raises_on_a_fifo_at_the_task_level(self, control_config):
+        # O_DIRECTORY is what keeps this from blocking on the O_RDONLY open
+        # of a FIFO with no writer.
+        root = control_config.temp_dir / CONTROL_DIR_NAME
+        (root / "alice").mkdir(parents=True)
+        os.mkfifo(root / "alice" / "task_1")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            ensure_task_control_dir(control_config, "alice", 1)
+
+        assert _refused_by(excinfo.value) == "ensure"
 
     @pytest.mark.parametrize("level", ["control", "user", "task"])
     def test_it_raises_when_a_level_is_a_regular_file(self, control_config, level):
@@ -221,8 +358,84 @@ class TestEnsure:
             (root / "alice").mkdir(parents=True)
             (root / "alice" / "task_1").write_text("not a directory")
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as excinfo:
             ensure_task_control_dir(control_config, "alice", 1)
+
+        # Every level, unlike the symlink case above. `Path.resolve()` is
+        # non-strict, so it returns the lexical path even when an ancestor is
+        # a regular file — the containment equality holds and the resolver
+        # passes it through. `O_DIRECTORY` is what refuses it, at all three
+        # levels, with ENOTDIR.
+        assert _refused_by(excinfo.value) == "ensure"
+
+    def test_it_refuses_a_level_owned_by_another_uid(self, control_config):
+        # A type check says the level is a directory, not that it is ours.
+        # `Config.temp_dir` defaults under world-writable `/tmp`, so a
+        # pre-created level is a reachable shape on the standalone install.
+        # The uid is faked rather than the directory, because the suite does
+        # not run as root and cannot chown one away.
+        real_fstat = os.fstat
+
+        def _alien_owner(fd):
+            st = real_fstat(fd)
+            return os.stat_result(
+                (st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                 os.geteuid() + 1, st.st_gid, st.st_size,
+                 int(st.st_atime), int(st.st_mtime), int(st.st_ctime))
+            )
+
+        with patch("istota.executor.os.fstat", _alien_owner):
+            with pytest.raises(RuntimeError) as excinfo:
+                ensure_task_control_dir(control_config, "alice", 1)
+
+        assert _refused_by(excinfo.value) == "ensure"
+        assert "owned by uid" in str(excinfo.value)
+
+    def test_it_retries_once_when_the_sweep_collects_a_level_underneath_it(
+        self, control_config
+    ):
+        # `cleanup_old_temp_files` recurses into every subdirectory of
+        # `temp_dir` — `.control` included — and rmdirs an empty directory
+        # past the retention window. Neither `mkdir` on an existing directory
+        # nor `fchmod` updates an mtime, so a per-user level can be collected
+        # while this function is walking down through it, and the next
+        # `mkdir(parents=False)` would fail a task for it.
+        root = control_config.temp_dir / CONTROL_DIR_NAME
+        real_ensure = executor._ensure_control_level
+        collected = []
+
+        def _sweeping(path, *, parents):
+            real_ensure(path, parents=parents)
+            # Collect the user level exactly once, immediately after it is
+            # created and before the task level is made inside it.
+            if path == root / "alice" and not collected:
+                collected.append(path)
+                path.rmdir()
+
+        with patch("istota.executor._ensure_control_level", _sweeping):
+            control_dir = ensure_task_control_dir(control_config, "alice", 1)
+
+        assert collected, "the sweep stand-in never fired; the test proves nothing"
+        assert control_dir.is_dir()
+        assert _mode(control_dir) == 0o700
+        assert _mode(control_dir.parent) == 0o700
+
+    def test_it_gives_up_when_a_level_keeps_disappearing(self, control_config):
+        # One retry, not a loop. A level that vanishes every time is not a
+        # sweep race and must not spin.
+        root = control_config.temp_dir / CONTROL_DIR_NAME
+        real_ensure = executor._ensure_control_level
+
+        def _always_sweeping(path, *, parents):
+            real_ensure(path, parents=parents)
+            if path == root / "alice":
+                path.rmdir()
+
+        with patch("istota.executor._ensure_control_level", _always_sweeping):
+            with pytest.raises(RuntimeError) as excinfo:
+                ensure_task_control_dir(control_config, "alice", 1)
+
+        assert "kept disappearing" in str(excinfo.value)
 
     def test_the_error_names_the_path_and_carries_no_contents(self, control_config):
         root = control_config.temp_dir / CONTROL_DIR_NAME
