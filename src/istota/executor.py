@@ -5800,8 +5800,13 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     (running the one-time components→blocks migration first); ``None`` when the
     module is disabled for the user, the briefing has no blocks, or any error
     occurs — the caller treats ``None`` as a task failure. Also stashes
-    per-block provenance in a deferred file the scheduler reads when archiving
-    the rendered briefing.
+    per-block provenance in the task's control directory, which the scheduler
+    reads when archiving the rendered briefing.
+
+    Not "a deferred file", which it used to be and which means something
+    specific here: a deferred op is model-authored, lives in the writable
+    per-user directory, is named in ``_KNOWN_DEFERRED_SUFFIXES`` and is purged
+    on retry. This one is none of those.
     """
     try:
         from . import briefings as briefings_module
@@ -5866,8 +5871,20 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
             "briefing_name": task.briefing_name,
             "block_meta": assembled.block_meta,
         }))
-    except Exception:  # noqa: BLE001
-        pass  # best-effort; archive still works with empty block_meta
+    except Exception as e:  # noqa: BLE001
+        # Best-effort — the archive still works with empty `block_meta` — but
+        # not silent. `execute_task` has already created this directory for
+        # this same `(user_id, task_id)` and failed the task if it could not,
+        # so the only way the `ensure_` call here raises is that a level was
+        # removed, replaced or re-owned *during* the task: the conditions the
+        # resolver's guards exist to detect. Swallowing that without a word
+        # made it indistinguishable from a briefings-module hiccup, and since
+        # the reader swallows its own miss too, the whole operator-visible
+        # trace was an archive row with no provenance in it.
+        logger.warning(
+            "briefing provenance not stashed for task %s (%s): %s",
+            task.id, task.briefing_name, e,
+        )
 
     return assembled.prompt
 

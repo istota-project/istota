@@ -380,6 +380,49 @@ class TestSchedulerArchive:
         assert len(rows) == 1
         assert rows[0].block_meta == {}
 
+    def test_an_unresolvable_control_dir_archives_with_empty_provenance(
+        self, tmp_path,
+    ):
+        # `get_task_control_dir` returns None when the control root is not a
+        # directory the daemon owns — a symlink planted at `.control` is the
+        # reachable case, since the resolver's containment equality resolves
+        # through it and fails. The reader then has no path to try, and what
+        # this pins is that the *rest* of the archive still happens: the row
+        # is written, with empty provenance, and nothing escapes.
+        #
+        # What it deliberately does not claim to cover is the
+        # `if control_dir else None` guard itself. Measured: removing that
+        # guard leaves this case green, because the `None /` `TypeError` lands
+        # in the same bare `except` that a missing file lands in. Two causes,
+        # one indistinguishable outcome — the shape this whole stage exists
+        # to work around, showing up one more time in its own test.
+        import os
+
+        from istota.executor import get_task_control_dir
+        from istota.scheduler import _maybe_archive_briefing
+
+        cfg = _config(tmp_path)
+        cfg.temp_dir = tmp_path / "temp"
+        cfg.temp_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        os.symlink(elsewhere, cfg.temp_dir / ".control")
+        _ctx_with_blocks(cfg, [{"title": "Notes", "sources": [{"kind": "notes"}]}])
+        db.init_db(cfg.db_path)
+
+        task = self._task(id=13, created_at="2026-07-27 06:00:00")
+        assert get_task_control_dir(cfg, "alice", 13) is None, (
+            "the resolver still resolved; the None branch is not under test"
+        )
+
+        _maybe_archive_briefing(cfg, task, "raw result", {"body": "the news"})
+
+        ctx = resolve_for_user("alice", cfg)
+        with bdb.connect(ctx.db_path) as conn:
+            rows = bdb.list_archive(conn, briefing_name="M")
+        assert len(rows) == 1
+        assert rows[0].block_meta == {}
+
     def test_skips_legacy_no_blocks(self, tmp_path):
         from istota.scheduler import _maybe_archive_briefing
 

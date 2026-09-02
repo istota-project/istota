@@ -3865,7 +3865,15 @@ def _maybe_archive_briefing(
         meta_path = control_dir / "briefing_meta.json" if control_dir else None
         if meta_path is not None and meta_path.exists():
             import json as _json
-            block_meta = _json.loads(meta_path.read_text()).get("block_meta", {})
+            # `encoding="utf-8"` rather than the locale's, to match the
+            # writer: `_write_control_file` names UTF-8 explicitly. Moot only
+            # while `json.dumps` keeps its `ensure_ascii=True` default, and a
+            # later `ensure_ascii=False` would otherwise lose provenance
+            # silently on a non-UTF-8 daemon — swallowed by the `except`
+            # below, which is the failure this whole stage is shaped around.
+            block_meta = _json.loads(
+                meta_path.read_text(encoding="utf-8")
+            ).get("block_meta", {})
             meta_path.unlink()
     except Exception:  # noqa: BLE001
         block_meta = {}
