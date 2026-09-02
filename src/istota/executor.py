@@ -29,6 +29,7 @@ from .claude_runtime_env import (
 )
 from .config import Config
 from .sandbox_plan import (
+    Mount,
     SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
     build_mount_plan,
     project_fs_roots,
@@ -2829,6 +2830,17 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     would cover every user's subtree beneath it. A future second reader of
     ``sandbox_cache_dir`` would want the entry already here rather than
     discover its absence the way ISSUE-319 was discovered.
+
+    **It stays hand-written, and a test is what the extraction bought
+    instead.** Making it a projection over the mount plan is an import cycle:
+    it is called from inside :func:`resolve_sandbox_cache_dir`, which
+    :func:`~istota.sandbox_plan.build_mount_plan` itself calls. So
+    ``tests/test_sandbox_plan_parity.py::TestTheCacheAncestorList`` asserts the
+    half that is available — every path named here is either a destination the
+    plan actually mounts, or is deliberately broader than any one bind and says
+    so there with its reason. An entry naming a path nothing mounts is
+    ISSUE-319's shape from the other side: a list entry that reads like a
+    boundary and refuses nothing.
     """
     home = Path(os.environ.get("HOME", "/tmp"))
     targets: list[Path] = [
@@ -2902,17 +2914,35 @@ def mask_protected_paths(
     *,
     user_temp_dir: Path | None = None,
     workspace_dir: Path | None = None,
+    plan_mounts: "tuple[Mount, ...] | None" = None,
 ) -> list[Path]:
     """Paths a late tmpfs mask must not shadow, for this config.
 
     A mask at or above any of these would take away something the task needs —
     its own workspace, the source tree it runs from, the venv, the mount — and
-    turn a security measure into an outage. ``build_bwrap_cmd`` builds this list
-    per task; ``doctor`` builds it without one, to answer whether the database
-    mask covers a directory on this deployment at all.
+    turn a security measure into an outage. ``build_mount_plan`` builds this
+    list per task; ``doctor`` builds it without one, to answer whether the
+    database mask covers a directory on this deployment at all.
 
-    A caller with no task omits both keyword arguments, and each omission is a
-    documented divergence rather than an equivalence.
+    **``plan_mounts`` is the per-task branch, and it is a projection rather
+    than a second derivation.** Four of the five paths below — the task
+    workspace, the source tree, the venv and the REPL workspace — are binds the
+    plan already carries, and naming them again here is exactly the two-copies
+    shape ISSUE-319 and ISSUE-320 each cost a filed bug. So
+    :func:`~istota.sandbox_plan.build_mount_plan` passes its own accumulated
+    mounts and this returns their ``Mount.protected`` entries. The Nextcloud
+    mount **root** is the fifth and is added from the config either way,
+    because it is the one protected path that is not a bind: the plan mounts
+    ``{mount}/Users/{user_id}``, ``{mount}/Talk`` and
+    ``{mount}/Channels/{token}`` and never the root itself, so projecting alone
+    would stop refusing a mask over the mount whenever none of those exists.
+
+    The mounts, not a whole ``MountPlan``, because the plan does not exist yet
+    at the point the builder needs this: the masks are part of it. Passing the
+    finished object would be a cycle wearing a nicer type.
+
+    A caller with no task omits all three keyword arguments, and each omission
+    is a documented divergence rather than an equivalence.
 
     ``user_temp_dir`` is the per-task workspace and is what the sandbox actually
     protects. Omitting it substitutes ``config.temp_dir``, the *parent* of every
@@ -2933,11 +2963,16 @@ def mask_protected_paths(
     of this one, which is why it is written down here: narrowing that blocklist
     would reopen the two-consumers gap the extraction exists to close.
     """
-    src, venv = _source_and_venv_paths()
-    temp = Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)
-    protected: list[Path] = [temp.resolve(), src, venv]
-    if workspace_dir is not None:
-        protected.append(Path(workspace_dir))
+    if plan_mounts is not None:
+        protected = [m.source for m in plan_mounts if m.protected and m.source]
+    else:
+        src, venv = _source_and_venv_paths()
+        temp = (
+            Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)
+        )
+        protected = [temp.resolve(), src, venv]
+        if workspace_dir is not None:
+            protected.append(Path(workspace_dir))
     mount = config.nextcloud_mount_path
     if mount:
         protected.append(Path(mount).resolve())

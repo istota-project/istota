@@ -95,9 +95,12 @@ class Mount:
     reason: str
     #: Raw argv for a ``flag`` entry (``--unshare-net``, ``--unshare-pid``, …).
     argv: tuple[str, ...] = ()
-    #: Whether a late tmpfs mask may not shadow this entry. Read by
-    #: ``mask_protected_paths``' plan branch; set by a later stage of the
-    #: sandbox-mount-plan-as-data spec, not by this one.
+    #: Whether a late tmpfs mask may not shadow this entry — a mask at or
+    #: above it would take away something the task needs and turn a security
+    #: measure into an outage. Read by ``mask_protected_paths``' plan branch,
+    #: which :func:`build_mount_plan` calls with its own accumulated mounts, so
+    #: this flag is what the database masks are refused against rather than a
+    #: description of a list derived elsewhere.
     protected: bool = False
     #: Whether this is user data the native brain's file tools should see as a
     #: root. False for /usr, the venv, the source tree, the Claude runtime
@@ -366,17 +369,24 @@ def build_mount_plan(
         user_data: bool = False,
         always_deny: bool = False,
         require_dir: bool = False,
+        protected: bool = False,
     ) -> None:
         mounts.append(Mount(
             mode="ro", source=src, dest=dest, reason=reason, user_data=user_data,
-            always_deny=always_deny, require_dir=require_dir,
+            always_deny=always_deny, require_dir=require_dir, protected=protected,
         ))
 
     def _rw(
-        src: Path, reason: str, *, dest: Path | None = None, user_data: bool = False,
+        src: Path,
+        reason: str,
+        *,
+        dest: Path | None = None,
+        user_data: bool = False,
+        protected: bool = False,
     ) -> None:
         mounts.append(Mount(
             mode="rw", source=src, dest=dest, reason=reason, user_data=user_data,
+            protected=protected,
         ))
 
     def _tmpfs(path: Path, reason: str) -> None:
@@ -432,8 +442,11 @@ def build_mount_plan(
     # Resolve istota_home from the source tree (src/istota/ -> parent -> parent).
     # Shared with `mask_protected_paths`, which has to name the same two paths.
     istota_src, venv_path = executor._source_and_venv_paths()
-    _ro(venv_path, "venv")
-    _ro(istota_src, "istota_src")
+    # `protected`: a database mask at or above either of these would take away
+    # the interpreter or the code the task runs from. `mask_protected_paths`
+    # projects the flag rather than naming these two a second time.
+    _ro(venv_path, "venv", protected=True)
+    _ro(istota_src, "istota_src", protected=True)
 
     # --- Custom system prompt (RO, this one file) --- CLAUDE only.
     # The config directory is not in the sandbox and should not be: it holds
@@ -513,13 +526,13 @@ def build_mount_plan(
                     _rw(d, f"claude_{subdir}")
 
     # --- User workspace (RW) ---
-    _rw(user_temp_dir.resolve(), "user_temp_dir", user_data=True)
+    _rw(user_temp_dir.resolve(), "user_temp_dir", user_data=True, protected=True)
 
     # --- REPL workspace (RW) — validated, bound, and used as the chdir target.
     workspace_resolved: Path | None = None
     if workspace_dir is not None:
         workspace_resolved = executor._validate_workspace_dir(config, workspace_dir)
-        _rw(workspace_resolved, "repl_workspace", user_data=True)
+        _rw(workspace_resolved, "repl_workspace", user_data=True, protected=True)
 
     # .developer/ scripts (credential-fetch, git helpers) must be read-only
     # to prevent a compromised subprocess from replacing them to intercept
@@ -805,9 +818,13 @@ def build_mount_plan(
     # --- Database masks (must be the LAST mount operations) ---
     # Held apart from the binds so the render cannot put anything after them.
     # See `plan_masks` for why they are masks rather than absent binds.
-    protected = executor.mask_protected_paths(
-        config, user_temp_dir=user_temp_dir, workspace_dir=workspace_resolved,
-    )
+    # The protected list is the plan's own `protected=True` entries, not a
+    # second derivation beside them: this call used to name the workspace, the
+    # source tree, the venv and the REPL workspace over again, four paths that
+    # are all binds emitted above. Passing the mounts is what makes the two
+    # agree by construction. The Nextcloud mount root is the one protected path
+    # that is not a bind, and `mask_protected_paths` adds it from the config.
+    protected = executor.mask_protected_paths(config, plan_mounts=tuple(mounts))
     masks, refused = plan_masks(config, protected)
 
     return MountPlan(
@@ -967,7 +984,11 @@ def project_fs_roots(
     data: the two used to be written twice and ISSUE-319 and ISSUE-320 were
     both one copy disagreeing with the other. ``native_fs_roots``' docstring is
     where the *purpose* of these roots is recorded; this function is only the
-    derivation.
+    derivation, and ``tests/test_sandbox_plan_parity.py`` is what holds it to
+    the plan in both directions — every ``user_data`` bind reaches a root,
+    every root traces back to one, and the rules below that break that
+    symmetry are named there as literal exemptions rather than described by a
+    predicate.
 
     Only ``user_data`` entries. ``/usr``, the venv, the source tree, the Claude
     runtime block and the three sockets are in the namespace because a process

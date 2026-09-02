@@ -14,10 +14,10 @@ future simplification would look correct and be wrong:
 - the derived package cache is not a write root of its own;
 - a REPL workspace the blocklist refuses costs the workspace and nothing else.
 
-The full two-directions parity assertion is `tests/test_sandbox_plan_parity.py`
-(stage 4 of the sandbox-mount-plan-as-data spec). This file covers the rules
-that parity test cannot state, because they are exactly where the projection is
-allowed to differ from a mechanical walk.
+The full two-directions parity assertion is
+`tests/test_sandbox_plan_parity.py`. This file covers the rules that parity
+test cannot state, because they are exactly where the projection is allowed to
+differ from a mechanical walk.
 """
 
 from pathlib import Path
