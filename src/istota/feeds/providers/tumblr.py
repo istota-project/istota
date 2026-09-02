@@ -62,10 +62,10 @@ def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[Fetche
     # (ISSUE-388). The old `.get("response", {}).get("posts", [])` turned every
     # malformed shape — an error object, a captcha page decoded as JSON, an
     # API change — into an empty list indistinguishable from a blog with
-    # nothing on it. Once absence drives retention, that difference decides
-    # whether stored entries are treated as gone, so it is raised instead;
-    # `poll_feed` turns it into the ordinary error result, which advances no
-    # membership state.
+    # nothing on it, so a broken API reported a clean poll: `last_error`
+    # cleared, the ordinary cadence kept, and nothing saying the blog had
+    # stopped arriving. Raised instead; `poll_feed` turns it into the ordinary
+    # error result, which backs off and advances no observation state.
     if not isinstance(data, dict):
         raise ValueError("tumblr payload is not a JSON object")
     response = data.get("response")

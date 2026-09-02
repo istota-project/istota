@@ -61,6 +61,7 @@ from istota.feeds.models import (
     retry_after_from_headers,
     provider_identifier,
 )
+from istota.feeds.retention import plan_admission, resolve_max_entries_per_feed
 from istota.feeds.providers import arena as arena_provider
 from istota.feeds.providers import tumblr as tumblr_provider
 from istota.feeds.sanitize import (
@@ -520,19 +521,31 @@ def _persist_poll(
         return 0
 
     if result.not_modified:
-        items: list[FetchedItem] = []
+        returned: list[FetchedItem] = []
+        admitted: list[FetchedItem] = []
     else:
-        # Duplicate guids take their first occurrence — later ones are the same
-        # entry — and an item with no guid is not identifiable at all.
+        # Identifiable items, first occurrence of a duplicated guid only. This
+        # is what the marker rule reads: whether the response returned
+        # anything, which `plan_admission`'s own output cannot answer — a feed
+        # whose stars fill its maximum admits nothing from a response that
+        # returned plenty.
         seen: set[str] = set()
-        items = []
+        returned = []
         for item in result.items:
             if not item.guid or item.guid in seen:
                 continue
             seen.add(item.guid)
-            items.append(item)
+            returned.append(item)
+        # Admission is about the maximum and nothing else — nothing is refused
+        # on age, because age deletion is already churn-proof through the
+        # most-recent-response clause. It runs on any response carrying items,
+        # since it is not a judgement about the document.
+        admitted = plan_admission(
+            conn, feed.id, returned,
+            max_entries_per_feed=resolve_max_entries_per_feed(conn),
+        )
 
-    if items:
+    if admitted:
         records = [
             EntryRecord(
                 id=0,
@@ -552,8 +565,7 @@ def _persist_poll(
                 fetched_at=fetched_iso,
                 status="unread",
             )
-            for item in items
-            if item.guid
+            for item in admitted
         ]
         new_count = feeds_db.insert_entries(conn, feed.id, records)
 
@@ -566,7 +578,7 @@ def _persist_poll(
     # no item, so it leaves the marker where it was and every stored entry
     # stays protected.
     marker_at: object = feeds_db.UNCHANGED
-    if items:
+    if returned:
         marker_at = fetched_iso
     feeds_db.update_feed_fetch_state(
         conn, feed.id,

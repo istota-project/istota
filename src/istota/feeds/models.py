@@ -106,6 +106,14 @@ UPGRADE_GRACE_DAYS = 90
 # maximum reinserting everything the count pass just deleted.
 DEFAULT_MAX_ENTRIES_PER_FEED = 5000
 
+# The fewest entries a feed keeps whatever their age. Deliberately not a user
+# setting: it is a safety floor rather than a preference — its whole job is to
+# stop a low-volume feed emptying out — and the quantity a user has an opinion
+# about is the ceiling, which is already exposed. Where `max_entries_per_feed`
+# is set below this, the ceiling wins: an explicit instruction to store at most
+# twenty entries must not be overridden by a default that says fifty.
+MIN_ENTRIES_PER_FEED = 50
+
 # How long one process's claim on a feed lasts. Longer than a single feed's
 # 30-second network timeout and scoped to the individual fetch rather than the
 # paced batch, so a crashed poll costs one lease rather than the feed. Nothing

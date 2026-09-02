@@ -10,9 +10,14 @@ from istota.feeds import db as feeds_db
 from istota.feeds.models import (
     DEFAULT_ENTRY_RETENTION_DAYS,
     DEFAULT_MAX_ENTRIES_PER_FEED,
+    MIN_ENTRIES_PER_FEED,
     POLL_CLAIM_SECONDS,
     EntryRecord,
+    FeedsContext,
+    FetchedItem,
+    FetchResult,
 )
+from istota.feeds import retention
 
 
 class TestInitDb:
@@ -1424,6 +1429,7 @@ def _rewind_to_v7(path):
     conn = sqlite3.connect(path)
     try:
         conn.execute("DROP INDEX IF EXISTS idx_entries_feed_last_seen_unstarred")
+        conn.execute("DROP INDEX IF EXISTS idx_entries_feed_fetched_unstarred")
         conn.execute("ALTER TABLE feed_entries DROP COLUMN last_seen_at")
         conn.execute("ALTER TABLE feeds DROP COLUMN last_items_seen_at")
         conn.execute("ALTER TABLE feeds DROP COLUMN poll_claimed_until")
@@ -1463,7 +1469,7 @@ class TestSchemaV8Migration:
         _rewind_to_v7(path)
         return path, feed_id
 
-    def test_migration_adds_columns_and_the_partial_index(self, tmp_path):
+    def test_migration_adds_columns_and_both_partial_indexes(self, tmp_path):
         path, _ = self._v7_db_with_history(tmp_path)
 
         feeds_db.init_db(path)
@@ -1473,17 +1479,25 @@ class TestSchemaV8Migration:
                 r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")
             }
             feed_cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
-            index = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
-                ("idx_entries_feed_last_seen_unstarred",),
-            ).fetchone()
+            indexes = {
+                r["name"]: r["sql"]
+                for r in conn.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type='index'"
+                )
+            }
             version = conn.execute(
                 "SELECT value FROM schema_meta WHERE key='version'"
             ).fetchone()["value"]
 
         assert "last_seen_at" in entry_cols
         assert {"last_items_seen_at", "poll_claimed_until"} <= feed_cols
-        assert index is not None and "starred = 0" in index["sql"]
+        # Both are partial on `starred = 0`, because every retention pass
+        # excludes stars before it does anything else.
+        for name in (
+            "idx_entries_feed_last_seen_unstarred",
+            "idx_entries_feed_fetched_unstarred",
+        ):
+            assert "starred = 0" in indexes[name]
         assert version == "8"
 
     def test_migration_stamps_one_observation_time(self, tmp_path):
@@ -1717,14 +1731,19 @@ class TestSchemaV8Migration:
                 r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")
             }
             feed_cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
-            index = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
-                ("idx_entries_feed_last_seen_unstarred",),
-            ).fetchone()
+            indexes = {
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
             keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
         assert "last_seen_at" in entry_cols
         assert {"last_items_seen_at", "poll_claimed_until"} <= feed_cols
-        assert index is not None
+        assert {
+            "idx_entries_feed_last_seen_unstarred",
+            "idx_entries_feed_fetched_unstarred",
+        } <= indexes
         assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY not in keys
         # A fresh DB resolves the policy from the constants rather than storing
         # explicit rows, so an operator-visible default is never frozen at
@@ -2017,3 +2036,848 @@ class TestFetchStateObservationFields:
             feed = feeds_db.list_feeds(conn)[0]
         assert feed.last_items_seen_at == "2026-09-01T12:00:00+00:00"
         assert feed.poll_claimed_until is None
+
+
+# ---------------------------------------------------------------------------
+# retention: settings, the two passes, grace, and the churn control (ISSUE-388)
+# ---------------------------------------------------------------------------
+
+
+NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _ctx(tmp_path, db_path):
+    return FeedsContext(
+        user_id="alice", data_dir=tmp_path, db_path=db_path,
+    )
+
+
+def _store(
+    conn, feed_id, guid, *, fetched_at, last_seen_at=None, status="unread",
+    starred=False, published_at=None,
+):
+    """Write one entry row with every retention-relevant field set by hand.
+
+    Direct SQL rather than ``insert_entries`` because these tests need to place
+    a row at an arbitrary point in the past on both clocks, which the real
+    writer deliberately refuses to do.
+    """
+    conn.execute(
+        "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+        "last_seen_at, status, starred, published_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (feed_id, guid, guid, fetched_at, last_seen_at, status,
+         1 if starred else 0, published_at),
+    )
+
+
+def _mark(conn, feed_id, when):
+    conn.execute(
+        "UPDATE feeds SET last_items_seen_at = ? WHERE id = ?", (when, feed_id),
+    )
+
+
+def _guids(conn, feed_id=None):
+    if feed_id is None:
+        rows = conn.execute("SELECT guid FROM feed_entries ORDER BY guid")
+    else:
+        rows = conn.execute(
+            "SELECT guid FROM feed_entries WHERE feed_id = ? ORDER BY guid",
+            (feed_id,),
+        )
+    return [r["guid"] for r in rows]
+
+
+def _iso(days_ago):
+    return (NOW - timedelta(days=days_ago)).isoformat()
+
+
+def _fill_to_floor(conn, feed_id, marker, *, days_ago=2):
+    """``MIN_ENTRIES_PER_FEED`` current unread rows on one feed.
+
+    Every rule below the floor is unobservable, because the floor protects a
+    feed's whole contents. A test about some *other* rule therefore has to lift
+    the feed over it first, or it passes for a reason it did not name — which
+    for the churn control would be the whole point of the test lost.
+    """
+    for i in range(MIN_ENTRIES_PER_FEED):
+        _store(
+            conn, feed_id, f"filler{i:03d}", fetched_at=_iso(days_ago),
+            last_seen_at=marker, status="unread",
+        )
+
+
+class TestRetentionSettings:
+    def test_both_settings_round_trip_absent_positive_zero_and_cleared(
+        self, tmp_path,
+    ):
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) is None
+            assert feeds_db.get_max_entries_per_feed(conn) is None
+            feeds_db.set_entry_retention_days(conn, 30)
+            feeds_db.set_max_entries_per_feed(conn, 200)
+            conn.commit()
+            assert feeds_db.get_entry_retention_days(conn) == 30
+            assert feeds_db.get_max_entries_per_feed(conn) == 200
+            # `0` is a real value meaning "off", distinct from unset.
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+            assert feeds_db.get_entry_retention_days(conn) == 0
+            assert feeds_db.get_max_entries_per_feed(conn) == 0
+            feeds_db.set_entry_retention_days(conn, None)
+            feeds_db.set_max_entries_per_feed(conn, None)
+            conn.commit()
+            assert feeds_db.get_entry_retention_days(conn) is None
+            assert feeds_db.get_max_entries_per_feed(conn) is None
+
+    def test_a_malformed_stored_value_reads_as_absent(self, tmp_path):
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+                (feeds_db.ENTRY_RETENTION_DAYS_KEY, "not-a-number"),
+            )
+            conn.commit()
+            assert feeds_db.get_entry_retention_days(conn) is None
+
+    def test_a_negative_stored_value_resolves_to_the_default(self, tmp_path):
+        """Nothing may resolve to a negative window.
+
+        A negative retention would put the cutoff in the *future*, which makes
+        every stored row past it — the whole reader deleted on one bad value.
+        The API rejects negatives; this is the second guard, at the point of
+        use.
+        """
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_entry_retention_days(conn, -5)
+            feeds_db.set_max_entries_per_feed(conn, -5)
+            conn.commit()
+            assert retention.resolve_retention_days(conn) == (
+                DEFAULT_ENTRY_RETENTION_DAYS
+            )
+            assert retention.resolve_max_entries_per_feed(conn) == (
+                DEFAULT_MAX_ENTRIES_PER_FEED
+            )
+
+    def test_absent_settings_resolve_to_the_constants(self, tmp_path):
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            assert retention.resolve_retention_days(conn) == (
+                DEFAULT_ENTRY_RETENTION_DAYS
+            )
+            assert retention.resolve_max_entries_per_feed(conn) == (
+                DEFAULT_MAX_ENTRIES_PER_FEED
+            )
+
+    def test_zero_resolves_to_zero_rather_than_the_default(self, tmp_path):
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+            assert retention.resolve_retention_days(conn) == 0
+            assert retention.resolve_max_entries_per_feed(conn) == 0
+
+
+class TestAgePruning:
+    """``prune_entries_by_age`` — the five predicates and their controls."""
+
+    def _feed_with(self, tmp_path, rows, *, marker=_iso(1)):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for row in rows:
+                _store(conn, feed_id, **row)
+            _mark(conn, feed_id, marker)
+            conn.commit()
+        return path, feed_id
+
+    def _prune(self, path, *, days=90, floor=0, cap=0):
+        with feeds_db.connect(path) as conn:
+            deleted, held = feeds_db.prune_entries_by_age(
+                conn,
+                before_iso=(NOW - timedelta(days=days)).isoformat(),
+                min_entries_per_feed=floor,
+                max_entries_per_feed=cap,
+            )
+            conn.commit()
+            return deleted, held, _guids(conn)
+
+    def test_a_read_entry_past_the_cutoff_and_out_of_the_response_goes(
+        self, tmp_path,
+    ):
+        path, _ = self._feed_with(tmp_path, [
+            dict(guid="old-read", fetched_at=_iso(200), last_seen_at=_iso(150),
+                 status="read"),
+        ])
+        deleted, held, guids = self._prune(path)
+        assert (deleted, held) == (1, 0)
+        assert guids == []
+
+    def test_a_removed_entry_goes_the_same_way(self, tmp_path):
+        path, _ = self._feed_with(tmp_path, [
+            dict(guid="old-removed", fetched_at=_iso(200),
+                 last_seen_at=_iso(150), status="removed"),
+        ])
+        deleted, _, guids = self._prune(path)
+        assert deleted == 1
+        assert guids == []
+
+    def test_unread_starred_recent_and_in_response_rows_all_stay(self, tmp_path):
+        marker = _iso(1)
+        path, _ = self._feed_with(tmp_path, [
+            # unread, however old
+            dict(guid="unread", fetched_at=_iso(300), last_seen_at=_iso(200),
+                 status="unread"),
+            # starred, however old and however long read
+            dict(guid="starred", fetched_at=_iso(300), last_seen_at=_iso(200),
+                 status="read", starred=True),
+            # read, but inside the window
+            dict(guid="recent", fetched_at=_iso(10), last_seen_at=_iso(5),
+                 status="read"),
+            # read and ancient, but the latest response still returns it
+            dict(guid="in-response", fetched_at=_iso(300), last_seen_at=marker,
+                 status="read"),
+            # never observed at all: fails closed
+            dict(guid="never-seen", fetched_at=_iso(300), last_seen_at=None,
+                 status="read"),
+        ], marker=marker)
+        deleted, held, guids = self._prune(path)
+        assert (deleted, held) == (0, 0)
+        assert guids == [
+            "in-response", "never-seen", "recent", "starred", "unread",
+        ]
+
+    def test_a_feed_with_no_marker_loses_nothing(self, tmp_path):
+        """No response has ever returned an item here, so nothing is known
+        about what the source still offers — fail closed."""
+        path, _ = self._feed_with(tmp_path, [
+            dict(guid="old-read", fetched_at=_iso(300), last_seen_at=_iso(200),
+                 status="read"),
+        ], marker=None)
+        deleted, held, guids = self._prune(path)
+        assert (deleted, held) == (0, 0)
+        assert guids == ["old-read"]
+
+    def test_published_at_is_irrelevant_in_both_directions(self, tmp_path):
+        """The clock is ``fetched_at``, and this is the pair that proves it.
+
+        An Are.na block created in 2019 and added to a channel today arrives
+        with a 2019 ``published_at``; deleting on that would purge it on the
+        day it appeared.
+        """
+        path, _ = self._feed_with(tmp_path, [
+            dict(guid="old-published-new-here", fetched_at=_iso(2),
+                 last_seen_at=_iso(2), status="read",
+                 published_at="2019-01-01T00:00:00+00:00"),
+            dict(guid="new-published-old-here", fetched_at=_iso(300),
+                 last_seen_at=_iso(200), status="read",
+                 published_at="2026-08-31T00:00:00+00:00"),
+        ])
+        deleted, _, guids = self._prune(path)
+        assert deleted == 1
+        assert guids == ["old-published-new-here"]
+
+
+class TestTheFloor:
+    def _quiet_feed(self, tmp_path, count, *, status="read"):
+        """``count`` old, read, out-of-response rows on one feed."""
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(count):
+                _store(
+                    conn, feed_id, f"e{i:03d}",
+                    fetched_at=_iso(300 - i), last_seen_at=_iso(200),
+                    status=status,
+                )
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        return path, feed_id
+
+    def _prune(self, path, *, floor=MIN_ENTRIES_PER_FEED, cap=0):
+        with feeds_db.connect(path) as conn:
+            deleted, held = feeds_db.prune_entries_by_age(
+                conn,
+                before_iso=(NOW - timedelta(days=90)).isoformat(),
+                min_entries_per_feed=floor,
+                max_entries_per_feed=cap,
+            )
+            conn.commit()
+            return deleted, held, _guids(conn)
+
+    def test_a_feed_at_the_floor_loses_nothing_however_old(self, tmp_path):
+        path, _ = self._quiet_feed(tmp_path, MIN_ENTRIES_PER_FEED)
+        deleted, held, guids = self._prune(path)
+        assert deleted == 0
+        assert held == MIN_ENTRIES_PER_FEED
+        assert len(guids) == MIN_ENTRIES_PER_FEED
+
+    def test_a_feed_under_the_floor_loses_nothing(self, tmp_path):
+        path, _ = self._quiet_feed(tmp_path, 3)
+        deleted, held, guids = self._prune(path)
+        assert (deleted, held) == (0, 3)
+        assert len(guids) == 3
+
+    def test_a_feed_above_the_floor_loses_only_its_oldest(self, tmp_path):
+        path, _ = self._quiet_feed(tmp_path, MIN_ENTRIES_PER_FEED + 5)
+        deleted, held, guids = self._prune(path)
+        assert deleted == 5
+        assert held == MIN_ENTRIES_PER_FEED
+        # `e000` is the oldest `fetched_at`; the five oldest went.
+        assert len(guids) == MIN_ENTRIES_PER_FEED
+        assert "e000" not in guids
+        assert "e004" not in guids
+        assert "e005" in guids
+
+    def test_the_floor_counts_every_stored_row_not_only_deletable_ones(
+        self, tmp_path,
+    ):
+        """Fifty unread rows are plenty of history, so the read ones go.
+
+        "Keep at least fifty entries" is a statement about what is in the
+        reader, not about how many *read* ones survive.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(MIN_ENTRIES_PER_FEED):
+                _store(conn, feed_id, f"unread{i:03d}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(5), status="unread")
+            for i in range(7):
+                _store(conn, feed_id, f"read{i:03d}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        deleted, held, guids = self._prune(path)
+        assert deleted == 7
+        assert held == 0
+        assert [g for g in guids if g.startswith("read")] == []
+        assert len([g for g in guids if g.startswith("unread")]) == (
+            MIN_ENTRIES_PER_FEED
+        )
+
+    def test_a_maximum_below_the_floor_clamps_the_floor(self, tmp_path):
+        """An explicit instruction to store at most twenty must not be
+        overridden by a default that says fifty."""
+        path, _ = self._quiet_feed(tmp_path, 30)
+        deleted, held, guids = self._prune(path, cap=20)
+        assert deleted == 10
+        assert held == 20
+        assert len(guids) == 20
+
+    def test_a_maximum_of_zero_leaves_the_floor_alone(self, tmp_path):
+        """There is no ceiling to clamp against, so the constant stands."""
+        path, _ = self._quiet_feed(tmp_path, MIN_ENTRIES_PER_FEED + 2)
+        deleted, _, guids = self._prune(path, cap=0)
+        assert deleted == 2
+        assert len(guids) == MIN_ENTRIES_PER_FEED
+
+    def test_the_floor_is_per_feed_not_per_database(self, tmp_path):
+        path, feed_a = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feed_b = feeds_db.upsert_feed(
+                conn, url="https://other.example.com/feed.xml", title=None,
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            for feed_id in (feed_a, feed_b):
+                for i in range(4):
+                    _store(conn, feed_id, f"f{feed_id}-{i}",
+                           fetched_at=_iso(300 - i), last_seen_at=_iso(200),
+                           status="read")
+                _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        deleted, held, guids = self._prune(path, floor=3)
+        # One row over the floor on each feed, not one over a shared eight.
+        assert deleted == 2
+        assert held == 6
+        assert len(guids) == 6
+
+
+class TestCountPruning:
+    def _prune(self, path, cap):
+        with feeds_db.connect(path) as conn:
+            out = feeds_db.prune_entries_to_feed_cap(
+                conn, max_entries_per_feed=cap,
+            )
+            conn.commit()
+            return out, _guids(conn)
+
+    def test_unread_is_kept_before_read_and_newest_first_within_each(
+        self, tmp_path,
+    ):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            # Read rows are the *newest* here, so a rule that only looked at
+            # `fetched_at` would keep them and drop the unread ones.
+            _store(conn, feed_id, "read-new", fetched_at=_iso(1),
+                   last_seen_at=_iso(1), status="read")
+            _store(conn, feed_id, "read-old", fetched_at=_iso(2),
+                   last_seen_at=_iso(1), status="read")
+            _store(conn, feed_id, "unread-new", fetched_at=_iso(3),
+                   last_seen_at=_iso(1), status="unread")
+            _store(conn, feed_id, "unread-old", fetched_at=_iso(4),
+                   last_seen_at=_iso(1), status="unread")
+            conn.commit()
+        (deleted, over, excess), guids = self._prune(path, 3)
+        assert (deleted, over, excess) == (1, 0, 0)
+        assert guids == ["read-new", "unread-new", "unread-old"]
+
+    def test_stars_consume_the_budget_and_are_never_deleted(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(3):
+                _store(conn, feed_id, f"star{i}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(1), status="read", starred=True)
+            for i in range(3):
+                _store(conn, feed_id, f"plain{i}", fetched_at=_iso(20 + i),
+                       last_seen_at=_iso(1), status="read")
+            conn.commit()
+        (deleted, over, excess), guids = self._prune(path, 4)
+        # Budget is 4 - 3 stars = 1 unstarred row, the newest.
+        assert deleted == 2
+        assert (over, excess) == (0, 0)
+        assert guids == ["plain0", "star0", "star1", "star2"]
+
+    def test_stars_alone_can_leave_a_feed_over_the_maximum(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(5):
+                _store(conn, feed_id, f"star{i}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(1), status="read", starred=True)
+            _store(conn, feed_id, "plain", fetched_at=_iso(1),
+                   last_seen_at=_iso(1), status="read")
+            conn.commit()
+        (deleted, over, excess), guids = self._prune(path, 3)
+        # Every unstarred row goes; the overage is reported rather than
+        # guessing that a starred row is safe to delete.
+        assert deleted == 1
+        assert (over, excess) == (1, 2)
+        assert len(guids) == 5
+
+    def test_the_count_pass_ignores_the_floor(self, tmp_path):
+        """A feed over its configured maximum is by definition not empty, and
+        honouring the floor here would make a maximum below fifty
+        unenforceable."""
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(20):
+                _store(conn, feed_id, f"e{i:02d}", fetched_at=_iso(1 + i),
+                       last_seen_at=_iso(1), status="read")
+            conn.commit()
+        (deleted, _, _), guids = self._prune(path, 5)
+        assert deleted == 15
+        assert len(guids) == 5
+
+    def test_a_maximum_of_zero_deletes_nothing(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(10):
+                _store(conn, feed_id, f"e{i}", fetched_at=_iso(1 + i),
+                       last_seen_at=_iso(1), status="read")
+            conn.commit()
+        (deleted, over, excess), guids = self._prune(path, 0)
+        assert (deleted, over, excess) == (0, 0, 0)
+        assert len(guids) == 10
+
+    def test_the_delete_count_is_never_negative(self, tmp_path):
+        """``cursor.rowcount`` is ``-1`` for a statement prefixed by ``WITH``
+        under this driver, so both helpers read ``SELECT changes()``."""
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            _store(conn, feed_id, "only", fetched_at=_iso(1),
+                   last_seen_at=_iso(1), status="read")
+            conn.commit()
+        (deleted, _, _), _ = self._prune(path, 500)
+        assert deleted == 0
+        with feeds_db.connect(path) as conn:
+            aged, held = feeds_db.prune_entries_by_age(
+                conn, before_iso=_iso(90), min_entries_per_feed=50,
+                max_entries_per_feed=0,
+            )
+        assert aged >= 0 and held >= 0
+
+
+class TestImageCascade:
+    def test_deleting_an_entry_takes_its_image_rows_and_spares_the_rest(
+        self, tmp_path,
+    ):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                _entry(feed_id, "goes", _iso(300),
+                       image_urls=["https://img.example.com/a.jpg"]),
+                _entry(feed_id, "stays", _iso(300),
+                       image_urls=["https://img.example.com/b.jpg"]),
+            ])
+            conn.execute(
+                "UPDATE feed_entries SET status='read', last_seen_at=?",
+                (_iso(200),),
+            )
+            conn.execute(
+                "UPDATE feed_entries SET last_seen_at=? WHERE guid='stays'",
+                (_iso(1),),
+            )
+            _mark(conn, feed_id, _iso(1))
+            _fill_to_floor(conn, feed_id, _iso(1))
+            conn.commit()
+            before = conn.execute(
+                "SELECT COUNT(*) c FROM entry_images"
+            ).fetchone()["c"]
+            feeds_db.prune_entries_by_age(
+                conn, before_iso=_iso(90), min_entries_per_feed=0,
+                max_entries_per_feed=0,
+            )
+            conn.commit()
+            after = conn.execute(
+                "SELECT COUNT(*) c FROM entry_images"
+            ).fetchone()["c"]
+            kept = conn.execute(
+                "SELECT e.guid FROM entry_images i "
+                "JOIN feed_entries e ON e.id = i.entry_id"
+            ).fetchall()
+        assert before == 2
+        assert after == 1
+        assert [r["guid"] for r in kept] == ["stays"]
+
+
+class TestPruneFeeds:
+    def _db(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        return path, feed_id, _ctx(tmp_path, path)
+
+    def test_a_naive_clock_is_refused_before_anything_is_touched(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            _store(conn, feed_id, "old", fetched_at=_iso(300),
+                   last_seen_at=_iso(200), status="read")
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        with pytest.raises(ValueError):
+            retention.prune_feeds(ctx, now=datetime(2026, 9, 1, 12, 0))
+        with feeds_db.connect(path) as conn:
+            assert _guids(conn) == ["old"]
+
+    def test_both_passes_run_and_commit_together(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            # Age candidates: old, read, out of the response.
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            # Count candidates: recent, read, in the response.
+            for i in range(6):
+                _store(conn, feed_id, f"cap{i}", fetched_at=_iso(1 + i),
+                       last_seen_at=_iso(1), status="read")
+            _mark(conn, feed_id, _iso(1))
+            feeds_db.set_max_entries_per_feed(conn, 4)
+            conn.commit()
+
+        result = retention.prune_feeds(ctx, now=NOW)
+
+        assert result.dry_run is False
+        assert result.retention_days == DEFAULT_ENTRY_RETENTION_DAYS
+        assert result.max_entries_per_feed == 4
+        assert result.entries_deleted_by_age == 4
+        assert result.entries_deleted_by_cap == 2
+        assert result.entries_held_by_floor == 0
+        assert result.entry_pruning_deferred_until is None
+        assert result.feeds_over_cap_after == 0
+        assert result.protected_excess_entries == 0
+        assert result.page_size > 0
+        with feeds_db.connect(path) as conn:
+            assert _guids(conn) == ["cap0", "cap1", "cap2", "cap3"]
+
+    def test_it_reports_the_rows_the_floor_held(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(10):
+                _store(conn, feed_id, f"e{i:02d}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        result = retention.prune_feeds(ctx, now=NOW)
+        # Ten rows against a floor of fifty: nothing goes, and the count is
+        # what tells that apart from a feed with nothing to prune.
+        assert result.entries_deleted_by_age == 0
+        assert result.entries_held_by_floor == 10
+
+    def test_it_counts_the_image_rows_the_cascade_removed(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                _entry(feed_id, "a", _iso(300),
+                       image_urls=["https://img.example.com/a.jpg",
+                                   "https://img.example.com/b.jpg"]),
+            ])
+            conn.execute(
+                "UPDATE feed_entries SET status='read', last_seen_at=?",
+                (_iso(200),),
+            )
+            _mark(conn, feed_id, _iso(1))
+            _fill_to_floor(conn, feed_id, _iso(1))
+            conn.commit()
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert result.entries_deleted_by_age == 1
+        assert result.images_deleted_by_cascade == 2
+
+    def test_a_dry_run_plans_the_same_counts_and_changes_nothing(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            for i in range(6):
+                _store(conn, feed_id, f"cap{i}", fetched_at=_iso(1 + i),
+                       last_seen_at=_iso(1), status="read")
+            _mark(conn, feed_id, _iso(1))
+            feeds_db.set_max_entries_per_feed(conn, 4)
+            conn.execute(
+                "UPDATE feeds SET poll_claimed_until = ?", (_iso(-1),),
+            )
+            conn.commit()
+
+        planned = retention.prune_feeds(ctx, dry_run=True, now=NOW)
+        real = retention.prune_feeds(ctx, now=NOW)
+
+        assert planned.dry_run is True
+        assert planned.entries_deleted_by_age == real.entries_deleted_by_age
+        assert planned.entries_deleted_by_cap == real.entries_deleted_by_cap
+
+    def test_a_dry_run_leaves_every_row_claim_and_setting_alone(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            for i in range(6):
+                _store(conn, feed_id, f"cap{i}", fetched_at=_iso(1 + i),
+                       last_seen_at=_iso(1), status="read")
+            _mark(conn, feed_id, _iso(1))
+            feeds_db.set_max_entries_per_feed(conn, 4)
+            conn.execute(
+                "UPDATE feeds SET poll_claimed_until = ?",
+                ("2026-09-01T12:05:00+00:00",),
+            )
+            conn.commit()
+
+        result = retention.prune_feeds(ctx, dry_run=True, now=NOW)
+
+        assert result.entries_deleted_by_age == 4
+        assert result.entries_deleted_by_cap == 2
+        with feeds_db.connect(path) as conn:
+            assert len(_guids(conn)) == 10
+            feed = feeds_db.list_feeds(conn)[0]
+        assert feed.poll_claimed_until == "2026-09-01T12:05:00+00:00"
+        assert feed.last_items_seen_at == _iso(1)
+
+    def test_a_failing_second_pass_rolls_the_first_one_back(
+        self, tmp_path, monkeypatch,
+    ):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+
+        def _boom(conn, **kwargs):
+            raise sqlite3.OperationalError("no such table: nope")
+
+        monkeypatch.setattr(feeds_db, "prune_entries_to_feed_cap", _boom)
+        with pytest.raises(sqlite3.OperationalError):
+            retention.prune_feeds(ctx, now=NOW)
+        with feeds_db.connect(path) as conn:
+            assert len(_guids(conn)) == 4
+
+    def test_age_retention_of_zero_skips_only_the_age_pass(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 2)
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert result.entries_deleted_by_age == 0
+        assert result.entries_deleted_by_cap == 2
+
+    def test_both_limits_off_deletes_nothing(self, tmp_path):
+        path, feed_id, ctx = self._db(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert (result.entries_deleted_by_age, result.entries_deleted_by_cap) == (0, 0)
+        with feeds_db.connect(path) as conn:
+            assert len(_guids(conn)) == 4
+
+
+class TestUpgradeGrace:
+    def _deferred_db(self, tmp_path, not_before):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(4):
+                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                       last_seen_at=_iso(200), status="read")
+            for i in range(6):
+                _store(conn, feed_id, f"cap{i}", fetched_at=_iso(1 + i),
+                       last_seen_at=_iso(1), status="read")
+            _mark(conn, feed_id, _iso(1))
+            feeds_db.set_max_entries_per_feed(conn, 4)
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+                (feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY, not_before),
+            )
+            conn.commit()
+        return path, _ctx(tmp_path, path)
+
+    def test_before_the_boundary_both_passes_are_blocked(self, tmp_path):
+        not_before = (NOW + timedelta(seconds=1)).isoformat()
+        path, ctx = self._deferred_db(tmp_path, not_before)
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert result.entry_pruning_deferred_until == not_before
+        assert result.entries_deleted_by_age == 0
+        assert result.entries_deleted_by_cap == 0
+        assert result.images_deleted_by_cascade == 0
+        with feeds_db.connect(path) as conn:
+            assert len(_guids(conn)) == 10
+            keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
+        assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY in keys
+
+    def test_at_the_boundary_both_passes_run_and_the_row_goes(self, tmp_path):
+        path, ctx = self._deferred_db(tmp_path, NOW.isoformat())
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert result.entry_pruning_deferred_until is None
+        assert result.entries_deleted_by_age == 4
+        assert result.entries_deleted_by_cap == 2
+        with feeds_db.connect(path) as conn:
+            keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
+        assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY not in keys
+
+    def test_a_dry_run_at_the_boundary_leaves_the_grace_row_in_place(
+        self, tmp_path,
+    ):
+        path, ctx = self._deferred_db(tmp_path, NOW.isoformat())
+        retention.prune_feeds(ctx, dry_run=True, now=NOW)
+        with feeds_db.connect(path) as conn:
+            keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
+            assert len(_guids(conn)) == 10
+        assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY in keys
+
+    def test_a_malformed_grace_timestamp_fails_closed(self, tmp_path):
+        path, ctx = self._deferred_db(tmp_path, "not-a-timestamp")
+        with pytest.raises(ValueError):
+            retention.prune_feeds(ctx, now=NOW)
+        with feeds_db.connect(path) as conn:
+            assert len(_guids(conn)) == 10
+
+
+class TestTheChurnControl:
+    """The point of the whole design: a prune can never fight a poll.
+
+    ``_persist_poll`` is driven directly with a hand-built ``FetchResult``, so
+    the control is about what the storage layer does with a response rather
+    than about parsing one.
+    """
+
+    def _feed(self, path):
+        with feeds_db.connect(path) as conn:
+            return feeds_db.list_feeds(conn)[0]
+
+    def _persist(self, path, items, when):
+        from istota.feeds import poller
+
+        with feeds_db.connect(path) as conn:
+            feed = feeds_db.list_feeds(conn)[0]
+            poller._persist_poll(
+                conn, feed,
+                FetchResult(feed_url=feed.url, items=items),
+                now=when, backoff_max_minutes=60, jitter_fraction=0.0,
+            )
+
+    def test_a_pruned_entry_is_not_resurrected_by_the_same_response(
+        self, tmp_path,
+    ):
+        path, feed_id = _seed_one_feed(tmp_path)
+        ctx = _ctx(tmp_path, path)
+        # Two polls: the first brings in an entry the second no longer offers.
+        self._persist(path, [FetchedItem(guid="gone", title="Gone")],
+                      NOW - timedelta(days=300))
+        self._persist(path, [FetchedItem(guid="current", title="Current")],
+                      NOW - timedelta(days=1))
+        with feeds_db.connect(path) as conn:
+            conn.execute("UPDATE feed_entries SET status = 'read'")
+            marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+            _fill_to_floor(conn, feed_id, marker)
+            conn.commit()
+
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert result.entries_deleted_by_age == 1
+        assert result.entries_deleted_by_cap == 0
+        with feeds_db.connect(path) as conn:
+            assert "gone" not in _guids(conn)
+            assert "current" in _guids(conn)
+
+        # Now re-run the response that is still live. Nothing it returned was
+        # deleted, so nothing comes back and nothing flips to unread.
+        self._persist(path, [FetchedItem(guid="current", title="Current")],
+                      NOW + timedelta(minutes=5))
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT guid, status FROM feed_entries WHERE guid IN "
+                "('gone', 'current')"
+            ).fetchall()
+        assert [r["guid"] for r in rows] == ["current"]
+        assert [r["status"] for r in rows] == ["read"]
+
+    def test_an_entry_the_latest_response_returned_is_never_age_deleted(
+        self, tmp_path,
+    ):
+        """The mirror image, and the reason the clause is phrased on the
+        response rather than on the entry's age.
+
+        This entry is 300 days old on the retention clock and has been read
+        the whole time; the source still hands it over, so it stays.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        ctx = _ctx(tmp_path, path)
+        self._persist(path, [FetchedItem(guid="archival", title="Archival")],
+                      NOW - timedelta(days=300))
+        with feeds_db.connect(path) as conn:
+            conn.execute("UPDATE feed_entries SET status = 'read'")
+            conn.commit()
+        # An archive-shaped source: the same block is in the newest response.
+        self._persist(path, [FetchedItem(guid="archival", title="Archival")],
+                      NOW - timedelta(minutes=5))
+        with feeds_db.connect(path) as conn:
+            marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+            _fill_to_floor(conn, feed_id, marker)
+            conn.commit()
+
+        result = retention.prune_feeds(ctx, now=NOW)
+
+        assert result.entries_deleted_by_age == 0
+        # Nothing was held back by the floor either, so the response clause is
+        # the only thing that can have saved it. Its twin above, at the same
+        # rank and the same age, is deleted.
+        assert result.entries_held_by_floor == 0
+        with feeds_db.connect(path) as conn:
+            row = conn.execute(
+                "SELECT guid, fetched_at, status FROM feed_entries "
+                "WHERE guid = 'archival'"
+            ).fetchone()
+        assert row["guid"] == "archival"
+        # The refresh left the retention clock where it was, so the entry is
+        # protected by the response rather than by looking new.
+        assert row["fetched_at"] == (NOW - timedelta(days=300)).isoformat()
+        assert row["status"] == "read"

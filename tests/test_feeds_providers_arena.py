@@ -600,9 +600,11 @@ class TestPayloadValidation:
     """A response that is not a block collection must not read as "no blocks".
 
     ``payload.get("data") or []`` turned every malformed payload into an empty
-    list, indistinguishable from a channel that really is empty. Once absence
-    drives retention, that difference decides whether stored entries are
-    treated as gone (ISSUE-388).
+    list, indistinguishable from a channel that really is empty — so a broken
+    API reported a clean poll, cleared ``last_error`` and kept the ordinary
+    cadence (ISSUE-388). A valid empty list is a real answer and still
+    succeeds; the two lead to the same observation state and to different
+    error state.
     """
 
     def test_a_valid_empty_collection_succeeds(self, stub_raw):

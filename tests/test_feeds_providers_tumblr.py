@@ -134,8 +134,10 @@ class TestPayloadValidation:
 
     ``.get("response", {}).get("posts", [])`` turned every malformed payload
     into an empty list, which is indistinguishable from a blog that really has
-    no posts. Once absence drives retention, that difference decides whether
-    stored entries are treated as gone (ISSUE-388).
+    no posts — so a broken API reported a clean poll, cleared ``last_error``
+    and kept the ordinary cadence (ISSUE-388). A valid empty list is a real
+    answer and still succeeds; the two lead to the same observation state and
+    to different error state.
     """
 
     def test_a_valid_empty_collection_succeeds(self, stub_get):

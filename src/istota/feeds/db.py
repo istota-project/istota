@@ -124,6 +124,11 @@ CREATE INDEX IF NOT EXISTS idx_entries_starred
 CREATE INDEX IF NOT EXISTS idx_entries_feed_last_seen_unstarred
     ON feed_entries(feed_id, last_seen_at)
     WHERE starred = 0;
+-- The one the age pass actually runs on: `fetched_at` is the retention clock
+-- and the pass ranks a feed's rows by it.
+CREATE INDEX IF NOT EXISTS idx_entries_feed_fetched_unstarred
+    ON feed_entries(feed_id, fetched_at)
+    WHERE starred = 0;
 
 -- Normalised image keys per entry, for the reader's cross-entry image
 -- suppression (ISSUE-162). Derived data: rebuildable from feed_entries at
@@ -417,6 +422,10 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_entries_feed_last_seen_unstarred "
         "ON feed_entries(feed_id, last_seen_at) WHERE starred = 0"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entries_feed_fetched_unstarred "
+        "ON feed_entries(feed_id, fetched_at) WHERE starred = 0"
     )
 
     migration_now = datetime.now(timezone.utc)
@@ -846,6 +855,234 @@ def set_image_dedupe_window_days(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             (_IMAGE_DEDUPE_WINDOW_KEY, str(int(days))),
         )
+
+
+def _get_int_setting(conn: sqlite3.Connection, key: str) -> int | None:
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?", (key,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_int_setting(conn: sqlite3.Connection, key: str, value: int | None) -> None:
+    if value is None:
+        conn.execute("DELETE FROM schema_meta WHERE key = ?", (key,))
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            (key, str(int(value))),
+        )
+
+
+def get_entry_retention_days(conn: sqlite3.Connection) -> int | None:
+    """Read the user-set age window in days. ``None`` if unset or malformed.
+
+    ``0`` is a real value meaning "no age pruning", distinct from unset (which
+    falls back to :data:`istota.feeds.models.DEFAULT_ENTRY_RETENTION_DAYS`).
+    """
+    return _get_int_setting(conn, ENTRY_RETENTION_DAYS_KEY)
+
+
+def set_entry_retention_days(conn: sqlite3.Connection, days: int | None) -> None:
+    """Set or clear the age window. ``None`` deletes the stored row."""
+    _set_int_setting(conn, ENTRY_RETENTION_DAYS_KEY, days)
+
+
+def get_max_entries_per_feed(conn: sqlite3.Connection) -> int | None:
+    """Read the user-set per-feed maximum. ``None`` if unset or malformed."""
+    return _get_int_setting(conn, MAX_ENTRIES_PER_FEED_KEY)
+
+
+def set_max_entries_per_feed(conn: sqlite3.Connection, count: int | None) -> None:
+    """Set or clear the per-feed maximum. ``None`` deletes the stored row."""
+    _set_int_setting(conn, MAX_ENTRIES_PER_FEED_KEY, count)
+
+
+def get_entry_prune_not_before(conn: sqlite3.Connection) -> str | None:
+    """The upgrade grace deadline, or ``None`` on a database that has none.
+
+    Internal: written once by the v7-to-v8 migration and never exposed through
+    the API, because a user who could edit it could turn a safety period into
+    an immediate delete.
+    """
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        (ENTRY_PRUNE_NOT_BEFORE_KEY,),
+    ).fetchone()
+    return None if row is None else row["value"]
+
+
+def clear_entry_prune_not_before(conn: sqlite3.Connection) -> None:
+    """Drop the grace row. Called only after both passes have succeeded, in
+    their own transaction, so a rolled-back prune keeps its grace."""
+    conn.execute(
+        "DELETE FROM schema_meta WHERE key = ?", (ENTRY_PRUNE_NOT_BEFORE_KEY,),
+    )
+
+
+def _effective_floor(min_entries_per_feed: int, max_entries_per_feed: int) -> int:
+    """The floor a feed is actually held at.
+
+    The ceiling wins where a user set one below the floor: an explicit
+    instruction to store at most twenty entries must not be overridden by a
+    default that says fifty. With no ceiling there is nothing to clamp
+    against, so the constant stands.
+    """
+    floor = max(min_entries_per_feed, 0)
+    if max_entries_per_feed > 0:
+        return min(floor, max_entries_per_feed)
+    return floor
+
+
+def _changes(conn: sqlite3.Connection) -> int:
+    """Rows the last statement changed.
+
+    ``cursor.rowcount`` is ``-1`` for a statement prefixed by ``WITH`` under
+    this driver, so a caller adding those up silently reports a negative
+    deletion count. ``SELECT changes()`` is read immediately after the delete
+    instead, and is never negative.
+    """
+    return int(conn.execute("SELECT changes()").fetchone()[0])
+
+
+def prune_entries_by_age(
+    conn: sqlite3.Connection,
+    *,
+    before_iso: str,
+    min_entries_per_feed: int,
+    max_entries_per_feed: int,
+) -> tuple[int, int]:
+    """Delete read and removed entries past the age cutoff. ``(deleted, held)``.
+
+    A row goes only when every one of these holds:
+
+    * it is not starred;
+    * it is read or removed — an unread row is never aged out;
+    * its ``fetched_at`` is older than ``before_iso``. That is the clock: when
+      the entry entered *this reader*, not when the source published it;
+    * its feed has a non-null ``last_items_seen_at`` — no response has ever
+      returned an item there otherwise, so nothing is known and it fails
+      closed;
+    * its own ``last_seen_at`` is non-null and older than that marker, so it
+      was **not** in the most recent response. This is the churn guard: we
+      never delete something the feed has just handed us, so the feed cannot
+      hand it back;
+    * and deleting it would not take its feed below the effective floor.
+
+    Rows are ranked newest ``fetched_at`` first across *every* stored row for
+    the feed, not only the deletable ones, so a feed holding fifty unread rows
+    has plenty of history and does lose its old read ones. ``held`` counts the
+    candidates the floor spared — reported rather than inferred, because
+    without it a quiet feed and a feed with nothing to prune produce identical
+    output. Does not commit.
+    """
+    floor = _effective_floor(min_entries_per_feed, max_entries_per_feed)
+    ranked = """
+        WITH ranked AS (
+            SELECT
+                e.id AS id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.feed_id
+                    ORDER BY e.fetched_at DESC, e.id DESC
+                ) AS rn,
+                (
+                    e.starred = 0
+                    AND e.status IN ('read', 'removed')
+                    AND e.fetched_at < :before
+                    AND f.last_items_seen_at IS NOT NULL
+                    AND e.last_seen_at IS NOT NULL
+                    AND e.last_seen_at < f.last_items_seen_at
+                ) AS candidate
+            FROM feed_entries e
+            JOIN feeds f ON f.id = e.feed_id
+        )
+    """
+    params = {"before": before_iso, "floor": floor}
+    # Counted before the delete, and from the same expression, so the two
+    # numbers describe one population rather than two.
+    held = int(conn.execute(
+        ranked + "SELECT COUNT(*) FROM ranked WHERE candidate AND rn <= :floor",
+        params,
+    ).fetchone()[0])
+    conn.execute(
+        ranked
+        + "DELETE FROM feed_entries WHERE id IN ("
+        "SELECT id FROM ranked WHERE candidate AND rn > :floor)",
+        params,
+    )
+    return _changes(conn), held
+
+
+def prune_entries_to_feed_cap(
+    conn: sqlite3.Connection,
+    *,
+    max_entries_per_feed: int,
+) -> tuple[int, int, int]:
+    """Trim each feed to its maximum. ``(deleted, feeds_over, protected)``.
+
+    The maximum applies to *total* stored rows for one feed, with stars as the
+    only exemption, so a feed's unstarred budget is what the maximum leaves
+    after its stars. Among unstarred rows it keeps unread history before read
+    history and, within each, the most recently fetched — the current
+    response's entries are by definition the most recently fetched, so
+    ``fetched_at DESC`` already ranks them first and no second ordering key has
+    to be kept in step.
+
+    The floor is deliberately not honoured here. It guards against an *age*
+    rule emptying a quiet feed; a feed over its configured maximum is by
+    definition not empty, and honouring the floor would make a maximum below
+    fifty unenforceable.
+
+    A feed can still finish above the maximum on its stars alone. That overage
+    is reported rather than guessing that a starred row is safe to delete.
+    ``0`` disables the pass entirely. Does not commit.
+    """
+    if max_entries_per_feed <= 0:
+        return 0, 0, 0
+    conn.execute(
+        """
+        WITH stars AS (
+            SELECT feed_id, COUNT(*) AS n FROM feed_entries
+            WHERE starred = 1 GROUP BY feed_id
+        ),
+        ranked AS (
+            SELECT
+                e.id AS id,
+                e.feed_id AS feed_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.feed_id
+                    ORDER BY
+                        CASE WHEN e.status IN ('read', 'removed') THEN 1 ELSE 0 END,
+                        e.fetched_at DESC,
+                        e.id DESC
+                ) AS rn
+            FROM feed_entries e
+            WHERE e.starred = 0
+        )
+        DELETE FROM feed_entries WHERE id IN (
+            SELECT r.id FROM ranked r
+            LEFT JOIN stars s ON s.feed_id = r.feed_id
+            WHERE r.rn > MAX(:cap - COALESCE(s.n, 0), 0)
+        )
+        """,
+        {"cap": max_entries_per_feed},
+    )
+    deleted = _changes(conn)
+    over = conn.execute(
+        """
+        SELECT COUNT(*) AS feeds, COALESCE(SUM(n - :cap), 0) AS excess FROM (
+            SELECT COUNT(*) AS n FROM feed_entries
+            GROUP BY feed_id HAVING n > :cap
+        )
+        """,
+        {"cap": max_entries_per_feed},
+    ).fetchone()
+    return deleted, int(over["feeds"]), int(over["excess"])
 
 
 # -- entries ------------------------------------------------------------------

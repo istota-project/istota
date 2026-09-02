@@ -1036,3 +1036,144 @@ class TestPollClaimsInTheBatch:
                 now=now + timedelta(seconds=POLL_CLAIM_SECONDS + 1),
             )
         assert len(outcomes) == 1
+
+
+class TestAdmission:
+    """``plan_admission`` caps one response at the same budget the count pass
+    enforces, so a response larger than the maximum has no tail to churn."""
+
+    def _feed(self, tmp_path):
+        path, feed_id = _seed_rss_feed(tmp_path, url="arena:chan")
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feeds SET source_type = 'arena' WHERE id = ?", (feed_id,),
+            )
+            conn.commit()
+        return path, feed_id
+
+    def _poll_with(self, path, guids, *, when, monkeypatch):
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        monkeypatch.setattr(
+            arena_provider, "fetch",
+            lambda ident, **kw: [FetchedItem(guid=g, title=g) for g in guids],
+        )
+        _make_due(path)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, now=when)
+
+    def test_a_response_larger_than_the_maximum_admits_only_the_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        path, _ = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 5)
+            conn.commit()
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            guids = [
+                r["guid"]
+                for r in conn.execute("SELECT guid FROM feed_entries ORDER BY guid")
+            ]
+        # Source order, so the first five blocks of the page.
+        assert guids == ["b00", "b01", "b02", "b03", "b04"]
+
+    def test_repeating_that_response_inserts_nothing_and_resurrects_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        path, _ = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 5)
+            conn.commit()
+        page = [f"b{i:02d}" for i in range(12)]
+        self._poll_with(
+            path, page, when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            conn.execute("UPDATE feed_entries SET status = 'read'")
+            conn.commit()
+        self._poll_with(
+            path, page, when=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT guid, status FROM feed_entries ORDER BY guid"
+            ).fetchall()
+        assert [r["guid"] for r in rows] == ["b00", "b01", "b02", "b03", "b04"]
+        assert {r["status"] for r in rows} == {"read"}
+
+    def test_a_returned_star_is_always_admitted_and_consumes_the_total(
+        self, tmp_path, monkeypatch,
+    ):
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 3)
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                "last_seen_at, status, starred) "
+                "VALUES (?, 'b09', 'b09', ?, ?, 'read', 1)",
+                (feed_id, "2026-08-01T00:00:00+00:00",
+                 "2026-08-01T00:00:00+00:00"),
+            )
+            conn.commit()
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT guid, last_seen_at FROM feed_entries ORDER BY guid"
+            ).fetchall()
+            feed = feeds_db.list_feeds(conn)[0]
+        # The star is refreshed whatever its position in the page, and the
+        # unstarred budget is 3 - 1 = 2.
+        assert [r["guid"] for r in rows] == ["b00", "b01", "b09"]
+        assert {r["last_seen_at"] for r in rows} == {feed.last_items_seen_at}
+
+    def test_a_maximum_of_zero_admits_every_identifiable_item(
+        self, tmp_path, monkeypatch,
+    ):
+        path, _ = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM feed_entries"
+            ).fetchone()["c"]
+        assert count == 12
+
+    def test_plan_admission_drops_unidentifiable_and_duplicate_items(
+        self, tmp_path,
+    ):
+        from istota.feeds import retention
+        from istota.feeds.models import FetchedItem
+
+        path, feed_id = self._feed(tmp_path)
+        items = [
+            FetchedItem(guid=""),
+            FetchedItem(guid="a"),
+            FetchedItem(guid="a", title="second copy"),
+            FetchedItem(guid="b"),
+        ]
+        with feeds_db.connect(path) as conn:
+            admitted = retention.plan_admission(
+                conn, feed_id, items, max_entries_per_feed=10,
+            )
+        assert [i.guid for i in admitted] == ["a", "b"]
+        # The first occurrence wins: a later copy is the same entry, and
+        # taking it would make the window depend on write order.
+        assert admitted[0].title is None

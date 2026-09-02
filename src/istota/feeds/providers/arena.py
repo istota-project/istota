@@ -84,13 +84,15 @@ def fetch(identifier: str, *, limit: int = 50) -> list[FetchedItem]:
 
     # A payload that is not a block collection must not read as "no blocks"
     # (ISSUE-388). The old `payload.get("data") or []` turned every malformed
-    # shape into an empty list indistinguishable from an empty channel, and
-    # once absence drives retention that difference decides whether stored
-    # entries are treated as gone. Raised instead; `poll_feed` turns it into
-    # the ordinary error result, which advances no membership state. A
-    # malformed *block* is still dropped individually below — one bad block
-    # must not cost the channel its poll — but a malformed *document* is not
-    # evidence about any block.
+    # shape into an empty list indistinguishable from an empty channel, so a
+    # broken API, a captcha page decoded as JSON or a v4 rename all reported a
+    # clean poll of an empty channel: `last_error` cleared, the ordinary
+    # cadence kept, and nothing anywhere saying the channel had stopped
+    # arriving. Raised instead; `poll_feed` turns it into the ordinary error
+    # result, which backs off and advances no observation state. A malformed
+    # *block* is still dropped individually below — one bad block must not
+    # cost the channel its poll — but a malformed *document* is not evidence
+    # about any block.
     if not isinstance(payload, dict):
         raise ValueError("are.na payload is not a JSON object")
     blocks = payload.get("data")
