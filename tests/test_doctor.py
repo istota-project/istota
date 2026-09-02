@@ -5130,3 +5130,117 @@ class TestSandboxMasksUsesTheNativeProfile:
         # earlier mask already covers — so the assertion is that it is covered,
         # not that it has a mask of its own.
         assert config.module_db_root().resolve().is_relative_to(db_dir)
+
+
+class TestVerdict:
+    """`verdict` — the adapter for a caller that needs a boolean and a sentence.
+
+    `!check`'s non-admin arm and `heartbeat._check_self` are the two consumers.
+    Both used to compute their own pass/fail from their own hand-rolled probe,
+    which is what this whole spec removes; the shape they need back from the
+    registry is one bool and one line.
+    """
+
+    def _r(self, name, status):
+        return CheckResult(name, status, "detail")
+
+    def test_a_failure_makes_the_verdict_unhealthy(self):
+        healthy, summary = doctor.verdict(
+            [self._r("a.one", OK), self._r("a.two", FAIL)]
+        )
+        assert healthy is False
+        assert "1 fail" in summary
+
+    def test_a_warning_does_not(self):
+        """A warning that pages someone is a failure wearing the wrong label.
+
+        This is a deliberate behaviour change from `heartbeat._check_self`,
+        which appended its high-failure-rate finding to `failures` and so
+        returned `healthy=False` for it.
+        """
+        healthy, summary = doctor.verdict(
+            [self._r("a.one", OK), self._r("a.two", WARN)]
+        )
+        assert healthy is True
+        assert "1 warn" in summary, (
+            f"the warning is not named in the summary: {summary!r}"
+        )
+
+    def test_all_skip_is_healthy_and_says_how_many(self):
+        """A run that checked nothing must not read as a run that passed
+        everything, so the count carries the caveat."""
+        healthy, summary = doctor.verdict(
+            [self._r("a.one", SKIP), self._r("a.two", SKIP)]
+        )
+        assert healthy is True
+        assert "2 skip" in summary
+        assert "0 ok" in summary
+
+    def test_an_empty_list_says_so_in_words(self):
+        assert doctor.verdict([]) == (True, "no checks ran")
+
+    def test_every_status_appears_in_the_summary(self):
+        _, summary = doctor.verdict(
+            [
+                self._r("a.one", OK),
+                self._r("a.two", WARN),
+                self._r("a.three", FAIL),
+                self._r("a.four", SKIP),
+            ]
+        )
+        assert summary == "1 ok, 1 warn, 1 fail, 1 skip"
+
+    def test_it_agrees_with_exit_code(self):
+        """`verdict`'s bool and `exit_code`'s int answer the same question, and
+        a caller reading one and a caller reading the other must not disagree
+        about whether the deployment is healthy."""
+        for results in (
+            [self._r("a.one", OK)],
+            [self._r("a.one", WARN)],
+            [self._r("a.one", FAIL)],
+            [self._r("a.one", SKIP)],
+            [],
+        ):
+            healthy, _ = doctor.verdict(results)
+            assert healthy is (exit_code(results) == 0)
+
+    def test_verdict_and_summarize_are_different_functions(self):
+        """The collision the name was chosen to avoid.
+
+        `summarize` was already taken and returns counts by status; `verdict`
+        returns a bool and a sentence. They look close enough that a later
+        tidy-up could merge them, and the two callers of `verdict` would then
+        get a dict where they expected a tuple.
+        """
+        assert doctor.verdict is not doctor.summarize
+        results = [self._r("a.one", OK)]
+        assert isinstance(doctor.summarize(results), dict)
+        assert isinstance(doctor.verdict(results), tuple)
+
+
+#: The two files that used to carry a hand-rolled copy of the health probe.
+_ONCE_HAND_ROLLED = ("heartbeat.py", "commands.py")
+
+#: Strings that only a hand-rolled copy of the probe can contain. The marker is
+#: what the copies asked the model to echo; `build_bwrap_cmd` is how they
+#: wrapped it. Both now live in `doctor.check_model_execution` and nowhere else.
+_PROBE_FINGERPRINTS = (_MODEL_MARKER, "build_bwrap_cmd")
+
+
+@pytest.mark.parametrize("filename", _ONCE_HAND_ROLLED)
+def test_no_hand_rolled_health_probe(filename):
+    """Neither caller carries its own health probe any more.
+
+    Cheap, and it is what stops the copies growing back — the same shape as
+    `tests/test_lint_scope.py`. Both files ran the same five checks as doctor's
+    registry, in the same order, drifting from it and from each other; the whole
+    point of pointing them at `run_checks` is that there is one copy.
+    """
+    source = Path(doctor.__file__).parent / filename
+    text = source.read_text()
+    for fingerprint in _PROBE_FINGERPRINTS:
+        assert fingerprint not in text, (
+            f"{filename} contains {fingerprint!r} — a hand-rolled health probe "
+            "has grown back. The one copy lives in "
+            "`doctor.check_model_execution`; call `doctor.run_checks` instead."
+        )

@@ -9,9 +9,16 @@ what the runtime was — and none of them was a Python defect.
 
 This module writes those assumptions down. Each check answers one question
 about the host, returns a :class:`CheckResult`, and never raises. It runs at
-daemon start-up, on a scheduler interval, from ``istota doctor``, and from the
-admin dashboard. It is also the oracle the image and smoke test tiers reuse
-instead of hand-writing assertions that drift from the code.
+daemon start-up, on a scheduler interval, from ``istota doctor``, from the admin
+dashboard, from ``!check`` and from the ``self-check`` heartbeat. It is also the
+oracle the image and smoke test tiers reuse instead of hand-writing assertions
+that drift from the code.
+
+The last two are recent. ``commands.cmd_check`` and ``heartbeat._check_self``
+each carried a near-verbatim copy of the other — the same five probes in the
+same order, about 180 duplicated lines — and both had drifted from this registry
+and from each other. ``tests/test_doctor.py::test_no_hand_rolled_health_probe``
+is what stops them growing back.
 
 Two constraints shape the design and are easy to violate by accident:
 
@@ -4944,6 +4951,33 @@ def summarize(results: list[CheckResult]) -> dict[str, int]:
     for r in results:
         counts[r.status] = counts.get(r.status, 0) + 1
     return counts
+
+
+def verdict(results: list[CheckResult]) -> tuple[bool, str]:
+    """``(healthy, one-line summary)`` — for a caller that reports pass/fail.
+
+    ``healthy`` is False when any result is ``FAIL``, matching :func:`exit_code`
+    exactly, so a caller reading the bool and a caller reading the int never
+    disagree about the same deployment. A ``WARN`` is named in the summary and
+    does not make the verdict unhealthy: a warning that pages someone is a
+    failure wearing the wrong label. That is a deliberate change from
+    ``heartbeat._check_self``, which appended its high-failure-rate finding to
+    the same list as its real failures and so paged for it.
+
+    Built on :func:`summarize`'s counts rather than re-walking the list, which
+    is also what keeps the two in step.
+
+    Named ``verdict`` rather than ``summarize`` because that name is taken and
+    returns a different type, and rather than ``health`` because ``healthy`` is
+    already the field it produces. On an empty list it says "no checks ran"
+    rather than rendering four zeroes: a run that checked nothing must not read
+    as a run that passed everything.
+    """
+    if not results:
+        return True, "no checks ran"
+    counts = summarize(results)
+    summary = ", ".join(f"{counts.get(status, 0)} {status}" for status in (OK, WARN, FAIL, SKIP))
+    return counts.get(FAIL, 0) == 0, summary
 
 
 def failing(results: list[CheckResult]) -> list[CheckResult]:

@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -638,103 +637,87 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
     return CheckResult(healthy=True, message="No overdue or upcoming deadlines")
 
 
+#: Registry checks the heartbeat does not run, each with the reason it is out.
+#: Follows `scheduler.SWEEP_SKIPPED_CHECKS`' precedent as a module constant with
+#: its reasons written beside the entries rather than in a commit message.
+#:
+#: What every entry has in common is a cost that multiplies by something the
+#: heartbeat multiplies by. `self-check` is per user *and* per check definition,
+#: on a cadence each user chooses in their own `HEARTBEAT.md`, and it is not
+#: admin-gated — `run_check` gates only `shell-command`. So a check costing one
+#: spawn per configured user, or reaching past a `--version`, is a check this
+#: path must not run.
+_SELF_CHECK_SKIPPED = (
+    # A `PRAGMA quick_check` over the whole framework database. `check_db_health`
+    # owns that on a daily cadence, and `SWEEP_SKIPPED_CHECKS` excludes it from
+    # the hourly sweep for the same reason — more strongly here, since a
+    # heartbeat can be configured to run more often than hourly.
+    "runtime.framework_db",
+    # An HTTPS GET behind its own TTL and its own deployment-wide disk cache.
+    # Its cadence is not this one's to override.
+    "runtime.subscription_usage",
+    # One exec-transport socket connection per configured user.
+    "developer.container",
+    # Spawns `iptables`.
+    "security.devbox_netfilter",
+)
+
+
 def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckResult:
-    """
-    Run system health diagnostics (mirrors !check command).
+    """Run the doctor registry and report its verdict.
 
     Config fields:
-        execution_test: Whether to run Claude CLI invocation test (default: True)
+        execution_test: whether to run the live model invocation (default: True)
+
+    This used to be a hand-rolled copy of `commands.cmd_check` — the same five
+    probes in the same order, drifting from doctor's registry and from the other
+    copy. All five are registry checks now, so this handler selects and renders
+    and asserts nothing of its own.
+
+    Four things about the call are decisions rather than defaults:
+
+    ``execution_test`` selects ``live``, not ``deep``. It gates exactly one
+    thing today — the live model invocation — and ``live`` is exactly one thing.
+    Mapping it to ``deep`` would have widened ``execution_test = false`` from
+    "spawn nothing" to "run the whole registry", and ``true`` to "also build a
+    namespace". The key keeps its name, its default and its meaning.
+
+    ``deep`` is therefore never passed. A namespace spawn on a per-user,
+    per-check cadence multiplies by both; ``security.sandbox_effective`` answers
+    the availability question from the warm memo at no cost, which is what this
+    path actually needs.
+
+    ``probe`` stays True. ``probe=False`` would map neatly onto the old
+    ``shutil.which`` calls, but it would make ``live=True`` self-contradictory,
+    and the cost is already paid: ``scheduler.check_doctor`` runs this same
+    registry hourly with ``probe=True``. :data:`_SELF_CHECK_SKIPPED` names the
+    four whose cost multiplies badly instead.
+
+    And it redacts before anything leaves. `scheduler` and `web_app` both do;
+    this path delivers to a user and had no reason to be the exception. The
+    message names the specific failures because that is what makes the alert
+    actionable — a count alone would be a regression on what this reported
+    before — with :func:`doctor.verdict`'s summary as the fallback when there is
+    nothing to name.
     """
-    from .executor import SandboxProfile, build_bwrap_cmd, build_model_cli_env
+    from . import doctor
 
-    failures = []
-
-    # 1. Claude binary
-    if not shutil.which("claude"):
-        failures.append("Claude binary not found in PATH")
-
-    # 2. Sandbox (bwrap) — only if sandbox enabled
-    if config.security.sandbox_enabled and not shutil.which("bwrap"):
-        failures.append("bwrap not found in PATH (sandbox enabled)")
-
-    # 3. DB health
-    try:
-        with db.get_db(config.db_path) as conn:
-            conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
-    except Exception as e:
-        failures.append(f"Database error: {e}")
-
-    # 4. Recent task failure rate (last hour)
-    try:
-        with db.get_db(config.db_path) as conn:
-            stats = conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-                FROM tasks
-                WHERE created_at > datetime('now', '-1 hour')
-                """,
-            ).fetchone()
-            completed = stats[0] or 0
-            failed = stats[1] or 0
-            if failed > 0 and failed >= completed:
-                failures.append(
-                    f"High failure rate: {failed} failed vs {completed} completed in last hour"
-                )
-    except Exception as e:
-        failures.append(f"Task stats error: {e}")
-
-    # 5. Claude execution test (optional, default enabled)
-    if check.config.get("execution_test", True):
-        try:
-            cmd = [
-                "claude", "-p", "Run: echo healthcheck-ok",
-                "--allowedTools", "Bash",
-                "--output-format", "text",
-            ]
-
-            env = build_model_cli_env(config)
-
-            if config.security.sandbox_enabled:
-                fake_task = db.Task(
-                    id=0, status="running", source_type="cli",
-                    user_id=user_id, prompt="healthcheck",
-                    conversation_token="",
-                )
-                try:
-                    with db.get_db(config.db_path) as conn:
-                        user_resources = db.get_user_resources(conn, user_id)
-                except Exception:
-                    user_resources = []
-                user_temp = config.temp_dir / user_id
-                user_temp.mkdir(parents=True, exist_ok=True)
-                is_admin = config.is_admin(user_id)
-                # CLAUDE: the command this wraps is `claude -p`, which needs
-                # its own binary, its credential and its state directory.
-                cmd = build_bwrap_cmd(
-                    cmd, config, fake_task, is_admin, user_resources, user_temp,
-                    profile=SandboxProfile.CLAUDE,
-                )
-
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, env=env,
-            )
-            if "healthcheck-ok" not in result.stdout:
-                failures.append("Claude execution test: 'healthcheck-ok' not in output")
-        except subprocess.TimeoutExpired:
-            failures.append("Claude execution test timed out (30s)")
-        except Exception as e:
-            failures.append(f"Claude execution test error: {e}")
-
-    if failures:
-        return CheckResult(
-            healthy=False,
-            message="; ".join(failures),
-            details={"failures": failures},
-        )
-
-    return CheckResult(healthy=True, message="All self-checks passed")
+    results = doctor.redact(
+        doctor.run_checks(
+            config,
+            live=bool(check.config.get("execution_test", True)),
+            skip=_SELF_CHECK_SKIPPED,
+        ),
+        config,
+    )
+    healthy, summary = doctor.verdict(results)
+    failures = doctor.failing(results)
+    message = "; ".join(f"{r.name}: {r.detail}" for r in failures) or summary
+    return CheckResult(
+        healthy=healthy,
+        message=message,
+        details={"failures": [r.name for r in failures], "summary": summary},
+    )
 
 
 # Handler dispatch table
