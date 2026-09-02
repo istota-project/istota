@@ -14,18 +14,33 @@ today arrives with a 2019 date and would be purged on the day it appeared;
 ``fetched_at`` is neither, and ``insert_entries`` has always refused to
 overwrite it on refresh, so the field this needs already exists and is stable.
 
-**Churn is closed by "was it in the most recent response", not by a
-completeness test.** An entry is deletable only if ``last_seen_at`` is older
-than its feed's ``last_items_seen_at``. We never delete something the feed has
-just handed us, so the feed cannot hand it back — by construction, rather than
-by inference about what the source still holds. That asks nothing about
-whether the response was complete, well-formed or a full page, which is why
-pagination needs no special handling and no provider gets a branch.
+**The age pass closes churn with "was it in the most recent response",
+not with a completeness test.** An entry is deletable only if
+``last_seen_at`` is older than its feed's ``last_items_seen_at``. We never
+delete something the feed has just handed us, so the feed cannot hand it back
+— by construction, rather than by inference about what the source still holds.
+That asks nothing about whether the response was complete, well-formed or a
+full page, which is why pagination needs no special handling and no provider
+gets a branch.
+
+**The count pass carries no such clause, and keeps the same property a
+different way.** It cannot: a maximum lowered below a feed's own window would
+be unenforceable if every row in the window were undeletable. Instead it must
+delete exactly the rows :func:`plan_admission` refuses, which makes the two
+orderings one fact in two places — see ``prune_entries_to_feed_cap`` on why
+the tie-break is ``id ASC``. Getting that wrong is not a cosmetic difference:
+under the opposite tie-break the pass deleted the head of each response while
+admission kept the head, so every poll handed back what the last prune
+deleted.
 
 **Admission is the other half of the maximum.** A response carrying more items
 than the maximum would otherwise have its tail inserted and immediately
 trimmed, then re-inserted next poll. :func:`plan_admission` caps one response
-at the same budget the count pass enforces, so there is no tail to churn.
+at the same budget the count pass enforces, so there is no tail to churn. What
+it must not do is decide what was *observed*: an item past the budget was
+still returned, so the poller stamps its ``last_seen_at`` anyway
+(``mark_entries_seen``), or the age pass would delete it, free budget, and let
+the next response re-admit it as unread.
 
 This module owns setting resolution, admission, transaction control, dry-run
 behaviour and result construction. The SQL storage helpers stay in
@@ -86,11 +101,11 @@ class PruneResult:
 def _resolve(value: int | None, default: int) -> int:
     """A stored setting, or the constant.
 
-    A negative value resolves to the default rather than being used. The API
-    rejects negatives, so this is the second guard, at the point of use — and
-    it is the one that matters: a negative age window puts the cutoff in the
-    *future*, which makes every stored row past it and deletes the reader on
-    one bad number.
+    A negative value resolves to the default rather than being used. The
+    settings API will reject negatives when it lands; this is the guard at the
+    point of use, and it is the one that matters: a negative age window puts
+    the cutoff in the *future*, which makes every stored row past it and
+    deletes the reader on one bad number.
     """
     if value is None or value < 0:
         return default
@@ -181,19 +196,20 @@ def plan_admission(
     return admitted
 
 
-def _freelist(conn: sqlite3.Connection) -> tuple[int, int]:
-    """``(freelist_count, page_size)``, or zeros where they cannot be read.
+def _pragma_int(conn: sqlite3.Connection, pragma: str) -> int:
+    """One diagnostic PRAGMA, or ``0`` where it cannot be read.
 
-    A diagnostic must never turn a committed deletion into a failure, so this
-    is the one place an exception is swallowed — and only this one.
+    A diagnostic must never turn a committed deletion into a failure, which is
+    why an exception is swallowed here and nowhere else in this module. Read
+    one at a time, so an unavailable ``page_size`` does not also zero a
+    perfectly good freelist count and leave the caller unable to tell which
+    value was missing.
     """
     try:
-        pages = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
-        size = int(conn.execute("PRAGMA page_size").fetchone()[0])
-        return pages, size
+        return int(conn.execute(f"PRAGMA {pragma}").fetchone()[0])
     except sqlite3.Error as exc:
-        logger.debug("feeds_prune_freelist_unavailable err=%s", exc)
-        return 0, 0
+        logger.debug("feeds_prune_pragma_unavailable pragma=%s err=%s", pragma, exc)
+        return 0
 
 
 def _count_images(conn: sqlite3.Connection) -> int:
@@ -284,17 +300,29 @@ def prune_feeds(
                     conn, max_entries_per_feed=max_entries,
                 )
                 images_deleted = images_before - _count_images(conn)
-                if grace is not None:
-                    # Only once both passes have succeeded, and in their own
-                    # transaction, so a rolled-back prune keeps its grace.
+                if grace is not None and (retention_days > 0 or max_entries > 0):
+                    # Only once both passes have succeeded, and inside the same
+                    # transaction they ran in, so a rolled-back or dry run
+                    # keeps its grace. Not cleared when both limits are off:
+                    # nothing could have been deleted, and spending the safety
+                    # period on a run that did nothing would leave a user who
+                    # enables retention afterwards with no grace at all.
                     feeds_db.clear_entry_prune_not_before(conn)
         except Exception:
-            # A partial prune is never reported as success.
-            conn.execute("ROLLBACK")
+            # A partial prune is never reported as success. The rollback is
+            # guarded because SQLite rolls back on its own for some errors
+            # (a full disk, an I/O error), after which ROLLBACK raises "no
+            # transaction is active" — and that secondary error would reach
+            # the operator in place of the real cause.
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error as rollback_exc:
+                logger.debug("feeds_prune_rollback_failed err=%s", rollback_exc)
             raise
 
         conn.execute("ROLLBACK" if dry_run else "COMMIT")
-        pages, page_size = _freelist(conn)
+        pages = _pragma_int(conn, "freelist_count")
+        page_size = _pragma_int(conn, "page_size")
 
     result = PruneResult(
         dry_run=dry_run,

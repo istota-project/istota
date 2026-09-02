@@ -124,8 +124,10 @@ CREATE INDEX IF NOT EXISTS idx_entries_starred
 CREATE INDEX IF NOT EXISTS idx_entries_feed_last_seen_unstarred
     ON feed_entries(feed_id, last_seen_at)
     WHERE starred = 0;
--- The one the age pass actually runs on: `fetched_at` is the retention clock
--- and the pass ranks a feed's rows by it.
+-- `fetched_at` is the retention clock, and both passes rank on it. Partial
+-- like its neighbour, so the age pass — which ranks a feed's whole contents,
+-- stars included, because the floor counts every stored row — cannot use it
+-- and sorts instead; the count pass, which looks at unstarred rows only, can.
 CREATE INDEX IF NOT EXISTS idx_entries_feed_fetched_unstarred
     ON feed_entries(feed_id, fetched_at)
     WHERE starred = 0;
@@ -980,6 +982,15 @@ def prune_entries_by_age(
     candidates the floor spared — reported rather than inferred, because
     without it a quiet feed and a feed with nothing to prune produce identical
     output. Does not commit.
+
+    The tie-break is ``id ASC`` and it is load-bearing rather than arbitrary:
+    every entry of one poll is stored with that poll's single ``fetched_at``,
+    so a whole batch ties and the second key decides all of it.
+    ``insert_entries`` writes in source order, so the lowest rowid is the item
+    the response listed first — the newest content on any ordinary feed.
+    ``id DESC`` therefore protected the *tail* of each response and deleted its
+    head, which is both backwards and out of step with ``plan_admission``,
+    which keeps the head.
     """
     floor = _effective_floor(min_entries_per_feed, max_entries_per_feed)
     ranked = """
@@ -988,7 +999,7 @@ def prune_entries_by_age(
                 e.id AS id,
                 ROW_NUMBER() OVER (
                     PARTITION BY e.feed_id
-                    ORDER BY e.fetched_at DESC, e.id DESC
+                    ORDER BY e.fetched_at DESC, e.id ASC
                 ) AS rn,
                 (
                     e.starred = 0
@@ -1028,10 +1039,18 @@ def prune_entries_to_feed_cap(
     The maximum applies to *total* stored rows for one feed, with stars as the
     only exemption, so a feed's unstarred budget is what the maximum leaves
     after its stars. Among unstarred rows it keeps unread history before read
-    history and, within each, the most recently fetched — the current
-    response's entries are by definition the most recently fetched, so
-    ``fetched_at DESC`` already ranks them first and no second ordering key has
-    to be kept in step.
+    history and, within each, the most recently fetched.
+
+    There is no most-recent-response clause here, and that is deliberate: with
+    one, a maximum lowered below a feed's own window could never be enforced,
+    since every row in the window would be undeletable. What keeps that from
+    becoming churn is that this pass and ``plan_admission`` must delete and
+    refuse *the same rows* — so the tie-break is ``id ASC``, for the reason
+    ``prune_entries_by_age`` states at length: one poll's entries all share
+    that poll's ``fetched_at``, insertion follows source order, and admission
+    keeps the head of the response. Under ``id DESC`` this pass kept the tail
+    instead, so it deleted exactly the entries the next response would hand
+    back — read entries returning as unread, every poll, for good.
 
     The floor is deliberately not honoured here. It guards against an *age*
     rule emptying a quiet feed; a feed over its configured maximum is by
@@ -1059,7 +1078,7 @@ def prune_entries_to_feed_cap(
                     ORDER BY
                         CASE WHEN e.status IN ('read', 'removed') THEN 1 ELSE 0 END,
                         e.fetched_at DESC,
-                        e.id DESC
+                        e.id ASC
                 ) AS rn
             FROM feed_entries e
             WHERE e.starred = 0
@@ -1086,6 +1105,47 @@ def prune_entries_to_feed_cap(
 
 
 # -- entries ------------------------------------------------------------------
+
+
+# SQLite's own host-parameter limit is far higher, but one response can be
+# arbitrarily large and a single over-long IN list would fail the whole poll.
+_PARAM_CHUNK = 400
+
+
+def mark_entries_seen(
+    conn: sqlite3.Connection,
+    feed_id: int,
+    guids: Iterable[str],
+    *,
+    seen_at: str,
+) -> int:
+    """Record that this feed's response returned these guids. Never inserts.
+
+    The counterpart to the observation stamp ``insert_entries`` writes, for the
+    entries a response returned and admission did **not** store — everything
+    past the per-feed budget. Being returned is what protects a row from the
+    age pass, and admission is a decision about the maximum rather than about
+    what was observed, so an entry the source is still handing over must not be
+    left looking like history because the feed is full (ISSUE-388).
+
+    Without it the two rules fight: the age pass deletes those rows, that frees
+    budget, admission then re-admits the same guids from the next response as
+    fresh unread rows, and a read entry resurfaces every retention period.
+    """
+    wanted = [g for g in guids if g]
+    if not wanted or not seen_at:
+        return 0
+    updated = 0
+    for start in range(0, len(wanted), _PARAM_CHUNK):
+        chunk = wanted[start:start + _PARAM_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"UPDATE feed_entries SET last_seen_at = ? "
+            f"WHERE feed_id = ? AND guid IN ({placeholders})",
+            (seen_at, feed_id, *chunk),
+        )
+        updated += max(cur.rowcount, 0)
+    return updated
 
 
 def insert_entries(

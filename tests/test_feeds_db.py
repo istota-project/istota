@@ -2675,13 +2675,26 @@ class TestPruneFeeds:
     def test_a_failing_second_pass_rolls_the_first_one_back(
         self, tmp_path, monkeypatch,
     ):
-        path, feed_id, ctx = self._db(tmp_path)
-        with feeds_db.connect(path) as conn:
-            for i in range(4):
-                _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
-                       last_seen_at=_iso(200), status="read")
-            _mark(conn, feed_id, _iso(1))
-            conn.commit()
+        """The feed is lifted over the floor first, or the age pass deletes
+        nothing and the assertion holds whether or not the rollback runs."""
+        def _seed(target):
+            path, feed_id, ctx = self._db(target)
+            with feeds_db.connect(path) as conn:
+                for i in range(4):
+                    _store(conn, feed_id, f"age{i}", fetched_at=_iso(300 + i),
+                           last_seen_at=_iso(200), status="read")
+                _mark(conn, feed_id, _iso(1))
+                _fill_to_floor(conn, feed_id, _iso(1))
+                conn.commit()
+            return path, ctx
+
+        control_path, control_ctx = _seed(tmp_path / "control")
+        control = retention.prune_feeds(control_ctx, now=NOW)
+        # Without the raise, this fixture really does lose its four old rows.
+        assert control.entries_deleted_by_age == 4
+
+        path, ctx = _seed(tmp_path / "rolled-back")
+        seeded = MIN_ENTRIES_PER_FEED + 4
 
         def _boom(conn, **kwargs):
             raise sqlite3.OperationalError("no such table: nope")
@@ -2690,7 +2703,8 @@ class TestPruneFeeds:
         with pytest.raises(sqlite3.OperationalError):
             retention.prune_feeds(ctx, now=NOW)
         with feeds_db.connect(path) as conn:
-            assert len(_guids(conn)) == 4
+            assert len(_guids(conn)) == seeded
+        assert control_path != path
 
     def test_age_retention_of_zero_skips_only_the_age_pass(self, tmp_path):
         path, feed_id, ctx = self._db(tmp_path)
@@ -2774,12 +2788,92 @@ class TestUpgradeGrace:
             assert len(_guids(conn)) == 10
         assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY in keys
 
+    def test_a_run_with_both_limits_off_does_not_spend_the_grace(self, tmp_path):
+        """Nothing could have been deleted, so the safety period is not used up.
+
+        Otherwise a user who turns retention on after the first post-upgrade
+        prune gets no grace at all.
+        """
+        path, ctx = self._deferred_db(tmp_path, NOW.isoformat())
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+
+        result = retention.prune_feeds(ctx, now=NOW)
+
+        assert (result.entries_deleted_by_age, result.entries_deleted_by_cap) == (0, 0)
+        with feeds_db.connect(path) as conn:
+            keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
+        assert feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY in keys
+
     def test_a_malformed_grace_timestamp_fails_closed(self, tmp_path):
         path, ctx = self._deferred_db(tmp_path, "not-a-timestamp")
         with pytest.raises(ValueError):
             retention.prune_feeds(ctx, now=NOW)
         with feeds_db.connect(path) as conn:
             assert len(_guids(conn)) == 10
+
+
+class TestOneBatchOrdering:
+    """Every entry of one poll carries that poll's single ``fetched_at``.
+
+    So a whole response ties on the retention clock and the tie-break decides
+    all of it. Every other test in this file gives each row a distinct
+    ``fetched_at``, which is the one shape a real poll never produces.
+    """
+
+    def _batch(self, path, feed_id, guids, when):
+        from istota.feeds import poller
+
+        with feeds_db.connect(path) as conn:
+            feed = feeds_db.list_feeds(conn)[0]
+            poller._persist_poll(
+                conn, feed,
+                FetchResult(
+                    feed_url=feed.url,
+                    items=[FetchedItem(guid=g, title=g) for g in guids],
+                ),
+                now=when, backoff_max_minutes=60, jitter_fraction=0.0,
+            )
+
+    def test_the_count_pass_keeps_the_head_of_the_response(self, tmp_path):
+        """The head is what ``plan_admission`` keeps, so it is what survives.
+
+        Under the opposite tie-break this pass kept the *tail* of the batch and
+        deleted its head — precisely the entries the next response hands back,
+        which is churn every poll rather than a one-off trim.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        self._batch(path, feed_id, [f"n{i:02d}" for i in range(1, 21)],
+                    NOW - timedelta(days=1))
+        with feeds_db.connect(path) as conn:
+            deleted, _, _ = feeds_db.prune_entries_to_feed_cap(
+                conn, max_entries_per_feed=15,
+            )
+            conn.commit()
+            kept = _guids(conn)
+        assert deleted == 5
+        assert kept == [f"n{i:02d}" for i in range(1, 16)]
+
+    def test_the_age_floor_holds_the_head_of_the_response(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        self._batch(path, feed_id, [f"p{i:02d}" for i in range(60)],
+                    NOW - timedelta(days=300))
+        with feeds_db.connect(path) as conn:
+            conn.execute("UPDATE feed_entries SET status = 'read'")
+            _mark(conn, feed_id, _iso(1))
+            conn.commit()
+            deleted, held = feeds_db.prune_entries_by_age(
+                conn, before_iso=_iso(90),
+                min_entries_per_feed=MIN_ENTRIES_PER_FEED,
+                max_entries_per_feed=0,
+            )
+            conn.commit()
+            kept = _guids(conn)
+        assert (deleted, held) == (10, MIN_ENTRIES_PER_FEED)
+        # The floor keeps the fifty the response listed first, not its tail.
+        assert kept == [f"p{i:02d}" for i in range(MIN_ENTRIES_PER_FEED)]
 
 
 class TestTheChurnControl:
@@ -2839,6 +2933,85 @@ class TestTheChurnControl:
             ).fetchall()
         assert [r["guid"] for r in rows] == ["current"]
         assert [r["status"] for r in rows] == ["read"]
+
+    def test_the_count_pass_deletes_only_what_admission_will_refuse(
+        self, tmp_path,
+    ):
+        """The count pass's own churn control, and the reason it needs no
+        most-recent-response clause of its own.
+
+        A response larger than the maximum is the shape that exposes it: the
+        pass must delete exactly the rows the next admission will refuse, or
+        the two take turns and read entries come back unread every poll.
+        """
+        from istota.feeds import poller
+
+        path, feed_id = _seed_one_feed(tmp_path)
+        ctx = _ctx(tmp_path, path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 20)
+            conn.commit()
+
+        def _poll(guids, when):
+            with feeds_db.connect(path) as conn:
+                feed = feeds_db.list_feeds(conn)[0]
+                poller._persist_poll(
+                    conn, feed,
+                    FetchResult(
+                        feed_url=feed.url,
+                        items=[FetchedItem(guid=g, title=g) for g in guids],
+                    ),
+                    now=when, backoff_max_minutes=60, jitter_fraction=0.0,
+                )
+
+        page_one = [f"n{i:02d}" for i in range(1, 26)]
+        _poll(page_one, NOW - timedelta(days=2))
+        with feeds_db.connect(path) as conn:
+            conn.execute("UPDATE feed_entries SET status = 'read'")
+            conn.commit()
+            assert _guids(conn) == [f"n{i:02d}" for i in range(1, 21)]
+
+        # Three new items at the head push the response's tail out of the
+        # admission window.
+        page_two = [f"m{i:02d}" for i in range(1, 4)] + page_one
+        _poll(page_two, NOW - timedelta(days=1))
+        with feeds_db.connect(path) as conn:
+            rows = {
+                r["guid"]: r["last_seen_at"]
+                for r in conn.execute("SELECT guid, last_seen_at FROM feed_entries")
+            }
+            marker = feeds_db.list_feeds(conn)[0].last_items_seen_at
+        # Returned but not admitted, and still stamped: the source is handing
+        # them over, so they are not history whatever the budget said.
+        assert rows["n18"] == rows["n19"] == rows["n20"] == marker
+
+        result = retention.prune_feeds(ctx, now=NOW)
+        assert result.entries_deleted_by_cap == 3
+        with feeds_db.connect(path) as conn:
+            survivors = _guids(conn)
+        # The three that went are the three the next admission refuses.
+        assert [g for g in ("n18", "n19", "n20") if g in survivors] == []
+        assert {"m01", "m02", "m03", "n01", "n17"} <= set(survivors)
+
+        with feeds_db.connect(path) as conn:
+            before = {
+                r["guid"]: r["status"]
+                for r in conn.execute("SELECT guid, status FROM feed_entries")
+            }
+        _poll(page_two, NOW + timedelta(minutes=5))
+        with feeds_db.connect(path) as conn:
+            after = {
+                r["guid"]: r["status"]
+                for r in conn.execute("SELECT guid, status FROM feed_entries")
+            }
+        # Nothing came back and nothing flipped. The three `m` rows were new in
+        # the second poll and were never read, so the comparison is against the
+        # state before the re-poll rather than a blanket "everything is read".
+        assert after == before
+        assert sorted(after) == sorted(survivors)
+        assert {g: after[g] for g in ("n01", "n17")} == {
+            "n01": "read", "n17": "read",
+        }
 
     def test_an_entry_the_latest_response_returned_is_never_age_deleted(
         self, tmp_path,

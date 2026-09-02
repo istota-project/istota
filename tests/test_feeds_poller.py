@@ -1038,6 +1038,71 @@ class TestPollClaimsInTheBatch:
         assert len(outcomes) == 1
 
 
+class TestConditionalValidators:
+    """An ETag off a document that is not a feed must not be stored.
+
+    A liveness rule rather than a retention one, and it is scoped as narrowly
+    as the marker rule beside it: nothing here judges whether a response was
+    complete. A 200 that yielded no items *and* that the parser did not
+    recognise as a feed at all is the case — an HTML error page — and storing
+    its validator answers every later request with a 304, so the feed stops
+    updating with `last_error` clear and nothing saying why.
+    """
+
+    def test_an_html_error_page_stores_no_validators(self):
+        resp = _StubResponse(
+            status_code=200, content=HTML_ERROR_PAGE,
+            headers={"ETag": '"error-page"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items == []
+        assert result.etag is None
+        assert result.last_modified is None
+
+    def test_a_genuinely_empty_feed_keeps_its_conditional_get(self):
+        """The control, and the reason the guard is not "no items".
+
+        An empty feed is a feed. Refusing its validator would cost it a full
+        body fetch on every poll, for ever, to no purpose.
+        """
+        resp = _StubResponse(
+            status_code=200, content=EMPTY_RSS,
+            headers={"ETag": '"empty-but-real"',
+                     "Last-Modified": "Thu, 01 May 2026 12:00:00 GMT"},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items == []
+        assert result.etag == '"empty-but-real"'
+        assert result.last_modified == "Thu, 01 May 2026 12:00:00 GMT"
+
+    def test_an_ordinary_response_stores_its_validators(self):
+        resp = _StubResponse(
+            status_code=200, content=SAMPLE_RSS,
+            headers={"ETag": '"good"'},
+        )
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.etag == '"good"'
+
+
+class TestPollDueFeedsClock:
+    def test_a_naive_clock_is_refused(self, tmp_path):
+        """A naive stamp sorts below every `+00:00` one in the same column, so
+        a poll would write entries whose observation reads as older than the
+        marker written in the same transaction."""
+        path, _ = _seed_rss_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            with pytest.raises(ValueError):
+                poll_due_feeds(
+                    conn,
+                    http_get=_stub_get_factory(
+                        _StubResponse(status_code=200, content=SAMPLE_RSS)
+                    ),
+                    now=datetime(2026, 9, 1, 12, 0),
+                )
+            assert feeds_db.list_entries(conn) == []
+
+
 class TestAdmission:
     """``plan_admission`` caps one response at the same budget the count pass
     enforces, so a response larger than the maximum has no tail to churn."""

@@ -171,6 +171,20 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
         new_etag = resp_headers.get("etag")
         new_last_modified = resp_headers.get("last-modified")
 
+    if not items and not (parsed.get("version") or ""):
+        # A document that yielded nothing and is not a feed at all — an HTML
+        # error page at HTTP 200 is the case, and it parses cleanly. Storing
+        # its ETag answers every later request with a 304, so the feed stops
+        # updating with `last_error` clear and nothing anywhere saying why,
+        # until the publisher happens to change something.
+        #
+        # This is a liveness guard, not the completeness test this stage
+        # removed: it asks only what the marker rule asks — did the response
+        # return anything — plus whether the parser recognised a feed at all,
+        # so a legitimately empty feed keeps its conditional GET.
+        new_etag = None
+        new_last_modified = None
+
     feed_meta = parsed.get("feed", {}) or {}
     return FetchResult(
         feed_url=feed.url,
@@ -384,8 +398,15 @@ def poll_due_feeds(
     # string — the poll claim across processes, and `last_seen_at` against the
     # feed's observation marker — so a caller's non-UTC clock is converted once
     # here rather than at each of the four writes.
-    if now.tzinfo is not None:
-        now = now.astimezone(timezone.utc)
+    if now.tzinfo is None:
+        # Refused here rather than left to `claim_feed_for_poll`, which already
+        # raises on one, so the message names the entry point the caller
+        # actually used. A naive stamp is not merely unconverted: it sorts
+        # *below* every `+00:00` string in the same column, so a poll would
+        # write entries whose `last_seen_at` reads as older than the marker it
+        # wrote in the same transaction — its own entries, age-deletable.
+        raise ValueError("poll_due_feeds requires a timezone-aware `now`")
+    now = now.astimezone(timezone.utc)
     sleep = sleep or time.sleep
     rng = rng or random.Random()
     feeds = feeds_db.feeds_due_for_poll(conn, now=now)
@@ -568,6 +589,20 @@ def _persist_poll(
             for item in admitted
         ]
         new_count = feeds_db.insert_entries(conn, feed.id, records)
+
+    # Everything the response returned was observed, whether or not admission
+    # had room to store it. Admission is a decision about the per-feed maximum;
+    # `last_seen_at` is a record of what the source is still handing over, and
+    # conflating the two would leave a returned-but-unadmitted entry looking
+    # like history — age-deleted, which frees budget, which lets the next
+    # response re-admit it as unread. That is the churn the design forbids.
+    if returned:
+        admitted_guids = {item.guid for item in admitted}
+        feeds_db.mark_entries_seen(
+            conn, feed.id,
+            [item.guid for item in returned if item.guid not in admitted_guids],
+            seen_at=fetched_iso,
+        )
 
     interval = max(feed.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES)
     next_poll = _schedule(now, interval, jitter_fraction, rng)
