@@ -30,6 +30,7 @@ from istota.doctor import (
     DEPLOYMENT,
     FAIL,
     IMAGE,
+    LIVE_CHECKS,
     OK,
     SKIP,
     WARN,
@@ -51,6 +52,12 @@ def _fake_bin(path, output="", exit_code=0):
 
 def _by_name(results):
     return {r.name: r for r in results}
+
+
+#: What `runtime.model_execution` asks the model to echo. Restated rather than
+#: imported, so a rename of the private constant cannot silently disarm the
+#: sentinel below by making it match nothing.
+_MODEL_MARKER = "healthcheck-ok"
 
 
 def _dev_config(make_config, tmp_path, **developer_overrides):
@@ -88,17 +95,48 @@ class TestRegistry:
         names = {name for name, _ in CHECKS}
         assert DEEP_CHECKS <= names
 
+    def test_live_checks_are_registered(self):
+        names = {name for name, _ in CHECKS}
+        assert LIVE_CHECKS <= names
+
     def test_every_result_name_matches_its_registry_entry(self, make_config, tmp_path):
         """`only=` filters on the registry name, so a result named something
         else is invisible to the caller that asked for it."""
         config = _dev_config(make_config, tmp_path)
         for name, _ in CHECKS:
-            results = run_checks(config, only=(name,), deep=True)
+            # `live=` because a registry entry filtered out of the sweep is a
+            # registry entry this test does not check. It is the one place in
+            # the default suite that selects the model probe at all, so the
+            # sentinel goes on the iteration that takes the risk rather than in
+            # a neighbouring test: `_dev_config` configures no users and the
+            # check therefore SKIPs, but nothing here enforces that, and a
+            # guard that only reports afterwards reports after the spend.
+            live = name in LIVE_CHECKS
+            with pytest.MonkeyPatch.context() as mp:
+                if live:
+                    mp.setattr(subprocess, "run", _NoModel())
+                results = run_checks(config, only=(name,), deep=True, live=live)
             assert results, f"{name} produced no result"
             for r in results:
                 assert r.name == name or r.name.startswith(name + "."), (
                     f"{name} returned a result named {r.name!r}"
                 )
+
+    def test_the_registry_sweep_cannot_reach_a_model(self, make_config, tmp_path, monkeypatch):
+        """The sweep above is the only `live=True` run in the default suite.
+
+        It does not bill the account because `_dev_config` configures no users
+        and `runtime.model_execution` therefore SKIPs — which is luck until
+        something asserts it. This is that assertion, with `subprocess.run`
+        replaced by a sentinel so a future change that makes the sweep reach a
+        model fails here rather than on an invoice.
+        """
+        sentinel = _NoModel()
+        monkeypatch.setattr(subprocess, "run", sentinel)
+        config = _dev_config(make_config, tmp_path)
+        results = run_checks(config, only=("runtime.model_execution",), deep=True, live=True)
+        assert [r.status for r in results] == [SKIP]
+        assert sentinel.calls == []
 
     def test_every_result_has_a_detail(self, make_config, tmp_path):
         config = _dev_config(make_config, tmp_path)
@@ -632,6 +670,548 @@ class TestFrameworkDb:
         monkeypatch.setattr(db_health, "reindex", _fail)
         monkeypatch.setattr(db_health, "check_and_repair", _fail)
         run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))
+
+
+class TestTaskFailureRate:
+    """The recent-failure-rate query, lifted verbatim off the two hand-rolled
+    probes in `heartbeat.py` and `commands.py`.
+
+    Driven through the real `db` helpers against a `tmp_path` database rather
+    than by patching the query: the predicate and the NULL coalescing are the
+    whole subject, and a patched query would be asserting about the patch.
+    """
+
+    def _db(self, tmp_path, statuses):
+        from istota import db
+
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            for status in statuses:
+                task_id = db.create_task(conn, prompt="p", user_id="alice")
+                db.update_task_status(conn, task_id, status)
+        return db_path
+
+    def _run(self, make_config, db_path):
+        return run_checks(make_config(db_path=db_path), only=("runtime.task_failure_rate",))[0]
+
+    def test_warns_when_failures_match_or_beat_completions(self, make_config, tmp_path):
+        db_path = self._db(tmp_path, ["failed", "failed", "completed"])
+        r = self._run(make_config, db_path)
+        assert r.status == WARN
+        assert r.remedy.strip()
+        assert "2" in r.detail and "1" in r.detail
+
+    def test_warns_at_the_boundary(self, make_config, tmp_path):
+        """`failed >= completed`, not `>`. One and one is the existing predicate."""
+        r = self._run(make_config, self._db(tmp_path, ["failed", "completed"]))
+        assert r.status == WARN
+
+    def test_ok_when_failures_are_a_minority(self, make_config, tmp_path):
+        r = self._run(make_config, self._db(tmp_path, ["failed", "completed", "completed"]))
+        assert r.status == OK
+
+    def test_ok_when_nothing_failed(self, make_config, tmp_path):
+        r = self._run(make_config, self._db(tmp_path, ["completed", "completed"]))
+        assert r.status == OK
+
+    def test_ok_on_an_empty_window(self, make_config, tmp_path):
+        """`SUM` over no rows is NULL, not 0. Both copies coalesce before
+        comparing; a naive port raises here, on the commonest deployment state."""
+        r = self._run(make_config, self._db(tmp_path, []))
+        assert r.status == OK
+
+    def test_old_rows_are_outside_the_window(self, make_config, tmp_path):
+        from istota import db
+
+        db_path = self._db(tmp_path, ["failed", "failed"])
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE tasks SET created_at = datetime('now', '-2 hours')")
+        r = self._run(make_config, db_path)
+        assert r.status == OK
+
+    def test_never_fails_on_a_high_rate(self, make_config, tmp_path):
+        """A symptom, not a broken deployment: it must not fail the daemon's
+        start-up report or `istota doctor`'s exit code."""
+        r = self._run(make_config, self._db(tmp_path, ["failed", "failed"]))
+        assert r.status != FAIL
+        assert exit_code([r]) == 0
+
+    def test_skips_with_no_database(self, make_config, tmp_path):
+        r = self._run(make_config, tmp_path / "absent.db")
+        assert r.status == SKIP
+
+    def test_fails_with_no_tasks_table(self, make_config, tmp_path):
+        """`check_framework_db` runs `quick_check` and never touches `tasks`, so
+        a schema-less database passes it. This is where that surfaces."""
+        import sqlite3
+
+        db_path = tmp_path / "istota.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE unrelated (a INTEGER)")
+        conn.commit()
+        conn.close()
+        r = self._run(make_config, db_path)
+        assert r.status == FAIL
+        assert "init" in r.remedy
+
+    def test_a_corrupt_file_gets_the_restore_remedy_not_init(self, make_config, tmp_path):
+        """The URI form opens lazily, so a file that is not a database connects
+        and raises on the first execute — in the same branch a missing table
+        lands in. `istota init` is the wrong advice for corruption."""
+        db_path = tmp_path / "istota.db"
+        db_path.write_bytes(b"this is definitely not a sqlite database")
+        r = self._run(make_config, db_path)
+        assert r.status == FAIL
+        assert "db_restore" in r.remedy
+        assert "init" not in r.remedy
+
+    def test_opens_the_database_read_only(self, make_config, tmp_path, monkeypatch):
+        """`sudo istota doctor` against a stopped daemon must not materialize
+        root-owned WAL sidecars — `check_framework_db`'s reasoning, same file."""
+        import sqlite3
+
+        seen = []
+        real_connect = sqlite3.connect
+
+        def _spy(target, *args, **kwargs):
+            seen.append(target)
+            return real_connect(target, *args, **kwargs)
+
+        db_path = self._db(tmp_path, ["completed"])
+        monkeypatch.setattr(sqlite3, "connect", _spy)
+        assert self._run(make_config, db_path).status == OK
+        assert seen, "the check opened no connection"
+        assert all(str(t).startswith("file:") and "mode=ro" in str(t) for t in seen), seen
+
+    def test_is_deployment_scoped(self, make_config, tmp_path):
+        assert self._run(make_config, tmp_path / "absent.db").scope == DEPLOYMENT
+
+    def test_is_not_live_or_deep(self):
+        """It opens a file and spawns nothing, so it runs for every caller."""
+        assert "runtime.task_failure_rate" not in doctor.LIVE_CHECKS
+        assert "runtime.task_failure_rate" not in DEEP_CHECKS
+
+
+class _ModelReached(BaseException):
+    """Deliberately not an ``Exception``.
+
+    Both `check_model_execution` and `run_checks` catch `Exception` and turn it
+    into a FAIL result, so a sentinel raising `AssertionError` is swallowed
+    twice over: the test that spent the money goes green unless it happens to
+    assert on the sentinel's own call list. A `BaseException` passes through
+    both and ends the test where the call happened.
+    """
+
+
+#: Captured before any test can patch it, so the stand-in below can delegate.
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+class _NoModel:
+    """A `subprocess.run` stand-in that fails the test if the *model probe* runs.
+
+    It discriminates on the probe's own marker rather than refusing everything,
+    because a blanket refusal cannot be installed across a whole-registry run:
+    `runtime.model_cli`, `runtime.tmux` and the forge checks all spawn a real
+    `--version`, and turning those into a "reached a model" failure would
+    report the hazard where there is none while saying nothing about the one
+    that matters. Everything else is delegated to the real function, which is
+    what those checks would have called anyway.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, cmd, *args, **kwargs):
+        if any(_MODEL_MARKER in str(part) for part in (cmd or ())):
+            self.calls.append(cmd)
+            raise _ModelReached("a test reached a real model invocation")
+        return _REAL_SUBPROCESS_RUN(cmd, *args, **kwargs)
+
+
+class TestModelExecution:
+    """The live `claude -p` probe.
+
+    Every case patches `subprocess.run` and asserts the patched callable was
+    the one invoked, so no case can bill the account by accident.
+    """
+
+    def _config(self, make_config, make_user_config, tmp_path, **overrides):
+        fields = {"users": {"alice": make_user_config()}, "admin_users": {"alice"}}
+        fields.update(overrides)
+        return make_config(**fields)
+
+    def _stub(self, monkeypatch, *, stdout="healthcheck-ok\n", stderr="", raises=None):
+        calls = []
+
+        def _run_stub(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if raises is not None:
+                raise raises
+            return subprocess.CompletedProcess(cmd, 0, stdout, stderr)
+
+        monkeypatch.setattr(subprocess, "run", _run_stub)
+        return calls
+
+    def _unsandboxed(self, monkeypatch):
+        """Pin the wrap off, so a Linux host and a macOS host answer alike."""
+        from istota import executor
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: False)
+
+    def _run(self, config, **kwargs):
+        kwargs.setdefault("live", True)
+        return run_checks(config, only=("runtime.model_execution",), **kwargs)[0]
+
+    def test_skips_under_probe_false_even_when_live(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """The no-spawn constraint at the top of doctor.py is unconditional,
+        and this is the most expensive possible way to violate it."""
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        config = self._config(make_config, make_user_config, tmp_path)
+        r = self._run(config, probe=False)
+        assert r.status == SKIP
+
+    def test_skips_on_a_native_brain(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        from istota.config import BrainConfig
+
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        config = self._config(
+            make_config, make_user_config, tmp_path, brain=BrainConfig(kind="native")
+        )
+        r = self._run(config)
+        assert r.status == SKIP
+        assert "native" in r.detail
+
+    def test_skips_with_no_user_to_run_as(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        r = self._run(make_config())
+        assert r.status == SKIP
+        assert "user" in r.detail
+
+    def test_ok_when_the_echo_comes_back(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        self._unsandboxed(monkeypatch)
+        calls = self._stub(monkeypatch)
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert r.status == OK
+        assert len(calls) == 1
+        cmd, kwargs = calls[0]
+        assert cmd[0] == "claude" and "healthcheck-ok" in " ".join(cmd)
+        assert kwargs["timeout"] == doctor.MODEL_PROBE_TIMEOUT
+
+    def test_fails_when_the_output_is_wrong(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch, stdout="something else", stderr="boom")
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert r.status == FAIL
+        assert r.remedy.strip()
+        # The excerpt is what makes the finding actionable; without asserting it
+        # the whole `observed` chain could return "" and this would still pass.
+        assert "boom" in r.detail
+
+    def test_the_detail_falls_back_to_stdout_and_names_the_exit_status(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        self._unsandboxed(monkeypatch)
+        calls = []
+
+        def _run_stub(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 7, "only on stdout", "")
+
+        monkeypatch.setattr(subprocess, "run", _run_stub)
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert r.status == FAIL
+        assert "only on stdout" in r.detail
+        assert "7" in r.detail
+        assert calls
+
+    def test_the_detail_bounds_a_long_stream(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """A subprocess stream is unbounded; a rendered check line is not."""
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch, stdout="nope", stderr="x " * 5000)
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert len(r.detail) < 400, len(r.detail)
+
+    def test_the_detail_says_so_when_there_was_no_output_at_all(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch, stdout="", stderr="")
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert r.status == FAIL
+        assert "no output" in r.detail
+
+    def test_fails_on_a_timeout(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        self._unsandboxed(monkeypatch)
+        self._stub(
+            monkeypatch, raises=subprocess.TimeoutExpired(cmd=["claude"], timeout=30)
+        )
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert r.status == FAIL
+        assert "timed out" in r.detail
+
+    def test_fails_when_the_binary_is_missing(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch, raises=FileNotFoundError("no claude"))
+        r = self._run(self._config(make_config, make_user_config, tmp_path))
+        assert r.status == FAIL
+
+    def test_resolves_the_single_admin_and_says_so(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """The probe answers a question about the deployment, not about a
+        caller, so which user it ran as belongs in the detail."""
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch)
+        config = self._config(
+            make_config,
+            make_user_config,
+            tmp_path,
+            users={"alice": make_user_config(), "bob": make_user_config()},
+            admin_users={"bob"},
+        )
+        assert "bob" in self._run(config).detail
+
+    def test_falls_through_to_a_configured_user_when_everyone_is_admin(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """An empty `admin_users` means everyone is admin (`Config.is_admin`),
+        so it names nobody in particular and the user list decides."""
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch)
+        config = self._config(
+            make_config,
+            make_user_config,
+            tmp_path,
+            users={"alice": make_user_config()},
+            admin_users=set(),
+        )
+        assert "alice" in self._run(config).detail
+
+    def test_prefers_an_admin_who_is_also_a_configured_user(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """With several admins, the probe must still run in an admin's sandbox
+        shape — that is the deployment the operator asked about. Picking the
+        first configured user would answer as `alice`, a non-admin, and
+        `build_bwrap_cmd` would build the scoped namespace instead."""
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch)
+        config = self._config(
+            make_config,
+            make_user_config,
+            tmp_path,
+            users={
+                "alice": make_user_config(),
+                "bob": make_user_config(),
+                "carol": make_user_config(),
+            },
+            admin_users={"bob", "carol"},
+        )
+        assert "bob" in self._run(config).detail
+
+    def test_an_admin_with_no_user_config_does_not_displace_a_real_user(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """`admin_users` comes from /etc/istota/admins and has no relationship
+        to `config.users`, so an admin id with nothing behind it would get a
+        namespace around a workspace that does not exist — a failure about the
+        user list wearing a model-failure label."""
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch)
+        config = self._config(
+            make_config,
+            make_user_config,
+            tmp_path,
+            users={"alice": make_user_config()},
+            admin_users={"ghost"},
+        )
+        assert "alice" in self._run(config).detail
+
+    def test_refuses_rather_than_creating_the_per_user_temp_dir(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """Doctor is a diagnostic and one of its entry points is an operator
+        shell, so creating this directory means `sudo istota doctor` leaves a
+        root-owned one every later task binds read-write and cannot write to."""
+        from istota import executor
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        config = self._config(make_config, make_user_config, tmp_path)
+        user_temp = Path(config.temp_dir) / "alice"
+        assert not user_temp.exists()
+
+        r = self._run(config)
+
+        assert r.status == SKIP
+        assert not user_temp.exists(), "the check created the directory it was asked about"
+
+    def test_reads_user_resources_read_only(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """`db.get_db` connects read-write and commits; on a WAL database that
+        materializes sidecars a `sudo` run would leave owned by root."""
+        import sqlite3
+
+        from istota import db, executor
+
+        seen = []
+        real_connect = sqlite3.connect
+
+        def _spy(target, *args, **kwargs):
+            seen.append(str(target))
+            return real_connect(target, *args, **kwargs)
+
+        config = self._config(make_config, make_user_config, tmp_path)
+        db.init_db(Path(config.db_path))
+        (Path(config.temp_dir) / "alice").mkdir(parents=True)
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
+        monkeypatch.setattr(executor, "build_bwrap_cmd", lambda cmd, *a, **kw: list(cmd))
+        self._stub(monkeypatch)
+        monkeypatch.setattr(sqlite3, "connect", _spy)
+
+        assert self._run(config).status == OK
+        assert seen, "the resource lookup opened no connection"
+        assert all("mode=ro" in target for target in seen), seen
+
+    def test_wraps_under_effective_sandboxing_not_the_flag(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """On the shipped Docker stack `sandbox_enabled` is true and the
+        namespace cannot be created, so the copies' spelling builds a wrap that
+        dies for the wrong reason."""
+        from istota import executor
+
+        def _must_not_wrap(*args, **kwargs):
+            raise AssertionError("wrapped a probe on a deployment with no sandbox")
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: False)
+        monkeypatch.setattr(executor, "build_bwrap_cmd", _must_not_wrap)
+        calls = self._stub(monkeypatch)
+        config = self._config(make_config, make_user_config, tmp_path)
+        assert self._run(config).status == OK
+        assert calls[0][0][0] == "claude"
+
+    def test_wraps_when_the_sandbox_is_effective(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        from istota import executor
+        from istota.executor import SandboxProfile
+
+        seen = {}
+
+        def _wrap(cmd, config, task, is_admin, user_resources, user_temp_dir, *a, **kw):
+            seen["profile"] = kw.get("profile")
+            seen["task"] = task
+            seen["temp"] = user_temp_dir
+            return ["bwrap", "--", *cmd]
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
+        monkeypatch.setattr(executor, "build_bwrap_cmd", _wrap)
+        calls = self._stub(monkeypatch)
+        config = self._config(make_config, make_user_config, tmp_path)
+        # The check refuses to create this itself; the daemon owns that.
+        (Path(config.temp_dir) / "alice").mkdir(parents=True)
+        assert self._run(config).status == OK
+        assert calls[0][0][0] == "bwrap"
+        assert seen["profile"] == SandboxProfile.CLAUDE
+        assert seen["task"].user_id == "alice"
+
+    def test_env_comes_from_build_model_cli_env(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """A daemon-side model call with no task behind it: its env is that
+        function's business, not `os.environ`'s."""
+        from istota import executor
+
+        self._unsandboxed(monkeypatch)
+        monkeypatch.setattr(executor, "build_model_cli_env", lambda config: {"MARKER": "1"})
+        calls = self._stub(monkeypatch)
+        self._run(self._config(make_config, make_user_config, tmp_path))
+        assert calls[0][1]["env"] == {"MARKER": "1"}
+
+    def test_is_deployment_scoped(self, make_config, tmp_path, monkeypatch):
+        sentinel = _NoModel()
+        monkeypatch.setattr(subprocess, "run", sentinel)
+        assert self._run(make_config()).scope == DEPLOYMENT
+        # A scope assertion is true of the FAIL a swallowed sentinel would
+        # produce as well, so it cannot stand alone on this check.
+        assert sentinel.calls == []
+
+
+class TestLiveChecks:
+    """The second opt-in axis. `DEEP_CHECKS` means "spawns a namespace";
+    `LIVE_CHECKS` means "costs money", and no caller wants one flag for both."""
+
+    def test_live_checks_are_registered(self):
+        assert doctor.LIVE_CHECKS <= {name for name, _ in CHECKS}
+
+    def test_the_two_axes_are_disjoint(self):
+        assert not (doctor.LIVE_CHECKS & DEEP_CHECKS)
+
+    def test_the_sentinel_matches_the_probes_own_marker(self):
+        """`_NoModel` discriminates on this string. A rename in doctor.py that
+        did not reach here would disarm every guard in this file at once, and
+        every one of them would keep passing."""
+        assert doctor._MODEL_PROBE_MARKER == _MODEL_MARKER
+
+    def test_deep_checks_is_exactly_the_mask_probe(self):
+        """A budget guard for `web_app._doctor_deep_timeout`, which is
+        `DEEP_TIMEOUT` plus headroom for exactly one deep check. It lives here
+        because the file that pays for a violation cannot see it."""
+        assert DEEP_CHECKS == frozenset({"sandbox.masks"})
+
+    def test_deep_does_not_select_a_live_check(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        names = {r.name for r in run_checks(make_config(), deep=True)}
+        assert "runtime.model_execution" not in names
+
+    def test_live_selects_it(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        names = {r.name for r in run_checks(make_config(), live=True)}
+        assert "runtime.model_execution" in names
+
+    def test_live_filters_before_invoking(self, make_config, tmp_path, monkeypatch):
+        """A live check discarded after the fact is a live check that already
+        billed. Same shape as `test_only_selects_before_invoking`."""
+        called = []
+
+        def _explodes(config, probe):
+            called.append(1)
+            raise AssertionError("a live check must not run without live=True")
+
+        monkeypatch.setattr(
+            doctor,
+            "CHECKS",
+            (("runtime.platform", doctor.check_platform), ("live.check", _explodes)),
+        )
+        monkeypatch.setattr(doctor, "LIVE_CHECKS", frozenset({"live.check"}))
+        monkeypatch.setitem(doctor.CHECK_SCOPES, "live.check", DEPLOYMENT)
+        results = run_checks(make_config(), deep=True)
+        assert called == []
+        assert [r.name for r in results] == ["runtime.platform"]
+
+    def test_live_does_not_imply_deep(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", _NoModel())
+        names = {r.name for r in run_checks(make_config(), live=True)}
+        assert "sandbox.masks" not in names
 
 
 class TestWritableDirs:
