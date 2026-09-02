@@ -1134,6 +1134,59 @@ class TestRetentionSettingsConfig:
         assert resp.status_code == 200
         assert self._validator_state(ctx) == [(None, None, None)] * 2
 
+    def test_a_throttled_feed_keeps_its_standoff_through_a_maximum_change(
+        self, ctx, client,
+    ):
+        # ISSUE-347's invariant is that a 429 never schedules sooner than a
+        # success would. A settings save is user-triggered and repeatable, so
+        # clearing `next_poll_at` here would hand the user a way to stampede a
+        # host that has just turned us away, one save at a time. The validators
+        # still go, because they only decide what the next request asks for.
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            first = feeds_db.list_feeds(conn)[0]
+            conn.execute(
+                "UPDATE feeds SET last_throttled_at = ? WHERE id = ?",
+                ("2026-09-01T00:00:00+00:00", first.id),
+            )
+            conn.commit()
+
+        resp = self._put(client, {"max_entries_per_feed": 100}, feeds=feeds)
+        assert resp.status_code == 200
+
+        with feeds_db.connect(ctx.db_path) as conn:
+            by_url = {f.url: f for f in feeds_db.list_feeds(conn)}
+        throttled = by_url[first.url]
+        healthy = [f for u, f in by_url.items() if u != first.url][0]
+        # The standoff survives; the validators do not.
+        assert throttled.next_poll_at == self.STALE[2]
+        assert (throttled.etag, throttled.last_modified) == (None, None)
+        # Its neighbour is still made due, so the narrowing is targeted rather
+        # than a blanket refusal to reset.
+        assert healthy.next_poll_at is None
+
+    def test_an_erroring_feed_keeps_its_backoff_through_a_maximum_change(
+        self, ctx, client,
+    ):
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            first = feeds_db.list_feeds(conn)[0]
+            conn.execute(
+                "UPDATE feeds SET error_count = 3 WHERE id = ?", (first.id,),
+            )
+            conn.commit()
+
+        resp = self._put(client, {"max_entries_per_feed": 100}, feeds=feeds)
+        assert resp.status_code == 200
+
+        with feeds_db.connect(ctx.db_path) as conn:
+            by_url = {f.url: f for f in feeds_db.list_feeds(conn)}
+        assert by_url[first.url].next_poll_at == self.STALE[2]
+
     def test_an_unchanged_effective_maximum_leaves_the_validators_alone(
         self, ctx, client,
     ):

@@ -866,9 +866,26 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
             # next poll fetch a full body once, which is what lets admission
             # fill the new budget. The age window needs no such reset: it
             # deletes on a stored clock and inserts nothing.
+            #
+            # The validators go on every feed, because clearing them costs a
+            # throttled feed nothing: it only decides what the *next* request
+            # asks for, whenever that turns out to be.
+            #
+            # The schedule does not. `next_poll_at` on a throttled or erroring
+            # feed is a standoff that ISSUE-347 put there, and that issue's
+            # stated invariant is that a 429 never schedules sooner than a
+            # success would. A settings save is user-triggered and repeatable,
+            # so clearing it there hands the user a way to stampede a host that
+            # has just turned us away, one save at a time. Those feeds keep
+            # their backoff and pick the new budget up at their own next poll,
+            # which is late rather than wrong.
+            #
+            # `_migrate_v7_to_v8` clears the schedule unconditionally and is
+            # right to: it runs once per upgrade, not once per click.
+            conn.execute("UPDATE feeds SET etag = NULL, last_modified = NULL")
             conn.execute(
-                "UPDATE feeds SET etag = NULL, last_modified = NULL, "
-                "next_poll_at = NULL"
+                "UPDATE feeds SET next_poll_at = NULL "
+                "WHERE last_throttled_at IS NULL AND error_count = 0"
             )
 
         conn.commit()

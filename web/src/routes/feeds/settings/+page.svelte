@@ -449,7 +449,7 @@
       </SettingsField>
       <SettingsField
         label="Keep read entries for (days)"
-        hint="Counted from when an entry was added to your reader, not from when it was published. Unread and starred entries are always kept, and so is anything the feed still returns. At least 50 entries per feed are kept whatever their age. 0 turns age pruning off; blank uses the default (90). Older entries disappear from the reader."
+        hint="Counted from when an entry was added to your reader, not from when it was published. Unread and starred entries are always kept, and so is anything the feed still returns. At least 50 entries per feed are kept whatever their age, or the maximum below if you set it lower. 0 turns age pruning off; blank uses the default (90). Older entries disappear from the reader."
       >
         <input
           type="number"
