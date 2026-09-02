@@ -33,6 +33,7 @@ from istota.config import SecurityConfig
 from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
 from istota.session.tools import hello_payload, start_tool_server
 
+from ..support.cgroups import live_cgroup_task_id
 from .test_sandbox_real import _unavailable
 
 pytestmark = pytest.mark.linux
@@ -63,9 +64,16 @@ def background_probe(marker) -> str:
 
     `setsid` is deliberately *not* used: the point is that the process stays in
     the server's cgroup and in its process group, so the kill path reaches it.
+
+    The marker is a counter rather than `date +%s`, because a caller asserting
+    that the writer is *still running* compares two reads and a timestamp in
+    whole seconds makes that a race: the reads below are 0.8s apart, so roughly
+    one run in five saw the same second twice and reported a live process as
+    dead. A counter changes on every tick whatever the clock says.
     """
     return (
-        f'( while true; do date +%s > {_q(marker)}; sleep 0.2; done ) >/dev/null 2>&1 & '
+        f'( n=0; while true; do n=$((n+1)); echo "$n" > {_q(marker)}; sleep 0.2; done )'
+        f' >/dev/null 2>&1 & '
         f'echo "BGPID=$!"'
     )
 
@@ -132,7 +140,7 @@ def live_cgroup():
     if reason is not None:
         _unavailable(f"delegation not usable here: {reason}")
     path = task_cgroup.create(
-        999997,
+        live_cgroup_task_id(),
         task_cgroup.CgroupLimits(memory_max_mb=2048, pids_max=512, cpu_max_percent=0),
         attempt=0,
         root=root,
