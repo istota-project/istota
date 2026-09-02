@@ -204,6 +204,41 @@ class TestExtractRoute:
         assert "path" in captured
         assert captured["mime"] == "application/pdf"
 
+    def test_the_temp_copy_lands_where_the_sandbox_binds(
+        self, ctx, monkeypatch, make_config
+    ):
+        """ISSUE-397: one level below ``config.temp_dir``, not the shared root.
+
+        The OCR sandbox binds ``{temp_dir}/{user_id}`` read-write and binds the
+        shared root at no path, so a temp copy written to the root is a document
+        the model cannot open. The document is also named in ``extra_ro_binds``,
+        which is what stops this being the only thing between the wrap and an
+        outage — but the write still belongs inside the user's own directory.
+        """
+        captured: dict = {}
+
+        def _fake(path: Path, mime: str, *, config=None, user_id="") -> dict:
+            captured["path"] = path
+            return {"rows": [], "mode": "vision", "warnings": []}
+
+        from istota.health import encounter_ocr as enc_mod
+        monkeypatch.setattr(enc_mod, "extract_from_file", _fake)
+
+        config = make_config()
+        app = FastAPI()
+        app.include_router(router, prefix="/istota/api/health")
+        app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+        app.dependency_overrides[get_user_context] = lambda: ctx
+        app.state.istota_config = config
+
+        resp = TestClient(app).post(
+            "/istota/api/health/encounters/extract",
+            files={"file": ("visit.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        )
+
+        assert resp.status_code == 200
+        assert captured["path"].parent == (config.temp_dir / ctx.user_id).resolve()
+
 
 class TestBulkRoute:
     def _row(self, **overrides) -> dict:

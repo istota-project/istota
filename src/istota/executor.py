@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -347,6 +347,225 @@ def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list
 def get_user_temp_dir(config: Config, user_id: str) -> Path:
     """Get the per-user temp directory path."""
     return config.temp_dir / user_id
+
+
+class DaemonSandbox(NamedTuple):
+    """What a task-less daemon-side model call needs to run confined.
+
+    ``wrap`` goes on the request's ``sandbox_wrap`` and ``work_dir`` on its
+    ``cwd``; the two travel together because bwrap chdirs into ``work_dir``
+    inside the namespace, so a request naming a different directory would
+    disagree with its own wrap.
+
+    ``wrap`` is ``None`` where there is no namespace to build, and
+    ``refused`` is what tells the two reasons apart. ``False`` means nothing
+    was asked for: the operator set ``sandbox_enabled = false``, and an
+    ordinary task is unconfined on that deployment too. ``True`` means a
+    namespace was wanted and could not be built, which is the ISSUE-397
+    exposure exactly — a caller granting a file tool must treat it as a
+    refusal to run rather than as permission to run unconfined.
+    """
+
+    wrap: Callable[[list[str]], list[str]] | None
+    work_dir: Path
+    refused: bool = False
+
+
+def daemon_work_dir(config: Config | None, user_id: str) -> Path:
+    """The scratch directory a task-less daemon-side model call runs in.
+
+    ``{config.temp_dir}/{user_id}`` — one level below the shared root, because
+    that is what :func:`build_daemon_sandbox` binds into the namespace
+    (ISSUE-397). The shared root is bound by nothing, so a caller that writes
+    an upload's temp copy there hands the model a path it cannot open.
+
+    Returns the shared root itself when there is no per-user directory to name:
+    an empty ``user_id``, or one whose join escapes the root. That return value
+    is also the signal :func:`build_daemon_sandbox` refuses on — binding the
+    shared root would put every user's scratch space in one user's namespace,
+    which is worse than not wrapping at all. The containment test is the same
+    equality :func:`get_user_repos_dir` uses, and for the same reason:
+    truthiness alone lets ``.``, ``..`` and an absolute component through.
+
+    It names the same directory as :func:`get_user_temp_dir` and is not a
+    second rule for it: that one is the task path's plain join, where
+    ``execute_task`` does the ``mkdir`` and the sandbox plan carries the
+    containment. There is no executor around a daemon-side call, so the
+    resolve, the ``mkdir`` and the refusal are folded in here.
+
+    Creates the directory it names. Never raises.
+    """
+    return _daemon_dirs(config, user_id)[1]
+
+
+def _daemon_dirs(config: Config | None, user_id: str) -> tuple[Path, Path]:
+    """``(shared root, per-user work dir)``, equal when the id could not scope.
+
+    Returning both is what lets :func:`build_daemon_sandbox` tell a scoped
+    directory from the fallback without re-deriving the rule — inferring it
+    from the returned path alone is the kind of second copy that goes quietly
+    wrong.
+
+    The containment test is :func:`get_user_repos_dir`'s, both halves of it,
+    because neither half catches the other's cases: the lexical one refuses a
+    component that never became a child (``.`` is dropped by ``PurePath``, an
+    absolute one replaces the root, a nested one goes deeper), and the resolved
+    one refuses ``..`` and every symlink, which are children by name and
+    somewhere else on disk. A ``resolved.parent == root`` test looks like it
+    covers the second and does not: ``{temp_dir}/alice -> {temp_dir}/bob``
+    resolves to another child of the root, passes, and would put bob's scratch
+    directory in alice's namespace read-write.
+
+    The resolved path is what is returned, since it is what goes on to bwrap
+    and into the prompt, and those two must name one directory.
+    """
+    root = Path(getattr(config, "temp_dir", None) or tempfile.gettempdir())
+    with contextlib.suppress(OSError):
+        root = root.resolve()
+    work_dir = root
+    if user_id:
+        candidate = root / user_id
+        try:
+            contained = (
+                candidate.parent == root and candidate.resolve() == root / user_id
+            )
+        except (OSError, ValueError):
+            contained = False
+        if contained:
+            work_dir = root / user_id
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # Not fatal here — `build_daemon_sandbox` refuses to wrap a directory
+        # that is not there, and an unwrapped caller fails at its own open with
+        # a real errno. Logged because the previous code in the two upload
+        # routes called `mkdir` directly, so a permission problem used to
+        # surface at the route rather than as a later missing directory.
+        logger.warning("daemon_work_dir_mkdir_failed path=%s error=%s", work_dir, e)
+    return root, work_dir
+
+
+def build_daemon_sandbox(
+    config: Config,
+    user_id: str,
+    *,
+    extra_ro_binds: Iterable[Path] | None = None,
+) -> DaemonSandbox:
+    """Bubblewrap for a model call that has no task behind it (ISSUE-397).
+
+    The OCR extractors build their own ``BrainRequest`` rather than going
+    through :func:`execute_task`, so none of the per-task plumbing above runs
+    for them — including the sandbox. That mattered more than it looks:
+    ``build_claude_cli_flags`` reads a non-empty ``allowed_tools`` as the signal
+    to add ``--dangerously-skip-permissions`` and emit no ``--allowedTools``
+    allowlist at all, so a request asking for ``Read`` gets the CLI's whole
+    default toolset, ``Bash`` and ``Write`` included. The two Claude brains take
+    their filesystem boundary from bubblewrap and ignore ``fs_read_roots``
+    entirely, so without a wrap that toolset ran host-side as the daemon user.
+
+    ``SandboxProfile.CLAUDE``, following ``heartbeat.py``'s task-less
+    ``claude -p``: the process being wrapped is that CLI, which needs its own
+    binary, its credential and its state directory. The synthetic ``db.Task``
+    is what the per-user binds key on; ``conversation_token`` stays empty, so no
+    channel directory is bound.
+
+    No ``net_proxy_sock``, so no ``--unshare-net``: these calls run in the
+    daemon's own network namespace and have to reach the provider. That is the
+    same posture ``heartbeat.py`` takes, and it is why
+    :func:`build_model_cli_env` carries the proxy and CA-bundle names forward.
+
+    ``extra_ro_binds`` is how the caller names the document. The
+    ``{mount}/Users/{user_id}`` bind covers a bloodwork panel's upload but not
+    every caller: the encounter and immunization routes hand the extractor a
+    temp copy, and ``python -m istota.health.ocr`` an arbitrary local file. A
+    wrap that hides the document is an outage rather than a boundary, so the
+    file is bound by name. Read-only even where it falls inside the read-write
+    ``work_dir`` bind — the extractor reads it and nothing more, and a later
+    ``--ro-bind`` on a path under an earlier ``--bind`` is what takes the write
+    away. That "later" is why ``build_bwrap_cmd`` emits ``extra_ro_binds``
+    after every other bind rather than in the middle, where it used to sit.
+
+    **A document under a masked database directory would be hidden, and that is
+    left as is.** The masks are last and shadow whatever is beneath them, and
+    the document is not in ``mask_protected_paths``, so such a wrap would be an
+    outage. Protecting it would refuse the mask instead, which trades a
+    boundary for the outage rather than removing it — the worse of the two. No
+    shipped caller lands there: a panel's upload is on the Nextcloud mount, the
+    two routes' temp copies are under ``work_dir``, and
+    ``python -m istota.health.ocr`` uses a system temp dir.
+
+    ``wrap`` is ``None`` in two cases and they are **not** the same answer, so
+    see ``refused`` on :class:`DaemonSandbox`. ``security.sandbox_enabled =
+    false`` is a deployment that confines no task at all, and this one runs
+    with it; a ``user_id`` that names no directory under ``config.temp_dir``
+    is a namespace that was wanted and could not be built, and a caller
+    granting a file tool must decline to run rather than run unconfined.
+
+    That the wrap is non-``None`` does not mean a namespace exists. Where
+    bubblewrap is unavailable — macOS, the shipped Docker stack, which grants
+    neither `seccomp:unconfined` nor `systempaths=unconfined` (ISSUE-381) —
+    the flag still reads true, `build_bwrap_cmd` returns its argument
+    unchanged, and the closure is inert. Same posture as an ordinary task on
+    those hosts, which is the whole claim: equal to the rest of the
+    deployment, not better than it.
+
+    **`is_admin` is the caller's real one and stays that way**, which is worth
+    stating because narrowing it looks like a free win and is not. For an
+    admin on a `developer.enabled` deployment the namespace therefore also
+    carries `{repos_dir}/{user_id}` read-write and the derived package cache —
+    reached, on this path, by a prompt whose input is an uploaded document. It
+    stays because `sandbox_cache_is_derived` reads `config.is_admin(user_id)`
+    itself rather than this argument: passing `False` would derive the cache
+    inside the repos subtree and then skip the repos bind that buries a symlink
+    swapped in under it, which is ISSUE-320 reopened. The two gates are one on
+    purpose, and narrowing the namespace here means narrowing them together.
+
+    Never raises; a failure to read the user's resources costs the resource
+    binds, not the wrap.
+    """
+    root, work_dir = _daemon_dirs(config, user_id)
+    if not config.security.sandbox_enabled:
+        return DaemonSandbox(None, work_dir)
+    if work_dir == root or not work_dir.is_dir():
+        logger.warning(
+            "daemon_sandbox_refused user_id=%r work_dir=%s — no per-user "
+            "directory to build a namespace around; a tool-granting caller "
+            "must not run here",
+            user_id, work_dir,
+        )
+        return DaemonSandbox(None, work_dir, refused=True)
+
+    task = db.Task(
+        id=0,
+        status="running",
+        source_type="cli",
+        user_id=user_id,
+        prompt="",
+        conversation_token="",
+    )
+    try:
+        with db.get_db(config.db_path) as conn:
+            user_resources = db.get_user_resources(conn, user_id)
+    except Exception as e:  # noqa: BLE001 — a missing DB costs binds, not the wrap
+        logger.debug(
+            "daemon_sandbox_resources_unavailable user_id=%r error=%s", user_id, e
+        )
+        user_resources = []
+    is_admin = config.is_admin(user_id)
+    binds: list[Path] = []
+    for path in extra_ro_binds or []:
+        try:
+            binds.append(Path(path).resolve())
+        except OSError:
+            continue
+
+    def _wrap(raw_cmd: list[str]) -> list[str]:
+        return build_bwrap_cmd(
+            raw_cmd, config, task, is_admin, user_resources, work_dir,
+            extra_ro_binds=binds, profile=SandboxProfile.CLAUDE,
+        )
+
+    return DaemonSandbox(_wrap, work_dir)
 
 
 def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
@@ -2876,9 +3095,10 @@ def build_bwrap_cmd(
     it decides and why it has no default. Everything else about the plan is
     generic, including the ordering, which is load-bearing in four places
     (cache bind before repos bind, ``.developer`` re-bind after
-    ``user_temp_dir``, ``extra_ro_binds`` after ``user_temp_dir`` too — its one
-    production entry is the composed system prompt, which lives *inside* that
-    read-write bind — and masks last with ``--remount-ro`` after each).
+    ``user_temp_dir``, ``extra_ro_binds`` after *every* bind — its two entries
+    are a document a daemon-side OCR call names and the task's own composed
+    system prompt, and both live inside a read-write bind that would otherwise
+    bury them — and masks last with ``--remount-ro`` after each).
     Omitting the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
@@ -3065,28 +3285,6 @@ def build_bwrap_cmd(
         args.append("--unshare-net")
         if net_proxy_sock.exists():
             _ro_bind(net_proxy_sock)
-
-    # --- Extra RO binds ---
-    #
-    # Emitted after the `user_temp_dir` bind above, and that is the mechanism
-    # rather than a coincidence: the one production entry is the task's own
-    # `task_<id>_system_prompt.txt`, which sits inside that read-write bind, so
-    # only a *later* read-only bind of the file makes it read-only. An earlier
-    # one would simply be overmounted by its parent.
-    #
-    # A missing entry is skipped rather than raising, because bwrap fails the
-    # whole namespace on a bind whose source is absent — one cleanup race would
-    # otherwise fail every task instead of one. It is logged, because the entry
-    # is a boundary: a silently dropped read-only bind leaves the writable copy
-    # of the same path in the namespace and nothing anywhere says so.
-    for path in (extra_ro_binds or []):
-        if path.exists():
-            _ro_bind(path)
-        else:
-            logger.warning(
-                "sandbox: extra read-only bind %s does not exist; the path is "
-                "left as its parent bind has it", path,
-            )
 
     # --- No Docker API reaches a task, and no `docker` binary either ---
     # This used to bind the Docker CLI read-only and, at the conventional
@@ -3276,6 +3474,46 @@ def build_bwrap_cmd(
                 _bind(rpath)
             else:
                 _ro_bind(rpath)
+
+    # --- Extra RO binds (e.g. service sockets for same-host APIs, and the
+    # document a task-less OCR call reads) ---
+    #
+    # **Last of the binds, and that is the point.** bwrap applies operations in
+    # argv order and the later mount wins, so a caller asking for read-only
+    # gets read-only whatever else covers the same path. Emitted higher up —
+    # where this block used to sit, between the `user_temp_dir` bind and the
+    # Nextcloud mount — it was buried by any later bind of an ancestor, and a
+    # bloodwork panel's upload lives under `{mount}/Users/{user_id}`, which is
+    # bound read-write. So the one caller that names a document
+    # (`build_daemon_sandbox`, ISSUE-397) got read-write on its main path while
+    # every comment said otherwise, and a test asserting only that the
+    # `--ro-bind` was emitted passed throughout. The assertion has to be about
+    # argv order: `tests/test_brain_request_confinement.py::
+    # test_the_document_stays_read_only_under_a_later_bind`.
+    #
+    # It has one task-path entry now, and being last is what that entry wants
+    # too. `execute_task` appends the task's own `task_<id>_system_prompt.txt`,
+    # which holds Istota's composed standing instructions and sits *inside* the
+    # read-write `user_temp_dir` bind — so only a later read-only bind of the
+    # file makes it read-only, and an earlier one is simply overmounted by its
+    # parent. That needed the loop after `user_temp_dir`; being after every
+    # bind satisfies it and more. (This comment used to say the loop was free
+    # to move because the list was always empty on the task path. It was true
+    # when written and stopped being true in the same release.)
+    #
+    # A missing entry is skipped rather than raising, because bwrap fails the
+    # whole namespace on a bind whose source is absent — one cleanup race would
+    # otherwise fail every task instead of one. It is logged, because the entry
+    # is a boundary: a silently dropped read-only bind leaves the writable copy
+    # of the same path in the namespace and nothing anywhere says so.
+    for path in (extra_ro_binds or []):
+        if path.exists():
+            _ro_bind(path)
+        else:
+            logger.warning(
+                "sandbox: extra read-only bind %s does not exist; the path is "
+                "left as its parent bind has it", path,
+            )
 
     # --- Database masks (must be the LAST mount operations) ---
     # No SQLite file the daemon owns is readable from inside the sandbox, for
