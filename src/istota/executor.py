@@ -3524,9 +3524,22 @@ def native_fs_roots(
     is denied only its own file. Nothing here expresses
     ``task_*_system_prompt.txt`` as a shape: a deny root is compared by
     equality or containment (``ToolEnv._in_denied``), and the same is true of
-    the bwrap bind. Closing it fully would mean either moving the artifact into
-    a denied subdirectory or teaching ``ToolEnv`` and the tool-server protocol
-    a pattern; neither is in scope here, so the residual is stated rather than
+    the bwrap bind.
+
+    That was reviewed and the flat path was kept deliberately, because **the
+    exposure is not specific to this file**. ``task_<id>_prompt.txt`` carries
+    the user half and therefore what the task was asked to do; the result file
+    and every deferred-op JSON sit in the same directory on the same terms. A
+    dedicated denied subdirectory for the system half closes one member of that
+    class, adds a mechanism to keep in sync forever, and leaves the larger
+    member open. What the entry above *does* close is the case this spec
+    introduced and the one a single task can reach on its own: a native task
+    rewriting the instructions it is itself running under, which a
+    ``native -> claude_code`` reroute would read back. The cross-task case needs
+    two concurrent tasks of the same user and yields no privilege that user does
+    not already hold — only the chance to strip another in-flight task's rules.
+    It is a residual of the artifact directory, to be closed if that directory
+    ever moves out of the model-writable tree, and it is stated rather than
     implied.
 
     **This function is not the only producer of that deny entry, and must not
