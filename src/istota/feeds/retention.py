@@ -27,11 +27,12 @@ gets a branch.
 different way.** It cannot: a maximum lowered below a feed's own window would
 be unenforceable if every row in the window were undeletable. Instead it must
 delete exactly the rows :func:`plan_admission` refuses, which makes the two
-orderings one fact in two places — see ``prune_entries_to_feed_cap`` on why
-the tie-break is ``id ASC``. Getting that wrong is not a cosmetic difference:
-under the opposite tie-break the pass deleted the head of each response while
-admission kept the head, so every poll handed back what the last prune
-deleted.
+orderings one fact in two places — see ``prune_entries_to_feed_cap`` on why it
+ranks by ``fetched_at DESC, id ASC`` alone and reads no status at all. Getting
+either half wrong is not a cosmetic difference: under the opposite tie-break
+the pass deleted the head of each response while admission kept the head, and
+under a read-state tier it trimmed in-response read rows while admission kept
+those too. Both hand back next poll exactly what the last prune deleted.
 
 **Admission is the other half of the maximum.** A response carrying more items
 than the maximum would otherwise have its tail inserted and immediately
@@ -162,8 +163,13 @@ def plan_admission(
     missing or malformed publication dates, so re-sorting would substitute a
     guess and could permanently exclude undated new items.
 
-    ``0`` disables the maximum, and with it this filter: every identifiable
-    item is returned.
+    The budget is :func:`istota.feeds.db.unstarred_budget`, the same call the
+    count pass takes its floor from — the two must refuse and delete the same
+    rows or they take turns on every poll. Its floor is what stops a feed whose
+    stars reach the maximum from admitting nothing ever again.
+
+    ``0`` disables the maximum, and with it this filter and both clamps: every
+    identifiable item is returned.
     """
     identified: list[FetchedItem] = []
     seen: set[str] = set()
@@ -181,7 +187,7 @@ def plan_admission(
         "SELECT COUNT(*) AS n FROM feed_entries WHERE feed_id = ? AND starred = 1",
         (feed_id,),
     ).fetchone()["n"]
-    budget = max(max_entries_per_feed - int(stored_stars), 0)
+    budget = feeds_db.unstarred_budget(max_entries_per_feed, int(stored_stars))
 
     admitted: list[FetchedItem] = []
     taken = 0

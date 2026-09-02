@@ -2404,13 +2404,21 @@ class TestCountPruning:
             conn.commit()
             return out, _guids(conn)
 
-    def test_unread_is_kept_before_read_and_newest_first_within_each(
-        self, tmp_path,
-    ):
+    def test_it_ranks_by_recency_alone_and_never_reads_status(self, tmp_path):
+        """One ordering, no tiers, and read state is not part of it.
+
+        An earlier draft kept unread ahead of read here. Admission ranks by
+        source order, so the two disagreed: a feed near its maximum could have
+        in-response *read* rows trimmed while older out-of-response unread rows
+        were kept, and the next poll re-admitted the trimmed ones as unread.
+        Ranking by recency alone makes this pass delete exactly what admission
+        refuses. Unread protection lives in the age pass, which exempts it
+        absolutely; this pass is a hard ceiling and nothing else.
+        """
         path, feed_id = _seed_one_feed(tmp_path)
         with feeds_db.connect(path) as conn:
-            # Read rows are the *newest* here, so a rule that only looked at
-            # `fetched_at` would keep them and drop the unread ones.
+            # The read rows are the newest, so a status tier would keep the
+            # unread ones and delete one of these instead.
             _store(conn, feed_id, "read-new", fetched_at=_iso(1),
                    last_seen_at=_iso(1), status="read")
             _store(conn, feed_id, "read-old", fetched_at=_iso(2),
@@ -2422,23 +2430,61 @@ class TestCountPruning:
             conn.commit()
         (deleted, over, excess), guids = self._prune(path, 3)
         assert (deleted, over, excess) == (1, 0, 0)
-        assert guids == ["read-new", "unread-new", "unread-old"]
+        # The oldest row goes, though it is unread and two read rows are newer.
+        assert guids == ["read-new", "read-old", "unread-new"]
 
-    def test_stars_consume_the_budget_and_are_never_deleted(self, tmp_path):
+    def test_stars_consume_the_budget_above_the_floor(self, tmp_path):
+        """Stars come off the maximum, but only as far as the floor.
+
+        Observable only above ``MIN_ENTRIES_PER_FEED``: at or below it the
+        effective floor *is* the maximum, so stars take nothing off the budget
+        and the feed goes over the maximum instead.
+        """
+        cap = MIN_ENTRIES_PER_FEED + 5
         path, feed_id = _seed_one_feed(tmp_path)
         with feeds_db.connect(path) as conn:
             for i in range(3):
                 _store(conn, feed_id, f"star{i}", fetched_at=_iso(10 + i),
                        last_seen_at=_iso(1), status="read", starred=True)
-            for i in range(3):
-                _store(conn, feed_id, f"plain{i}", fetched_at=_iso(20 + i),
-                       last_seen_at=_iso(1), status="read")
+            for i in range(cap):
+                _store(conn, feed_id, f"plain{i:02d}",
+                       fetched_at=_iso(100 + i), last_seen_at=_iso(1),
+                       status="read")
             conn.commit()
-        (deleted, over, excess), guids = self._prune(path, 4)
-        # Budget is 4 - 3 stars = 1 unstarred row, the newest.
-        assert deleted == 2
+        (deleted, over, excess), guids = self._prune(path, cap)
+        # Budget is 55 - 3 stars = 52 unstarred rows, the newest by clock.
+        assert deleted == 3
         assert (over, excess) == (0, 0)
-        assert guids == ["plain0", "star0", "star1", "star2"]
+        assert len(guids) == cap
+        assert "plain51" in guids and "plain52" not in guids
+
+    def test_stars_at_the_maximum_still_leave_a_working_budget(self, tmp_path):
+        """The budget is floored at ``min(MIN_ENTRIES_PER_FEED, maximum)``.
+
+        Without that floor this feed's budget is zero *permanently*: every
+        unstarred row deleted — unread and in-response alike — and
+        ``plan_admission`` admitting nothing ever again, so the feed goes
+        silently inert with only ``protected_excess_entries`` hinting at it.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(7):
+                _store(conn, feed_id, f"star{i}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(1), status="read", starred=True)
+            for i in range(8):
+                _store(conn, feed_id, f"plain{i}", fetched_at=_iso(20 + i),
+                       last_seen_at=_iso(1), status="unread")
+            conn.commit()
+        (deleted, over, excess), guids = self._prune(path, 5)
+        # min(50, 5) unstarred rows survive, the newest five.
+        assert deleted == 3
+        assert [g for g in guids if g.startswith("plain")] == [
+            "plain0", "plain1", "plain2", "plain3", "plain4",
+        ]
+        assert len([g for g in guids if g.startswith("star")]) == 7
+        # Twelve rows against a maximum of five: the overage is reported
+        # rather than guessing that a starred row is safe to delete.
+        assert (over, excess) == (1, 7)
 
     def test_stars_alone_can_leave_a_feed_over_the_maximum(self, tmp_path):
         path, feed_id = _seed_one_feed(tmp_path)
@@ -2450,11 +2496,12 @@ class TestCountPruning:
                    last_seen_at=_iso(1), status="read")
             conn.commit()
         (deleted, over, excess), guids = self._prune(path, 3)
-        # Every unstarred row goes; the overage is reported rather than
-        # guessing that a starred row is safe to delete.
-        assert deleted == 1
-        assert (over, excess) == (1, 2)
-        assert len(guids) == 5
+        # The unstarred row stays: the budget is floored at the maximum, and
+        # stars put this feed over that maximum either way. The overage is
+        # reported rather than guessing that a starred row is safe to delete.
+        assert deleted == 0
+        assert (over, excess) == (1, 3)
+        assert len(guids) == 6
 
     def test_the_count_pass_ignores_the_floor(self, tmp_path):
         """A feed over its configured maximum is by definition not empty, and
@@ -2856,6 +2903,31 @@ class TestOneBatchOrdering:
         assert deleted == 5
         assert kept == [f"n{i:02d}" for i in range(1, 16)]
 
+    def test_the_count_tie_break_does_not_read_status(self, tmp_path):
+        """The head survives whatever each row's read state.
+
+        The tie-break decides the whole of a real poll, since every entry of
+        one response shares that poll's ``fetched_at``. A status tier laid over
+        it kept the unread tail and deleted the read head — which is exactly
+        what the next response hands back, as unread, every poll.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        self._batch(path, feed_id, [f"n{i:02d}" for i in range(1, 21)],
+                    NOW - timedelta(days=1))
+        with feeds_db.connect(path) as conn:
+            conn.execute(
+                "UPDATE feed_entries SET status = 'read' WHERE guid <= 'n10'"
+            )
+            deleted, _, _ = feeds_db.prune_entries_to_feed_cap(
+                conn, max_entries_per_feed=15,
+            )
+            conn.commit()
+            kept = _guids(conn)
+        assert deleted == 5
+        # The response's head, read rows and all; its tail goes, unread rows
+        # and all — which is what `plan_admission` refuses next time.
+        assert kept == [f"n{i:02d}" for i in range(1, 16)]
+
     def test_the_age_floor_holds_the_head_of_the_response(self, tmp_path):
         path, feed_id = _seed_one_feed(tmp_path)
         self._batch(path, feed_id, [f"p{i:02d}" for i in range(60)],
@@ -3013,6 +3085,68 @@ class TestTheChurnControl:
             "n01": "read", "n17": "read",
         }
 
+    def test_a_maximum_near_the_window_size_does_not_churn_read_rows(
+        self, tmp_path,
+    ):
+        """The case that removed the count pass's status tier.
+
+        A user lowers the maximum toward a feed's own window size and reads
+        the older half of it. Under a tier the pass ranked those read rows
+        last and trimmed them, while admission — which ranks by source order —
+        kept them and dropped the newer unread tail instead. So the next poll
+        re-admitted what the prune had just deleted, as unread, for good.
+
+        The whole feed shares two poll timestamps here, which is what a real
+        poll produces and what makes the tie-break decisive.
+        """
+        path, feed_id = _seed_one_feed(tmp_path)
+        ctx = _ctx(tmp_path, path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 20)
+            conn.commit()
+
+        page_one = [f"n{i:02d}" for i in range(1, 26)]
+        self._persist(path, [FetchedItem(guid=g, title=g) for g in page_one],
+                      NOW - timedelta(days=2))
+        with feeds_db.connect(path) as conn:
+            # The head of the window has been read; its tail has not.
+            conn.execute(
+                "UPDATE feed_entries SET status = 'read' WHERE guid <= 'n15'"
+            )
+            conn.commit()
+            assert _guids(conn) == [f"n{i:02d}" for i in range(1, 21)]
+
+        # Three new items at the head push the stored tail out of the window.
+        page_two = [f"m{i:02d}" for i in range(1, 4)] + page_one
+        self._persist(path, [FetchedItem(guid=g, title=g) for g in page_two],
+                      NOW - timedelta(days=1))
+
+        result = retention.prune_feeds(ctx, now=NOW)
+
+        assert result.entries_deleted_by_age == 0
+        assert result.entries_deleted_by_cap == 3
+        with feeds_db.connect(path) as conn:
+            before = {
+                r["guid"]: r["status"]
+                for r in conn.execute("SELECT guid, status FROM feed_entries")
+            }
+        # The three that went are the three the next admission refuses — the
+        # unread tail, not the read head. That is the stated cost of a ceiling
+        # that does not read status, and the reason it cannot churn.
+        assert [g for g in ("n18", "n19", "n20") if g in before] == []
+        assert {"m01", "m02", "m03", "n01", "n15", "n17"} <= set(before)
+        assert before["n01"] == "read" and before["n17"] == "unread"
+
+        self._persist(path, [FetchedItem(guid=g, title=g) for g in page_two],
+                      NOW + timedelta(minutes=5))
+        with feeds_db.connect(path) as conn:
+            after = {
+                r["guid"]: r["status"]
+                for r in conn.execute("SELECT guid, status FROM feed_entries")
+            }
+        # Nothing came back and nothing flipped to unread.
+        assert after == before
+
     def test_an_entry_the_latest_response_returned_is_never_age_deleted(
         self, tmp_path,
     ):
@@ -3054,3 +3188,85 @@ class TestTheChurnControl:
         # protected by the response rather than by looking new.
         assert row["fetched_at"] == (NOW - timedelta(days=300)).isoformat()
         assert row["status"] == "read"
+
+
+class TestAStarredFeedKeepsWorking:
+    """``starred_count >= max_entries_per_feed`` used to zero the budget.
+
+    Permanently: the count pass deleted every unstarred row, unread and
+    in-response alike, and ``plan_admission`` then admitted nothing ever again,
+    so the feed stopped storing anything with only ``protected_excess_entries``
+    hinting at it. Stars already sit outside the ceiling by design, so
+    reserving room beneath them breaks no promise the setting makes — a feed
+    over its maximum because of stars is over it either way, and the difference
+    is only whether it still works.
+    """
+
+    CAP = 5
+
+    def _feed(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, self.CAP)
+            for i in range(7):
+                _store(conn, feed_id, f"star{i}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(1), status="read", starred=True)
+            for i in range(8):
+                _store(conn, feed_id, f"plain{i}", fetched_at=_iso(20 + i),
+                       last_seen_at=_iso(1), status="read")
+            conn.commit()
+        return path, _ctx(tmp_path, path)
+
+    def _poll(self, path, guids, when):
+        from istota.feeds import poller
+
+        with feeds_db.connect(path) as conn:
+            feed = feeds_db.list_feeds(conn)[0]
+            poller._persist_poll(
+                conn, feed,
+                FetchResult(
+                    feed_url=feed.url,
+                    items=[FetchedItem(guid=g, title=g) for g in guids],
+                ),
+                now=when, backoff_max_minutes=60, jitter_fraction=0.0,
+            )
+
+    def test_it_keeps_a_floored_budget_and_goes_on_admitting(self, tmp_path):
+        path, ctx = self._feed(tmp_path)
+
+        result = retention.prune_feeds(ctx, now=NOW)
+
+        assert result.entries_deleted_by_cap == 3
+        with feeds_db.connect(path) as conn:
+            survivors = _guids(conn)
+        # min(MIN_ENTRIES_PER_FEED, 5) unstarred rows survive, not none.
+        assert [g for g in survivors if g.startswith("plain")] == [
+            "plain0", "plain1", "plain2", "plain3", "plain4",
+        ]
+
+        self._poll(path, ["fresh0", "fresh1"], NOW + timedelta(minutes=5))
+        with feeds_db.connect(path) as conn:
+            after = _guids(conn)
+        assert {"fresh0", "fresh1"} <= set(after)
+
+    def test_without_the_floor_the_same_feed_stores_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        """The control, and the reason the test above is not vacuous.
+
+        ``MIN_ENTRIES_PER_FEED`` reaches the maximum through one function,
+        ``feeds_db.budget_floor``, which both the count pass and
+        ``plan_admission`` go through, so zeroing the constant here reproduces
+        the pre-floor behaviour exactly: every unstarred row deleted, and
+        nothing admitted afterwards.
+        """
+        monkeypatch.setattr(feeds_db, "MIN_ENTRIES_PER_FEED", 0)
+        path, ctx = self._feed(tmp_path)
+
+        result = retention.prune_feeds(ctx, now=NOW)
+
+        assert result.entries_deleted_by_cap == 8
+        self._poll(path, ["fresh0", "fresh1"], NOW + timedelta(minutes=5))
+        with feeds_db.connect(path) as conn:
+            after = _guids(conn)
+        assert [g for g in after if not g.startswith("star")] == []

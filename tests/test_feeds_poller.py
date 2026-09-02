@@ -12,7 +12,11 @@ import pytest
 pytest.importorskip("feedparser", reason="feeds extra not installed")
 
 from istota.feeds import db as feeds_db
-from istota.feeds.models import POLL_CLAIM_SECONDS, FeedRecord
+from istota.feeds.models import (
+    MIN_ENTRIES_PER_FEED,
+    POLL_CLAIM_SECONDS,
+    FeedRecord,
+)
 from istota.feeds.poller import (
     _backoff_interval,
     poll_due_feeds,
@@ -1174,20 +1178,32 @@ class TestAdmission:
         assert [r["guid"] for r in rows] == ["b00", "b01", "b02", "b03", "b04"]
         assert {r["status"] for r in rows} == {"read"}
 
-    def test_a_returned_star_is_always_admitted_and_consumes_the_total(
-        self, tmp_path, monkeypatch,
-    ):
-        path, feed_id = self._feed(tmp_path)
+    def _star(self, path, feed_id, guid):
         with feeds_db.connect(path) as conn:
-            feeds_db.set_max_entries_per_feed(conn, 3)
             conn.execute(
                 "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
                 "last_seen_at, status, starred) "
-                "VALUES (?, 'b09', 'b09', ?, ?, 'read', 1)",
-                (feed_id, "2026-08-01T00:00:00+00:00",
+                "VALUES (?, ?, ?, ?, ?, 'read', 1)",
+                (feed_id, guid, guid, "2026-08-01T00:00:00+00:00",
                  "2026-08-01T00:00:00+00:00"),
             )
             conn.commit()
+
+    def test_a_returned_star_is_always_admitted_and_the_budget_is_floored(
+        self, tmp_path, monkeypatch,
+    ):
+        """At or below ``MIN_ENTRIES_PER_FEED`` the floor *is* the maximum.
+
+        So a star takes nothing off the budget and the feed goes over the
+        maximum by its stars instead — which is where stars already sat by
+        design, and is what stops a feed whose stars fill its maximum from
+        going permanently inert.
+        """
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 3)
+            conn.commit()
+        self._star(path, feed_id, "b09")
         self._poll_with(
             path, [f"b{i:02d}" for i in range(12)],
             when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
@@ -1199,9 +1215,62 @@ class TestAdmission:
             ).fetchall()
             feed = feeds_db.list_feeds(conn)[0]
         # The star is refreshed whatever its position in the page, and the
-        # unstarred budget is 3 - 1 = 2.
-        assert [r["guid"] for r in rows] == ["b00", "b01", "b09"]
+        # unstarred budget is the floored 3 rather than 3 - 1.
+        assert [r["guid"] for r in rows] == ["b00", "b01", "b02", "b09"]
         assert {r["last_seen_at"] for r in rows} == {feed.last_items_seen_at}
+
+    def test_stars_consume_the_total_above_the_floor(
+        self, tmp_path, monkeypatch,
+    ):
+        """Where the maximum is above the floor, stars do come off it."""
+        cap = MIN_ENTRIES_PER_FEED + 5
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, cap)
+            conn.commit()
+        for guid in ("b57", "b58", "b59"):
+            self._star(path, feed_id, guid)
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(60)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            guids = [
+                r["guid"]
+                for r in conn.execute("SELECT guid FROM feed_entries ORDER BY guid")
+            ]
+        # 55 - 3 stars = 52 unstarred items in source order, plus the three
+        # stars the page returned.
+        assert guids == [f"b{i:02d}" for i in range(52)] + ["b57", "b58", "b59"]
+
+    def test_a_feed_whose_stars_fill_its_maximum_still_admits_the_floor(
+        self, tmp_path, monkeypatch,
+    ):
+        """Otherwise the budget is zero for good and the feed stores nothing.
+
+        Nothing surfaces that state, so the feed looks like a source that has
+        stopped publishing rather than a setting that has stopped working.
+        """
+        path, feed_id = self._feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 3)
+            conn.commit()
+        for i in range(4):
+            self._star(path, feed_id, f"kept{i}")
+        self._poll_with(
+            path, [f"b{i:02d}" for i in range(12)],
+            when=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            monkeypatch=monkeypatch,
+        )
+        with feeds_db.connect(path) as conn:
+            guids = [
+                r["guid"]
+                for r in conn.execute(
+                    "SELECT guid FROM feed_entries WHERE starred = 0 ORDER BY guid"
+                )
+            ]
+        assert guids == ["b00", "b01", "b02"]
 
     def test_a_maximum_of_zero_admits_every_identifiable_item(
         self, tmp_path, monkeypatch,

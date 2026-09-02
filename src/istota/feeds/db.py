@@ -19,6 +19,7 @@ from istota.feeds.image_dedupe import entry_seen_ts
 from istota.feeds.models import (
     DEFAULT_ENTRY_RETENTION_DAYS,
     DEFAULT_MAX_ENTRIES_PER_FEED,
+    MIN_ENTRIES_PER_FEED,
     POLL_CLAIM_SECONDS,
     UPGRADE_GRACE_DAYS,
     CategoryRecord,
@@ -941,6 +942,49 @@ def _effective_floor(min_entries_per_feed: int, max_entries_per_feed: int) -> in
     return floor
 
 
+def budget_floor(max_entries_per_feed: int) -> int:
+    """The floor under a feed's unstarred budget, and the only place
+    :data:`MIN_ENTRIES_PER_FEED` is read for the maximum.
+
+    One place because the count pass and admission must delete and refuse the
+    same rows or they take turns: the pass needs it as a bound SQL value and
+    :func:`unstarred_budget` needs it in Python, and a second reading of the
+    constant is how the two start disagreeing.
+    """
+    return _effective_floor(MIN_ENTRIES_PER_FEED, max_entries_per_feed)
+
+
+def unstarred_budget(max_entries_per_feed: int, starred_count: int) -> int:
+    """How many unstarred rows one feed may hold under its maximum.
+
+    Stars sit outside the ceiling by design, so they come off the total first
+    — and the remainder is floored at ``min(MIN_ENTRIES_PER_FEED,
+    max_entries_per_feed)``, which is load-bearing rather than tidiness. Without
+    it a feed whose stars reach the maximum gets a budget of zero
+    *permanently*: the count pass deletes every unstarred row, unread and
+    in-response alike, ``plan_admission`` then admits nothing ever again, and
+    the feed goes silently inert with only ``protected_excess_entries`` hinting
+    at it. Reserving room beneath the stars breaks no promise the setting
+    makes: such a feed is over its maximum either way, and the difference is
+    only whether it still works.
+
+    One consequence, stated because it surprises: at or below the floor the
+    effective floor *is* the maximum, so stars take nothing off the budget
+    there and a feed with twenty stars and a maximum of twenty stores twenty
+    unstarred rows as well.
+
+    A maximum of ``0`` disables the limit and both clamps with it; both callers
+    short-circuit before here, and the ``0`` returned on that path is what a
+    budget under a ceiling that does not exist is worth.
+    """
+    if max_entries_per_feed <= 0:
+        return 0
+    return max(
+        max_entries_per_feed - max(starred_count, 0),
+        budget_floor(max_entries_per_feed),
+    )
+
+
 def _changes(conn: sqlite3.Connection) -> int:
     """Rows the last statement changed.
 
@@ -1038,24 +1082,38 @@ def prune_entries_to_feed_cap(
 
     The maximum applies to *total* stored rows for one feed, with stars as the
     only exemption, so a feed's unstarred budget is what the maximum leaves
-    after its stars. Among unstarred rows it keeps unread history before read
-    history and, within each, the most recently fetched.
+    after its stars — floored, see :func:`unstarred_budget`.
 
-    There is no most-recent-response clause here, and that is deliberate: with
-    one, a maximum lowered below a feed's own window could never be enforced,
-    since every row in the window would be undeletable. What keeps that from
-    becoming churn is that this pass and ``plan_admission`` must delete and
-    refuse *the same rows* — so the tie-break is ``id ASC``, for the reason
-    ``prune_entries_by_age`` states at length: one poll's entries all share
-    that poll's ``fetched_at``, insertion follows source order, and admission
-    keeps the head of the response. Under ``id DESC`` this pass kept the tail
-    instead, so it deleted exactly the entries the next response would hand
-    back — read entries returning as unread, every poll, for good.
+    **One ordering, no tiers, and read state is not part of it.** An earlier
+    draft kept unread rows ahead of read ones here. Because admission ranks by
+    source order and this pass then re-ranked by read state, the two disagreed:
+    a feed near its maximum could have *in-response read* rows trimmed while
+    older out-of-response unread rows were kept, and the next poll re-admitted
+    the trimmed ones as unread — churn every poll, for good. Ranking by
+    recency alone makes this pass delete exactly what admission refuses, which
+    is what lets it carry no most-recent-response clause of its own. It cannot
+    carry one: a maximum lowered below a feed's own window would be
+    unenforceable if every row in the window were undeletable.
 
-    The floor is deliberately not honoured here. It guards against an *age*
-    rule emptying a quiet feed; a feed over its configured maximum is by
-    definition not empty, and honouring the floor would make a maximum below
-    fifty unenforceable.
+    Unread rows lose nothing they should keep. The *age* pass exempts them
+    absolutely, which is where "don't throw away what I haven't read" belongs;
+    this is the hard ceiling and nothing else. The cost, stated plainly: on a
+    feed at its ceiling an old unread entry can be dropped ahead of a newer
+    read one.
+
+    The tie-break is ``id ASC``, for the reason ``prune_entries_by_age`` states
+    at length, and the tie is the common case rather than a corner: one poll's
+    entries all share that poll's ``fetched_at``, so a whole batch ties and the
+    tie-break alone decides it. Insertion follows source order, so the lowest
+    rowid is the item the response listed first — which is what admission
+    keeps. Under ``id DESC`` this pass kept the tail instead, so it deleted
+    exactly the entries the next response would hand back.
+
+    The floor on *rows* is deliberately not honoured here. It guards against an
+    *age* rule emptying a quiet feed; a feed over its configured maximum is by
+    definition not empty, and honouring it would make a maximum below fifty
+    unenforceable. The floor on the *budget* is a different quantity and does
+    apply.
 
     A feed can still finish above the maximum on its stars alone. That overage
     is reported rather than guessing that a starred row is safe to delete.
@@ -1075,10 +1133,7 @@ def prune_entries_to_feed_cap(
                 e.feed_id AS feed_id,
                 ROW_NUMBER() OVER (
                     PARTITION BY e.feed_id
-                    ORDER BY
-                        CASE WHEN e.status IN ('read', 'removed') THEN 1 ELSE 0 END,
-                        e.fetched_at DESC,
-                        e.id ASC
+                    ORDER BY e.fetched_at DESC, e.id ASC
                 ) AS rn
             FROM feed_entries e
             WHERE e.starred = 0
@@ -1086,10 +1141,16 @@ def prune_entries_to_feed_cap(
         DELETE FROM feed_entries WHERE id IN (
             SELECT r.id FROM ranked r
             LEFT JOIN stars s ON s.feed_id = r.feed_id
-            WHERE r.rn > MAX(:cap - COALESCE(s.n, 0), 0)
+            WHERE r.rn > MAX(:cap - COALESCE(s.n, 0), :floor)
         )
         """,
-        {"cap": max_entries_per_feed},
+        {
+            "cap": max_entries_per_feed,
+            # The same expression `unstarred_budget` applies in Python, in the
+            # one form SQL can take it: the per-feed star count is only known
+            # inside the statement, so the floor crosses as a bound value.
+            "floor": budget_floor(max_entries_per_feed),
+        },
     )
     deleted = _changes(conn)
     over = conn.execute(
