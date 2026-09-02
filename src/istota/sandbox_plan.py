@@ -75,11 +75,12 @@ class Mount:
     later, so the namespace is unchanged; the old argv merely reached that path
     through the covering bind instead of its own.
 
-    The three flags below all default to the *permissive* answer, which is
-    worth knowing before setting one: an entry that forgets ``protected`` may
-    be shadowed by a late mask, and one that forgets ``always_deny`` is not
-    carried as a write-deny root. Both fail open. ``user_data`` fails closed —
-    a missing root is a missing capability.
+    The flags below default to the *permissive* answer, which is worth knowing
+    before setting one: an entry that forgets ``protected`` may be shadowed by
+    a late mask, and one that forgets ``always_deny`` is not carried as a
+    write-deny root. Both fail open. ``user_data`` fails closed — a missing
+    root is a missing capability. ``require_dir`` is not a policy flag at all;
+    it narrows the render's own existence test and is documented with it.
     """
 
     mode: Mode
@@ -100,13 +101,22 @@ class Mount:
     protected: bool = False
     #: Whether this is user data the native brain's file tools should see as a
     #: root. False for /usr, the venv, the source tree, the Claude runtime
-    #: block and the sockets. Read by ``project_fs_roots``; set by a later
-    #: stage, not by this one.
+    #: block and the sockets. Read by :func:`project_fs_roots`.
     user_data: bool = False
     #: Whether the projection must carry this entry as a write-deny root even
-    #: when the source is absent. Read by ``project_fs_roots``; set by a later
-    #: stage, not by this one.
+    #: when the source is absent. Read by :func:`project_fs_roots`. One entry
+    #: sets it — see the ``.developer`` emission in :func:`build_mount_plan`
+    #: for the window that costs.
     always_deny: bool = False
+    #: Whether the *render* requires the source to be a directory rather than
+    #: merely to exist. Only ``.developer`` sets it, and only because
+    #: ``always_deny`` forced that entry to be emitted unconditionally: the
+    #: single function this module replaced gated the bind on ``is_dir()``, and
+    #: ``user_temp_dir`` is per user rather than per task, so a model in one
+    #: task can leave a regular file named ``.developer`` there for the next.
+    #: Without this the render's plain ``exists()`` would bind that file and
+    #: the argv would differ from the argv this module promises not to change.
+    require_dir: bool = False
 
 
 @dataclass(frozen=True)
@@ -343,11 +353,26 @@ def build_mount_plan(
 
     mounts: list[Mount] = []
 
-    def _ro(src: Path, reason: str, *, dest: Path | None = None) -> None:
-        mounts.append(Mount(mode="ro", source=src, dest=dest, reason=reason))
+    def _ro(
+        src: Path,
+        reason: str,
+        *,
+        dest: Path | None = None,
+        user_data: bool = False,
+        always_deny: bool = False,
+        require_dir: bool = False,
+    ) -> None:
+        mounts.append(Mount(
+            mode="ro", source=src, dest=dest, reason=reason, user_data=user_data,
+            always_deny=always_deny, require_dir=require_dir,
+        ))
 
-    def _rw(src: Path, reason: str, *, dest: Path | None = None) -> None:
-        mounts.append(Mount(mode="rw", source=src, dest=dest, reason=reason))
+    def _rw(
+        src: Path, reason: str, *, dest: Path | None = None, user_data: bool = False,
+    ) -> None:
+        mounts.append(Mount(
+            mode="rw", source=src, dest=dest, reason=reason, user_data=user_data,
+        ))
 
     def _tmpfs(path: Path, reason: str) -> None:
         mounts.append(Mount(mode="tmpfs", source=path, dest=None, reason=reason))
@@ -483,20 +508,29 @@ def build_mount_plan(
                     _rw(d, f"claude_{subdir}")
 
     # --- User workspace (RW) ---
-    _rw(user_temp_dir.resolve(), "user_temp_dir")
+    _rw(user_temp_dir.resolve(), "user_temp_dir", user_data=True)
 
     # --- REPL workspace (RW) — validated, bound, and used as the chdir target.
     workspace_resolved: Path | None = None
     if workspace_dir is not None:
         workspace_resolved = executor._validate_workspace_dir(config, workspace_dir)
-        _rw(workspace_resolved, "repl_workspace")
+        _rw(workspace_resolved, "repl_workspace", user_data=True)
 
     # .developer/ scripts (credential-fetch, git helpers) must be read-only
     # to prevent a compromised subprocess from replacing them to intercept
     # credentials.  A later --ro-bind on a subdir overrides the parent --bind.
+    #
+    # **Emitted whether or not the directory is there**, which is the one
+    # entry where that matters. `build_bwrap_cmd` is called per Bash
+    # invocation and re-reads the filesystem each time, while the roots
+    # `project_fs_roots` derives are built once per task — so an entry that
+    # appeared only when the directory did would leave a window in which a
+    # `.developer` created mid-run is read-only for Bash and writable for the
+    # native file tools. `always_deny` is what carries it through the
+    # projection; `require_dir` is what keeps the argv unchanged, since the
+    # render's own skip is `exists()` and this site's used to be `is_dir()`.
     dev_dir = user_temp_dir.resolve() / ".developer"
-    if dev_dir.is_dir():
-        _ro(dev_dir, "developer_dir")
+    _ro(dev_dir, "developer_dir", user_data=True, always_deny=True, require_dir=True)
 
     # --- Skill proxy socket (RO inside sandbox) ---
     if proxy_sock and proxy_sock.exists():
@@ -540,15 +574,15 @@ def build_mount_plan(
         mount = mount.resolve()
         user_dir = mount / "Users" / task.user_id
         if user_dir.exists():
-            _rw(user_dir, "nextcloud_user_dir")
+            _rw(user_dir, "nextcloud_user_dir", user_data=True)
         # Talk attachments directory (flat, shared across conversations)
         talk_dir = mount / "Talk"
         if talk_dir.exists():
-            _ro(talk_dir, "nextcloud_talk_dir")
+            _ro(talk_dir, "nextcloud_talk_dir", user_data=True)
         if task.conversation_token:
             channel_dir = mount / "Channels" / task.conversation_token
             if channel_dir.exists():
-                _rw(channel_dir, "nextcloud_channel_dir")
+                _rw(channel_dir, "nextcloud_channel_dir", user_data=True)
 
     # --- Huggingface model cache (RO) ---
     hf_cache = home / ".cache" / "huggingface"
@@ -620,9 +654,28 @@ def build_mount_plan(
     # `link(2)`: moving this bind after the repos bind costs both. The linux
     # tier is what detects that; `tests/test_sandbox.py`'s bind-order assertion
     # names this as its second reason.
+    #
+    # **`user_data` is False on the derived branch, and that asymmetry with the
+    # bind is deliberate (ISSUE-320).** The projection has no mounts and so no
+    # ordering to lean on: nothing lands on top of anything, and `ToolEnv`
+    # realpaths every root it is handed, which is later than
+    # `resolve_sandbox_cache_dir`'s `O_NOFOLLOW` check. A symlink planted at
+    # `.package-caches` in between would therefore make the link's *target* a
+    # write root of its own. On the derived branch the cache is inside the
+    # repos subtree, which is already a write root, so the entry buys nothing
+    # and costs that; the cache stays writable through the root that contains
+    # it. On the fallback branch the root is operator-owned, outside
+    # `repos_dir` and bound into no sandbox, so there is no writer to race and
+    # the entry is the only thing making the cache writable at all.
+    #
+    # `sandbox_cache_is_derived` is the gate for both halves, which is why this
+    # is one condition rather than two that could drift apart.
     cache_dir = executor.resolve_sandbox_cache_dir(config, task.user_id)
     if cache_dir is not None:
-        _rw(cache_dir, "package_cache")
+        _rw(
+            cache_dir, "package_cache",
+            user_data=not executor.sandbox_cache_is_derived(config, task.user_id),
+        )
 
     # --- Developer repos (RW) ---
     #
@@ -643,7 +696,10 @@ def build_mount_plan(
     if is_admin and config.developer.enabled:
         repos = executor.get_user_repos_dir(config, task.user_id)
         if repos is not None and repos.exists():
-            _rw(repos, "developer_repos")
+            # `user_data`, and safe to realpath in a way the derived cache is
+            # not: its parent is `developer.repos_dir`, which no task and no
+            # devbox can write, so there is no planting a symlink at this name.
+            _rw(repos, "developer_repos", user_data=True)
 
     # --- The devbox exec socket (RW) ---
     #
@@ -693,9 +749,9 @@ def build_mount_plan(
             except ValueError:
                 pass
             if r.permissions == "readwrite":
-                _rw(rpath, "user_resource")
+                _rw(rpath, "user_resource", user_data=True)
             else:
-                _ro(rpath, "user_resource")
+                _ro(rpath, "user_resource", user_data=True)
 
     # --- Extra RO binds (e.g. service sockets for same-host APIs, and the
     # document a task-less OCR call reads) ---
@@ -770,6 +826,8 @@ def render_bwrap_argv(
     Mechanical, with one decision left in it: a bind whose source does not
     exist is skipped, because bwrap fails the whole namespace on a missing
     source and one cleanup race would otherwise fail every task instead of one.
+    ``Mount.require_dir`` narrows that test to ``is_dir()`` for the one entry
+    the builder emits unconditionally.
 
     Raises nothing for a plan :func:`build_mount_plan` produced — which is the
     only kind there is on any product path, and the precondition the ``assert``
@@ -816,7 +874,7 @@ def render_bwrap_argv(
             continue
         original = str(entry.source)
         src = entry.source.resolve()
-        if not src.exists():
+        if not (src.is_dir() if entry.require_dir else src.exists()):
             continue
         dest = str(entry.dest.resolve()) if entry.dest else original
         args.extend(["--ro-bind" if entry.mode == "ro" else "--bind", str(src), dest])
@@ -881,3 +939,100 @@ def render_bwrap_argv(
         args.extend(cmd)
 
     return args
+
+
+def project_fs_roots(
+    plan: MountPlan, control_dir: Path | None = None,
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """The plan's user-data binds as ``(read_roots, write_roots, write_denied)``.
+
+    The native brain's file tools take path roots rather than a namespace, so
+    they need the same answer :func:`render_bwrap_argv` renders, in a different
+    shape. This is that projection, and it is the reason the plan exists as
+    data: the two used to be written twice and ISSUE-319 and ISSUE-320 were
+    both one copy disagreeing with the other. ``native_fs_roots``' docstring is
+    where the *purpose* of these roots is recorded; this function is only the
+    derivation.
+
+    Only ``user_data`` entries. ``/usr``, the venv, the source tree, the Claude
+    runtime block and the three sockets are in the namespace because a process
+    needs them, not because the model's files live there, and the file tools
+    have never listed them.
+
+    Four rules, none of which falls out of a plain walk:
+
+    1. **An ``always_deny`` entry is carried whether or not its source
+       exists**, and is carried *as written* rather than resolved. That is
+       ``.developer``, and both halves matter. ``build_bwrap_cmd`` re-reads the
+       filesystem on every invocation while these roots are built once per
+       task, so an existence gate leaves a window in which a ``.developer``
+       created mid-run is read-only for Bash and writable here; and resolving
+       it would follow a symlink planted at that name, denying the target
+       instead of the name the tools will use.
+    2. **A read-only entry nested inside an earlier read-write one is a
+       write-deny root, not a read root.** That is what bwrap's ordering does —
+       the later ``--ro-bind`` lands on top of the earlier ``--bind`` — and
+       containment is how it is expressed where there are no mounts. *Earlier*
+       is load-bearing: a nesting the other way round is not read-only in the
+       namespace either.
+    3. **The derived package cache is not a write root**, because it is inside
+       the repos subtree which already is one, and adding it would make a
+       symlink planted at ``.package-caches`` a write root of its own once
+       ``ToolEnv`` realpaths it. The plan carries that as ``user_data=False``
+       on the derived branch, so this function needs no branch of its own.
+    4. **No database root of any kind.** ``plan.masks`` are not mounts, are
+       held apart from them, and are not projected. The file tools have no
+       masks; what keeps a database out of these roots is that none is under a
+       ``user_data`` bind.
+
+    ``control_dir`` is not a plan entry. ``execute_task`` passes it through
+    ``extra_ro_binds``, which is a caller-supplied list rather than policy, and
+    it is seeded onto the deny list outside the confinement branch besides — so
+    it is an argument here for the same reason. It goes on **both**
+    ``write_denied`` and ``read_only``: the deny list is enforced ahead of
+    ``ToolEnv``'s unconfined early return while the root lists are inert there,
+    and under confinement the directory is inside no write root, so without the
+    read entry a task could not open its own prepared attachment.
+
+    Raises nothing.
+    """
+    plan_write: list[Path] = []
+    plan_read_only: list[Path] = []
+    plan_denied: list[Path] = []
+    #: Read-write roots seen so far, for rule 2. Order, not membership.
+    rw_seen: list[Path] = []
+
+    def _add(target: list[Path], path: Path) -> None:
+        if path not in target:
+            target.append(path)
+
+    for entry in plan.mounts:
+        if not entry.user_data or entry.mode not in ("ro", "rw") or entry.source is None:
+            continue
+        if entry.always_deny:
+            _add(plan_denied, entry.source)
+            continue
+        root = entry.source.resolve()
+        if not root.exists():
+            continue
+        if entry.mode == "rw":
+            _add(plan_write, root)
+            rw_seen.append(root)
+        elif any(root != seen and root.is_relative_to(seen) for seen in rw_seen):
+            _add(plan_denied, root)
+        else:
+            _add(plan_read_only, root)
+
+    write = plan_write
+    read_only: list[Path] = []
+    write_denied = plan_denied
+
+    if control_dir is not None:
+        control = control_dir.resolve()
+        _add(write_denied, control)
+        _add(read_only, control)
+    for path in plan_read_only:
+        _add(read_only, path)
+
+    read_roots = list(dict.fromkeys(write + read_only))
+    return read_roots, write, write_denied

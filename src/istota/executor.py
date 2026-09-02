@@ -29,8 +29,10 @@ from .claude_runtime_env import (
 )
 from .config import Config
 from .sandbox_plan import (
+    MountPlan,
     SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
     build_mount_plan,
+    project_fs_roots,
     render_bwrap_argv,
 )
 from .context import (
@@ -3444,16 +3446,23 @@ def native_fs_roots(
     than ENOENT, and it is the answer on the unsandboxed shapes too — macOS,
     the standalone install, a Docker stack without the two container settings —
     where ``build_bwrap_cmd`` hands the command back unwrapped and this list is
-    once again the only confinement there is. So it still mirrors
+    once again the only confinement there is. So it still names
     ``build_bwrap_cmd``'s user-data binds exactly (not the system/venv binds,
     which are irrelevant to the file tools): writable roots are the RW binds,
     read roots additionally the RO binds (Talk attachments, read-only
-    resources). No database root of any kind — ``build_bwrap_cmd`` masks those,
-    and these tools have no masks.
+    resources). No database root of any kind — the sandbox masks those, and
+    these tools have no masks.
 
-    Drifting from the binds is therefore no longer a boundary failure and is
-    still a bug: on a sandboxed host the two would disagree about which error a
-    path gets, and on an unsandboxed one the drift is the whole policy.
+    **It no longer restates them.** This function builds the same
+    :class:`~istota.sandbox_plan.MountPlan` ``build_bwrap_cmd`` renders and
+    hands it to :func:`~istota.sandbox_plan.project_fs_roots`, which is where
+    the four derivation rules live. A bind added to the plan reaches both
+    consumers or neither, which is what ISSUE-319 and ISSUE-320 each cost a
+    filed bug to discover. The plan is built with ``profile=NATIVE`` — the
+    profile decides only the Claude runtime block and the custom system prompt
+    bind, none of which is user data, so the roots would be the same either
+    way; naming the right one keeps the plan honest for anything that reads it
+    later.
 
     The third element carries the RO carve-outs bwrap gets by re-binding a
     path read-only *after* the RW bind that would otherwise cover it.
@@ -3533,132 +3542,38 @@ def native_fs_roots(
     and on ``_validate_workspace_dir`` refusing a workspace that would bind one
     back in. Those two guards, not this function, are what to check if a
     deployment ever puts a database under ``temp_dir`` or ``repos_dir``.
+
+    **A rejected REPL workspace costs the workspace and nothing else, which is
+    the deliberate asymmetry with ``build_bwrap_cmd``.** There a workspace the
+    blocklist refuses fails the task, because the alternative is a namespace
+    that silently lacks the directory the user asked to work in. Here the roots
+    are an error-message layer over the same plan, so the answer is to log and
+    carry on without it — which means rebuilding the plan without the
+    workspace, not returning nothing. ``_validate_workspace_dir`` is the only
+    ``ValueError`` :func:`~istota.sandbox_plan.build_mount_plan` raises, so the
+    retry cannot raise again.
     """
-    write: list[Path] = []
-    read_only: list[Path] = []
-    write_denied: list[Path] = []
 
-    def _add(target: list[Path], p: Path | None) -> None:
-        if p is None:
-            return
-        rp = p.resolve()
-        if rp.exists() and rp not in target:
-            target.append(rp)
+    def _plan(workspace: Path | None) -> MountPlan:
+        return build_mount_plan(
+            config,
+            task,
+            is_admin,
+            user_resources,
+            user_temp_dir,
+            profile=SandboxProfile.NATIVE,
+            workspace_dir=workspace,
+        )
 
-    # User workspace (RW) — always present (mkdir'd by the caller).
-    _add(write, user_temp_dir)
+    try:
+        plan = _plan(workspace_dir)
+    except ValueError:
+        # Not fatal here, unlike in `build_bwrap_cmd` — see the docstring. The
+        # workspace is the only thing dropped; every other root still stands.
+        logger.warning("native_fs_roots: workspace %s rejected by blocklist", workspace_dir)
+        plan = _plan(None)
 
-    # .developer/ (RO carve-out inside the workspace above). Mirrors the
-    # _ro_bind in build_bwrap_cmd: the scripts in here hold the credential
-    # helpers, so a writable copy is a credential-interception path.
-    #
-    # Appended directly rather than through _add, which skips a path that does
-    # not exist yet. build_bwrap_cmd re-checks `dev_dir.is_dir()` on every Bash
-    # invocation, while this list is built once per task — so an existence gate
-    # here would leave a window where a .developer created mid-run is read-only
-    # for Bash and writable for the file tools. A deny root that never comes
-    # into existence costs one failed comparison.
-    write_denied.append(user_temp_dir.resolve() / ".developer")
-
-    # The task control directory. Mirrors the `extra_ro_binds` entry
-    # `execute_task` passes to `build_bwrap_cmd`, and takes two entries here
-    # rather than one — see the docstring for why `read_only` and
-    # `write_denied` are enforced under different conditions.
-    #
-    # Both appended directly rather than through `_add`, for the reason
-    # `.developer` is: `_add` skips a path that does not exist, and a deny root
-    # that only appears once the directory does would leave a window in which
-    # it is writable. `ensure_task_control_dir` runs before this is called, so
-    # the window is theoretical — which is exactly when it is cheapest to
-    # close. A read root that never comes into existence costs one failed
-    # comparison.
-    if control_dir is not None:
-        _control_real = control_dir.resolve()
-        write_denied.append(_control_real)
-        if _control_real not in read_only:
-            read_only.append(_control_real)
-
-    # REPL workspace (RW), validated against the protected-path blocklist.
-    if workspace_dir is not None:
-        try:
-            _add(write, _validate_workspace_dir(config, workspace_dir))
-        except ValueError:
-            logger.warning("native_fs_roots: workspace %s rejected by blocklist", workspace_dir)
-
-    mount = config.nextcloud_mount_path
-    user_dir = None
-    if mount:
-        mount = mount.resolve()
-        user_dir = mount / "Users" / task.user_id
-        _add(write, user_dir)
-        _add(read_only, mount / "Talk")  # attachments, RO
-        if task.conversation_token:
-            _add(write, mount / "Channels" / task.conversation_token)
-
-    # No database root of any kind. The file tools are the native brain's
-    # stand-in for the bwrap binds, and bwrap no longer exposes the framework
-    # DB or the module DBs to anyone — see the mask block in build_bwrap_cmd.
-
-    # Package-manager cache (RW) — mirrors the bwrap bind. `_add` skips a path
-    # that does not exist, and `resolve_sandbox_cache_dir` creates it, so the
-    # two agree.
-    #
-    # **Added only on the fallback branch, and the asymmetry with bwrap is the
-    # point (ISSUE-320).** On the derived branch the cache is
-    # `{repos_dir}/{user_id}/.package-caches`, which is *inside* the repos write
-    # root added below — so adding it here is redundant, and redundant is not
-    # free: `ToolEnv.__post_init__` realpaths every write root, so a symlink
-    # planted at `.package-caches` after `resolve_sandbox_cache_dir` validated
-    # the name would make the link's *target* a write root, and the file tools
-    # would then write wherever it pointed. Under bwrap the same swap is
-    # covered by the repos bind landing on top of the cache bind; there are no
-    # mounts here, so nothing lands on top of anything and the ordering
-    # argument has no counterpart. The repos root below is realpathed the same
-    # way, and is safe for a different reason: its parent is
-    # `developer.repos_dir`, which no task and no devbox can write.
-    #
-    # The fallback root is operator-owned, outside `repos_dir`, and bound into
-    # no sandbox, so there is no writer to race there.
-    # Called unconditionally, and only the `_add` is gated: the resolver
-    # *creates* the cache directory, and that side effect is what the rest of
-    # the task path expects to have happened by now. Folding the call into the
-    # branch would have skipped creating it on exactly the shape that needs it.
-    _native_cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
-    if not sandbox_cache_is_derived(config, task.user_id):
-        _add(write, _native_cache_dir)
-
-    # No deny root for another user's cache, and its absence is the point.
-    # ISSUE-319 needed one here because the cache root was shared and sat inside
-    # a write root, so the bwrap sibling masks were a namespace-only property
-    # the native brain's in-process file tools walked straight past. The cache
-    # is derived inside this user's own subtree now — there is no other user's
-    # cache under any root this function hands out, so there is nothing to deny
-    # and no second seam to keep in step with a first.
-
-    # Developer repos (RW, admin only). The task's own subtree, mirroring the
-    # bind in `build_bwrap_cmd` — another user's is not a write root here for
-    # the same reason it is not in the namespace there.
-    if is_admin and config.developer.enabled:
-        _add(write, get_user_repos_dir(config, task.user_id))
-
-    # Per-resource mounts (RW/RO) not already covered by the user dir.
-    if mount:
-        for r in user_resources:
-            if not r.resource_path:
-                continue
-            rpath = (mount / r.resource_path.lstrip("/")).resolve()
-            if not rpath.exists():
-                continue
-            if user_dir is not None:
-                try:
-                    rpath.relative_to(user_dir.resolve())
-                    continue  # already inside the user dir
-                except ValueError:
-                    pass
-            _add(write if r.permissions == "readwrite" else read_only, rpath)
-
-    read_roots = list(dict.fromkeys(write + read_only))
-    return read_roots, write, write_denied
+    return project_fs_roots(plan, control_dir)
 
 
 def _detect_notification_reply(
