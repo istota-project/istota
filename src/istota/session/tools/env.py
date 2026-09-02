@@ -140,10 +140,14 @@ class ToolEnv:
     def __post_init__(self) -> None:
         # Resolved unconditionally, and consulted unconditionally: the deny
         # check in ``resolve``/``contains`` runs ahead of the unconfined early
-        # return. No caller sets a deny root without confinement today, so this
-        # costs an empty-list scan; what it buys is that a future
-        # ``ToolEnv(cwd=…, write_denied_roots=…)`` with no ``read_roots``
-        # refuses the write it looks like it refuses.
+        # return. That used to be insurance against a hypothetical caller and
+        # now has a real one: ``execute_task`` seeds the composed system prompt
+        # onto ``fs_write_denied_roots`` *outside* its
+        # ``native_fs_confinement_active`` branch, so on macOS, the standalone
+        # install and the shipped Docker stack a ``ToolEnv`` arrives with a deny
+        # root and no ``read_roots`` at all. Those are precisely the shapes with
+        # no bwrap re-bind behind the file, so this is the only thing standing
+        # between the model and a ``Write`` over its own standing instructions.
         self._write_denied_real = [_realpath(p) for p in self.write_denied_roots]
         if self.read_roots is None:
             self._read_real = None
