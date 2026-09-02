@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from istota.feeds import db as feeds_db
+from istota.feeds import routes
 from istota.feeds.models import EntryRecord, FeedsContext
 from istota.feeds.routes import (
     get_user_context,
@@ -1201,5 +1202,105 @@ class TestRetentionSettingsConfig:
 
         assert self._put(
             client, {"max_entries_per_feed": 0}, feeds=feeds,
+        ).status_code == 200
+        assert self._validator_state(ctx) == [(None, None, None)] * 2
+
+    @pytest.mark.parametrize("key", [
+        "entry_retention_days", "max_entries_per_feed",
+    ])
+    def test_put_rejects_a_value_the_prune_could_not_express(
+        self, ctx, client, key,
+    ):
+        # The ceiling is not taste. `now - timedelta(days=1_000_000)` raises
+        # OverflowError, and a maximum at or above 2**63 cannot be bound as a
+        # SQLite integer — either raises out of `prune_feeds` on every run, so
+        # the daily prune job fails until it auto-disables and retention stops
+        # for that user with nothing saying why. Stored once, it is unreachable
+        # from the API that stored it.
+        _seed(ctx)
+        for bad in (routes.MAX_RETENTION_SETTING + 1, 10**6, 2**63, 10**9):
+            resp = self._put(client, {key: bad})
+            assert resp.status_code == 400, bad
+            assert key in resp.json()["error"]
+
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) is None
+            assert feeds_db.get_max_entries_per_feed(conn) is None
+
+    @pytest.mark.parametrize("key", [
+        "entry_retention_days", "max_entries_per_feed",
+    ])
+    def test_put_accepts_the_ceiling_itself(self, ctx, client, key):
+        # The control for the test above: the bound is inclusive, so it rejects
+        # what the prune cannot express and nothing else.
+        _seed(ctx)
+        resp = self._put(client, {key: routes.MAX_RETENTION_SETTING})
+        assert resp.status_code == 200
+
+    def test_the_ceiling_is_a_value_the_prune_can_actually_run_on(self, ctx):
+        # Ties the number to the failure it exists to prevent rather than to a
+        # comment: at the ceiling both passes complete, one above the age
+        # cutoff is still expressible but the point is that nothing between
+        # here and the overflow is reachable through the API.
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=routes.MAX_RETENTION_SETTING,
+        )
+        assert cutoff.isoformat()
+
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.prune_entries_to_feed_cap(
+                conn, max_entries_per_feed=routes.MAX_RETENTION_SETTING,
+            )
+
+    @pytest.mark.parametrize("bad", [[], 0, "", False, "nope", 5])
+    def test_put_rejects_a_non_object_settings_rather_than_wiping_them(
+        self, ctx, client, bad,
+    ):
+        # A *falsy* non-dict used to collapse to `{}` before the isinstance
+        # check could see it, skip validation whole, and then clear every
+        # stored setting on a 200 — which turns an `entry_retention_days` of 0
+        # ("never prune") into the 90-day default, i.e. deletion switched on by
+        # a malformed request.
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {"settings": bad, "categories": [], "feeds": []}},
+        )
+        assert resp.status_code == 400
+        assert "settings must be an object" in resp.json()["error"]
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) == 0
+            assert feeds_db.get_max_entries_per_feed(conn) == 0
+
+    def test_put_still_treats_a_null_settings_as_absent(self, ctx, client):
+        # `null` meant "no settings" before the check above went in and still
+        # does — the check narrows falsy non-dicts, not the absent case.
+        _seed(ctx)
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {"settings": None, "categories": [], "feeds": []}},
+        )
+        assert resp.status_code == 200
+
+    def test_a_raised_maximum_refetches_too(self, ctx, client):
+        # The rule is "changed", not "raised" — but raising is the direction
+        # the reset exists for, and it was the one with no test of its own.
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 100)
+            conn.commit()
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+
+        assert self._put(
+            client, {"max_entries_per_feed": 400}, feeds=feeds,
         ).status_code == 200
         assert self._validator_state(ctx) == [(None, None, None)] * 2

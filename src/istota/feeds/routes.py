@@ -613,10 +613,17 @@ def _validate_feeds_config(cfg: dict) -> str | None:
             return "each category must be an object"
         if not str(c.get("slug") or "").strip():
             return "every category needs a non-empty slug"
-    settings = cfg.get("settings") or {}
+    raw_settings = cfg.get("settings")
+    # Checked before the truthiness gate below, because a *falsy* non-dict —
+    # `[]`, `0`, `""`, `false` — otherwise collapses to `{}` and skips
+    # validation entirely, and `_apply_config_to_db` reads the payload the same
+    # way and clears every stored setting on a 200. That silently turns an
+    # `entry_retention_days` of 0 ("never prune") back into the 90-day default,
+    # which is deletion switched on. `null` still means absent, as it did.
+    if raw_settings is not None and not isinstance(raw_settings, dict):
+        return "settings must be an object"
+    settings = raw_settings or {}
     if settings:
-        if not isinstance(settings, dict):
-            return "settings must be an object"
         interval = settings.get("default_poll_interval_minutes")
         if interval is not None and not isinstance(interval, int):
             return "settings.default_poll_interval_minutes must be int"
@@ -629,6 +636,18 @@ def _validate_feeds_config(cfg: dict) -> str | None:
             if err:
                 return err
     return None
+
+
+# A thousand years of days, and far more entries than any feed holds. The
+# ceiling is about what the code can express rather than what a user might
+# want: above roughly 739,000 the age cutoff `now - timedelta(days=N)`
+# overflows `datetime`, and a maximum at or above 2**63 cannot be bound as a
+# SQLite integer. Either raises out of `prune_feeds` on *every* run, so the
+# daily `_module.feeds.prune` job fails until it auto-disables after five
+# consecutive failures — retention then stops for that user, permanently, with
+# nothing on any surface saying why. Anyone wanting more than this means "no
+# limit", which is what 0 already says.
+MAX_RETENTION_SETTING = 365_000
 
 
 def _non_negative_int(settings: dict, key: str) -> str | None:
@@ -647,15 +666,20 @@ def _non_negative_int(settings: dict, key: str) -> str | None:
         return f"settings.{key} must be int"
     if value < 0:
         return f"settings.{key} must be >= 0"
+    if value > MAX_RETENTION_SETTING:
+        return f"settings.{key} must be <= {MAX_RETENTION_SETTING}"
     return None
 
 
 def _optional_count(settings: dict, key: str) -> int | None:
     """Read one optional count. Absent or blank clears it; ``0`` is a value.
 
-    Validation has already rejected a malformed value by the time this runs,
-    so this must not silently substitute a default for one — an unparseable
-    value clears the setting back to the constant rather than being stored.
+    Clearing the stored row *is* how a setting returns to its constant, so the
+    blank and unparseable branches below must never be reached by a value the
+    user meant as a number. They are not: `_validate_feeds_config` answers 400
+    to a blank string and to every non-int before this runs, which leaves only
+    absent and `null` arriving here from the route. The branches stay for a
+    direct caller, which has no validator in front of it.
     """
     raw = settings.get(key)
     if raw is None or raw == "":
@@ -774,7 +798,7 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
             conn, _optional_count(settings_payload, "image_dedupe_window_days"),
         )
 
-        # Same rule for both retention settings: absent or blank clears the
+        # Same rule for both retention settings: an absent key clears the
         # stored row back to the constant, and 0 is stored as "off".
         feeds_db.set_entry_retention_days(
             conn, _optional_count(settings_payload, "entry_retention_days"),

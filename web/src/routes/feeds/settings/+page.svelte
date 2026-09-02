@@ -454,6 +454,7 @@
         <input
           type="number"
           min="0"
+          max="365000"
           value={config.settings.entry_retention_days ?? ''}
           placeholder="90"
           oninput={(e) => {
@@ -478,6 +479,7 @@
         <input
           type="number"
           min="0"
+          max="365000"
           value={config.settings.max_entries_per_feed ?? ''}
           placeholder="5000"
           oninput={(e) => {
