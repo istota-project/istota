@@ -38,6 +38,13 @@ _needs_web_deps = pytest.mark.skipif(
 if _has_web_deps:
     from httpx import ASGITransport, AsyncClient
 
+    # Imported here rather than lazily inside `_patch_app`, because
+    # `istota.web_app` calls `load_config()` at module scope and that
+    # reaches `doctor.run_checks` via `_validate_forge_clis`. Deferred,
+    # the import lands inside whichever test patched `run_checks` first
+    # and its call is counted as the endpoint's.
+    import istota.web_app  # noqa: F401
+
 from istota.doctor import DEPLOYMENT, FAIL, IMAGE, OK, SKIP, WARN, CheckResult
 
 from .test_web_app import _make_config, _patch_app
