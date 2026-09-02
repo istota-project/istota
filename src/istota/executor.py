@@ -22,6 +22,10 @@ from . import db
 from . import email_support
 from . import task_cgroup
 from . import config as istota_config
+from .claude_runtime_env import (
+    CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401  — re-exported; the drift guard reads it beside `build_clean_env`
+    without_claude_runtime_env,
+)
 from .config import Config
 from .context import (
     build_talk_context,
@@ -1647,6 +1651,13 @@ def build_clean_env(config: Config) -> dict[str, str]:
         if val is not None:
             env[key] = val
     # Pass through Claude Code auth token if present.
+    #
+    # Set for every task whatever brain will run it, because two of the three
+    # brains authenticate with it. The one that does not takes it back out —
+    # `claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names it, `NativeBrain`
+    # applies that on the way into its tools, and `execute_task` applies it to
+    # `proxy_base_env` (ISSUE-390). A second variable hand-set here belongs in
+    # that set too, unless a model-facing subprocess has business reading it.
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if oauth_token:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
@@ -5706,7 +5717,20 @@ def execute_task(
             # a lie. Everything else the CLIs rely on rides along — notably
             # ISTOTA_DEFERRED_DIR, whose absence is what makes a deferring skill
             # take its direct-write fallback instead.
-            proxy_base_env = {**env, **proxy_only_env}
+            #
+            # Minus the Claude runtime credential, which is the second route
+            # ISSUE-390 had to close and the less obvious one. The token is
+            # declared in no skill manifest, so neither `derive_credential_set`
+            # nor `derive_proxy_only_set` takes it out of this snapshot, and the
+            # model reaches every host-side skill CLI through the same Bash tool
+            # the strip in `NativeBrain._build_tools` just cleaned. No skill
+            # invokes the `claude` binary and none reads the variable, so it has
+            # no reader here either — and unlike a tool subprocess these run
+            # *unsandboxed as the daemon user*, which is the reason to be strict
+            # rather than a reason to relax.
+            proxy_base_env = without_claude_runtime_env(
+                {**env, **proxy_only_env}
+            )
             _proxy_ctx = SkillProxy(
                 _proxy_sock, credential_env, proxy_base_env,
                 timeout=config.security.skill_proxy_timeout,

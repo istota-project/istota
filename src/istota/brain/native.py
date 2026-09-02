@@ -44,6 +44,7 @@ from urllib.parse import urlparse
 
 from istota import __version__ as _ISTOTA_VERSION
 from istota import usage as usage_types
+from istota.claude_runtime_env import without_claude_runtime_env
 from istota.agent.events import AgentEvent, _describe_tool_use, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
@@ -2077,10 +2078,35 @@ class NativeBrain:
             corpus = _extract_urls(req.prompt)
 
         deferred = (req.env or {}).get("ISTOTA_DEFERRED_DIR")
+        # The Claude runtime credential does not cross into a native tool
+        # subprocess (ISSUE-390). `build_clean_env` sets it for every task
+        # whatever brain will run it, and nothing on this path reads it — the
+        # provider key comes from the config — so its only effect here is that
+        # `echo "$CLAUDE_CODE_OAUTH_TOKEN"` in a Bash call comes back as a
+        # `ToolResultMessage` addressed to whatever provider native is pointed
+        # at. Same provider-boundary crossing ISSUE-389 closed for the mounts,
+        # by the other mechanism.
+        #
+        # **This function is the seam for the tool subprocesses, and
+        # deliberately so.** Deciding it per brain further up, where the env is
+        # built, looks tidier and is wrong: `_run_fallback` rebuilds the request
+        # with `dataclasses.replace` and never rebuilds `env`, so a `native ->
+        # claude_code` reroute would then hand the CLI an env with the
+        # credential already removed and fail to authenticate on the shape where
+        # that token is the only credential there is. It is not the *only* place
+        # the task env leaves for a model-facing process — `execute_task` strips
+        # the same names from `proxy_base_env`, which is what the host-side
+        # skill CLIs get.
+        #
+        # `or None` goes on the **input**, never the output. `ToolEnv` reads
+        # `None` as "inherit the parent environment", and the parent is the
+        # daemon, whose environment is where `build_clean_env` read the token
+        # from — so collapsing a fully-stripped `{}` to `None` would hand the
+        # child the whole daemon env and put the credential straight back.
         env = ToolEnv(
             cwd=cwd,
             sandbox_wrap=req.sandbox_wrap,
-            subprocess_env=req.env or None,
+            subprocess_env=without_claude_runtime_env(req.env or None),
             bash_timeout_seconds=max(1, req.timeout_seconds),
             read_roots=read_roots,
             write_roots=write_roots,

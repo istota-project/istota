@@ -131,6 +131,29 @@ class TestProxyIsUnconditional:
         assert "ISTOTA_SKILL_PROXY_SOCK" in claude_env
 
 
+class TestClaudeRuntimeEnvIsNotInTheProxyBaseEnv:
+    """ISSUE-390's second route, and the less obvious one.
+
+    The skill proxy's `base_env` is snapshotted from the same task env the
+    brains get, and `CLAUDE_CODE_OAUTH_TOKEN` is declared in no skill manifest —
+    so neither `derive_credential_set` nor `derive_proxy_only_set` takes it out,
+    and it rode into every host-side skill CLI. Those run unsandboxed as the
+    daemon user, and the model reaches them through the same Bash tool the
+    `_build_tools` strip cleaned. Nothing there reads it: no skill invokes the
+    `claude` binary.
+    """
+
+    def test_the_token_does_not_reach_a_skill_cli(self, env_config):
+        with patch.dict(
+            os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-fake-for-tests"},
+        ):
+            claude_env, proxy_call = _run_task(env_config)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in _proxy_base_env(proxy_call)
+        # Control: the variable really was set for this task, so the assertion
+        # above is not passing merely because the daemon had no token.
+        assert claude_env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake-for-tests"
+
+
 class TestFrameworkDbPathRouting:
     """ISTOTA_DB_PATH goes to the proxy, for every user, and to no one else."""
 
