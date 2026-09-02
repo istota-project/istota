@@ -53,8 +53,10 @@ class TalkTransport:
         # Talk is a room view whose transcript lives in Nextcloud, not in our
         # `messages` table — a room fan-out has to make a real API call here.
         room_view="external",
-        # An inbound Talk message registers the room, binds the surface, seeds
-        # membership, renames from `displayName` and un-archives.
+        # An inbound Talk message registers the room, binds the surface and
+        # seeds membership. The rename from `displayName` and the un-archive
+        # beside them in `record_inbound` are Talk's alone, not part of what
+        # `member` means — a web-origin room's user-set name wins.
         inbound_room_role="member",
         # The web process posts a web-origin turn to Talk *as the user* when it
         # holds their OAuth token, and the scheduler reposts it attributed when

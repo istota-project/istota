@@ -140,8 +140,12 @@ class TransportCapabilities:
     ``room_view`` above says nothing about: what an arriving message on this
     surface does to the room registry.
 
-    - ``"member"`` — an inbound message registers the room, binds the surface,
-      adds membership, renames from the surface and un-archives (talk, web).
+    - ``"member"`` — an inbound message registers the room, binds the surface
+      and adds membership (talk, web). Talk *additionally* renames the room from
+      the conversation's ``displayName`` and un-archives it; web does not, and
+      the comment at that branch in ``ingest.record_inbound`` says why — a
+      web-origin room's user-set name wins. Those two are a Talk behaviour
+      rather than part of what ``member`` means.
     - ``"guest"`` — an inbound message joins an existing room's transcript and
       never mints one. Email, and ISSUE-136's "existence, never creation" rule
       is exactly this value.

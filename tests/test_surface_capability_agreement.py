@@ -83,6 +83,17 @@ class TestTheCapabilityRecordIsInternallyConsistent:
         # behaviour no path can perform. The leaf asserts the same thing over
         # its own table (`test_surface_facts.py`); the two records are what
         # would disagree.
+        #
+        # Deliberately one-way. The reverse — an external room view must
+        # declare a mirror mode — would refuse a declaration the model permits:
+        # `None` is a legal answer to "how does this surface show a turn it did
+        # not receive natively", and a third external view that genuinely
+        # carries none would have to lie to get past it. What covers the
+        # forget-to-declare case instead is the pair of properties below it:
+        # `SurfaceRoomFacts` takes no defaults, so the leaf author must state an
+        # answer, and the agreement tests above then require the transport to
+        # match it. Both halves have to be forgotten together, and only one of
+        # them can be.
         for name, transport in transports.items():
             caps = transport.capabilities
             if caps.user_turn_mirror is not None:
