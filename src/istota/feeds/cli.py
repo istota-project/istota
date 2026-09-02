@@ -542,6 +542,23 @@ def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
     _poll_due(ctx, DEFAULT_SCHEDULED_POLL_LIMIT if limit is None else limit)
 
 
+@cli.command("prune")
+@click.option("--dry-run", is_flag=True, help="Report what would go; delete nothing")
+@pass_ctx
+def cmd_prune(ctx: FeedsContext, dry_run) -> None:
+    """Apply the retention policy: age window, per-feed maximum, image cascade."""
+    from dataclasses import asdict
+
+    from istota.feeds import retention
+
+    try:
+        result = retention.prune_feeds(ctx, dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001 — the envelope is the contract
+        _output(_err(str(exc)))
+        return
+    _output(_ok(**asdict(result)))
+
+
 # ---------------------------------------------------------------------------
 # OPML
 # ---------------------------------------------------------------------------
