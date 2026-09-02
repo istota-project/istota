@@ -333,21 +333,6 @@ def marked_block(stack, begin: str, end: str, what: str) -> str:
     return transcript[start:stop]
 
 
-def messages_by_role(stack, role: str) -> list[str]:
-    """Every message of one role, across every request the endpoint served.
-
-    `transcript()` flattens the roles away, and the whole point here is which
-    role a string arrived on: the system half surviving compaction is exactly
-    the claim that it is *not* in a user message.
-    """
-    out = []
-    for body in list(stack.endpoint.requests):
-        for message in body.get("messages") or []:
-            if isinstance(message, dict) and message.get("role") == role:
-                out.append(str(message.get("content")))
-    return out
-
-
 class TestTheComposedSystemPromptInTheStack:
     """`task_<id>_system_prompt.txt`, observed from inside a live task.
 
@@ -417,8 +402,8 @@ class TestTheComposedSystemPromptInTheStack:
         )
         stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
 
-        systems = messages_by_role(stack, "system")
-        users = messages_by_role(stack, "user")
+        systems = stack.endpoint.messages_by_role("system")
+        users = stack.endpoint.messages_by_role("user")
 
         assert any(COMPOSED_SENTINEL in text for text in systems), (
             "no system message carried Istota's standing instructions, so the "

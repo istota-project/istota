@@ -2874,10 +2874,12 @@ def build_bwrap_cmd(
 
     ``profile`` is required and keyword-only — see ``SandboxProfile`` for what
     it decides and why it has no default. Everything else about the plan is
-    generic, including the ordering, which is load-bearing in three places
+    generic, including the ordering, which is load-bearing in four places
     (cache bind before repos bind, ``.developer`` re-bind after
-    ``user_temp_dir``, masks last with ``--remount-ro`` after each). Omitting
-    the Claude block under ``NATIVE`` moves none of them.
+    ``user_temp_dir``, ``extra_ro_binds`` after ``user_temp_dir`` too — its one
+    production entry is the composed system prompt, which lives *inside* that
+    read-write bind — and masks last with ``--remount-ro`` after each).
+    Omitting the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
     auto-authorized by credential presence — the same set
@@ -3064,10 +3066,27 @@ def build_bwrap_cmd(
         if net_proxy_sock.exists():
             _ro_bind(net_proxy_sock)
 
-    # --- Extra RO binds (e.g. service sockets for same-host APIs) ---
+    # --- Extra RO binds ---
+    #
+    # Emitted after the `user_temp_dir` bind above, and that is the mechanism
+    # rather than a coincidence: the one production entry is the task's own
+    # `task_<id>_system_prompt.txt`, which sits inside that read-write bind, so
+    # only a *later* read-only bind of the file makes it read-only. An earlier
+    # one would simply be overmounted by its parent.
+    #
+    # A missing entry is skipped rather than raising, because bwrap fails the
+    # whole namespace on a bind whose source is absent — one cleanup race would
+    # otherwise fail every task instead of one. It is logged, because the entry
+    # is a boundary: a silently dropped read-only bind leaves the writable copy
+    # of the same path in the namespace and nothing anywhere says so.
     for path in (extra_ro_binds or []):
         if path.exists():
             _ro_bind(path)
+        else:
+            logger.warning(
+                "sandbox: extra read-only bind %s does not exist; the path is "
+                "left as its parent bind has it", path,
+            )
 
     # --- No Docker API reaches a task, and no `docker` binary either ---
     # This used to bind the Docker CLI read-only and, at the conventional
@@ -3509,6 +3528,17 @@ def native_fs_roots(
     a denied subdirectory or teaching ``ToolEnv`` and the tool-server protocol
     a pattern; neither is in scope here, so the residual is stated rather than
     implied.
+
+    **This function is not the only producer of that deny entry, and must not
+    become it.** ``execute_task`` calls this only under
+    ``native_fs_confinement_active``, so on an unsandboxed shape — macOS, the
+    standalone install, the shipped Docker stack — nothing here runs at all.
+    The composed path is therefore seeded onto ``fs_write_denied_roots``
+    *outside* that branch, which is where it does the most work: those are the
+    deployments with no bwrap re-bind behind it. ``ToolEnv`` enforces a deny
+    root whether or not confinement is on, precisely so that seeding means
+    something. This function returns it too, so the confined path has one list
+    and no duplicate.
 
     Carve-outs here deny *writes* only. bwrap's other nested override, the
     tmpfs masks over ``db_path.parent`` and ``module_db_root()``, is a total
@@ -5823,19 +5853,25 @@ def execute_task(
     # message instead of trailing eight kilobytes of tool documentation.
     prompt = composed.user
 
-    # Log prompt size breakdown. No `other` line: the prompt is two strings
-    # with different authority now, and a single residual computed across both
-    # would describe a string nothing sends.
+    # Log prompt size breakdown. Each component is attributed to the half it
+    # is actually in, with a residual per half — a single `other` across both
+    # would describe a string nothing sends, while dropping the residual
+    # altogether loses the one figure that moves when the persona, the
+    # emissaries, the rules or the tool section grow. That is the number to
+    # watch on a context-pressure bug, which is what ISSUE-375 is.
     context_chars = len(conversation_context) if conversation_context else 0
     memory_chars = len(user_memory or "") + len(dated_memories or "") + len(channel_memory or "") + len(recalled_memories or "")
     skills_chars = len(skills_doc or "")
     system_chars = len(composed.system)
     user_chars = len(composed.user)
     logger.info(
-        "Prompt for task %d: %d chars total (system: %d, user: %d; "
-        "context: %d, memory: %d, skills: %d)",
-        task.id, system_chars + user_chars, system_chars, user_chars,
-        context_chars, memory_chars, skills_chars,
+        "Prompt for task %d: %d chars total "
+        "(system: %d [skills %d, other %d], "
+        "user: %d [context %d, memory %d, other %d])",
+        task.id, system_chars + user_chars,
+        system_chars, skills_chars, system_chars - skills_chars,
+        user_chars, context_chars, memory_chars,
+        user_chars - context_chars - memory_chars,
     )
 
     if dry_run:
@@ -5850,24 +5886,55 @@ def execute_task(
 
     # The system half, and the file the brain is handed by path.
     #
-    # Resolved, for two reasons that have to agree. `BrainRequest` documents
-    # the path as absolute — NativeBrain opens it in the daemon process while
-    # the Claude CLI opens it inside the sandbox, against two different working
-    # directories, and a reroute carries the same value between them. And
-    # `build_bwrap_cmd`'s `_ro_bind` uses the path it is given as the
-    # *in-namespace destination* while binding the resolved source, so an
-    # unresolved path on a deployment whose `temp_dir` sits behind a symlink
-    # would land the read-only bind somewhere the CLI never looks — leaving the
-    # writable copy at the path it does look at. `ImageInput.path` records the
-    # same rule for the same reason.
+    # **The directory is resolved and the filename is not**, and the split is
+    # the whole point rather than an oversight.
+    #
+    # Resolving the ancestors is what makes the path absolute — `BrainRequest`
+    # requires that, since NativeBrain opens it in the daemon process while the
+    # Claude CLI opens it inside the sandbox, against two different working
+    # directories, and a reroute carries one value between them — and it is
+    # also what makes it the *in-namespace* path: `build_bwrap_cmd` binds
+    # `user_temp_dir.resolve()` at its own resolved name, and `_ro_bind` uses
+    # the string it is handed as the destination, so an unresolved ancestor on
+    # a deployment whose `temp_dir` sits behind a symlink would land the
+    # read-only bind somewhere the CLI never looks. `ImageInput.path` records
+    # that half of the rule for the same reason.
+    #
+    # Resolving the *last* component would undo the guard below. `.resolve()`
+    # follows a symlink, so a planted one would silently become its target and
+    # `O_NOFOLLOW` would then inspect a perfectly ordinary file — leaving the
+    # write to land wherever the link pointed, with the symlink hidden rather
+    # than caught. Measured: the first draft of this did exactly that.
     #
     # Written before the request is built and never conditionally: a request
     # naming a file that was not written is the fail-closed contract firing on
     # our own bug.
+    #
+    # `O_NOFOLLOW`, and that is not decoration. `user_temp_dir` is per *user*,
+    # bound read-write into every one of that user's sandboxes and exported as
+    # `ISTOTA_DEFERRED_DIR`, so a concurrent task of the same user can create
+    # entries in it — and task ids are sequential and in the environment, so
+    # the entry it creates can be a *dangling* symlink named after a task that
+    # has not started yet. A plain `write_text` follows that on open and writes
+    # the composed prompt through it, which is an arbitrary write as the daemon
+    # user with substantially task-controlled content. `ELOOP` fails the task
+    # instead, which is the direction to fail in. The same hazard is latent on
+    # `task_<id>_prompt.txt` above and on every deferred-op file; it is not
+    # this stage's to fix, and is recorded rather than quietly matched.
+    #
+    # `0o600` because the file holds the persona, the user's own overlays and
+    # the per-user email address, and there is no reason for it to be readable
+    # by other local accounts.
     system_prompt_file = (
-        user_temp_dir / f"task_{task.id}_system_prompt.txt"
-    ).resolve()
-    system_prompt_file.write_text(composed.system, encoding="utf-8")
+        Path(user_temp_dir).resolve() / f"task_{task.id}_system_prompt.txt"
+    )
+    _fd = os.open(
+        system_prompt_file,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+        _f.write(composed.system)
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"
@@ -6593,7 +6660,24 @@ def execute_task(
         # cwd choice below uses. Other brains ignore these fields.
         _fs_read_roots: "list[Path] | None" = None
         _fs_write_roots: "list[Path] | None" = None
-        _fs_write_denied_roots: "list[Path]" = []
+        # The composed system prompt is denied **whether or not confinement is
+        # active**, which is why it is seeded here rather than only inside the
+        # branch. The two root lists are an allowlist and mean nothing without
+        # confinement, but a deny root is a statement about a path: `ToolEnv`
+        # resolves `write_denied_roots` unconditionally and checks them ahead
+        # of its unconfined early return, exactly so a caller who sets one
+        # without `read_roots` gets the refusal it looks like
+        # (`session/tools/env.py`, and `test_denied_even_when_unconfined`).
+        #
+        # That matters because the unconfined shapes are the ones with nothing
+        # else: `build_bwrap_cmd` hands the command back unwrapped on macOS, on
+        # the standalone install and on the shipped Docker stack (which grants
+        # neither `seccomp:unconfined` nor `systempaths=unconfined`, so the
+        # bwrap probe fails and every task runs uncontained). Gating this on
+        # sandboxing would leave the file with no guard at all on precisely
+        # those deployments. The confined branch below returns a list that
+        # already contains it, so there is no duplicate.
+        _fs_write_denied_roots: "list[Path]" = [system_prompt_file]
         if native_fs_confinement_active(config):
             _fs_read_roots, _fs_write_roots, _fs_write_denied_roots = native_fs_roots(
                 config,

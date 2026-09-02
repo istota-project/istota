@@ -587,6 +587,7 @@ class TestWhatTheBrainIsHanded:
     """
 
     def _config(self, tmp_path, sandbox=False) -> Config:
+        tmp_path.mkdir(parents=True, exist_ok=True)
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         config_dir = tmp_path / "config"
@@ -774,6 +775,101 @@ class TestWhatTheBrainIsHanded:
         assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
             f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
         )
+        # Once, not twice: `native_fs_roots` returns it and the executor seeds
+        # it, and a duplicate would be the shape of two producers drifting.
+        assert req.fs_write_denied_roots.count(
+            req.composed_system_prompt_path
+        ) == 1, req.fs_write_denied_roots
+
+    def test_the_deny_entry_survives_an_unsandboxed_deployment(self, tmp_path):
+        """The shapes with nothing else, and the ones easiest to miss.
+
+        `build_bwrap_cmd` hands the command back unwrapped on macOS, on the
+        standalone install and on the shipped Docker stack, so the read-only
+        re-bind does not exist there. `native_fs_roots` is not called either —
+        it is gated on `native_fs_confinement_active`. The deny root is the
+        only guard the file has on those deployments, and `ToolEnv` enforces a
+        deny root whether or not confinement is on, so it has to be set
+        outside that gate. The spec says so in as many words: "Native file
+        tools, sandbox active or not".
+        """
+        with patch(
+            "istota.executor.native_fs_confinement_active", return_value=False,
+        ):
+            _config, _task, req = self._run(tmp_path)
+
+        assert req.fs_read_roots is None, (
+            "the roots are an allowlist and mean nothing unconfined; this test "
+            "is about the deny set, so the fixture has to actually be unconfined"
+        )
+        assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
+            f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
+        )
+
+    def test_an_unconfined_tool_env_refuses_the_write(self, tmp_path):
+        """The deny list is only worth setting if the consumer honours it with
+        no `read_roots`. Asserted through `ToolEnv` itself rather than through
+        the list, so the claim is the refusal and not the plumbing."""
+        from istota.session.tools.env import ToolEnv, ToolPathError
+
+        with patch(
+            "istota.executor.native_fs_confinement_active", return_value=False,
+        ):
+            _config, _task, req = self._run(tmp_path)
+
+        env = ToolEnv(
+            cwd=req.composed_system_prompt_path.parent,
+            write_denied_roots=tuple(req.fs_write_denied_roots),
+        )
+        assert env.confined is False
+        with pytest.raises(ToolPathError, match="read-only"):
+            env.resolve(str(req.composed_system_prompt_path), write=True)
+        # The sibling control: nothing else in the directory became read-only.
+        env.resolve(
+            str(req.composed_system_prompt_path.parent / "notes.txt"), write=True,
+        )
+
+    def test_a_planted_symlink_fails_the_write_rather_than_following_it(
+        self, tmp_path,
+    ):
+        """`user_temp_dir` is per user, not per task, and task ids are
+        sequential and in the environment — so a concurrent task of the same
+        user can leave a *dangling* symlink named after a task that has not
+        started. A plain `write_text` follows it and writes the composed prompt
+        wherever it points, as the daemon user. `O_NOFOLLOW` refuses instead.
+        """
+        for existing in (True, False):
+            config = self._config(tmp_path / f"plant-{existing}")
+            temp = executor.get_user_temp_dir(config, "alice")
+            temp.mkdir(parents=True, exist_ok=True)
+            victim = tmp_path / f"victim-{existing}.txt"
+            if existing:
+                victim.write_text("do not overwrite me\n")
+            (temp / "task_1_system_prompt.txt").symlink_to(victim)
+
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt=f"{SENTINELS['request']} do the thing",
+                    user_id="alice", source_type="talk",
+                    conversation_token="room1",
+                )
+                task = db.get_task(conn, task_id)
+                assert task.id == 1, "the planted name has to match the task"
+                with patch(
+                    "istota.executor.make_brain", return_value=_CaptureBrain(),
+                ):
+                    with pytest.raises(OSError):
+                        execute_task(
+                            task, config, [], conn=conn, use_context=False,
+                        )
+
+            if existing:
+                assert victim.read_text() == "do not overwrite me\n"
+            else:
+                # The dangling case is the worse one: a plain open would have
+                # *created* the target, so an attacker picks any path the
+                # daemon can write rather than one it already wrote.
+                assert not victim.exists()
 
     def test_url_provenance_derives_from_the_user_half(self, tmp_path):
         """`_extract_urls(req.prompt)` is the `require_url_provenance` corpus.
