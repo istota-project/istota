@@ -20,10 +20,16 @@ from istota.transport.ingest import record_inbound
 
 from .support.rooms import RoomShape, plain_talk_room, promoted_room
 
-# What `db._new_web_chat_token` produces. Asserted against a freshly minted real
-# token below, so a change to that format turns this red instead of leaving the
-# builder quietly generating a shape the product no longer mints.
-WEB_TOKEN_RE = re.compile(r"^web-[^-]+-[0-9a-f]{12}$")
+def web_token_re(user_id: str) -> re.Pattern:
+    """What `db._new_web_chat_token` produces for this user.
+
+    Built per user rather than written once with `[^-]+`, because a Nextcloud
+    account name may contain a hyphen and that pattern would reject a perfectly
+    real token. Asserted against a freshly minted one below, so a change to the
+    product's format turns this red instead of leaving the builder quietly
+    generating a shape nothing mints any more.
+    """
+    return re.compile(rf"^web-{re.escape(user_id)}-[0-9a-f]{{12}}$")
 
 
 @pytest.fixture
@@ -126,11 +132,15 @@ class TestGeneratedDefaults:
         assert len({t for s in shapes for t in (s.canonical, s.talk_ref)}) == 30
         assert len(db.list_member_rooms(conn, "alice")) == 20
 
-    def test_generated_canonical_has_the_shape_a_real_web_token_has(self, conn):
-        real = db.create_web_chat_room(conn, "alice", "Ideas").token
-        built = promoted_room(conn, "alice").canonical
-        assert WEB_TOKEN_RE.match(real), real
-        assert WEB_TOKEN_RE.match(built), built
+    @pytest.mark.parametrize("user_id", ["alice", "alice-smith"])
+    def test_generated_canonical_has_the_shape_a_real_web_token_has(
+        self, conn, user_id,
+    ):
+        real = db.create_web_chat_room(conn, user_id, "Ideas").token
+        built = promoted_room(conn, user_id).canonical
+        pattern = web_token_re(user_id)
+        assert pattern.match(real), real
+        assert pattern.match(built), built
 
     def test_a_repeated_canonical_token_is_refused(self, conn):
         room = plain_talk_room(conn, "alice", token="cpzpcfx2")
@@ -144,44 +154,71 @@ class TestGeneratedDefaults:
         with pytest.raises(ValueError, match="already bound"):
             promoted_room(conn, "alice", talk_ref=room.talk_ref)
 
+    def test_a_talk_ref_naming_another_room_is_refused(self, conn):
+        # A web room binds `web` only, so the ref is free by the check above —
+        # but binding `talk -> <another room's canonical token>` would make an
+        # inbound naming that token resolve into this room. That is ISSUE-400
+        # planted in the fixture rather than exposed by it.
+        other = db.create_web_chat_room(conn, "alice", "Ideas")
+        assert db.resolve_room_token(conn, "talk", other.token) is None
+        with pytest.raises(ValueError, match="another room's canonical token"):
+            promoted_room(conn, "alice", talk_ref=other.token)
+
+
+# Written by a producer and by no builder, because a builder builds a room and
+# not a turn: `record_inbound` also stores the user's message and creates the
+# task that answers it.
+NOT_THE_ROOM_MODEL = frozenset({"messages", "tasks"})
+
+# Nothing chooses these, so two runs differ by construction. `applied_at` is
+# `_migration_state`'s, stamped by `db.init_db` on each database in turn — the
+# two calls land a second apart often enough to matter.
+VOLATILE_COLUMNS = frozenset({"id", "created_at", "updated_at", "applied_at"})
+
 
 def _room_model(conn) -> dict[str, list[tuple]]:
-    """Every room-model row, with the columns nothing chooses left out.
+    """Every non-empty table in the database, minus the two above.
 
-    `id`, `created_at` and `updated_at` differ between two runs by construction.
-    `messages` and `tasks` are out of scope on purpose: a builder builds a room,
-    not a turn, and `record_inbound` writes both.
+    Enumerated from `sqlite_master` rather than from a list of the room tables.
+    A list would make the pin's guarantee smaller than it reads: a producer that
+    grew a write into a table nobody had thought of would leave it green while
+    the builders diverged, which is the failure this whole file exists to catch.
     """
-    def rows(sql: str) -> list[tuple]:
-        return [tuple(r) for r in conn.execute(sql).fetchall()]
-
-    return {
-        "rooms": rows(
-            "SELECT token, user_id, name, origin, archived, model, effort "
-            "FROM rooms ORDER BY token"
-        ),
-        "room_bindings": rows(
-            "SELECT room_token, surface, surface_ref FROM room_bindings "
-            "ORDER BY room_token, surface"
-        ),
-        "room_members": rows(
-            "SELECT room_token, user_id FROM room_members "
-            "ORDER BY room_token, user_id"
-        ),
-        "room_dismissals": rows(
-            "SELECT room_token, user_id FROM room_dismissals "
-            "ORDER BY room_token, user_id"
-        ),
-        "web_chat_rooms": rows(
-            "SELECT user_id, token, name, archived FROM web_chat_rooms "
-            "ORDER BY user_id, token"
-        ),
-    }
+    out: dict[str, list[tuple]] = {}
+    tables = [
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
+    for table in tables:
+        if table in NOT_THE_ROOM_MODEL:
+            continue
+        columns = [
+            r[1] for r in conn.execute(f"PRAGMA table_info({table})")
+            if r[1] not in VOLATILE_COLUMNS
+        ]
+        if not columns:
+            continue
+        # Quoted, because at least one column in this schema is a reserved
+        # word (`sent_emails.references`).
+        selected = ", ".join(f'"{c}"' for c in columns)
+        rows = conn.execute(
+            f'SELECT {selected} FROM "{table}" ORDER BY {selected}'
+        ).fetchall()
+        if rows:
+            out[table] = [tuple(r) for r in rows]
+    return out
 
 
 class TestPinnedAgainstTheProducers:
     """Run the real producer and the builder against two fresh databases and
-    diff the room model. A producer that grows a write turns this red."""
+    diff every table. A producer that grows a write turns this red.
+
+    Both are parametrized over a name needing normalization, because the two
+    producers disagree about whether to normalize one and a fixed already-clean
+    name makes the pin hold for a reason unrelated to the builders agreeing.
+    """
 
     @pytest.fixture
     def two_dbs(self, tmp_path):
@@ -190,25 +227,27 @@ class TestPinnedAgainstTheProducers:
         db.init_db(built)
         return produced, built
 
-    def test_plain_talk_room_matches_record_inbound(self, two_dbs):
+    @pytest.mark.parametrize("name", ["#istota", "  #istota  "])
+    def test_plain_talk_room_matches_record_inbound(self, two_dbs, name):
         produced, built = two_dbs
         config = Config()
         config.db_path = produced
         with db.get_db(produced) as conn:
             token, task_id = record_inbound(
                 conn, config, surface="talk", surface_ref="cpzpcfx2",
-                user_id="alice", text="hi", channel_name="#istota",
+                user_id="alice", text="hi", channel_name=name,
             )
         assert token == "cpzpcfx2" and task_id is not None  # the room branch ran
 
         with db.get_db(built) as conn:
-            plain_talk_room(conn, "alice", token="cpzpcfx2", name="#istota")
+            plain_talk_room(conn, "alice", token="cpzpcfx2", name=name)
 
         with db.get_db(produced) as a, db.get_db(built) as b:
             assert _room_model(b) == _room_model(a)
 
     @pytest.mark.asyncio
-    async def test_promoted_room_matches_create_plus_promote(self, two_dbs):
+    @pytest.mark.parametrize("name", ["Ideas", "  Ideas  ", ""])
+    async def test_promoted_room_matches_create_plus_promote(self, two_dbs, name):
         from istota import web_app
 
         produced, built = two_dbs
@@ -218,7 +257,7 @@ class TestPinnedAgainstTheProducers:
             url="https://nc.example", username="bot", app_password="pw",
         )
         with db.get_db(produced) as conn:
-            handle = db.create_web_chat_room(conn, "alice", "Ideas")
+            handle = db.create_web_chat_room(conn, "alice", name)
 
         fake = MagicMock()
         fake.create_conversation = AsyncMock(return_value={"token": "promoted-tok"})
@@ -237,7 +276,7 @@ class TestPinnedAgainstTheProducers:
         with db.get_db(built) as conn:
             room = promoted_room(
                 conn, "alice",
-                canonical=handle.token, talk_ref="promoted-tok", name="Ideas",
+                canonical=handle.token, talk_ref="promoted-tok", name=name,
             )
         assert room.diverges
 
