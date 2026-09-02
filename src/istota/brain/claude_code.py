@@ -204,7 +204,9 @@ def build_image_prompt(req: BrainRequest) -> str:
     `allowed_tools=[]` is a policy decision by the caller (the sleep cycle, the
     health OCR paths), never a gap to fill: the tool set is not enabled
     implicitly. Those requests get a named omission instead, the same split
-    `health/ocr.py` already settled with `allowed_tools=["Read"] if allow_read`.
+    `health/ocr.py` already settled with `allowed_tools=["Read"] if read_path`
+    (where the same value also supplies `fs_read_roots`, so the grant and its
+    confinement cannot be separated).
     """
     if not req.images:
         return req.prompt

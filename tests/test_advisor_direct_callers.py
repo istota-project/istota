@@ -119,7 +119,7 @@ class TestDirectCallerShapesStayAdvisorFree:
         assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
 
     def test_read_only_shape(self, tmp_path):
-        # ocr / encounter_ocr / immunization_ocr (allow_read=True)
+        # ocr / encounter_ocr / immunization_ocr (read_path=<document>)
         cmd, env = self._execute_capturing(tmp_path, allowed_tools=["Read"])
         assert "--advisor" not in cmd
         assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"

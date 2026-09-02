@@ -23,7 +23,6 @@ WARNING at generation time.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -258,11 +257,19 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
         return False, ""
 
     brain = make_brain(config.brain)
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these
+    # callers risks closing a cycle back through it.
+    from istota.executor import build_model_cli_env
+
     req = BrainRequest(
         prompt=prompt,
         allowed_tools=[],
         cwd=Path(config.temp_dir) if config.temp_dir else Path("/tmp"),
-        env=dict(os.environ),
+        # Not `dict(os.environ)`: a daemon-side model call with no task behind
+        # it, so nothing has stripped the master Fernet key, the Nextcloud app
+        # password, the mail passwords or the forge tokens (ISSUE-395).
+        env=build_model_cli_env(config),
         timeout_seconds=_GENERATION_TIMEOUT_SECONDS,
         model=brain.resolve_model_name("general"),
         streaming=False,

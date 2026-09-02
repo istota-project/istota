@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -370,14 +369,43 @@ def _coerce_str(v) -> str | None:
 
 
 def _call_brain(
-    prompt: str, config, *, allow_read: bool = False, user_id: str = ""
+    prompt: str, config, *, read_path: Path | None = None, user_id: str = ""
 ) -> str | None:
     """Run the extraction prompt through the active brain.
 
-    Returns the raw response text or ``None`` on failure. Pass
-    ``allow_read=True`` for vision-mode prompts that reference an image
-    or PDF by absolute path — the brain needs ``Read`` permission to load
-    the file as a multimodal block.
+    Returns the raw response text or ``None`` on failure.
+
+    ``read_path`` is the document a vision-mode prompt names by absolute path.
+    Passing it is what grants the ``Read`` tool, and it is simultaneously the
+    only path ``Read`` may touch — the two travel together so that granting the
+    tool without a root is not expressible (ISSUE-395). The root is the file
+    rather than its directory: on a shared deployment the uploads directory
+    holds other users' documents.
+
+    ``fs_read_roots`` is an allowlist, and its absent value means "no
+    allowlist" rather than "nothing allowed" (``session/tools/env.py``), so an
+    empty list here would leave the tools unconfined. That is why the caller
+    names a file rather than passing a possibly-empty list.
+
+    Confinement covers ``NativeBrain``, whose file tools read these roots.
+
+    **It does not cover the Claude Code brains, and what is exposed there is
+    the whole toolset rather than a read.** ``build_claude_cli_flags`` treats a
+    non-empty ``allowed_tools`` as a signal to add
+    ``--dangerously-skip-permissions`` and no ``--allowedTools`` allowlist at
+    all, so the CLI runs with its full default toolset — ``Bash`` and ``Write``
+    included — and takes its filesystem boundary from bubblewrap instead. This
+    path builds no bubblewrap wrap, so on a ``claude_code`` or ``tmux_claude``
+    deployment that toolset runs host-side as the daemon user.
+
+    That is a **deferral, not a limitation of the shape**: ``heartbeat.py``
+    wraps a task-less ``claude -p`` with a synthetic ``db.Task`` and
+    ``SandboxProfile.CLAUDE``, so the same is available here. It is not taken
+    yet because the document lives under ``uploads_dir``, which such a wrap
+    would have to bind (``extra_ro_binds``) or the extraction stops working
+    entirely — and the sandbox path is exercised by the ``linux`` and ``smoke``
+    tiers rather than the default suite, which patches ``_bwrap_available`` and
+    asserts on argv. See the resolution note on ISSUE-395.
     """
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
@@ -392,11 +420,22 @@ def _call_brain(
     except Exception as e:  # noqa: BLE001
         logger.warning("health_ocr_brain_init_failed error=%s", e)
         return None
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import build_model_cli_env, persist_brain_usage
+
     req = BrainRequest(
         prompt=prompt,
-        allowed_tools=["Read"] if allow_read else [],
+        allowed_tools=["Read"] if read_path else [],
         cwd=Path(getattr(config, "temp_dir", None) or "/tmp"),
-        env=dict(os.environ),
+        # Not `dict(os.environ)`: this is a daemon-side call with no task
+        # behind it, so nothing has stripped the master Fernet key, the
+        # Nextcloud app password, the mail passwords or the forge tokens
+        # (ISSUE-395). `build_model_cli_env` is the existing answer for a
+        # daemon-side model spawn that is not a task (ISSUE-232).
+        env=build_model_cli_env(config),
+        fs_read_roots=[read_path] if read_path else None,
         timeout_seconds=180,
         model=model,
         streaming=False,
@@ -406,10 +445,6 @@ def _call_brain(
     except Exception as e:  # noqa: BLE001
         logger.warning("health_ocr_brain_failed error=%s", e)
         return None
-    # Imported here rather than at module scope: `executor` imports
-    # `briefings.generate`, and a top-level import from any of these callers
-    # risks closing a cycle back through it.
-    from istota.executor import persist_brain_usage
 
     # One call per uploaded document, with no task row behind it.
     persist_brain_usage(
@@ -552,7 +587,7 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
     else:
         prompt = _build_vision_prompt(source_path, refs)
         response = _call_brain(
-            prompt, config, allow_read=True, user_id=ctx.user_id
+            prompt, config, read_path=source_path, user_id=ctx.user_id
         )
 
     if not response:

@@ -339,11 +339,23 @@ def cmd_run(args):
         # setting.
         base_model, effort = split_effort(raw_model)
         brain = make_brain(config.brain)
+        # Imported here rather than at module scope: `executor` imports
+        # `briefings.generate`, and a top-level import from any of these
+        # callers risks closing a cycle back through it.
+        from istota.executor import build_model_cli_env
+
         req = BrainRequest(
             prompt=prompt,
             allowed_tools=[],
             cwd=cwd,
-            env=dict(os.environ),
+            # Not `dict(os.environ)` (ISSUE-395). What that carried depends
+            # on how this CLI was started: spawned by the skill proxy it holds
+            # the manifest-injected provider key rather than the daemon's own
+            # credentials, which `_split_credential_env` already removed; run
+            # host-side directly, `os.environ` *is* the daemon environment,
+            # master Fernet key and all. `build_model_cli_env` is the right
+            # answer to both.
+            env=build_model_cli_env(config),
             timeout_seconds=timeout,
             model=brain.resolve_model_name(base_model),
             effort=effort or "",
