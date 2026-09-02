@@ -105,6 +105,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Feeds no longer keep every entry they have ever fetched.** A read entry is deleted 90 days after it arrived in your reader, and each feed is trimmed to 5000 stored entries; both numbers are on the feeds settings page, where `0` turns either limit off independently. The clock counts from when an entry was added here, not from when it was published, so an old post added to a channel today gets its full window rather than being deleted on arrival.
+
+- Starred entries are never deleted, and neither is anything the feed's most recent response still returned. Unread entries are never deleted by age, and at least 50 entries per feed are kept whatever their age — or the maximum, when you set that lower. The per-feed maximum is a hard ceiling and does not look at read state, so on a feed already at its limit an old unread entry can go ahead of a newer read one.
+
+- Nothing is deleted from an existing database for the first 90 days after the upgrade. That is a deliberate safety period, not the default window in disguise: it is time to see the two numbers on the settings page and change them before anything goes. The daily cleanup runs from day one and reports the date it is waiting for, and `istota-skill feeds prune --dry-run` shows what a real run would delete without touching anything.
+
+- Deleting entries does not make the database file smaller. SQLite keeps the freed pages and reuses them for later writes, so growth stops rather than reverses and a backup snapshot may still be the size it was. Nothing is vacuumed on a schedule: rewriting the file needs a lock that would fight the online backup.
+
 - **You can give yourself a profile picture in the web UI.** Settings → Identity takes one — drop it, paste it or pick a file — and it replaces the lettered square beside your messages in chat. It is saved as soon as you choose it, with no Save step, and Remove takes it away again. The picture is resized and re-encoded on the way in, so what is stored carries none of the camera and location data a photo arrives with. It is separate from your Nextcloud picture: setting one here does not change what Nextcloud shows.
 
 - **A profile picture you have set in Nextcloud is imported for you.** It shows up in web chat within a few hours of the bot first seeing your account, and it sits behind anything you upload here — so removing your own picture reveals it rather than leaving a lettered square. Only a picture you actually set is taken: Nextcloud draws a coloured letter for an account that has none, and importing that would replace one lettered square with another. Operators can switch the import off with `[web] avatar_import_from_nextcloud`, and `istota doctor` reports what the last pass did.
