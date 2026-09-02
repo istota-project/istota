@@ -518,3 +518,22 @@ class TestItIsNotReachableFromTheModelsDirectory:
         # directory is a directory bound read-write into the sandbox.
         assert user_temp.resolve() not in control_dir.parents
         assert control_dir.parents[2] == control_config.temp_dir.resolve()
+
+
+class TestTheNameIsRestatedInOnePlaceAndHeldEqual:
+    """`config.py` cannot import the executor, so it restates the name.
+
+    `load_config` runs in the daemon, the web app, the webhook receiver, every
+    CLI invocation and every host-side skill CLI the proxy spawns per call —
+    importing `istota.executor` there would put that whole graph on all of
+    them for one string. The copy is the same trade `sandbox_cache_sweeper`
+    makes for the cache subdirectory names, and it is only safe with the two
+    held equal: a drift would leave `_warn_ro_paths_over_control_tree`
+    checking a directory nothing writes to, silently passing every broad
+    entry it exists to catch.
+    """
+
+    def test_the_config_copy_matches_the_executor_constant(self):
+        from istota.config import _CONTROL_DIR_NAME
+
+        assert _CONTROL_DIR_NAME == CONTROL_DIR_NAME

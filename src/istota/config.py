@@ -2548,6 +2548,75 @@ def exec_socket_path(config: "Config", user_id: str) -> Path | None:
 EXEC_SOCKET_NAME = "exec.sock"
 
 
+#: ``executor.CONTROL_DIR_NAME``, restated. `config.py` sits below the executor
+#: and is loaded by the daemon, the web app, the webhook receiver, every CLI
+#: invocation and every host-side skill CLI the proxy spawns per call — so an
+#: import of `istota.executor` here would pull that whole graph (`.brain`
+#: included) onto all of them for one string. Held equal by
+#: ``tests/test_task_control_dir.py``, the same way `sandbox_cache_sweeper`
+#: restates the cache subdirectory names.
+_CONTROL_DIR_NAME = ".control"
+
+
+def _warn_ro_paths_over_control_tree(config: "Config") -> None:
+    """Warn where a ``sandbox_ro_paths`` entry would bind the control tree.
+
+    ``sandbox_ro_paths`` is bound verbatim, and one broad entry has cost this
+    project every database once: ``["/srv/app"]`` was the shipped default,
+    ``db_path`` and ``module_data_dir`` lived under it, and a single read-only
+    bind that mentioned no database exposed the framework DB, every user's
+    module DB and the local backups. The masks were the fix for that.
+
+    ``{temp_dir}/.control`` has no mask behind it and cannot have one: a task
+    has to *read* its own control directory, which is what the per-task
+    ``extra_ro_binds`` entry is for. So the only thing between a broad entry
+    and every task of every user's assembled prompt — retrieved memory,
+    knowledge facts, conversation history, the request itself — is that nobody
+    writes one. This says so at load rather than letting it be found later.
+
+    A warning rather than a refusal, on the same reasoning
+    ``_validate_sandbox_ro_paths`` refuses only ``/``: the operator's own
+    directory layout is theirs, an entry can overlap for reasons this cannot
+    see, and refusing to load would take the daemon down over a bind that is
+    otherwise working. Gated on the *requested* ``sandbox_enabled`` flag, not
+    the effective one, for the reason the credential pairing above is: nothing
+    is bound at all with the sandbox off, and ``effective_sandboxing`` spawns.
+    """
+    if not config.security.sandbox_enabled:
+        return
+    if not config.security.sandbox_ro_paths:
+        return
+    try:
+        control_root = Path(config.temp_dir).resolve() / _CONTROL_DIR_NAME
+    except (OSError, ValueError):  # pragma: no cover - an unresolvable temp_dir
+        return
+    for entry in config.security.sandbox_ro_paths:
+        try:
+            resolved = Path(entry).resolve()
+        except (OSError, ValueError):
+            continue
+        # Both directions. Above the root binds every user's whole tree; inside
+        # it binds one user's, or one task's, which is smaller and no more
+        # acceptable — and is the shape a well-meaning "let the model read its
+        # own control dir" edit takes.
+        overlaps = (
+            resolved == control_root
+            or control_root.is_relative_to(resolved)
+            or resolved.is_relative_to(control_root)
+        )
+        if overlaps:
+            logger.warning(
+                "[security] sandbox_ro_paths entry %r would bind the task "
+                "control tree (%s) into every sandbox: the framework writes "
+                "each task's assembled prompt, briefing metadata and prepared "
+                "image attachments there, and a task could then read every "
+                "other task's. Narrow the entry to the directory you actually "
+                "need; the control directory a task needs is bound for it "
+                "already.",
+                entry, control_root,
+            )
+
+
 def _validate_sandbox_ro_paths(raw: object) -> list[str]:
     """Coerce ``[security] sandbox_ro_paths`` to a safe list of absolute paths.
 
@@ -3187,6 +3256,10 @@ def load_config(config_path: Path | None = None) -> Config:
                 "Enable the skill proxy, or disable the sandbox for a trusted "
                 "single-user install."
             )
+
+    # Read off the loaded config rather than off `data`, so it fires whichever
+    # of the two keys the file names and whichever it inherits.
+    _warn_ro_paths_over_control_tree(config)
 
     config.admin_users = load_admin_users()
 
