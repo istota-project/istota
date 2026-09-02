@@ -30,10 +30,20 @@ logger = logging.getLogger("istota.consumers.talk")
 class TalkEventSubscriber:
     """Delivers discrete tool events to Talk via message editing."""
 
-    def __init__(self, config, task, ack_msg_id: int | None):
+    def __init__(
+        self, config, task, ack_msg_id: int | None,
+        *, target_token: str | None = None,
+    ):
         self._config = config
         self._task = task
         self._ack_msg_id = ack_msg_id
+        # The room the ack was posted to, resolved by the scheduler before the
+        # post. Not `task.conversation_token`: on a promoted room that is the
+        # canonical `web-…` token and naming it 404s, which is what silently
+        # killed every progress edit on those rooms (ISSUE-400). None keeps the
+        # helpers' own `conversation_token` fallback, for a caller with no room
+        # to resolve.
+        self._target_token = target_token
         self._start_time = time.monotonic()
         self._descriptions: list[str] = []
         # Live text message (progress_show_text only).
@@ -107,7 +117,10 @@ class TalkEventSubscriber:
     def _edit_ack(self, body: str) -> None:
         from ..scheduler import edit_talk_message
         try:
-            run_coro(edit_talk_message(self._config, self._task, self._ack_msg_id, body))
+            run_coro(edit_talk_message(
+                self._config, self._task, self._ack_msg_id, body,
+                target_token=self._target_token,
+            ))
         except Exception:
             logger.debug("Talk ack edit failed", exc_info=True)
 
@@ -118,10 +131,12 @@ class TalkEventSubscriber:
                 self._text_msg_id = run_coro(post_result_to_talk(
                     self._config, self._task, body,
                     reference_id=f"istota:task:{self._task.id}:text",
+                    target_token=self._target_token,
                 ))
             else:
                 run_coro(edit_talk_message(
                     self._config, self._task, self._text_msg_id, body,
+                    target_token=self._target_token,
                 ))
         except Exception:
             logger.debug("Talk text progress update failed", exc_info=True)
