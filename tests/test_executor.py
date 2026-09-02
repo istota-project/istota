@@ -1156,9 +1156,12 @@ class TestPathPrependOrdering:
         """The hook loop skips it, so it cannot ride into proxy_base_env."""
         import inspect
 
-        from istota import executor
+        from istota import task_env
 
-        src = inspect.getsource(executor.execute_task)
+        # Reads `build_task_runtime` rather than `execute_task`: the env
+        # assembly moved to `task_env` whole, and the ordering it guards moved
+        # with it. Same two statements, same order, one function along.
+        src = inspect.getsource(task_env.build_task_runtime)
         assert "if k == HOOK_PATH_PREPEND_KEY:" in src
         # ...and the application site is after the snapshot, not before.
         # Anchored on the assignment target rather than its right-hand side:
