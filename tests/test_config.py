@@ -609,6 +609,17 @@ class TestTheReadOnlyPathThatWouldExposeTheControlTree:
 
     _MARKER = "would bind the task control tree"
 
+    @pytest.fixture(autouse=True)
+    def _clear_the_latch(self):
+        """The warning is said once per process per entry, so a test that did
+        not clear it would depend on whether an earlier one had already used
+        the same path — and under xdist, on which worker it landed."""
+        from istota.config import _RO_PATH_CONTROL_TREE_WARNED
+
+        _RO_PATH_CONTROL_TREE_WARNED.clear()
+        yield
+        _RO_PATH_CONTROL_TREE_WARNED.clear()
+
     def _warnings(self, path, caplog):
         with caplog.at_level("WARNING", logger="istota.config"):
             load_config(path)
@@ -682,6 +693,38 @@ class TestTheReadOnlyPathThatWouldExposeTheControlTree:
             "sandbox_enabled = false\n"
             f'sandbox_ro_paths = ["{tmp_path}/tmp"]\n'
             "\n"
+        )
+        assert not self._warnings(p, caplog)
+
+
+    def test_it_is_said_once_per_process_not_once_per_load(self, tmp_path, caplog):
+        """`load_config` runs on every host-side skill CLI the proxy spawns,
+        which is once per model tool call. A multi-line warning on each of
+        those is noise on a path the model reads, so the notice latches the way
+        `_validate_brain_fallback`'s does."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            f'sandbox_ro_paths = ["{tmp_path}/tmp"]\n'
+        )
+        assert self._warnings(p, caplog)
+        caplog.clear()
+        assert not self._warnings(p, caplog)
+
+    def test_a_relative_temp_dir_is_skipped_rather_than_guessed_at(
+        self, tmp_path, caplog,
+    ):
+        """`Path.resolve()` on a relative value answers against the calling
+        process's cwd, which differs between the daemon, the web app and a
+        skill CLI — so the same config would warn in one and not another."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'temp_dir = "relative/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            'sandbox_ro_paths = ["relative"]\n'
         )
         assert not self._warnings(p, caplog)
 

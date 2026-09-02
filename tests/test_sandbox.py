@@ -493,6 +493,17 @@ class TestBuildBwrapCmdTaskControlDirectory:
     read-write `user_temp_dir` bind). The ordering argument is unchanged and
     the guard is now per directory: a framework file added later is covered
     without a new entry.
+
+    **Every test here passes `extra_ro_binds` itself, so none of them can fail
+    if `execute_task` stopped naming the control directory.** They check the
+    loop — that it binds what it is handed, after every other bind and before
+    the masks. The executor half is one assertion elsewhere,
+    `tests/test_prompt_split.py::TestWhatTheBrainIsHanded::
+    test_the_sandbox_wrap_carries_the_control_dir_as_a_ro_bind`, which patches
+    `build_bwrap_cmd` and reads the argument off both wrap closures. Said here
+    because `.claude/rules/testbed.md` records this exact shape as the way a
+    sandbox assertion stops being able to fail, and eight green tests in this
+    file are easy to mistake for cover the executor does not have.
     """
 
     def _control(self, config, task):
@@ -656,6 +667,11 @@ class TestBuildBwrapCmdTaskControlDirectory:
         user_temp = sandbox_config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
         missing = get_task_control_dir(sandbox_config, task.user_id, task.id)
+        # `get_task_control_dir` returns `Path | None`, and `str(None)` is
+        # `"None"` — which is in no argv, so a refusal would make the assertion
+        # below pass while testing nothing at all.
+        assert missing is not None
+        assert not missing.exists()
 
         with _patch_linux():
             result = build_bwrap_cmd(

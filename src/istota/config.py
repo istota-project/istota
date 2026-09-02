@@ -2557,6 +2557,13 @@ EXEC_SOCKET_NAME = "exec.sock"
 #: restates the cache subdirectory names.
 _CONTROL_DIR_NAME = ".control"
 
+#: Said once per process per entry, not once per ``load_config`` — same
+#: mechanism as ``_TMUX_NO_FALLBACK_NOTICE_SAID`` below, and for a sharper
+#: reason: the skill proxy spawns a host-side CLI per model tool call and each
+#: one loads the config. Keyed on the entry as written, so an operator who
+#: narrows one of two overlapping entries still hears about the other.
+_RO_PATH_CONTROL_TREE_WARNED: set[str] = set()
+
 
 def _warn_ro_paths_over_control_tree(config: "Config") -> None:
     """Warn where a ``sandbox_ro_paths`` entry would bind the control tree.
@@ -2581,10 +2588,29 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
     otherwise working. Gated on the *requested* ``sandbox_enabled`` flag, not
     the effective one, for the reason the credential pairing above is: nothing
     is bound at all with the sandbox off, and ``effective_sandboxing`` spawns.
+
+    **Once per process per entry**, the way ``_validate_brain_fallback`` is
+    and for the same reason: ``load_config`` runs on every host-side skill CLI
+    the proxy spawns, which is once per model tool call, and a multi-line
+    warning on each of those is noise on a path the model reads rather than a
+    notice anybody acts on.
+
+    A **relative** ``temp_dir`` is out of scope and is skipped rather than
+    guessed at: ``Path.resolve()`` would answer against the calling process's
+    cwd, which differs between the daemon, the web app and a skill CLI, so the
+    same config would warn in one process and not another. Nothing forces the
+    field absolute and both deploy paths render one.
     """
     if not config.security.sandbox_enabled:
         return
     if not config.security.sandbox_ro_paths:
+        return
+    if not Path(config.temp_dir).is_absolute():
+        logger.debug(
+            "[security] sandbox_ro_paths: not checked against the task control "
+            "tree, because temp_dir (%s) is relative and would resolve against "
+            "this process's working directory", config.temp_dir,
+        )
         return
     try:
         control_root = Path(config.temp_dir).resolve() / _CONTROL_DIR_NAME
@@ -2605,6 +2631,9 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
             or resolved.is_relative_to(control_root)
         )
         if overlaps:
+            if entry in _RO_PATH_CONTROL_TREE_WARNED:
+                continue
+            _RO_PATH_CONTROL_TREE_WARNED.add(entry)
             logger.warning(
                 "[security] sandbox_ro_paths entry %r would bind the task "
                 "control tree (%s) into every sandbox: the framework writes "

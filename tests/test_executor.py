@@ -4454,19 +4454,40 @@ class TestTheControlDirectoryIsGuardedOnEveryShape:
             for r in (req.fs_write_roots or [])
         ), req.fs_write_roots
 
-    def test_every_framework_file_rides_on_the_one_entry(self, tmp_path):
-        """The point of a per-directory guard: nothing has to be remembered
-        into a list. Asserted over the files the task actually wrote rather
-        than over a hardcoded set of names, so a file added later is covered
-        by this test the day it is added."""
+    def test_the_guard_covers_the_framework_files_and_not_the_model_s(
+        self, tmp_path,
+    ):
+        """The point of a per-directory guard, asserted in both directions.
+
+        Read off the paths `execute_task` put on the *request* rather than off
+        a `rglob` of the control directory: enumerating the directory and then
+        asserting its contents are under the deny root that is the directory
+        is true by construction, and would stay green on exactly the failure
+        worth catching — a framework file written somewhere else.
+
+        The result file is the discriminating half. It is written by the model
+        from inside the sandbox and read back by the daemon, so it lives in the
+        model's own working directory by definition; a guard that covered it
+        would break every task, and a test that only checked the deny side
+        would pass equally against a task whose whole temp tree was refused.
+        """
         from istota.executor import get_task_control_dir
 
         config, task, req = self._run(tmp_path, confined=True)
 
         control = get_task_control_dir(config, task.user_id, task.id)
-        written = sorted(p for p in control.rglob("*") if p.is_file())
-        assert written, "the task wrote no control files at all"
-        for path in written:
-            assert any(
-                path.is_relative_to(root) for root in req.fs_write_denied_roots
-            ), f"{path} is under no deny root: {req.fs_write_denied_roots}"
+        denied = req.fs_write_denied_roots
+
+        composed = req.composed_system_prompt_path
+        assert composed is not None, "nothing named the composed system prompt"
+        assert any(composed.is_relative_to(root) for root in denied), (
+            f"{composed} is under no deny root: {denied}"
+        )
+        # The user half, named by no request field, so read from the directory
+        # the request's own path points into.
+        assert (control / "prompt.txt").exists()
+
+        assert req.result_file is not None
+        assert not any(
+            Path(req.result_file).is_relative_to(root) for root in denied
+        ), f"the result file {req.result_file} was denied: {denied}"

@@ -3817,15 +3817,21 @@ def build_bwrap_cmd(
     # A missing entry is skipped rather than raising, because bwrap fails the
     # whole namespace on a bind whose source is absent — one cleanup race would
     # otherwise fail every task instead of one. It is logged, because the entry
-    # is a boundary: a silently dropped read-only bind leaves the writable copy
-    # of the same path in the namespace and nothing anywhere says so.
+    # is a boundary and the two callers lose different things by it. The OCR
+    # document sits inside a read-write bind, so a skipped entry leaves the
+    # writable copy in the namespace and nothing else says so. The control
+    # directory is bound by nothing else, so a skipped entry leaves the path
+    # *absent*: the CLI then exits at `--append-system-prompt-file` and a
+    # `Read` of a prepared attachment gets ENOENT. Fail-closed either way,
+    # which is why the message names both rather than picking one.
     for path in (extra_ro_binds or []):
         if path.exists():
             _ro_bind(path)
         else:
             logger.warning(
                 "sandbox: extra read-only bind %s does not exist; the path is "
-                "left as its parent bind has it", path,
+                "left as its parent bind has it, or absent from the namespace "
+                "entirely where nothing else binds it", path,
             )
 
     # --- Database masks (must be the LAST mount operations) ---
@@ -4081,6 +4087,25 @@ def native_fs_roots(
       ``read_only`` is what makes it *readable* while leaving it unwritable.
       Without it a confined task could not open its own prepared image
       attachment, on a path its own prompt named.
+
+    **Only this task's own directory, and the routes that could widen that.**
+    ``{temp_dir}/.control`` and ``{temp_dir}/.control/{user_id}`` are named
+    here by nothing, so a task reaches no other task's control files. Two
+    things could put a wider path back in, and only one of them is guarded.
+    ``security.sandbox_ro_paths`` is bound verbatim and now warns at config
+    load (``config._warn_ro_paths_over_control_tree``). The **per-resource
+    mounts** below are not: a ``user_resources`` row is ``mount /
+    resource_path``, bounded by the Nextcloud mount root and nothing else, so
+    on a layout where ``config.temp_dir`` sits *under*
+    ``nextcloud_mount_path`` a row naming the control tree would bind it
+    read-write and neither entry here would cover a sibling task's directory.
+    That is the same residual ``.claude/rules/brain.md`` records for the
+    session-log directory, and it is out of scope on the same grounds: no
+    shipped shape produces the layout (Ansible and Docker both put
+    ``temp_dir`` outside the mount; on the standalone install the two coincide
+    but ``sandbox_enabled`` is false, so this function is never called), and
+    refusing a resource path is a decision about resources rather than about
+    this guard. Stated so it is a known gap rather than an assumed absence.
 
     **The entry is a directory, and that is what retired the per-file one.**
     It used to be ``composed_system_prompt_path``, one exact path, because
