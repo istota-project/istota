@@ -18,6 +18,58 @@ FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file\d*\}')
 MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
 
 
+class TalkResponseError(Exception):
+    """Nextcloud answered a Talk read with something that is not an OCS
+    envelope.
+
+    A bare ``json.JSONDecodeError`` says only "Expecting value: line 1 column 1
+    (char 0)", which is what an empty body, an HTML error page and an XML
+    envelope all decode to — three different faults with one message, and the
+    poll handler logs the message alone, so a production deployment ran a
+    hundred of these a day for weeks with nothing in the log to tell them
+    apart (ISSUE-399). Carry the status, the declared type and a bounded
+    prefix of what actually came back, so the next occurrence names its own
+    cause.
+    """
+
+
+def _ocs_data(response: httpx.Response, what: str, default=None):
+    """Pull ``ocs.data`` out of an OCS response, or raise TalkResponseError.
+
+    The body prefix is capped and flattened to one line. It is only ever read
+    on the failure path, where by construction the payload is not a Talk
+    message list but an error page, an empty body or a proxy's own answer.
+    """
+    try:
+        body = response.json()
+    except Exception as e:
+        status = getattr(response, "status_code", None)
+        headers = getattr(response, "headers", {}) or {}
+        ctype = headers.get("content-type", "?")
+        # `.text` raises on a response whose body was never read. These calls
+        # are all non-streaming, so it is available — but a diagnostic must not
+        # be the thing that raises.
+        try:
+            text = getattr(response, "text", "") or ""
+        except Exception:
+            text = ""
+        snippet = " ".join(text.split())[:200]
+        raise TalkResponseError(
+            f"{what}: non-JSON response (HTTP {status}, content-type {ctype}, "
+            f"{len(text)} chars): {snippet!r} [{type(e).__name__}: {e}]"
+        ) from e
+
+    if not isinstance(body, dict) or "ocs" not in body:
+        status = getattr(response, "status_code", None)
+        raise TalkResponseError(
+            f"{what}: JSON without an ocs envelope (HTTP {status}): "
+            f"{str(body)[:200]!r}"
+        )
+
+    data = (body.get("ocs") or {}).get("data")
+    return default if data is None else data
+
+
 def _resolve_param(key: str, param: dict, bot_username: str | None) -> str | None:
     """Render a single Nextcloud Talk rich-object param to its display form.
 
@@ -532,7 +584,9 @@ class TalkClient:
             return []
         response.raise_for_status()
 
-        messages = response.json().get("ocs", {}).get("data", [])
+        messages = _ocs_data(
+            response, f"poll {conversation_token}", default=[],
+        )
 
         # History fetch returns newest-first, reverse for oldest-first processing
         if not last_known_message_id and messages:
@@ -556,7 +610,9 @@ class TalkClient:
             params={"lookIntoFuture": 0, "limit": 1},
         )
         response.raise_for_status()
-        messages = response.json().get("ocs", {}).get("data", [])
+        messages = _ocs_data(
+            response, f"latest message id {conversation_token}", default=[],
+        )
         if messages:
             return messages[0].get("id")
         return None

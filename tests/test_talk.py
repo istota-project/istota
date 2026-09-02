@@ -1,9 +1,17 @@
 """Tests for istota.talk module."""
 
+import json
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from istota.talk import TalkClient, split_message, truncate_message, clean_message_content
+from istota.talk import (
+    TalkClient,
+    TalkResponseError,
+    clean_message_content,
+    split_message,
+    truncate_message,
+)
 from istota.config import Config, NextcloudConfig
 
 
@@ -140,6 +148,81 @@ class TestTalkClient:
             result = await client.poll_messages("room1", last_known_message_id=10)
 
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_poll_messages_non_json_names_what_came_back(self, client):
+        """A 2xx whose body is not JSON is reported with status, type and body.
+
+        Production logged ~100 of these a day as the bare decoder message
+        "Expecting value: line 1 column 1 (char 0)", which an empty body, an
+        HTML error page and an XML envelope all produce.
+        """
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "text/html; charset=UTF-8"}
+        mock_response.text = "<html>\n<body>502 Bad Gateway</body>\n</html>"
+        mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(TalkResponseError) as excinfo:
+                await client.poll_messages("room1", last_known_message_id=10)
+
+        message = str(excinfo.value)
+        assert "room1" in message
+        assert "HTTP 200" in message
+        assert "text/html" in message
+        assert "502 Bad Gateway" in message
+
+    @pytest.mark.asyncio
+    async def test_poll_messages_empty_body_reports_its_length(self, client):
+        """An empty 2xx body is the shape that says least — say it is empty."""
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.text = ""
+        mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(TalkResponseError) as excinfo:
+                await client.poll_messages("room1", last_known_message_id=10)
+
+        assert "0 chars" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_poll_messages_json_without_ocs_envelope(self, client):
+        """Valid JSON that is not an OCS envelope is a different fault."""
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"error": "nope"}
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(TalkResponseError) as excinfo:
+                await client.poll_messages("room1", last_known_message_id=10)
+
+        assert "ocs envelope" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_poll_messages_body_snippet_is_bounded(self, client):
+        """A huge error page does not become a huge log line."""
+        mock_http = _mock_httpx_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "text/html"}
+        mock_response.text = "x" * 10000
+        mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
+        mock_http.get = AsyncMock(return_value=mock_response)
+
+        with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
+            with pytest.raises(TalkResponseError) as excinfo:
+                await client.poll_messages("room1", last_known_message_id=10)
+
+        assert len(str(excinfo.value)) < 400
 
     @pytest.mark.asyncio
     async def test_poll_messages_history(self, client):

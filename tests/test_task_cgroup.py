@@ -28,6 +28,8 @@ import pytest
 
 from istota import task_cgroup
 
+from .support.cgroups import live_cgroup_task_id
+
 
 @pytest.fixture(autouse=True)
 def _fresh_log_state():
@@ -710,7 +712,9 @@ class TestAgainstARealCgroupFs:
     def test_create_place_and_destroy_against_the_kernel(self, live_root):
         import subprocess
 
-        path = task_cgroup.create(999999, DEFAULT_LIMITS, attempt=0, root=live_root)
+        path = task_cgroup.create(
+            live_cgroup_task_id(), DEFAULT_LIMITS, attempt=0, root=live_root
+        )
         assert path is not None, "probe said this would work"
         try:
             # The kernel made these; the fixture cannot prove that.

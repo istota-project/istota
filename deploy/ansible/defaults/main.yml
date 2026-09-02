@@ -40,25 +40,19 @@ istota_model: ""
 istota_effort: ""
 
 # Advisor model ("" = no advisor). Anthropic-namespace brains only
-# (claude_code / tmux_claude); the advisor tool has no wire over the native
-# brain's openai_compat endpoint. Resolves through the same alias table as
-# istota_model but carries no effort. Must resolve to a model capable of
-# *being* an advisor (a weak/cheap tier fails every task the advisor would
-# run on — the CLI rejects it outright, not a downgrade). A per-task model
-# pin (!model, !room model, a [[jobs]] model) drops the advisor for that
-# task: the CLI's fatal advisor-gate check is "does the *main* model support
-# the advisor tool at all," which is pin-dependent, so turning this on must
-# never break a task that was already pinned.
+# (claude_code / tmux_claude) — the advisor tool has no wire over the native
+# brain's openai_compat endpoint. Resolves through istota_models_aliases but
+# carries no effort, and must be a model capable of being an advisor: a weak
+# tier is rejected outright rather than downgraded. A per-task model pin (!model,
+# !room model, a [[jobs]] model) drops the advisor for that task.
 istota_advisor_model: ""
 
-# Model alias registry ([models.aliases]) — one operator-visible table overlaying
-# the code-shipped defaults (tiers fast/general/smart + shortcuts opus/sonnet/haiku).
-# Aliases are per model namespace so one definition works on every brain:
-# `anthropic` = the CLI brains (claude_code / tmux_claude), `openai_compat` = native.
-# Each entry is a {model, effort} pair; empty effort ("") means model default.
-# openai_compat defaults to istota_brain_native_model. Custom aliases stay a pin
-# unless flagged `portable: true`. An entry may also be a bare string (legacy flat,
-# namespace-agnostic). Effort is the orthogonal :effort modifier, never a name.
+# Model alias registry ([models.aliases]), overlaying the code-shipped defaults
+# (tiers fast/general/smart + shortcuts opus/sonnet/haiku). Aliases are per model
+# namespace so one definition works on every brain: `anthropic` = the CLI brains,
+# `openai_compat` = native. Each entry is a {model, effort} pair, where effort is
+# the orthogonal :effort modifier and "" means the model default. Custom aliases
+# stay a pin unless flagged `portable: true`.
 istota_models_aliases:
   fast:
     anthropic:
@@ -95,16 +89,12 @@ istota_custom_system_prompt: true
 istota_brain_kind: "claude_code"
 
 # Brain fallback ([brain] fallback_*). When the primary brain is unavailable
-# (usage limit, missing binary, tmux launch failure) run the task on the fallback
-# brain with its own settings. Portable role tiers cross the provider boundary; a
-# provider-specific pin drops to the fallback's default (with a visible note).
-# "" = no fallback, whatever the primary kind — no brain has an implicit target
-# (ISSUE-362). The default below keeps a tmux_claude deployment on the failover
-# it had before that change, by writing the line into config.toml rather than by
-# magic; set it to "" to turn failover off there. It covers a source_type_overrides
-# entry routing to tmux as well as a tmux primary, because a routed config
-# inherits `fallback` from this one and would otherwise lose failover with
-# nothing in `kind` to see it by. Single level only.
+# (usage limit, missing binary, tmux launch failure) the task runs on the
+# fallback with its own settings. Portable role tiers cross the provider
+# boundary; a provider-specific pin drops to the fallback's default. Single level
+# only. "" = no fallback, whatever the primary kind (ISSUE-362); the expression
+# below keeps a tmux_claude deployment on the failover it had before that change,
+# including one reached through source_type_overrides.
 # Values: "" | "claude_code" | "native" | "tmux_claude".
 istota_brain_fallback: "{{ 'claude_code' if (istota_brain_kind == 'tmux_claude' or 'tmux_claude' in (istota_brain_source_type_overrides | default({})).values()) else '' }}"
 istota_brain_fallback_on_transient: true        # also reroute a persistent transient_api_error
@@ -128,7 +118,7 @@ istota_brain_native_bash_spill_full_output: true  # spill over-cap Bash output t
 istota_brain_native_turn_budget_nudge: true       # nudge the model to pace itself as it nears max_turns
 istota_brain_native_turn_budget_nudge_early_percent: 50   # first (~halfway) reminder fires at this % of the cap
 istota_brain_native_turn_budget_nudge_remaining: [15, 5]  # escalating late fires at these absolute steps-remaining
-istota_brain_native_soft_deadline_percent: 90     # stop the loop at this % of the task timeout, on the stop that keeps the partial work (0 or >= 100 disables)
+istota_brain_native_soft_deadline_percent: 90     # stop at this % of the task timeout, keeping partial work (0 or >= 100 disables)
 istota_brain_native_prompt_caching: ""            # "" = derive from base_url (ON for api.anthropic.com); set true/false to force
 
 # Native-brain WebFetch tool ([brain.native.web_fetch]). Runs in the daemon
@@ -162,11 +152,10 @@ istota_brain_source_type_overrides: {}
 
 # Tmux-driven interactive-TUI brain ([brain.tmux]). Emitted to config.toml only
 # when tmux_claude is the kind, the fallback, or a source_type_overrides target.
-# Drives the interactive `claude` TUI in a detached tmux session to keep traffic
-# on subscription billing; istota_brain_fallback defaults to claude_code for it.
-# Needs tmux on the host. Runbook: .claude/rules/brain.md "TmuxClaudeBrain". All fields
-# default in code to the prototype's pinned values; the marker lists are pane-text
-# heuristics pinned to a CLI version (override on a CLI reword, no code release).
+# Drives the interactive `claude` TUI in a detached tmux session; needs tmux on
+# the host, and istota_brain_fallback defaults to claude_code for it. Runbook:
+# .claude/rules/brain.md. The marker lists are pane-text heuristics pinned to a
+# CLI version — override on a CLI reword, no code release needed.
 istota_brain_tmux_fallback_trip_threshold: 5       # launch failures before the circuit opens
 istota_brain_tmux_fallback_cooldown_seconds: 300   # seconds the circuit stays open
 istota_brain_tmux_ready_timeout_seconds: 30        # REPL-ready deadline
@@ -191,10 +180,9 @@ istota_repo_branch: main
 istota_repo_tag: "latest"  # "latest" = highest semver tag, "v0.2.0" = specific tag, "" = use branch
 istota_repo_dir: "{{ istota_home }}/istota"
 
-# GitLab access token used to clone the istota repo itself (for private repos).
-# Generate at: GitLab > Settings > Access Tokens (read_repository scope).
-# NOT the same as istota_developer_gitlab_token — that one feeds the
-# developer skill's API access.
+# GitLab access token for cloning the istota repo itself (private repos).
+# Generate at GitLab > Settings > Access Tokens, read_repository scope. NOT
+# istota_developer_gitlab_token, which feeds the developer skill's API access.
 istota_repo_clone_token: ""
 
 # Scheduler settings
@@ -208,7 +196,7 @@ istota_scheduler_email_poll_batch_size: 50
 istota_scheduler_email_rate_limit_messages: 60          # Inbound email tasks per user per window (0 = unlimited)
 istota_scheduler_email_sender_rate_limit_messages: 20   # …and per sender, under the per-user budget (0 = unlimited)
 istota_scheduler_email_rate_limit_window_seconds: 3600
-istota_scheduler_email_confirmation_prompts_per_window: 3  # Gate prompts per (user, sender) per window before they collapse (0 = never collapse)
+istota_scheduler_email_confirmation_prompts_per_window: 3  # Gate prompts per (user, sender) before they collapse (0 = never)
 istota_scheduler_email_task_queue: background            # "foreground" puts inbound mail back on the interactive queue
 istota_scheduler_email_max_body_chars: 32000
 istota_scheduler_email_max_attachment_bytes: 26214400          # 25 MiB per message
@@ -219,36 +207,38 @@ istota_scheduler_shared_file_check_interval: 120  # Shared file organization che
 istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
 istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
 istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping sweep (ISSUE-288, 6h; 0 disables)
-istota_scheduler_sandbox_cache_sweep_interval: 21600 # package-cache sweep (ISSUE-317, 6h; 0 disables). Inert unless a cache root resolves: istota_developer_repos_dir (derived) or istota_security_sandbox_cache_dir (fallback)
-istota_scheduler_avatar_import_interval: 21600 # Nextcloud profile-picture import (6h; 0 disables). Also gated by istota_web_avatar_import_from_nextcloud and by the storage backend being Nextcloud. Six hours rather than daily because a user who has just signed in for the first time sees the initial chip until the next tick
-istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch loop's read scans; a lock past this skips the tick instead of blocking 30s (0 = 30s default)
+# Package-cache sweep (ISSUE-317). Inert unless a cache root resolves — the
+# derived one under istota_developer_repos_dir, or istota_security_sandbox_cache_dir.
+istota_scheduler_sandbox_cache_sweep_interval: 21600 # 6h; 0 disables
+# Nextcloud profile-picture import. Also gated by
+# istota_web_avatar_import_from_nextcloud and by a Nextcloud storage backend.
+# Six-hourly rather than daily: a new user sees the initial chip until the tick.
+istota_scheduler_avatar_import_interval: 21600 # 6h; 0 disables
+istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for dispatch read scans; a lock past this skips the tick (0 = 30s)
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
 istota_scheduler_db_backup_dir: ""               # Snapshot destination; empty = {nextcloud_mount}/istota-db-backups
-istota_scheduler_db_backup_retention: 7          # Newest dated snapshot dirs to keep (0 = keep all); dirs holding the newest good copy of a DB are never pruned
+istota_scheduler_db_backup_retention: 7          # Newest snapshot dirs to keep (0 = all); the newest good copy of a DB is never pruned
 istota_scheduler_stats_interval: 60              # scheduler_stats health line interval (0 = disabled)
 # Host memory breadcrumb: one host_pressure line per interval carrying
 # MemAvailable / Shmem / SwapFree / PSI / per-tmpfs usage / shmem_unaccounted,
-# written whether or not the box is under pressure. The 2026-08-20 outage
-# accumulated unreclaimable shmem for five days without crossing any threshold,
-# so a threshold-gated record could not have caught it. 288 lines/day at 300s.
+# written whether or not the box is under pressure — a threshold-gated record
+# misses a slow shmem leak entirely. 288 lines/day at 300s.
 istota_scheduler_host_pressure_enabled: true     # Master switch for host-pressure sampling
 istota_scheduler_host_pressure_breadcrumb_interval: 300  # Breadcrumb cadence in seconds (0 = disabled)
 
-# Memory admission gate + threshold snapshot (Track B alerting, Track C2).
-# Below the floor, dispatch spawns no new worker and pending tasks wait for a
-# later tick; nothing running is ever stopped, preempted or failed.
+# Memory admission gate + threshold snapshot. Below the floor, dispatch spawns
+# no new worker and pending tasks wait for a later tick; nothing running is ever
+# stopped, preempted or failed.
 istota_scheduler_host_pressure_sample_interval: 30   # Gate/snapshot sample cadence in seconds (0 = disabled)
 istota_scheduler_host_pressure_psi_threshold: 40.0   # `memory some avg10` above this counts as pressure
 istota_scheduler_host_pressure_alert_cooldown: 900   # Min seconds between snapshots + admin notifications
 istota_scheduler_min_available_memory_mb: 768        # Admission floor
-# Third snapshot trigger, from the production series rather than from theory.
-# A production host took 1.52 GB of shmem in under five minutes with PSI
-# peaking at 0.07 and 2.9 GB still available — zram absorbed it, so the two
-# thresholds above were right not to fire, but that burst is the one event in
-# 24 hours whose attribution anyone would want. Not wired into the gate: a
-# residue is a reason to collect evidence, not a reason to refuse work.
-# Baseline residue on that host is ~80 MB. 0 disables.
+# Third snapshot trigger: a shmem burst large enough to be worth attributing
+# even when PSI and MemAvailable are both fine. Snapshot only — it does not feed
+# the admission gate, since a residue is a reason to collect evidence rather
+# than to refuse work. Baseline residue on the reference host is ~80 MB.
+# 0 disables.
 istota_scheduler_host_pressure_shmem_alert_mb: 1024
 # Read-only GET handle, used only to ask Docker which pid a container has so
 # its tmpfs can be read through /proc/<pid>/root — container mounts are
@@ -256,71 +246,49 @@ istota_scheduler_host_pressure_shmem_alert_mb: 1024
 istota_scheduler_host_pressure_docker_socket: /var/run/docker.sock
 
 # ---------------------------------------------------------------------------
-# Host memory headroom (host-and-scheduler-robustness spec, Track A)
+# Host memory headroom
 # ---------------------------------------------------------------------------
-# The production host ran with Total swap = 0, and that is what turned a memory
-# shortfall into a thrash-to-death. Two things follow from having no swap and
-# both bit: anonymous pages can never be evicted, so the page cache absorbs the
-# entire shortfall (it was squeezed to 1.5 MB, after which every process
-# faulted its own executable text back from disk continuously); and
-# tmpfs/shmem pages, which are swap-backed by design, become permanently
-# unevictable. Swap makes cold shmem reclaimable *without anyone knowing what
-# created it*, which is why this does not wait on attribution.
+# A host with no swap cannot evict anonymous pages and cannot reclaim
+# tmpfs/shmem at all, so a memory shortfall becomes a thrash-to-death. zram
+# rather than a disk swapfile because the disk is usually the resource already
+# under strain: it compresses cold pages in RAM (zstd, ~3:1) and adds no disk
+# traffic.
 #
-# zram rather than a disk swapfile because the disk was already the saturated
-# resource — roughly 1.7 GB/s of forced re-reads. zram compresses cold pages in
-# RAM (zstd, around 3:1 on this kind of content) and adds no disk traffic.
+# Sizing: zram-size is the device's UNCOMPRESSED logical capacity, and
+# compression happens beneath it. `ram / 2` on an 8 GB box is a ~4 GB swap
+# device costing ~1.3 GB of real RAM at 3:1 — not "10-12 GB effective", which
+# would need `ram * 1.5`. Over-provisioning makes the incompressible worst case
+# fatal on its own. A mitigation, not a fix: a real leak outgrows it.
 #
-# Sizing, stated carefully because the spec got it wrong: zram-size sets the
-# device's *uncompressed* logical capacity, and compression happens beneath it.
-# `ram / 2` on a 7.9 GB box is therefore a ~4 GB swap device that costs ~1.3 GB
-# of real RAM at 3:1 — NOT the "~10-12 GB effective" the spec claims, which
-# would need `ram * 1.5`. 4 GB is kept deliberately: it comfortably covers the
-# 4.6 GB of cold shmem that killed the host, while the worst case (incompressible
-# pages) commits only 4 GB of the 7.9. Over-provisioning to 12 GB would make
-# that worst case fatal on its own.
-#
-# Treat this as a mitigation with an expiry date, not a fix: something reaching
-# 4.2 GB in five days reaches 8 GB in ten, with or without swap. The Stage 1
-# breadcrumb is what names the source.
+# false makes every zram task a no-op, so a host where swap was arranged another
+# way is left alone. It does NOT tear down a device this role already created —
+# remove that by hand with `systemctl disable --now systemd-zram-setup@zram0`
+# and deleting /etc/systemd/zram-generator.conf.
 istota_zram_enabled: true                # Install systemd-zram-generator and enable a zram swap device
-istota_zram_size: "ram / 2"              # The device's UNCOMPRESSED capacity, not its RAM cost: ~4 GB of swap for ~1.3 GB of real RAM at 3:1
+istota_zram_size: "ram / 2"              # UNCOMPRESSED capacity, not RAM cost: ~4 GB of swap for ~1.3 GB of RAM at 3:1
 istota_zram_algorithm: "zstd"            # Compression algorithm
 istota_zram_priority: 100                # Swap priority. Linux prefers the HIGHER number, so this must stay above the swapfile
 
-# Setting istota_zram_enabled: false makes every zram task a no-op, so a host
-# where the operator arranged swap another way is left exactly as it is. Note
-# the asymmetry: false means "this role does not manage swap", NOT "tear down
-# the swap this role previously set up". Flipping true -> false on a host that
-# already has the device leaves it running; remove it by hand with
-# `systemctl disable --now systemd-zram-setup@zram0` and deleting
-# /etc/systemd/zram-generator.conf.
-
-# Optional second tier: a disk swapfile at a LOWER priority than zram, for
-# pages cold enough that even compression is wasted. Off by default — it is
-# listed so the shape is decided here rather than invented ad hoc later, and
-# because on this host the disk is the resource to protect. Assumes ext4;
+# Optional second tier: a disk swapfile at a LOWER priority than zram, for pages
+# cold enough that even compression is wasted. Off by default. Assumes ext4 —
 # fallocate-backed swap needs different handling on btrfs.
 istota_swapfile_enabled: false           # Second-tier disk swapfile
-istota_swapfile_size_mb: 2048            # Its size
-istota_swapfile_path: /swapfile          # Where it lives
+istota_swapfile_size_mb: 2048
+istota_swapfile_path: /swapfile
 istota_swapfile_priority: 10             # Below istota_zram_priority, so zram is filled first
 
-# Soft throttling on the istota units. MemoryHigh, NOT MemoryMax: past the
-# limit the kernel puts the cgroup under heavy reclaim pressure and slows it,
-# where a hard cap would kill it — and killing the daemon takes everything
-# down. Nothing in the incident showed istota exceeding a sane budget (its
-# whole footprint was around 1.2 GB), so this is a guard against a future
-# regression rather than a fix for the observed failure. Empty string omits the
+# Soft throttling on the istota units. MemoryHigh, NOT MemoryMax: past the limit
+# the kernel throttles the cgroup with reclaim pressure, where a hard cap would
+# kill the daemon and take everything down with it. A guard against a future
+# regression — istota's own footprint is around 1.2 GB. Empty string omits the
 # directive entirely.
-istota_scheduler_memory_high: "5G"       # MemoryHigh= on the scheduler unit ("" = no throttle). Covers the daemon PLUS every claude subprocess and its children — see the unit template for the arithmetic; the spec's 3G was sized against the daemon alone
+istota_scheduler_memory_high: "5G"       # MemoryHigh= on the scheduler unit ("" = no throttle). Covers the daemon PLUS
+                                         # every claude subprocess and its children, not the daemon alone
 istota_web_memory_high: "1G"             # MemoryHigh= on the web and webhooks units ("" = no throttle)
 
 # Below the systemd default of 100, so every other unit wins under contention.
-# A hard CPUQuota is deliberately NOT set: PSI recorded `cpu full avg10=0`
-# against `memory full avg10=60`, so the cores were idle-waiting on memory, not
-# oversubscribed, and a quota would have slowed the work without preventing the
-# outage. CPUWeight is kept because it is free and helps under real contention.
+# No CPUQuota is set deliberately: the contention observed here was memory, with
+# the cores idle-waiting, and a quota slows the work without helping.
 istota_scheduler_cpu_weight: 50          # CPUWeight= on the scheduler unit ("" = systemd default of 100)
 
 # Local-disk root for per-user module DBs (feeds/health/location/money). MUST be
@@ -333,7 +301,8 @@ istota_scheduler_progress_updates: true                # Show real-time progress
 istota_scheduler_progress_show_tool_use: true          # Emit tool_start / tool_end events
 istota_scheduler_progress_show_text: false             # Emit intermediate assistant text events (noisy)
 istota_scheduler_event_log_enabled: true               # Write events to the task_events table (kill-switch)
-istota_scheduler_stream_text_gate_chars: 280           # Narration gate: hold streamed answer text until it crosses N chars w/o a tool call (web/REPL); 0 disables. Watch `stream_gate:` logs to tune
+istota_scheduler_stream_text_gate_chars: 280           # Hold streamed answer text until N chars without a tool call (web/REPL);
+                                                       # 0 disables. Watch `stream_gate:` logs to tune
 istota_scheduler_push_notification_threshold_seconds: 30  # Min task duration before a push notification fires
 istota_scheduler_push_notification_sources: []   # source_types that trigger a completion push; empty = ntfy opt-in only
 istota_scheduler_task_timeout_minutes: 60             # Kill task execution after N minutes
@@ -345,10 +314,10 @@ istota_scheduler_stale_pending_warn_minutes: 30     # Log warnings for stale tas
 istota_scheduler_stale_pending_fail_hours: 2        # Auto-fail ancient pending tasks
 istota_scheduler_max_retry_age_minutes: 60           # Don't retry stuck tasks older than this
 istota_scheduler_worker_heartbeat_seconds: 60        # Running worker pings liveness this often (0 disables)
-istota_scheduler_worker_stuck_minutes: 10            # Reclaim a heartbeating worker's task after this much heartbeat silence (higher = fewer false-dead reclaims)
+istota_scheduler_worker_stuck_minutes: 10            # Reclaim a task after this much heartbeat silence (higher = fewer false reclaims)
 istota_scheduler_task_retention_days: 7             # Delete old completed tasks
 istota_scheduler_email_retention_days: 7            # Delete old emails from IMAP (0 to disable)
-istota_scheduler_processed_email_retention_days: 90 # Prune the processed_emails dedup ledger (0 to disable; floored at email_retention_days + 1)
+istota_scheduler_processed_email_retention_days: 90 # Prune the dedup ledger (0 disables; floored at email_retention_days + 1)
 istota_scheduler_worker_idle_timeout: 10           # Cumulative-idle seconds a worker lingers (re-checking) before exiting
 istota_scheduler_worker_idle_poll_interval: 0.5    # Idle re-check cadence (0 or >= worker_idle_timeout = legacy single wait)
 istota_scheduler_max_foreground_workers: 5         # Instance-level foreground (interactive) worker cap
@@ -357,9 +326,8 @@ istota_scheduler_user_max_foreground_workers: 2    # Global per-user fg worker d
 istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker default
 # Elapsed-time slot reclassification: a running foreground task older than the
 # threshold stops counting against its user's interactive cap. Both allowances
-# bound discounts, not long tasks. Per-user additive (thread ceiling 2+1=3),
-# instance-wide partitioned inside max_foreground_workers, which stays the hard
-# ceiling. 0 on either of the first two restores the pre-change behaviour.
+# bound discounts, not long tasks — per-user additive, instance-wide partitioned
+# inside max_foreground_workers, which stays the hard ceiling. 0 disables.
 istota_scheduler_long_task_threshold_minutes: 10   # A running fg task older than this stops counting as interactive
 istota_scheduler_user_max_long_workers: 1          # Per-user discount allowance (additive)
 istota_scheduler_max_long_workers: 2               # Instance-wide discount budget (inside max_foreground_workers)
@@ -373,7 +341,7 @@ istota_scheduler_task_memory_max_mb: 2048          # memory.max per task (0 = un
 istota_scheduler_task_pids_max: 512                # pids.max per task — bounds a fork storm
 istota_scheduler_task_cpu_max_percent: 200         # cpu.max as % of one core (200 = two cores; 0 = unset)
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
-istota_scheduler_cron_max_staleness_minutes: 60             # Skip cron-driven catch-up fires older than this (jobs + briefings); 0 = legacy unconditional catch-up
+istota_scheduler_cron_max_staleness_minutes: 60             # Skip catch-up fires older than this (jobs + briefings); 0 = always catch up
 istota_scheduler_max_subtasks_per_task: 10                  # Cap deferred subtasks created per task
 istota_scheduler_max_subtask_depth: 3                       # Max subtask chain depth (0=unlimited)
 istota_scheduler_max_subtask_prompt_chars: 8000             # Skip deferred subtasks with prompts over this size (0=unlimited)
@@ -389,12 +357,10 @@ istota_logging_rotate: true                         # Let Python handle rotation
 istota_logging_max_size_mb: 10
 istota_logging_backup_count: 5
 
-# Host log retention. These bound the two system logs the role does not own but
-# does have to live on the same disk as: neither ships with a working cap on
-# Debian, and together they had reached 4.3G on a 40G root.
-#
-# journald's [Journal] section is empty out of the box, which means the cap
-# falls back to 10% of the filesystem. The drop-in makes it explicit.
+# Host log retention. Neither journald nor auditd ships with a working cap on
+# Debian, and together they can reach several GB on a small root. journald's
+# [Journal] section is empty out of the box, so the cap falls back to 10% of
+# the filesystem; the drop-in makes it explicit.
 istota_journald_manage: true
 istota_journald_max_use: "500M"        # total journal size across all files
 istota_journald_max_file_size: "50M"   # per-file cap, so rotation stays granular
@@ -421,26 +387,19 @@ istota_nextcloud_app_password: ""
 istota_nextcloud_share_default_expire_days: 14
 
 # Create each user's default Talk rooms (#general / #logs / #alerts) and seed
-# the log/alerts channel tokens into their profile, matching what the Docker
-# entrypoint does (ISSUE-115). Without this a bare-metal install starts with an
-# empty `log_channel`, so the execution log is off and the web "Send execution
-# log to" control reads `(off)`.
+# the log/alerts channel tokens into their profile (ISSUE-115). Without it a
+# bare-metal install starts with an empty `log_channel` and no execution log.
 #
-# Idempotent, and it cannot overrule a human. A channel whose column is already
-# set (pinned below, or chosen in the web UI) gets no room created for it at
-# all, and a token is written only for a room this run itself made usable — so
-# clearing "Send execution log to" in the web UI stays cleared across deploys
-# rather than being refilled, the way an inventory timezone used to clobber a
-# web-set one (ISSUE-102). Re-pointing a channel on purpose is
-# `istota nextcloud provision-rooms --user U --reseed`, by hand.
+# Idempotent, and it cannot overrule a human: a channel whose column is already
+# set gets no room created, and a token is written only for a room this run made
+# usable — so a channel cleared in the web UI stays cleared across deploys
+# (ISSUE-102). Re-point one on purpose with
+# `istota nextcloud provision-rooms --user U --reseed`. Renaming a room is safe;
+# the token is remembered on first provision and matched on later runs
+# (ISSUE-342).
 #
-# Renaming a room is safe: each room's token is remembered on first provision
-# and later runs match on it, so a room renamed on either surface is still
-# recognised. Matching on the display name alone made every deploy mint a
-# second room under the old name (ISSUE-342).
-#
-# Also gated on istota_talk_enabled and on a non-empty app password. Set to
-# false to manage the rooms yourself.
+# Also gated on istota_talk_enabled and a non-empty app password. false to
+# manage the rooms yourself.
 istota_provision_talk_rooms: true
 
 # Talk settings (polling-based, no webhook needed)
@@ -460,53 +419,41 @@ istota_email_bot_address: ""
 istota_email_imap_timeout_seconds: 30  # socket timeout for IMAP connections
 # What an own-address claim buys. Three states, weakest first:
 #
-#   "off"     the claim is proof. Sound only because something upstream —
-#             normally DMARC enforcement at the receiving MTA — rejects a forged
-#             From: before it reaches poll_folder. The default, and what every
-#             deployment ran before "verify" existed.
+#   "off"     the claim is proof. Sound only if something upstream (normally
+#             DMARC at the receiving MTA) rejects a forged From: first.
 #   "verify"  the claim is proof when the receiving MTA's stamp says so. Needs
 #             istota_email_authserv_id; the daemon refuses to load without it.
-#   "gate"    the claim is never proof. Every self-sent email is held for a
-#             yes/no. Noisy by construction — nothing in a plain SMTP message
-#             separates the user from someone claiming to be them, which is
-#             what "verify" fixes.
+#   "gate"    the claim is never proof — every self-sent email is held for a
+#             yes/no. Noisy by construction.
 #
-# The legacy booleans still work: false is "off", true is "gate". Quote the
-# value — off, on, yes and no are YAML booleans.
+# Legacy booleans still work: false is "off", true is "gate". QUOTE THE VALUE —
+# off, on, yes and no are YAML booleans.
 istota_email_confirm_sender_match: "off"
-# Canary for the assumption the setting above encodes. Reads the DMARC verdict
-# the receiving MTA stamped and warns when mail routed on a user's own address
-# arrives without a pass, so the protection lapsing gets noticed. On by default;
-# monitoring only, it never blocks a message. Set warn_on_missing once you know
-# your MTA stamps Authentication-Results — that is what catches a move to a
-# provider that does not evaluate DMARC.
+# Canary for the assumption above: warns when mail routed on a user's own
+# address arrives without a DMARC pass. Monitoring only, never blocks. Set
+# warn_on_missing once you know your MTA stamps Authentication-Results — that is
+# what catches a move to a provider that does not evaluate DMARC.
 istota_email_dmarc_canary: true
 istota_email_dmarc_canary_warn_on_missing: false
 # Your receiving MTA's authserv-id — the first field of the
-# Authentication-Results header it stamps. Blank reads the topmost header and
-# trusts that "topmost" means "ours", which stops holding the moment the MTA
-# stops stamping: the sender's own header is then the top one. Set it and any
-# header from another authserv-id is discarded. Setting it also says your MTA
-# stamps, so mail arriving without your stamp warns on its own.
+# Authentication-Results header it stamps. Blank trusts the topmost header,
+# which is the sender's own if your MTA stops stamping. Set it and headers from
+# any other authserv-id are discarded, and unstamped mail warns on its own.
 istota_email_authserv_id: ""
-# The weakest outbound approval policy any user on this instance may run. An
-# outgoing email whose recipients are not explicitly authorized is held as an
-# editable draft instead of being sent; the user approves, edits or discards it
-# from web chat or with `!drafts`. One of:
-#   off        no holds — every send goes out immediately (pre-feature behaviour)
+# The weakest outbound approval policy any user may run. An outgoing email whose
+# recipients are not authorized is held as an editable draft; the user approves,
+# edits or discards it from web chat or with `!drafts`. One of:
+#   off        no holds — every send goes out immediately
 #   untrusted  hold unless EVERY recipient (To, Cc, Bcc) is trusted: one of the
 #              user's own addresses, a `trusted_email_senders` pattern, or an
-#              address trusted at runtime via `!trust` / "yes trust"
+#              address trusted at runtime via `!trust`
 #   all        hold unless every recipient is one of the user's own addresses
-# A floor, not a default: a user may tighten past it but never loosen below it,
-# and a user who never set their own follows this value. An invalid value FAILS
-# the config load rather than falling back — there is no safe value to guess.
-# Note `trusted_email_senders` now authorizes both directions (inbound gate
-# skip + outbound send without approval), so a catch-all pattern there turns
-# `untrusted` off entirely.
-# QUOTE THE VALUE. `off` unquoted is a YAML boolean, and would render
-# `outbound_approval_floor = "False"` into config.toml, which the daemon
-# refuses to load. The play asserts this before templating.
+# A floor, not a default: a user may tighten past it, never loosen below it, and
+# a user who set nothing follows this value. An invalid value fails the config
+# load. `trusted_email_senders` authorizes both directions, so a catch-all
+# pattern there turns `untrusted` off entirely.
+# QUOTE THE VALUE — unquoted `off` is a YAML boolean and renders as "False",
+# which the daemon refuses to load. The play asserts this before templating.
 istota_email_outbound_approval_floor: "untrusted"
 
 # Conversation context settings
@@ -523,25 +470,20 @@ istota_conversation_context_min_messages: 10     # always include at least this 
 istota_conversation_previous_tasks_count: 3      # inject N recent scheduled/briefing tasks into context
 istota_conversation_talk_context_limit: 100      # max messages to fetch from Talk message cache
 
-# Admin users - users with full system access (DB, all mount paths, admin-only skills)
-# Asymmetric semantics when this list is empty:
-#   - Sandbox / skills / commands (Config.is_admin): all users are admin (legacy back-compat)
-#   - Web admin dashboard (_user_is_web_admin): no users are admin (fails closed)
-# To grant web admin access, list at least one user_id.
-# Deployed as /etc/<namespace>/admins (root-owned, not editable by service user or Claude)
+# Admin users — full system access (DB, all mount paths, admin-only skills).
+# Deployed as /etc/<namespace>/admins, root-owned. An EMPTY list is asymmetric:
+# sandbox / skills / commands treat everyone as admin (back-compat), while the
+# web admin dashboard treats nobody as admin. List a user_id to grant web admin.
 istota_admin_users: []
 
-# Instance-wide disabled skills — skill names excluded from prompt selection.
-# Orthogonal to feature flags (browser_enabled, developer_enabled): a flag
-# deploys the backend, disabled_skills keeps the skill doc out of prompts.
-# Example: ["browse", "whisper"]
+# Instance-wide skill names excluded from prompt selection. Orthogonal to the
+# feature flags: a flag deploys the backend, this keeps the skill doc out of
+# prompts. Example: ["browse", "whisper"]
 istota_disabled_skills: []
 
-# Experimental feature flags — operator opt-in for rough features that
-# ship in the tree but are off by default. Not exposed in the web UI,
-# not toggleable per user. Run `uv run istota experimental list` on the
-# host to see the current registry. See docs/EXPERIMENTAL.md.
-# Example: ["money_tax", "money_wash_sales"]
+# Experimental feature flags — operator opt-in, not exposed in the web UI and
+# not per-user. `uv run istota experimental list` shows the registry; see
+# docs/EXPERIMENTAL.md. Example: ["money_tax", "money_wash_sales"]
 istota_experimental_features: []
 
 # Users configuration (dict of user_id -> user config). The data model is split:
@@ -550,7 +492,6 @@ istota_experimental_features: []
 #   * Briefings        → briefing_configs table (`istota briefings schedule ensure`)
 #   * Tier-2 creds     → encrypted secrets table (`istota secret ensure`, see istota_user_secrets)
 #   * Module opt-outs  → `disabled_modules:` list
-# `folder` is the only declarable resource type (an out-of-workspace sandbox mount).
 #
 # Example:
 # istota_users:
@@ -558,85 +499,57 @@ istota_experimental_features: []
 #     display_name: "Alice"
 #     email_addresses:
 #       - "alice@example.com"
-#     # timezone is NOT set here — it's a user preference owned by the web UI /
-#     # Nextcloud (seeded on first login). Setting it in inventory would clobber
-#     # the user's web-set value on every deploy (ISSUE-102).
-#     log_channel: ""               # Legacy Talk-room shorthand for the verbose
-#                                   # execution log. For non-Talk destinations
-#                                   # (email / ntfy / comma lists) set routing.log
-#                                   # below instead — it wins over this field.
-#                                   # Leave empty to let istota_provision_talk_rooms
-#                                   # create #logs and fill this in; a value set
-#                                   # here is never overwritten by provisioning.
-#     alerts_channel: ""            # Talk room token for confirmations and security alerts
-#                                   # Same: empty means auto-provision #alerts.
-#     trusted_email_senders:        # patterns for trusted email senders (plus-address gate)
-#       - "*@example.com"           # domain wildcard
-#       - "bob@other.com"           # exact match
-#     quiet_email_senders:          # patterns whose mail is filed silently — no task, no session
-#       - "*@stratechery.com"       # read back on demand via `email from-senders`
-#     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
-#     max_background_workers: 1    # per-user override (0 or omit = use global default)
-#     disabled_skills: []          # per-user skill exclusion list
-#     disabled_modules: []         # per-user module opt-outs; one of: feeds, money, location
-#     # Purpose-keyed delivery routing (routes notifications by purpose). Each
-#     # purpose maps to an output_target descriptor (talk / email / ntfy /
-#     # all / talk:<room> / comma lists). Purposes: reply, alert, log, briefing,
-#     # notification. When `routing:` is set, the listed purposes REPLACE the
-#     # stored table on each deploy; omit `routing:` entirely to leave a web-set
-#     # table untouched (same non-clobber rule as timezone, ISSUE-102).
+#     # timezone is NOT set here — it is a user preference owned by the web UI /
+#     # Nextcloud, and inventory would clobber it on every deploy (ISSUE-102).
+#     log_channel: ""               # Talk-room shorthand for the execution log;
+#                                   # routing.log below wins over it. Empty lets
+#                                   # istota_provision_talk_rooms fill it in.
+#     alerts_channel: ""            # Talk room for confirmations and security
+#                                   # alerts; empty auto-provisions #alerts.
+#     trusted_email_senders:        # skips the inbound gate and the outbound
+#       - "*@example.com"           # approval hold. Domain wildcard or exact
+#       - "bob@example.net"         # match.
+#     quiet_email_senders:          # mail filed silently — no task, no session.
+#       - "*@newsletter.example"    # Read back with `email from-senders`.
+#     max_foreground_workers: 2     # per-user override (0 or omit = global default)
+#     max_background_workers: 1     # per-user override (0 or omit = global default)
+#     disabled_skills: []           # per-user skill exclusion list
+#     disabled_modules: []          # feeds, money, location
+#     # Delivery routing by purpose (reply, alert, log, briefing, notification).
+#     # Each maps to an output_target: talk / email / ntfy / all / talk:<room> /
+#     # comma list. Listed purposes REPLACE the stored table on each deploy; omit
+#     # `routing:` entirely to leave a web-set table alone (ISSUE-102).
 #     routing:
-#       alert: "ntfy"               # send alerts to the user's ntfy instead of Talk
-#       log: "talk:room123"         # verbose execution log → any user-routable
-#                                   # surface (talk / email / ntfy / comma list).
-#                                   # Off unless set here or via log_channel above;
-#                                   # Talk streams live, email/ntfy get one summary.
-#     default_destination: "talk"   # fallback descriptor when no purpose matches;
-#                                   # omit to leave the stored value (default "talk")
-#     email_reply_routing: "origin+thread"  # where a reply to a sent email goes:
-#                                   # origin+thread (default) | origin | thread
-#     outbound_approval: "all"      # this user's own outbound approval policy:
-#                                   # off | untrusted | all — QUOTED, since off
-#                                   # is a YAML boolean. Omit to follow
-#                                   # istota_email_outbound_approval_floor above;
-#                                   # "" clears a previously set value back to
-#                                   # following it, and a bare key with no value
-#                                   # is treated as omitted rather than as "".
-#                                   # The floor is a minimum, so a value weaker
-#                                   # than it has no effect.
+#       alert: "ntfy"
+#       log: "talk:room123"         # Talk streams live; email/ntfy get one summary
+#     default_destination: "talk"   # fallback when no purpose matches; omit to
+#                                   # leave the stored value
+#     email_reply_routing: "origin+thread"  # origin+thread (default) | origin | thread
+#     outbound_approval: "all"      # off | untrusted | all — QUOTE IT, off is a
+#                                   # YAML boolean. Omit to follow
+#                                   # istota_email_outbound_approval_floor; ""
+#                                   # clears a set value back to following it.
+#                                   # The floor is a minimum, so a weaker value
+#                                   # has no effect.
 #     external_turn_display: "collapsed"  # how much of a turn that arrived from
-#                                   # outside the room (an external contact's
-#                                   # email) shows inline in web chat:
-#                                   # full | collapsed (default) | hidden. The
-#                                   # turn itself is always shown. A user
-#                                   # preference — set it in the web UI unless
-#                                   # you mean to hold every deploy to it.
-#     resources:
-#       # Only `folder` is declarable after the Resources sunset — an
-#       # out-of-workspace path mounted into the sandbox. In-workspace paths
-#       # are already covered by the wholesale user-dir bind.
-#       - type: "folder"
+#                                   # outside the room shows inline in web chat:
+#                                   # full | collapsed (default) | hidden. A user
+#                                   # preference — prefer the web UI.
+#     resources:                    # `folder` is the only declarable type: an
+#       - type: "folder"            # out-of-workspace path bound into the sandbox.
 #         path: "/shared/Projects"
 #         name: "Projects"
 #         permissions: "write"
-#     # Opt this user out of the shared [[default_briefings]] set (default on).
-#     default_briefings: false
-#     # Briefing email as multipart/alternative — HTML (clickable article links)
-#     # plus a plain-text fallback part. Default on; false = plain text only.
-#     briefing_email_html: false
-#     # Set this user's timezone from their GPS position once they have settled
-#     # in a new one (default off). Needs the location module; the user is
-#     # notified on every change.
-#     timezone_follow_location: true
+#     default_briefings: false      # opt out of the shared [[default_briefings]] set
+#     briefing_email_html: false    # false = plain text only (default is HTML plus
+#                                   # a plain-text fallback part)
+#     timezone_follow_location: true  # set timezone from GPS once settled; needs
+#                                   # the location module, notifies on each change
 #     briefings:
-#       # Content is blocks-only (legacy `components:` authoring is retired).
-#       # A briefing declaring `blocks:` seeds them ONCE into the user's module
-#       # DB as an editable baseline; the user then edits them in the web editor
-#       # and operator re-runs never re-clobber. Schedule/delivery come from
-#       # name/cron/output via the CLI/DB path. Source `kind` is one of
+#       # Blocks-only. `blocks:` seeds ONCE into the user's module DB as an
+#       # editable baseline; later web edits are never clobbered. Source `kind` is
 #       # rss / email / browse / markets / calendar / todos / reminders / notes;
-#       # `render_mode` is synthesis | structured (omit to infer). Loop over
-#       # `istota_users` in the playbook to apply one definition to many users.
+#       # `render_mode` is synthesis | structured (omit to infer).
 #       - name: "world"
 #         cron: "0 7 * * *"
 #         conversation_token: "room123"
@@ -658,14 +571,10 @@ istota_experimental_features: []
 #                 config: {}
 istota_users: {}
 
-# Per-user encrypted secrets (Karakeep, Monarch, Tumblr API key, Overland
-# ingest token, ...). Each row is upserted via `istota secret ensure` and
-# stored in the encrypted `secrets` table — never in plaintext on disk.
-# `istota_secret_key` (above) must be set; the role exports it through the
-# secrets.env file consumed by the systemd units.
-#
-# Schema is validated server-side; a typo in `service` or `key` fails the
-# play. Known services / keys (as of the current refactor):
+# Per-user encrypted secrets, upserted via `istota secret ensure` into the
+# encrypted `secrets` table — never in plaintext on disk. `istota_secret_key`
+# must be set. The schema is validated server-side, so a typo in `service` or
+# `key` fails the play. Known services / keys:
 #
 #   karakeep         base_url, api_key
 #   monarch          email, password, session_token
@@ -685,18 +594,12 @@ istota_users: {}
 istota_user_secrets: {}
 
 # Canonical shared briefing set, seeded once into each opted-in user (per-user
-# `default_briefings: true`, the default). Rendered into [[default_briefings]];
-# blocks-only, same name/cron/output/blocks shape as a per-user briefing. Users'
-# later web edits win and re-runs never clobber them.
-#
-# The default set is a weekday morning + evening briefing. Headlines and Markets
-# read the module-owned shared blocks (world-headlines / markets-summary, see
-# istota_briefing_shared_blocks) via `shared_block` sources, so the browse/markets
-# fetch + synthesis happens once globally per window rather than per user. A
-# `shared_block` block is `structured` (spliced verbatim); `max_age_hours` gates
-# freshness so a stale block never leaks across windows. Headlines (needs the
-# headless browser) and Calendar (needs CalDAV) soft-degrade to omitted when
-# unavailable. Set to [] to seed nothing.
+# `default_briefings: true`). Same name/cron/output/blocks shape as a per-user
+# briefing; later web edits win and re-runs never clobber them. Headlines and
+# Markets read the shared blocks below via `shared_block` sources, so the fetch
+# and synthesis happens once globally per window rather than per user;
+# `max_age_hours` gates freshness. Headlines (needs the headless browser) and
+# Calendar (needs CalDAV) are omitted when unavailable. [] seeds nothing.
 istota_default_briefings:
   - name: "morning"
     # Display title — the email subject and the archive entry. The run date is
@@ -742,15 +645,12 @@ istota_default_briefings:
           - kind: "calendar"
             config: {}
 
-# Module-owned shared briefing blocks (shared-kv-curated-content). Generated
-# globally by the scheduler (no user, UTC cron) into the shared_kv store; per-user
-# briefings read them via a `shared_block` source, collapsing the N-way fetch +
-# synthesis to one generation. Mirrors DEFAULT_SHARED_BLOCKS in config.py; [] to
-# disable. Allowed source kinds are user-agnostic: browse / markets / email.
-# Crons fire twice daily ~15 min before the default briefing windows (06:00 /
-# 18:00); consuming sources gate on max_age_hours (6h) so each window reads its
-# own fresh copy. Crons are UTC while briefing crons are per-user TZ — align these
-# to your users' timezone if your windows differ.
+# Module-owned shared briefing blocks. Generated globally by the scheduler (no
+# user, UTC cron) into the shared_kv store and read by per-user briefings via a
+# `shared_block` source, collapsing the N-way fetch to one generation. Mirrors
+# DEFAULT_SHARED_BLOCKS in config.py; [] disables. Source kinds must be
+# user-agnostic: browse / markets / email. These crons are UTC while briefing
+# crons are per-user TZ — align them if your windows differ.
 istota_briefing_shared_blocks:
   - name: "world-headlines"
     cron: "45 5,17 * * *"
@@ -766,9 +666,8 @@ istota_briefing_shared_blocks:
   - name: "markets-summary"
     cron: "50 5,17 * * *"
     title: "📈 Markets"
-    # Structured/verbatim: the markets source already emits a formatted quote
-    # table — stored as-is with zero LLM passes (no directive). Trusted (pure
-    # numbers, no injection surface) so it renders un-wrapped.
+    # The markets source already emits a formatted quote table, so it is stored
+    # verbatim with no LLM pass. Trusted (pure numbers) so it renders un-wrapped.
     render_mode: "structured"
     enabled: true
     trusted: true
@@ -781,11 +680,10 @@ istota_briefing_shared_blocks:
 # regeneration windows line up. Maps to [briefings] shared_block_timezone.
 istota_briefing_shared_tz: "UTC"
 
-# Inline [anchor](url) links preserved per newsletter body in a briefing source.
-# Newsletters are link soup, so the converter filters unsubscribe / social /
-# web-version chrome and this caps what survives; an over-cap anchor keeps its
-# text and loses only the destination. 0 = unlimited. Maps to [briefings]
-# newsletter_max_links_per_source.
+# Inline [anchor](url) links kept per newsletter body in a briefing source. The
+# converter already drops unsubscribe / social / web-version chrome; this caps
+# what survives, and an over-cap anchor keeps its text and loses the destination.
+# 0 = unlimited. Maps to [briefings] newsletter_max_links_per_source.
 istota_briefing_newsletter_max_links: 20
 
 # Cap on a single health document (a scan, discharge summary, vaccination
@@ -795,10 +693,9 @@ istota_briefing_newsletter_max_links: 20
 istota_health_max_document_bytes: 26214400 # 25 MiB
 
 # Whether the portfolio module may look up ticker metadata from a third-party
-# quote API when classifying newly imported symbols. The request carries the
-# symbol (private financial data) and runs outside the sandbox's CONNECT
-# allowlist. Off falls back to offline description heuristics, which need no
-# network. Maps to [money] autoclass_lookup.
+# quote API when classifying new symbols. The request carries the symbol
+# (private financial data) and runs outside the sandbox's CONNECT allowlist. Off
+# falls back to offline heuristics. Maps to [money] autoclass_lookup.
 istota_money_autoclass_lookup: true
 
 # rclone remote name for Nextcloud
@@ -823,14 +720,11 @@ istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 istota_browser_enabled: false
 istota_browser_api_port: 9223
 istota_browser_vnc_port: 6080
-# Which host address the noVNC console is published on. noVNC serves an
-# *interactive* view of the browser holding your logged-in profile, so this
-# used to be `0.0.0.0` in the compose template while the API port beside it was
-# correctly on loopback (ISSUE-297). Loopback by default; set it to a VPN or
-# management address to reach the console for troubleshooting, which is what
-# istota_browser_vnc_external_url below assumes you have done. Anything other
-# than a loopback address requires istota_browser_vnc_password to be set — the
-# role refuses to deploy an unauthenticated console on a reachable address.
+# Which host address the noVNC console is published on. It serves an interactive
+# view of the browser holding your logged-in profile, so it is loopback by
+# default; set a VPN or management address to reach it for troubleshooting.
+# Anything but loopback requires istota_browser_vnc_password — the role refuses
+# to deploy an unauthenticated console on a reachable address (ISSUE-297).
 istota_browser_vnc_bind_address: "127.0.0.1"
 # Deliberately empty rather than generated: a generated password is one you
 # cannot log in with, and generating on upgrade would change the meaning of an
@@ -856,15 +750,10 @@ istota_browser_watchdog_ntfy_url: ""          # optional: full ntfy topic URL fo
 istota_browser_watchdog_alert_email: ""       # optional: email address (requires `mail`) for alerts
 istota_browser_daily_restart_cron: "0 5 * * *"  # cron schedule for the proactive daily restart
 
-# The deep liveness probe's CDP arm (ISSUE-384): how many consecutive CDP
-# failures, with Chrome up and answering, make the container report itself
-# unhealthy so the watchdog above restarts it. This is the one fault a Chrome
-# restart cannot clear — the API process's own Patchright binding — so a restart
-# is the only cure and these two decide how eagerly it is reached.
-# Threshold 0 switches the arm off; the counters stay on /health either way.
-# The window is clamped to a 210s floor in the container, because below the
-# healthcheck's own detection latency the arm becomes unreachable rather than
-# merely eager.
+# The deep liveness probe's CDP arm (ISSUE-384): consecutive CDP failures, with
+# Chrome up and answering, that make the container report itself unhealthy so
+# the watchdog restarts it. A restart is the only cure for that fault. The
+# window is clamped to a 210s floor in the container.
 istota_browser_cdp_failure_threshold: 3        # consecutive failures before unhealthy (0 disables)
 istota_browser_cdp_failure_window: 900         # seconds; a failure older than this no longer counts
 
@@ -879,12 +768,9 @@ istota_devbox_image: "istota-devbox:latest"
 istota_devbox_container_prefix: "devbox-"
 istota_devbox_docker_cli: "/usr/bin/docker"
 istota_devbox_max_output_bytes: 102400
-# Raised from 2g when the devbox became the place project code builds. It is now
-# shared by *all* of one user's concurrent tasks (per-user concurrency is about
-# four workers), and the task cgroup no longer bounds a build at all — container
-# processes are in the container's cgroup, not the task's — so this is the only
-# limit left. An OOM-killed build comes back as exit 137 with signal SIGKILL and
-# is reported by nothing else.
+# Shared by all of one user's concurrent tasks, and the only limit on a build —
+# container processes sit in the container's cgroup, not the task's. An
+# OOM-killed build comes back as exit 137 / SIGKILL and nothing else reports it.
 istota_devbox_mem_limit: "4g"
 istota_devbox_cpus: 2
 istota_devbox_pids_limit: 512
@@ -895,59 +781,43 @@ istota_devbox_log_max_size: "10m"
 istota_devbox_log_max_file: 3
 istota_devbox_network_name: "{{ istota_namespace }}-devbox-net"
 istota_devbox_network_subnet: "172.30.0.0/24"
-# Metadata and link-local blocking. Covers the whole 169.254.0.0/16, not just
-# 169.254.169.254: AWS also serves instance DNS at .169.253, ECS task
-# credentials — which hand out role credentials — at .170.2, and NTP at
-# .169.123. Also covers Azure's 168.63.129.16, which is neither link-local nor
-# private and so is matched by nothing else here.
+# Metadata and link-local blocking. Covers all of 169.254.0.0/16, not just
+# 169.254.169.254 — AWS also serves instance DNS, ECS task credentials and NTP
+# in that range. Also covers Azure's 168.63.129.16, matched by nothing else here.
 istota_devbox_block_metadata: true
-# Private-range blocking: drops outbound traffic from the devbox network
-# targeting 10/8, 172.16/12, 192.168/16 and 100.64/10, so a compromised devbox
-# can't pivot to the host's LAN. The last of those is RFC 6598 carrier-grade
-# NAT rather than RFC 1918 — it is the range Tailscale hands out, and it is
-# gated by this flag despite the flag's name. If your devbox loses reach to a
-# tailnet service, this is why.
-# Disable when you want the devbox to reach a colocated service intentionally.
+# Private-range blocking: drops outbound devbox traffic to 10/8, 172.16/12,
+# 192.168/16 and 100.64/10, so a compromised devbox can't pivot to the LAN. The
+# last is RFC 6598 CGNAT — the range Tailscale uses — despite the flag's name,
+# so this is why a devbox loses reach to a tailnet service. Disable to let the
+# devbox reach a colocated service on purpose.
 istota_devbox_block_rfc1918: true
 # Users whose containers should be created. Each entry is a user_id; the
 # container is named "{{ istota_devbox_container_prefix }}{{ user_id }}".
 istota_devbox_users: []
 
-# Force a devbox image rebuild and container recreate on the next run, even
-# when nothing Ansible tracks has changed. Two things normally trigger that on
-# their own: the compose template changing, and the content hash over
-# docker/devbox (Dockerfile, lib/, scripts/, etc/) moving. This is for the case
-# neither can see — a container someone modified by hand, a half-built image, a
-# build that failed after the marker was already written. Meant as a
-# command-line override (`-e istota_devbox_force_recreate=true`) rather than
-# something to set in inventory, where it would recreate every container on
-# every run and interrupt whatever work is in the box at the time.
-#
-# It fires the ordinary restart handler, so the build still uses Docker's layer
-# cache. That covers every file the image copies in, and does not cover the base
-# image or anything an apt-get in a RUN layer installed — for those, build once
-# by hand with `docker compose -f docker-compose.devbox.yml build --pull
-# --no-cache` and let this flag do the recreate.
+# Force a devbox image rebuild and container recreate even when nothing Ansible
+# tracks has changed — a hand-modified container, a half-built image, a build
+# that failed after its marker was written. Use it as a command-line override
+# (`-e istota_devbox_force_recreate=true`); set in inventory it would recreate
+# every container on every run. It uses Docker's layer cache, so for a stale
+# base image or apt layer build by hand first:
+#   docker compose -f docker-compose.devbox.yml build --pull --no-cache
 istota_devbox_force_recreate: false
 
-# Devbox credential proxy. One systemd unit per devbox user listens on a per-user
-# Unix socket, bind-mounted into the container at /run/istota-cred. It answers two
-# things: a git credential for git-credential-istota, injected server-side, and the
-# forge token for the container's gh/glab wrapper, which needs it in the real CLI's
-# own environment. The per-user forge URL rides along with that token, since one
-# image serves every user and cannot bake one in. Defaults on when devbox is on.
+# Devbox credential proxy. One systemd unit per devbox user on a per-user Unix
+# socket, bind-mounted into the container at /run/istota-cred. It answers a git
+# credential (injected server-side) and the forge token plus URL for the
+# container's gh/glab wrapper. Defaults on when devbox is on.
 istota_devbox_proxy_enabled: true
 istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
 # Empty string → audit lines go to the journal only. Set to an absolute
 # path to also tail audit lines into a file.
 istota_devbox_proxy_audit_log: ""
 
-# The Docker-API allowlist proxy is retired and every variable that configured
-# it went with it. Nothing in a task reaches Docker any more: project code goes
-# to the container over the exec transport, and the devbox skill's one Docker
-# verb, `reset`, runs host-side against the real socket. The role tears down any
-# surviving units. `tests/test_ansible_config_template.py` sweeps the whole role
-# for the retired key names, which is why none is written out even in a comment.
+# The Docker-API allowlist proxy is retired, with every variable that configured
+# it. Nothing in a task reaches Docker: project code goes to the container over
+# the exec transport, and the devbox skill's `reset` runs host-side. The role
+# tears down any surviving units.
 
 # ntfy push notifications are configured per-user via the encrypted secrets
 # table (`istota secret ensure -s ntfy ...` or web settings). There is no
@@ -972,13 +842,10 @@ istota_location_reconcile_min_dwell_sec: 60
 istota_web_enabled: true
 istota_web_port: 8766
 
-# Restart behaviour. The room-event SSE stream never completes on its own, so
-# uvicorn's default "wait forever for open connections" turned every restart
-# with a browser tab open into a 90s SIGKILL. The graceful window is how long
-# uvicorn drains before cancelling stragglers; the stop timeout is the systemd
-# cap behind it (a SIGKILL at that point means wedged, not draining). Both are
-# backstops: the streams observe SIGTERM (istota.web_shutdown) and end
-# themselves, so a restart normally reaches neither deadline.
+# Restart behaviour, both backstops: the SSE streams observe SIGTERM and end
+# themselves, so a restart normally reaches neither deadline. The graceful
+# window is uvicorn's drain before it cancels stragglers; the stop timeout is
+# the systemd cap behind it.
 istota_web_graceful_shutdown_seconds: 5
 istota_web_stop_timeout_seconds: 20
 
@@ -988,43 +855,39 @@ istota_web_oauth2_client_secret: ""
 istota_web_oauth2_token_endpoint: ""     # Optional override; defaults derive from oauth2_provider
 istota_web_oauth2_userinfo_endpoint: ""  # Optional override
 istota_web_oauth2_redirect_uri: ""       # Optional override; defaults to https://{site_hostname}/istota/callback
-istota_web_secret_key: ""                # Session signing key (vault); generate with `python3 -c 'import secrets;print(secrets.token_hex(32))'`
+istota_web_secret_key: ""                # Session signing key (vault). Generate:
+                                         #   python3 -c 'import secrets; print(secrets.token_hex(32))'
 
 # User-scoped Nextcloud OAuth token retention (post-as-user Talk mirroring +
 # read-state sync). "ephemeral" (default) discards the OAuth pair at login;
 # "encrypted" retains it in web_user_tokens, encrypted with the web-only key
 # below. NC OAuth2 tokens grant full account access — a deliberate opt-in.
 istota_web_token_storage: "ephemeral"
-# Byte cap on a profile-picture upload, in KB. Checked on the declared
-# Content-Length before the body is read and again on the running total.
-# Distinct from istota_web_chat_max_attachment_mb, which nginx's
-# client_max_body_size is rendered from: that bounds what reaches the process
-# at all, this bounds what the avatar endpoint accepts. 0 switches uploads off
-# (the endpoint answers 503); a stored picture is still served.
+# Byte cap on a profile-picture upload, in KB. Distinct from
+# istota_web_chat_max_attachment_mb, which bounds what reaches the process at
+# all; this bounds what the avatar endpoint accepts. 0 switches uploads off
+# (503); a stored picture is still served.
 istota_web_max_avatar_kb: 4096
-# Whether the scheduler imports users' Nextcloud profile pictures. Only a
-# *custom* avatar is imported: Nextcloud generates a coloured letter for a user
-# who has set none, and importing that would swap the app's own initial chip for
-# Nextcloud's version of the same idea, indistinguishable afterwards. Inert on a
-# local storage backend. Cadence: istota_scheduler_avatar_import_interval.
+# Whether the scheduler imports users' Nextcloud profile pictures. Only a custom
+# avatar is imported, never Nextcloud's generated letter. Inert on a local
+# storage backend. Cadence: istota_scheduler_avatar_import_interval.
 istota_web_avatar_import_from_nextcloud: true
 # Web-only Fernet key (vault); >=32 chars. Rendered into web-secrets.env and
 # loaded only by the web unit, never the scheduler or webhooks units.
 istota_web_token_key: ""
-# Talk→web read-state pull cadence in seconds (0 disables the pull;
-# web→Talk push is unaffected). Only active with token storage "encrypted".
-# Map background tiles. The default needs no key and no account.
-# "carto" needs a free key from https://carto.com/basemaps/apikey/ — without
-# one every tile comes back watermarked "API KEY REQUIRED" with a 200 status,
-# so no automated check sees it. The key travels in the tile URL to every
-# browser that loads a map, so it is public: it is not a secret to protect,
-# and each user can override it from the location settings page.
+# Map background tiles. The default needs no key and no account. "carto" needs
+# a free key from https://carto.com/basemaps/apikey/ — without one every tile
+# comes back watermarked "API KEY REQUIRED" with a 200 status, so no automated
+# check sees it. The key travels in the tile URL to every browser, so it is
+# public rather than secret; each user can override it in location settings.
 istota_web_map_provider: openfreemap   # openfreemap | carto | osm | custom
 istota_web_map_api_key: ""             # carto only
 istota_web_map_dark_style: ""          # custom only: MapLibre style URL
 istota_web_map_light_style: ""         # custom only
 istota_web_map_attribution: ""         # custom only
 
+# Talk→web read-state pull cadence in seconds (0 disables the pull; web→Talk
+# push is unaffected). Only active with token storage "encrypted".
 istota_web_chat_talk_read_sync_interval: 60
 # Live room-event stream (GET /chat/stream): one user-scoped SSE connection per
 # open tab carrying every room the user is a member of. Server-side poll cadence
@@ -1041,18 +904,10 @@ istota_web_chat_room_stream_max_bytes: 2000000
 # Per-connection room-metadata diff cadence (rename / model / effort / room
 # added or removed elsewhere), seconds. 0 disables it.
 istota_web_chat_room_stream_room_check_seconds: 10
-# Largest chat attachment, in MB. One number for two consumers: the app rejects
-# a larger upload with a 413 the client can read, and the vhost sets
-# client_max_body_size from it. Left to drift, the smaller of the two wins and
-# nginx answers with its own HTML error page instead — which the web client
-# cannot parse, so the user gets "upload failed (413)" and no reason. nginx's
-# own default is 1m, so this must be rendered rather than omitted.
-#
-# Higher than the application default of 25, which is what a base64 round trip
-# through the WebView could survive. The iOS shell posts a picked file straight
-# from disk (IstotaUploader, 0.5.0), and reads it in windows where it cannot, so
-# nothing on either side scales with the file any more. What is left is upload
-# time on a phone connection, which is why this is not simply unlimited.
+# Largest chat attachment, in MB. One number for two consumers: the app's own
+# 413, and nginx's client_max_body_size. Never omit it — nginx defaults to 1m
+# and answers with an HTML error page the web client cannot parse. The only
+# remaining cost of raising it is upload time on a phone connection.
 istota_web_chat_max_attachment_mb: 100
 
 # Master key for the encrypted `secrets` table, rendered into secrets.env as
@@ -1064,36 +919,22 @@ istota_secret_key: ""
 istota_google_workspace_enabled: false
 istota_google_workspace_client_id: ""
 istota_google_workspace_client_secret: ""
-# This list is a CEILING, not a request: each user picks their own subset of it
-# at Settings -> Google Workspace, and the connect redirect asks Google only for
-# what that user chose. So it is the maximum any user may grant, and there is no
-# cost to listing a service here that most users leave switched off.
+# A CEILING, not a request: each user picks their own subset at Settings ->
+# Google Workspace, and the connect redirect asks Google only for that. List a
+# service only once its API is enabled in your Google Cloud project — a scope
+# for a disabled API fails at Google's end.
 #
-# It is a maximum rather than advice because the OAuth client belongs to a
-# Google Cloud project whose enabled APIs you control: a scope for an API the
-# project has not enabled fails at Google's end with an error the user can do
-# nothing about. List a service only once its API is enabled in the project.
-#
-# Read-only by default. To offer read/write, swap the .readonly variant for its
-# full counterpart — the pair per service is:
+# Read-only by default. To offer read/write, swap in the full counterpart, which
+# adds a "Read and write" option to that service's picker:
 #   drive.readonly        -> drive
 #   gmail.readonly        -> gmail.modify
 #   calendar.readonly     -> calendar
 #   spreadsheets.readonly -> spreadsheets
 #   documents.readonly    -> documents
 #   chat.spaces.readonly + chat.messages.readonly -> chat.spaces + chat.messages
-# Listing the full scope does not force it on anyone: it adds a "Read and write"
-# option to that service's picker. Chat is offered by no default scope, so the
-# skill's documented `chat spaces` verbs need it added here first.
-#
-# A scope outside those pairs (a narrow one like drive.file / gmail.send, or
-# openid) gets no picker row, so no user can decline it — which is why it is
-# requested unconditionally on top of whatever they did choose, and named on the
-# card as something this instance always asks for.
-#
-# Changing this list never rewrites an existing grant — nothing revalidates one
-# at startup. A user keeps whatever they consented to until they reconnect, and
-# the settings card shows the difference.
+# Chat has no default scope, so `chat spaces` needs it added here first. A scope
+# outside these pairs (drive.file, gmail.send, openid) gets no picker row and is
+# requested unconditionally. Changing the list never rewrites an existing grant.
 istota_google_workspace_scopes:
   - "https://www.googleapis.com/auth/drive.readonly"
   - "https://www.googleapis.com/auth/gmail.readonly"
@@ -1118,11 +959,10 @@ istota_memory_search_auto_recall: false           # BM25 search using task promp
 istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 istota_memory_search_recency_half_life_days: 180   # recency decay half-life for recall (0 = off)
 
-# Skills routing is single-axis and has no operator knobs: a skill is either
-# eager (selected deterministically, full body in the prompt) or in the on-demand
-# menu (a one-line entry the model loads via `istota-skill skills show <name>`).
-# The former `[skills]` block (progressive_disclosure / auto_lazy_threshold_chars)
-# was removed; a stale block is ignored with a load-time warning.
+# Skills routing has no operator knobs: a skill is either eager (full body in the
+# prompt) or in the on-demand menu (a one-line entry the model loads via
+# `istota-skill skills show <name>`). A stale `[skills]` block is ignored with a
+# load-time warning.
 
 # Learned playbooks (procedural memory) — per-user markdown task procedures the
 # sleep cycle distills from successful multi-step tasks, recalled by relevance.
@@ -1156,42 +996,22 @@ istota_nodejs_enabled: false
 # Developer skill settings (git + GitLab/GitHub workflows)
 # Recommended: dedicated bot accounts with minimal required permissions
 istota_developer_enabled: false
-# Base directory for repo clones/worktrees. **A per-user root**: the daemon
-# derives {repos_dir}/{user_id} and everything that scopes a task — the bwrap
-# bind, the devbox mount, DEVELOPER_REPOS_DIR, the credential scrub — is handed
-# that rather than this. The role moves an existing flat layout down one level
-# on the first run after this lands, and refuses to move a directory holding
-# uncommitted work.
+# Base directory for repo clones/worktrees. A per-user root: the daemon derives
+# {repos_dir}/{user_id}, and that is what every task-scoping mechanism is handed
+# (the bwrap bind, the devbox mount, DEVELOPER_REPOS_DIR, the credential scrub).
+# The role migrates an existing flat layout down one level, and refuses to move
+# a directory holding uncommitted work.
 istota_developer_repos_dir: ""
 istota_developer_author_credit: ""                # Appended to every commit (e.g., "Co-Authored-By: Name <email>")
 
 # --- Where project code builds and runs ([developer.container]) -------------
 #
-# **There is no variable here for that any more.** It is derived, from
-# istota_devbox_enabled together with istota_developer_enabled and a non-empty
-# istota_developer_repos_dir. With the devbox on, npm, uv, cargo and the rest
-# run inside the user's devbox over a Unix-socket exec transport; with it off
-# they run on the host inside the task's bwrap sandbox, where they cannot reach
-# a registry off the CONNECT allowlist and cannot install a system package.
-#
-# `istota_developer_container_backend` used to say which, and retiring it
-# removed two states rather than a knob. A deployment could hold the devbox on
-# with the backend off, which offered the model a devbox skill whose every verb
-# but `reset` refused; or the backend on with the devbox off, which asked the
-# developer skill to reach a container this role had never built. Note that
-# every `when:` in this role that tested the backend already carried
-# istota_devbox_enabled as its other conjunct, so no task runs on more hosts
-# than it did. The compose template is where the change shows: its two
-# conditional blocks key on istota_developer_enabled and a non-empty
-# istota_developer_repos_dir now, so a host that had the container on and the
-# backend unset gains the two mounts and the transport's environment.
-#
-# `istota doctor --only developer.container` is the check, and it re-derives
-# from the rendered file rather than reading a key — a deployment where the file
-# and the running daemon disagree is reported there rather than found by a task
-# failing hours later. It also reports a config.toml still carrying the retired
-# key, since that is where an operator's stated intent can differ from the
-# running behaviour with no drift present.
+# There is no variable for this — it is derived from istota_devbox_enabled plus
+# istota_developer_enabled plus a non-empty istota_developer_repos_dir. With the
+# devbox on, npm/uv/cargo run in the user's devbox over the exec transport; with
+# it off they run on the host in the task's bwrap sandbox, where they cannot
+# reach a registry off the CONNECT allowlist or install a system package.
+# Check the result with `istota doctor --only developer.container`.
 # The parent directory holding one socket directory per user. Only the per-user
 # subdirectory is ever mounted into a container: mounting the parent would put
 # every user's socket in every user's container, which is arbitrary command
@@ -1204,13 +1024,10 @@ istota_developer_container_connect_timeout_seconds: 5.0
 # practice it only fires on an orphan whose task is already gone. Do not lower it
 # to something that would kill a long link step.
 istota_developer_container_idle_timeout_seconds: 3600
-# The commands fronted by a shim. Two absences are deliberate. `python3` is not
-# here and cannot be added — the sandbox starts its own network bridge with it,
-# so a shim would route that into the container and break egress for every
-# developer-enabled task. `make` is not here because shimming a *driver*
-# inverts routing for everything beneath it: a Makefile calling git, gh or
-# python3 would get the container's copies. Add it only if you know your
-# Makefiles.
+# The commands fronted by a shim. Two absences are deliberate: `python3` cannot
+# be added (the sandbox starts its network bridge with it, so a shim breaks
+# egress for every developer task), and `make` is left out because shimming a
+# driver routes everything beneath it into the container too.
 istota_developer_container_shim_commands:
   - npm
   - npx
@@ -1227,19 +1044,12 @@ istota_developer_container_shim_commands:
   - go
   - bundle
   - gem
-# The forge CLIs the developer skill drives, from the vendors' own releases
-# rather than the Debian archive: trixie ships gh 2.46 and glab 1.53, roughly
-# fifty releases behind what both images pin, and a bare-metal host is meant to
-# be interchangeable with the container.
-#
-# The same version has to be named in three places — here,
-# docker/istota/Dockerfile and docker/devbox/Dockerfile. Nothing can share a
-# literal across an Ansible role and two Docker builds, so
-# `tests/test_ansible_forge_cli_install.py` holds the three equal instead.
-# Bump them together.
-#
-# The digests are literals here rather than a checksums file fetched from the
-# same host, so that a changed artifact shows up as a diff in this repository.
+# The forge CLIs the developer skill drives, from the vendors' releases rather
+# than the Debian archive (trixie ships gh 2.46 / glab 1.53, ~50 releases back).
+# The same version is named here, in docker/istota/Dockerfile and in
+# docker/devbox/Dockerfile — bump all three together;
+# tests/test_ansible_forge_cli_install.py holds them equal. Digests are literals
+# so a changed artifact shows up as a diff here.
 istota_developer_gh_version: "2.98.0"
 istota_developer_gh_checksums:
   amd64: "f65a3fa2fa0eb2e97c445ee3f5e087a40aae03b64847f45a8f13805e504535d6"
@@ -1248,15 +1058,10 @@ istota_developer_glab_version: "1.114.0"
 istota_developer_glab_checksums:
   amd64: "6df680f88a2a45700d1dd6a08a44a74838473ef3dcc5cb1ad243f4d1fd704ad0"
   arm64: "c2bcb44cc10d849cccb879e687f3b9e102a3415c3d02f0cecfd9ce1442519350"
-# gitleaks is the credential half of this repository's pre-commit hook, and the
-# hook refuses an unattended agent commit when it cannot run — so on a host that
-# makes agent commits this install is load-bearing, not optional.
-#
-# Pinned and fetched from the upstream release, the same way gh and glab are
-# above and for a sharper reason: trixie ships 8.16, below the minimum below,
-# so an apt install would put a binary here that the hook's own probe rejects.
-# The digests are literals here rather than a checksums file fetched from the
-# same host, so that a changed artifact shows up as a diff in this repository.
+# gitleaks is the credential half of the pre-commit hook, which refuses an
+# unattended agent commit when it cannot run. Fetched from the upstream release
+# rather than apt: trixie ships 8.16, below the minimum below. Digests are
+# literals so a changed artifact shows up as a diff here.
 istota_developer_gitleaks_version: "8.30.1"
 istota_developer_gitleaks_checksums:
   amd64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
@@ -1267,27 +1072,11 @@ istota_developer_gitleaks_release_arch:
   arm64: "arm64"
 
 # `gitleaks git --staged` replaced `detect` / `protect` in 8.19, and the hook
-# calls the new spelling — so below this the scan does not merely run old, it
-# does not run at all, and `.githooks/pre-commit` refuses every unattended
-# commit on the host (ISSUE-291).
-#
-# What it catches, precisely: gitleaks absent from PATH entirely, which the
-# assert's `default('0.0.0', true)` turns into a failure naming the consequence,
-# and this pin edited down below what the hook calls. Not an apt-installed 8.16
-# shadowing ours, despite the obvious reading — the role installs to
-# /usr/local/bin, which *precedes* /usr/bin on Debian's default PATH, so the
-# archive's copy loses. It is still resolved through PATH rather than by
-# absolute path, because `command -v gitleaks` is what the hook itself runs and
-# a check should ask the question its consumer asks.
-#
-# gh and glab carry no equivalent, deliberately. Their floors were 2.40 and
-# 1.36 against a trixie shipping 2.46 and 1.53, so the stale-install case they
-# named cleared them; and no floor was ever derived from the verbs the skill
-# uses, so any honest number would be a guess. The consequence, stated rather
-# than hidden: nothing stops those two pins being edited *down*, since the
-# parity test is satisfied by lowering all three files together. gitleaks is
-# guarded against that by tests/test_ansible_gitleaks_install.py, because 8.19
-# is a real derived number; the forge CLIs have none to derive.
+# calls the new spelling — below this the scan does not run at all and
+# `.githooks/pre-commit` refuses every unattended commit (ISSUE-291). The play
+# asserts it, resolved through PATH, so it also catches gitleaks missing
+# entirely. gh and glab carry no equivalent floor: no honest number could be
+# derived from the verbs the skill uses.
 istota_developer_gitleaks_min_version: "8.19.0"
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
@@ -1315,62 +1104,36 @@ istota_developer_github_reviewer: ""              # GitHub username to request a
 istota_developer_forge_cli_extra_denied: []       # Additional verbs to refuse
 istota_developer_forge_cli_permit: []             # Baseline entries to turn off — each one removes a guard
 
-# Where the wrapper execs the real binaries. The role extracts both from the
-# vendors' release .debs into /usr/local/bin, which is also the code default —
-# so an Ansible host and a by-hand install now agree, where they used to differ
-# because the archive put its packages under /usr/bin.
-#
-# /usr/local/bin is deliberate rather than incidental. It sits ahead of /usr/bin
-# on the default PATH, so this binary wins over an apt-installed `gh` an earlier
-# run of this same role left behind — which is why the section does not remove
-# the package, and why the floor assert (which resolves through PATH) is worth
-# keeping. It also reaches the sandbox: `build_bwrap_cmd` binds /usr read-only,
-# and the scheduler unit's Environment=PATH lists /usr/local/bin.
-#
-# Repoint these to install somewhere else: the task file takes its install
-# destination from these same two values rather than naming a directory a second
-# time, so the binary always lands where the wrapper is told to look. One
-# consequence worth knowing before reaching for it — pointing either at a
-# dpkg-owned path such as /usr/bin/gh overwrites that package's file, which apt
-# will fight on its next upgrade. The default deliberately does not.
+# Where the wrapper execs the real binaries, and where the role installs them —
+# the task file takes its destination from these same values. /usr/local/bin
+# precedes /usr/bin on the default PATH, so ours wins over any apt-installed
+# copy, and it reaches the sandbox (/usr is bound read-only). Do not point
+# either at a dpkg-owned path such as /usr/bin/gh — apt will fight it.
 istota_developer_gh_bin_path: "/usr/local/bin/gh"
 istota_developer_glab_bin_path: "/usr/local/bin/glab"
 
-# Worktree reaping (ISSUE-288). Nothing removed a task's worktree, so
-# `repos_dir` accumulated gigabyte checkouts with no owner and no stated
-# retention rule. The sweep runs before every developer task and removes only a
-# worktree that is clean, unlocked, idle for the window below, and carrying no
-# commit that is not already upstream. The window is what protects a
-# *concurrently running* task rather than merely a stale one: tasks for one
-# user run in parallel and none knows the others exist, so recent activity is
-# the only evidence available that a checkout is in use. Raise it on a host
-# where a checkout is routinely inspected by hand days later; `git worktree
-# lock` pins one indefinitely and is the better tool for a single case.
+# Worktree reaping (ISSUE-288). Removes only a worktree that is clean, unlocked,
+# idle for the retention window, and carrying no commit not already upstream.
+# The window also protects concurrently running tasks, whose only evidence of
+# being in use is recent activity. Raise it if checkouts are inspected by hand
+# days later; `git worktree lock` pins a single one indefinitely.
 istota_developer_worktree_reap_enabled: true
 istota_developer_worktree_retention_hours: 24.0
 
-# Wall-clock budget for one code-review agent. Both agents run concurrently, so
-# this is the whole review's clock and not half of it, and it covers the entire
-# round: a `need_files` re-invocation and a malformed-output retry come out of
-# this budget rather than out of a fresh one. The code default of 120s fits one
-# reviewer call on a `smart` model and leaves too little for a second, so the
-# round trip gets charged and then times out.
-#
-# The skill clamps this down to istota_security_skill_proxy_timeout minus 60s
-# of assembly allowance, because the proxy kills the whole command at the
-# ceiling. At the default 300s ceiling that puts the largest unclamped value at
-# 240. Raise the ceiling first if you want more than that here.
+# Wall-clock budget for a code-review round. Both agents run concurrently, so
+# this is the whole review's clock, and it covers retries and `need_files`
+# re-invocations too. Clamped to istota_security_skill_proxy_timeout minus 60s
+# — at the default 300s ceiling the largest usable value is 240. Raise the
+# ceiling first if you want more.
 istota_developer_review_timeout_seconds: 240
 
 # Public hostname for nginx (web UI, webhooks)
 istota_hostname: "{{ istota_namespace }}.example.com"
 
-# Static web root served at the domain root (/). Ansible-managed and entirely
-# outside the bot: the path is not under istota_home, the istota user has no
-# write access, and nothing binds it into the bwrap sandbox — so this is not a
-# return of the agent-writable web root removed in ISSUE-194. Content is the
-# operator's; the templated index is written only when the file is missing.
-# Set istota_web_root_enabled: false to keep `/` returning 404.
+# Static web root served at the domain root (/). Ansible-managed and outside the
+# bot: not under istota_home, not writable by the istota user, never bound into
+# the sandbox. Content is the operator's; the templated index is written only
+# when the file is missing. false keeps `/` returning 404.
 istota_web_root_enabled: true
 istota_web_root_path: /srv/www/html
 istota_web_root_owner: root
@@ -1384,19 +1147,11 @@ istota_web_root_file_mode: "0644"
 istota_backup_enabled: true
 istota_backup_local_dir: "{{ istota_home }}/data/backups"
 istota_backup_remote_dir: "{{ istota_nextcloud_mount_path }}/Backups"
-# Local snapshots are the fast-restore working set and sit on the same disk the
-# daemon is running out of; the copies on the mount are the durable tail and
-# cost nothing locally, so they keep the longer window. Before these were split
-# both finds read the same variable, and shrinking the local window to reclaim
-# disk silently truncated the off-host history too.
-#
-# The local window is not cut to the bone on purpose. The remote copy is gated
-# on mount_available and there is no back-fill: a snapshot skipped while the
-# mount is down is never copied up later, so the local daily file is its only
-# copy. The window has to outlast a plausible mount outage.
-#
-# These feed `find -mtime +N`, which deletes strictly older than N*24h, so a
-# value of N retains N+1 days.
+# Local snapshots are the fast-restore working set; the copies on the mount are
+# the durable tail and keep the longer window. Don't cut the local window to the
+# bone — the remote copy is gated on the mount being available and there is no
+# back-fill, so a snapshot skipped during an outage has only its local copy.
+# These feed `find -mtime +N`, so a value of N retains N+1 days.
 istota_backup_db_daily_retention: 5          # delete local dailies older than N days
 istota_backup_db_weekly_retention: 3         # delete local weeklies older than N weeks
 istota_backup_db_daily_retention_remote: 7   # same, for the copies on the mount
@@ -1434,68 +1189,37 @@ istota_security_sandbox_enabled: true             # bwrap filesystem isolation p
 istota_security_skill_proxy_enabled: true         # proxy skill CLI calls via Unix socket (credential isolation)
 istota_security_skill_proxy_timeout: 300          # timeout for proxied skill commands (seconds)
 # Extra RO bind-mounts in the sandbox, for co-located services the agent needs
-# to read. Was ["/srv/app"], for a co-located moneyman install that no longer
-# exists — and since istota_home lives under it, that entry exposed the
-# framework DB and every user's module DB to every task. Keep entries narrow;
-# the DB directories are masked after this list either way.
+# to read. Keep entries narrow — a broad path such as /srv/app sits above
+# istota_home and exposes the framework and module DBs to every task. The DB
+# directories are masked after this list either way.
 istota_security_sandbox_ro_paths: []
-# FALLBACK root for the package managers' caches (uv, npm, and anything else
-# honouring XDG_CACHE_HOME) — for a deployment running the sandbox WITHOUT the
-# developer skill. Each user gets {root}/{user_id}, bound RW into their sandbox.
-# Empty leaves the caches on bubblewrap's own root tmpfs, which is RAM the host
-# cannot attribute and which is discarded at task exit, so every task
-# re-downloads (ISSUE-305).
-#
-# Blank by default, and this is the second time the key has moved. It was blank
-# because there was no good place to put the cache; it was briefly derived from
-# istota_developer_repos_dir (ISSUE-319, commit cc691d6f); it is blank again
-# because the daemon now derives the cache itself, per user, at
-# {repos_dir}/{user_id}/.package-caches. Setting it here would name the fallback
-# path rather than the one a developer deployment actually uses, so the value
-# would be read only where the derivation does not apply — and would read as
-# the intended location to anyone who found it.
-#
-# The derivation exists for the mount, not for tidiness: uv populates a venv by
-# hardlinking out of its cache, link(2) compares MOUNTS rather than devices, and
-# the per-user repos bind is emitted after the cache bind and is an ancestor of
-# it. That single covering bind is the only shape where uv hardlinks instead of
-# copying every wheel; a cache root anywhere else returns EXDEV even on the same
-# filesystem, measured on the reference deployment. Set this key and the caches
-# go on their own mount and pay that copy.
-#
-# Do not point it at the temp dir or at ~/.cache — a bind above an existing
-# mount covers it, and the daemon refuses those values rather than doing so.
+# FALLBACK root for the package managers' caches (uv, npm, XDG_CACHE_HOME) —
+# only for a sandboxed deployment WITHOUT the developer skill. Each user gets
+# {root}/{user_id}, bound RW into their sandbox. With the developer skill on the
+# daemon derives the cache at {repos_dir}/{user_id}/.package-caches and this key
+# is unused, so leave it blank there: a cache on its own mount makes uv copy
+# every wheel rather than hardlink it (link(2) compares mounts, not devices).
+# Blank with no derivation leaves caches on bwrap's root tmpfs, discarded at
+# task exit, so every task re-downloads (ISSUE-305).
+# Do not point it at the temp dir or ~/.cache — the daemon refuses both.
 istota_security_sandbox_cache_dir: ""
-# Bounding what that directory grows to (ISSUE-317). Every sweep runs the cheap
-# reclaim the package managers ship (uv cache prune, npm cache verify); a
-# per-user cache still over the ceiling afterwards is wiped with their own clean
-# verbs. A ceiling in bytes rather than an age window because one
-# `uv sync --all-extras` writes about 1.8 GB in a single command. Cadence is
-# istota_scheduler_sandbox_cache_sweep_interval. A user with a task in flight is
-# skipped rather than raced.
-#
-# The sweep follows the cache rather than the key: with the developer skill on
-# it walks {repos_dir}/{user_id}/.package-caches for each user the daemon knows
-# about, and with it off it walks this key's root as before. So a blank value
-# above switches nothing off.
+# Bound the package caches (ISSUE-317). Each sweep runs the cheap reclaim
+# (uv cache prune, npm cache verify); a cache still over the ceiling afterwards
+# is wiped with the tools' own clean verbs. Cadence is
+# istota_scheduler_sandbox_cache_sweep_interval; a user with a task in flight is
+# skipped. The sweep follows the cache, not the key above, so a blank
+# istota_security_sandbox_cache_dir switches nothing off.
 istota_security_sandbox_cache_sweep_enabled: true
-# Per user, clamped to a 1 GiB floor by the sweeper. Sized against two figures
-# from the reference deployment: one `uv sync --all-extras` writes about 1.8 GB,
-# so a ceiling under that would wipe a cache that is doing its job on every
-# sweep; and the root now shares a 40 GB volume with the worktrees, which had
-# about 9 GB free. 4 GB holds two full resolutions per admin and leaves the
-# worktrees room. Raise it on a bigger volume — a sweep only ever costs a
-# re-download.
+# Per user, clamped to a 1 GiB floor by the sweeper. One `uv sync --all-extras`
+# writes ~1.8 GB, so a ceiling below that wipes a working cache on every sweep.
+# Raise it on a bigger volume — a sweep only ever costs a re-download.
 istota_security_sandbox_cache_max_gb: 4.0
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
-# Operator-specific additions to the CONNECT allowlist, as "host:port" strings.
-# The public npm and crates.io registries are already added for a task holding
-# the developer skill, so an install inside a worktree needs nothing here; this
-# is for a private registry, a company mirror, or an ecosystem that is not npm,
-# PyPI or cargo. It applies to *every* task rather than only developer ones —
-# there is no per-skill operator list. Matching is exact with no wildcards, so
-# a missing entry fails at the boundary and reads as a broken install.
+# Additions to the CONNECT allowlist, as exact "host:port" strings (no
+# wildcards). npm and crates.io are already allowed for developer tasks, so this
+# is for a private registry, a mirror, or an ecosystem that is not npm, PyPI or
+# cargo. Applies to every task, not just developer ones.
 istota_security_network_extra_hosts: []
 # When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
 # and omitted from config.toml (config.py reads them from env vars)

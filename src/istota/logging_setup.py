@@ -80,8 +80,16 @@ def setup_logging(
 
 
 def reset_logging() -> None:
-    """Reset logging state for testing purposes."""
+    """Reset logging state for testing purposes.
+
+    Puts back the level as well as the handlers. `setup_logging` raises the
+    `istota` logger to the configured level (INFO by default), and a reset that
+    only cleared handlers left that behind — which is enough on its own to
+    change what a later test sees, because it decides whether an `INFO` record
+    is created at all.
+    """
     global _initialized
     _initialized = False
     logger = logging.getLogger("istota")
     logger.handlers.clear()
+    logger.setLevel(logging.NOTSET)

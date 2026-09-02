@@ -1,5 +1,6 @@
 """Shared test fixtures for istota tests."""
 
+import logging
 import os
 from pathlib import Path
 
@@ -59,6 +60,7 @@ for _name, _value in SUITE_ENV_DEFAULTS.items():
     os.environ.setdefault(_name, _value)
 
 from istota import db
+from istota import logging_setup
 from istota.config import Config, UserConfig
 
 
@@ -120,6 +122,45 @@ def _scrub_ambient_env(monkeypatch, request):
     # proxy variables themselves are left alone.
     for name in NO_PROXY_NAMES:
         monkeypatch.setenv(name, NO_PROXY_VALUE)
+
+
+@pytest.fixture(autouse=True)
+def _reset_istota_logging():
+    """Take the `istota` logger's handlers and level out of every test.
+
+    `logging` is a process global that this file did not reset, and one test
+    could poison every later one in the same xdist worker. `istota.cli.main`
+    calls `setup_logging`, which raises the `istota` logger to INFO and adds a
+    `StreamHandler` bound to `sys.stderr` **as it is at that moment**; a
+    `logging_setup._initialized` flag then makes it permanent. A test calling
+    `cli.main()` under `capsys` binds that handler to the capture object
+    pytest closes at teardown, so from then on every `istota.*` record at INFO
+    or above raises inside `emit`, and `logging.Handler.handleError` prints
+    `--- Logging error ---` plus a traceback to the *current* `sys.stderr`.
+
+    Inside a `click.testing.CliRunner` invocation the current `sys.stderr` is
+    that invocation's own buffer, and click's `Result.output` is a mix of
+    stdout and stderr — so the traceback lands in the value the test parses.
+    That is what broke 37 of the 39 tests in `tests/test_feeds_cli.py` in a
+    full-suite run: `ensure_initialised` logs one INFO line per feeds database
+    (`feeds_image_dedup_backfilled`), on the first CLI invocation and never
+    again, so the only two survivors were the two tests that parse a *second*
+    invocation's output. Reproduces in under two seconds as
+    `pytest tests/test_cli_session.py tests/test_feeds_cli.py -n0`.
+
+    Restoring rather than clearing, so a test that installs its own handler on
+    `istota` still sees it for the whole of its own body.
+    """
+    logger = logging.getLogger("istota")
+    handlers = list(logger.handlers)
+    level = logger.level
+    initialized = logging_setup._initialized
+    try:
+        yield
+    finally:
+        logger.handlers[:] = handlers
+        logger.setLevel(level)
+        logging_setup._initialized = initialized
 
 
 @pytest.fixture(autouse=True)
