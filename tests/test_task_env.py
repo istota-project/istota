@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import executor, task_env
+from istota import executor, network_proxy, skill_proxy, task_env
 from istota.config import Config, DevboxConfig, NetworkConfig, SecurityConfig
 from istota.skills._types import EnvSpec, SkillMeta
 
@@ -254,12 +254,53 @@ class TestTheNetworkProxyGate:
 
 
 class TestBothManagersAreReturnedUnentered:
+    """The one property the spec names as the thing not to tidy away.
+
+    The `ExitStack` lives in `execute_task` and must stay there: the proxies
+    have to be live across the primary call, the reroute and the fallback
+    call. A `with` inside the builder would close them before the brain ran.
+    """
+
+    def test_neither_proxy_was_started(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # Records `start`/`stop` rather than probing for the socket file. The
+        # socket is not a discriminating probe: `SkillProxy.stop` unlinks it,
+        # so a builder "tidied" into `with SkillProxy(...)` would leave no
+        # socket behind either and the absence would read as never-entered.
+        calls = []
+        for cls, name in (
+            (skill_proxy.SkillProxy, "skill"),
+            (network_proxy.NetworkProxy, "net"),
+        ):
+            for verb in ("start", "stop"):
+                monkeypatch.setattr(
+                    cls, verb,
+                    (lambda n, v: lambda self, *a, **k: calls.append((n, v)))(
+                        name, verb,
+                    ),
+                )
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+        config.security.network = NetworkConfig(enabled=True)
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert runtime.proxy_ctx is not None
+        assert runtime.net_proxy_ctx is not None
+        assert calls == []
+
+        # The control: entering one *is* observable through the recorder, so
+        # an empty list above means never-entered rather than never-recorded.
+        with runtime.proxy_ctx:
+            pass
+        assert calls == [("skill", "start"), ("skill", "stop")]
+
     def test_neither_socket_exists_yet(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
-        # The `ExitStack` lives in `execute_task` and must stay there: the
-        # proxies have to be live across the primary call, the reroute and the
-        # fallback call.
+        # Weaker than the recorder above and kept for the plainer claim: the
+        # builder has bound nothing on the filesystem.
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         config = _config(tmp_path)
         config.security.network = NetworkConfig(enabled=True)

@@ -46,7 +46,19 @@ from istota.skills import devbox
 _REPO = Path(__file__).resolve().parents[1]
 _SKILL_DIR = _REPO / "src" / "istota" / "skills" / "devbox"
 _EXECUTOR = _REPO / "src" / "istota" / "executor.py"
+# Every module that writes into the model's task environment. A list
+# rather than one path because the env assembly moved out of
+# `execute_task` into `task_env` and this scan silently found nothing:
+# the sibling "has a reader" guard then passed vacuously, which is the
+# worse half. A further extraction has to be added here or go red.
+_ENV_SOURCES = (_EXECUTOR, _REPO / "src" / "istota" / "task_env.py")
+
+
 _SERVER = _REPO / "docker/devbox/scripts/istota-exec-serve"
+
+
+def _env_source_text() -> str:
+    return "\n".join(p.read_text() for p in _ENV_SOURCES)
 
 
 # --------------------------------------------------------------------------- #
@@ -1769,7 +1781,7 @@ class TestExecutorExportsNothingTheCLIIgnores:
         from istota.skills._loader import load_skill_index
         imperative = set(re.findall(
             r"""env\[\s*['"](ISTOTA_DEVBOX_[A-Z_]+)['"]\s*\]\s*=""",
-            _EXECUTOR.read_text(),
+            _env_source_text(),
         ))
         meta = load_skill_index(Path("config/skills")).get("devbox")
         declared = {
@@ -1832,7 +1844,7 @@ class TestTheDockerApiProxyIsRetired:
         )
 
     def test_the_executor_binds_nothing_at_the_docker_path(self):
-        source = _EXECUTOR.read_text()
+        source = _env_source_text()
         assert "api_proxy" not in source
         # The path may still be *named* in the comment explaining the removal;
         # what must not survive is a bind argument built from it.
