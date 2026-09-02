@@ -349,6 +349,162 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
     return config.temp_dir / user_id
 
 
+CONTROL_DIR_NAME = ".control"
+
+
+def get_task_control_dir(
+    config: Config, user_id: str, task_id: int
+) -> Path | None:
+    """The daemon-owned directory for one task's framework-authored files.
+
+    ``{config.temp_dir}/.control/{user_id}/task_{task_id}``, resolved.
+
+    Framework-authored per-task files — the two prompt halves, the briefing
+    metadata, the prepared image attachments — are written by the daemon and
+    must not be modified by the model. They live here rather than in
+    :func:`get_user_temp_dir` because that directory is the sandbox's
+    ``--chdir`` target, bound read-write, and it is per *user* rather than per
+    task: a concurrent task of the same user can create an entry in it, task
+    ids are sequential and exported as ``ISTOTA_TASK_ID``, so the entry can be
+    a dangling symlink named after a task that has not started yet.
+
+    **A sibling of the per-user directories, not a child of one.** That is the
+    whole of it: a directory inside a model-writable parent can be replaced
+    with a symlink between the daemon's ``mkdir`` and bwrap's ``mount``, which
+    is ISSUE-320 exactly. ``.developer`` survives that only because a later
+    bind buries the swap; this directory would have no bind behind it. The
+    shared temp root is bound at no path, so being one level up removes the
+    window rather than racing it.
+
+    **Resolved, unlike :func:`get_user_repos_dir`**, which returns its
+    candidate as written. ``_ro_bind(src)`` with no explicit ``dest`` uses the
+    *unresolved* string it was handed as the in-namespace destination, and
+    ``BrainRequest.composed_system_prompt_path`` is a single value read by
+    ``NativeBrain`` in the daemon and by the ``claude`` CLI inside the
+    namespace — so host path and namespace path must be one string, which
+    means the caller must hand over an already-resolved one. The last
+    component is deliberately *not* resolved: :func:`ensure_task_control_dir`
+    opens it ``O_NOFOLLOW``, and resolving here would follow a planted symlink
+    and leave that open inspecting an ordinary directory.
+
+    Returns None when ``user_id`` is empty or would escape the root — the same
+    containment equality :func:`get_user_repos_dir` and :func:`daemon_work_dir`
+    use, both halves of it, because truthiness alone lets ``.``, ``..`` and an
+    absolute component through and the lexical half alone lets a symlink
+    through. Also refuses a ``user_id`` equal to :data:`CONTROL_DIR_NAME`:
+    :func:`get_user_temp_dir` is a plain join, so a user of that name would
+    put its scratch directory exactly where the control root goes. A leading
+    dot is not a legal user id anywhere one is produced; the refusal is
+    explicit rather than relying on that.
+
+    ``task_id`` is interpolated as given. ``task_0`` — the heartbeat's
+    synthetic task — is a legal directory name and needs no special case.
+
+    Does not create anything. Never raises.
+    """
+    temp_dir = getattr(config, "temp_dir", None)
+    if not temp_dir or not user_id or user_id == CONTROL_DIR_NAME:
+        return None
+    try:
+        root = Path(temp_dir).resolve() / CONTROL_DIR_NAME
+    except (OSError, ValueError):
+        return None
+    candidate = root / user_id
+    try:
+        # Two checks, because neither catches the other's cases. The lexical
+        # one refuses a component that never became a child (`.` is dropped by
+        # `PurePath`, an absolute one replaces the root, a nested one goes
+        # deeper); the resolved one refuses `..` and every symlink, which are
+        # children by name and somewhere else on disk.
+        contained = candidate.parent == root and candidate.resolve() == root / user_id
+    except (OSError, ValueError):
+        contained = False
+    if not contained:
+        logger.warning(
+            "task control dir: %s does not resolve to the subtree named by "
+            "user id %r; not using it. A symlink or a path component in the "
+            "user id would reach outside that user's own control directory.",
+            candidate, user_id,
+        )
+        return None
+    return candidate / f"task_{task_id}"
+
+
+def _ensure_control_level(path: Path, *, parents: bool) -> None:
+    """One level of the control directory: a real directory, owned, at 0700.
+
+    ``Path.mkdir(exist_ok=True)`` swallows ``FileExistsError`` whenever
+    ``is_dir()`` says yes, and ``is_dir()`` follows a symlink — so a symlink
+    pointing at a directory sails straight through the create, and a plain
+    ``os.chmod`` afterwards would follow it too. ``O_NOFOLLOW | O_DIRECTORY``
+    is what refuses both that and a regular file, and ``fchmod`` then acts on
+    the descriptor rather than on the name, so the mode lands on the inode
+    that was opened or on nothing at all.
+
+    The mode is re-asserted on every call because ``mkdir(exist_ok=True)``
+    leaves an existing directory's mode alone: a directory created under a
+    different umask, or widened by hand, would otherwise stay widened for the
+    life of the deployment.
+
+    Raises ``OSError`` — the caller turns it into the ``RuntimeError`` that
+    fails the task.
+    """
+    with contextlib.suppress(FileExistsError):
+        path.mkdir(mode=0o700, parents=parents)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
+def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
+    """Create the directory :func:`get_task_control_dir` names, 0700 the whole
+    way down, and return the resolved path.
+
+    Raises ``RuntimeError`` when the path cannot be resolved or created. The
+    caller is ``execute_task``, and a control directory that does not exist is
+    a task that must fail rather than run with its standing instructions
+    reachable by nothing — the same fail-closed argument ISSUE-375 made for
+    ``composed_system_prompt_path``.
+
+    All three levels are created and mode-asserted, not just the last: the
+    control root and the per-user level are what keep one user's control files
+    out of another's reach, and ``mkdir(parents=True)`` would create both with
+    the ambient umask. A level that is a symlink or a regular file raises
+    rather than being worked around — the daemon owns the shared temp root, so
+    that is a corrupt-state check rather than a boundary, and it costs one
+    syscall.
+
+    Idempotent: a retry of the same task reuses the same directory, which is
+    what makes it safe for ``execute_task`` to call unconditionally and for
+    ``_build_module_briefing_prompt`` to call again underneath it.
+
+    The message names the path and never the contents of anything found there.
+    """
+    control_dir = get_task_control_dir(config, user_id, task_id)
+    if control_dir is None:
+        raise RuntimeError(
+            f"cannot name a task control directory for user {user_id!r}: "
+            f"the user id is empty or does not resolve to a child of "
+            f"{getattr(config, 'temp_dir', None)}/{CONTROL_DIR_NAME}"
+        )
+    user_level = control_dir.parent
+    root = user_level.parent
+    # The shared temp root itself may not exist yet, so the control root takes
+    # `parents=True`. That creates the temp root with the ambient umask, which
+    # is what `daemon_work_dir` does for the per-user directories beside it —
+    # the root is shared and 0700 there would be wrong.
+    for level, parents in ((root, True), (user_level, False), (control_dir, False)):
+        try:
+            _ensure_control_level(level, parents=parents)
+        except OSError as exc:
+            raise RuntimeError(
+                f"task control directory {level} is unusable: {exc.strerror or exc}"
+            ) from exc
+    return control_dir
+
+
 class DaemonSandbox(NamedTuple):
     """What a task-less daemon-side model call needs to run confined.
 
