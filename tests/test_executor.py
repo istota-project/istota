@@ -1149,7 +1149,11 @@ class TestPathPrependOrdering:
         src = inspect.getsource(executor.execute_task)
         assert "if k == HOOK_PATH_PREPEND_KEY:" in src
         # ...and the application site is after the snapshot, not before.
-        assert src.index("proxy_base_env = {**env") < src.index(
+        # Anchored on the assignment target rather than its right-hand side:
+        # the property is the *ordering* of the snapshot against the PATH
+        # application, and the expression being snapshotted is free to change
+        # (ISSUE-390 wrapped it in `without_claude_runtime_env`).
+        assert src.index("proxy_base_env = ") < src.index(
             "_path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY"
         )
 

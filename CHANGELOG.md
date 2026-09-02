@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The browser no longer freezes after a handful of page loads. Chrome was being asked to write its log into a pipe nothing read, and once that pipe filled — two or three pages' worth — the write blocked and took Chrome's main thread with it. The browser looked alive from every angle: animations kept running, its debug port kept answering, and the container reported healthy, while clicks did nothing and every page fetch hung until a 90-second timer killed the browser and started it again. Measured on the production container at 63,199 of 65,536 bytes after three renders. The log now goes nowhere unless you ask for it with `CHROME_LOG_STDERR=1`, which sends it to the container's own output instead.
+
+- A browser restart no longer leaves dead processes behind. Chrome was killed without waiting for it, and only the browser process was signalled, so its renderer and GPU children were orphaned — 43 defunct processes accumulated in 40 minutes on the production host, against a container limit of 9,507. The whole process group is now signalled and collected, and the container runs an init to catch anything that still escapes.
+
+- After a browser restart, a page you had open no longer reports "Tab not found" for the next ten minutes. Sessions are numbered tabs in the running browser, and the restart left them pointing at tabs that no longer existed. They are now discarded when the browser they belonged to goes away, so the next request opens a fresh one.
+
+- A browser that has to be rescued repeatedly now reports itself unhealthy and gets restarted. The rescue timer healed the same fault every 90 seconds for hours while every health check stayed green, because a hung browser satisfies all of them. Configurable via `BROWSER_WEDGE_RECOVERY_THRESHOLD` (default 3) and `BROWSER_WEDGE_RECOVERY_WINDOW_S` (default 900).
+
+- A JavaScript dialog on a page no longer stops the browser dead. There is no window manager behind the browser, so an `alert()`, a "leave site?" prompt or Chrome's own "page unresponsive" dialog had nothing that could close it. Dialogs are now answered as they appear, and the dialogs Chrome raises on its own are switched off.
+
 - When the browser container answers with something that is not JSON — an internal error page, a gateway error from something in front of it, an empty reply — the browse commands now report the status code and quote the start of the body. Every one of those used to come back as `Expecting value: line 1 column 1 (char 0)`, the same string whatever had gone wrong, so the outage below could only be diagnosed by reading the container's logs.
 
 - Browsing no longer strands a browser tab when a page fetch fails partway. `browse links --selector` opens a session, reads it, then closes it; if the read failed the close was skipped, and with only two tabs available the lost one stayed locked for ten minutes. Fetching links from a site that errors used to cost half the browser's capacity each time.
@@ -35,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
 
 ### Security
+
+- A task running on the native brain could read the bot's Claude subscription token out of its own shell environment, and anything a task reads becomes text sent to the model. The native brain talks to whichever provider you configured it for, which on most setups is not the company that issued that token. The token is set for every task whatever brain will run it, because the two Claude brains sign in with it; it is now taken back out both on the way into the native brain's tools and on the way into the skills the bot runs on your behalf, neither of which ever read it. Deployments that keep the token in the service environment and run the native brain were affected; one authenticating the Claude CLI by its credentials file alone was not.
 
 - The files in your workspace's `config/` folder — your memory file, your persona, your scheduled jobs, your monitoring checks, your task list, and the examples the bot keeps up to date there — are read and written by the bot itself, outside the sandbox, where it can see far more of the machine than a task can. A task can write to that folder; that is the feature. What it could also do was put a link there in place of one of those files, or in place of the folder, and the bot followed it: a link at your memory file put the contents of some other file on the machine into the next task's prompt, and a link at the folder turned a memory write into a file of the task's choosing written wherever it liked. Every read and write of that folder now refuses to follow a link out of your own workspace, and refuses anything that is not an ordinary file. A room's shared notes file and your daily memory files get the same treatment, for the same reason.
 

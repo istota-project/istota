@@ -122,6 +122,37 @@ CDP_FAILURE_WINDOW_S = max(
     int(os.environ.get("BROWSER_CDP_FAILURE_WINDOW_S", "900")),
 )
 
+# Wedge-recovery policy: when the browse watchdog healing Chrome over and over
+# stops being a heal and becomes the fault (ISSUE-394).
+#
+# The three arms above all ask a question the wedge answers wrongly. Chrome is
+# alive, DevTools answers on the browser IO thread, and the CDP heartbeat is not
+# only quiet but actively reset -- a hang records nothing, since only a returned
+# exception reaches _record_cdp_failure, and the successful connect_cdp() after
+# each relaunch zeroes the count. So a container wedging every 90s for hours
+# read as healthy on every arm, the watchdog kept healing it, and the only actor
+# that ever noticed was a human.
+#
+# What the container can see is its own recovery rate. One recovery is the
+# watchdog working as designed and must not restart anything; a run of them
+# inside a window is a browser that cannot stay up, and the process-scoped state
+# a relaunch does not clear is exactly what a container restart is for.
+#
+# The window shares CDP_WINDOW_FLOOR_S for the same reason: below roughly 210s
+# the verdict expires before the image HEALTHCHECK (30s x 3) and the Ansible
+# watchdog's debounce (2 reads at a 1-minute cron) can act on it, which makes
+# the arm unreachable rather than merely eager.
+#
+# THRESHOLD 0 disables the arm. The default of 3 is deliberately above the two
+# recoveries a single bad page can produce back to back.
+WEDGE_RECOVERY_THRESHOLD = int(
+    os.environ.get("BROWSER_WEDGE_RECOVERY_THRESHOLD", "3"),
+)
+WEDGE_RECOVERY_WINDOW_S = max(
+    CDP_WINDOW_FLOOR_S,
+    int(os.environ.get("BROWSER_WEDGE_RECOVERY_WINDOW_S", "900")),
+)
+
 # Response budgets. Every one of these is a ceiling a caller may lower, not a
 # fixed size: a link-dense hub rendered to markdown legitimately runs past the
 # text-extraction defaults these endpoints shipped with (ISSUE-192), and the old
@@ -190,17 +221,42 @@ def _create_session():
         _sessions[session_id] = {
             "tab_index": tab_index,
             "created_at": time.time(),
+            # Which Chrome this index means. See _get_session.
+            "generation": chrome.launch_generation(),
         }
     return session_id, tab_index
 
 
 def _get_session(session_id):
-    """Get session info dict, or None if expired/missing."""
+    """Get session info dict, or None if expired, missing, or from a dead Chrome.
+
+    A session here is a *tab index*, not a page object, so it is only meaningful
+    against the Chrome that was running when it was created. The browse watchdog
+    kills and relaunches Chrome, which comes back with a single about:blank tab
+    while this table still holds indices 1 and 2 -- so every request carrying a
+    pre-kill session id resolved to nothing and returned "Tab not found" for the
+    rest of the 600s TTL. A recovery that worked, reported to the client as a
+    fault, for ten minutes after the fact (ISSUE-394).
+
+    Treated as expiry rather than as an error, because that is what it is: the
+    tab is gone and the caller's next request opens a fresh one. Dropped here on
+    the Flask thread rather than cleared by the watchdog that did the relaunch,
+    since touching this table from that thread is a smaller version of the
+    mistake ISSUE-382 is about.
+    """
     with _sessions_lock:
         session = _sessions.get(session_id)
         if session is None:
             return None
         if time.time() - session["created_at"] > SESSION_TTL:
+            _sessions.pop(session_id, None)
+            return None
+        if session.get("generation") != chrome.launch_generation():
+            log.info(
+                "Session %s belonged to a previous Chrome (generation %s, now %s) "
+                "-- discarding", session_id, session.get("generation"),
+                chrome.launch_generation(),
+            )
             _sessions.pop(session_id, None)
             return None
         return session
@@ -894,6 +950,25 @@ def _cdp_wedged(now=None):
     return age <= CDP_FAILURE_WINDOW_S, health
 
 
+def _wedge_looping(now=None):
+    """Whether Chrome has been recovered too often lately (ISSUE-394).
+
+    Reads chrome.py's recovery record -- a list copy under a leaf lock, no
+    Patchright and no I/O -- so it is safe from the liveness thread.
+
+    Returns (verdict, count_in_window), the same one-shape rule _cdp_wedged
+    follows: an exception here escapes do_GET, `curl -sf` fails, and the switch
+    meant to turn the arm off would cause the restart it exists to prevent.
+    """
+    history = chrome.wedge_recovery_history()
+    if WEDGE_RECOVERY_THRESHOLD <= 0:
+        return False, 0
+    # Monotonic on both sides, so an NTP step cannot re-arm an aged-out verdict.
+    cutoff = (now if now is not None else time.monotonic()) - WEDGE_RECOVERY_WINDOW_S
+    recent = sum(1 for ts in history if ts >= cutoff)
+    return recent >= WEDGE_RECOVERY_THRESHOLD, recent
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """Health check.
@@ -1129,6 +1204,27 @@ def _note_cdp_wedge(wedged, cdp):
         log.info("Liveness: CDP heartbeat recovered, reporting healthy again")
 
 
+# Same shape and same reason as _cdp_wedge_reported above: the liveness thread
+# must not block, and logging writes to a stream shared with the Flask thread.
+_wedge_loop_reported = False
+
+
+def _note_wedge_loop(looping, recoveries):
+    """Log a recovery loop once when it starts, and once more when it clears."""
+    global _wedge_loop_reported
+    if looping and not _wedge_loop_reported:
+        _wedge_loop_reported = True
+        log.error(
+            "Liveness: %d Chrome wedge recoveries within %ds -- the browse "
+            "watchdog is healing the same fault on a loop, reporting unhealthy "
+            "so the container is restarted (ISSUE-394)",
+            recoveries, WEDGE_RECOVERY_WINDOW_S,
+        )
+    elif not looping and _wedge_loop_reported:
+        _wedge_loop_reported = False
+        log.info("Liveness: wedge recoveries back under threshold, reporting healthy")
+
+
 def _probe(deep):
     """The liveness verdict, as (status, body).
 
@@ -1161,6 +1257,15 @@ def _probe(deep):
         _note_cdp_wedge(wedged, cdp)
         if wedged:
             return 503, b"cdp-wedged\n"
+        # Deep tier, arm 3: is this container healing the same wedge on a loop?
+        # The three arms above are all satisfied by a Chrome whose UI thread is
+        # blocked -- the process lives, DevTools answers on its IO thread, and a
+        # hung CDP call records no failure at all. The recovery rate is the one
+        # signal the wedge cannot fake, because the watchdog produces it.
+        looping, recoveries = _wedge_looping()
+        _note_wedge_loop(looping, recoveries)
+        if looping:
+            return 503, b"wedge-loop\n"
     return 200, b"ok\n"
 
 

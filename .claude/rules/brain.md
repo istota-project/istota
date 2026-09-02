@@ -165,7 +165,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `prompt: str` | Fully composed prompt (emissaries+persona+memory+skills+context+request) |
 | `allowed_tools: list[str]` | From `executor.build_allowed_tools()`. For ClaudeCodeBrain / TmuxClaudeBrain this is now effectively a **non-empty = give the model tools** signal (they run with `--dangerously-skip-permissions`, not an allowlist); the specific names only matter to NativeBrain, which filters its in-process tool set by them. Empty list = text-only invocation: ClaudeCodeBrain emits no tool flags and no skip-permissions (sleep-cycle path). |
 | `cwd: Path` | Subprocess working dir (`config.temp_dir`) |
-| `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled) |
+| `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled). The one thing that split does **not** take out is the Claude runtime credential, which `build_clean_env` sets for every task whatever brain runs it and which no skill manifest declares — `NativeBrain._build_tools` removes it on its own way into `ToolEnv.subprocess_env` (see `CLAUDE_RUNTIME_ENV_VARS` below), so the field as the two CLI brains read it still carries the token they authenticate with. Mutable and shared: `ClaudeCodeBrain` writes `IS_SANDBOX` / `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` onto this dict in place, and `_run_fallback` hands the same object to the fallback brain, so anything filtering it must copy. |
 | `timeout_seconds: int` | `config.scheduler.task_timeout_minutes * 60` |
 | `model: str` | `task.model` or `config.model`; brain default if empty |
 | `effort: str` | `task.effort` or `config.effort`; brain default if empty |
@@ -775,6 +775,57 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
 - **Image tool results.** `_tool_image_followup` renders an image-bearing tool
   result as a follow-up `role:"user"` block on vision models
   (`render_tool_images` = `supports_vision`); a no-vision model gets a text note.
+- **The Claude runtime credential does not reach a native tool subprocess**
+  (ISSUE-390). `executor.build_clean_env` copies `CLAUDE_CODE_OAUTH_TOKEN` out
+  of the daemon's environment into every task's env, unconditionally and for
+  every brain, and no skill manifest declares the name — so neither
+  `derive_credential_set` nor `derive_proxy_only_set` splits it out to the skill
+  proxy, and it arrived in `ToolEnv.subprocess_env` and then in the Bash child.
+  Nothing on this path reads it (the provider key comes from
+  `NativeBrainConfig`), so its only effect was that `echo
+  "$CLAUDE_CODE_OAUTH_TOKEN"` came back as a `ToolResultMessage` addressed to
+  whatever provider native is pointed at — the same provider-boundary crossing
+  ISSUE-389 describes for the mounted `~/.claude/.credentials.json`, by the
+  other mechanism. `claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names what a
+  task env carries only because the outer process is the `claude` CLI, and
+  `without_claude_runtime_env` takes it back out. **Two call sites, not one**:
+  `_build_tools`, for the tool subprocesses, and `execute_task`'s
+  `proxy_base_env`, which is what every host-side skill CLI gets — the model
+  reaches those through the same Bash tool, they run unsandboxed as the daemon
+  user, and none of them reads the variable or invokes the `claude` binary.
+  Four things about the shape are deliberate. It is a **name list, not a
+  `CLAUDE_*` prefix rule**, because a prefix would also swallow an operator's
+  own `passthrough_env_vars` entry; the drift that buys is covered by a guard in
+  `tests/test_security.py` asserting over the *keys* `build_clean_env` produces
+  (a value-based check sees only an untransformed copy and misses a rename, and
+  `PATH` is already transformed in that same function). It **copies rather than
+  mutates**, because the mapping is `req.env`: `ClaudeCodeBrain` hands it to the
+  CLI and writes to it in place, and `_run_fallback` carries it across a reroute
+  with `dataclasses.replace` without rebuilding it. It keeps `{}` and `None`
+  **distinct** — `ToolEnv` reads `None` as "inherit the parent environment", and
+  the parent is the daemon, whose environment is where the token came from, so
+  `or None` goes on the input and a fully-stripped env must never collapse into
+  inheritance. And the strip happens **at these seams rather than where the env
+  is built**, which looks like the tidier place and is the trap: the env is
+  assembled some six hundred lines before `_brain_config.kind` is known, and a
+  per-brain-kind decision made there would strip the credential from a `native
+  -> claude_code` fallback and leave the CLI unauthenticated on the Ansible
+  shape, where that token is the credential. Inert where the variable is unset,
+  including a deployment authenticating the CLI by credentials file alone.
+  **The property is about this one credential, and that is not an arbitrary
+  scope.** The skill credentials — `NC_PASS`, the mail passwords, the forge
+  tokens — are already removed from the model's env by `_split_credential_env`,
+  gated on `security.skill_proxy_enabled`, which defaults on. The Claude token
+  is the one name that gating never reaches: `build_clean_env` sets it
+  unconditionally and no manifest declares it, so `derive_credential_set` cannot
+  see it, and it therefore survived on the *sandboxed* production shape where
+  every other credential was already gone. Two neighbouring shapes look like the
+  same bug and are not. With the proxy off, `setup_wizard` also sets
+  `sandbox_enabled = false`, so nothing is confined and there is no boundary for
+  an env var to cross — the task runs as the user and can read `config.toml`
+  directly, which makes stripping decorative. With the proxy off *and* a sandbox
+  on, credentials do land inside a real boundary; `load_config` warns on that
+  pairing today, and whether the warning says enough is ISSUE-393.
 - **Bash `exclude_from_context`.** The Bash tool takes an optional
   `exclude_from_context` boolean: the full output still streams to the user via
   `on_update`, but the model gets a short `[output shown to user; N bytes
