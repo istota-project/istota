@@ -550,15 +550,27 @@ class TestPhase2ManifestAcceptance:
 
 class TestExecutorHardcodedCredentialBlockGone:
     """Phase 2 acceptance: the hardcoded credential injection block is
-    deleted. A grep for ``env[...] =`` in executor.execute_task outside
+    deleted. A grep for ``env[...] =`` in the env-assembly path outside
     the build_clean_env path and the ISTOTA_* identity block returns
     nothing for credential-shaped vars (NC_*, CALDAV_*, SMTP/IMAP_*,
     GITLAB_*, GITHUB_*, KARAKEEP_*).
+
+    Scans every module that writes into the model's task environment
+    rather than one file. The block this guards moved out of
+    ``execute_task`` into ``task_env.build_task_runtime``, and a guard
+    pinned to the old file stays green while covering nothing — putting
+    one of the lines below back into the module that now builds the env
+    would have passed. A further extraction goes in this list or the
+    guard lapses the same way, silently.
     """
 
+    _ENV_SOURCES = ("executor.py", "task_env.py")
+
     def test_hardcoded_credential_assignments_removed(self):
-        executor_src = Path(__file__).parent.parent / "src" / "istota" / "executor.py"
-        text = executor_src.read_text()
+        src_dir = Path(__file__).parent.parent / "src" / "istota"
+        text = "\n".join(
+            (src_dir / name).read_text() for name in self._ENV_SOURCES
+        )
         # These literal substrings appeared in the deleted block; if any
         # come back, the manifest source-of-truth principle is broken.
         forbidden = [
@@ -582,6 +594,7 @@ class TestExecutorHardcodedCredentialBlockGone:
         ]
         for needle in forbidden:
             assert needle not in text, (
-                f"executor.py still contains hardcoded credential injection "
-                f"({needle!r}); Phase 2 should have deleted it."
+                f"{' / '.join(self._ENV_SOURCES)} still contains hardcoded "
+                f"credential injection ({needle!r}); Phase 2 should have "
+                f"deleted it."
             )

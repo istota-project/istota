@@ -21,13 +21,18 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     import sqlite3
 
+    from .brain import BrainResult
+
 from . import db
 from . import email_support
 from . import task_cgroup
+from . import task_env
 from . import config as istota_config
 from .claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401  — re-exported; the drift guard reads it beside `build_clean_env`
-    without_claude_runtime_env,
+    without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
+    # the only remaining call, and `tests/test_security.py` imports both names
+    # from here beside `build_clean_env`.
 )
 from .config import Config
 from .context import (
@@ -48,15 +53,6 @@ from .storage import (
     read_user_memory_v2,
 )
 from .brain import (
-    ContextManagementEvent,
-    StreamEvent,
-    TextDeltaEvent,
-    TextEvent,
-    ThinkingDeltaEvent,
-    ThinkingEvent,
-    ToolEndEvent,
-    ToolProgressEvent,
-    ToolUseEvent,
     CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
@@ -71,6 +67,7 @@ from .brain._fallback import (
 )
 from .agent.events import READ_DESCRIPTION_PREFIX
 from .events import EventWriter, random_progress_message
+from .executor_stream import TaskStreamAdapter
 from .image_attachments import (
     KIND_OMITTED,
     ImagePreparation,
@@ -1371,6 +1368,289 @@ def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason, wind
         )
     except Exception:
         logger.debug("brain fallback alert failed", exc_info=True)
+
+
+@dataclass
+class FailoverOutcome:
+    """What one availability-failover run produced, for the persist step.
+
+    Every field is read by ``execute_task`` after the call. ``ran_fallback`` is
+    not derivable from ``primary_usage_result``: on the breaker-cooldown path
+    the fallback runs with no primary call at all, so there is nothing to hold
+    and the flag would read false for every task in the window.
+    """
+
+    result: "BrainResult"
+    # The primary's result, held only when a fallback replaced it, so both
+    # attempts' usage can be written from the one call site that has a `conn`.
+    primary_usage_result: "BrainResult | None"
+    ran_fallback: bool
+    # The effort the attempt actually ran at. The fallback re-resolves it in
+    # its own namespace, so `req.effort` describes the primary only.
+    usage_effort: str
+    dropped_pin: "str | None"
+    primary_kind: str
+    fallback_kind: "str | None"
+
+
+def _failover_notice(stream, event_writer, reason, *, primary_kind, fallback_kind):
+    """A `brain_fallback` emitter bound to `reason`, for `on_start`.
+
+    Both reroute paths hand the same notice to the stream; only the
+    reason differs (a fresh primary failure vs. the breaker already
+    being open). Returns None when there is no **event writer**, so
+    `_run_fallback` skips the hook entirely — the gate is the writer
+    rather than the stream, which matters now that the two arrive as
+    separate arguments instead of one adapter wrapping one writer. A
+    stream with no writer has buffered nothing either (`on_event`
+    returns at its own `event_writer is None`), so the skipped settle
+    costs nothing.
+    """
+    if event_writer is None:
+        return None
+
+    def _emit(model, dropped_pin):
+        # A reroute is a stream boundary exactly like a tool call: what
+        # streamed before it came from the brain that just failed, and
+        # the fallback streams into these same buffers. Settle them
+        # first, or an unflushed primary tail is emitted as the opening
+        # of the fallback's answer — one paragraph, under a notice
+        # saying the primary failed — and the fallback's own narration
+        # gate starts pre-credited with the primary's characters.
+        # The settle runs whether or not the notice does, because it is
+        # about the daemon's own buffers rather than the sentence: a
+        # retry that called the primary and watched it fail again has a
+        # tail held here that must not open the fallback's answer.
+        if stream is not None and stream.is_stream_surface:
+            stream.flush_thinking()
+            stream.settle_at_tool_boundary()
+        # ISSUE-361: once per turn, not once per failover attempt. The
+        # retry ladder re-runs this same task id, and every attempt
+        # after the breaker opens takes the cooldown path, so the
+        # per-attempt emit stacked the banner three deep under one user
+        # message. The first is what survives; `emit_once` is where the
+        # cases that costs something are written down.
+        event_writer.emit_once("brain_fallback", {
+            "primary": primary_kind,
+            "reason": reason,
+            "fallback": fallback_kind,
+            "model": model,
+            "dropped_pin": dropped_pin or "",
+            "text": fallback_notice_text(
+                primary_kind, reason, fallback_kind, model, dropped_pin,
+            ),
+        })
+
+    return _emit
+
+
+def run_with_failover(
+    brain,
+    req,
+    *,
+    config,
+    brain_config,
+    task,
+    stream,
+    event_writer,
+) -> FailoverOutcome:
+    """Run one attempt through the primary brain, rerouting when it is down.
+
+    Generalizes the old tmux->claude_code in-attempt fallback: when the primary
+    brain is unavailable (usage limit / missing binary / tmux launch failure)
+    and a fallback is configured, re-run this same attempt through the fallback
+    brain — no new DB row, no attempt increment. Stickiness: once the primary
+    reports a persistent unavailability, subsequent tasks skip it for a
+    cooldown. All of it collapses to the plain primary call when no fallback is
+    configured.
+
+    The caller owns the ``ExitStack`` around this call: the skill and network
+    proxies must be live for the primary call, the reroute and the fallback
+    call alike.
+
+    ``brain_config`` is the *identity* source (which brain ran, which one
+    catches it) and ``config.brain`` is the *policy* source: the cooldown and
+    ``fallback_on_transient`` are read off the latter, as they were when this
+    was inline. The two agree today because ``execute_task`` derives
+    ``brain_config`` from ``config.brain`` with ``dataclasses.replace``, which
+    carries both fields across. A future per-source-type override that varied
+    either one would have to change this function, not just its caller.
+    """
+    _primary_kind = brain_config.kind
+    _fallback_kind = effective_fallback_kind(brain_config)
+    _cooldown = config.brain.fallback_cooldown_seconds
+    _breaker = get_availability_breaker()
+    _dropped_pin = None
+    _primary_usage_result = None
+    _ran_fallback = False
+    _usage_effort = req.effort
+    _primary_started_at = None
+    _primary_started_monotonic = None
+
+    def _notice(reason):
+        return _failover_notice(
+            stream, event_writer, reason,
+            primary_kind=_primary_kind, fallback_kind=_fallback_kind,
+        )
+
+    _skip_primary = (
+        _fallback_kind is not None
+        and _cooldown > 0
+        and _breaker.should_skip(_primary_kind, _cooldown)
+    )
+    if _skip_primary:
+        # Cooling down — go straight to the fallback, no primary call.
+        logger.info(
+            "brain fallback: skipping primary %s (cooling down) "
+            "-> %s task=%d",
+            _primary_kind, _fallback_kind, task.id,
+        )
+        _fb, _dropped_pin, _fb_effort = _run_fallback(
+            config, brain_config, _fallback_kind, task, req,
+            on_start=_notice("cooldown"),
+        )
+        if _fb is not None:
+            # This branch is the steady state once the breaker
+            # opens — every task for the cooldown window takes it —
+            # so flagging the row here is what keeps the *majority*
+            # of genuinely-fallback rows from being labelled
+            # otherwise. There is no primary row: the primary was
+            # never called. When construction failed instead, the
+            # primary really did run below and the flag stays off.
+            _ran_fallback = True
+            _usage_effort = _fb_effort
+        brain_result = _fb if _fb is not None else brain.execute(req)
+    else:
+        _primary_started_at = time.time()
+        _primary_started_monotonic = time.monotonic()
+        brain_result = brain.execute(req)
+        _triggers = set(TRIGGER_STOP_REASONS)
+        if config.brain.fallback_on_transient:
+            _triggers.add("transient_api_error")
+        if brain_result.stop_reason in _triggers:
+            # Open the availability breaker only for persistent
+            # conditions (usage_limit / not_found). "fallback" is
+            # excluded so tmux keeps being probed per-task (its own
+            # launch _CircuitBreaker governs when to stop).
+            #
+            # Deliberately not gated on a fallback being configured
+            # (ISSUE-362). The breaker is a shared signal: the
+            # direct callers (sleep cycle, shared blocks) read it
+            # through `primary_brain_unavailable`, and
+            # `report_brain_result` already opens it for them with
+            # no regard to a fallback. Gating it here left a
+            # deployment with no fallback without the availability
+            # record and without either operator alert, so the only
+            # notice that a primary had gone down was the failed
+            # task itself. Safe for the task path: `_skip_primary`
+            # is separately gated on a fallback existing, so an open
+            # breaker never skips a primary there is nothing to
+            # replace.
+            #
+            # The window ends at the quota's reset where one is
+            # known, not a flat `_cooldown` from the failure
+            # (ISSUE-374). `open_primary_breaker` owns that and
+            # publishes the same deadline it armed, so the
+            # scheduler's breaker and the record the web process
+            # reads describe one window.
+            _armed_window = (
+                open_primary_breaker(
+                    _primary_kind,
+                    _cooldown,
+                    brain_result.stop_reason,
+                    config=config,
+                )
+                if brain_result.stop_reason in COOLDOWN_STOP_REASONS
+                else None
+            )
+            if _armed_window is not None:
+                _fire_fallback_alert(
+                    config, task, _primary_kind, _fallback_kind,
+                    brain_result.stop_reason, _armed_window,
+                )
+            if _fallback_kind is not None:
+                logger.error(
+                    "brain fallback: task=%d primary=%s reason=%s "
+                    "-> %s",
+                    task.id, _primary_kind,
+                    brain_result.stop_reason, _fallback_kind,
+                )
+            else:
+                logger.error(
+                    "brain unavailable: task=%d primary=%s "
+                    "reason=%s, no [brain] fallback configured",
+                    task.id, _primary_kind,
+                    brain_result.stop_reason,
+                )
+            # Preserve tmux's own launch alert: its _CircuitBreaker
+            # governs fallback/not_found (which are NOT in the
+            # availability breaker's cooldown set), so its
+            # 5-consecutive-launch-failure alert still routes here.
+            if _primary_kind == "tmux_claude":
+                try:
+                    from .brain.tmux_claude import (
+                        consume_circuit_open_alert,
+                    )
+                    if consume_circuit_open_alert():
+                        from . import notifications
+                        _tail = (
+                            "falling back."
+                            if _fallback_kind is not None
+                            else "no fallback configured, so tasks "
+                                 "keep failing."
+                        )
+                        notifications.send_notification(
+                            config, task.user_id,
+                            "⚠️ tmux_claude brain circuit opened — "
+                            f"{_tail} Check the claude CLI "
+                            "version / readiness markers.",
+                            purpose="alert",
+                        )
+                except Exception:
+                    logger.debug(
+                        "tmux circuit-open alert failed", exc_info=True
+                    )
+            _fb = None
+            if _fallback_kind is not None:
+                _fb, _dropped_pin, _fb_effort = _run_fallback(
+                    config, brain_config, _fallback_kind, task,
+                    req, on_start=_notice(brain_result.stop_reason),
+                )
+            if _fb is not None:
+                # The fallback *replaces* brain_result, so without
+                # this the single persist call below would record the
+                # fallback's numbers under the primary's identity and
+                # the primary's own spend would be unrecoverable. It
+                # is captured rather than written here because
+                # `_run_fallback` takes no `conn`: opening a second
+                # one would block on the write lock for the full 30s
+                # busy timeout whenever `execute_task` was entered
+                # with an open write transaction, as the interactive
+                # path does.
+                _primary_usage_result = brain_result
+                _ran_fallback = True
+                _usage_effort = _fb_effort
+                brain_result = _fb
+        elif brain_result.success and _cooldown > 0:
+            # Primary healthy again → close the breaker.
+            _breaker.record_success(
+                _primary_kind, started_at=_primary_started_monotonic,
+            )
+            from .brain_availability import clear_unavailable
+
+            clear_unavailable(
+                config, _primary_kind, started_at=_primary_started_at,
+            )
+
+    return FailoverOutcome(
+        result=brain_result,
+        primary_usage_result=_primary_usage_result,
+        ran_fallback=_ran_fallback,
+        usage_effort=_usage_effort,
+        dropped_pin=_dropped_pin,
+        primary_kind=_primary_kind,
+        fallback_kind=_fallback_kind,
+    )
 
 
 def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
@@ -6643,330 +6923,36 @@ def execute_task(
         # a first run is attempt 1, as `task_usage.attempt_seq` is.
         task_attempt = task.attempt_count + 1
 
-        env = build_clean_env(config)
-        env.update({
-            "ISTOTA_TASK_ID": str(task.id),
-            # `tasks transcript` reads this to decide which log is the one being
-            # written right now. The row it used to read that from is bumped by
-            # the liveness reaper underneath a worker the reaper wrongly
-            # believes is dead, which handed that worker its own live
-            # transcript (ISSUE-377). Withheld from the model — see
-            # `_EXECUTOR_PROXY_ONLY_VARS`.
-            "ISTOTA_TASK_ATTEMPT": str(task_attempt),
-            "ISTOTA_USER_ID": task.user_id,
-            "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
-            "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
-            "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
-            "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
-        })
-
-        # NEXTCLOUD_MOUNT_PATH is the real mount root for everyone. Every
-        # consumer (the memory / memory_search skill CLIs, the schedules /
-        # reminders skill docs) builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/
-        # <uid>/…`, so a "scoped" non-admin value (real/Users/<uid>) doubled the
-        # Users/<uid> segment — a non-admin's USER.md write then landed at
-        # real/Users/<uid>/Users/<uid>/… , a phantom path the auto-loader never
-        # reads back (silent memory loss). Per-user filesystem isolation is
-        # enforced by the bwrap bind (build_bwrap_cmd binds only the user's own
-        # Users/<uid> dir, for admin and non-admin alike) and the CLIs self-scope
-        # by ISTOTA_USER_ID, so the real root is safe here; the prompt still
-        # shows non-admins their scoped path.
-        env["NEXTCLOUD_MOUNT_PATH"] = (
-            str(config.nextcloud_mount_path) if config.nextcloud_mount_path else ""
-        )
-        # Set for every user, admin or not, and then split out of Claude's env
-        # into the proxy's below. It used to be admin-gated, which was never a
-        # real boundary — the path is fixed and derivable from
-        # ISTOTA_CONFIG_PATH — while it *did* break every framework-DB skill CLI
-        # for non-admins (`tasks status`, `memory_search`, `kv` reads all
-        # self-scope by ISTOTA_USER_ID and returned an error instead of that
-        # user's own rows). The boundary is the SQL, plus the fact that the file
-        # is not in the sandbox at all.
-        if config.db_path:
-            env["ISTOTA_DB_PATH"] = str(config.db_path)
-
-        # Browser container credentials
-        if config.browser.enabled:
-            env["BROWSER_API_URL"] = config.browser.api_url
-            env["BROWSER_VNC_URL"] = config.browser.vnc_url
-
-        # Devbox: the agent's persistent dev container. The skill CLI speaks the
-        # exec transport to a server inside it; only `reset` still runs
-        # `docker`, host-side in the CLI's own process.
+        # The model's environment, the three-way credential split behind it,
+        # the two proxy objects and the sandbox's read-only bind list — all in
+        # `task_env`. Three orderings inside it are load-bearing (the proxy
+        # snapshot before `ISTOTA_SANDBOXED`, proxy-only before credentials,
+        # the PATH-prepend key consumed after the hook merge) and its docstring
+        # is where they are written down.
         #
-        # No socket path is exported, and that is load-bearing rather than
-        # tidiness (ISSUE-284, and Design 5 of the devbox transport). This
-        # environment is the *model's*, so a path named here is a path the model
-        # can replace: `ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine` would buy an `ok`
-        # acknowledgement and a fabricated exit 0 from a socket the model wrote.
-        # The CLI reads its socket from the config file instead, in a host-side
-        # process the model cannot reach.
-        #
-        # `ISTOTA_DEVBOX_EXEC_TIMEOUT` went with the 300-second default it
-        # carried: the transport imposes no timeout, the task's own budget
-        # governs, and a caller wanting a kill passes `--timeout`.
-        if config.devbox.enabled:
-            env["ISTOTA_DEVBOX_CONTAINER"] = (
-                f"{config.devbox.container_prefix}{task.user_id}"
-            )
-            env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
-            env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
-                config.devbox.max_output_bytes
-            )
-
-        # Declarative env vars from skill manifests
-        from .skills._env import (
-            EnvContext,
-            build_identity_env,
-            build_skill_env,
-            dispatch_setup_env_hooks,
-        )
-        env_ctx = EnvContext(
-            config=config,
-            task=task,
+        # Both proxies come back *constructed and not entered*. They are
+        # entered in the `ExitStack` below, which has to wrap the primary call,
+        # the reroute and the fallback call alike.
+        _runtime = task_env.build_task_runtime(
+            config,
+            task,
+            user_temp_dir=Path(user_temp_dir),
+            control_dir=control_dir,
+            task_attempt=task_attempt,
+            selected_skills=selected_skills,
+            skill_index=skill_index,
+            is_admin=is_admin,
             user_resources=user_resources,
             user_config=user_config,
-            user_temp_dir=Path(user_temp_dir),
-            is_admin=is_admin,
-            discovered_calendars=list(discovered_calendars or []),
+            discovered_calendars=discovered_calendars,
         )
-        # Phase 3: resolve manifest env vars for ``authorized_skills`` —
-        # the union of selected skills and skills auto-authorized via
-        # credential presence. ``derive_authorized_skills`` walks each
-        # skill's sensitive specs with ``fallbacks_disabled=True`` so
-        # operator-set EnvironmentFile fallbacks cannot fan out to per-
-        # user auto-authorization. Resolution itself (below) honors
-        # fallbacks for the value path.
-        # setup_env hooks self-gate; the dispatcher iterates the full
-        # skill_index regardless of the argument it's given. Dispatched
-        # *before* authorization because a hook-sourced credential is the
-        # only auto-auth signal a ``source="setup_env"`` skill has.
-        hook_env = dispatch_setup_env_hooks(selected_skills, skill_index, env_ctx)
-        authorized_skills = derive_authorized_skills(
-            selected_skills, skill_index, env_ctx, hook_env=hook_env,
-        )
-        skill_env = build_skill_env(authorized_skills, skill_index, env_ctx)
-        # A menu-loaded skill (the model self-selects it at runtime via
-        # ``skills show``) is neither eagerly selected nor credential-
-        # authorized, so the call above skips it. Its pure-identity vars
-        # (``source="user_id"``, e.g. ``MONEY_USER`` / ``FEEDS_USER``) are
-        # non-sensitive and required for the skill to run at all — resolve
-        # those over the full index so the proxied CLI isn't missing them
-        # ("MONEY_USER not set"). Config/secret-derived vars stay gated on
-        # ``authorized_skills`` (env minimisation for the untrusted model).
-        for k, v in build_identity_env(skill_index, env_ctx).items():
-            skill_env.setdefault(k, v)
-        # Declarative env vars don't override hardcoded ones
-        for k, v in skill_env.items():
-            if k not in env:
-                env[k] = v
-        for k, v in hook_env.items():
-            if k == HOOK_PATH_PREPEND_KEY:
-                # Never merged into ``env``: see the application site below.
-                continue
-            if k not in env:
-                env[k] = v
-
-        # Credential isolation via skill proxy: strip secrets from Claude's env
-        # and run skill CLIs through a Unix socket proxy that injects them.
-        _proxy_ctx = None
-        _proxy_sock = None
-        # Third bucket alongside credentials and the clean env: non-secret
-        # values (database paths) that belong to the host-side CLI and not to
-        # the model. Split *outside* the proxy branch — an operator who turns
-        # the proxy off has made skill CLIs unreachable, not made it acceptable
-        # to hand the model a path to every user's data.
-        proxy_only_env, env = _split_credential_env(
-            env, derive_proxy_only_set(skill_index),
-        )
-        if config.security.skill_proxy_enabled:
-            from .skill_proxy import SkillProxy
-            # Phase 3: credential set is derived from the loaded skill
-            # index; no hand-maintained constant. Same for the per-skill
-            # credential map and the lookup-endpoint allowlist.
-            credential_set = derive_credential_set(skill_index)
-            credential_env, env = _split_credential_env(env, credential_set)
-            # Started unconditionally. This used to be gated on
-            # ``if credential_env:``, so a task whose authorized skills declared
-            # no secret got no socket — and `istota-skill` then silently fell
-            # back to running the skill module *inside* the sandbox, which is
-            # the one place it must never run. On a Nextcloud deployment
-            # NC_PASS made the gate true nearly always, so the fallback was
-            # rare rather than absent; that is a property of the configuration,
-            # not an invariant.
-            #
-            # Use /tmp for the socket path to stay within the AF_UNIX length
-            # limit (~104 chars). build_bwrap_cmd() bind-mounts this file into
-            # the sandbox. PID is included so concurrent processes (xdist test
-            # workers, parallel scheduler instances on the same host) don't race
-            # on the same path — task.id alone collides when each process has
-            # its own DB.
-            _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
-            env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-            allowed_creds = derive_lookup_allowlist(
-                authorized_skills, skill_index,
-            )
-            skill_cred_map = derive_skill_credential_map(
-                authorized_skills, skill_index,
-            )
-            cli_skills = frozenset(
-                name for name, meta in skill_index.items() if meta.cli
-            )
-            logger.info(
-                "proxy_authorization task_id=%d selected=%d authorized=%d "
-                "selected_skills=%s authorized_skills=%s",
-                task.id, len(selected_skills), len(authorized_skills),
-                ",".join(sorted(selected_skills)),
-                ",".join(authorized_skills),
-            )
-            # Snapshot, not the live dict: ``env`` picks up ISTOTA_SANDBOXED
-            # below, and the proxy runs skills on the host where that would be
-            # a lie. Everything else the CLIs rely on rides along — notably
-            # ISTOTA_DEFERRED_DIR, whose absence is what makes a deferring skill
-            # take its direct-write fallback instead.
-            #
-            # Minus the Claude runtime credential, which is the second route
-            # ISSUE-390 had to close and the less obvious one. The token is
-            # declared in no skill manifest, so neither `derive_credential_set`
-            # nor `derive_proxy_only_set` takes it out of this snapshot, and the
-            # model reaches every host-side skill CLI through the same Bash tool
-            # the strips in `NativeBrain` just cleaned. No skill
-            # invokes the `claude` binary and none reads the variable, so it has
-            # no reader here either — and unlike a tool subprocess these run
-            # *unsandboxed as the daemon user*, which is the reason to be strict
-            # rather than a reason to relax.
-            proxy_base_env = without_claude_runtime_env(
-                {**env, **proxy_only_env}
-            )
-            _proxy_ctx = SkillProxy(
-                _proxy_sock, credential_env, proxy_base_env,
-                timeout=config.security.skill_proxy_timeout,
-                allowed_credentials=allowed_creds,
-                skill_credential_map=skill_cred_map,
-                allowed_skills=cli_skills,
-                authorized_skills=frozenset(authorized_skills),
-                task_id=task.id,
-            )
-
-        # Marks the env as one that will run under bwrap, so `istota-skill`
-        # refuses to execute a skill module in-process rather than silently
-        # doing it against databases that aren't there. Set after the proxy's
-        # base env is snapshotted (the proxy runs skills on the host, where the
-        # marker would be a lie), and only when the sandbox is really in
-        # effect — on macOS / a container without CAP_SYS_ADMIN,
-        # build_bwrap_cmd returns the command unwrapped.
-        #
-        # Gated on the proxy too. The marker means "the socket is how you run a
-        # skill"; with the proxy off there is no socket, and setting it anyway
-        # would turn a supported (if now discouraged) configuration into one
-        # where every skill CLI fails — including the many that never open a
-        # database. That combination gets a loud warning at config load instead.
-        if config.security.skill_proxy_enabled and effective_sandboxing(config):
-            env["ISTOTA_SANDBOXED"] = "1"
-
-        # Package-manager caches, pointed at the disk-backed directory
-        # `build_bwrap_cmd` binds RW from the same predicate (ISSUE-305).
-        #
-        # Here, not in `build_clean_env`, for two reasons. `proxy_base_env` was
-        # snapshotted above and is what SkillProxy hands every host-side skill
-        # CLI — a process running unsandboxed as the daemon user, which has no
-        # business resolving a cache out of a directory the model can write;
-        # that is the confused-deputy shape the ISTOTA_PATH_PREPEND comment
-        # below spells out. And the cache is per user, which needs the task.
-        #
-        # Gated on effective sandboxing, matching the bind exactly: without
-        # bwrap there is no root tmpfs and nothing to move off it.
-        if native_fs_confinement_active(config):
-            _cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
-            if _cache_dir is not None:
-                env["UV_CACHE_DIR"] = str(_cache_dir / SANDBOX_CACHE_UV)
-                env["XDG_CACHE_HOME"] = str(_cache_dir)
-                # npm on Linux uses ~/.npm and ignores XDG, so XDG_CACHE_HOME
-                # alone would leave it in RAM. Inert until ISSUE-304 opens the
-                # registry, and one line now rather than a rediscovery later.
-                env["npm_config_cache"] = str(_cache_dir / SANDBOX_CACHE_NPM)
-                # HF_HOME defaults to $XDG_CACHE_HOME/huggingface, so moving XDG
-                # would silently orphan the read-only `~/.cache/huggingface`
-                # bind — a pre-warmed model cache every task would re-download.
-                # Pin it back where the bind is.
-                env["HF_HOME"] = str(
-                    Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface"
-                )
-
-        # PATH entries contributed by setup_env hooks — today the developer
-        # skill's .developer dir, so the model can type `gh` and reach the
-        # wrapper rather than the real binary.
-        #
-        # Applied *here*, after the proxy's base env was snapshotted above, and
-        # never merged into ``env`` by the hook loop. That ordering is the
-        # whole point and must not be tidied away:
-        #
-        #   ``proxy_base_env`` is what SkillProxy hands every host-side skill
-        #   CLI, which runs outside bwrap as the daemon user. Some of those
-        #   resolve a binary by bare name — google_workspace does
-        #   ``os.execvp("gws", …)``, devbox does ``shutil.which("docker")``.
-        #   A task-temp directory on that PATH would therefore be a host-side
-        #   code-execution path, wide open to whatever the model can write
-        #   into it. The sandbox re-binds .developer read-only precisely to
-        #   stop that, but relying on a bind to contain a PATH entry that
-        #   never needed to be there is the wrong way round.
-        #
-        # ``build_claude_env`` already set PATH, so a hook returning "PATH"
-        # would be silently dropped by the ``if k not in env`` merge; this
-        # reserved key is the explicit alternative. It is consumed here and
-        # never reaches the model.
-        _path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY, "")
-        if _path_prepend:
-            _entries = [p for p in _path_prepend.split(os.pathsep) if p]
-            if _entries:
-                env["PATH"] = os.pathsep.join([*_entries, env["PATH"]])
-
-        # Network isolation via CONNECT proxy: outbound traffic restricted
-        # to an allowlist of host:port pairs via --unshare-net + proxy.
-        _net_proxy_ctx = None
-        _net_proxy_sock = None
-        if config.security.network.enabled and config.security.sandbox_enabled:
-            from .network_proxy import NetworkProxy, write_bridge_script
-
-            allowed_hosts = _build_network_allowlist(config, authorized_skills)
-
-            # Write bridge script to .developer/ (RO inside sandbox)
-            dev_dir = Path(user_temp_dir) / ".developer"
-            dev_dir.mkdir(parents=True, exist_ok=True)
-            write_bridge_script(dev_dir / "net-bridge")
-
-            _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{os.getpid()}-{task.id}.sock"
-            _net_proxy_ctx = NetworkProxy(
-                _net_proxy_sock, allowed_hosts,
-            )
-
-        # Collect extra paths to RO bind-mount into the sandbox.
-        #
-        # The task control directory is this parameter's production consumer,
-        # and it is a *directory* rather than the composed system prompt file
-        # it started as. A bind names one exact path and cannot express a
-        # filename pattern, so the per-file entry guarded the standing
-        # instructions and left `prompt.txt`, the briefing metadata and every
-        # prepared image rendition beside it unguarded — each one a thing
-        # somebody had to remember into this list by hand.
-        #
-        # `build_bwrap_cmd` applies these after every other bind, which is what
-        # keeps a read-only entry read-only under any bind added later; the
-        # `.developer` carve-out established the pattern. The directory is a
-        # sibling of `user_temp_dir` rather than a child, so nothing binds over
-        # it today either.
-        #
-        # Emitted under both profiles. Nothing inside a NATIVE namespace opens
-        # the system prompt — NativeBrain reads it in the daemon — but both
-        # backends put the prepared attachment paths into the prompt's
-        # `Attached files:` section, so a model that decides to `Read` one has
-        # to find it, and the tool server runs in there.
-        #
-        # This is half the protection: `Read`, `Write` and `Edit` run through
-        # `ToolEnv` and enter no mount namespace on the unsandboxed shapes. The
-        # other half is the pair of entries `native_fs_roots` returns, some
-        # four hundred lines below, plus the unconditional seed beside them.
-        _extra_ro_binds: list[Path] = [control_dir]
+        env = _runtime.env
+        _proxy_ctx = _runtime.proxy_ctx
+        _proxy_sock = _runtime.proxy_sock
+        _net_proxy_ctx = _runtime.net_proxy_ctx
+        _net_proxy_sock = _runtime.net_proxy_sock
+        _extra_ro_binds = _runtime.extra_ro_binds
+        authorized_skills = _runtime.authorized_skills
 
         # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
@@ -6987,11 +6973,12 @@ def execute_task(
                     Path(user_temp_dir), proxy_sock=_proxy_sock,
                     net_proxy_sock=_net_proxy_sock,
                     extra_ro_binds=_extra_ro_binds,
-                    # The set computed ~190 lines above, not `selected_skills`.
-                    # See `build_bwrap_cmd`'s own docstring for why the
-                    # distinction decides whether the exec transport routes on
-                    # the first turn of a conversation.
-                    authorized_skills=frozenset(authorized_skills),
+                    # `TaskRuntime.authorized_skills` — the union credential
+                    # presence widened, not `selected_skills`. See
+                    # `build_bwrap_cmd`'s own docstring for why the distinction
+                    # decides whether the exec transport routes on the first
+                    # turn of a conversation.
+                    authorized_skills=authorized_skills,
                     workspace_dir=workspace_dir,
                     profile=sandbox_profile,
                 )
@@ -7001,261 +6988,12 @@ def execute_task(
         _sandbox_wrap = _build_wrap(SandboxProfile.CLAUDE)
         _native_sandbox_wrap = _build_wrap(SandboxProfile.NATIVE)
 
-        # Adapt the brain's (widened) StreamEvent stream to TaskEvents. Called
-        # by the brain in place of the old string callback. For loop-based
-        # brains (NativeBrain) this fires on a worker thread, not the brain's
-        # event loop (Layer 3 invariant) — the body stays plain-synchronous
-        # either way. progress_show_tool_use / progress_show_text gate whether
-        # tool_* and progress_text events are emitted at all.
-        show_tool_use = config.scheduler.progress_show_tool_use
-        show_text = config.scheduler.progress_show_text
-
-        # Stream surfaces (web chat, repl) get the answer text streamed live as
-        # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
-        # completely untouched — no text_delta rows. Computed once per task.
-        from .transport.registry import task_is_stream_surface
-        is_stream_surface = task_is_stream_surface(config, task)
-
-        # Per-task coalescing buffer for streamed answer text. Incoming deltas
-        # (NativeBrain's TextDeltaEvent, or ClaudeCodeBrain's block TextEvent)
-        # are buffered and flushed as one ``text_delta`` event every ~250 ms or
-        # ~120 chars, plus a forced flush on each tool/CM boundary and a final
-        # flush after the brain finishes. This bounds row volume to tens per
-        # answer (not thousands of token rows); the scheduler prunes them once
-        # the canonical ``result`` lands, so steady state retains zero. Events
-        # arrive serialized (NativeBrain awaits each run_in_executor hop;
-        # ClaudeCodeBrain's parse loop is sequential), so no lock is needed.
-        #
-        # Narration gate: a text run emits NOTHING until it crosses
-        # ``_DELTA_GATE_CHARS`` without an intervening tool call. This splits a
-        # text-then-tool block into two cases at the boundary (see
-        # ``_settle_deltas_at_tool_boundary``): a short lead-in ("Let me check…")
-        # stays under the ceiling, never streams, and is dropped; a SUBSTANTIAL
-        # block crosses the ceiling, "unlocks" (the held buffer flushes and
-        # subsequent deltas stream live at the cadence below), and is KEPT —
-        # flushed at the tool boundary so the full block reaches the stream
-        # surface, where the web client renders it as its own prose block rather
-        # than throwaway narration. The gate is thus a substance classifier, not
-        # an answer-vs-narration one: the final answer (after the last tool)
-        # always streams, and a short *final* answer that never crosses the gate
-        # still arrives via the canonical ``result`` event (and the final flush
-        # in the ``finally`` releases the held buffer), so gating costs only
-        # token-by-token animation on text too short to benefit. Threshold is
-        # the ``[scheduler]`` knob ``stream_text_gate_chars`` (0 disables —
-        # deltas stream immediately, legacy behaviour); the ``stream_gate:``
-        # telemetry below records every flush / discard so the value can be
-        # tuned against production.
-        _DELTA_FLUSH_MS = 250
-        _DELTA_FLUSH_CHARS = 120
-        _DELTA_GATE_CHARS = config.scheduler.stream_text_gate_chars
-        _delta_buf: list[str] = []
-        # ``unlocked``: this text run has crossed the narration gate; deltas now
-        # stream live. Reset to False at every tool boundary (new run re-gates).
-        _delta_state = {"chars": 0, "last_flush": time.monotonic(), "unlocked": False}
-        # True once any TextDeltaEvent has streamed this task. Used to dedupe a
-        # NativeBrain whole-turn TextEvent against the deltas that already
-        # carried the same text: the brain stays surface-agnostic (it always
-        # emits both per-token deltas and intermediate-turn TextEvents); the
-        # executor — which alone knows the surface — drops the redundant
-        # TextEvent on a stream surface once deltas have flowed, and forwards it
-        # as progress_text on a push surface (where deltas were dropped).
-        _delta_seen = {"value": False}
-        # Symmetric flag for reasoning: True once any ThinkingDeltaEvent has
-        # streamed. A brain that streams thinking deltas (NativeBrain, or
-        # ClaudeCodeBrain with --include-partial-messages) may *also* emit the
-        # whole-block ThinkingEvent afterward; on a stream surface that whole
-        # block is then a redundant re-render, so it is dropped here. Thinking is
-        # stream-surface-only either way (push drops both), so no push fallback.
-        _thinking_seen = {"value": False}
-
-        def _flush_deltas() -> None:
-            if event_writer is None or not _delta_buf:
-                return
-            text = "".join(_delta_buf)
-            _delta_buf.clear()
-            _delta_state["chars"] = 0
-            _delta_state["last_flush"] = time.monotonic()
-            # Best-effort: a flush failure means slightly less live text, never
-            # a failed task (matches EventWriter.emit's own swallow).
-            try:
-                event_writer.emit("text_delta", {"text": text})
-            except Exception:
-                logger.debug("text_delta flush failed", exc_info=True)
-
-        def _buffer_delta(text: str) -> None:
-            if not text:
-                return
-            _delta_buf.append(text)
-            _delta_state["chars"] += len(text)
-            if not _delta_state["unlocked"]:
-                # Gated: hold everything (emit nothing) until the run crosses
-                # the narration ceiling. Crucially NO time-based flush here —
-                # that was the race that leaked narration. A tool boundary
-                # before the ceiling discards the buffer; crossing it unlocks.
-                if _delta_state["chars"] >= _DELTA_GATE_CHARS:
-                    _delta_state["unlocked"] = True
-                    logger.debug(
-                        "stream_gate: unlocked at %d chars (task %s, gate=%d)",
-                        _delta_state["chars"], task.id, _DELTA_GATE_CHARS,
-                    )
-                    _flush_deltas()
-                return
-            now = time.monotonic()
-            if (
-                _delta_state["chars"] >= _DELTA_FLUSH_CHARS
-                or (now - _delta_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
-            ):
-                _flush_deltas()
-
-        def _settle_deltas_at_tool_boundary() -> None:
-            # Resolve the buffered answer text at a tool boundary. Text before a
-            # tool is one of two things, and the narration gate already told them
-            # apart:
-            #   (a) a SUBSTANTIAL block (the run crossed _DELTA_GATE_CHARS and
-            #       unlocked — analysis the model wrote, then acted on). It has
-            #       been streaming; FLUSH its unflushed tail so the full block
-            #       reaches the stream surface and renders as its own prose block
-            #       (the web client keeps substantial intermediate blocks — they
-            #       are not narration). A token-streaming brain (NativeBrain)
-            #       leaves up to one flush-window buffered here; a whole-block
-            #       brain already flushed everything on unlock, so this is a
-            #       no-op for it.
-            #   (b) a short LEAD-IN ("Let me search…", under the gate). It was
-            #       held and never emitted; DROP it intact so it doesn't flash in
-            #       the prominent answer area. Only reasoning + tool actions land
-            #       in the activity chip.
-            held = _delta_state["chars"]
-            if _delta_state["unlocked"]:
-                if held:
-                    logger.debug(
-                        "stream_gate: flushed %d-char tail of a substantial "
-                        "block at a tool boundary (task %s)", held, task.id,
-                    )
-                _flush_deltas()  # clears buf + resets chars/last_flush
-            else:
-                if held:
-                    logger.debug(
-                        "stream_gate: discarded %d chars of held narration at a "
-                        "tool boundary (task %s, gate=%d)",
-                        held, task.id, _DELTA_GATE_CHARS,
-                    )
-                _delta_buf.clear()
-                _delta_state["chars"] = 0
-                _delta_state["last_flush"] = time.monotonic()
-            _delta_state["unlocked"] = False  # next text run re-gates
-
-        # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
-        # text. It must be independent of the answer-text buffer above because the
-        # two render to different places on a stream surface: thinking folds into
-        # the activity chip, the answer streams prominent. Same flush cadence /
-        # boundaries; emits ``thinking`` task events instead of ``text_delta``.
-        _thinking_buf: list[str] = []
-        _thinking_state = {"chars": 0, "last_flush": time.monotonic()}
-
-        def _flush_thinking() -> None:
-            if event_writer is None or not _thinking_buf:
-                return
-            text = "".join(_thinking_buf)
-            _thinking_buf.clear()
-            _thinking_state["chars"] = 0
-            _thinking_state["last_flush"] = time.monotonic()
-            try:
-                event_writer.emit("thinking", {"text": text})
-            except Exception:
-                logger.debug("thinking flush failed", exc_info=True)
-
-        def _buffer_thinking(text: str) -> None:
-            if not text:
-                return
-            _thinking_buf.append(text)
-            _thinking_state["chars"] += len(text)
-            now = time.monotonic()
-            if (
-                _thinking_state["chars"] >= _DELTA_FLUSH_CHARS
-                or (now - _thinking_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
-            ):
-                _flush_thinking()
-
-        def _on_event(event: StreamEvent) -> None:
-            if event_writer is None:
-                return
-            if isinstance(event, ToolUseEvent):
-                # A tool boundary settles the reasoning chip and drops any
-                # pre-tool narration. This is a property of the STREAM SURFACE,
-                # not of whether the tool row is shown — so it must run even when
-                # progress_show_tool_use is off, or pre-tool narration would
-                # flush and flash in the answer area with no tool chip to explain
-                # it.
-                if is_stream_surface:
-                    _flush_thinking()  # tool boundary: settle the reasoning chip
-                    _settle_deltas_at_tool_boundary()  # keep substantial, drop lead-ins
-                if show_tool_use:
-                    event_writer.emit("tool_start", {
-                        "tool_name": event.tool_name,
-                        "description": event.description,
-                        "tool_call_id": event.tool_call_id,  # "" under ClaudeCodeBrain
-                    })
-            elif isinstance(event, ToolEndEvent) and show_tool_use:
-                event_writer.emit("tool_end", {
-                    "tool_name": event.tool_name,
-                    "tool_call_id": event.tool_call_id,
-                    "success": event.success,
-                    "duration_ms": event.duration_ms,
-                })
-            elif isinstance(event, ToolProgressEvent):
-                # Web SSE only; Talk/log subscribers ignore this kind.
-                event_writer.emit("tool_progress", {
-                    "tool_name": event.tool_name,
-                    "tool_call_id": event.tool_call_id,
-                    "text": event.text,
-                })
-            elif isinstance(event, ThinkingDeltaEvent):
-                # Incremental reasoning (NativeBrain, or ClaudeCodeBrain with
-                # --include-partial-messages). Stream surfaces only; a push task
-                # drops it (thinking is web/repl-only — no progress_text
-                # fallback).
-                if is_stream_surface:
-                    _thinking_seen["value"] = True
-                    _buffer_thinking(event.thinking)
-            elif isinstance(event, ThinkingEvent):
-                # Whole reasoning block. Stream surfaces only. Dropped when
-                # thinking deltas already carried this turn's reasoning live
-                # (mirrors the TextEvent-vs-deltas dedup above).
-                if is_stream_surface:
-                    if _thinking_seen["value"]:
-                        return
-                    _buffer_thinking(event.text)
-            elif isinstance(event, TextDeltaEvent):
-                # NativeBrain incremental answer text. Stream surfaces only; a
-                # push task drops it (the final result is delivered once).
-                if is_stream_surface:
-                    _flush_thinking()  # thinking → answer boundary: keep order
-                    _delta_seen["value"] = True
-                    _buffer_delta(event.text)
-            elif isinstance(event, TextEvent):
-                if is_stream_surface:
-                    if _delta_seen["value"]:
-                        # NativeBrain: the per-token deltas already carried this
-                        # intermediate turn's text live, so the whole-turn
-                        # TextEvent is a redundant re-render — drop it.
-                        return
-                    # ClaudeCodeBrain (no deltas): coarse streaming, one
-                    # TextEvent per completed block — route through the same
-                    # delta channel rather than progress_text so it renders live.
-                    _flush_thinking()  # thinking → answer boundary: keep order
-                    _buffer_delta(event.text)
-                elif show_text:
-                    # Push surface: deltas are dropped, so intermediate-turn
-                    # TextEvents are how NativeBrain narration reaches Talk. The
-                    # brain holds back the final turn's text (it becomes the
-                    # result); ClaudeCodeBrain's ResultEvent is a distinct frame.
-                    # Neither double-renders against the result.
-                    event_writer.emit("progress_text", {"text": event.text})
-            elif isinstance(event, ContextManagementEvent):
-                if is_stream_surface:
-                    _flush_thinking()  # turn/CM boundary
-                    _flush_deltas()  # turn/CM boundary
-                event_writer.emit("context_management")
+        # Adapts the brain's (widened) StreamEvent stream to TaskEvents:
+        # the coalescing buffers for answer text and reasoning, the
+        # narration gate and the delta-vs-whole-turn dedupe all live in
+        # `executor_stream`. `stream.on_event` is what goes on
+        # `BrainRequest.on_progress`.
+        stream = TaskStreamAdapter(config, task, event_writer)
 
         # Per-task cgroup (A6). Created before the brain is asked for anything,
         # because the pid it hands back has already been spawned and every
@@ -7450,7 +7188,7 @@ def execute_task(
             # and the fallback brain makes its own capability decision.
             images=image_prep.images,
             streaming=use_streaming,
-            on_progress=_on_event if use_streaming else None,
+            on_progress=stream.on_event if use_streaming else None,
             cancel_check=_cancel_check,
             # Steering channel — only for a brain that can act on it mid-run
             # (`!steer`). A non-steerable brain leaves this None (no extra DB
@@ -7485,82 +7223,9 @@ def execute_task(
                 "task %d: model=%s advisor=%s", task.id, req.model, req.advisor,
             )
 
-        # Availability failover (brain-fallback spec). Generalizes the old
-        # tmux→claude_code in-attempt fallback: when the primary brain is
-        # unavailable (usage limit / missing binary / tmux launch failure) and a
-        # fallback is configured, re-run this same attempt through the fallback
-        # brain — no new DB row, no attempt increment. Stickiness: once the
-        # primary reports a persistent unavailability, subsequent tasks skip it
-        # for a cooldown. All of it collapses to the plain primary call when no
-        # fallback is configured.
-        _primary_kind = _brain_config.kind
-        _fallback_kind = effective_fallback_kind(_brain_config)
-        _cooldown = config.brain.fallback_cooldown_seconds
-        _breaker = get_availability_breaker()
-        _dropped_pin = None
-        # The primary's result, held only when a fallback replaced it, so both
-        # attempts' usage can be written from the one call site that has a `conn`.
-        _primary_usage_result = None
-        # Whether the result being persisted came from the fallback brain. Not
-        # derivable from `_primary_usage_result`: on the breaker-cooldown path
-        # the fallback runs with no primary call at all, so there is nothing to
-        # hold and the flag would read false for every task in the window.
-        _ran_fallback = False
-        # The effort the attempt actually ran at. The fallback re-resolves it in
-        # its own namespace, so `req.effort` describes the primary only.
-        _usage_effort = req.effort
-        _primary_started_at = None
-        _primary_started_monotonic = None
-
-        def _notice(reason):
-            """A `brain_fallback` emitter bound to `reason`, for `on_start`.
-
-            Both reroute paths hand the same notice to the stream; only the
-            reason differs (a fresh primary failure vs. the breaker already
-            being open). Returns None when there is no stream to notify, so
-            `_run_fallback` skips the hook entirely.
-            """
-            if event_writer is None:
-                return None
-
-            def _emit(model, dropped_pin):
-                # A reroute is a stream boundary exactly like a tool call: what
-                # streamed before it came from the brain that just failed, and
-                # the fallback streams into these same buffers. Settle them
-                # first, or an unflushed primary tail is emitted as the opening
-                # of the fallback's answer — one paragraph, under a notice
-                # saying the primary failed — and the fallback's own narration
-                # gate starts pre-credited with the primary's characters.
-                # The settle runs whether or not the notice does, because it is
-                # about the daemon's own buffers rather than the sentence: a
-                # retry that called the primary and watched it fail again has a
-                # tail held here that must not open the fallback's answer.
-                if is_stream_surface:
-                    _flush_thinking()
-                    _settle_deltas_at_tool_boundary()
-                # ISSUE-361: once per turn, not once per failover attempt. The
-                # retry ladder re-runs this same task id, and every attempt
-                # after the breaker opens takes the cooldown path, so the
-                # per-attempt emit stacked the banner three deep under one user
-                # message. The first is what survives; `emit_once` is where the
-                # cases that costs something are written down.
-                event_writer.emit_once("brain_fallback", {
-                    "primary": _primary_kind,
-                    "reason": reason,
-                    "fallback": _fallback_kind,
-                    "model": model,
-                    "dropped_pin": dropped_pin or "",
-                    "text": fallback_notice_text(
-                        _primary_kind, reason, _fallback_kind, model, dropped_pin,
-                    ),
-                })
-
-            return _emit
-        _skip_primary = (
-            _fallback_kind is not None
-            and _cooldown > 0
-            and _breaker.should_skip(_primary_kind, _cooldown)
-        )
+        # Availability failover (brain-fallback spec) — see
+        # `run_with_failover`. The ExitStack stays here: the proxies must be
+        # live across the primary call, the reroute and the fallback call.
         try:
             with contextlib.ExitStack() as stack:
                 if _proxy_ctx is not None:
@@ -7573,157 +7238,28 @@ def execute_task(
                 if _task_cg is not None:
                     stack.callback(_release_task_cgroup, task.id, _task_cg)
 
-                if _skip_primary:
-                    # Cooling down — go straight to the fallback, no primary call.
-                    logger.info(
-                        "brain fallback: skipping primary %s (cooling down) "
-                        "-> %s task=%d",
-                        _primary_kind, _fallback_kind, task.id,
-                    )
-                    _fb, _dropped_pin, _fb_effort = _run_fallback(
-                        config, _brain_config, _fallback_kind, task, req,
-                        on_start=_notice("cooldown"),
-                    )
-                    if _fb is not None:
-                        # This branch is the steady state once the breaker
-                        # opens — every task for the cooldown window takes it —
-                        # so flagging the row here is what keeps the *majority*
-                        # of genuinely-fallback rows from being labelled
-                        # otherwise. There is no primary row: the primary was
-                        # never called. When construction failed instead, the
-                        # primary really did run below and the flag stays off.
-                        _ran_fallback = True
-                        _usage_effort = _fb_effort
-                    brain_result = _fb if _fb is not None else brain.execute(req)
-                else:
-                    _primary_started_at = time.time()
-                    _primary_started_monotonic = time.monotonic()
-                    brain_result = brain.execute(req)
-                    _triggers = set(TRIGGER_STOP_REASONS)
-                    if config.brain.fallback_on_transient:
-                        _triggers.add("transient_api_error")
-                    if brain_result.stop_reason in _triggers:
-                        # Open the availability breaker only for persistent
-                        # conditions (usage_limit / not_found). "fallback" is
-                        # excluded so tmux keeps being probed per-task (its own
-                        # launch _CircuitBreaker governs when to stop).
-                        #
-                        # Deliberately not gated on a fallback being configured
-                        # (ISSUE-362). The breaker is a shared signal: the
-                        # direct callers (sleep cycle, shared blocks) read it
-                        # through `primary_brain_unavailable`, and
-                        # `report_brain_result` already opens it for them with
-                        # no regard to a fallback. Gating it here left a
-                        # deployment with no fallback without the availability
-                        # record and without either operator alert, so the only
-                        # notice that a primary had gone down was the failed
-                        # task itself. Safe for the task path: `_skip_primary`
-                        # is separately gated on a fallback existing, so an open
-                        # breaker never skips a primary there is nothing to
-                        # replace.
-                        #
-                        # The window ends at the quota's reset where one is
-                        # known, not a flat `_cooldown` from the failure
-                        # (ISSUE-374). `open_primary_breaker` owns that and
-                        # publishes the same deadline it armed, so the
-                        # scheduler's breaker and the record the web process
-                        # reads describe one window.
-                        _armed_window = (
-                            open_primary_breaker(
-                                _primary_kind,
-                                _cooldown,
-                                brain_result.stop_reason,
-                                config=config,
-                            )
-                            if brain_result.stop_reason in COOLDOWN_STOP_REASONS
-                            else None
-                        )
-                        if _armed_window is not None:
-                            _fire_fallback_alert(
-                                config, task, _primary_kind, _fallback_kind,
-                                brain_result.stop_reason, _armed_window,
-                            )
-                        if _fallback_kind is not None:
-                            logger.error(
-                                "brain fallback: task=%d primary=%s reason=%s "
-                                "-> %s",
-                                task.id, _primary_kind,
-                                brain_result.stop_reason, _fallback_kind,
-                            )
-                        else:
-                            logger.error(
-                                "brain unavailable: task=%d primary=%s "
-                                "reason=%s, no [brain] fallback configured",
-                                task.id, _primary_kind,
-                                brain_result.stop_reason,
-                            )
-                        # Preserve tmux's own launch alert: its _CircuitBreaker
-                        # governs fallback/not_found (which are NOT in the
-                        # availability breaker's cooldown set), so its
-                        # 5-consecutive-launch-failure alert still routes here.
-                        if _primary_kind == "tmux_claude":
-                            try:
-                                from .brain.tmux_claude import (
-                                    consume_circuit_open_alert,
-                                )
-                                if consume_circuit_open_alert():
-                                    from . import notifications
-                                    _tail = (
-                                        "falling back."
-                                        if _fallback_kind is not None
-                                        else "no fallback configured, so tasks "
-                                             "keep failing."
-                                    )
-                                    notifications.send_notification(
-                                        config, task.user_id,
-                                        "⚠️ tmux_claude brain circuit opened — "
-                                        f"{_tail} Check the claude CLI "
-                                        "version / readiness markers.",
-                                        purpose="alert",
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "tmux circuit-open alert failed", exc_info=True
-                                )
-                        _fb = None
-                        if _fallback_kind is not None:
-                            _fb, _dropped_pin, _fb_effort = _run_fallback(
-                                config, _brain_config, _fallback_kind, task,
-                                req, on_start=_notice(brain_result.stop_reason),
-                            )
-                        if _fb is not None:
-                            # The fallback *replaces* brain_result, so without
-                            # this the single persist call below would record the
-                            # fallback's numbers under the primary's identity and
-                            # the primary's own spend would be unrecoverable. It
-                            # is captured rather than written here because
-                            # `_run_fallback` takes no `conn`: opening a second
-                            # one would block on the write lock for the full 30s
-                            # busy timeout whenever `execute_task` was entered
-                            # with an open write transaction, as the interactive
-                            # path does.
-                            _primary_usage_result = brain_result
-                            _ran_fallback = True
-                            _usage_effort = _fb_effort
-                            brain_result = _fb
-                    elif brain_result.success and _cooldown > 0:
-                        # Primary healthy again → close the breaker.
-                        _breaker.record_success(
-                            _primary_kind, started_at=_primary_started_monotonic,
-                        )
-                        from .brain_availability import clear_unavailable
-
-                        clear_unavailable(
-                            config, _primary_kind, started_at=_primary_started_at,
-                        )
+                _failover = run_with_failover(
+                    brain, req,
+                    config=config,
+                    brain_config=_brain_config,
+                    task=task,
+                    stream=stream,
+                    event_writer=event_writer,
+                )
+                brain_result = _failover.result
+                _primary_usage_result = _failover.primary_usage_result
+                _ran_fallback = _failover.ran_fallback
+                _usage_effort = _failover.usage_effort
+                _dropped_pin = _failover.dropped_pin
+                _primary_kind = _failover.primary_kind
+                _fallback_kind = _failover.fallback_kind
         finally:
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep
             # a lower seq than any trailing answer text. On success this precedes
             # the canonical ``result`` (which replaces the answer in the UI); on
             # an exception the finally still drains both buffers.
-            _flush_thinking()
-            _flush_deltas()
+            stream.finish()
 
         success = brain_result.success
         result = brain_result.result_text

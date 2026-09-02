@@ -14,7 +14,7 @@ def execute_task(
     event_writer: "events.EventWriter | None" = None,
 ) -> tuple[bool, str, str | None, str | None]:
 ```
-The old `on_progress: Callable[[str], None]` parameter is gone (task-event-streaming spec). The scheduler builds an `EventWriter`, subscribes consumers, and passes it; the executor emits `task_started` then adapts the brain's widened `StreamEvent` stream to `TaskEvent`s via `_on_brain_event` → `event_writer.emit(...)`. `None` on dry-run / CLI paths.
+The old `on_progress: Callable[[str], None]` parameter is gone (task-event-streaming spec). The scheduler builds an `EventWriter`, subscribes consumers, and passes it; the executor emits `task_started` then adapts the brain's widened `StreamEvent` stream to `TaskEvent`s via `executor_stream.TaskStreamAdapter`, one instance per task, whose `on_event` calls `event_writer.emit(...)`. `None` on dry-run / CLI paths.
 Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths. `execution_trace` is a JSON array of interleaved `{"type": "tool", "text": "..."}` and `{"type": "text", "text": "..."}` events, or `None`. A `tool` entry additionally carries `"raw": "<verbatim command>"` for Bash calls (the literal command, untruncated; `_tool_invocation` in `agent/events.py`) so the sleep cycle can distil playbooks that quote the real invocation rather than the paraphrased description (ISSUE-174 fix 1). Additive — consumers that read `text`/`type` are unaffected.
 
 ### Flow
@@ -37,7 +37,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 10. **Build prompt**: `build_prompt()` returns a `ComposedPrompt` — standing instructions in `.system`, task material in `.user`. Includes `confirmation_context` when set
 11. **Dry run check**: return both halves through `render_composed_prompt()`, under fixed `===== SYSTEM =====` / `===== USER =====` labels. No prompt file is written and no brain request is built
 12. **Write prompt files**: into the control directory from step 1 — the user half to `prompt.txt`, the system half to `system_prompt.txt`, both opened `O_NOFOLLOW` at mode `0600`; see "The two prompt files" below for why
-13. **Build env**: see env var table below; credential vars split via `_split_credential_env()` when proxy enabled
+13. **Build env**: `task_env.build_task_runtime()` returns a `TaskRuntime` — the env (see the var table below), the two proxy objects, their socket paths, the sandbox's read-only bind list and `authorized_skills`. Credential vars split via `_split_credential_env()`, twice, proxy-only first. Both context managers come back *constructed and not entered*: the `ExitStack` at step 15 is what enters them, because they must be live across the primary call, a reroute and the fallback call. The three orderings inside that function are load-bearing and its docstring is where they are written down
 14. **Build BrainRequest**: prompt (the **user half only**) + `composed_system_prompt_path` (the system file) + allowed_tools + env + model/effort + the two sandbox-wrap closures (one per `SandboxProfile`) + on_progress/cancel_check/on_pid callbacks + `images` (the prepared attachments)
 15. **Execute**: `make_brain(config.brain).execute(req)` — see `.claude/rules/brain.md`
 16. **Compose result**: `_compose_full_result(result, trace)` reconciles result-text vs trace (CM-aware + terse-result recovery)
@@ -213,7 +213,7 @@ Per-task BrainRequest fields the executor populates:
   spec, Stage 3).
 - `custom_system_prompt_path = config/system-prompt.md` when `custom_system_prompt = true`
 - `streaming = event_writer is not None`
-- `on_progress = _on_brain_event`: closure that maps the widened `StreamEvent`
+- `on_progress = stream.on_event`: `executor_stream.TaskStreamAdapter`, which maps the widened `StreamEvent`
   union to `TaskEvent`s on the `EventWriter` — `ToolUseEvent`→`tool_start`,
   `ToolEndEvent`→`tool_end`, `ToolProgressEvent`→`tool_progress`,
   `TextEvent`→`progress_text`, `ContextManagementEvent`→`context_management`.
@@ -250,13 +250,38 @@ After `brain.execute()` returns, the executor:
 
 ## Brain fallback (availability failover)
 Generalizes the old hardcoded tmux→claude_code in-attempt rerun. The
-`brain.execute(req)` call is wrapped in a routing block (replacing the tmux-only
-`if _brain_config.kind == "tmux_claude"` block) that reruns the *same attempt*
-(no new DB row, no `attempt_count` increment) through a configured fallback
-brain when the primary is unavailable. Kept executor-level: brains have no
-`Config` for the operator alert, and the rerun/breaker already live here.
+`brain.execute(req)` call happens inside `run_with_failover`, which reruns the
+*same attempt* (no new DB row, no `attempt_count` increment) through a
+configured fallback brain when the primary is unavailable. Kept executor-level:
+brains have no `Config` for the operator alert, and the rerun/breaker already
+live here.
 
-- `_fallback_kind = effective_fallback_kind(_brain_config)` (`brain/_fallback.py`);
+`run_with_failover(brain, req, *, config, brain_config, task, stream,
+event_writer) -> FailoverOutcome` sits at module scope beside its helpers rather
+than inside `execute_task`, which is where the loop used to be — 6000 lines from
+the code it belongs with. `FailoverOutcome` is the block's existing output set
+written down: `result`, `primary_usage_result`, `ran_fallback`, `usage_effort`,
+`dropped_pin`, `primary_kind`, `fallback_kind`, each read by `execute_task`
+after the call. `ran_fallback` is not derivable from `primary_usage_result` —
+on the breaker-cooldown path the fallback runs with no primary call at all, so
+there is nothing to hold. **The `ExitStack` stays in `execute_task`** and wraps
+this call: the skill and network proxies must be live across the primary call,
+the reroute and the fallback call alike.
+
+`_failover_notice(stream, event_writer, reason, *, primary_kind,
+fallback_kind)` is where the stream and the failover meet, and it is why
+`run_with_failover` takes a `TaskStreamAdapter`. A reroute is a stream boundary
+exactly like a tool call, so it settles the buffers — `flush_thinking()` then
+`settle_at_tool_boundary()`, in that order — before emitting the banner, or an
+unflushed primary tail opens the fallback's answer. Two asymmetries: the settle
+runs even when `emit_once` dedupes the banner away (it is about the daemon's
+own buffers, not the sentence), and the gate is the **writer**, not the stream:
+with no `event_writer` the function returns `None` and `_run_fallback` skips the
+hook entirely. Nothing is lost there, because `TaskStreamAdapter.on_event`
+returns at its own `event_writer is None` before either buffer is appended to,
+so a writerless stream has buffered nothing to settle.
+
+- `_fallback_kind = effective_fallback_kind(brain_config)` (`brain/_fallback.py`);
   `_cooldown = config.brain.fallback_cooldown_seconds`; `_breaker =
   get_availability_breaker()` (process-global `PrimaryAvailabilityBreaker`).
 - **Stickiness:** when the breaker `should_skip(primary_kind, cooldown)`, the
