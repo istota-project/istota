@@ -1,6 +1,6 @@
-"""Goldens over the fully assembled task prompt.
+"""Goldens over the fully assembled task prompt, in both its halves.
 
-``execute_task(..., dry_run=True)`` returns the prompt the brain would have been
+``execute_task(..., dry_run=True)`` returns what the brain would have been
 handed, as the second element of its four-tuple, with every layer in place —
 emissaries, persona, channel guidelines, the workspace and file-tool vocabulary,
 the eager skill bodies, the on-demand menu, the CLI-tool list, conversation
@@ -8,6 +8,18 @@ context, memory, and the rules block. Snapshotting that across a matrix catches
 the failure mode substring assertions decay away from: a layer that silently
 stops being included. An intentional change is a reviewed golden update via
 ``ISTOTA_UPDATE_GOLDEN=1``.
+
+**Two halves, one file per case.** ``build_prompt`` returns a
+``ComposedPrompt``: the standing instructions the brain receives outside the
+compactable message history, and the task material that may be summarized away.
+The dry-run rendering labels them ``===== SYSTEM =====`` and
+``===== USER =====``, and each golden snapshots both under those labels rather
+than splitting into twenty-six files — cross-half duplication and cross-half
+loss are exactly what a reviewer needs to see side by side, and two files hide
+both. Nothing here re-parses the rendering back into a ``ComposedPrompt``; the
+whole labelled string is the snapshot. The classification itself is asserted by
+name in ``tests/test_prompt_split.py``, because a golden regenerated from a
+mistaken classification records the mistake and goes green.
 
 **The regeneration command puts `env` inside the `uv run`**, and the shell
 assignment in front of it that everyone reaches for first does not work on every
@@ -100,7 +112,13 @@ from istota.config import (
     SleepCycleConfig,
     UserConfig,
 )
-from istota.executor import custom_system_prompt_path, execute_task
+from istota.executor import (
+    DRY_RUN_PROMPT_HEADER,
+    PROMPT_SYSTEM_LABEL,
+    PROMPT_USER_LABEL,
+    custom_system_prompt_path,
+    execute_task,
+)
 
 GOLDEN_DIR = Path(__file__).parent / "golden" / "prompts"
 UPDATE_ENV = "ISTOTA_UPDATE_GOLDEN"
@@ -109,7 +127,10 @@ UPDATE_ENV = "ISTOTA_UPDATE_GOLDEN"
 #: The `env` sits *inside* the `uv run`, not as a shell assignment in front of
 #: it, and that is the whole point — see the module docstring.
 UPDATE_CMD = f"uv run env {UPDATE_ENV}=1 pytest tests/test_prompt_golden.py -n0"
-DRY_RUN_PREFIX = "[DRY RUN] Would execute with prompt:\n\n"
+#: Taken from the product rather than restated, so a change to the dry-run
+#: rendering shows up here as a golden diff instead of as a prefix that no
+#: longer strips and thirteen goldens carrying a header line.
+DRY_RUN_PREFIX = f"{DRY_RUN_PROMPT_HEADER}\n\n"
 
 
 def updating() -> bool:
@@ -542,7 +563,12 @@ def _seed_history(config: Config, case: Case) -> None:
 
 
 def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
-    """Run one case to a normalized prompt."""
+    """Run one case to the normalized, two-part dry-run rendering.
+
+    The return value is the whole labelled string — system half, blank line,
+    user half — with the ``[DRY RUN]`` header stripped. Tests that care about
+    one half assert on the section they name; the goldens keep both.
+    """
     # A host-capability probe, not a collaborator: `_bwrap_available` shells out
     # to bwrap, so it answers False on a laptop and True on the Linux runner,
     # and it picks one of two rule-3 paragraphs. Pinning it is what makes the
@@ -565,6 +591,20 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     assert success, result
     assert result.startswith(DRY_RUN_PREFIX), result[:200]
     return normalize(result[len(DRY_RUN_PREFIX):], tmp_path=tmp_path)
+
+
+def split_halves(rendered: str) -> tuple[str, str]:
+    """The two halves of an assembled case, for a test that names one.
+
+    Here rather than in the product, deliberately: `render_composed_prompt`
+    goes one way only, and a parser in `executor.py` would make the labels
+    load-bearing in the other direction too. The goldens themselves never use
+    this — they snapshot the whole labelled string.
+    """
+    assert rendered.count(PROMPT_SYSTEM_LABEL) == 1, rendered[:200]
+    assert rendered.count(PROMPT_USER_LABEL) == 1, rendered[:200]
+    system, user = rendered.split(f"\n\n{PROMPT_USER_LABEL}\n", 1)
+    return system[len(PROMPT_SYSTEM_LABEL) + 1:], user
 
 
 # ---------------------------------------------------------------------- the test
@@ -599,6 +639,24 @@ def test_prompt_golden(case, tmp_path, monkeypatch):
         f"{golden.relative_to(GOLDEN_DIR.parent.parent)}. If the change is "
         f"intended, regenerate with `{UPDATE_CMD}` and review the diff."
     )
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
+def test_every_case_renders_two_labelled_halves(case, tmp_path, monkeypatch):
+    """The shape the goldens are snapshots of, asserted once rather than read.
+
+    A case whose system half came out empty, or whose user half lost its
+    request, still produces a well-formed golden — a reviewer would have to
+    notice the absence. Both halves are non-trivial in every case in the
+    matrix, so the floor is stated here and the diff carries the detail.
+    """
+    system, user = split_halves(assemble(case, tmp_path, monkeypatch))
+
+    assert "You are Istota, a helpful assistant bot." in system
+    assert "## Important rules" in system
+    assert user.startswith("## User's request") or user.startswith("## ")
+    assert "## User's request" in user
+    assert "## Important rules" not in user
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)

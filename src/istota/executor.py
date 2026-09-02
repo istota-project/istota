@@ -10,6 +10,7 @@ import tempfile
 import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -4618,6 +4619,50 @@ def _attachment_line(
     return f"  - {attachment} [{where}]" + (f" — {note}" if note else "")
 
 
+@dataclass(frozen=True)
+class ComposedPrompt:
+    """The two halves of a task prompt, which are not interchangeable.
+
+    ``system`` is Istota's standing instructions — identity, execution
+    constraints, emissaries, persona, the workspace vocabulary, the callable
+    tool surface, the rules, the response guidelines and the skill bodies. It
+    reaches the brain *outside* the compactable message history, so it is still
+    there verbatim after the model's context has been summarized (ISSUE-375).
+
+    ``user`` is the task material a compaction summary is meant to carry
+    forward instead: retrieved memory, conversation and confirmation history,
+    and the request itself.
+
+    A frozen dataclass rather than a tuple, because the two strings have
+    different authority and swapping them must be visible at the call site
+    rather than being a silent argument-order mistake.
+    """
+
+    system: str
+    user: str
+
+
+#: The dry-run rendering, in fixed labels rather than prose, so nothing has to
+#: guess where one half ends. Read by `tests/test_prompt_golden.py`, which
+#: snapshots both halves of one assembly into one file.
+DRY_RUN_PROMPT_HEADER = "[DRY RUN] Would execute with prompts:"
+PROMPT_SYSTEM_LABEL = "===== SYSTEM ====="
+PROMPT_USER_LABEL = "===== USER ====="
+
+
+def render_composed_prompt(prompt: ComposedPrompt) -> str:
+    """Both halves, labelled, for a dry run and for the goldens.
+
+    Takes the value type. It never parses a joined string back into parts —
+    that would make the delimiters load-bearing in the other direction, and a
+    prompt containing one of them would then re-split wrongly.
+    """
+    return (
+        f"{PROMPT_SYSTEM_LABEL}\n{prompt.system}\n\n"
+        f"{PROMPT_USER_LABEL}\n{prompt.user}"
+    )
+
+
 def build_prompt(
     task: db.Task,
     user_resources: list[db.UserResource],
@@ -4644,8 +4689,36 @@ def build_prompt(
     conn: "db.sqlite3.Connection | None" = None,
     effective_prompt: str | None = None,
     attachment_status: "dict[str, str] | None" = None,
-) -> str:
-    """Build the full prompt for Claude Code execution.
+) -> ComposedPrompt:
+    """Build a task's prompt, split by authority rather than by size.
+
+    Returns a `ComposedPrompt`: standing instructions in ``system``, task
+    material in ``user``. The split is not about how often a value changes —
+    it is about whether the value has to remain verbatim for the life of the
+    task. Anything a rule still names after the model's history has been
+    compacted away belongs in ``system``, which is why the four time lines and
+    the accessible-resources section are there despite reading as task facts:
+    rules 1, 7, 8 and 9 point at them, those rules survive compaction, and a
+    surviving instruction pointing at deleted material is ISSUE-375 again.
+
+    **No line in the system half may point at material in the user half.** The
+    single string this replaced was written as one document and referred to
+    itself throughout. Four references were live at the split; three are
+    answered by putting the referent in the system half, and the fourth — the
+    group-conversation line — is answered by dropping the word "below", since
+    its referent is conversation context and belongs in the user half.
+
+    The split also raises several interpolated scalars from a user message to a
+    system one, so every one of them goes through `_one_line` before it is
+    rendered into a header. That is structural sanitation and not instruction
+    sanitation: the multiline instruction blocks (persona, emissaries,
+    guidelines, changelog, skill overlays) are untouched, because their
+    structure *is* lines.
+
+    This is the only production assembly function. There are deliberately no
+    parallel ``build_system_prompt`` / ``build_user_prompt`` entry points: they
+    would have to repeat every conditional in here, and the two copies would
+    drift into a layer rendered twice or not at all.
 
     Pass ``conn`` to let the per-task timezone lookup reuse an existing
     framework-DB connection instead of opening a throwaway one.
@@ -4673,17 +4746,30 @@ def build_prompt(
     # bind-mount loop (build_sandbox_command / native_fs_roots) still mounts
     # out-of-workspace paths into the sandbox; CalDAV discovery still drives
     # the Calendar section; the web root stays config-driven.
+
+    # Every scalar interpolated into the system half is flattened first. The
+    # split raised this whole document from a user message to a system one, so
+    # a value carrying a line break no longer forges a line in task material —
+    # it forges a standing instruction, in the one message compaction never
+    # touches. `_one_line` collapses rather than refuses, for the reason it
+    # gives: this runs on the assembly path, where raising means no task at all.
+    # Nothing upstream validates any of these — the user id and conversation
+    # token come off a task row, the source and output target off routing, the
+    # timezone label off a per-user profile.
+    display_bot_name = _one_line(config.bot_name)
+    display_user_id = _one_line(task.user_id)
+
     resource_sections = []
 
     if config.use_mount:
         resource_sections.append(
-            f"Your workspace is at Users/{task.user_id}/, containing "
+            f"Your workspace is at Users/{display_user_id}/, containing "
             f"shared/, inbox/, memories/, and your bot dir "
             f"({config.bot_dir_name}/). Notes live in {config.bot_dir_name}/notes/."
         )
     else:
         resource_sections.append(
-            f"Your workspace is at Users/{task.user_id}/."
+            f"Your workspace is at Users/{display_user_id}/."
         )
 
     # Calendars stay discovery-driven (CalDAV); the resource-typed fallback
@@ -4693,7 +4779,9 @@ def build_prompt(
             f"  - {name}: {url} ({'read/write' if writable else 'read-only'})"
             for name, url, writable in discovered_calendars
         )
-        resource_sections.append(f"Calendars (shared by {task.user_id}):\n{cal_list}")
+        resource_sections.append(
+            f"Calendars (shared by {display_user_id}):\n{cal_list}"
+        )
 
     resources_text = "\n\n".join(resource_sections)
 
@@ -4824,15 +4912,22 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # local folder, Nextcloud via mount, Nextcloud via rclone. Non-admin users
     # get a scoped path restricted to their own directory (server shape only).
     if config.storage_backend == "local":
-        ws_root = config.workspace_root(task.user_id) or config.nextcloud_mount_path
+        # `_one_line` here as well as on the bare user id above: these paths are
+        # built from it, so a line break survives `Path` joining into the
+        # system half.
+        ws_root = _one_line(
+            str(config.workspace_root(task.user_id) or config.nextcloud_mount_path)
+        )
         file_tools = f"""- Your files live in your workspace at '{ws_root}'. Use standard file tools (Read, Write, Edit, ls, cat).
   - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is a normal local folder.
   - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
     elif config.use_mount:
         if is_admin:
-            mount_display = str(config.nextcloud_mount_path)
+            mount_display = _one_line(str(config.nextcloud_mount_path))
         else:
-            mount_display = str(config.nextcloud_mount_path / "Users" / task.user_id)
+            mount_display = _one_line(
+                str(config.nextcloud_mount_path / "Users" / task.user_id)
+            )
         file_tools = f"""- Nextcloud files are mounted at '{mount_display}'
   - List: ls {mount_display}/path/
   - Read: cat {mount_display}/path/file.txt
@@ -4898,8 +4993,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             if cli_skills_section else skills_index
         )
 
-    # Compute user's local time
-    user_tz, user_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
+    # Compute user's local time. The label is flattened *before* it reaches the
+    # three rendered lines rather than only at the `User timezone:` header:
+    # rules 7, 8 and 9 name `Current time` and `Today's date` too, and both
+    # carry the same label in parentheses.
+    user_tz, _raw_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
+    user_tz_str = _one_line(_raw_tz_str)
     user_now = datetime.now(user_tz)
     user_time_str = user_now.strftime("%A, %B %-d, %Y at %-I:%M %p") + f" ({user_tz_str})"
     user_date_str = user_now.strftime("%Y-%m-%d") + f" ({user_tz_str})"
@@ -4951,33 +5050,44 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         )
         reply_quote_section = f"> Replying to:\n{quoted}\n\n"
 
+    # The remaining header scalars, flattened for the reason given where
+    # `display_bot_name` and `display_user_id` are bound.
+    display_source = _one_line(source_type or task.source_type or "unknown")
+    display_output_target = _one_line(output_target or "text")
+    display_token = _one_line(task.conversation_token or "none")
+
     group_chat_line = ""
     if task.is_group_chat:
-        group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{task.user_id}'. Other participants' messages are visible in conversation context below."
+        # No "below": the conversation context this names is in the user half,
+        # which native compaction may replace with a summary. A system line
+        # pointing there would become a false statement in a message that
+        # survives for the life of the task.
+        group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{display_user_id}'. Other participants' messages are visible in conversation context."
 
     # Per-user plus-addressed email line
     per_user_email_line = ""
     _per_user_email = email_support.per_user_address(config, task.user_id)
     if _per_user_email:
-        per_user_email_line = f"\nPer-user email: {_per_user_email}"
+        per_user_email_line = f"\nPer-user email: {_one_line(_per_user_email)}"
 
-    prompt = f"""You are {config.bot_name}, a helpful assistant bot. You are responding to a request from user '{task.user_id}'.
+    # ---- the system half: standing instructions, verbatim for the whole task
+    system = f"""You are {display_bot_name}, a helpful assistant bot. You are responding to a request from user '{display_user_id}'.
 
 Current time: {user_time_str}
 Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {task.conversation_token or 'none'}{group_chat_line}
-Source: {source_type or task.source_type or 'unknown'}
-Output target: {output_target or 'text'}{per_user_email_line}
+Conversation token: {display_token}{group_chat_line}
+Source: {display_source}
+Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
 {privileges_line}
 {emissaries_section}{persona_section}
 ## User's accessible resources
 
 {resources_text}
-{memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}{playbooks_section}## Available tools
+## Available tools
 
 You have access to:
 {file_tools}{browser_tool}{web_tools}{bash_tool}
@@ -4985,19 +5095,39 @@ You have access to:
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 {rules_section}
-{context_section}
-{confirmation_section}## User's request
-
-{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}
 {channel_section}"""
 
     if skills_changelog:
-        prompt += f"\n\n## What's New in Skills\n\n{skills_changelog}"
+        system += f"\n\n## What's New in Skills\n\n{skills_changelog}"
 
     if skills_doc:
-        prompt += f"\n\n{skills_doc}"
+        system += f"\n\n{skills_doc}"
 
-    return prompt
+    # ---- the user half: task material the compaction summary carries forward
+    #
+    # Joined block by block rather than by one f-string skeleton: each of these
+    # carries its own leading and trailing newlines from the days when they sat
+    # between fixed neighbours, and concatenating them raw now leaves a dropped
+    # block's separators behind. One blank line between whatever is present.
+    user_blocks = [
+        memory_section,
+        knowledge_facts_section,
+        channel_memory_section,
+        dated_memories_section,
+        recalled_section,
+        playbooks_section,
+        context_section,
+        confirmation_section,
+    ]
+    user = "".join(
+        block.strip("\n") + "\n\n" for block in user_blocks if block.strip()
+    )
+    user += (
+        "## User's request\n\n"
+        f"{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}\n"
+    )
+
+    return ComposedPrompt(system=system, user=user)
 
 
 def build_deferred_briefing_prompt(task: db.Task, config: Config) -> str | None:
@@ -5612,7 +5742,7 @@ def execute_task(
     if task.confirmed_at and task.confirmation_prompt:
         _confirmation_context = task.confirmation_prompt
 
-    prompt = build_prompt(
+    composed = build_prompt(
         task, user_resources, config, skills_doc, conversation_context, user_memory,
         discovered_calendars, user_email_addresses, dated_memories, channel_memory,
         skills_changelog, is_admin, emissaries,
@@ -5630,6 +5760,13 @@ def execute_task(
         attachment_status=image_attachment_status(image_prep),
     )
 
+    # The two halves are still concatenated into the one string the brains take
+    # today. `BrainRequest` learns to carry them apart in a later stage of the
+    # compaction-safe-composed-prompts spec; splitting assembly and wiring the
+    # consumer in one step would mean a stage that ships a task with no persona,
+    # no rules and no tool descriptions.
+    prompt = f"{composed.system}\n\n{composed.user}"
+
     # Log prompt size breakdown
     context_chars = len(conversation_context) if conversation_context else 0
     memory_chars = len(user_memory or "") + len(dated_memories or "") + len(channel_memory or "") + len(recalled_memories or "")
@@ -5642,7 +5779,8 @@ def execute_task(
     )
 
     if dry_run:
-        return True, f"[DRY RUN] Would execute with prompt:\n\n{prompt}", None, None
+        rendered = render_composed_prompt(composed)
+        return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
     # Write prompt to temp file for debugging
     prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"

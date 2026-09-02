@@ -1658,7 +1658,7 @@ class TestChannelMemoryInPrompt:
         prompt = build_prompt(
             task, [], config,
             channel_memory="- Project uses PostgreSQL",
-        )
+        ).user
         assert "## Channel memory" in prompt
         assert "Project uses PostgreSQL" in prompt
 
@@ -1669,7 +1669,7 @@ class TestChannelMemoryInPrompt:
         config = _make_config(tmp_path)
         task = _make_task()
 
-        prompt = build_prompt(task, [], config, channel_memory=None)
+        prompt = build_prompt(task, [], config, channel_memory=None).user
         assert "## Channel memory" not in prompt
 
     def test_build_prompt_includes_conversation_token(self, tmp_path):
@@ -1679,7 +1679,7 @@ class TestChannelMemoryInPrompt:
         config = _make_config(tmp_path)
         task = _make_task(conversation_token="room42")
 
-        prompt = build_prompt(task, [], config)
+        prompt = build_prompt(task, [], config).system
         assert "Conversation token: room42" in prompt
 
     def test_build_prompt_conversation_token_none(self, tmp_path):
@@ -1689,7 +1689,7 @@ class TestChannelMemoryInPrompt:
         config = _make_config(tmp_path)
         task = _make_task()
 
-        prompt = build_prompt(task, [], config)
+        prompt = build_prompt(task, [], config).system
         assert "Conversation token: none" in prompt
 
     def test_execute_task_loads_channel_memory(self, tmp_path):

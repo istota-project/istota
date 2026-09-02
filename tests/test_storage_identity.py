@@ -101,7 +101,7 @@ class TestPromptStorageFramingLocal:
             nextcloud_mount_path=tmp_path / "workspace",
         )
         assert config.storage_backend == "local"
-        return build_prompt(_task(), [], config)
+        return build_prompt(_task(), [], config).system
 
     def test_no_nextcloud_vocabulary(self, tmp_path):
         # Strip environment paths (pytest's tmp_path embeds the method name,
@@ -132,7 +132,7 @@ class TestPromptStorageFramingNextcloud:
             nextcloud_mount_path=tmp_path / "mnt",
         )
         assert config.storage_backend == "nextcloud"
-        return build_prompt(_task(), [], config)
+        return build_prompt(_task(), [], config).system
 
     def test_keeps_nextcloud_vocabulary(self, tmp_path):
         prompt = self._prompt(tmp_path)
@@ -152,7 +152,7 @@ class TestPromptStorageFramingRclone:
         )
         assert config.storage_backend == "nextcloud"
         assert config.use_mount is False
-        prompt = build_prompt(_task(), [], config)
+        prompt = build_prompt(_task(), [], config).system
         assert "rclone" in prompt
         assert "Nextcloud" in prompt
 
