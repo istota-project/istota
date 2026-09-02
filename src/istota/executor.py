@@ -3404,9 +3404,9 @@ def build_bwrap_cmd(
     generic, including the ordering, which is load-bearing in four places
     (cache bind before repos bind, ``.developer`` re-bind after
     ``user_temp_dir``, ``extra_ro_binds`` after *every* bind — its two entries
-    are a document a daemon-side OCR call names and the task's own composed
-    system prompt, and both live inside a read-write bind that would otherwise
-    bury them — and masks last with ``--remount-ro`` after each).
+    are a document a daemon-side OCR call names, which lives inside a
+    read-write bind that would otherwise bury it, and the task's own control
+    directory — and masks last with ``--remount-ro`` after each).
     Omitting the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
@@ -3800,14 +3800,19 @@ def build_bwrap_cmd(
     # test_the_document_stays_read_only_under_a_later_bind`.
     #
     # It has one task-path entry now, and being last is what that entry wants
-    # too. `execute_task` appends the task's own `task_<id>_system_prompt.txt`,
-    # which holds Istota's composed standing instructions and sits *inside* the
-    # read-write `user_temp_dir` bind — so only a later read-only bind of the
-    # file makes it read-only, and an earlier one is simply overmounted by its
-    # parent. That needed the loop after `user_temp_dir`; being after every
-    # bind satisfies it and more. (This comment used to say the loop was free
-    # to move because the list was always empty on the task path. It was true
-    # when written and stopped being true in the same release.)
+    # too. `execute_task` appends the task's own control directory,
+    # `{temp_dir}/.control/{user_id}/task_{id}` — both prompt halves, the
+    # briefing metadata and the prepared image renditions, everything the
+    # daemon authors for this task. It is a sibling of `user_temp_dir` rather
+    # than a child, so nothing binds over it today; being after every bind is
+    # what keeps that true of any bind added later. (The entry used to be one
+    # file *inside* the read-write `user_temp_dir` bind, where a later
+    # read-only bind was the only thing that made it read-only at all. That
+    # ordering requirement is gone with the file, and the loop stays where it
+    # is because the property is worth having unconditionally. This comment
+    # used to say the loop was free to move because the list was always empty
+    # on the task path. It was true when written and stopped being true in the
+    # same release.)
     #
     # A missing entry is skipped rather than raising, because bwrap fails the
     # whole namespace on a bind whose source is absent — one cleanup race would
@@ -4015,7 +4020,7 @@ def native_fs_roots(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
-    composed_system_prompt_path: Path | None = None,
+    control_dir: Path | None = None,
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """File-access roots for a native-brain task.
 
@@ -4048,51 +4053,50 @@ def native_fs_roots(
     path gets, and on an unsandboxed one the drift is the whole policy.
 
     The third element carries the RO carve-outs bwrap gets by re-binding a
-    subdirectory read-only *after* its parent's RW bind. Containment alone
-    cannot express those, so they are returned separately and threaded onto
-    ``ToolEnv.write_denied_roots``. Two entries today. ``.developer`` — the
-    credential-fetch helper and the git credential helpers — which the
-    claude_code path has protected since the RO re-bind was added and which
-    this function silently left writable until it grew this return value. And
-    ``composed_system_prompt_path``, the task's own
-    ``task_<id>_system_prompt.txt``: Istota's standing instructions, written
-    into ``user_temp_dir`` and therefore inside a write root. bwrap re-binds it
-    read-only through ``extra_ro_binds``, which covers Bash and covers nothing
-    that goes through ``ToolEnv`` — so without this entry a native task
-    rewrites the instructions it is running under with one ``Write`` call, and
-    a ``native -> claude_code`` reroute reads the rewrite, since the reroute
-    keeps the same path. That is the ``.developer`` asymmetry above, repeated,
-    which is why it is closed in the same commit that opens it.
+    path read-only *after* the RW bind that would otherwise cover it.
+    Containment alone cannot express those, so they are returned separately and
+    threaded onto ``ToolEnv.write_denied_roots``. Two entries today.
+    ``.developer`` — the credential-fetch helper and the git credential helpers
+    — which the claude_code path has protected since the RO re-bind was added
+    and which this function silently left writable until it grew this return
+    value. And ``control_dir``, the task's own
+    ``{temp_dir}/.control/{user_id}/task_{id}``: every file the daemon authors
+    for this task, which is to say both prompt halves, the briefing metadata
+    and the prepared image renditions.
 
-    **The deny entry is the task's own exact path, and that is narrower than
-    the shape.** ``user_temp_dir`` is per *user*, not per task, so a second
-    concurrent task of the same user has this directory in its write roots and
-    is denied only its own file. Nothing here expresses
-    ``task_*_system_prompt.txt`` as a shape: a deny root is compared by
-    equality or containment (``ToolEnv._in_denied``), and the same is true of
-    the bwrap bind.
+    **``control_dir`` goes in two lists, and neither covers the other's case.**
+    It is also appended to ``read_only``, and the reason is the whole shape of
+    ``ToolEnv``:
 
-    That was reviewed and the flat path was kept deliberately, because **the
-    exposure is not specific to this file**. ``task_<id>_prompt.txt`` carries
-    the user half and therefore what the task was asked to do; the result file
-    and every deferred-op JSON sit in the same directory on the same terms. A
-    dedicated denied subdirectory for the system half closes one member of that
-    class, adds a mechanism to keep in sync forever, and leaves the larger
-    member open. What the entry above *does* close is the case this spec
-    introduced and the one a single task can reach on its own: a native task
-    rewriting the instructions it is itself running under, which a
-    ``native -> claude_code`` reroute would read back. The cross-task case needs
-    two concurrent tasks of the same user and yields no privilege that user does
-    not already hold — only the chance to strip another in-flight task's rules.
-    It is a residual of the artifact directory, to be closed if that directory
-    ever moves out of the model-writable tree, and it is stated rather than
-    implied.
+    - ``read_roots`` is ``None`` when confinement is off, and ``None`` means
+      *unconfined* — both root lists are then inert. So a ``read_only`` entry
+      alone protects nothing on the standalone install or the shipped Docker
+      stack.
+    - ``write_denied_roots`` is checked *ahead of* that unconfined return, so
+      it is enforced whether or not confinement is active; its empty value is
+      ``()`` rather than ``None``, because a deny set has no unconfined meaning
+      to signal.
+    - Under confinement the control directory is inside no write root — that is
+      the design, it is a sibling of ``user_temp_dir`` rather than a child — so
+      ``read_only`` is what makes it *readable* while leaving it unwritable.
+      Without it a confined task could not open its own prepared image
+      attachment, on a path its own prompt named.
+
+    **The entry is a directory, and that is what retired the per-file one.**
+    It used to be ``composed_system_prompt_path``, one exact path, because
+    neither this list nor a bwrap bind can express a filename pattern — so
+    ``task_<id>_prompt.txt``, the briefing metadata and every rendition sat
+    beside it unguarded, and a *second concurrent task of the same user* could
+    overwrite another task's file, ``user_temp_dir`` being per user rather than
+    per task. ``ToolEnv._in_denied`` compares realpaths with ``is_relative_to``,
+    so one directory entry covers every file nested under it and a framework
+    file added later needs no new entry here.
 
     **This function is not the only producer of that deny entry, and must not
     become it.** ``execute_task`` calls this only under
     ``native_fs_confinement_active``, so on an unsandboxed shape — macOS, the
     standalone install, the shipped Docker stack — nothing here runs at all.
-    The composed path is therefore seeded onto ``fs_write_denied_roots``
+    The control directory is therefore seeded onto ``fs_write_denied_roots``
     *outside* that branch, which is where it does the most work: those are the
     deployments with no bwrap re-bind behind it. ``ToolEnv`` enforces a deny
     root whether or not confinement is on, precisely so that seeding means
@@ -4134,16 +4138,23 @@ def native_fs_roots(
     # into existence costs one failed comparison.
     write_denied.append(user_temp_dir.resolve() / ".developer")
 
-    # The composed system prompt (RO carve-out inside the same workspace).
-    # Mirrors the `extra_ro_binds` entry `execute_task` passes to
-    # `build_bwrap_cmd`. Appended directly rather than through `_add`, for the
-    # reason `.developer` is: `_add` skips a path that does not exist, and a
-    # deny root that only appears once the file does would leave a window in
-    # which the file is writable. The executor writes it before this is called,
-    # so the window is theoretical — which is exactly when it is cheapest to
-    # close.
-    if composed_system_prompt_path is not None:
-        write_denied.append(composed_system_prompt_path.resolve())
+    # The task control directory. Mirrors the `extra_ro_binds` entry
+    # `execute_task` passes to `build_bwrap_cmd`, and takes two entries here
+    # rather than one — see the docstring for why `read_only` and
+    # `write_denied` are enforced under different conditions.
+    #
+    # Both appended directly rather than through `_add`, for the reason
+    # `.developer` is: `_add` skips a path that does not exist, and a deny root
+    # that only appears once the directory does would leave a window in which
+    # it is writable. `ensure_task_control_dir` runs before this is called, so
+    # the window is theoretical — which is exactly when it is cheapest to
+    # close. A read root that never comes into existence costs one failed
+    # comparison.
+    if control_dir is not None:
+        _control_real = control_dir.resolve()
+        write_denied.append(_control_real)
+        if _control_real not in read_only:
+            read_only.append(_control_real)
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
@@ -6906,20 +6917,31 @@ def execute_task(
 
         # Collect extra paths to RO bind-mount into the sandbox.
         #
-        # The composed system prompt is this parameter's first production
-        # consumer. `build_bwrap_cmd` binds `user_temp_dir` read-write and
-        # applies these twenty-odd lines further down, after the `.developer`
-        # carve-out that established the pattern — so the later read-only bind
-        # of this one file shadows the read-write bind of its directory, and
-        # the model's own Bash tool cannot rewrite the standing instructions it
-        # is running under. A `native -> claude_code` reroute keeps the same
-        # path, so a rewrite would survive the reroute too.
+        # The task control directory is this parameter's production consumer,
+        # and it is a *directory* rather than the composed system prompt file
+        # it started as. A bind names one exact path and cannot express a
+        # filename pattern, so the per-file entry guarded the standing
+        # instructions and left `prompt.txt`, the briefing metadata and every
+        # prepared image rendition beside it unguarded — each one a thing
+        # somebody had to remember into this list by hand.
         #
-        # This is half the protection and on the native brain it is the half
-        # that matters least: `Write` and `Edit` run through `ToolEnv` and
-        # enter no mount namespace. The other half is the matching deny entry
-        # `native_fs_roots` returns, some four hundred lines below.
-        _extra_ro_binds: list[Path] = [system_prompt_file]
+        # `build_bwrap_cmd` applies these after every other bind, which is what
+        # keeps a read-only entry read-only under any bind added later; the
+        # `.developer` carve-out established the pattern. The directory is a
+        # sibling of `user_temp_dir` rather than a child, so nothing binds over
+        # it today either.
+        #
+        # Emitted under both profiles. Nothing inside a NATIVE namespace opens
+        # the system prompt — NativeBrain reads it in the daemon — but both
+        # backends put the prepared attachment paths into the prompt's
+        # `Attached files:` section, so a model that decides to `Read` one has
+        # to find it, and the tool server runs in there.
+        #
+        # This is half the protection: `Read`, `Write` and `Edit` run through
+        # `ToolEnv` and enter no mount namespace on the unsandboxed shapes. The
+        # other half is the pair of entries `native_fs_roots` returns, some
+        # four hundred lines below, plus the unconditional seed beside them.
+        _extra_ro_binds: list[Path] = [control_dir]
 
         # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
@@ -7295,7 +7317,7 @@ def execute_task(
         # cwd choice below uses. Other brains ignore these fields.
         _fs_read_roots: "list[Path] | None" = None
         _fs_write_roots: "list[Path] | None" = None
-        # The composed system prompt is denied **whether or not confinement is
+        # The task control directory is denied **whether or not confinement is
         # active**, which is why it is seeded here rather than only inside the
         # branch. The two root lists are an allowlist and mean nothing without
         # confinement, but a deny root is a statement about a path: `ToolEnv`
@@ -7309,10 +7331,15 @@ def execute_task(
         # the standalone install and on the shipped Docker stack (which grants
         # neither `seccomp:unconfined` nor `systempaths=unconfined`, so the
         # bwrap probe fails and every task runs uncontained). Gating this on
-        # sandboxing would leave the file with no guard at all on precisely
-        # those deployments. The confined branch below returns a list that
-        # already contains it, so there is no duplicate.
-        _fs_write_denied_roots: "list[Path]" = [system_prompt_file]
+        # sandboxing would leave the directory with no guard at all on
+        # precisely those deployments. The confined branch below returns a list
+        # that already contains it, so there is no duplicate.
+        #
+        # No matching *read* seed, and that is not an omission: `read_roots`
+        # left as None is what `ToolEnv` reads as unconfined, so adding one
+        # here would turn an unconfined shape into a confined one whose only
+        # readable path is this directory.
+        _fs_write_denied_roots: "list[Path]" = [control_dir]
         if native_fs_confinement_active(config):
             _fs_read_roots, _fs_write_roots, _fs_write_denied_roots = native_fs_roots(
                 config,
@@ -7321,7 +7348,7 @@ def execute_task(
                 user_resources,
                 Path(user_temp_dir),
                 workspace_dir,
-                composed_system_prompt_path=system_prompt_file,
+                control_dir=control_dir,
             )
 
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller

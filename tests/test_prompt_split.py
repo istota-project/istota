@@ -779,15 +779,19 @@ class TestWhatTheBrainIsHanded:
         assert not (control / "prompt.txt").exists()
         assert not (control / "system_prompt.txt").exists()
 
-    def test_the_sandbox_wrap_carries_the_composed_file_as_a_ro_bind(
+    def test_the_sandbox_wrap_carries_the_control_dir_as_a_ro_bind(
         self, tmp_path,
     ):
         """`_extra_ro_binds` had no production consumer until this stage.
 
         `tests/test_sandbox.py` proves `build_bwrap_cmd` re-binds whatever it
-        is handed, after the read-write bind of the directory. This proves the
-        executor hands it the composed file — the two halves of a claim that
-        neither test makes alone.
+        is handed, after every other bind and before the masks. This proves
+        the executor hands it the task control directory — the two halves of a
+        claim that neither test makes alone.
+
+        The entry is the *directory*, not the composed file: a bind names one
+        exact path and cannot express a filename pattern, so a per-file entry
+        left every other framework file in that directory unguarded.
         """
         captured = {}
 
@@ -796,33 +800,40 @@ class TestWhatTheBrainIsHanded:
             return raw_cmd
 
         with patch("istota.executor.build_bwrap_cmd", side_effect=fake_bwrap):
-            _config, _task, req = self._run(tmp_path, sandbox=True)
+            config, task, req = self._run(tmp_path, sandbox=True)
             req.sandbox_wrap(["true"])
             req.native_sandbox_wrap(["true"])
 
-        assert req.composed_system_prompt_path in captured["extra_ro_binds"], (
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert captured["extra_ro_binds"] == [control], (
             f"extra_ro_binds was {captured.get('extra_ro_binds')!r}"
         )
+        assert req.composed_system_prompt_path.parent == control
 
-    def test_the_native_file_tools_are_denied_the_composed_file(self, tmp_path):
+    def test_the_native_file_tools_are_denied_the_control_dir(self, tmp_path):
         """The other mechanism, from the same run.
 
-        The bind covers Bash. `Write` and `Edit` resolve through `ToolEnv` and
-        enter no namespace, so the deny list is what stops a native task
-        rewriting its own standing instructions. Both, or neither is worth
-        having.
+        The bind covers Bash. `Read`, `Write` and `Edit` resolve through
+        `ToolEnv` and enter no namespace on the unsandboxed shapes, so the
+        deny list is what stops a native task rewriting its own standing
+        instructions. Both, or neither is worth having.
         """
         with patch("istota.executor.native_fs_confinement_active", return_value=True):
-            _config, _task, req = self._run(tmp_path, sandbox=True)
+            config, task, req = self._run(tmp_path, sandbox=True)
 
-        assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert control in req.fs_write_denied_roots, (
             f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
         )
         # Once, not twice: `native_fs_roots` returns it and the executor seeds
         # it, and a duplicate would be the shape of two producers drifting.
-        assert req.fs_write_denied_roots.count(
-            req.composed_system_prompt_path
-        ) == 1, req.fs_write_denied_roots
+        assert req.fs_write_denied_roots.count(control) == 1, (
+            req.fs_write_denied_roots
+        )
+        # Denied but readable. The control directory is inside no write root,
+        # so without the read entry a confined task could not open the image
+        # attachment its own prompt named.
+        assert control in (req.fs_read_roots or []), req.fs_read_roots
 
     def test_the_deny_entry_survives_an_unsandboxed_deployment(self, tmp_path):
         """The shapes with nothing else, and the ones easiest to miss.
@@ -839,13 +850,14 @@ class TestWhatTheBrainIsHanded:
         with patch(
             "istota.executor.native_fs_confinement_active", return_value=False,
         ):
-            _config, _task, req = self._run(tmp_path)
+            config, task, req = self._run(tmp_path)
 
         assert req.fs_read_roots is None, (
             "the roots are an allowlist and mean nothing unconfined; this test "
             "is about the deny set, so the fixture has to actually be unconfined"
         )
-        assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert control in req.fs_write_denied_roots, (
             f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
         )
 
@@ -858,18 +870,25 @@ class TestWhatTheBrainIsHanded:
         with patch(
             "istota.executor.native_fs_confinement_active", return_value=False,
         ):
-            _config, _task, req = self._run(tmp_path)
+            config, task, req = self._run(tmp_path)
 
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
         env = ToolEnv(
-            cwd=req.composed_system_prompt_path.parent,
-            write_denied_roots=tuple(req.fs_write_denied_roots),
+            cwd=control, write_denied_roots=tuple(req.fs_write_denied_roots),
         )
         assert env.confined is False
         with pytest.raises(ToolPathError, match="read-only"):
             env.resolve(str(req.composed_system_prompt_path), write=True)
-        # The sibling control: nothing else in the directory became read-only.
+        # And a name nothing has written yet, which is the per-directory claim
+        # the old per-file entry could not make.
+        with pytest.raises(ToolPathError, match="read-only"):
+            env.resolve(str(control / "planted.txt"), write=True)
+        # The sibling control: the model's own working directory is untouched.
+        # Without it this test would pass equally against a task whose whole
+        # temp tree had been refused, which is a different mechanism.
         env.resolve(
-            str(req.composed_system_prompt_path.parent / "notes.txt"), write=True,
+            str(executor.get_user_temp_dir(config, task.user_id) / "notes.txt"),
+            write=True,
         )
 
     @pytest.mark.parametrize("name", ["prompt.txt", "system_prompt.txt"])

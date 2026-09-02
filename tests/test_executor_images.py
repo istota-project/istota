@@ -596,17 +596,6 @@ class TestCancellation:
 
 
 class TestPathsAndBinds:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "the prepared renditions moved into the task control directory "
-            "ahead of the guards that reach it: `execute_task` still passes "
-            "only the composed system prompt file in `extra_ro_binds`, so the "
-            "directory the renditions are in is under no bind and a "
-            "sandboxed task cannot open the image the prompt names. Remove "
-            "this marker in the commit that binds the control directory."
-        ),
-    )
     def test_the_paths_named_to_the_model_are_the_ones_bwrap_binds(
         self, tmp_path, ocr, monkeypatch
     ):

@@ -4351,3 +4351,122 @@ class TestAnUnusableControlDirectoryFailsTheTask:
         # And the model was never reached: a task that cannot hold its own
         # standing instructions must not run without them.
         assert not mock_run.called
+
+
+class TestTheControlDirectoryIsGuardedOnEveryShape:
+    """`execute_task`'s two guard entries, read from the request it built.
+
+    They are enforced under different conditions and neither subsumes the
+    other, which is the one thing about this pair that is easy to get wrong:
+
+    - `fs_read_roots` is `None` when confinement is off, and `None` means
+      *unconfined* in `ToolEnv` — both root lists are then inert. A `read_only`
+      entry alone protects nothing on the standalone install or the shipped
+      Docker stack.
+    - `fs_write_denied_roots` is checked ahead of that unconfined return, so it
+      holds on every shape. That is why `execute_task` seeds it outside the
+      `native_fs_confinement_active` branch.
+    - Under confinement the control directory is inside no write root, so the
+      `read_only` entry is what makes it readable while leaving it unwritable.
+
+    `tests/test_sandbox.py::TestNativeFsRootsTaskControlDirectory` is the unit
+    half; this is the wiring.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            skills_dir=tmp_path / "_empty_skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+        )
+
+    def _run(self, tmp_path, confined):
+        from istota.executor import execute_task
+
+        config = self._make_config(tmp_path)
+        captured = {}
+
+        class _Brain:
+            model_namespace = "anthropic"
+            supports_steering = False
+            kind = "claude_code"
+
+            def execute(self, req):
+                captured["req"] = req
+                return BrainResult(
+                    success=True, result_text="answer", stop_reason="completed",
+                )
+
+            def resolve_model_name(self, name):
+                return (name or "").strip()
+
+            def resolve_alias(self, alias):
+                return None
+
+        with patch("istota.executor.make_brain", return_value=_Brain()), \
+                patch(
+                    "istota.executor.native_fs_confinement_active",
+                    return_value=confined,
+                ):
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt="hi", user_id="alice", source_type="talk",
+                )
+                task = db.get_task(conn, task_id)
+                execute_task(task, config, [], conn=conn, use_context=False)
+
+        assert "req" in captured, "the brain was never called"
+        return config, task, captured["req"]
+
+    def test_the_unconditional_seed_is_the_control_directory(self, tmp_path):
+        """The shapes with nothing else behind it. `build_bwrap_cmd` hands the
+        command back unwrapped on macOS, on the standalone install and on the
+        shipped Docker stack, and `native_fs_roots` is not called there at all
+        — so this seed is the only guard the control directory has."""
+        from istota.executor import get_task_control_dir
+
+        config, task, req = self._run(tmp_path, confined=False)
+
+        control = get_task_control_dir(config, task.user_id, task.id)
+        assert req.fs_read_roots is None, (
+            "the fixture is not actually unconfined, so this asserts nothing "
+            "about the shape it is named for"
+        )
+        assert req.fs_write_denied_roots == [control], req.fs_write_denied_roots
+
+    def test_the_confined_shape_gets_both_entries_once(self, tmp_path):
+        from istota.executor import get_task_control_dir
+
+        config, task, req = self._run(tmp_path, confined=True)
+
+        control = get_task_control_dir(config, task.user_id, task.id)
+        assert req.fs_write_denied_roots.count(control) == 1, (
+            f"fs_write_denied_roots was {req.fs_write_denied_roots!r}; two "
+            "producers seeding the same root is the shape of a drift"
+        )
+        assert control in (req.fs_read_roots or []), req.fs_read_roots
+        assert not any(
+            control == r or control.is_relative_to(r)
+            for r in (req.fs_write_roots or [])
+        ), req.fs_write_roots
+
+    def test_every_framework_file_rides_on_the_one_entry(self, tmp_path):
+        """The point of a per-directory guard: nothing has to be remembered
+        into a list. Asserted over the files the task actually wrote rather
+        than over a hardcoded set of names, so a file added later is covered
+        by this test the day it is added."""
+        from istota.executor import get_task_control_dir
+
+        config, task, req = self._run(tmp_path, confined=True)
+
+        control = get_task_control_dir(config, task.user_id, task.id)
+        written = sorted(p for p in control.rglob("*") if p.is_file())
+        assert written, "the task wrote no control files at all"
+        for path in written:
+            assert any(
+                path.is_relative_to(root) for root in req.fs_write_denied_roots
+            ), f"{path} is under no deny root: {req.fs_write_denied_roots}"
