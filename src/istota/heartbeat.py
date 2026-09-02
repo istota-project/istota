@@ -647,6 +647,22 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
 #: admin-gated — `run_check` gates only `shell-command`. So a check costing one
 #: spawn per configured user, or reaching past a `--version`, is a check this
 #: path must not run.
+#:
+#: **This list is known to be incomplete, and the reason is worth reading before
+#: extending it.** The spec that unified this handler onto the registry argued
+#: the cost was already paid, because `scheduler.check_doctor` runs the same
+#: registry hourly with `probe=True`. That is true of the *work* and false of
+#: the *thread*: `check_doctor` is dispatched through `_spawn_background_check`
+#: (`scheduler.py:8142`), while `check_heartbeats` is called synchronously on
+#: the dispatch loop inside an open transaction (`scheduler.py:8293`). So this
+#: handler blocks the loop for as long as the registry takes, once per user. A
+#: 30s `runtime.model_execution` there is not new — the probe this replaced did
+#: the same on the same thread — but the ~20 other checks are, and `web.basemap`
+#: (network), `runtime.mount_liveness` (a FUSE stat) and `config.skill_overlays`
+#: (a mount walk) all meet this list's own stated criterion. They are not added
+#: here because the alternative — moving `check_heartbeats` off the loop — is a
+#: better fix that belongs to whoever owns the scheduler's threading, and
+#: choosing between the two is not this constant's decision to make.
 _SELF_CHECK_SKIPPED = (
     # A `PRAGMA quick_check` over the whole framework database. `check_db_health`
     # owns that on a daily cadence, and `SWEEP_SKIPPED_CHECKS` excludes it from
@@ -688,34 +704,74 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     path actually needs.
 
     ``probe`` stays True. ``probe=False`` would map neatly onto the old
-    ``shutil.which`` calls, but it would make ``live=True`` self-contradictory,
-    and the cost is already paid: ``scheduler.check_doctor`` runs this same
-    registry hourly with ``probe=True``. :data:`_SELF_CHECK_SKIPPED` names the
-    four whose cost multiplies badly instead.
+    ``shutil.which`` calls, but it would make ``live=True`` self-contradictory.
+    :data:`_SELF_CHECK_SKIPPED` names the ones whose cost multiplies badly
+    instead. **Read that constant's second paragraph before adding a caller
+    here**: this handler runs on the scheduler's dispatch loop, not on a
+    background thread, and the registry is much more work than the five probes
+    it replaced.
 
     And it redacts before anything leaves. `scheduler` and `web_app` both do;
-    this path delivers to a user and had no reason to be the exception. The
-    message names the specific failures because that is what makes the alert
-    actionable — a count alone would be a regression on what this reported
-    before — with :func:`doctor.verdict`'s summary as the fallback when there is
-    nothing to name.
+    this path delivers to a user and had no reason to be the exception.
+
+    **An admin is told which checks failed; everyone else gets the count.** The
+    same disclosure boundary `commands.cmd_check` draws, drawn here for the same
+    reason and by the same mechanism, because this handler reaches the same
+    audience: ``run_check`` admin-gates only ``shell-command``, and
+    ``check_heartbeats`` runs each user's own ``HEARTBEAT.md`` and delivers the
+    message to that user. A registry ``detail`` is not a per-user fact —
+    ``config.skill_overlays`` labels overlays ``{user_id}/{filename}`` across
+    every user's tree, ``developer.repos_layout`` names the namespaces filed on
+    disk, and ``runtime.model_execution`` names the admin it probed as. An
+    allowlist of safe check names is rejected here for the reason the spec
+    rejects it there: a second list to keep in step with a registry that grows,
+    where a check whose detail widens later leaks with nothing going red.
+
+    Naming the failures is what makes an admin's alert actionable, and a count
+    alone would be a regression on what this reported before — so the narrowing
+    is only for the audience that could not act on the names anyway.
+
+    ``user_id`` is now read only for that gate. The probe itself resolves the
+    deployment's own user (``doctor._probe_user``), which is a deliberate
+    narrowing recorded there; it is not a per-user knob to restore.
     """
     from . import doctor
 
-    results = doctor.redact(
-        doctor.run_checks(
+    try:
+        results = doctor.redact(
+            doctor.run_checks(
+                config,
+                live=bool(check.config.get("execution_test", True)),
+                skip=_SELF_CHECK_SKIPPED,
+            ),
             config,
-            live=bool(check.config.get("execution_test", True)),
-            skip=_SELF_CHECK_SKIPPED,
-        ),
-        config,
-    )
+        )
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not page a user
+        # Both scheduler callers wrap this same pair and return no results
+        # (`run_startup_checks`, `check_doctor`), because `run_checks` is not
+        # exception-proof end to end: a check returning a non-iterable escapes
+        # the per-check `try`, and `redact` is outside it entirely. `run_check`'s
+        # blanket handler would catch this, but it renders as an unhealthy
+        # result, so a defect in doctor would alert every user with a
+        # `self-check` rather than being logged for an operator.
+        logger.error("heartbeat self-check could not run doctor: %s", exc, exc_info=True)
+        return CheckResult(
+            healthy=True,
+            message="the health registry could not be run; see the daemon log",
+            details={"failures": [], "summary": "registry unavailable"},
+        )
+
     healthy, summary = doctor.verdict(results)
     failures = doctor.failing(results)
-    message = "; ".join(f"{r.name}: {r.detail}" for r in failures) or summary
+    if config.is_admin(user_id):
+        message = "; ".join(f"{r.name}: {r.detail}" for r in failures) or summary
+    else:
+        message = summary
     return CheckResult(
         healthy=healthy,
         message=message,
+        # Not delivered to the user — nothing in `heartbeat` or `scheduler`
+        # reads it — so the names are safe here whatever the gate above said.
         details={"failures": [r.name for r in failures], "summary": summary},
     )
 

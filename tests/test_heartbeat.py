@@ -1352,6 +1352,121 @@ class TestCheckSelf:
         spawned.assert_not_called()
         looked_up.assert_not_called()
 
+
+    def test_a_non_admin_gets_the_count_and_no_details(self, db_path):
+        """The disclosure boundary `cmd_check` draws, drawn here too.
+
+        `self-check` is not admin-gated and `check_heartbeats` delivers the
+        message to whichever user's `HEARTBEAT.md` defined the check, so a
+        registry detail reaches a non-admin. Several of them are cross-user:
+        `config.skill_overlays` labels overlays `{user_id}/{filename}` across
+        every user's tree, `developer.repos_layout` names what is filed on disk,
+        and `runtime.model_execution` names the admin it probed as.
+        """
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        config.admin_users = {"boss"}
+
+        result, _ = self._capture(
+            [
+                self._result(
+                    "config.skill_overlays", FAIL, "bob/coding.md (unknown skill)"
+                ),
+                self._result(
+                    "developer.repos_layout", FAIL, "/srv/repos still holds acme, widgets"
+                ),
+            ],
+            self._make_check(execution_test=False),
+            config,
+            user_id="alice",
+        )
+
+        assert not result.healthy, "the alert must still fire, only quieter"
+        assert "bob" not in result.message
+        assert "coding.md" not in result.message
+        assert "acme" not in result.message
+        assert "/srv/repos" not in result.message
+        assert "2 fail" in result.message
+
+    def test_an_admin_still_gets_the_details(self, db_path):
+        """The control for the case above. Without it, the absence assertions
+        pass against a handler that returns nothing at all — and naming the
+        failures is what makes the alert actionable for whoever can act."""
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        config.admin_users = {"alice"}
+
+        result, _ = self._capture(
+            [
+                self._result(
+                    "config.skill_overlays", FAIL, "bob/coding.md (unknown skill)"
+                )
+            ],
+            self._make_check(execution_test=False),
+            config,
+            user_id="alice",
+        )
+
+        assert "config.skill_overlays: bob/coding.md (unknown skill)" in result.message
+
+    def test_an_empty_admin_list_means_everyone(self, db_path):
+        """`Config.is_admin` reads an empty `admin_users` as "everyone is
+        admin", which is the single-user shape. The gate must inherit that
+        rather than reading the empty list as "nobody"."""
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        assert not config.admin_users
+
+        result, _ = self._capture(
+            [self._result("web.static", FAIL, "no built frontend")],
+            self._make_check(execution_test=False),
+            config,
+            user_id="alice",
+        )
+
+        assert "web.static: no built frontend" in result.message
+
+    def test_a_doctor_defect_does_not_page_the_user(self, db_path):
+        """`run_checks` is not exception-proof end to end: a check returning a
+        non-iterable escapes the per-check `try`, and `redact` sits outside it.
+        Both scheduler callers wrap this pair; `run_check`'s blanket handler
+        would otherwise turn a defect in doctor into an alert for every user
+        with a `self-check`."""
+        config = self._make_config(db_path)
+
+        with patch("istota.doctor.run_checks", side_effect=TypeError("boom")):
+            result = _check_self(
+                self._make_check(execution_test=False), config, "alice"
+            )
+
+        assert result.healthy, "a broken diagnostic must not page a user"
+        assert "could not be run" in result.message
+        assert result.details["failures"] == []
+
+    def test_a_redaction_failure_is_caught_too(self, db_path):
+        """The half that is easy to miss: `redact` is outside `run_checks`'
+        own per-check guard, so it is the call that actually reaches a user."""
+        from istota.doctor import OK
+
+        config = self._make_config(db_path)
+
+        with (
+            patch(
+                "istota.doctor.run_checks",
+                return_value=[self._result("runtime.platform", OK)],
+            ),
+            patch("istota.doctor.redact", side_effect=RuntimeError("boom")),
+        ):
+            result = _check_self(
+                self._make_check(execution_test=False), config, "alice"
+            )
+
+        assert result.healthy
+        assert "could not be run" in result.message
+
     def test_run_check_dispatches_self_check(self, db_path):
         """Verify run_check() correctly dispatches self-check with user_id."""
         from istota.doctor import OK
