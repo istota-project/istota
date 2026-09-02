@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The browser no longer freezes after a handful of page loads. Chrome was being asked to write its log into a pipe nothing read, and once that pipe filled — two or three pages' worth — the write blocked and took Chrome's main thread with it. The browser looked alive from every angle: animations kept running, its debug port kept answering, and the container reported healthy, while clicks did nothing and every page fetch hung until a 90-second timer killed the browser and started it again. Measured on the production container at 63,199 of 65,536 bytes after three renders. The log now goes nowhere unless you ask for it with `CHROME_LOG_STDERR=1`, which sends it to the container's own output instead.
+
+- A browser restart no longer leaves dead processes behind. Chrome was killed without waiting for it, and only the browser process was signalled, so its renderer and GPU children were orphaned — 43 defunct processes accumulated in 40 minutes on the production host, against a container limit of 9,507. The whole process group is now signalled and collected, and the container runs an init to catch anything that still escapes.
+
+- After a browser restart, a page you had open no longer reports "Tab not found" for the next ten minutes. Sessions are numbered tabs in the running browser, and the restart left them pointing at tabs that no longer existed. They are now discarded when the browser they belonged to goes away, so the next request opens a fresh one.
+
+- A browser that has to be rescued repeatedly now reports itself unhealthy and gets restarted. The rescue timer healed the same fault every 90 seconds for hours while every health check stayed green, because a hung browser satisfies all of them. Configurable via `BROWSER_WEDGE_RECOVERY_THRESHOLD` (default 3) and `BROWSER_WEDGE_RECOVERY_WINDOW_S` (default 900).
+
+- A JavaScript dialog on a page no longer stops the browser dead. There is no window manager behind the browser, so an `alert()`, a "leave site?" prompt or Chrome's own "page unresponsive" dialog had nothing that could close it. Dialogs are now answered as they appear, and the dialogs Chrome raises on its own are switched off.
+
 - When the browser container answers with something that is not JSON — an internal error page, a gateway error from something in front of it, an empty reply — the browse commands now report the status code and quote the start of the body. Every one of those used to come back as `Expecting value: line 1 column 1 (char 0)`, the same string whatever had gone wrong, so the outage below could only be diagnosed by reading the container's logs.
 
 - Browsing no longer strands a browser tab when a page fetch fails partway. `browse links --selector` opens a session, reads it, then closes it; if the read failed the close was skipped, and with only two tabs available the lost one stayed locked for ten minutes. Fetching links from a site that errors used to cost half the browser's capacity each time.

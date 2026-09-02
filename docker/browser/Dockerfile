@@ -77,6 +77,11 @@ EXPOSE 9223 6080
 # not just a dead process — a busy browse still passes (ISSUE-149). Both of those
 # ask about Chrome; the deep tier's third arm asks whether the API process can
 # still drive it, by reading the CDP heartbeat rather than by trying (ISSUE-384).
+# A fourth arm reads how often the browse watchdog has had to relaunch Chrome
+# (ISSUE-394): a browser whose UI thread is blocked satisfies all three of the
+# others -- the process lives, DevTools answers on its IO thread, and a hung CDP
+# call records no failure -- so a container wedging every 90s read as healthy for
+# hours. The recovery rate is the one signal the wedge cannot fake.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -sf "http://localhost:9224/live?deep=1" || exit 1
 

@@ -4,6 +4,13 @@ services:
       context: {{ istota_repo_dir }}/docker/browser/
       dockerfile: Dockerfile
     container_name: {{ istota_namespace }}-browser
+    # PID 1 in this image is `su` (entrypoint.sh ends with `exec su … python`),
+    # which reaps no orphan. Chrome's renderer, GPU, zygote and crashpad
+    # processes are children of the browser process, so every hard kill of it
+    # reparents them here -- 43 zombies in 40 minutes of production before
+    # ISSUE-394. The API now kills Chrome's whole process group and waits on it;
+    # this is the backstop for whatever still escapes.
+    init: true
     ports:
       - "127.0.0.1:{{ istota_browser_api_port }}:9223"
       # Compose requires an IPv6 host address to be bracketed, so a bare `::1`
