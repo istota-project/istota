@@ -47,17 +47,18 @@ than left to differ between a laptop and a Linux runner:
 host state: Debian has ``/bin`` as a symlink and ``/etc/ld.so.cache``, macOS
 has neither, so the entries differ in *presence*, not just in spelling.
 Everything from after ``bwrap`` up to ``--unshare-pid`` is therefore replaced
-by a single token, and ``test_the_host_system_prologue_has_the_documented_shape``
-pins its order and membership on whatever host is running instead. That test is
-the golden for that slice; the golden proper still pins that the slice comes
-first and that nothing moved across its boundary.
+by a single token, and
+``test_the_host_system_prologue_is_exactly_what_this_host_earns`` rebuilds the
+expected slice from the host with the source's own predicates and compares it
+whole. That test is the golden for that slice; the golden proper still pins
+that the slice comes first and that nothing moved across its boundary.
 """
 
 from __future__ import annotations
 
 import os
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -139,10 +140,23 @@ class Case:
     resources: tuple[tuple[str, str], ...] = ()
     proxy_sock: bool = False
     net_proxy_sock: bool = False
+    #: Whether the socket files exist. A socket that is *configured and absent*
+    #: is its own branch in both cases — `--unshare-net` with no bridge bound is
+    #: the fail-closed network shape — and a world that always creates them
+    #: leaves that branch reached by nothing.
+    socket_files: bool = True
     extra_ro_binds: tuple[str, ...] = ()
     ro_paths: tuple[str, ...] = ()
     custom_system_prompt: bool = False
     cache_dir: bool = False
+    #: Whether a Nextcloud mount is configured at all. Off is the single-user
+    #: install, where `if mount:` skips both the Users/Talk/Channels block and
+    #: the per-resource loop.
+    mount: bool = True
+    #: Config paths spelled through a symlink to the world, so that the source
+    #: and the destination of a bind are two different strings. See
+    #: `symlinked_deployment_root` for what that covers.
+    symlinked_root: bool = False
 
     #: Relative to the world root, or the literal "mount/modules" to make
     #: `module_db_root()` raise. None keeps the derived `{db_dir}/modules`.
@@ -159,8 +173,6 @@ class Case:
     disable_userns: bool = True
     remount_ro: bool = True
     requires_unshare_user: bool = False
-
-    axes: frozenset[str] = field(default_factory=frozenset)
 
 
 _RW = "readwrite"
@@ -231,7 +243,18 @@ CASES: list[Case] = [
         ),
     ),
     Case("sockets_and_network", proxy_sock=True, net_proxy_sock=True),
-    Case("network_without_a_live_socket", net_proxy_sock=True, developer_dir=False),
+    # Both sockets named and neither on disk. `--unshare-net` is emitted from
+    # the argument alone, so this is the shape where a task is cut off the
+    # network with no bridge to reach — and the shell wrapper still composes a
+    # bridge path under a `.developer` that is not bound either.
+    Case(
+        "sockets_configured_but_absent",
+        proxy_sock=True,
+        net_proxy_sock=True,
+        socket_files=False,
+        developer_dir=False,
+    ),
+    Case("network_without_a_developer_dir", net_proxy_sock=True, developer_dir=False),
     Case("extra_ro_binds_present_and_absent", extra_ro_binds=("doc.pdf", "gone.pdf")),
     Case("custom_system_prompt_claude", custom_system_prompt=True),
     Case(
@@ -245,6 +268,28 @@ CASES: list[Case] = [
     Case("module_root_under_the_mount", module_data_dir="mount/modules"),
     Case("db_mask_refused_above_the_workspace", db_dir="temp"),
     Case("no_developer_dir", developer_dir=False),
+    Case("no_nextcloud_mount", mount=False, resources=(("Docs", _RW),)),
+    # The one case where a bind's source and destination are different
+    # strings, and the only one where `_mask_dir` emits both of its
+    # candidates. `_ro_bind`/`_bind` resolve the source and keep the path *as
+    # written* as the sandbox destination, and three consumers depend on that
+    # asymmetry: the mask has to cover both names or the databases stay
+    # readable at the one the model would use, and `resolve_sandbox_cache_dir`
+    # returns its path unresolved on purpose so the cache and the repos bind
+    # land on one mount. With every world path resolved, all three are
+    # invisible — a render that emitted the resolved path for both, or the
+    # written path for both, would pass every other golden here.
+    Case(
+        "symlinked_deployment_root",
+        symlinked_root=True,
+        developer_enabled=True,
+        repos_dir=True,
+        devbox_enabled=True,
+        authorized_skills=("developer",),
+        ro_paths=("ro",),
+        custom_system_prompt=True,
+        extra_ro_binds=("doc.pdf",),
+    ),
     Case("probes_all_off", disable_userns=False, remount_ro=False),
     Case(
         "probes_unshare_user_only",
@@ -282,7 +327,24 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
     Built rather than discovered, so what exists is a property of the case and
     not of the machine. ``_ro_bind`` and ``_bind`` skip a source that does not
     exist, so a directory missing here is an entry missing from the argv.
+
+    **Two spellings, one tree.** Everything is created under ``base``. On a
+    ``symlinked_root`` case ``base`` is ``{root}/real`` and ``{root}/link``
+    points at it, and the config is handed the *link* spelling for the paths
+    the product does not resolve before binding — which is what makes a bind's
+    source and destination differ. The keys below are split on exactly that:
+    ``spelled`` for a path the product binds as written, ``base`` for one it
+    resolves first (``nextcloud_mount_path``, ``user_temp_dir``, the workspace)
+    or never binds (``src``, ``venv``).
     """
+    base = root / "real" if case.symlinked_root else root
+    base.mkdir(parents=True, exist_ok=True)
+    if case.symlinked_root:
+        spelled = root / "link"
+        spelled.symlink_to(base)
+    else:
+        spelled = base
+    root = base
     home = root / "home"
     (home / ".local" / "bin").mkdir(parents=True)
     (home / ".local" / "share" / "claude").mkdir(parents=True)
@@ -312,7 +374,7 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
     db_dir.mkdir(parents=True, exist_ok=True)
 
     temp = root / "temp"
-    user_temp = temp / case.user_id if case.user_id else temp
+    user_temp = temp / case.user_id
     user_temp.mkdir(parents=True, exist_ok=True)
     if case.developer_dir:
         (user_temp / ".developer").mkdir(exist_ok=True)
@@ -332,43 +394,54 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
     (root / "config" / "system-prompt.md").write_text("system\n")
     sockets = root / "sockets"
     sockets.mkdir()
-    (sockets / "proxy.sock").touch()
-    (sockets / "net.sock").touch()
+    if case.socket_files:
+        (sockets / "proxy.sock").touch()
+        (sockets / "net.sock").touch()
     extra = root / "extra"
     extra.mkdir()
     (extra / "doc.pdf").write_text("doc\n")
 
     return {
+        # Resolved before the product binds them, or never bound.
+        "base": base,
+        "spelled": spelled,
         "home": home,
         "src": src,
         "venv": venv,
         "mount": mount,
-        "db_dir": db_dir,
         "user_temp": user_temp,
-        "repos": repos,
-        "exec_root": exec_root,
+        "workspace": root / "workspace",
+        # Bound as written, so the link spelling is what reaches the argv.
+        "db_dir": spelled / db_dir.relative_to(root),
+        "repos": spelled / "repos",
+        "exec_root": spelled / "run" / "istota-exec",
+        "cache": spelled / "cache",
+        "config": spelled / "config",
+        "ro": spelled / "ro",
+        "extra": spelled / "extra",
+        "sockets": spelled / "sockets",
     }
 
 
-def _make_config(root: Path, case: Case, world: dict[str, Path]) -> Config:
+def _make_config(case: Case, world: dict[str, Path]) -> Config:
     if case.module_data_dir is None:
         module_data_dir = None
     else:
-        module_data_dir = root / case.module_data_dir
-        module_data_dir.mkdir(parents=True, exist_ok=True)
+        (world["base"] / case.module_data_dir).mkdir(parents=True, exist_ok=True)
+        module_data_dir = world["spelled"] / case.module_data_dir
 
     return Config(
         db_path=world["db_dir"] / "istota.db",
-        temp_dir=root / "temp",
-        nextcloud_mount_path=world["mount"],
-        skills_dir=root / "config" / "skills",
+        temp_dir=world["base"] / "temp",
+        nextcloud_mount_path=world["mount"] if case.mount else None,
+        skills_dir=world["config"] / "skills",
         module_data_dir=module_data_dir,
         custom_system_prompt=case.custom_system_prompt,
         admin_users=set(case.admin_users),
         security=SecurityConfig(
             sandbox_enabled=True,
-            sandbox_cache_dir=str(root / "cache") if case.cache_dir else "",
-            sandbox_ro_paths=[str(root / p) for p in case.ro_paths],
+            sandbox_cache_dir=str(world["cache"]) if case.cache_dir else "",
+            sandbox_ro_paths=[str(world["spelled"] / p) for p in case.ro_paths],
         ),
         developer=DeveloperConfig(
             enabled=case.developer_enabled,
@@ -379,12 +452,18 @@ def _make_config(root: Path, case: Case, world: dict[str, Path]) -> Config:
     )
 
 
-def build_argv(case: Case, root: Path, monkeypatch) -> list[str]:
-    """The argv for one case, normalised. Nothing here reaches the network."""
+def build_argv(case: Case, root: Path, monkeypatch, *, raw: bool = False) -> list[str]:
+    """The argv for one case. Nothing here reaches the network.
+
+    ``raw`` skips the normalisation and is for the prologue test alone, which
+    needs the host paths the collapse throws away. One builder rather than two:
+    a second copy with its own patch stack agrees with this one only until a
+    ``Case`` default changes, and then it disagrees silently.
+    """
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     world = _make_world(root, case)
-    config = _make_config(root, case, world)
+    config = _make_config(case, world)
 
     monkeypatch.setenv("HOME", str(world["home"]))
     task = db.Task(
@@ -432,17 +511,17 @@ def build_argv(case: Case, root: Path, monkeypatch) -> list[str]:
             case.is_admin,
             resources,
             world["user_temp"],
-            proxy_sock=root / "sockets" / "proxy.sock" if case.proxy_sock else None,
+            proxy_sock=world["sockets"] / "proxy.sock" if case.proxy_sock else None,
             net_proxy_sock=(
-                root / "sockets" / "net.sock" if case.net_proxy_sock else None
+                world["sockets"] / "net.sock" if case.net_proxy_sock else None
             ),
-            extra_ro_binds=[root / "extra" / name for name in case.extra_ro_binds],
+            extra_ro_binds=[world["extra"] / name for name in case.extra_ro_binds],
             authorized_skills=frozenset(case.authorized_skills),
-            workspace_dir=root / "workspace" if case.workspace else None,
+            workspace_dir=world["workspace"] if case.workspace else None,
             profile=case.profile,
         )
 
-    return normalize(argv, root, world)
+    return argv if raw else normalize(argv, root, world)
 
 
 # ----------------------------------------------------------- the substitutions
@@ -458,8 +537,13 @@ def normalize(argv: list[str], root: Path, world: dict[str, Path]) -> list[str]:
         (str(world["home"]), "<HOME>"),
         (str(world["src"]), "<SRC>"),
         (str(world["venv"]), "<VENV>"),
+        (str(world["base"]), "<TMP>"),
         (str(root), "<TMP>"),
     ]
+    if world["spelled"] != world["base"]:
+        # Two placeholders, deliberately: collapsing both spellings to one
+        # would erase the very difference the symlinked case exists to show.
+        table.append((str(world["spelled"]), "<LINK>"))
     table.sort(key=lambda pair: len(pair[0]), reverse=True)
 
     collapsed = _collapse_host_system(argv)
@@ -567,6 +651,14 @@ def test_normalization_is_total(case, tmp_path, monkeypatch):
     made, so it can only catch a value it already knows about. Building twice
     states the property: a second root moves every path, and anything
     run-specific that the table does not cover comes out as an inequality.
+
+    Two builds catch only what *varies* between them, though, and a host-stable
+    absolute path — a real ``/Users/...`` or ``/home/...`` reaching the argv
+    because a refactor stopped routing through ``_source_and_venv_paths`` — is
+    identical in both and passes the equality while making the golden
+    unportable. So the second half is a positive rule rather than another
+    denylist: every token that looks like a path is either placeholder-rooted
+    or one of the few literals the sandbox legitimately names.
     """
     first = build_argv(case, tmp_path / "first", monkeypatch)
     second = build_argv(case, tmp_path / "second", monkeypatch)
@@ -582,84 +674,80 @@ def test_normalization_is_total(case, tmp_path, monkeypatch):
     assert "/var/folders/" not in text
     assert str(tmp_path) not in text
 
+    # The literals `build_bwrap_cmd` names itself, plus the bridge wrapper's.
+    allowed = {"/proc", "/dev", "/tmp", "/bin/sh"}
+    stray = [
+        token for token in first
+        if token.startswith("/") and token not in allowed
+    ]
+    assert stray == [], (
+        f"absolute paths reached the argv unsubstituted: {stray}. Either the "
+        "substitution table is missing a root, or a host path is being emitted "
+        "that would differ on another machine."
+    )
 
-def test_the_host_system_prologue_has_the_documented_shape(tmp_path, monkeypatch):
-    """The slice the golden collapses, pinned on whatever host is running.
 
-    ``/usr`` first, then the merged-usr compat entries, then the ``/etc``
-    allowlist — each in the order the source emits them, each optional because
-    presence is host state. Order and membership are what the golden cannot
-    hold, so they are held here; a bind added to that block without a thought
-    about ordering fails this rather than passing everywhere.
+def test_the_host_system_prologue_is_exactly_what_this_host_earns(
+    tmp_path, monkeypatch
+):
+    """The slice the golden collapses, reconstructed from the host and compared.
+
+    This is the golden for those twenty-odd tokens, so it has to fail in both
+    directions. The version that only checked ``dest in expected_order`` plus
+    ``seen == [p for p in expected_order if p in seen]`` caught an addition and
+    a reordering and could not catch a *deletion*: the second assertion filters
+    the expected list by ``seen`` itself, so it holds for any order-preserving
+    subset, and the collapse means no golden sees the loss either. Dropping
+    ``/etc/alternatives`` leaves every Debian symlink under ``/usr/bin`` —
+    ``awk``, ``cc``, ``vi``, ``nc`` — dangling inside the sandbox
+    (``executor.py`` says so at the ``etc_files`` list), and dropping
+    ``/etc/resolv.conf`` takes DNS with it. Neither would have failed anything.
+
+    So the expected list is rebuilt here with the source's own predicates and
+    compared whole, triple by triple — verb, source and destination. The
+    predicates are duplicated from the product deliberately: a projection of
+    the thing under test cannot detect that the thing under test changed.
     """
-    argv = build_argv(CASES_BY_NAME["claude_baseline"], tmp_path / "world", monkeypatch)
+    case = CASES_BY_NAME["claude_baseline"]
+    argv = build_argv(case, tmp_path / "world", monkeypatch)
 
     # The golden's first line proves the collapse happened at all.
     assert argv[:2] == ["bwrap", HOST_SYSTEM_TOKEN]
 
-    raw = build_raw_argv(CASES_BY_NAME["claude_baseline"], tmp_path / "raw", monkeypatch)
-    prologue = host_system_prologue(raw)
-
-    assert prologue[:3] == ["--ro-bind", "/usr", "/usr"], (
-        f"/usr is not the first system bind: {prologue[:6]}"
+    prologue = host_system_prologue(
+        build_argv(case, tmp_path / "raw", monkeypatch, raw=True)
     )
 
-    compat = ["/bin", "/lib", "/lib64", "/sbin"]
-    etc = [
+    # `executor.build_bwrap_cmd`: /usr, then the merged-usr compat names, then
+    # the /etc allowlist, in this order.
+    expected: list[str] = ["--ro-bind", str(Path("/usr").resolve()), "/usr"]
+    for compat in ("/bin", "/lib", "/lib64", "/sbin"):
+        path = Path(compat)
+        if path.is_symlink():
+            expected += ["--symlink", str(path.readlink()), compat]
+        elif path.exists():
+            expected += ["--ro-bind", str(path.resolve()), compat]
+    for name in (
         "/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf",
         "/etc/hosts", "/etc/nsswitch.conf", "/etc/ld.so.cache",
         "/etc/localtime", "/etc/passwd", "/etc/group",
         "/etc/alternatives",
-    ]
-    expected_order = compat + etc
-
-    # Every entry after /usr is a three-token bind or symlink whose *last*
-    # token is a destination from the list above, and the destinations appear
-    # in the list's own order.
-    seen: list[str] = []
-    index = 3
-    while index < len(prologue):
-        verb = prologue[index]
-        assert verb in ("--ro-bind", "--symlink"), (
-            f"unexpected verb {verb!r} in the system prologue: {prologue[index:]}"
-        )
-        dest = prologue[index + 2]
-        assert dest in expected_order, f"unexpected system mount at {dest!r}"
-        seen.append(dest)
-        index += 3
-
-    assert index == len(prologue), "the prologue does not divide into triples"
-    assert seen == [p for p in expected_order if p in seen], (
-        f"the system binds are out of order: {seen}"
-    )
-    assert "/etc/hosts" in seen, "no /etc bind at all — the probe patch is wrong"
-
-
-def build_raw_argv(case: Case, root: Path, monkeypatch) -> list[str]:
-    """``build_argv`` without the normalisation, for the prologue test alone."""
-    root = root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    world = _make_world(root, case)
-    config = _make_config(root, case, world)
-    monkeypatch.setenv("HOME", str(world["home"]))
-    task = db.Task(
-        id=1, prompt="test", user_id=case.user_id, source_type="talk",
-        status="running", conversation_token=case.conversation_token,
-    )
-    with (
-        patch("istota.executor._bwrap_available", return_value=True),
-        patch(
-            "istota.executor._source_and_venv_paths",
-            return_value=(world["src"], world["venv"]),
-        ),
-        patch("istota.executor._bwrap_supports_disable_userns", return_value=True),
-        patch("istota.executor._bwrap_supports_remount_ro", return_value=True),
-        patch("istota.executor._bwrap_requires_unshare_user", return_value=False),
     ):
-        return build_bwrap_cmd(
-            list(CMD), config, task, case.is_admin, [], world["user_temp"],
-            profile=case.profile,
-        )
+        # `_ro_bind` resolves first and skips what does not exist, so a
+        # dangling symlink is skipped and a live one is bound at its target.
+        resolved = Path(name).resolve()
+        if resolved.exists():
+            expected += ["--ro-bind", str(resolved), name]
+
+    assert prologue == expected, (
+        "the host-system binds are not what this host earns. This slice is "
+        "collapsed to one token in every golden, so nothing else in this file "
+        "can see a bind added, dropped, reordered or changed between "
+        "--ro-bind and --symlink."
+    )
+    # A floor, so a bug that emptied the prologue could not satisfy the
+    # equality above by making both sides empty.
+    assert len(prologue) >= 6, f"almost nothing was bound: {prologue}"
 
 
 def test_every_golden_file_belongs_to_a_case():
@@ -707,8 +795,22 @@ AXES = {
     "custom system prompt": lambda c: c.custom_system_prompt,
     "configured cache root": lambda c: c.cache_dir,
     "--disable-userns": lambda c: c.disable_userns,
+    "--unshare-user alone": lambda c: c.requires_unshare_user,
     "--remount-ro": lambda c: c.remount_ro,
     ".developer directory": lambda c: c.developer_dir,
+    "skill proxy socket": lambda c: c.proxy_sock,
+    "socket files on disk": lambda c: c.socket_files,
+    "sandbox_ro_paths": lambda c: bool(c.ro_paths),
+    "nextcloud mount": lambda c: c.mount,
+    "symlinked deployment root": lambda c: c.symlinked_root,
+    "claude home": lambda c: c.claude_home,
+    "other users' config dir": lambda c: c.users_config_dir,
+    "module root outside the db dir": lambda c: c.module_data_dir == "modules",
+    "module root under the mount": lambda c: c.module_data_dir == "mount/modules",
+    "db dir above the workspace": lambda c: c.db_dir == "temp",
+    "resource already inside the user dir": lambda c: any(
+        path.startswith("Users/") for path, _ in c.resources
+    ),
 }
 
 
