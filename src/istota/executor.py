@@ -11,6 +11,7 @@ import threading  # noqa: F401  — kept for `mock.patch("istota.executor.thread
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -2761,6 +2762,38 @@ def _is_relative_to(path: Path, other: Path) -> bool:
         return False
 
 
+class SandboxProfile(str, Enum):
+    """Which *outer process* a sandbox is being built for.
+
+    The mount plan is otherwise generic: every bind, mask and namespace flag
+    `build_bwrap_cmd` emits is decided by the config, the task and the user,
+    and is identical under both profiles. Two things are not, and both exist
+    only because the process bwrap execs is the `claude` CLI:
+
+    - the Claude runtime block — ``~/.local/bin``, ``~/.local/share/claude``,
+      ``~/.local/state/claude``, and the ``~/.claude`` tmpfs base with
+      ``.credentials.json``, ``settings.json`` and the ``projects``/``debug``/
+      ``todos`` directories through it;
+    - the ``custom_system_prompt_path`` bind, which is there because the CLI
+      opens that file itself, inside the namespace.
+
+    ``NATIVE`` is the profile for a sandbox around istota's own code —
+    NativeBrain's Bash tool today, its tool server next. That process makes no
+    model call from inside the namespace, so it needs neither: it reads the
+    system prompt in the daemon, and handing it the credential file means a
+    `cat` of `~/.claude/.credentials.json` comes back as a tool result to
+    whatever provider native is pointed at (ISSUE-389). Read-only stops the
+    token being *rewritten*, never read.
+
+    There is deliberately no default. A forgotten profile is a ``TypeError``
+    at the call site rather than a silent grant of the Claude mounts, which is
+    the failure this split exists to make impossible.
+    """
+
+    CLAUDE = "claude"
+    NATIVE = "native"
+
+
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -2773,11 +2806,20 @@ def build_bwrap_cmd(
     extra_ro_binds: list[Path] | None = None,
     authorized_skills: "frozenset[str] | set[str] | list[str] | None" = None,
     workspace_dir: Path | None = None,
+    *,
+    profile: SandboxProfile,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
     Returns the original cmd unchanged if sandbox is not available
     (non-Linux, bwrap not installed, or namespace creation denied).
+
+    ``profile`` is required and keyword-only — see ``SandboxProfile`` for what
+    it decides and why it has no default. Everything else about the plan is
+    generic, including the ordering, which is load-bearing in three places
+    (cache bind before repos bind, ``.developer`` re-bind after
+    ``user_temp_dir``, masks last with ``--remount-ro`` after each). Omitting
+    the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
     auto-authorized by credential presence — the same set
@@ -2862,7 +2904,7 @@ def build_bwrap_cmd(
     _ro_bind(venv_path)
     _ro_bind(istota_src)
 
-    # --- Custom system prompt (RO, this one file) ---
+    # --- Custom system prompt (RO, this one file) --- CLAUDE only.
     # The config directory is not in the sandbox and should not be: it holds
     # config.toml. Everything else in it — emissaries, persona, guidelines,
     # skill bodies — reaches the model as content the daemon read and put in
@@ -2875,38 +2917,68 @@ def build_bwrap_cmd(
     # ["/srv/app"]`, the same default that exposed the databases; narrowing it
     # to [] made every task on a custom_system_prompt install exit with
     # "System prompt file not found".
-    sp_path = custom_system_prompt_path(config)
-    if sp_path is not None:
-        _ro_bind(sp_path)
+    #
+    # `NATIVE` skips it because nothing inside that namespace opens the path:
+    # NativeBrain reads the system prompt in the daemon and puts it on the
+    # wire itself, so the file is already prompt text by the time the sandbox
+    # is built. Which is also why `NATIVE` needs no config-directory bind at
+    # all — this was the only one.
+    if profile is SandboxProfile.CLAUDE:
+        sp_path = custom_system_prompt_path(config)
+        if sp_path is not None:
+            _ro_bind(sp_path)
 
     # Mask other users' config files
     users_config_dir = istota_src / "config" / "users"
     if users_config_dir.exists():
         _tmpfs(users_config_dir)
 
-    # --- Claude CLI (selective .local binds) ---
+    # --- Claude CLI runtime (selective .local binds) --- CLAUDE only.
+    #
+    # These exist because the process bwrap execs *is* the `claude` CLI: it
+    # resolves its own binary, reads its installed versions, takes a lock in
+    # state/, authenticates with the credential and writes its session JSONL
+    # back out. Under `NATIVE` the outer process is istota's own code, which
+    # does none of that — and binding the block anyway is ISSUE-389's filed
+    # bug, because `cat "$HOME/.claude/.credentials.json"` inside a native
+    # Bash call returns the subscription token as a tool result. Read-only
+    # stops it being rewritten, not read.
+    #
+    # `~/.local/bin` goes with them. On the reference deployment it holds
+    # `claude` and `gws`, and neither is reachable from a native namespace by
+    # design: `gws` is spawned host-side by the skill proxy, never in-sandbox.
+    #
+    # The `~/.claude` tmpfs goes too, and that is the one line worth pausing
+    # on, because it is a mask as well as a mount base. With the shipped
+    # `sandbox_ro_paths = []` nothing puts `$HOME` in the namespace, so under
+    # `NATIVE` the directory is absent rather than shadowed and the mask has
+    # nothing to do. Under a broadened `sandbox_ro_paths` covering `$HOME` it
+    # would have — that is the same default-deny-plus-hardening question the
+    # spec parks for `/etc/{namespace}` and the config directory, and it is
+    # deferred here for the same reason rather than overlooked.
     home = Path(os.environ.get("HOME", "/tmp"))
-    # bin/ and share/claude/ are RO (binary + versions)
-    _ro_bind(home / ".local" / "bin")
-    _ro_bind(home / ".local" / "share" / "claude")
-    # state/claude/ is RW (lock files created at runtime)
-    _bind(home / ".local" / "state" / "claude")
+    if profile is SandboxProfile.CLAUDE:
+        # bin/ and share/claude/ are RO (binary + versions)
+        _ro_bind(home / ".local" / "bin")
+        _ro_bind(home / ".local" / "share" / "claude")
+        # state/claude/ is RW (lock files created at runtime)
+        _bind(home / ".local" / "state" / "claude")
 
-    # --- Claude auth (tmpfs base + RW credentials for OAuth refresh) ---
-    claude_dir = home / ".claude"
-    if claude_dir.exists():
-        _tmpfs(claude_dir)
-        creds = claude_dir / ".credentials.json"
-        if creds.exists():
-            _ro_bind(creds)  # RO: prevents token persistence attacks
-        settings = claude_dir / "settings.json"
-        if settings.exists():
-            _ro_bind(settings)
-        # Persist session JSONL logs and debug output across sandbox exits
-        for subdir in ["projects", "debug", "todos"]:
-            d = claude_dir / subdir
-            if d.exists():
-                _bind(d)
+        # --- Claude auth (tmpfs base + RW credentials for OAuth refresh) ---
+        claude_dir = home / ".claude"
+        if claude_dir.exists():
+            _tmpfs(claude_dir)
+            creds = claude_dir / ".credentials.json"
+            if creds.exists():
+                _ro_bind(creds)  # RO: prevents token persistence attacks
+            settings = claude_dir / "settings.json"
+            if settings.exists():
+                _ro_bind(settings)
+            # Persist session JSONL logs and debug output across sandbox exits
+            for subdir in ["projects", "debug", "todos"]:
+                d = claude_dir / subdir
+                if d.exists():
+                    _bind(d)
 
     # --- User workspace (RW) ---
     _bind(user_temp_dir.resolve())
@@ -3325,12 +3397,31 @@ def native_fs_roots(
 
     Returns ``(read_roots, write_roots, write_denied_roots)``.
 
-    Mirrors ``build_bwrap_cmd``'s user-data binds (not the system/venv binds,
-    which are irrelevant to the file tools) so the native file tools reach
-    exactly what the claude_code path's bwrap would allow — no more, no less.
-    Writable roots are the RW binds; read roots additionally include the RO
-    binds (Talk attachments, read-only resources). No database root of any
-    kind — build_bwrap_cmd masks those, and these tools have no masks.
+    **These are no longer the boundary, and that changes what this function is
+    for.** It was written when the native file tools ran on daemon worker
+    threads with no namespace around them, so it was a second filesystem policy
+    written in Python — one that had to be kept in step with every bind
+    ``build_bwrap_cmd`` emits, and one whose check and open were separate
+    syscalls, so an ancestor could be swapped between them. The tools now run
+    inside ``istota.tool_server``, in the one bwrap namespace the attempt gets
+    (ISSUE-389), where a path outside the binds is *absent* rather than
+    refused.
+
+    What these roots still do is produce the error the model reads. "Cannot
+    read /etc/shadow: path is outside the allowed workspace" is a better answer
+    than ENOENT, and it is the answer on the unsandboxed shapes too — macOS,
+    the standalone install, a Docker stack without the two container settings —
+    where ``build_bwrap_cmd`` hands the command back unwrapped and this list is
+    once again the only confinement there is. So it still mirrors
+    ``build_bwrap_cmd``'s user-data binds exactly (not the system/venv binds,
+    which are irrelevant to the file tools): writable roots are the RW binds,
+    read roots additionally the RO binds (Talk attachments, read-only
+    resources). No database root of any kind — ``build_bwrap_cmd`` masks those,
+    and these tools have no masks.
+
+    Drifting from the binds is therefore no longer a boundary failure and is
+    still a bug: on a sandboxed host the two would disagree about which error a
+    path gets, and on an unsandboxed one the drift is the whole policy.
 
     The third element carries the RO carve-outs bwrap gets by re-binding a
     subdirectory read-only *after* its parent's RW bind. Containment alone
@@ -5723,7 +5814,7 @@ def execute_task(
             # declared in no skill manifest, so neither `derive_credential_set`
             # nor `derive_proxy_only_set` takes it out of this snapshot, and the
             # model reaches every host-side skill CLI through the same Bash tool
-            # the strip in `NativeBrain._build_tools` just cleaned. No skill
+            # the strips in `NativeBrain` just cleaned. No skill
             # invokes the `claude` binary and none reads the variable, so it has
             # no reader here either — and unlike a tool subprocess these run
             # *unsandboxed as the daemon user*, which is the reason to be strict
@@ -5836,23 +5927,38 @@ def execute_task(
         # Collect extra paths to RO bind-mount into the sandbox
         _extra_ro_binds: list[Path] = []
 
-        # Sandbox wrapper closure — captures the per-task bind config so the
+        # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
-        def _sandbox_wrap(raw_cmd: list[str]) -> list[str]:
-            if not config.security.sandbox_enabled:
-                return raw_cmd
-            return build_bwrap_cmd(
-                raw_cmd, config, task, is_admin, user_resources,
-                Path(user_temp_dir), proxy_sock=_proxy_sock,
-                net_proxy_sock=_net_proxy_sock,
-                extra_ro_binds=_extra_ro_binds,
-                # The set computed ~190 lines above, not `selected_skills`. See
-                # `build_bwrap_cmd`'s own docstring for why the distinction
-                # decides whether the exec transport routes on the first turn of
-                # a conversation.
-                authorized_skills=frozenset(authorized_skills),
-                workspace_dir=workspace_dir,
-            )
+        #
+        # Two closures rather than one taking a profile, because the request
+        # carries them as two fields (see `BrainRequest.native_sandbox_wrap`):
+        # `_run_fallback` copies the request with `dataclasses.replace`, so a
+        # single field whose value encoded a profile would hand the Claude
+        # mounts to NativeBrain on the shipped `claude_code -> native` reroute.
+        # Everything else about the two is identical, which is why the plan is
+        # built once and the profile is the only argument that differs.
+        def _build_wrap(sandbox_profile: SandboxProfile):
+            def _wrap(raw_cmd: list[str]) -> list[str]:
+                if not config.security.sandbox_enabled:
+                    return raw_cmd
+                return build_bwrap_cmd(
+                    raw_cmd, config, task, is_admin, user_resources,
+                    Path(user_temp_dir), proxy_sock=_proxy_sock,
+                    net_proxy_sock=_net_proxy_sock,
+                    extra_ro_binds=_extra_ro_binds,
+                    # The set computed ~190 lines above, not `selected_skills`.
+                    # See `build_bwrap_cmd`'s own docstring for why the
+                    # distinction decides whether the exec transport routes on
+                    # the first turn of a conversation.
+                    authorized_skills=frozenset(authorized_skills),
+                    workspace_dir=workspace_dir,
+                    profile=sandbox_profile,
+                )
+
+            return _wrap
+
+        _sandbox_wrap = _build_wrap(SandboxProfile.CLAUDE)
+        _native_sandbox_wrap = _build_wrap(SandboxProfile.NATIVE)
 
         # Adapt the brain's (widened) StreamEvent stream to TaskEvents. Called
         # by the brain in place of the old string callback. For loop-based
@@ -6288,6 +6394,10 @@ def execute_task(
             # those itself, from this path. Other brains ignore the field.
             task_cgroup=_task_cg,
             sandbox_wrap=_sandbox_wrap,
+            # The same plan under the NATIVE profile — no Claude runtime block,
+            # no credential, no system-prompt bind. Read only by NativeBrain;
+            # the two Claude brains read `sandbox_wrap` and ignore this.
+            native_sandbox_wrap=_native_sandbox_wrap,
             # Filesystem confinement for NativeBrain's in-process file tools
             # (NB-1). Populated only when effective sandboxing is on; other
             # brains ignore these (bwrap already confines their tools).

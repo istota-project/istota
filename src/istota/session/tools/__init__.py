@@ -4,26 +4,35 @@ The six core tools (Read, Write, Edit, Grep, Glob, Bash) the native agent loop
 dispatches against, built as ``AgentTool`` instances. They mirror Claude Code's
 tool schemas closely enough that prompts written for one work on the other.
 
-Sandbox model: the agent loop runs in istota's main process, *outside* any
-sandbox. The two isolation mechanisms are asymmetric, because only one tool
-spawns a subprocess:
+Sandbox model: these six run in ``istota.tool_server``, one process per task
+attempt, wrapped once by ``build_bwrap_cmd(..., profile=NATIVE)`` and placed in
+the task cgroup before it can fork. ``NativeBrain`` holds proxies onto it
+(``session/tools/remote.py``); the agent loop, the provider client and
+``WebFetch`` stay in the daemon.
 
-- ``Bash`` runs its subprocess through ``ToolEnv.sandbox_wrap`` (bwrap on Linux,
-  a no-op on macOS / when the sandbox is disabled) — the same per-execution
-  bwrap the claude_code path uses.
-- ``Read`` / ``Write`` / ``Edit`` / ``Grep`` / ``Glob`` do their file I/O in the
-  daemon process (``asyncio.to_thread``), so bwrap can't confine them. Instead
-  they honor ``ToolEnv.read_roots`` / ``write_roots`` — a symlink-resolved path
-  allowlist the executor populates with the same user-data roots bwrap would
-  bind for the claude_code path (NB-1). When the roots are ``None`` (dev /
-  bwrap unavailable) the file tools are unconfined, matching the claude_code
-  path's own posture where bwrap can't run.
+**The asymmetry this replaced is worth writing down, because the shape of these
+modules still carries it.** ``Bash`` used to rebuild a bwrap namespace per call
+while ``Read`` / ``Write`` / ``Edit`` / ``Grep`` / ``Glob`` did their file I/O
+on daemon worker threads, confined only by ``ToolEnv``'s symlink-resolved root
+allowlist. That was a second filesystem policy written in Python: every tool
+had to remember to call it, every bwrap bind change had to be copied across,
+the check and the open were separate syscalls so an ancestor could be swapped
+between them, and ``Grep``/``Glob`` walked the daemon's own filesystem view and
+filtered afterwards (NB-1, ISSUE-389).
 
-Filesystem-isolation correctness under bwrap is validated only on Linux / in
-Docker; the path-allowlist confinement is exercised in unit tests everywhere.
+The roots are still passed and still enforced — the server builds its
+``ToolEnv`` from them — but they are the **error-message layer** now rather
+than the boundary: "outside the allowed workspace" beats ENOENT, and a path
+outside the namespace is not there to reach in the first place. Where bwrap is
+unavailable (macOS, the standalone install, a Docker stack without the two
+container settings) ``build_bwrap_cmd`` returns the command unchanged, the
+server is an ordinary child, and the roots are the confinement exactly as
+before — which is also what lets the default suite exercise this seam on a
+developer machine.
 
-``build_default_tools(env)`` returns all six bound to one ``ToolEnv``; that's
-what ``NativeBrain`` calls in Phase 3.
+``build_default_tools(env)`` returns all six bound to one ``ToolEnv``, plus
+``WebFetch`` when ``env.web_fetch`` is set. Inside the server it never is, so
+the server is exactly six; the daemon builds the seventh itself.
 """
 
 from .bash import make_bash_tool
@@ -36,6 +45,14 @@ from .files import (
     make_write_tool,
 )
 from .web_fetch import make_web_fetch_tool
+# Last, and after `.bash` / `.files`: it imports schema constants from both.
+from .remote import (
+    RemoteToolServer,
+    ToolServerError,
+    build_remote_tools,
+    hello_payload,
+    start_tool_server,
+)
 from istota.agent.tools import AgentTool
 
 
@@ -63,10 +80,15 @@ def build_default_tools(env: ToolEnv) -> list[AgentTool]:
 
 
 __all__ = [
+    "RemoteToolServer",
     "ToolEnv",
     "ToolPathError",
+    "ToolServerError",
     "WebFetchPolicy",
     "build_default_tools",
+    "build_remote_tools",
+    "hello_payload",
+    "start_tool_server",
     "make_read_tool",
     "make_write_tool",
     "make_edit_tool",

@@ -645,7 +645,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     Config fields:
         execution_test: Whether to run Claude CLI invocation test (default: True)
     """
-    from .executor import build_bwrap_cmd, build_model_cli_env
+    from .executor import SandboxProfile, build_bwrap_cmd, build_model_cli_env
 
     failures = []
 
@@ -710,7 +710,12 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
                 user_temp = config.temp_dir / user_id
                 user_temp.mkdir(parents=True, exist_ok=True)
                 is_admin = config.is_admin(user_id)
-                cmd = build_bwrap_cmd(cmd, config, fake_task, is_admin, user_resources, user_temp)
+                # CLAUDE: the command this wraps is `claude -p`, which needs
+                # its own binary, its credential and its state directory.
+                cmd = build_bwrap_cmd(
+                    cmd, config, fake_task, is_admin, user_resources, user_temp,
+                    profile=SandboxProfile.CLAUDE,
+                )
 
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=30, env=env,

@@ -618,6 +618,7 @@ class TestPathsAndBinds:
             _run(config, task, brain, conn)
             cmd = executor.build_bwrap_cmd(
                 ["true"], config, task, True, [], executor.get_user_temp_dir(config, "alice"),
+                profile=executor.SandboxProfile.CLAUDE,
             )
 
         prepared = brain.reqs[-1].images[0].path

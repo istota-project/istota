@@ -3911,3 +3911,143 @@ class TestSessionLogDir:
         config.brain.native.session_log.dir = str(blocker)
         r = self._run(config)
         assert r.status in (WARN, FAIL)
+
+
+class TestSandboxMasksUsesTheNativeProfile:
+    """The `sandbox.masks` probe execs `/bin/sh`, not the `claude` CLI.
+
+    It moved to `SandboxProfile.NATIVE` with the profile split, so a diagnostic
+    no longer builds a namespace holding the subscription credential. The claim
+    that came with that move is that its *verdict* is unchanged, and this is
+    where that is checked rather than assumed: everything the probe reads — the
+    two database masks, and the system binds that make `/bin/sh` resolve — is
+    part of the generic plan and identical under both profiles.
+
+    The verdict itself is asserted end to end on the Linux tier
+    (`tests/linux/test_sandbox_profiles_real.py`), which is the only place a
+    namespace is actually entered.
+    """
+
+    @pytest.fixture
+    def claude_home(self, tmp_path, monkeypatch):
+        """A HOME with a sentinel at every Claude runtime path, so "the probe
+        carries none of them" is an assertion about the gate rather than about
+        an empty home directory."""
+        home = tmp_path / "home"
+        for d in (
+            ".local/bin", ".local/share/claude", ".local/state/claude",
+            ".claude/projects", ".claude/debug", ".claude/todos",
+        ):
+            (home / d).mkdir(parents=True)
+        (home / ".claude" / ".credentials.json").write_text('{"token": "sentinel"}')
+        monkeypatch.setenv("HOME", str(home))
+        return home
+
+    def _run_and_capture(self, make_config, monkeypatch, tmp_path):
+        monkeypatch.setattr(doctor, "_bwrap_usable", lambda: True)
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: True)
+        seen = {}
+
+        class _Result:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+
+        def _capture(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return _Result()
+
+        monkeypatch.setattr(doctor.subprocess, "run", _capture)
+        # The database in a directory of its own: `make_config` puts it beside
+        # the Nextcloud mount, and a mask there is refused (it would shadow a
+        # path the sandbox needs), which would make every assertion below about
+        # the refusal rather than about the profile.
+        config = make_config(db_path=tmp_path / "data" / "istota.db")
+        Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(config.db_path).touch()
+        verdict = run_checks(config, only=("sandbox.masks",), deep=True)[0]
+        return verdict, seen["cmd"], config
+
+    def test_the_probe_is_built_under_the_native_profile(
+        self, make_config, monkeypatch, claude_home, tmp_path,
+    ):
+        verdict, cmd, _ = self._run_and_capture(make_config, monkeypatch, tmp_path)
+
+        assert verdict.status == OK
+        assert cmd[0] == "bwrap"
+        for token in cmd:
+            assert str(claude_home / ".claude") not in token
+            assert str(claude_home / ".local") not in token
+
+    def test_everything_the_probe_reads_is_identical_under_both_profiles(
+        self, make_config, monkeypatch, claude_home, tmp_path,
+    ):
+        """The masks it asserts on, and the `/bin/sh` it runs them with.
+
+        Rebuilds the same argv under CLAUDE and compares the two things the
+        verdict depends on. If a future change made a mask or a system bind
+        profile-dependent, this is what would say so before the Linux tier did.
+        """
+        import tempfile
+
+        from istota import db
+        from istota.executor import SandboxProfile, build_bwrap_cmd
+
+        _, native_cmd, config = self._run_and_capture(
+            make_config, monkeypatch, tmp_path,
+        )
+        task = db.Task(
+            id=0, status="running", source_type="doctor", user_id="doctor", prompt="",
+        )
+        script = native_cmd[native_cmd.index("--") + 3]
+        with tempfile.TemporaryDirectory(prefix="istota-doctor-probe-") as user_temp:
+            claude_cmd = build_bwrap_cmd(
+                ["/bin/sh", "-c", script], config, task, is_admin=False,
+                user_resources=[], user_temp_dir=Path(user_temp),
+                profile=SandboxProfile.CLAUDE,
+            )
+
+        def _masks(argv):
+            """The database masks: every tmpfs/remount-ro after the last bind.
+
+            Not every `--tmpfs` in the argv — `/tmp` is mounted early beside
+            `--proc`, and under CLAUDE so is the `~/.claude` base, which is part
+            of the block this profile deliberately drops.
+            """
+            last_bind = max(
+                (i for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")),
+                default=-1,
+            )
+            return [
+                (argv[i], argv[i + 1]) for i in range(last_bind + 1, len(argv) - 1)
+                if argv[i] in ("--tmpfs", "--remount-ro")
+            ]
+
+        def _system_binds(argv):
+            return [
+                (argv[i], argv[i + 1], argv[i + 2])
+                for i, a in enumerate(argv)
+                if a in ("--ro-bind", "--symlink")
+                and argv[i + 1].startswith(("/usr", "/bin", "/lib", "/sbin", "/etc"))
+            ]
+
+        # The user temp dir differs (a fresh TemporaryDirectory each call), so
+        # compare the two families the verdict actually reads.
+        assert _masks(native_cmd) == _masks(claude_cmd)
+        assert _system_binds(native_cmd) == _system_binds(claude_cmd)
+        assert native_cmd[native_cmd.index("--"):][:3] == ["--", "/bin/sh", "-c"]
+
+    def test_the_probe_still_masks_both_database_directories(
+        self, make_config, monkeypatch, claude_home, tmp_path,
+    ):
+        """The control for the two above: a probe built under NATIVE that had
+        lost the masks would satisfy "no Claude paths" perfectly."""
+        _, cmd, config = self._run_and_capture(make_config, monkeypatch, tmp_path)
+
+        masked = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--tmpfs"]
+        db_dir = Path(config.db_path).parent.resolve()
+        assert str(db_dir) in masked
+        # The module root is under it here, and `_mask_dir` skips a candidate an
+        # earlier mask already covers — so the assertion is that it is covered,
+        # not that it has a mask of its own.
+        assert config.module_db_root().resolve().is_relative_to(db_dir)

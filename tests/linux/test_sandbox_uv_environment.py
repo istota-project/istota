@@ -44,7 +44,7 @@ import pytest
 
 from istota import db
 from istota.config import DeveloperConfig, SecurityConfig
-from istota.executor import _bwrap_available, build_bwrap_cmd
+from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
 
 pytestmark = pytest.mark.linux
 
@@ -146,7 +146,8 @@ def run_probe(script, config, task, user_temp, *, is_admin=True, **kwargs):
     and quietly pass the assertions that matter least.
     """
     cmd = build_bwrap_cmd(
-        ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp, **kwargs,
+        ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
+        profile=SandboxProfile.CLAUDE, **kwargs,
     )
     assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120)

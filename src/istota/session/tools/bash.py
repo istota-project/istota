@@ -3,8 +3,13 @@
 Runs a shell command via ``asyncio.create_subprocess_exec`` so it can stream
 partial output (``on_update``), honor the ``abort`` event (kill on cancel), and
 enforce a wall-clock timeout — none of which a blocking ``subprocess.run`` gives
-cleanly. The raw argv is wrapped by ``ToolEnv.sandbox_wrap`` (bwrap on Linux,
-no-op on macOS) so each command is sandboxed per-execution.
+cleanly.
+
+It wraps nothing. This code runs in ``istota.tool_server``, which is itself the
+process bubblewrap wrapped once for the whole attempt, so the command inherits
+the namespace and the task cgroup by being forked from here rather than by
+each call rebuilding either. See ``session/tools/__init__.py`` for the shape
+that replaced, and why.
 """
 
 from __future__ import annotations
@@ -18,7 +23,6 @@ from pathlib import Path
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
-from istota import task_cgroup
 from istota.process_group import kill_process_group
 from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 
@@ -31,33 +35,39 @@ from .env import ToolEnv
 _READ_CHUNK_BYTES = 65536
 
 
-def make_bash_tool(env: ToolEnv) -> AgentTool:
-    schema = ToolSchema(
-        name="Bash",
-        description=(
-            "Run a bash command in the working directory. Runs under "
-            "`set -o pipefail`, so a pipeline reports the first failing stage "
-            "rather than the last command — note that a non-final `grep` with "
-            "no match fails the pipeline. Output (stdout+stderr) is captured "
-            "and capped. Provide a short `description` for progress display. "
-            "Optional `timeout` in milliseconds."
-        ),
-        parameters=[
-            ToolParameter(name="command", type="string", description="The command to run."),
-            ToolParameter(name="description", type="string", description="5-10 word description.", required=False),
-            ToolParameter(name="timeout", type="integer", description="Timeout in milliseconds.", required=False),
-            ToolParameter(
-                name="exclude_from_context",
-                type="boolean",
-                description=(
-                    "If true, keep the (possibly large/noisy) output out of the "
-                    "model's context — it still streams to the user. Use for "
-                    "commands whose output you don't need to reason over."
-                ),
-                required=False,
+# Module-level for the reason the file schemas are: `session/tools/remote.py`
+# binds a proxy Bash by the same name, and the model is shown *that* one. One
+# constant, two bindings. See `files.py`'s note.
+BASH_SCHEMA = ToolSchema(
+    name="Bash",
+    description=(
+        "Run a bash command in the working directory. Runs under "
+        "`set -o pipefail`, so a pipeline reports the first failing stage "
+        "rather than the last command — note that a non-final `grep` with "
+        "no match fails the pipeline. Output (stdout+stderr) is captured "
+        "and capped. Provide a short `description` for progress display. "
+        "Optional `timeout` in milliseconds."
+    ),
+    parameters=[
+        ToolParameter(name="command", type="string", description="The command to run."),
+        ToolParameter(name="description", type="string", description="5-10 word description.", required=False),
+        ToolParameter(name="timeout", type="integer", description="Timeout in milliseconds.", required=False),
+        ToolParameter(
+            name="exclude_from_context",
+            type="boolean",
+            description=(
+                "If true, keep the (possibly large/noisy) output out of the "
+                "model's context — it still streams to the user. Use for "
+                "commands whose output you don't need to reason over."
             ),
-        ],
-    )
+            required=False,
+        ),
+    ],
+)
+
+
+def make_bash_tool(env: ToolEnv) -> AgentTool:
+    schema = BASH_SCHEMA
 
     async def _execute(call_id, args, on_update, abort):
         command = args["command"]
@@ -69,46 +79,37 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         # `[exit code: N]` and the model reads that as whether the command
         # worked. Without it a pipeline reported its last stage, so
         # `pytest … | tail -3` came back clean on a suite that failed. The bare
-        # name rather than a probed absolute path: the argv below is wrapped in
-        # bubblewrap, and PATH resolution inside that namespace is what has
-        # always worked here.
+        # name rather than a probed absolute path: this process runs *inside*
+        # the namespace, where bubblewrap binds `/usr` and need not reproduce
+        # the host's `/bin` symlink, so PATH resolution in here is what has
+        # always worked.
         cmd = shell_argv(command, bash="bash")
-        if env.sandbox_wrap:
-            cmd = env.sandbox_wrap(cmd)
 
-        # Per-task cgroup (A6), placed from the child before it execs. This used
-        # to be a write to `cgroup.procs` after the spawn, on the reasoning that
-        # a `preexec_fn` in a threaded process must not open a file — true, and
-        # the reason the open happens in the parent here and the child does one
-        # `os.write` to the inherited descriptor. The window that reasoning
-        # called bounded is not: membership is inherited at fork, so anything
-        # the child forked first stays outside the cgroup permanently, and under
-        # `sandbox_wrap` the child is bwrap, which forks during namespace setup
-        # every time (ISSUE-285).
+        # No sandbox wrap and no cgroup placement, and both absences are the
+        # point of this seam rather than an omission (ISSUE-389). The process
+        # running this code is `istota.tool_server`, already inside the one
+        # bwrap namespace the attempt gets and already a member of the task
+        # cgroup — and membership is inherited at fork, so every command below
+        # is contained by being forked from here. Re-wrapping would nest
+        # bubblewrap inside a namespace built with `--unshare-user
+        # --disable-userns`, which fails every Bash call rather than confining
+        # anything; re-placing would open `cgroup.procs`, a path no sandbox
+        # binds. `tests/linux/test_tool_server_lifecycle.py` is where the
+        # inheritance is asserted against the kernel rather than assumed.
         try:
-            with task_cgroup.placement(env.task_cgroup) as place_in_cgroup:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    cwd=str(env.cwd),
-                    env=env.subprocess_env,
-                    # Own process group so a timeout/abort/cancel can SIGKILL the
-                    # whole tree — a command that backgrounds children (or a bwrap
-                    # wrapper) otherwise survives a bare child kill (NB-7).
-                    start_new_session=True,
-                    preexec_fn=place_in_cgroup,
-                )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(env.cwd),
+                env=env.subprocess_env,
+                # Own process group so a timeout/abort/cancel can SIGKILL the
+                # whole tree — a command that backgrounds children otherwise
+                # survives a bare child kill (NB-7).
+                start_new_session=True,
+            )
         except (OSError, ValueError) as exc:
             return ToolResult(content=[TextContent(text=f"Failed to start command: {exc}")])
-
-        # Only where placement engaged — otherwise `placement` has already named
-        # the cause and this would report it a second time. A command short
-        # enough to have exited by now is not reported at all; `verify_placement`
-        # checks liveness, because leaving the cgroup at exit and never having
-        # been in it look identical from here.
-        if place_in_cgroup is not None and env.task_cgroup is not None:
-            task_cgroup.verify_placement(proc.pid, env.task_cgroup)
 
         out = bytearray()
         total_bytes = 0

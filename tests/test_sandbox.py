@@ -10,6 +10,7 @@ import pytest
 from istota import db
 from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, SecurityConfig
 from istota.executor import (
+    SandboxProfile,
     _build_network_allowlist,
     build_bwrap_cmd,
     custom_system_prompt_path,
@@ -64,8 +65,14 @@ def _patch_linux():
     return patch("istota.executor._bwrap_available", return_value=True)
 
 
-def _run_bwrap(config, task, is_admin, resources=None, user_temp=None):
-    """Helper to call build_bwrap_cmd with Linux patches applied."""
+def _run_bwrap(config, task, is_admin, resources=None, user_temp=None,
+               profile=SandboxProfile.CLAUDE):
+    """Helper to call build_bwrap_cmd with Linux patches applied.
+
+    ``profile`` defaults to CLAUDE because that is what every assertion in this
+    file was written against; the product function itself has no default, so a
+    call site that forgets is a TypeError rather than a silent grant.
+    """
     if user_temp is None:
         user_temp = config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
@@ -75,6 +82,7 @@ def _run_bwrap(config, task, is_admin, resources=None, user_temp=None):
         return build_bwrap_cmd(
             ["claude", "-p", "test"],
             config, task, is_admin, resources, user_temp,
+            profile=profile,
         )
 
 
@@ -118,7 +126,10 @@ class TestBuildBwrapCmdDisabled:
         user_temp.mkdir(parents=True)
 
         with patch("istota.executor._bwrap_available", return_value=False):
-            result = build_bwrap_cmd(cmd, sandbox_config, task, False, [], user_temp)
+            result = build_bwrap_cmd(
+                cmd, sandbox_config, task, False, [], user_temp,
+                profile=SandboxProfile.CLAUDE,
+            )
 
         assert result == cmd
 
@@ -129,7 +140,10 @@ class TestBuildBwrapCmdDisabled:
         user_temp.mkdir(parents=True)
 
         with patch("istota.executor._bwrap_available", return_value=False):
-            result = build_bwrap_cmd(cmd, sandbox_config, task, False, [], user_temp)
+            result = build_bwrap_cmd(
+                cmd, sandbox_config, task, False, [], user_temp,
+                profile=SandboxProfile.CLAUDE,
+            )
 
         assert result == cmd
 
@@ -596,6 +610,7 @@ class TestNetworkProxyBwrapIntegration:
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
+                profile=SandboxProfile.CLAUDE,
             )
         assert "--unshare-net" in result
 
@@ -614,6 +629,7 @@ class TestNetworkProxyBwrapIntegration:
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
+                profile=SandboxProfile.CLAUDE,
             )
         ro_pairs = _get_bind_pairs(result, "--ro-bind")
         assert any(src == str(sock.resolve()) for src, _ in ro_pairs)
@@ -628,6 +644,7 @@ class TestNetworkProxyBwrapIntegration:
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
+                profile=SandboxProfile.CLAUDE,
             )
         sep_idx = result.index("--")
         after_sep = result[sep_idx + 1:]
@@ -660,6 +677,7 @@ class TestNetworkProxyBwrapIntegration:
                 ["claude", "-p", "-", "--allowedTools", "Read"],
                 sandbox_config, task, False, [], user_temp,
                 net_proxy_sock=sock,
+                profile=SandboxProfile.CLAUDE,
             )
         sep_idx = result.index("--")
         after_sep = result[sep_idx + 1:]
@@ -2543,3 +2561,328 @@ class TestSessionLogContainment:
                 )
             )
             assert taskless is per_task, candidate
+
+
+# ---------------------------------------------------------------------------
+# Sandbox profiles (ISSUE-389)
+# ---------------------------------------------------------------------------
+
+#: Every argv token that takes path arguments, and how many.
+_BWRAP_ARITY = {
+    "--ro-bind": 2, "--ro-bind-try": 2, "--bind": 2, "--bind-try": 2,
+    "--symlink": 2, "--file": 2,
+    "--tmpfs": 1, "--remount-ro": 1, "--proc": 1, "--dev": 1, "--chdir": 1,
+    "--unshare-pid": 0, "--unshare-net": 0, "--unshare-user": 0,
+    "--disable-userns": 0, "--die-with-parent": 0,
+}
+
+
+def _ops(argv):
+    """The mount plan as a list of operations, stopping at the `--` terminator.
+
+    A flat token list makes "the two argvs differ only here" hard to state: an
+    assertion over tokens cannot tell a bind's source from the next bind's
+    flag. Grouping first means the diff below is over operations, in order,
+    which is exactly the claim being made.
+    """
+    assert argv[0] == "bwrap", argv[:3]
+    ops = []
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            break
+        assert tok in _BWRAP_ARITY, f"unknown bwrap argument {tok!r} at {i}"
+        n = _BWRAP_ARITY[tok]
+        ops.append(tuple(argv[i:i + 1 + n]))
+        i += 1 + n
+    return ops
+
+
+@pytest.fixture
+def claude_home(tmp_path, monkeypatch):
+    """A fake HOME with a sentinel at every path the Claude runtime block binds.
+
+    `_ro_bind`/`_bind` skip a source that does not exist, so a profile test
+    against the real HOME would pass on a machine with no Claude install by
+    asserting the absence of mounts that were never emitted. Every path here
+    exists, so CLAUDE must carry all of them and NATIVE must carry none.
+    """
+    home = tmp_path / "home"
+    for d in (
+        ".local/bin", ".local/share/claude", ".local/state/claude",
+        ".claude/projects", ".claude/debug", ".claude/todos",
+        ".cache/huggingface",
+    ):
+        (home / d).mkdir(parents=True)
+    (home / ".local" / "bin" / "claude").write_text("#!/bin/sh\n")
+    (home / ".claude" / ".credentials.json").write_text('{"token": "sentinel"}')
+    (home / ".claude" / "settings.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _claude_paths(home):
+    """The paths that belong to the Claude profile and to nothing else.
+
+    Both spellings of each: `_ro_bind` emits `src.resolve()` as the source and
+    the path as written as the destination, and on macOS `tmp_path` sits under
+    the `/var -> /private/var` symlink, so the two differ.
+    """
+    raw = [
+        home / ".local" / "bin",
+        home / ".local" / "share" / "claude",
+        home / ".local" / "state" / "claude",
+        home / ".claude",
+    ]
+    out = []
+    for p in raw:
+        out.append(str(p))
+        out.append(str(p.resolve()))
+    return sorted(set(out))
+
+
+def _touches_claude(op, home, sp_path=None):
+    """Whether an operation names a Claude-profile path (or the prompt file)."""
+    profile_paths = _claude_paths(home)
+    if sp_path is not None:
+        profile_paths = profile_paths + [str(sp_path), str(sp_path.resolve())]
+    for arg in op[1:]:
+        for owned in profile_paths:
+            if arg == owned or arg.startswith(owned + os.sep):
+                return True
+    return False
+
+
+class TestSandboxProfiles:
+    """`SandboxProfile` decides one thing: whether the Claude CLI's own runtime
+    state is in the namespace.
+
+    ISSUE-389's filed bug is that NativeBrain's Bash tool got the Claude
+    profile, so `cat "$HOME/.claude/.credentials.json"` inside a sandboxed
+    native task returned the subscription token as a tool result to whatever
+    provider native points at. Read-only stops the token being rewritten, not
+    read.
+    """
+
+    def _both(self, config, task, **kwargs):
+        with _patch_linux():
+            claude = build_bwrap_cmd(
+                ["/bin/sh", "-c", "true"], config, task, False, [],
+                config.temp_dir / task.user_id,
+                profile=SandboxProfile.CLAUDE, **kwargs,
+            )
+            native = build_bwrap_cmd(
+                ["/bin/sh", "-c", "true"], config, task, False, [],
+                config.temp_dir / task.user_id,
+                profile=SandboxProfile.NATIVE, **kwargs,
+            )
+        return claude, native
+
+    def test_claude_carries_every_runtime_path(
+        self, sandbox_config, make_sandbox_task, claude_home,
+    ):
+        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+        claude, _ = self._both(sandbox_config, make_sandbox_task())
+
+        ro = {src for src, _ in _get_bind_pairs(claude, "--ro-bind")}
+        rw = {src for src, _ in _get_bind_pairs(claude, "--bind")}
+        c = claude_home / ".claude"
+
+        assert str((claude_home / ".local" / "bin").resolve()) in ro
+        assert str((claude_home / ".local" / "share" / "claude").resolve()) in ro
+        assert str((claude_home / ".local" / "state" / "claude").resolve()) in rw
+        assert str((c / ".credentials.json").resolve()) in ro
+        assert str((c / "settings.json").resolve()) in ro
+        for sub in ("projects", "debug", "todos"):
+            assert str((c / sub).resolve()) in rw
+        assert ("--tmpfs", str(c.resolve())) in _ops(claude)
+
+    def test_native_carries_none_of_them_at_any_position(
+        self, sandbox_config, make_sandbox_task, claude_home,
+    ):
+        """Not "is not a bind source" — not present in the argv at all.
+
+        A destination is as good as a source: bwrap would create the path
+        inside the namespace either way, and the credential is what is at
+        stake.
+        """
+        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+        _, native = self._both(sandbox_config, make_sandbox_task())
+
+        for op in _ops(native):
+            assert not _touches_claude(op, claude_home), op
+
+    def test_native_still_carries_the_generic_paths_under_the_same_home(
+        self, sandbox_config, make_sandbox_task, claude_home,
+    ):
+        """The positive control for the two above.
+
+        `~/.cache/huggingface` is under the same fake HOME and belongs to the
+        generic plan. Without this, "no Claude path in the NATIVE argv" would
+        pass just as well on a build that read a different HOME, or on one
+        where the gate had swallowed every home-relative bind.
+        """
+        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+        _, native = self._both(sandbox_config, make_sandbox_task())
+
+        ro = {src for src, _ in _get_bind_pairs(native, "--ro-bind")}
+        assert str((claude_home / ".cache" / "huggingface").resolve()) in ro
+
+    def test_the_only_difference_is_the_claude_block_and_the_prompt_bind(
+        self, sandbox_config, make_sandbox_task, claude_home,
+    ):
+        """Deleting the Claude operations from the CLAUDE plan yields the NATIVE
+        plan *exactly*, in order.
+
+        This is the assertion that the split moved nothing else. Ordering is
+        load-bearing in three places (cache bind before repos bind, the
+        `.developer` re-bind after `user_temp_dir`, the masks last), and an
+        equality over the remaining sequence is what says none of them shifted.
+        """
+        sandbox_config.custom_system_prompt = True
+        sp = sandbox_config.skills_dir.parent / "system-prompt.md"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text("custom prompt")
+        user_temp = sandbox_config.temp_dir / "alice"
+        (user_temp / ".developer").mkdir(parents=True)
+
+        claude, native = self._both(sandbox_config, make_sandbox_task())
+
+        claude_ops = _ops(claude)
+        generic = [op for op in claude_ops if not _touches_claude(op, claude_home, sp)]
+        assert generic == _ops(native)
+        # And the removed set is non-empty, or the equality above is vacuous.
+        assert len(claude_ops) > len(generic)
+        # The command itself, and everything after the `--`, is untouched.
+        assert claude[claude.index("--"):] == native[native.index("--"):]
+
+    def test_the_system_prompt_is_bound_under_claude_and_not_under_native(
+        self, sandbox_config, make_sandbox_task, claude_home,
+    ):
+        sandbox_config.custom_system_prompt = True
+        sp = sandbox_config.skills_dir.parent / "system-prompt.md"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text("custom prompt")
+        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+
+        claude, native = self._both(sandbox_config, make_sandbox_task())
+
+        assert str(sp) in claude
+        assert str(sp) not in native
+        assert str(sp.resolve()) not in native
+
+    def test_a_missing_profile_is_a_typeerror(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """No default, deliberately: a forgotten profile must be a loud failure
+        at the call site rather than a silent grant of the Claude mounts."""
+        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+        with _patch_linux(), pytest.raises(TypeError):
+            build_bwrap_cmd(
+                ["/bin/sh"], sandbox_config, make_sandbox_task(), False, [],
+                sandbox_config.temp_dir / "alice",
+            )
+
+    def test_the_profile_cannot_be_passed_positionally(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """Keyword-only. A positional would land on `proxy_sock` and be taken as
+        a path, which is the silent version of the failure above."""
+        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+        with _patch_linux(), pytest.raises(TypeError):
+            build_bwrap_cmd(
+                ["/bin/sh"], sandbox_config, make_sandbox_task(), False, [],
+                sandbox_config.temp_dir / "alice",
+                None, None, None, None, None, SandboxProfile.NATIVE,
+            )
+
+    def test_the_unavailable_path_is_profile_blind(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """Where bwrap cannot run, both profiles return the command unchanged —
+        the unsandboxed posture this spec does not touch."""
+        cmd = ["/bin/sh", "-c", "true"]
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        with patch("istota.executor._bwrap_available", return_value=False):
+            for profile in SandboxProfile:
+                assert build_bwrap_cmd(
+                    cmd, sandbox_config, make_sandbox_task(), False, [], user_temp,
+                    profile=profile,
+                ) == cmd
+
+
+@pytest.mark.parametrize("profile", list(SandboxProfile), ids=lambda p: p.value)
+class TestBindOrderUnderBothProfiles:
+    """The three orderings the plan depends on, asserted under each profile.
+
+    They are properties of the generic plan, so removing the Claude block must
+    leave every one of them intact — and the Claude block sits between the
+    `config/users` mask and the `user_temp_dir` bind, which is upstream of all
+    three.
+    """
+
+    def _argv(self, config, task, user_temp, profile, is_admin=False):
+        with _patch_linux():
+            return build_bwrap_cmd(
+                ["/bin/sh", "-c", "true"], config, task, is_admin, [], user_temp,
+                profile=profile,
+            )
+
+    @staticmethod
+    def _first_index(argv, flag, path):
+        for i, arg in enumerate(argv):
+            if arg == flag and i + 1 < len(argv) and argv[i + 1] == path:
+                return i
+        return None
+
+    def test_the_cache_bind_precedes_the_repos_bind(
+        self, sandbox_config, make_sandbox_task, tmp_path, profile, claude_home,
+    ):
+        """`link(2)` compares mounts: the repos bind has to be the ancestor that
+        covers the cache, or every wheel is a full byte copy (ISSUE-305), and
+        the covering is also what buries a symlink swap (ISSUE-320)."""
+        repos = tmp_path / "repos"
+        (repos / "alice").mkdir(parents=True)
+        sandbox_config.developer.enabled = True
+        sandbox_config.developer.repos_dir = str(repos)
+        sandbox_config.admin_users = {"alice"}
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+
+        argv = self._argv(
+            sandbox_config, make_sandbox_task(), user_temp, profile, is_admin=True,
+        )
+        binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+        cache = str((repos / "alice" / ".package-caches").resolve())
+        subtree = str((repos / "alice").resolve())
+        assert cache in binds and subtree in binds
+        assert binds.index(subtree) > binds.index(cache)
+
+    def test_the_developer_rebind_follows_the_user_temp_bind(
+        self, sandbox_config, make_sandbox_task, profile, claude_home,
+    ):
+        """A later `--ro-bind` on a subdirectory overrides the parent `--bind`;
+        the other order leaves the credential-fetch scripts writable."""
+        user_temp = sandbox_config.temp_dir / "alice"
+        dev = user_temp / ".developer"
+        dev.mkdir(parents=True)
+
+        argv = self._argv(sandbox_config, make_sandbox_task(), user_temp, profile)
+        temp_idx = self._first_index(argv, "--bind", str(user_temp.resolve()))
+        dev_idx = self._first_index(argv, "--ro-bind", str(dev.resolve()))
+        assert temp_idx is not None and dev_idx is not None
+        assert dev_idx > temp_idx
+
+    def test_the_masks_are_the_last_mount_operations(
+        self, sandbox_config, make_sandbox_task, profile, claude_home,
+    ):
+        """bwrap applies operations in argv order, so a bind after a mask shows
+        through it."""
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+
+        argv = self._argv(sandbox_config, make_sandbox_task(), user_temp, profile)
+        masks = _tmpfs_masks(argv)
+        assert str(Path(sandbox_config.db_path).parent.resolve()) in masks
