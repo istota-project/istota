@@ -424,3 +424,157 @@ class TestTheComposedSystemPromptInTheStack:
             "the standing instructions are still on the user turn, where "
             "compaction summarizes them away — the flip did not happen"
         )
+
+
+# --------------------------------------------------------------------------
+# One tool server, one namespace, for the whole attempt
+# --------------------------------------------------------------------------
+
+#: `temp_dir` is the literal `/data/tmp` on both container shapes
+#: (`render-config.sh:130`) and `Stack.submit` submits as `testuser`, so the
+#: task temp dir — `ISTOTA_DEFERRED_DIR`, a read-write bind and therefore a
+#: `native_fs_roots` write root — is this. Named as a literal because the
+#: `Read` call below has to carry an absolute path, and a scripted turn is
+#: fixed before the task exists. The probe echoes the variable back and the
+#: test compares, so a layout change says so here rather than surfacing as an
+#: unexplained "File not found" from the Read tool.
+TASK_TEMP_DIR = "/data/tmp/testuser"
+
+#: Written to the namespace's `/tmp` by the first Bash call and read back by
+#: the second. `/tmp` is a `--tmpfs` inside the sandbox: with one namespace per
+#: attempt it is the same tmpfs on the second call, and with the per-call
+#: sandbox this replaced it was a fresh one every time.
+TMPFS_SENTINEL = "TOOLSERVER_TMPFS_SURVIVED"
+
+#: Written by Bash, read back by the `Read` tool. The two tools are different
+#: families behind the same server — `Read` used to run on a daemon worker
+#: thread — so this is the leg that says the file tools reach the task's
+#: filesystem view through the tool server in the shipped image.
+READ_TOOL_SENTINEL = "TOOLSERVER_READ_TOOL_SAW_THIS"
+
+TOOLSERVER_SETUP = f"""
+echo TOOLSERVER_SETUP_BEGIN
+echo "deferred=$ISTOTA_DEFERRED_DIR"
+echo '{TMPFS_SENTINEL}' > /tmp/tool-server-probe.txt
+echo '{READ_TOOL_SENTINEL}' > "$ISTOTA_DEFERRED_DIR/tool-server-probe.txt"
+echo TOOLSERVER_SETUP_END
+"""
+
+TOOLSERVER_READBACK = """
+echo TOOLSERVER_READBACK_BEGIN
+if [ -f /tmp/tool-server-probe.txt ]; then
+  echo "tmp=$(cat /tmp/tool-server-probe.txt)"
+else
+  echo "tmp=MISSING"
+fi
+echo TOOLSERVER_READBACK_END
+"""
+
+TOOLSERVER_SCRIPT = [
+    {
+        "tool_calls": [
+            {"id": "call-1", "name": "Bash", "arguments": {"command": TOOLSERVER_SETUP}}
+        ]
+    },
+    # Both in one turn: three turns fit inside the endpoint's `MAX_TURNS` of
+    # four with a turn to spare, where four calls in four turns would sit
+    # exactly on the ceiling.
+    {
+        "tool_calls": [
+            {
+                "id": "call-2",
+                "name": "Bash",
+                "arguments": {"command": TOOLSERVER_READBACK},
+            },
+            {
+                "id": "call-3",
+                "name": "Read",
+                "arguments": {"file_path": f"{TASK_TEMP_DIR}/tool-server-probe.txt"},
+            },
+        ]
+    },
+    {"text": "I looked at what survived between the two calls"},
+]
+
+
+class TestOneNamespaceForTheWholeAttempt:
+    """The tool server's own shape, observed in the shipped image.
+
+    `NativeBrain` spawns `istota.tool_server` once per task *attempt* through
+    `build_bwrap_cmd(..., profile=NATIVE)` and every tool runs in that one
+    namespace (ISSUE-389). Before it, `Bash` rebuilt a whole bwrap namespace
+    per call and the five file tools ran on daemon worker threads behind a
+    Python path allowlist — two execution paths, neither of them this one.
+
+    `tests/linux/test_tool_server_lifecycle.py` asserts the same property
+    against a real kernel by driving `start_tool_server` directly. What this
+    adds is the deployment: the executor's own argv, the rendered config, the
+    image's bubblewrap, and the brain's own spawn.
+
+    **What this does not witness.** Neither scenario distinguishes a sandbox
+    that ran from one that was skipped: unconfined, `/tmp` is the container's
+    own and the file survives for a duller reason, and the `Read` succeeds
+    against the same path. `TestTheDatabaseMasks` above is what makes that
+    distinction, and it runs in the same session against the same stack. These
+    two say the *server* is there and holds one view across calls and across
+    tool families — which is exactly what a per-call sandbox could not do, and
+    what a Bash-only scenario cannot see.
+
+    **The control, and what it turned red.** Both assertions read strings out
+    of the endpoint transcript, and a transcript assertion is the shape that
+    passes on nothing at all. Replacing the two writes in `TOOLSERVER_SETUP`
+    with a no-op — the tool calls unchanged, so the server still runs both —
+    failed exactly
+    `test_the_tmpfs_written_in_the_first_call_is_there_in_the_second` (on
+    `tmp=MISSING`) and `test_the_read_tool_sees_what_bash_wrote` (on the absent
+    sentinel). That is a non-vacuity control: it shows each assertion depends on
+    the file the other tool wrote. It is *not* a control for the per-attempt
+    namespace itself, which would mean reinstating the per-call sandbox — the
+    linux tier holds that half, where `start_tool_server` can be driven
+    directly.
+    """
+
+    @pytest.mark.script(TOOLSERVER_SCRIPT)
+    def test_the_tmpfs_written_in_the_first_call_is_there_in_the_second(self, stack):
+        task_id = stack.submit("write something and read it back")
+        stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
+
+        setup = marked_block(
+            stack, "TOOLSERVER_SETUP_BEGIN", "TOOLSERVER_SETUP_END", "the setup probe"
+        )
+        assert f"deferred={TASK_TEMP_DIR}" in setup, (
+            "the task temp dir is not where this file says it is, so the Read "
+            f"call below is aimed at nothing\n--- probe ---\n{setup}"
+        )
+
+        readback = marked_block(
+            stack,
+            "TOOLSERVER_READBACK_BEGIN",
+            "TOOLSERVER_READBACK_END",
+            "the read-back probe",
+        )
+        assert f"tmp={TMPFS_SENTINEL}" in readback, (
+            "the second Bash call did not see what the first wrote to /tmp, so "
+            "the two ran in different namespaces — a tool server per call "
+            "rather than per attempt\n"
+            f"--- probe ---\n{readback}\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
+
+    @pytest.mark.script(TOOLSERVER_SCRIPT)
+    def test_the_read_tool_sees_what_bash_wrote(self, stack):
+        """The other tool family, through the same server and the same view.
+
+        The sentinel differs from the tmpfs one on purpose: both travel in the
+        same transcript, and one string for both would pass on either leg
+        alone.
+        """
+        task_id = stack.submit("write something and read it back")
+        stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
+
+        assert READ_TOOL_SENTINEL in stack.endpoint.transcript(), (
+            "the Read tool's result never carried the file's contents back — "
+            "it did not run, it was refused, or its result never reached the "
+            "model\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
