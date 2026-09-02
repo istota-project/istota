@@ -6824,16 +6824,40 @@ class TestWarnUnconsumedDeferredFiles:
             "task_123_kv_ops.json",
             "task_123_user_alerts.json",
             "task_123_email_output.json",
-            "task_123_prompt.txt",
-            # The system half, written beside the user half since the prompt
-            # split. Unrecognised, it would warn on every task that ran.
-            "task_123_system_prompt.txt",
+            # The one static file the framework still writes here: the model
+            # produces it inside the sandbox and the daemon reads it back.
             "task_123_result.txt",
         ):
             (tmp_path / name).write_text("{}")
         with caplog.at_level("WARNING"):
             _warn_unconsumed_deferred_files(task, tmp_path)
         assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
+
+    def test_warns_on_a_prompt_file_planted_in_the_user_temp_dir(
+        self, tmp_path, caplog,
+    ):
+        # Both prompt halves live in the task control directory now, outside
+        # anything a sandboxed task can write. So one of these names turning
+        # up in the per-user temp directory is not the executor's — it is a
+        # concurrent task of the same user writing under another task's id,
+        # which is the write vector the control directory exists to close.
+        # Keeping the names recognised would silence exactly that case.
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(123)
+        (tmp_path / "task_123_prompt.txt").write_text("planted")
+        (tmp_path / "task_123_system_prompt.txt").write_text("planted")
+        (tmp_path / "task_123_result.txt").write_text("mine")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        warnings = [
+            r.message for r in caplog.records
+            if "Unrecognized deferred file" in r.message
+        ]
+        assert len(warnings) == 2
+        assert any("task_123_prompt.txt" in m for m in warnings)
+        assert any("task_123_system_prompt.txt" in m for m in warnings)
+        # The result file is still ours and must stay quiet.
+        assert not any("task_123_result.txt" in m for m in warnings)
 
     def test_warns_on_missing_task_prefix(self, tmp_path, caplog):
         # The shape that hit prod: model wrote "{id}_skip_log.json" instead
@@ -6952,15 +6976,16 @@ class TestPurgeDeferredFilesForRetry:
         assert not (tmp_path / "task_999_kg_ops.json").exists()
         assert (tmp_path / "task_1000_kg_ops.json").exists()
 
-    def test_purge_leaves_prompt_and_result(self, tmp_path):
-        # Result/prompt are scoped per-task and overwritten by the executor.
+    def test_purge_leaves_the_result_file(self, tmp_path):
+        # The result file is scoped per-task, not per-attempt, and the model
+        # overwrites it. It is the only such file left in this directory —
+        # both prompt halves moved to the task control directory, which this
+        # function has never walked.
         from istota.scheduler import _purge_deferred_files_for_retry
         task = self._task(999)
-        (tmp_path / "task_999_prompt.txt").write_text("prompt")
         (tmp_path / "task_999_result.txt").write_text("result")
         (tmp_path / "task_999_kg_ops.json").write_text("[]")
         _purge_deferred_files_for_retry(task, tmp_path)
-        assert (tmp_path / "task_999_prompt.txt").exists()
         assert (tmp_path / "task_999_result.txt").exists()
         assert not (tmp_path / "task_999_kg_ops.json").exists()
 

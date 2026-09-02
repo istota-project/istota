@@ -1452,8 +1452,11 @@ def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
     ``delete`` for KG; subtask creation; outbound emails; user alerts) make
     replays harmful, not just redundant. Clear the slate on every retry.
 
-    Result and prompt files are left in place — they're scoped per-task, not
-    per-attempt, and the executor overwrites them.
+    The result file is left in place — it's scoped per-task, not per-attempt,
+    and the model overwrites it. It is also the only such file still in this
+    directory: both prompt halves moved to the task control directory
+    (``{temp_dir}/.control/{user_id}/task_{id}``), which this function has
+    never walked.
     """
     if not user_temp_dir.is_dir():
         return
@@ -1499,14 +1502,20 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
     known_filenames.update(
         f"task_{task.id}_{suffix}.json" for suffix in _KNOWN_ARTIFACT_SUFFIXES
     )
-    # Static task-scoped files written by the executor itself. The two prompt
-    # halves are separate artifacts under the same convention: `_prompt.txt` is
-    # the user turn and `_system_prompt.txt` is Istota's standing instructions,
-    # which also reach the brain as a path. Both are overwritten per attempt,
-    # neither is a deferred op, and an unrecognised one would log a warning on
-    # every single task.
-    known_filenames.add(f"task_{task.id}_prompt.txt")
-    known_filenames.add(f"task_{task.id}_system_prompt.txt")
+    # The one static task-scoped file the framework still puts in this
+    # directory: the model writes `task_{id}_result.txt` from inside the
+    # sandbox and the daemon reads it back, so a writable per-user directory
+    # is where it belongs.
+    #
+    # The two prompt halves used to be named here as well. They live in the
+    # task control directory now (`{temp_dir}/.control/{user_id}/task_{id}`),
+    # which nothing sandboxed can write, so a `task_{id}_prompt.txt` or
+    # `task_{id}_system_prompt.txt` appearing *here* is by definition not
+    # ours — exactly the case worth seeing, and the reason the names are gone
+    # rather than kept as harmless. `briefing_meta.json` moved with them and
+    # is deliberately not listed either: it was never in this set, so before
+    # the move it warned on every briefing task, and adding it now would
+    # silence a name the framework no longer writes here.
     known_filenames.add(f"task_{task.id}_result.txt")
 
     suspicious: list[Path] = []
