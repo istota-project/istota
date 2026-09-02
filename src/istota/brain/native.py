@@ -631,6 +631,21 @@ def _base_url_host(base_url: str) -> str:
         return ""
 
 
+def _join_system_prompt(parts: list[tuple[str, str]]) -> str:
+    """The system prompt text, from a `_system_prompt_parts` walk."""
+    return "\n\n".join(text for _, text in parts)
+
+
+def _system_prompt_source_of(parts: list[tuple[str, str]]) -> str:
+    """What that prompt was made of, from the same walk.
+
+    Both take the already-walked list rather than a request, so the run reads
+    the composed file once and the text and the label cannot describe two
+    different reads of it.
+    """
+    return "+".join(name for name, _ in parts) or "empty"
+
+
 def _tools_schema_sha(tools) -> str:
     """SHA-256 over the sorted tool schemas.
 
@@ -1749,8 +1764,19 @@ class NativeBrain:
         tool_server = None
         try:
             tool_server = await self._start_tool_server(req, abort)
+            # One walk, two consumers. Deliberately not
+            # `_extract_system_prompt(req)` here and `_system_prompt_source(req)`
+            # ten lines below: each of those walks again, and the walk now reads
+            # a file off disk. Two reads is two chances to fail, and the second
+            # one is the worse of them — by that point the system prompt has
+            # been assembled correctly and the run is viable, so a composed file
+            # that vanished in between would fail the attempt from a function
+            # whose only job is to name what the first read already got. The
+            # unguarded read is there so a *missing* required input cannot be
+            # ignored, not so a label can end a working run.
+            prompt_parts = self._system_prompt_parts(req)
             context = AgentContext(
-                system_prompt=self._extract_system_prompt(req),
+                system_prompt=_join_system_prompt(prompt_parts),
                 messages=[],
                 tools=self._build_tools(req, tool_server),
             )
@@ -1760,7 +1786,7 @@ class NativeBrain:
                 context.system_prompt,
                 [t.schema.name for t in (context.tools or [])],
                 _tools_schema_sha(context.tools),
-                system_prompt_source=self._system_prompt_source(req),
+                system_prompt_source=_system_prompt_source_of(prompt_parts),
             )
             prompt_msg = UserMessage(
                 content=_initial_user_content(
@@ -2370,8 +2396,14 @@ class NativeBrain:
         return sanitize_tool_pairs(rendered)
 
     def _extract_system_prompt(self, req: BrainRequest) -> str:
-        """The composed system prompt. See :meth:`_system_prompt_parts`."""
-        return "\n\n".join(text for _, text in self._system_prompt_parts(req))
+        """The composed system prompt. See :meth:`_system_prompt_parts`.
+
+        A convenience wrapper over one walk plus :func:`_join_system_prompt`.
+        The run itself does not use it — `_execute_async` walks once and feeds
+        both consumers from that one list, so the composed file is read once per
+        attempt rather than once per consumer.
+        """
+        return _join_system_prompt(self._system_prompt_parts(req))
 
     def _system_prompt_source(self, req: BrainRequest) -> str:
         """What the composed prompt is made of, for the ``context`` record.
@@ -2388,8 +2420,11 @@ class NativeBrain:
         ``builtin+composed+/etc/istota/system-prompt.md``, ``composed`` for a
         tool-less executor task, and ``empty`` for an unchanged direct
         text-only call.
+
+        A convenience wrapper, like :meth:`_extract_system_prompt`; the run
+        takes :func:`_system_prompt_source_of` off the walk it already did.
         """
-        return "+".join(name for name, _ in self._system_prompt_parts(req)) or "empty"
+        return _system_prompt_source_of(self._system_prompt_parts(req))
 
     def _system_prompt_parts(self, req: BrainRequest) -> list[tuple[str, str]]:
         """Compose the native brain's system prompt.
@@ -2432,12 +2467,21 @@ class NativeBrain:
             if self._config.turn_budget_nudge and self._config.max_turns:
                 coding = f"{coding}\n\n- {_TURN_BUDGET_UPFRONT}"
             parts.append(("builtin", coding))
+        # `encoding="utf-8"`, not the locale's. `read_text()` bare would decode
+        # through `locale.getencoding()`, and the two shipped deployment shapes
+        # disagree about what that is: the Docker image sets `LANG=C.UTF-8`, the
+        # systemd unit sets no locale at all. The failure that produces is the
+        # one this whole change's fail-closed argument does not catch — a
+        # non-UTF-8 locale decodes the persona, `USER.md` and the skill bodies
+        # as latin-1 and hands the model mojibake rather than raising. The
+        # executor writes both files `encoding="utf-8"`; this is the matching
+        # half.
         composed = req.composed_system_prompt_path
         if composed is not None:
-            parts.append(("composed", Path(composed).read_text()))
+            parts.append(("composed", Path(composed).read_text(encoding="utf-8")))
         path = req.custom_system_prompt_path
         if path is not None and Path(path).exists():
-            parts.append((str(path), Path(path).read_text()))
+            parts.append((str(path), Path(path).read_text(encoding="utf-8")))
         return parts
 
     @staticmethod

@@ -162,10 +162,15 @@ _USAGE_LIMIT_MARKERS = (
 # (`BrainRequest.composed_system_prompt_path`), so dropping it on this backend
 # alone would run tmux tasks with no persona, no rules and no tool descriptions
 # while the headless path kept them. A measured parser rejection in the
-# interactive TUI is a release blocker, not a reason to omit them here. The
-# handler is present in the pinned 2.1.241 bundle, verified by grepping the
-# binary for its own `Append system prompt file not found:` error string rather
-# than by a `--version` probe, which exits zero on any unrecognised option.
+# interactive TUI is a release blocker, not a reason to omit them here.
+#
+# The handler is present in the 2.1.241 bundle the split was developed against,
+# verified by grepping that binary for its own `Append system prompt file not
+# found:` error string rather than by a `--version` probe, which exits zero on
+# any unrecognised option and so cannot tell a supported flag from an ignored
+# one. That is a different number from `TmuxBrainConfig.cli_version_pin`, which
+# is the version this brain's *pane driving* was verified against; the flag
+# reaches the CLI through the shared builder either way.
 _TMUX_UNSUPPORTED_FLAGS: frozenset[str] = frozenset()
 
 # Per-process session-name counter (BrainRequest carries no task id by default).

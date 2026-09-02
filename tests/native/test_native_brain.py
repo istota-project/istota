@@ -322,15 +322,24 @@ class TestComposedSystemPrompt:
         assert provider.calls[0]["system_prompt"] == ""
 
     def test_the_composed_text_is_not_in_the_user_message(self, tmp_path):
-        """`req.prompt` is the user half and stays the initial user message."""
+        """`req.prompt` is the user half and stays the initial user message.
+
+        Asserted as a *pairing* — present in the system prompt, absent from
+        `messages` — rather than as an absence alone. An absence alone is
+        vacuous here and was measured to be: with the composed part removed
+        from `_system_prompt_parts` the file is never read, so "not in the user
+        message" holds for the wrong reason and the test stays green through
+        the exact regression it names.
+        """
         composed = self._composed(tmp_path)
         req = _req("REQUEST-SENTINEL", tmp_path, tools=["Read"])
         req.composed_system_prompt_path = composed
         _, provider = self._run(tmp_path, req)
-        messages = provider.calls[0]["messages"]
-        rendered = str(messages)
-        assert "REQUEST-SENTINEL" in rendered
+        rendered = str(provider.calls[0]["messages"])
+        assert "ISTOTA-COMPOSED-SENTINEL" in provider.calls[0]["system_prompt"]
         assert "ISTOTA-COMPOSED-SENTINEL" not in rendered
+        assert "REQUEST-SENTINEL" in rendered
+        assert "REQUEST-SENTINEL" not in provider.calls[0]["system_prompt"]
 
     def test_a_missing_composed_file_fails_the_attempt(self, tmp_path):
         """Required input. Silent omission would recreate ISSUE-375 under a
@@ -343,6 +352,33 @@ class TestComposedSystemPrompt:
         assert result.success is False
         assert result.stop_reason == "error"
         assert provider.calls == []
+
+    def test_the_composed_file_is_read_once_per_attempt(self, tmp_path):
+        """Two consumers, one walk.
+
+        The system text and the `system_prompt_source` label used to be derived
+        by two independent walks, and the walk now opens a file. That is two
+        chances to fail where one will do, and the second is the worse of them:
+        by then the prompt is assembled and the run is viable, so a file that
+        vanished in between would fail the attempt from a function whose only
+        job is to name what the first read already got.
+        """
+        composed = self._composed(tmp_path)
+        reads = []
+        real_read = Path.read_text
+
+        def _counting_read(self, *a, **kw):
+            if self == composed:
+                reads.append(self)
+            return real_read(self, *a, **kw)
+
+        req = _req("do a thing", tmp_path, tools=["Read"])
+        req.composed_system_prompt_path = composed
+        with patch.object(Path, "read_text", _counting_read):
+            result, _ = self._run(tmp_path, req)
+
+        assert result.success is True
+        assert len(reads) == 1, f"composed file read {len(reads)} times"
 
     def test_a_missing_operator_file_is_still_tolerated(self, tmp_path):
         """The control for the case above: the optional file keeps its

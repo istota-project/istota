@@ -273,11 +273,26 @@ class TestSandboxInteraction:
         assert "--dangerously-skip-permissions" in cmd
         assert str(tmp_path) in cmd  # cd <launch_cwd>
 
-    def test_launch_carries_the_composed_system_file(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("dirname", ["plain", "with space and 'quote'"])
+    def test_launch_carries_the_composed_system_file(
+        self, monkeypatch, tmp_path, dirname
+    ):
         """The composed system half reaches the pane's `claude` argv, and the
         user half still arrives by prompt injection rather than being
-        concatenated onto it."""
-        composed = tmp_path / "task_7_system_prompt.txt"
+        concatenated onto it.
+
+        Asserted through `shlex.split` rather than as a substring, and
+        parametrized over a directory name needing quoting: the pane command is
+        built with `shlex.quote` per argument, so a substring check would
+        silently stop testing the flag/value pairing the moment a real
+        deployment path contained a space — which is the only place a quoting
+        regression on this backend could show.
+        """
+        import shlex
+
+        base = tmp_path / dirname
+        base.mkdir()
+        composed = base / "task_7_system_prompt.txt"
         composed.write_text("You are Istota.")
         brain = TmuxClaudeBrain()
         sent = []
@@ -290,12 +305,13 @@ class TestSandboxInteraction:
         )
         brain._launch_claude("s1", req, tmp_path)
         literal = next(a for a in sent if a[:4] == ("send-keys", "-t", "s1", "-l"))
-        cmd = literal[4]
-        assert f"--append-system-prompt-file {composed}" in cmd
-        assert "--system-prompt-file" not in cmd.replace(
-            "--append-system-prompt-file", ""
-        )
-        assert "USER-HALF" not in cmd
+        argv = shlex.split(literal[4])
+        assert argv.count("--append-system-prompt-file") == 1
+        assert argv[argv.index("--append-system-prompt-file") + 1] == str(composed)
+        # The operator's replace flag is a different channel and is not set here.
+        assert "--system-prompt-file" not in argv
+        # The user half goes in by prompt injection, never on the argv.
+        assert "USER-HALF" not in literal[4]
 
     def test_no_sandbox_wrap_launches_bare_claude(self, monkeypatch, tmp_path):
         brain = TmuxClaudeBrain()

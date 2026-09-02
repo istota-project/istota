@@ -1,11 +1,19 @@
 """Brain protocol — the boundary between executor orchestration and model invocation.
 
-The executor builds a fully composed prompt + env + sandbox configuration
-and hands a BrainRequest to the brain. The brain owns everything from
-"we have a prompt and an env" through "we have a result + trace": building
-the model call, running it, parsing streaming events, and retrying on
-transient API errors. Result post-processing (malformed-output detection,
-CM-aware composition) and deferred file processing stay in the executor.
+The executor composes the prompt, the env and the sandbox configuration and
+hands a BrainRequest to the brain. The brain owns everything from "we have a
+prompt and an env" through "we have a result + trace": building the model call,
+running it, parsing streaming events, and retrying on transient API errors.
+Result post-processing (malformed-output detection, CM-aware composition) and
+deferred file processing stay in the executor.
+
+The prompt is not one string. It reaches the brain on three channels with
+different authority — the task material as ``prompt``, Istota's own standing
+instructions as ``composed_system_prompt_path``, and the operator's file as
+``custom_system_prompt_path`` — so that a brain which compacts its own message
+history cannot compact away the instructions that define the assistant.
+``BrainRequest`` documents each one. A direct text-only caller supplies only
+the first and is unaffected.
 """
 
 from collections.abc import Callable
@@ -118,6 +126,14 @@ class BrainRequest:
     # Carried across a reroute by `_run_fallback`'s `dataclasses.replace`, which
     # names it nowhere, so both prompt channels reach the fallback brain intact
     # and each backend consumes the split its own way.
+    #
+    # **Must be absolute**, and the producer is what has to guarantee it: a
+    # relative value names a different file on each backend and would survive a
+    # reroute between them. NativeBrain opens it in the *daemon* process, so it
+    # would resolve against the daemon's cwd; the Claude CLI resolves it itself,
+    # inside the sandbox, against the task's chdir target — and the tmux path
+    # puts another `cd` in front of that. `custom_system_prompt_path` never had
+    # the problem because it comes from a resolved config path.
     composed_system_prompt_path: Path | None = None
 
     # Whether the brain should stream events for progress callbacks. When

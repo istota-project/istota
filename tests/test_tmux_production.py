@@ -188,12 +188,22 @@ class TestComposedSystemPromptReachesTmux:
         assert "--system-prompt-file" not in flags
         assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
 
+    def test_only_the_operator_file(self, tmp_path):
+        custom, _ = self._files(tmp_path)
+        flags = build_claude_cli_flags(
+            _req(tmp_path, allowed_tools=["Bash"], custom_system_prompt_path=custom),
+            unsupported=tmux_claude._TMUX_UNSUPPORTED_FLAGS,
+        )
+        assert flags[flags.index("--system-prompt-file") + 1] == str(custom)
+        assert "--append-system-prompt-file" not in flags
+
     def test_neither_file(self, tmp_path):
         flags = build_claude_cli_flags(
             _req(tmp_path, allowed_tools=["Bash"]),
             unsupported=tmux_claude._TMUX_UNSUPPORTED_FLAGS,
         )
         assert "--append-system-prompt-file" not in flags
+        assert "--system-prompt-file" not in flags
 
     def test_a_missing_composed_file_still_reaches_the_pane(self, tmp_path):
         """Fail closed on this backend too: the CLI refuses to start rather
