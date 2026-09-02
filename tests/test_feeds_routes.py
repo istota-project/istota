@@ -923,3 +923,283 @@ class TestImageDedupeWindowConfig:
             }},
         )
         assert resp.status_code == 400
+
+
+class TestRetentionSettingsConfig:
+    """The ``entry_retention_days`` / ``max_entries_per_feed`` wire shape.
+
+    Both are per-user settings stored in ``schema_meta``. ``0`` is a real
+    value on each ("no age pruning", "no maximum") and is distinct from unset,
+    which resolves to the constant — so every assertion here has to tell those
+    two apart rather than treating a falsy read as absent.
+    """
+
+    def _put(self, client, settings: dict, feeds: list[dict] | None = None):
+        return client.put(
+            "/istota/api/feeds/config",
+            json={"config": {
+                "settings": settings,
+                "categories": [],
+                "feeds": feeds if feeds is not None else [],
+            }},
+        )
+
+    # -- GET ----------------------------------------------------------------
+
+    def test_get_omits_both_settings_when_unset(self, ctx, client):
+        # A fresh database stores neither row, and the page's placeholder is
+        # what shows the default. Sending a number the user never chose would
+        # make the next save store it.
+        _seed(ctx)
+        settings = client.get("/istota/api/feeds/config").json()["config"]["settings"]
+        assert "entry_retention_days" not in settings
+        assert "max_entries_per_feed" not in settings
+
+    def test_get_reports_stored_values(self, ctx, client):
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_entry_retention_days(conn, 30)
+            feeds_db.set_max_entries_per_feed(conn, 250)
+            conn.commit()
+
+        settings = client.get("/istota/api/feeds/config").json()["config"]["settings"]
+        assert settings["entry_retention_days"] == 30
+        assert settings["max_entries_per_feed"] == 250
+
+    def test_get_reports_zero_rather_than_omitting_it(self, ctx, client):
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_entry_retention_days(conn, 0)
+            feeds_db.set_max_entries_per_feed(conn, 0)
+            conn.commit()
+
+        settings = client.get("/istota/api/feeds/config").json()["config"]["settings"]
+        assert settings["entry_retention_days"] == 0
+        assert settings["max_entries_per_feed"] == 0
+
+    # -- PUT ----------------------------------------------------------------
+
+    def test_put_round_trips_both_settings(self, ctx, client):
+        _seed(ctx)
+        resp = self._put(
+            client, {"entry_retention_days": 45, "max_entries_per_feed": 1200},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) == 45
+            assert feeds_db.get_max_entries_per_feed(conn) == 1200
+
+    def test_put_stores_zero_as_a_value(self, ctx, client):
+        _seed(ctx)
+        assert self._put(
+            client, {"entry_retention_days": 0, "max_entries_per_feed": 0},
+        ).status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) == 0
+            assert feeds_db.get_max_entries_per_feed(conn) == 0
+
+    def test_put_without_the_keys_clears_both_stored_rows(self, ctx, client):
+        # How the page clears a field: blanking the input deletes the key from
+        # the payload, and the setting then falls back to the constant. The
+        # wire has no separate "reset" verb.
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_entry_retention_days(conn, 45)
+            feeds_db.set_max_entries_per_feed(conn, 1200)
+            conn.commit()
+
+        assert self._put(client, {}).status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) is None
+            assert feeds_db.get_max_entries_per_feed(conn) is None
+
+    def test_put_preserves_the_other_settings(self, ctx, client):
+        # The four settings share one object, and the save is wholesale — so a
+        # retention edit must not drop the poll interval or the image window.
+        _seed(ctx)
+        resp = self._put(client, {
+            "default_poll_interval_minutes": 45,
+            "image_dedupe_window_days": 21,
+            "entry_retention_days": 30,
+            "max_entries_per_feed": 900,
+        })
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_default_poll_interval(conn) == 45
+            assert feeds_db.get_image_dedupe_window_days(conn) == 21
+            assert feeds_db.get_entry_retention_days(conn) == 30
+            assert feeds_db.get_max_entries_per_feed(conn) == 900
+
+        settings = client.get("/istota/api/feeds/config").json()["config"]["settings"]
+        assert settings == {
+            "default_poll_interval_minutes": 45,
+            "image_dedupe_window_days": 21,
+            "entry_retention_days": 30,
+            "max_entries_per_feed": 900,
+        }
+
+    # -- Validation ---------------------------------------------------------
+
+    @pytest.mark.parametrize("key", [
+        "entry_retention_days", "max_entries_per_feed",
+    ])
+    @pytest.mark.parametrize("bad", [-1, True, False, "90", "", 1.5, []])
+    def test_put_rejects_a_malformed_value_without_storing_anything(
+        self, ctx, client, key, bad,
+    ):
+        # Re-reading afterwards is the load-bearing half: a rejected payload
+        # must not have written the feeds or categories half of the document
+        # either, and a 400 alone cannot show that.
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_entry_retention_days(conn, 90)
+            feeds_db.set_max_entries_per_feed(conn, 5000)
+            conn.commit()
+
+        resp = self._put(client, {key: bad})
+        assert resp.status_code == 400
+        assert key in resp.json()["error"]
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) == 90
+            assert feeds_db.get_max_entries_per_feed(conn) == 5000
+
+    @pytest.mark.parametrize("key", [
+        "entry_retention_days", "max_entries_per_feed",
+    ])
+    def test_put_treats_an_explicit_null_as_absent(self, ctx, client, key):
+        # JSON `null` is the one non-integer that is not a 400: it means the
+        # same thing an absent key does, so it clears rather than failing.
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_entry_retention_days(conn, 90)
+            feeds_db.set_max_entries_per_feed(conn, 5000)
+            conn.commit()
+
+        assert self._put(client, {key: None}).status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            reader = (
+                feeds_db.get_entry_retention_days
+                if key == "entry_retention_days"
+                else feeds_db.get_max_entries_per_feed
+            )
+            assert reader(conn) is None
+
+    def test_put_rejects_a_boolean_even_though_python_calls_it_an_int(
+        self, ctx, client,
+    ):
+        # The control for the `isinstance(value, bool)` guard: without it
+        # `True` stores as `1`, which is a one-entry-per-feed maximum.
+        _seed(ctx)
+        resp = self._put(client, {"max_entries_per_feed": True})
+        assert resp.status_code == 400
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_max_entries_per_feed(conn) is None
+
+    # -- The count-change refetch -------------------------------------------
+
+    STALE = ('"abc"', "Wed, 01 Apr 2026 00:00:00 GMT", "2099-01-01T00:00:00+00:00")
+
+    def _stale_validators(self, ctx) -> None:
+        with feeds_db.connect(ctx.db_path) as conn:
+            conn.execute(
+                "UPDATE feeds SET etag = ?, last_modified = ?, next_poll_at = ?",
+                self.STALE,
+            )
+            conn.commit()
+
+    def _feed_payload(self, ctx) -> list[dict]:
+        # The PUT is wholesale-replace, so a payload that omits a feed deletes
+        # it — and a deleted feed would satisfy "no stale validator" for the
+        # wrong reason.
+        with feeds_db.connect(ctx.db_path) as conn:
+            return [{"url": f.url} for f in feeds_db.list_feeds(conn)]
+
+    def _validator_state(self, ctx) -> list[tuple]:
+        with feeds_db.connect(ctx.db_path) as conn:
+            return [
+                (f.etag, f.last_modified, f.next_poll_at)
+                for f in feeds_db.list_feeds(conn)
+            ]
+
+    def test_a_changed_maximum_clears_validators_and_makes_feeds_due(
+        self, ctx, client,
+    ):
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+        assert len(feeds) == 2
+
+        resp = self._put(client, {"max_entries_per_feed": 100}, feeds=feeds)
+        assert resp.status_code == 200
+        assert self._validator_state(ctx) == [(None, None, None)] * 2
+
+    def test_an_unchanged_effective_maximum_leaves_the_validators_alone(
+        self, ctx, client,
+    ):
+        # Sending the default explicitly resolves to the same effective
+        # maximum, so nothing has to be refetched. Without the comparison
+        # every save would force a full body from every feed.
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+
+        resp = self._put(client, {"max_entries_per_feed": 5000}, feeds=feeds)
+        assert resp.status_code == 200
+        assert self._validator_state(ctx) == [self.STALE] * 2
+
+    def test_an_age_only_change_leaves_the_validators_alone(self, ctx, client):
+        # The age window deletes on a stored clock and admits nothing, so a
+        # refetch would buy it nothing.
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+
+        resp = self._put(client, {"entry_retention_days": 30}, feeds=feeds)
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_entry_retention_days(conn) == 30
+        assert self._validator_state(ctx) == [self.STALE] * 2
+
+    def test_clearing_a_non_default_maximum_back_to_the_default_refetches(
+        self, ctx, client,
+    ):
+        # Clearing a lowered maximum raises the effective one, so the next
+        # poll has to fetch a full body to fill the restored budget. The
+        # comparison is between *resolved* values for this reason: a raw
+        # stored-value comparison would also fire on a save that merely wrote
+        # the default down explicitly.
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_max_entries_per_feed(conn, 100)
+            conn.commit()
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+
+        assert self._put(client, {}, feeds=feeds).status_code == 200
+        assert self._validator_state(ctx) == [(None, None, None)] * 2
+
+    def test_writing_the_default_down_explicitly_does_not_refetch(
+        self, ctx, client,
+    ):
+        # The control for the test above: the stored row changes from absent
+        # to `5000` while the effective maximum does not, so nothing is due.
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+
+        assert self._put(
+            client, {"max_entries_per_feed": 5000}, feeds=feeds,
+        ).status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_max_entries_per_feed(conn) == 5000
+        assert self._validator_state(ctx) == [self.STALE] * 2
+
+    def test_turning_the_maximum_off_refetches(self, ctx, client):
+        _seed(ctx)
+        self._stale_validators(ctx)
+        feeds = self._feed_payload(ctx)
+
+        assert self._put(
+            client, {"max_entries_per_feed": 0}, feeds=feeds,
+        ).status_code == 200
+        assert self._validator_state(ctx) == [(None, None, None)] * 2

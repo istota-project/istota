@@ -447,6 +447,54 @@
           }}
         />
       </SettingsField>
+      <SettingsField
+        label="Keep read entries for (days)"
+        hint="Counted from when an entry was added to your reader, not from when it was published. Unread and starred entries are always kept, and so is anything the feed still returns. At least 50 entries per feed are kept whatever their age. 0 turns age pruning off; blank uses the default (90). Older entries disappear from the reader."
+      >
+        <input
+          type="number"
+          min="0"
+          value={config.settings.entry_retention_days ?? ''}
+          placeholder="90"
+          oninput={(e) => {
+            const v = (e.currentTarget as HTMLInputElement).value;
+            const next = { ...config.settings };
+            if (v === '') {
+              delete next.entry_retention_days;
+            } else {
+              const n = Number(v);
+              if (Number.isInteger(n) && n >= 0) {
+                next.entry_retention_days = n;
+              }
+            }
+            config.settings = next;
+          }}
+        />
+      </SettingsField>
+      <SettingsField
+        label="Maximum stored entries per feed"
+        hint="The most recently added entries are kept. Starred entries are always kept and can put a feed above this limit. 0 turns the limit off; blank uses the default (5000). Raising it lets the next full fetch store more."
+      >
+        <input
+          type="number"
+          min="0"
+          value={config.settings.max_entries_per_feed ?? ''}
+          placeholder="5000"
+          oninput={(e) => {
+            const v = (e.currentTarget as HTMLInputElement).value;
+            const next = { ...config.settings };
+            if (v === '') {
+              delete next.max_entries_per_feed;
+            } else {
+              const n = Number(v);
+              if (Number.isInteger(n) && n >= 0) {
+                next.max_entries_per_feed = n;
+              }
+            }
+            config.settings = next;
+          }}
+        />
+      </SettingsField>
     </SettingsCard>
 
     <SettingsCard title="Categories ({config.categories.length})">

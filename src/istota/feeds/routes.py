@@ -33,6 +33,7 @@ from istota.feeds.models import (
     default_poll_interval_for,
     detect_source_type,
 )
+from istota.feeds.retention import resolve_max_entries_per_feed
 from istota.feeds.sanitize import image_identity
 
 
@@ -455,10 +456,17 @@ async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
             feeds = feeds_db.list_feeds(conn)
             default_interval = feeds_db.get_default_poll_interval(conn)
             image_dedupe_window = feeds_db.get_image_dedupe_window_days(conn)
+            retention_days = feeds_db.get_entry_retention_days(conn)
+            max_entries = feeds_db.get_max_entries_per_feed(conn)
             total_entries = feeds_db.count_entries(conn)
             unread = feeds_db.count_entries(conn, status="unread")
         cfg = _config_payload_from_db(
-            cats, feeds, default_interval, image_dedupe_window,
+            cats,
+            feeds,
+            default_interval,
+            image_dedupe_window,
+            entry_retention_days=retention_days,
+            max_entries_per_feed=max_entries,
         )
         diagnostics = {
             "total_feeds": len(feeds),
@@ -612,19 +620,60 @@ def _validate_feeds_config(cfg: dict) -> str | None:
         interval = settings.get("default_poll_interval_minutes")
         if interval is not None and not isinstance(interval, int):
             return "settings.default_poll_interval_minutes must be int"
-        window = settings.get("image_dedupe_window_days")
-        if window is not None:
-            # bool is an int subclass — reject it explicitly so a stray true
-            # doesn't silently become a 1-day window.
-            if isinstance(window, bool) or not isinstance(window, int):
-                return "settings.image_dedupe_window_days must be int"
-            if window < 0:
-                return "settings.image_dedupe_window_days must be >= 0"
+        for key in (
+            "image_dedupe_window_days",
+            "entry_retention_days",
+            "max_entries_per_feed",
+        ):
+            err = _non_negative_int(settings, key)
+            if err:
+                return err
     return None
 
 
+def _non_negative_int(settings: dict, key: str) -> str | None:
+    """Validate one optional non-negative integer setting.
+
+    ``bool`` is an ``int`` subclass, so it is rejected explicitly: a stray
+    ``true`` would otherwise be stored as ``1`` — a one-day retention window,
+    or a one-entry-per-feed maximum, either of which deletes almost everything
+    on the next prune. ``0`` is a real value on all three settings and is
+    accepted.
+    """
+    value = settings.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"settings.{key} must be int"
+    if value < 0:
+        return f"settings.{key} must be >= 0"
+    return None
+
+
+def _optional_count(settings: dict, key: str) -> int | None:
+    """Read one optional count. Absent or blank clears it; ``0`` is a value.
+
+    Validation has already rejected a malformed value by the time this runs,
+    so this must not silently substitute a default for one — an unparseable
+    value clears the setting back to the constant rather than being stored.
+    """
+    raw = settings.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _config_payload_from_db(
-    cats, feeds, default_interval, image_dedupe_window=None,
+    cats,
+    feeds,
+    default_interval,
+    image_dedupe_window=None,
+    *,
+    entry_retention_days=None,
+    max_entries_per_feed=None,
 ) -> dict:
     """Project DB rows to the wire shape the settings page expects."""
     cat_by_id = {c.id: c for c in cats}
@@ -633,6 +682,12 @@ def _config_payload_from_db(
         settings["default_poll_interval_minutes"] = default_interval
     if image_dedupe_window is not None:
         settings["image_dedupe_window_days"] = image_dedupe_window
+    # Omitted when unset, so the page shows its placeholder default rather
+    # than a number the user never chose.
+    if entry_retention_days is not None:
+        settings["entry_retention_days"] = entry_retention_days
+    if max_entries_per_feed is not None:
+        settings["max_entries_per_feed"] = max_entries_per_feed
     feed_payload: list[dict] = []
     for f in feeds:
         entry: dict = {"url": f.url}
@@ -667,6 +722,12 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
     categories_removed = 0
 
     with feeds_db.connect(ctx.db_path) as conn:
+        settings_payload = payload.get("settings") or {}
+        # Read before anything is written: the comparison below is between the
+        # maximum the feeds were last polled under and the one they will be
+        # polled under next.
+        old_max_entries = resolve_max_entries_per_feed(conn)
+
         slug_to_id: dict[str, int] = {}
         payload_slugs: set[str] = set()
         for c in payload.get("categories") or []:
@@ -709,12 +770,21 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
 
         # 0 is meaningful here ("never suppress"), so only an absent/blank
         # value clears the setting back to the default window.
-        window_raw = (payload.get("settings") or {}).get("image_dedupe_window_days")
-        try:
-            window = None if window_raw in (None, "") else int(window_raw)
-        except (TypeError, ValueError):
-            window = None
-        feeds_db.set_image_dedupe_window_days(conn, window)
+        feeds_db.set_image_dedupe_window_days(
+            conn, _optional_count(settings_payload, "image_dedupe_window_days"),
+        )
+
+        # Same rule for both retention settings: absent or blank clears the
+        # stored row back to the constant, and 0 is stored as "off".
+        feeds_db.set_entry_retention_days(
+            conn, _optional_count(settings_payload, "entry_retention_days"),
+        )
+        feeds_db.set_max_entries_per_feed(
+            conn, _optional_count(settings_payload, "max_entries_per_feed"),
+        )
+        max_entries_changed = (
+            resolve_max_entries_per_feed(conn) != old_max_entries
+        )
 
         payload_urls: set[str] = set()
         for f in payload.get("feeds") or []:
@@ -763,6 +833,19 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
             if cat.slug not in payload_slugs:
                 feeds_db.delete_category(conn, cat.slug)
                 categories_removed += 1
+
+        if max_entries_changed:
+            # A new maximum only takes effect through a response carrying
+            # items, and a conditional request answered 304 carries none — so
+            # a raised maximum would sit unused until the feed happened to
+            # publish. Clearing the validators with the schedule makes the
+            # next poll fetch a full body once, which is what lets admission
+            # fill the new budget. The age window needs no such reset: it
+            # deletes on a stored clock and inserts nothing.
+            conn.execute(
+                "UPDATE feeds SET etag = NULL, last_modified = NULL, "
+                "next_poll_at = NULL"
+            )
 
         conn.commit()
 

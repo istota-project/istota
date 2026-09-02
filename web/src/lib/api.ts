@@ -631,6 +631,10 @@ export interface FeedsConfigSettings {
   default_poll_interval_minutes?: number;
   /** Look-back window for hiding repeated images; 0 disables. */
   image_dedupe_window_days?: number;
+  /** Days a read entry is kept after it was added; 0 disables age pruning. */
+  entry_retention_days?: number;
+  /** Maximum stored entries per feed, except stars; 0 disables the cap. */
+  max_entries_per_feed?: number;
 }
 
 export interface FeedsConfigPayload {
