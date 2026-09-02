@@ -250,13 +250,36 @@ After `brain.execute()` returns, the executor:
 
 ## Brain fallback (availability failover)
 Generalizes the old hardcoded tmux→claude_code in-attempt rerun. The
-`brain.execute(req)` call is wrapped in a routing block (replacing the tmux-only
-`if _brain_config.kind == "tmux_claude"` block) that reruns the *same attempt*
-(no new DB row, no `attempt_count` increment) through a configured fallback
-brain when the primary is unavailable. Kept executor-level: brains have no
-`Config` for the operator alert, and the rerun/breaker already live here.
+`brain.execute(req)` call happens inside `run_with_failover`, which reruns the
+*same attempt* (no new DB row, no `attempt_count` increment) through a
+configured fallback brain when the primary is unavailable. Kept executor-level:
+brains have no `Config` for the operator alert, and the rerun/breaker already
+live here.
 
-- `_fallback_kind = effective_fallback_kind(_brain_config)` (`brain/_fallback.py`);
+`run_with_failover(brain, req, *, config, brain_config, task, stream,
+event_writer) -> FailoverOutcome` sits at module scope beside its helpers rather
+than inside `execute_task`, which is where the loop used to be — 6000 lines from
+the code it belongs with. `FailoverOutcome` is the block's existing output set
+written down: `result`, `primary_usage_result`, `ran_fallback`, `usage_effort`,
+`dropped_pin`, `primary_kind`, `fallback_kind`, each read by `execute_task`
+after the call. `ran_fallback` is not derivable from `primary_usage_result` —
+on the breaker-cooldown path the fallback runs with no primary call at all, so
+there is nothing to hold. **The `ExitStack` stays in `execute_task`** and wraps
+this call: the skill and network proxies must be live across the primary call,
+the reroute and the fallback call alike.
+
+`_failover_notice(stream, event_writer, reason, *, primary_kind,
+fallback_kind)` is where the stream and the failover meet, and it is why
+`run_with_failover` takes a `TaskStreamAdapter`. A reroute is a stream boundary
+exactly like a tool call, so it settles the buffers — `flush_thinking()` then
+`settle_at_tool_boundary()`, in that order — before emitting the banner, or an
+unflushed primary tail opens the fallback's answer. Two asymmetries: the settle
+runs even when `emit_once` dedupes the banner away (it is about the daemon's
+own buffers, not the sentence), and with no `event_writer` the function returns
+`None` so `_run_fallback` skips the hook entirely — there is nothing buffered
+to settle there either.
+
+- `_fallback_kind = effective_fallback_kind(brain_config)` (`brain/_fallback.py`);
   `_cooldown = config.brain.fallback_cooldown_seconds`; `_breaker =
   get_availability_breaker()` (process-global `PrimaryAvailabilityBreaker`).
 - **Stickiness:** when the breaker `should_skip(primary_kind, cooldown)`, the

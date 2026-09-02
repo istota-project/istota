@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     import sqlite3
 
+    from .brain import BrainResult
+
 from . import db
 from . import email_support
 from . import task_cgroup
@@ -1363,6 +1365,276 @@ def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason, wind
         )
     except Exception:
         logger.debug("brain fallback alert failed", exc_info=True)
+
+
+@dataclass
+class FailoverOutcome:
+    """What one availability-failover run produced, for the persist step.
+
+    Every field is read by ``execute_task`` after the call. ``ran_fallback`` is
+    not derivable from ``primary_usage_result``: on the breaker-cooldown path
+    the fallback runs with no primary call at all, so there is nothing to hold
+    and the flag would read false for every task in the window.
+    """
+
+    result: "BrainResult"
+    # The primary's result, held only when a fallback replaced it, so both
+    # attempts' usage can be written from the one call site that has a `conn`.
+    primary_usage_result: "BrainResult | None"
+    ran_fallback: bool
+    # The effort the attempt actually ran at. The fallback re-resolves it in
+    # its own namespace, so `req.effort` describes the primary only.
+    usage_effort: str
+    dropped_pin: "str | None"
+    primary_kind: str
+    fallback_kind: "str | None"
+
+
+def _failover_notice(stream, event_writer, reason, *, primary_kind, fallback_kind):
+    """A `brain_fallback` emitter bound to `reason`, for `on_start`.
+
+    Both reroute paths hand the same notice to the stream; only the
+    reason differs (a fresh primary failure vs. the breaker already
+    being open). Returns None when there is no stream to notify, so
+    `_run_fallback` skips the hook entirely.
+    """
+    if event_writer is None:
+        return None
+
+    def _emit(model, dropped_pin):
+        # A reroute is a stream boundary exactly like a tool call: what
+        # streamed before it came from the brain that just failed, and
+        # the fallback streams into these same buffers. Settle them
+        # first, or an unflushed primary tail is emitted as the opening
+        # of the fallback's answer — one paragraph, under a notice
+        # saying the primary failed — and the fallback's own narration
+        # gate starts pre-credited with the primary's characters.
+        # The settle runs whether or not the notice does, because it is
+        # about the daemon's own buffers rather than the sentence: a
+        # retry that called the primary and watched it fail again has a
+        # tail held here that must not open the fallback's answer.
+        if stream is not None and stream.is_stream_surface:
+            stream.flush_thinking()
+            stream.settle_at_tool_boundary()
+        # ISSUE-361: once per turn, not once per failover attempt. The
+        # retry ladder re-runs this same task id, and every attempt
+        # after the breaker opens takes the cooldown path, so the
+        # per-attempt emit stacked the banner three deep under one user
+        # message. The first is what survives; `emit_once` is where the
+        # cases that costs something are written down.
+        event_writer.emit_once("brain_fallback", {
+            "primary": primary_kind,
+            "reason": reason,
+            "fallback": fallback_kind,
+            "model": model,
+            "dropped_pin": dropped_pin or "",
+            "text": fallback_notice_text(
+                primary_kind, reason, fallback_kind, model, dropped_pin,
+            ),
+        })
+
+    return _emit
+
+
+def run_with_failover(
+    brain,
+    req,
+    *,
+    config,
+    brain_config,
+    task,
+    stream,
+    event_writer,
+) -> FailoverOutcome:
+    """Run one attempt through the primary brain, rerouting when it is down.
+
+    Generalizes the old tmux->claude_code in-attempt fallback: when the primary
+    brain is unavailable (usage limit / missing binary / tmux launch failure)
+    and a fallback is configured, re-run this same attempt through the fallback
+    brain — no new DB row, no attempt increment. Stickiness: once the primary
+    reports a persistent unavailability, subsequent tasks skip it for a
+    cooldown. All of it collapses to the plain primary call when no fallback is
+    configured.
+
+    The caller owns the ``ExitStack`` around this call: the skill and network
+    proxies must be live for the primary call, the reroute and the fallback
+    call alike.
+    """
+    _primary_kind = brain_config.kind
+    _fallback_kind = effective_fallback_kind(brain_config)
+    _cooldown = config.brain.fallback_cooldown_seconds
+    _breaker = get_availability_breaker()
+    _dropped_pin = None
+    _primary_usage_result = None
+    _ran_fallback = False
+    _usage_effort = req.effort
+    _primary_started_at = None
+    _primary_started_monotonic = None
+
+    def _notice(reason):
+        return _failover_notice(
+            stream, event_writer, reason,
+            primary_kind=_primary_kind, fallback_kind=_fallback_kind,
+        )
+
+    _skip_primary = (
+        _fallback_kind is not None
+        and _cooldown > 0
+        and _breaker.should_skip(_primary_kind, _cooldown)
+    )
+    if _skip_primary:
+        # Cooling down — go straight to the fallback, no primary call.
+        logger.info(
+            "brain fallback: skipping primary %s (cooling down) "
+            "-> %s task=%d",
+            _primary_kind, _fallback_kind, task.id,
+        )
+        _fb, _dropped_pin, _fb_effort = _run_fallback(
+            config, brain_config, _fallback_kind, task, req,
+            on_start=_notice("cooldown"),
+        )
+        if _fb is not None:
+            # This branch is the steady state once the breaker
+            # opens — every task for the cooldown window takes it —
+            # so flagging the row here is what keeps the *majority*
+            # of genuinely-fallback rows from being labelled
+            # otherwise. There is no primary row: the primary was
+            # never called. When construction failed instead, the
+            # primary really did run below and the flag stays off.
+            _ran_fallback = True
+            _usage_effort = _fb_effort
+        brain_result = _fb if _fb is not None else brain.execute(req)
+    else:
+        _primary_started_at = time.time()
+        _primary_started_monotonic = time.monotonic()
+        brain_result = brain.execute(req)
+        _triggers = set(TRIGGER_STOP_REASONS)
+        if config.brain.fallback_on_transient:
+            _triggers.add("transient_api_error")
+        if brain_result.stop_reason in _triggers:
+            # Open the availability breaker only for persistent
+            # conditions (usage_limit / not_found). "fallback" is
+            # excluded so tmux keeps being probed per-task (its own
+            # launch _CircuitBreaker governs when to stop).
+            #
+            # Deliberately not gated on a fallback being configured
+            # (ISSUE-362). The breaker is a shared signal: the
+            # direct callers (sleep cycle, shared blocks) read it
+            # through `primary_brain_unavailable`, and
+            # `report_brain_result` already opens it for them with
+            # no regard to a fallback. Gating it here left a
+            # deployment with no fallback without the availability
+            # record and without either operator alert, so the only
+            # notice that a primary had gone down was the failed
+            # task itself. Safe for the task path: `_skip_primary`
+            # is separately gated on a fallback existing, so an open
+            # breaker never skips a primary there is nothing to
+            # replace.
+            #
+            # The window ends at the quota's reset where one is
+            # known, not a flat `_cooldown` from the failure
+            # (ISSUE-374). `open_primary_breaker` owns that and
+            # publishes the same deadline it armed, so the
+            # scheduler's breaker and the record the web process
+            # reads describe one window.
+            _armed_window = (
+                open_primary_breaker(
+                    _primary_kind,
+                    _cooldown,
+                    brain_result.stop_reason,
+                    config=config,
+                )
+                if brain_result.stop_reason in COOLDOWN_STOP_REASONS
+                else None
+            )
+            if _armed_window is not None:
+                _fire_fallback_alert(
+                    config, task, _primary_kind, _fallback_kind,
+                    brain_result.stop_reason, _armed_window,
+                )
+            if _fallback_kind is not None:
+                logger.error(
+                    "brain fallback: task=%d primary=%s reason=%s "
+                    "-> %s",
+                    task.id, _primary_kind,
+                    brain_result.stop_reason, _fallback_kind,
+                )
+            else:
+                logger.error(
+                    "brain unavailable: task=%d primary=%s "
+                    "reason=%s, no [brain] fallback configured",
+                    task.id, _primary_kind,
+                    brain_result.stop_reason,
+                )
+            # Preserve tmux's own launch alert: its _CircuitBreaker
+            # governs fallback/not_found (which are NOT in the
+            # availability breaker's cooldown set), so its
+            # 5-consecutive-launch-failure alert still routes here.
+            if _primary_kind == "tmux_claude":
+                try:
+                    from .brain.tmux_claude import (
+                        consume_circuit_open_alert,
+                    )
+                    if consume_circuit_open_alert():
+                        from . import notifications
+                        _tail = (
+                            "falling back."
+                            if _fallback_kind is not None
+                            else "no fallback configured, so tasks "
+                                 "keep failing."
+                        )
+                        notifications.send_notification(
+                            config, task.user_id,
+                            "⚠️ tmux_claude brain circuit opened — "
+                            f"{_tail} Check the claude CLI "
+                            "version / readiness markers.",
+                            purpose="alert",
+                        )
+                except Exception:
+                    logger.debug(
+                        "tmux circuit-open alert failed", exc_info=True
+                    )
+            _fb = None
+            if _fallback_kind is not None:
+                _fb, _dropped_pin, _fb_effort = _run_fallback(
+                    config, brain_config, _fallback_kind, task,
+                    req, on_start=_notice(brain_result.stop_reason),
+                )
+            if _fb is not None:
+                # The fallback *replaces* brain_result, so without
+                # this the single persist call below would record the
+                # fallback's numbers under the primary's identity and
+                # the primary's own spend would be unrecoverable. It
+                # is captured rather than written here because
+                # `_run_fallback` takes no `conn`: opening a second
+                # one would block on the write lock for the full 30s
+                # busy timeout whenever `execute_task` was entered
+                # with an open write transaction, as the interactive
+                # path does.
+                _primary_usage_result = brain_result
+                _ran_fallback = True
+                _usage_effort = _fb_effort
+                brain_result = _fb
+        elif brain_result.success and _cooldown > 0:
+            # Primary healthy again → close the breaker.
+            _breaker.record_success(
+                _primary_kind, started_at=_primary_started_monotonic,
+            )
+            from .brain_availability import clear_unavailable
+
+            clear_unavailable(
+                config, _primary_kind, started_at=_primary_started_at,
+            )
+
+    return FailoverOutcome(
+        result=brain_result,
+        primary_usage_result=_primary_usage_result,
+        ran_fallback=_ran_fallback,
+        usage_effort=_usage_effort,
+        dropped_pin=_dropped_pin,
+        primary_kind=_primary_kind,
+        fallback_kind=_fallback_kind,
+    )
 
 
 def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
@@ -7228,82 +7500,9 @@ def execute_task(
                 "task %d: model=%s advisor=%s", task.id, req.model, req.advisor,
             )
 
-        # Availability failover (brain-fallback spec). Generalizes the old
-        # tmux→claude_code in-attempt fallback: when the primary brain is
-        # unavailable (usage limit / missing binary / tmux launch failure) and a
-        # fallback is configured, re-run this same attempt through the fallback
-        # brain — no new DB row, no attempt increment. Stickiness: once the
-        # primary reports a persistent unavailability, subsequent tasks skip it
-        # for a cooldown. All of it collapses to the plain primary call when no
-        # fallback is configured.
-        _primary_kind = _brain_config.kind
-        _fallback_kind = effective_fallback_kind(_brain_config)
-        _cooldown = config.brain.fallback_cooldown_seconds
-        _breaker = get_availability_breaker()
-        _dropped_pin = None
-        # The primary's result, held only when a fallback replaced it, so both
-        # attempts' usage can be written from the one call site that has a `conn`.
-        _primary_usage_result = None
-        # Whether the result being persisted came from the fallback brain. Not
-        # derivable from `_primary_usage_result`: on the breaker-cooldown path
-        # the fallback runs with no primary call at all, so there is nothing to
-        # hold and the flag would read false for every task in the window.
-        _ran_fallback = False
-        # The effort the attempt actually ran at. The fallback re-resolves it in
-        # its own namespace, so `req.effort` describes the primary only.
-        _usage_effort = req.effort
-        _primary_started_at = None
-        _primary_started_monotonic = None
-
-        def _notice(reason):
-            """A `brain_fallback` emitter bound to `reason`, for `on_start`.
-
-            Both reroute paths hand the same notice to the stream; only the
-            reason differs (a fresh primary failure vs. the breaker already
-            being open). Returns None when there is no stream to notify, so
-            `_run_fallback` skips the hook entirely.
-            """
-            if event_writer is None:
-                return None
-
-            def _emit(model, dropped_pin):
-                # A reroute is a stream boundary exactly like a tool call: what
-                # streamed before it came from the brain that just failed, and
-                # the fallback streams into these same buffers. Settle them
-                # first, or an unflushed primary tail is emitted as the opening
-                # of the fallback's answer — one paragraph, under a notice
-                # saying the primary failed — and the fallback's own narration
-                # gate starts pre-credited with the primary's characters.
-                # The settle runs whether or not the notice does, because it is
-                # about the daemon's own buffers rather than the sentence: a
-                # retry that called the primary and watched it fail again has a
-                # tail held here that must not open the fallback's answer.
-                if stream.is_stream_surface:
-                    stream.flush_thinking()
-                    stream.settle_at_tool_boundary()
-                # ISSUE-361: once per turn, not once per failover attempt. The
-                # retry ladder re-runs this same task id, and every attempt
-                # after the breaker opens takes the cooldown path, so the
-                # per-attempt emit stacked the banner three deep under one user
-                # message. The first is what survives; `emit_once` is where the
-                # cases that costs something are written down.
-                event_writer.emit_once("brain_fallback", {
-                    "primary": _primary_kind,
-                    "reason": reason,
-                    "fallback": _fallback_kind,
-                    "model": model,
-                    "dropped_pin": dropped_pin or "",
-                    "text": fallback_notice_text(
-                        _primary_kind, reason, _fallback_kind, model, dropped_pin,
-                    ),
-                })
-
-            return _emit
-        _skip_primary = (
-            _fallback_kind is not None
-            and _cooldown > 0
-            and _breaker.should_skip(_primary_kind, _cooldown)
-        )
+        # Availability failover (brain-fallback spec) — see
+        # `run_with_failover`. The ExitStack stays here: the proxies must be
+        # live across the primary call, the reroute and the fallback call.
         try:
             with contextlib.ExitStack() as stack:
                 if _proxy_ctx is not None:
@@ -7316,149 +7515,21 @@ def execute_task(
                 if _task_cg is not None:
                     stack.callback(_release_task_cgroup, task.id, _task_cg)
 
-                if _skip_primary:
-                    # Cooling down — go straight to the fallback, no primary call.
-                    logger.info(
-                        "brain fallback: skipping primary %s (cooling down) "
-                        "-> %s task=%d",
-                        _primary_kind, _fallback_kind, task.id,
-                    )
-                    _fb, _dropped_pin, _fb_effort = _run_fallback(
-                        config, _brain_config, _fallback_kind, task, req,
-                        on_start=_notice("cooldown"),
-                    )
-                    if _fb is not None:
-                        # This branch is the steady state once the breaker
-                        # opens — every task for the cooldown window takes it —
-                        # so flagging the row here is what keeps the *majority*
-                        # of genuinely-fallback rows from being labelled
-                        # otherwise. There is no primary row: the primary was
-                        # never called. When construction failed instead, the
-                        # primary really did run below and the flag stays off.
-                        _ran_fallback = True
-                        _usage_effort = _fb_effort
-                    brain_result = _fb if _fb is not None else brain.execute(req)
-                else:
-                    _primary_started_at = time.time()
-                    _primary_started_monotonic = time.monotonic()
-                    brain_result = brain.execute(req)
-                    _triggers = set(TRIGGER_STOP_REASONS)
-                    if config.brain.fallback_on_transient:
-                        _triggers.add("transient_api_error")
-                    if brain_result.stop_reason in _triggers:
-                        # Open the availability breaker only for persistent
-                        # conditions (usage_limit / not_found). "fallback" is
-                        # excluded so tmux keeps being probed per-task (its own
-                        # launch _CircuitBreaker governs when to stop).
-                        #
-                        # Deliberately not gated on a fallback being configured
-                        # (ISSUE-362). The breaker is a shared signal: the
-                        # direct callers (sleep cycle, shared blocks) read it
-                        # through `primary_brain_unavailable`, and
-                        # `report_brain_result` already opens it for them with
-                        # no regard to a fallback. Gating it here left a
-                        # deployment with no fallback without the availability
-                        # record and without either operator alert, so the only
-                        # notice that a primary had gone down was the failed
-                        # task itself. Safe for the task path: `_skip_primary`
-                        # is separately gated on a fallback existing, so an open
-                        # breaker never skips a primary there is nothing to
-                        # replace.
-                        #
-                        # The window ends at the quota's reset where one is
-                        # known, not a flat `_cooldown` from the failure
-                        # (ISSUE-374). `open_primary_breaker` owns that and
-                        # publishes the same deadline it armed, so the
-                        # scheduler's breaker and the record the web process
-                        # reads describe one window.
-                        _armed_window = (
-                            open_primary_breaker(
-                                _primary_kind,
-                                _cooldown,
-                                brain_result.stop_reason,
-                                config=config,
-                            )
-                            if brain_result.stop_reason in COOLDOWN_STOP_REASONS
-                            else None
-                        )
-                        if _armed_window is not None:
-                            _fire_fallback_alert(
-                                config, task, _primary_kind, _fallback_kind,
-                                brain_result.stop_reason, _armed_window,
-                            )
-                        if _fallback_kind is not None:
-                            logger.error(
-                                "brain fallback: task=%d primary=%s reason=%s "
-                                "-> %s",
-                                task.id, _primary_kind,
-                                brain_result.stop_reason, _fallback_kind,
-                            )
-                        else:
-                            logger.error(
-                                "brain unavailable: task=%d primary=%s "
-                                "reason=%s, no [brain] fallback configured",
-                                task.id, _primary_kind,
-                                brain_result.stop_reason,
-                            )
-                        # Preserve tmux's own launch alert: its _CircuitBreaker
-                        # governs fallback/not_found (which are NOT in the
-                        # availability breaker's cooldown set), so its
-                        # 5-consecutive-launch-failure alert still routes here.
-                        if _primary_kind == "tmux_claude":
-                            try:
-                                from .brain.tmux_claude import (
-                                    consume_circuit_open_alert,
-                                )
-                                if consume_circuit_open_alert():
-                                    from . import notifications
-                                    _tail = (
-                                        "falling back."
-                                        if _fallback_kind is not None
-                                        else "no fallback configured, so tasks "
-                                             "keep failing."
-                                    )
-                                    notifications.send_notification(
-                                        config, task.user_id,
-                                        "⚠️ tmux_claude brain circuit opened — "
-                                        f"{_tail} Check the claude CLI "
-                                        "version / readiness markers.",
-                                        purpose="alert",
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "tmux circuit-open alert failed", exc_info=True
-                                )
-                        _fb = None
-                        if _fallback_kind is not None:
-                            _fb, _dropped_pin, _fb_effort = _run_fallback(
-                                config, _brain_config, _fallback_kind, task,
-                                req, on_start=_notice(brain_result.stop_reason),
-                            )
-                        if _fb is not None:
-                            # The fallback *replaces* brain_result, so without
-                            # this the single persist call below would record the
-                            # fallback's numbers under the primary's identity and
-                            # the primary's own spend would be unrecoverable. It
-                            # is captured rather than written here because
-                            # `_run_fallback` takes no `conn`: opening a second
-                            # one would block on the write lock for the full 30s
-                            # busy timeout whenever `execute_task` was entered
-                            # with an open write transaction, as the interactive
-                            # path does.
-                            _primary_usage_result = brain_result
-                            _ran_fallback = True
-                            _usage_effort = _fb_effort
-                            brain_result = _fb
-                    elif brain_result.success and _cooldown > 0:
-                        # Primary healthy again → close the breaker.
-                        _breaker.record_success(
-                            _primary_kind, started_at=_primary_started_monotonic,
-                        )
-                        from .brain_availability import clear_unavailable
-
-                        clear_unavailable(
-                            config, _primary_kind, started_at=_primary_started_at,
-                        )
+                _failover = run_with_failover(
+                    brain, req,
+                    config=config,
+                    brain_config=_brain_config,
+                    task=task,
+                    stream=stream,
+                    event_writer=event_writer,
+                )
+                brain_result = _failover.result
+                _primary_usage_result = _failover.primary_usage_result
+                _ran_fallback = _failover.ran_fallback
+                _usage_effort = _failover.usage_effort
+                _dropped_pin = _failover.dropped_pin
+                _primary_kind = _failover.primary_kind
+                _fallback_kind = _failover.fallback_kind
         finally:
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep
