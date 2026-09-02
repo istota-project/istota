@@ -457,11 +457,52 @@ def _summary_turn() -> AssistantMessage:
 
 
 def _final_turn() -> AssistantMessage:
+    # The small non-zero usage is load-bearing. `estimate_context_tokens` walks
+    # back to the newest message reporting `total_tokens > 0`, so with 25 here
+    # the check after this terminal turn is under the threshold and no second
+    # compaction fires. Drop it and the walk falls through to the bulky turn's
+    # 5010, a second cut fires, the script runs out of turns, and the run fails
+    # somewhere far from the line that caused it.
     return AssistantMessage(
         content=[TextContent(text="done")],
         usage=Usage(input_tokens=20, output_tokens=5),
         stop_reason="end_turn",
     )
+
+
+class _FakeToolServer:
+    """Answers the scripted `Write` call without a real tool server.
+
+    The tool call exists only to make the loop take a second turn, so nothing
+    here asserts anything was written. Faking it keeps an out-of-process
+    dependency out of a test whose subject is compaction: `_start_tool_server`
+    otherwise spawns `python -m istota.tool_server` with `env={}` (the request
+    carries none), which works only while the project is installed into the
+    running interpreter — and when it does not, the failure surfaces as
+    "expected exactly one compaction, got 0" rather than as "the tool server
+    did not start". Same fake shape `tests/native/test_native_brain.py` uses.
+    """
+
+    failure = None
+    tools: list[str] = []
+
+    async def aclose(self):
+        return None
+
+    async def call(self, name, call_id, args, on_update, abort):
+        from istota.agent.tools import ToolResult
+
+        return ToolResult(content=[TextContent(text="ok")])
+
+
+@pytest.fixture
+def _no_tool_server(monkeypatch):
+    async def _fake_start(self, req, abort):
+        return _FakeToolServer()
+
+    from istota.brain.native import NativeBrain
+
+    monkeypatch.setattr(NativeBrain, "_start_tool_server", _fake_start)
 
 
 def _read_session_log(root) -> list[dict]:
@@ -475,8 +516,101 @@ def _read_session_log(root) -> list[dict]:
     ]
 
 
-class TestTheSystemHalfSurvivesAProactiveCut:
-    """ISSUE-375, end to end, against a cut that really happens.
+def _composed_file(tmp_path):
+    # The sentinel leads the file, so the session-log assertion below cannot
+    # start passing or failing on `max_content_chars` head-and-tail truncation —
+    # a policy value these tests never name. The `truncated` assertion is the
+    # second half of that.
+    path = tmp_path / "task_4471_system_prompt.txt"
+    path.write_text(
+        f"{SYSTEM_SENTINEL}\nYou are Istota, a helpful assistant bot.\n"
+        "## Important rules\n1. Only access resources that belong to alice.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _run_compacting_task(tmp_path, *, composed, prompt, turns=None):
+    """One `NativeBrain.execute` whose window forces a cut mid-run.
+
+    Module-level rather than a method, so the negative control below calls the
+    same function as the positive class instead of instantiating it. A control
+    that reaches its subject through another test class's `self` silently stops
+    running whatever setup that class grows later — and a control that has
+    quietly stopped being able to fail is the one thing worse than no control.
+    """
+    from istota.brain import BrainRequest
+    from istota.brain.native import NativeBrain
+    from istota.config import NativeBrainConfig, SessionLogConfig
+
+    from ._mock_provider import MockProvider
+
+    root = tmp_path / "logs"
+    provider = MockProvider(
+        list(turns) if turns is not None
+        else [_bulky_tool_turn(), _summary_turn(), _final_turn()]
+    )
+    brain = NativeBrain(
+        NativeBrainConfig(
+            model="claude-sonnet-4-6",
+            # A window small enough that the first turn's reported usage trips
+            # `should_compact`, and a recent budget the bulky turn clears on its
+            # own. 20,000 chars is chosen against the 3000 here through the
+            # chars/4 estimate: below roughly 12,000 `find_cut_point` returns 0
+            # and nothing is compacted, which fails loudly at
+            # `_assert_one_compaction` rather than passing quietly.
+            context_window=100,
+            compaction_keep_recent_tokens=3000,
+            session_log=SessionLogConfig(enabled=True, dir=str(root)),
+        ),
+        provider=provider,
+    )
+    req = BrainRequest(
+        prompt=prompt,
+        allowed_tools=["Write"],
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        model="claude-sonnet-4-6",
+        task_id=4471,
+        attempt=1,
+        user_id="alice",
+        source_type="talk",
+        conversation_token="a1b2c3d4",
+        composed_system_prompt_path=composed,
+    )
+    result = brain.execute(req)
+    return result, provider, _read_session_log(root)
+
+
+def _split_calls(provider, expected=3):
+    """The provider calls, split into main-model and compaction-summary.
+
+    The summary call is the one compaction makes: no system prompt and no
+    tools. Splitting on that rather than on an index means a further call
+    appearing later fails a count assertion instead of silently shifting which
+    call is being asserted about.
+    """
+    assert len(provider.calls) == expected, provider.calls
+    main = [c for c in provider.calls if c["tools"]]
+    summary = [c for c in provider.calls if not c["tools"]]
+    assert len(summary) == 1, "expected exactly one compaction summary call"
+    assert summary[0]["system_prompt"] == ""
+    return main, summary[0]
+
+
+def _assert_one_compaction(records, trigger):
+    cuts = [r for r in records if r["type"] == "compaction"]
+    assert len(cuts) == 1, f"expected exactly one compaction, got {len(cuts)}"
+    assert cuts[0]["trigger"] == trigger
+    return cuts[0]
+
+
+
+
+@pytest.mark.usefixtures("_no_tool_server")
+class TestTheSystemHalfSurvivesACut:
+    """ISSUE-375, end to end, against cuts that really happen.
 
     ``executor.build_prompt()`` used to return one string holding Istota's
     identity, emissaries, persona, tool descriptions, skill inventory, rules and
@@ -488,98 +622,39 @@ class TestTheSystemHalfSurvivesAProactiveCut:
 
     A unit test over ``_system_prompt_parts`` proves the file is read. It cannot
     prove this, because the fault was never in the reading: it was in *where the
-    text lives*, and only a real cut moves that boundary. So this forces a
-    proactive compaction through ``NativeBrain.execute``.
+    text lives*, and only a real cut moves that boundary.
+
+    Both cut paths are covered, and the second is not redundant. The proactive
+    path returns a message list and never sees the system prompt at all, while
+    the reactive overflow path *rebuilds the whole ``AgentContext``* — so there
+    the system half survives because ``_build_recovery_context`` is handed it
+    and passes it on, which is a line of code that can be deleted rather than a
+    structural impossibility. A test pinned to ``trigger == "proactive"`` alone
+    would stay green through exactly that deletion.
 
     ``TestThePreSplitShapeLosesIt`` below is the control: the same run with the
     same text carried on ``req.prompt`` instead, which is the shape ISSUE-375
     describes, and it loses the sentinel at the same cut.
     """
 
-    def _composed(self, tmp_path):
-        # The sentinel leads the file, so the session-log assertion below cannot
-        # start passing or failing on `max_content_chars` head-and-tail
-        # truncation — a policy value this test never names. The `truncated`
-        # assertion is the second half of that.
-        path = tmp_path / "task_4471_system_prompt.txt"
-        path.write_text(
-            f"{SYSTEM_SENTINEL}\nYou are Istota, a helpful assistant bot.\n"
-            "## Important rules\n1. Only access resources that belong to alice.\n",
-            encoding="utf-8",
+    def _proactive(self, tmp_path):
+        return _run_compacting_task(
+            tmp_path, composed=_composed_file(tmp_path), prompt=REQUEST_SENTINEL
         )
-        return path
 
-    def _run(self, tmp_path, *, composed, prompt):
-        from istota.brain import BrainRequest
-        from istota.brain.native import NativeBrain
-        from istota.config import NativeBrainConfig, SessionLogConfig
-
-        from ._mock_provider import MockProvider
-
-        root = tmp_path / "logs"
-        provider = MockProvider([_bulky_tool_turn(), _summary_turn(), _final_turn()])
-        brain = NativeBrain(
-            NativeBrainConfig(
-                model="claude-sonnet-4-6",
-                # A window small enough that the first turn's reported usage
-                # trips `should_compact`, and a recent budget the bulky turn
-                # clears on its own.
-                context_window=100,
-                compaction_keep_recent_tokens=3000,
-                session_log=SessionLogConfig(enabled=True, dir=str(root)),
-            ),
-            provider=provider,
-        )
-        req = BrainRequest(
-            prompt=prompt,
-            allowed_tools=["Write"],
-            cwd=tmp_path,
-            env={},
-            timeout_seconds=30,
-            model="claude-sonnet-4-6",
-            task_id=4471,
-            attempt=1,
-            user_id="alice",
-            source_type="talk",
-            conversation_token="a1b2c3d4",
-            composed_system_prompt_path=composed,
-        )
-        result = brain.execute(req)
-        return result, provider, _read_session_log(root)
-
-    def _calls(self, provider):
-        """The three provider calls, named.
-
-        The summary call is the one compaction makes: no system prompt and no
-        tools. Splitting on that rather than on an index means a fourth call
-        appearing later fails the count assertion instead of silently shifting
-        which call is being asserted about.
-        """
-        assert len(provider.calls) == 3, provider.calls
-        main = [c for c in provider.calls if c["tools"]]
-        summary = [c for c in provider.calls if not c["tools"]]
-        assert len(main) == 2, "expected a first turn and a post-compaction turn"
-        assert len(summary) == 1, "expected exactly one compaction summary call"
-        assert summary[0]["system_prompt"] == ""
-        return main[0], summary[0], main[1]
-
-    def _compaction_record(self, records):
-        cuts = [r for r in records if r["type"] == "compaction"]
-        assert len(cuts) == 1, f"expected exactly one compaction, got {len(cuts)}"
-        assert cuts[0]["trigger"] == "proactive"
+    def _assert_the_cut_dropped_index_zero(self, records):
+        cut = _assert_one_compaction(records, "proactive")
         # The cut really dropped the initial user message, which is the whole
         # premise: index 0 gone, the assistant turn and its result kept.
-        assert cuts[0]["cut_index"] == 1
-        assert cuts[0]["messages_dropped"] == 1
-        return cuts[0]
+        assert cut["cut_index"] == 1
+        assert cut["messages_dropped"] == 1
+        return cut
 
     def test_the_system_sentinel_is_supplied_again_after_the_cut(self, tmp_path):
-        result, provider, records = self._run(
-            tmp_path, composed=self._composed(tmp_path), prompt=REQUEST_SENTINEL
-        )
+        result, provider, records = self._proactive(tmp_path)
         assert result.success is True
-        first, _summary, after = self._calls(provider)
-        self._compaction_record(records)
+        (first, after), _summary = _split_calls(provider)
+        self._assert_the_cut_dropped_index_zero(records)
 
         assert SYSTEM_SENTINEL in first["system_prompt"]
         assert SYSTEM_SENTINEL in after["system_prompt"]
@@ -588,28 +663,35 @@ class TestTheSystemHalfSurvivesAProactiveCut:
         assert after["system_prompt"] == first["system_prompt"]
 
     def test_the_system_sentinel_never_enters_the_compactable_history(self, tmp_path):
-        _result, provider, records = self._run(
-            tmp_path, composed=self._composed(tmp_path), prompt=REQUEST_SENTINEL
-        )
-        first, summary, after = self._calls(provider)
-        cut = self._compaction_record(records)
+        _result, provider, records = self._proactive(tmp_path)
+        (first, after), summary = _split_calls(provider)
+        cut = self._assert_the_cut_dropped_index_zero(records)
 
         # Asserted as a pairing. Every line below is an absence, and an absence
         # alone is vacuous here: with the composed part removed from
-        # `_system_prompt_parts` the file is never read at all, so all four
-        # hold for the wrong reason and this test stays green through the exact
-        # regression it names. Measured — that removal leaves the four absences
+        # `_system_prompt_parts` the file is never read at all, so they all hold
+        # for the wrong reason and this test stays green through the exact
+        # regression it names. Measured — that removal leaves every absence
         # passing and only this line red.
         assert SYSTEM_SENTINEL in first["system_prompt"]
         # Not in the initial user message …
         assert SYSTEM_SENTINEL not in str(first["messages"])
-        # … so it cannot be in what the summarizer was handed …
+        # … so it cannot be in what the summarizer was handed. This is the
+        # falsifiable half of "absent from the summary input": it is built from
+        # the real `ctx.messages` the cut handed over.
         assert SYSTEM_SENTINEL not in str(summary["messages"])
-        # … nor in the summary that replaced the cut prefix …
-        assert SYSTEM_SENTINEL not in cut["summary"]
-        # … nor in the `CompactionSummaryMessage` the next turn carries.
+        # … nor in the `CompactionSummaryMessage` the next turn carries, which
+        # is what would go red if anything post-cut re-injected system text into
+        # `messages`.
         assert SYSTEM_SENTINEL not in str(after["messages"])
+        # The positive control for the three lines above: the string being
+        # searched is really the rebuilt message list, not an empty repr.
         assert "[Summary of earlier conversation]" in str(after["messages"])
+        # And the summary text itself. A tautology under the scripted
+        # summarizer — the text comes from `_summary_turn`, so no production
+        # change can put the sentinel in it — kept because the property is what
+        # the spec names and the line above is what enforces it.
+        assert SYSTEM_SENTINEL not in cut["summary"]
 
     def test_the_request_sentinel_is_the_half_the_cut_reclaims(self, tmp_path):
         """The user half behaves as before: present on turn one, summarized away.
@@ -619,11 +701,9 @@ class TestTheSystemHalfSurvivesAProactiveCut:
         — because nothing was cut. The request sentinel leaving is the evidence
         that the cut this test forces actually happened.
         """
-        _result, provider, records = self._run(
-            tmp_path, composed=self._composed(tmp_path), prompt=REQUEST_SENTINEL
-        )
-        first, summary, after = self._calls(provider)
-        self._compaction_record(records)
+        _result, provider, records = self._proactive(tmp_path)
+        (first, after), summary = _split_calls(provider)
+        self._assert_the_cut_dropped_index_zero(records)
 
         assert REQUEST_SENTINEL in str(first["messages"])
         assert REQUEST_SENTINEL not in first["system_prompt"]
@@ -634,21 +714,59 @@ class TestTheSystemHalfSurvivesAProactiveCut:
         # the cut rather than the summarizer's wording.
         assert REQUEST_SENTINEL not in str(after["messages"])
 
-    def test_the_session_log_records_the_surviving_prompt_and_its_source(
+    def test_the_system_sentinel_also_survives_the_overflow_recovery_cut(
         self, tmp_path
     ):
-        _result, _provider, records = self._run(
-            tmp_path, composed=self._composed(tmp_path), prompt=REQUEST_SENTINEL
+        """The reactive path rebuilds the context, so it can lose the prompt.
+
+        `_build_recovery_context` constructs a fresh `AgentContext` rather than
+        returning a message list, and the system half survives only because it
+        is passed in and passed on. That is a deletable argument, not a
+        structural guarantee, so it gets its own cut rather than riding on the
+        proactive one.
+        """
+        overflow = AssistantMessage(
+            stop_reason="error", error_message="API Error: 400 context length exceeded"
         )
-        context = records[1]
-        assert context["type"] == "context"
+        _result, provider, records = _run_compacting_task(
+            tmp_path,
+            composed=_composed_file(tmp_path),
+            prompt=REQUEST_SENTINEL,
+            # First turn overflows before any tool runs, so recovery force-
+            # compacts the transcript and continues from the summary.
+            turns=[overflow, _summary_turn(), _final_turn()],
+        )
+        main, _summary = _split_calls(provider)
+        _assert_one_compaction(records, "overflow")
+
+        # Every main-model call, the one after the recovery included, still
+        # carries the standing instructions.
+        assert len(main) == 2, "expected the overflowing turn and the continue"
+        for call in main:
+            assert SYSTEM_SENTINEL in call["system_prompt"]
+        assert SYSTEM_SENTINEL not in str(main[-1]["messages"])
+
+    def test_the_session_log_records_one_context_across_a_compacting_run(
+        self, tmp_path
+    ):
+        _result, _provider, records = self._proactive(tmp_path)
+        self._assert_the_cut_dropped_index_zero(records)
+
+        contexts = [r for r in records if r["type"] == "context"]
+        # Written once, before the loop starts. A compaction rebuilding the
+        # context must not produce a second one, which is the property this run
+        # can plausibly break and a non-compacting run cannot test.
+        assert len(contexts) == 1
+        context = contexts[0]
         assert SYSTEM_SENTINEL in context["system_prompt"]
         assert context["system_prompt_source"] == "builtin+composed"
-        # The sentinel leads the file and the record is nowhere near
-        # `max_content_chars`, so nothing here rests on that policy value.
-        assert context.get("truncated") in (None, False)
+        # `truncated` is written at the record's top level and only when true,
+        # so this reads as "the composed prompt fit `max_content_chars`". The
+        # sentinel leads the file as well, so nothing here rests on that value.
+        assert "truncated" not in context
 
 
+@pytest.mark.usefixtures("_no_tool_server")
 class TestThePreSplitShapeLosesIt:
     """The control for the class above, and the shape ISSUE-375 reports.
 
@@ -660,14 +778,13 @@ class TestThePreSplitShapeLosesIt:
     """
 
     def test_instructions_on_the_user_turn_do_not_survive_the_cut(self, tmp_path):
-        runner = TestTheSystemHalfSurvivesAProactiveCut()
-        _result, provider, records = runner._run(
+        _result, provider, records = _run_compacting_task(
             tmp_path,
             composed=None,
             prompt=f"{SYSTEM_SENTINEL}\nYou are Istota.\n\n{REQUEST_SENTINEL}",
         )
-        first, _summary, after = runner._calls(provider)
-        runner._compaction_record(records)
+        (first, after), _summary = _split_calls(provider)
+        _assert_one_compaction(records, "proactive")
 
         # It was there on turn one, in the message compaction is allowed to eat.
         assert SYSTEM_SENTINEL in str(first["messages"])
