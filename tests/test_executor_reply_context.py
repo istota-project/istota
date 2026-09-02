@@ -143,7 +143,7 @@ class TestForceInclude:
         # prompt twice, once as context and once as the frame.
         assert history == []
         assert reply_parent is None
-        assert build_prompt(task, [], config).count(snapshot) == 1
+        assert build_prompt(task, [], config).user.count(snapshot) == 1
 
     def test_talk_reply_still_resolves_through_its_own_column(
         self, tmp_path, conn,
@@ -188,7 +188,7 @@ class TestQuoteFrame:
         from istota.executor import build_prompt
 
         config = _config(tmp_path, tmp_path / "istota.db")
-        return build_prompt(task, [], config)
+        return build_prompt(task, [], config).user
 
     def test_request_section_carries_the_quote(self, tmp_path):
         task = db.Task(
@@ -233,7 +233,7 @@ class TestQuoteFrame:
         )
         context, _ = _build_talk_api_context(task, config, conn)
         assert context is None
-        prompt = build_prompt(task, [], config, conversation_context=context)
+        prompt = build_prompt(task, [], config, conversation_context=context).user
         assert prompt.count("Shall I proceed?") == 1
 
     def test_the_snapshot_is_quoted_once_when_talk_history_lacks_the_parent(
@@ -262,7 +262,7 @@ class TestQuoteFrame:
             reply_to_talk_id=77, reply_to_content=snapshot,
         )
         context, _ = _build_talk_api_context(task, config, conn)
-        prompt = build_prompt(task, [], config, conversation_context=context)
+        prompt = build_prompt(task, [], config, conversation_context=context).user
         assert prompt.count(snapshot) == 1
 
     def test_talk_reply_also_gets_the_frame(self, tmp_path):

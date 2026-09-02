@@ -148,3 +148,31 @@ def transcript_summary(frames: list[dict]) -> str:
         f"({', '.join(f'{k}={v}' for k, v in sorted(census.items())) or 'none'}); "
         f"tools called: {', '.join(tools) or 'none'}"
     )
+
+
+def answer_text(frames: list[dict]) -> str:
+    """Everything the model said in prose, joined — assistant text plus the result.
+
+    Both, not one: the `result` frame carries the CLI's own rendering of the
+    final answer, and the `assistant` frames carry each turn's text. A witness
+    that reads only the result frame goes blind on a version that shapes it
+    differently, and one that reads only the assistant frames misses an answer
+    the CLI summarised. Joined, a sentinel present anywhere the model wrote it
+    is found.
+
+    Non-text blocks are skipped rather than stringified: a `tool_use` block's
+    `input` is a dict the model chose, so folding it in would let a sentinel
+    the model merely echoed into a tool argument read as an answer.
+    """
+    parts: list[str] = []
+    for frame in frames:
+        kind = frame.get("type")
+        if kind == "assistant":
+            for block in _content_blocks(frame):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+        elif kind == "result":
+            result = frame.get("result")
+            if isinstance(result, str):
+                parts.append(result)
+    return "\n".join(parts)

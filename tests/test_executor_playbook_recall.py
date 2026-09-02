@@ -128,11 +128,11 @@ class TestBuildPromptPlaybooks:
 
     def test_playbooks_section_rendered(self, tmp_path):
         config = self._config(tmp_path)
-        prompt = build_prompt(_task(), [], config, playbooks="- # Open a PR\n  1. gh pr create")
+        prompt = build_prompt(_task(), [], config, playbooks="- # Open a PR\n  1. gh pr create").user
         assert "## Learned Playbooks" in prompt
         assert "gh pr create" in prompt
 
     def test_no_section_when_none(self, tmp_path):
         config = self._config(tmp_path)
-        prompt = build_prompt(_task(), [], config, playbooks=None)
+        prompt = build_prompt(_task(), [], config, playbooks=None).user
         assert "Learned Playbooks" not in prompt

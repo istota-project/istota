@@ -85,6 +85,73 @@ class TestTheFallbackCopyCarriesBothWraps:
         assert only_native.native_sandbox_wrap is _native_wrap
 
 
+class TestTheFallbackCopyCarriesTheComposedSplit:
+    """A reroute must keep both prompt channels, in both directions.
+
+    `req.prompt` is the user half and `composed_system_prompt_path` names the
+    system half. `_run_fallback` copies with `dataclasses.replace(req, model=…,
+    effort=…, advisor=…, is_fallback=True)`, which names neither — so the
+    carrying is free and what needs holding is that each brain then *reads* the
+    field it was handed. A field that carried across and was consumed by
+    nobody would leave the fallback running with no standing instructions,
+    which is the failure this whole split exists to close.
+    """
+
+    def _composed(self, tmp_path):
+        p = tmp_path / "task_9_system_prompt.txt"
+        p.write_text("COMPOSED-SENTINEL")
+        return p
+
+    def _copy(self, req):
+        return dataclasses.replace(
+            req, model="m", effort="high", advisor="", is_fallback=True,
+        )
+
+    def test_the_replace_call_keeps_both_halves(self, tmp_path):
+        composed = self._composed(tmp_path)
+        fb = self._copy(
+            _req(tmp_path, prompt="USER-HALF", composed_system_prompt_path=composed)
+        )
+        assert fb.prompt == "USER-HALF"
+        assert fb.composed_system_prompt_path == composed
+
+    def test_claude_code_to_native_keeps_the_composed_file(self, tmp_path):
+        """The shipped reroute. A request assembled for ClaudeCodeBrain,
+        copied, then composed by NativeBrain."""
+        composed = self._composed(tmp_path)
+        fb = self._copy(
+            _req(
+                tmp_path,
+                prompt="USER-HALF",
+                allowed_tools=["Bash"],
+                composed_system_prompt_path=composed,
+            )
+        )
+        brain = NativeBrain(NativeBrainConfig(model="m"), provider=object())
+
+        assert "COMPOSED-SENTINEL" in brain._extract_system_prompt(fb)
+        assert brain._system_prompt_source(fb) == "builtin+composed"
+        assert fb.prompt == "USER-HALF"
+
+    def test_native_to_claude_code_keeps_the_composed_file(self, tmp_path):
+        """The other direction, through the shared CLI flag builder."""
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        composed = self._composed(tmp_path)
+        fb = self._copy(
+            _req(
+                tmp_path,
+                prompt="USER-HALF",
+                allowed_tools=["Bash"],
+                composed_system_prompt_path=composed,
+            )
+        )
+        flags = build_claude_cli_flags(fb)
+
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
+        assert fb.prompt == "USER-HALF"
+
+
 class TestNativeBrainReadsTheNativeWrap:
     """`_start_tool_server` is where the wrap reaches bubblewrap now.
 

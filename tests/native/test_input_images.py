@@ -3,7 +3,8 @@
 ``BrainRequest.images`` carries prepared attachments (``image_attachments``
 produces them) across the brain boundary without their bytes. NativeBrain is
 the brain that turns them into provider content: on a vision model the initial
-user message is one ``TextContent`` with the composed prompt followed by one
+user message is one ``TextContent`` with ``req.prompt`` — the user half of the
+composed prompt — followed by one
 ``ImageContent`` per image, which is the order OpenRouter's image-understanding
 guide documents. On a model that declares no vision support no image block is
 sent at all and each image gets a named text omission instead, so the request
@@ -328,25 +329,27 @@ class TestCompactionKeepsTheImages:
         assert after[0].content[1].display_name == "shot.png"
         assert "[Summary of earlier conversation]" in after[1].content[0].text
 
-    def test_the_pin_carries_the_blocks_and_not_the_composed_prompt(self, tmp_path):
-        # The original message leads with the whole composed prompt. Pinning it
-        # whole would make the largest text in the conversation the one piece
-        # compaction can never reclaim, and the summary already carries it
-        # forward in reduced form.
+    def test_the_pin_carries_the_blocks_and_not_the_user_half(self, tmp_path):
+        # The original message is the task's user half — retrieved memory,
+        # conversation history, the request. Pinning it whole would make the
+        # largest text in the conversation the one piece compaction can never
+        # reclaim, and the summary already carries it forward in reduced form.
+        # (Istota's standing instructions are not in it: they are the system
+        # half, outside `ctx.messages` entirely.)
         images = [_image(tmp_path, "shot.png", PNG_BYTES, "image/png")]
         provider = MockProvider(
             [self._tool_turn(), self._summary_turn(), self._final_turn()]
         )
         brain = NativeBrain(self._brain_with_a_tiny_window(), provider=provider)
-        req = _req(tmp_path, images, prompt="COMPOSED-PROMPT-MARKER " + "x" * 400)
+        req = _req(tmp_path, images, prompt="USER-HALF-MARKER " + "x" * 400)
         req.allowed_tools = ["Write"]
         brain.execute(req)
 
         pin = provider.calls[2]["messages"][0]
-        assert "COMPOSED-PROMPT-MARKER" not in pin.content[0].text
+        assert "USER-HALF-MARKER" not in pin.content[0].text
         assert isinstance(pin.content[1], ImageContent)
         # But the summarizer did see it — that text is what the summary is for.
-        assert "COMPOSED-PROMPT-MARKER" in provider.calls[1]["messages"][-1].content[0].text
+        assert "USER-HALF-MARKER" in provider.calls[1]["messages"][-1].content[0].text
 
     def test_the_summary_is_not_told_a_pinned_image_is_gone(self, tmp_path):
         # The two halves must not contradict each other. A summary saying the

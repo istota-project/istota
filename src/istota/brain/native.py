@@ -631,6 +631,21 @@ def _base_url_host(base_url: str) -> str:
         return ""
 
 
+def _join_system_prompt(parts: list[tuple[str, str]]) -> str:
+    """The system prompt text, from a `_system_prompt_parts` walk."""
+    return "\n\n".join(text for _, text in parts)
+
+
+def _system_prompt_source_of(parts: list[tuple[str, str]]) -> str:
+    """What that prompt was made of, from the same walk.
+
+    Both take the already-walked list rather than a request, so the run reads
+    the composed file once and the text and the label cannot describe two
+    different reads of it.
+    """
+    return "+".join(name for name, _ in parts) or "empty"
+
+
 def _tools_schema_sha(tools) -> str:
     """SHA-256 over the sorted tool schemas.
 
@@ -1749,8 +1764,19 @@ class NativeBrain:
         tool_server = None
         try:
             tool_server = await self._start_tool_server(req, abort)
+            # One walk, two consumers. Deliberately not
+            # `_extract_system_prompt(req)` here and `_system_prompt_source(req)`
+            # ten lines below: each of those walks again, and the walk now reads
+            # a file off disk. Two reads is two chances to fail, and the second
+            # one is the worse of them — by that point the system prompt has
+            # been assembled correctly and the run is viable, so a composed file
+            # that vanished in between would fail the attempt from a function
+            # whose only job is to name what the first read already got. The
+            # unguarded read is there so a *missing* required input cannot be
+            # ignored, not so a label can end a working run.
+            prompt_parts = self._system_prompt_parts(req)
             context = AgentContext(
-                system_prompt=self._extract_system_prompt(req),
+                system_prompt=_join_system_prompt(prompt_parts),
                 messages=[],
                 tools=self._build_tools(req, tool_server),
             )
@@ -1760,7 +1786,7 @@ class NativeBrain:
                 context.system_prompt,
                 [t.schema.name for t in (context.tools or [])],
                 _tools_schema_sha(context.tools),
-                system_prompt_source=self._system_prompt_source(req),
+                system_prompt_source=_system_prompt_source_of(prompt_parts),
             )
             prompt_msg = UserMessage(
                 content=_initial_user_content(
@@ -2370,8 +2396,14 @@ class NativeBrain:
         return sanitize_tool_pairs(rendered)
 
     def _extract_system_prompt(self, req: BrainRequest) -> str:
-        """The composed system prompt. See :meth:`_system_prompt_parts`."""
-        return "\n\n".join(text for _, text in self._system_prompt_parts(req))
+        """The composed system prompt. See :meth:`_system_prompt_parts`.
+
+        A convenience wrapper over one walk plus :func:`_join_system_prompt`.
+        The run itself does not use it — `_execute_async` walks once and feeds
+        both consumers from that one list, so the composed file is read once per
+        attempt rather than once per consumer.
+        """
+        return _join_system_prompt(self._system_prompt_parts(req))
 
     def _system_prompt_source(self, req: BrainRequest) -> str:
         """What the composed prompt is made of, for the ``context`` record.
@@ -2382,25 +2414,52 @@ class NativeBrain:
         rather than replacing it, and a configured path that does not exist
         contributes nothing at all. Naming the file in either case would have
         the record describe a prompt the run did not use.
+
+        Values are ``builtin``, ``composed`` and the operator file's absolute
+        path, joined with ``+`` in composition order — so ``builtin+composed``,
+        ``builtin+composed+/etc/istota/system-prompt.md``, ``composed`` for a
+        tool-less executor task, and ``empty`` for an unchanged direct
+        text-only call.
+
+        A convenience wrapper, like :meth:`_extract_system_prompt`; the run
+        takes :func:`_system_prompt_source_of` off the walk it already did.
         """
-        return "+".join(name for name, _ in self._system_prompt_parts(req)) or "empty"
+        return _system_prompt_source_of(self._system_prompt_parts(req))
 
     def _system_prompt_parts(self, req: BrainRequest) -> list[tuple[str, str]]:
         """Compose the native brain's system prompt.
 
-        Tool-bearing tasks (non-empty ``allowed_tools``) get the coding-guidance
-        block; a text-only invocation (empty ``allowed_tools``, e.g. the sleep
-        cycle) keeps an empty prompt — no behavioural change to that path. When
-        the turn-budget nudge is enabled the coding block also carries a
-        non-numeric "don't die mid-stream" pacing line (ISSUE-187 mechanism A;
-        compaction-safe since the system prompt lives outside ``ctx.messages``).
-        An operator's ``custom_system_prompt_path`` is appended after the base so
-        it still applies.
+        Three parts, in this order:
+
+        1. ``CODING_SYSTEM_PROMPT``, for tool-bearing tasks (non-empty
+           ``allowed_tools``). A text-only invocation (empty ``allowed_tools``,
+           e.g. the sleep cycle) skips it. When the turn-budget nudge is enabled
+           the coding block also carries a non-numeric "don't die mid-stream"
+           pacing line (ISSUE-187 mechanism A; compaction-safe since the system
+           prompt lives outside ``ctx.messages``).
+        2. ``composed_system_prompt_path`` — Istota's standing instructions,
+           written by the executor. Read with no ``exists()`` branch: it is
+           required input, so a file that has gone missing must raise here and
+           be converted into a failed ``BrainResult`` by ``_execute_sync``'s
+           catch-all, rather than leaving the task running with no persona, no
+           rules and no tool descriptions (ISSUE-375 by another route).
+        3. The operator's ``custom_system_prompt_path``, still last so its
+           existing final-override position on this backend is unchanged, and
+           still omitted when the configured file is absent.
+
+        Part 2 is deliberately *not* gated on ``allowed_tools``: an empty tool
+        list suppresses the coding block alone. A direct text-only caller is
+        unaffected because it supplies no composed path at all, while a future
+        tool-less executor task would still receive Istota's instructions.
 
         Returns ``(name, text)`` pairs so the ``context`` record can say what the
         prompt was made of without a second copy of these conditions deciding it
         — a checker with its own copy of the rule is free to disagree with the
-        thing it describes.
+        thing it describes. The composed part reports the stable label
+        ``composed`` rather than its path: unlike the operator file, that path is
+        task-specific (``task_<id>_system_prompt.txt`` under a per-user temp
+        directory), and the whole use of the recorded source is comparing one
+        run against another.
         """
         parts: list[tuple[str, str]] = []
         if req.allowed_tools:
@@ -2408,9 +2467,21 @@ class NativeBrain:
             if self._config.turn_budget_nudge and self._config.max_turns:
                 coding = f"{coding}\n\n- {_TURN_BUDGET_UPFRONT}"
             parts.append(("builtin", coding))
+        # `encoding="utf-8"`, not the locale's. `read_text()` bare would decode
+        # through `locale.getencoding()`, and the two shipped deployment shapes
+        # disagree about what that is: the Docker image sets `LANG=C.UTF-8`, the
+        # systemd unit sets no locale at all. The failure that produces is the
+        # one this whole change's fail-closed argument does not catch — a
+        # non-UTF-8 locale decodes the persona, `USER.md` and the skill bodies
+        # as latin-1 and hands the model mojibake rather than raising. The
+        # executor writes both files `encoding="utf-8"`; this is the matching
+        # half.
+        composed = req.composed_system_prompt_path
+        if composed is not None:
+            parts.append(("composed", Path(composed).read_text(encoding="utf-8")))
         path = req.custom_system_prompt_path
         if path is not None and Path(path).exists():
-            parts.append((str(path), Path(path).read_text()))
+            parts.append((str(path), Path(path).read_text(encoding="utf-8")))
         return parts
 
     @staticmethod

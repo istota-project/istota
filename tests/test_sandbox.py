@@ -477,6 +477,171 @@ class TestBuildBwrapCmdDeveloperDir:
         assert ".developer" not in result_str
 
 
+class TestBuildBwrapCmdComposedSystemPrompt:
+    """The composed system prompt, re-bound read-only inside its own directory.
+
+    `task_<id>_system_prompt.txt` is Istota's standing instructions, and the
+    Claude CLI opens it *inside* the namespace. It sits in `user_temp_dir`,
+    which is bound read-write, so without a later `--ro-bind` the model's own
+    Bash tool could rewrite the instructions it is running under and a
+    `native -> claude_code` reroute would read the rewrite. This is the same
+    carve-out shape `.developer` uses, arriving through `extra_ro_binds` —
+    which had no production consumer until the executor grew this one.
+    """
+
+    def _bind(self, config, task, composed):
+        with _patch_linux():
+            return build_bwrap_cmd(
+                ["claude", "-p", "test"],
+                config, task, False, [], composed.parent,
+                extra_ro_binds=[composed],
+                profile=SandboxProfile.CLAUDE,
+            )
+
+    def _composed(self, config, task):
+        user_temp = config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        f = user_temp / f"task_{task.id}_system_prompt.txt"
+        f.write_text("standing instructions")
+        return f.resolve()
+
+    def test_the_file_is_ro_bound_after_the_user_temp_bind(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """Order is the whole mechanism: an earlier read-only bind is simply
+        overwritten by the read-write bind of its parent."""
+        task = make_sandbox_task()
+        composed = self._composed(sandbox_config, task)
+        result = self._bind(sandbox_config, task, composed)
+
+        temp_resolved = str(composed.parent.resolve())
+        bind_idx = ro_idx = None
+        for i, arg in enumerate(result):
+            if arg == "--bind" and i + 1 < len(result) and result[i + 1] == temp_resolved:
+                bind_idx = i
+            if arg == "--ro-bind" and i + 1 < len(result) and result[i + 1] == str(composed):
+                ro_idx = i
+        assert bind_idx is not None, "user_temp --bind not found"
+        assert ro_idx is not None, (
+            f"the composed system prompt was never --ro-bind'ed: {result}"
+        )
+        assert ro_idx > bind_idx, (
+            f"--ro-bind for the composed file ({ro_idx}) must come after the "
+            f"read-write --bind of its directory ({bind_idx})"
+        )
+
+    def test_the_bind_lands_on_the_same_path_the_brain_is_given(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """Destination, not just source. The CLI opens the path the executor
+        put on the request, so a bind whose destination differed would leave it
+        reading the writable copy."""
+        task = make_sandbox_task()
+        composed = self._composed(sandbox_config, task)
+        result = self._bind(sandbox_config, task, composed)
+
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        assert (str(composed), str(composed)) in ro_pairs, ro_pairs
+
+    def test_no_directory_is_newly_read_only(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """One file, not its directory. The sibling result file and the task
+        workspace stay writable, which is what the rest of the task needs."""
+        task = make_sandbox_task()
+        composed = self._composed(sandbox_config, task)
+        result = self._bind(sandbox_config, task, composed)
+
+        ro_srcs = [src for src, _ in _get_bind_pairs(result, "--ro-bind")]
+        assert str(composed.parent.resolve()) not in ro_srcs, ro_srcs
+
+    def test_a_missing_file_binds_nothing(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """`extra_ro_binds` skips what does not exist, and must keep doing so:
+        bwrap fails the whole namespace on a bind whose source is absent, which
+        would turn a cleanup race into every task failing rather than one."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        missing = (user_temp / f"task_{task.id}_system_prompt.txt").resolve()
+
+        with _patch_linux():
+            result = build_bwrap_cmd(
+                ["claude", "-p", "test"],
+                sandbox_config, task, False, [], user_temp,
+                extra_ro_binds=[missing],
+                profile=SandboxProfile.CLAUDE,
+            )
+
+        assert str(missing) not in result
+
+
+class TestNativeFsRootsComposedSystemPrompt:
+    """The native half of the same carve-out.
+
+    The bind covers every bwrap-wrapped child, which includes the native Bash
+    tool. It does not cover `Write` and `Edit`, which resolve through
+    `ToolEnv` — and `native_fs_roots` puts `user_temp_dir` in the writable
+    list. Without a deny entry a native task rewrites its own standing
+    instructions with one tool call. `native_fs_roots`' docstring records this
+    exact asymmetry for `.developer`.
+    """
+
+    def _roots(self, config, task, composed):
+        user_temp = config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        return native_fs_roots(
+            config, task, False, [], user_temp,
+            composed_system_prompt_path=composed,
+        )
+
+    def test_the_composed_file_is_write_denied(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        composed = (user_temp / f"task_{task.id}_system_prompt.txt").resolve()
+        composed.write_text("standing instructions")
+
+        _read, write, denied = self._roots(sandbox_config, task, composed)
+
+        assert composed in denied, denied
+        # Still readable, through the writable root that contains it — the
+        # carve-out denies writes only, as `.developer` does.
+        assert any(composed.is_relative_to(r) for r in write), write
+
+    def test_the_deny_entry_does_not_wait_for_the_file(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """Appended unconditionally, like `.developer`'s. A deny root that
+        never comes into existence costs one failed comparison; an existence
+        gate leaves a window where the path is writable."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        composed = (user_temp / f"task_{task.id}_system_prompt.txt").resolve()
+
+        _read, _write, denied = self._roots(sandbox_config, task, composed)
+
+        assert composed in denied, denied
+
+    def test_no_composed_path_denies_only_developer(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """A direct caller with no composed prompt is unchanged."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        _read, _write, denied = native_fs_roots(
+            sandbox_config, task, False, [], user_temp,
+        )
+
+        assert denied == [user_temp.resolve() / ".developer"]
+
+
 class TestBuildBwrapCmdPathResolution:
     """Test that paths are resolved (no symlinks leak through)."""
 

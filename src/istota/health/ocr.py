@@ -389,23 +389,22 @@ def _call_brain(
 
     Confinement covers ``NativeBrain``, whose file tools read these roots.
 
-    **It does not cover the Claude Code brains, and what is exposed there is
-    the whole toolset rather than a read.** ``build_claude_cli_flags`` treats a
-    non-empty ``allowed_tools`` as a signal to add
-    ``--dangerously-skip-permissions`` and no ``--allowedTools`` allowlist at
-    all, so the CLI runs with its full default toolset — ``Bash`` and ``Write``
-    included — and takes its filesystem boundary from bubblewrap instead. This
-    path builds no bubblewrap wrap, so on a ``claude_code`` or ``tmux_claude``
-    deployment that toolset runs host-side as the daemon user.
+    **The Claude Code brains ignore those roots entirely and take their
+    boundary from bubblewrap**, which is what ``sandbox_wrap`` supplies
+    (ISSUE-397). Without it the grant was far wider than it reads:
+    ``build_claude_cli_flags`` treats a non-empty ``allowed_tools`` as the
+    signal to add ``--dangerously-skip-permissions`` and no ``--allowedTools``
+    allowlist at all, so the CLI ran its full default toolset — ``Bash`` and
+    ``Write`` included — host-side as the daemon user, on the default
+    deployment, driven by a prompt whose input is an uploaded document.
 
-    That is a **deferral, not a limitation of the shape**: ``heartbeat.py``
-    wraps a task-less ``claude -p`` with a synthetic ``db.Task`` and
-    ``SandboxProfile.CLAUDE``, so the same is available here. It is not taken
-    yet because the document lives under ``uploads_dir``, which such a wrap
-    would have to bind (``extra_ro_binds``) or the extraction stops working
-    entirely — and the sandbox path is exercised by the ``linux`` and ``smoke``
-    tiers rather than the default suite, which patches ``_bwrap_available`` and
-    asserts on argv. See the resolution note on ISSUE-395.
+    The wrap is passed on both branches rather than only on the vision one, so
+    "an OCR call runs in a namespace" is a property of the call rather than of
+    which branch it took. ``build_daemon_sandbox`` names the document in
+    ``extra_ro_binds``: the ``{mount}/Users/{user_id}`` bind covers a panel's
+    upload, but the encounter and immunization routes hand over a temp copy and
+    ``python -m istota.health.ocr`` an arbitrary local file, and a wrap that
+    hides the document is an outage rather than a boundary.
     """
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
@@ -423,12 +422,30 @@ def _call_brain(
     # Imported here rather than at module scope: `executor` imports
     # `briefings.generate`, and a top-level import from any of these callers
     # risks closing a cycle back through it.
-    from istota.executor import build_model_cli_env, persist_brain_usage
+    from istota.executor import (
+        build_daemon_sandbox,
+        build_model_cli_env,
+        persist_brain_usage,
+    )
 
+    sandbox = build_daemon_sandbox(
+        config, user_id, extra_ro_binds=[read_path] if read_path else None
+    )
+    if sandbox.refused and read_path:
+        # Fail closed. A namespace was wanted and could not be built, and the
+        # tool grant below is only safe inside one — on the Claude brains it is
+        # the CLI's whole default toolset, confined by nothing else. Better no
+        # extraction than an unconfined one: the caller renders "extraction
+        # unavailable, add the rows by hand", which is a recoverable answer.
+        logger.warning(
+            "health_ocr_sandbox_refused user_id=%r — not granting Read "
+            "outside a namespace", user_id,
+        )
+        return None
     req = BrainRequest(
         prompt=prompt,
         allowed_tools=["Read"] if read_path else [],
-        cwd=Path(getattr(config, "temp_dir", None) or "/tmp"),
+        cwd=sandbox.work_dir,
         # Not `dict(os.environ)`: this is a daemon-side call with no task
         # behind it, so nothing has stripped the master Fernet key, the
         # Nextcloud app password, the mail passwords or the forge tokens
@@ -436,6 +453,10 @@ def _call_brain(
         # daemon-side model spawn that is not a task (ISSUE-232).
         env=build_model_cli_env(config),
         fs_read_roots=[read_path] if read_path else None,
+        # The Claude brains' filesystem boundary (ISSUE-397). `NativeBrain`
+        # reads `native_sandbox_wrap` and not this one, and is confined by the
+        # roots above instead.
+        sandbox_wrap=sandbox.wrap,
         timeout_seconds=180,
         model=model,
         streaming=False,

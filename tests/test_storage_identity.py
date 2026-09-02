@@ -95,18 +95,30 @@ def _base_config(tmp_path, **kw):
 
 
 class TestPromptStorageFramingLocal:
-    def _prompt(self, tmp_path):
+    def _prompt(self, tmp_path, **task_kw):
         config = _base_config(
             tmp_path,
             nextcloud_mount_path=tmp_path / "workspace",
         )
         assert config.storage_backend == "local"
-        return build_prompt(_task(), [], config)
+        return build_prompt(_task(**task_kw), [], config).system
 
     def test_no_nextcloud_vocabulary(self, tmp_path):
+        """Both halves, and with an attachment, because the split moved one.
+
+        `_attachment_line` renders the storage label — "in Nextcloud, access
+        via rclone" for the Nextcloud backend — and the attachment list is in
+        the *user* half now. So a `.system`-only assertion here can no longer
+        see the one piece of storage vocabulary that crossed the boundary,
+        which is exactly the string this test exists to rule out.
+        """
+        config = _base_config(tmp_path, nextcloud_mount_path=tmp_path / "workspace")
+        assert config.storage_backend == "local"
+        composed = build_prompt(_task(attachments=["inbox/scan.pdf"]), [], config)
         # Strip environment paths (pytest's tmp_path embeds the method name,
         # which can contain "nextcloud") so we test prose, not artifacts.
-        prompt = self._prompt(tmp_path).replace(str(tmp_path), "<WS>")
+        prompt = (composed.system + composed.user).replace(str(tmp_path), "<WS>")
+        assert "inbox/scan.pdf" in prompt, "the attachment line did not render"
         assert "Nextcloud" not in prompt
         assert "nextcloud" not in prompt
         assert "rclone" not in prompt
@@ -132,7 +144,7 @@ class TestPromptStorageFramingNextcloud:
             nextcloud_mount_path=tmp_path / "mnt",
         )
         assert config.storage_backend == "nextcloud"
-        return build_prompt(_task(), [], config)
+        return build_prompt(_task(), [], config).system
 
     def test_keeps_nextcloud_vocabulary(self, tmp_path):
         prompt = self._prompt(tmp_path)
@@ -152,7 +164,7 @@ class TestPromptStorageFramingRclone:
         )
         assert config.storage_backend == "nextcloud"
         assert config.use_mount is False
-        prompt = build_prompt(_task(), [], config)
+        prompt = build_prompt(_task(), [], config).system
         assert "rclone" in prompt
         assert "Nextcloud" in prompt
 

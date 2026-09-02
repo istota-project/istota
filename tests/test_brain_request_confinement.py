@@ -1,4 +1,4 @@
-"""What a daemon-side ``BrainRequest`` may hand the model (ISSUE-395).
+"""What a daemon-side ``BrainRequest`` may hand the model (ISSUE-395, ISSUE-397).
 
 Six modules build a ``BrainRequest`` directly rather than going through
 ``execute_task``, so none of them gets the env and the confinement roots that
@@ -6,15 +6,22 @@ path assembles. Three of them — the OCR extractors — also grant a ``Read``
 tool. Together that handed the model a host-side read over the whole
 filesystem, as the daemon user, with the daemon's whole environment in reach.
 
-Two behavioural properties are asserted here. The environment one covers all
-six builders; the roots one covers the three that grant a tool, since the other
-three grant none and have nothing to confine.
+Three behavioural properties are asserted here. The environment one covers all
+six builders; the roots and the sandbox wrap cover the three that grant a tool,
+since the other three grant none and have nothing to confine.
+
+The roots and the wrap are not two spellings of one boundary. ``fs_read_roots``
+is read by ``NativeBrain`` and by nothing else; the two Claude brains ignore it
+and take their filesystem boundary from bubblewrap, which is what
+``sandbox_wrap`` supplies (ISSUE-397). Closing only the first left the default
+deployment running the CLI's whole default toolset host-side as the daemon user.
 
 The AST guards are what keep the *class* closed rather than the six instances.
 They walk the source for ``BrainRequest(...)`` construction sites and require,
 of each one, that ``env=`` is not the daemon's own environment and that a site
-granting a file tool also passes ``fs_read_roots``. A seventh builder that
-reproduces either half of ISSUE-395 fails here rather than shipping.
+granting a file tool also passes ``fs_read_roots`` and a non-``None``
+``sandbox_wrap``. A seventh builder that reproduces any part of ISSUE-395 or
+ISSUE-397 fails here rather than shipping.
 
 What the guards do **not** catch, stated so nobody reads more into a green run:
 they match literal expressions at the call site only. ``e = dict(os.environ)``
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -91,6 +99,66 @@ def _ocr_modules():
 
 def _ocr_module_ids():
     return ["panel", "encounter", "immunization"]
+
+
+def _document(tmp_path: Path) -> Path:
+    doc = tmp_path / "uploads" / "7" / "original.png"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_bytes(b"\x89PNG\r\n\x1a\n")
+    return doc.resolve()
+
+
+@pytest.fixture
+def _bwrap_flag_cache():
+    """Keep the process-wide bwrap flag-probe memo out of other tests.
+
+    ``build_bwrap_cmd`` asks ``_bwrap_supports_*`` whether the local bwrap
+    takes ``--remount-ro`` and ``--disable-userns``, and those cache their
+    answer for the life of the process. Patching ``_bwrap_available`` to True
+    makes them run for real, so without this a later test in the same xdist
+    worker sees a memo these tests filled in. Same save/restore
+    ``tests/test_executor_streaming.py`` does.
+    """
+    from istota import executor
+
+    saved = dict(executor._bwrap_flag_support)
+    executor._bwrap_flag_support.clear()
+    yield
+    executor._bwrap_flag_support.clear()
+    executor._bwrap_flag_support.update(saved)
+
+
+def _wrapped(req: BrainRequest, cmd: list[str]) -> list[str]:
+    """The argv the wrap produces, with bwrap forced available.
+
+    The default suite runs on macOS as often as not, and ``build_bwrap_cmd``
+    returns its input unchanged when the probe fails — so without this the
+    assertions below would pass against an unwrapped command.
+    """
+    with patch("istota.executor._bwrap_available", return_value=True):
+        return req.sandbox_wrap(list(cmd))
+
+
+def _mounts(argv: list[str]) -> list[tuple[int, str, str, str]]:
+    """Every bind in ``argv`` as ``(index, flag, source, destination)``.
+
+    bwrap pairs are ``[flag, src, dest]`` and the *last* mount over a path is
+    the one in force, so a helper that stops at the first match cannot answer
+    what mode a path ends up with. Both are why this returns the whole list
+    with indices rather than one flag.
+    """
+    out = []
+    for i, token in enumerate(argv[:-2]):
+        if token in ("--bind", "--ro-bind"):
+            out.append((i, token, argv[i + 1], argv[i + 2]))
+    return out
+
+
+def _effective_mount(argv: list[str], path: Path) -> tuple[int, str] | None:
+    """``(index, flag)`` of the last bind landing on ``path``, or ``None``."""
+    target = str(path)
+    hits = [(i, flag) for i, flag, _src, dest in _mounts(argv) if dest == target]
+    return hits[-1] if hits else None
 
 
 class TestTheOcrRequestNamesItsDocument:
@@ -166,6 +234,278 @@ class TestTheOcrRequestNamesItsDocument:
         # deployment, so the root is the file rather than its parent.
         with pytest.raises(ToolPathError):
             env.resolve(str(sibling))
+
+
+class TestTheOcrRequestRunsInANamespace:
+    """ISSUE-397: the Claude brains take their boundary from bubblewrap.
+
+    ``fs_read_roots`` above is read by ``NativeBrain`` alone.
+    ``ClaudeCodeBrain`` and ``TmuxClaudeBrain`` ignore it, and
+    ``build_claude_cli_flags`` reads a non-empty ``allowed_tools`` as the signal
+    to add ``--dangerously-skip-permissions`` with no ``--allowedTools``
+    allowlist at all — so ``allowed_tools=["Read"]`` gets the CLI's whole
+    default toolset, ``Bash`` and ``Write`` included. On the default deployment
+    that ran host-side as the daemon user, driven by a prompt whose input is an
+    uploaded document.
+    """
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_request_carries_a_wrap(
+        self, module, capture_request, make_config, tmp_path
+    ):
+        document = _document(tmp_path)
+
+        module._call_brain(
+            "extract this", make_config(), read_path=document, user_id="alice"
+        )
+
+        assert capture_request[0].sandbox_wrap is not None
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_text_native_branch_is_wrapped_too(
+        self, module, capture_request, make_config
+    ):
+        """One rule, not one per branch.
+
+        A text-native PDF grants no tool, so the CLI gets no bypass flag and the
+        exposure the entry describes is not reachable that way. Wrapping it
+        anyway is what makes "an OCR call runs in a namespace" a property of the
+        call rather than of which branch it took.
+        """
+        module._call_brain("extract this", make_config(), user_id="alice")
+
+        assert capture_request[0].sandbox_wrap is not None
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_wrap_builds_a_bubblewrap_argv(
+        self, module, capture_request, make_config, tmp_path, _bwrap_flag_cache
+    ):
+        """Asserting the field is non-None would pass against a no-op closure."""
+        document = _document(tmp_path)
+
+        module._call_brain(
+            "extract this", make_config(), read_path=document, user_id="alice"
+        )
+
+        argv = _wrapped(capture_request[0], ["claude", "-p", "-"])
+        assert argv[0] == "bwrap"
+        assert argv[-3:] == ["claude", "-p", "-"]
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_namespace_can_still_reach_the_document(
+        self, module, capture_request, make_config, tmp_path, _bwrap_flag_cache
+    ):
+        """A wrap that hides the document is an outage, not a boundary.
+
+        The document is bound by name rather than left to the
+        ``{mount}/Users/{user_id}`` bind: the encounter and immunization routes
+        hand the extractor a temp copy and ``python -m istota.health.ocr`` an
+        arbitrary local file, so the standard user bind does not cover every
+        caller. Read-only — the extractor reads the document and nothing more.
+        """
+        document = _document(tmp_path)
+
+        module._call_brain(
+            "extract this", make_config(), read_path=document, user_id="alice"
+        )
+
+        argv = _wrapped(capture_request[0], ["claude"])
+        assert _effective_mount(argv, document) is not None
+        assert _effective_mount(argv, document)[1] == "--ro-bind"
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_document_stays_read_only_under_a_later_bind(
+        self, module, capture_request, make_config, tmp_path, _bwrap_flag_cache
+    ):
+        """The ordering the read-only claim rests on, asserted as ordering.
+
+        bwrap applies argv in order and the later mount wins. A bloodwork
+        panel's upload sits under ``{mount}/Users/{user_id}``, and the encounter
+        and immunization routes put their temp copy under ``work_dir`` — both
+        of which are bound read-write. So "the document is read-only" is a
+        claim about where the ``--ro-bind`` sits relative to those, not about
+        the flag existing. It was false when this block ran before the mount
+        bind, and the flag assertion above passed anyway.
+        """
+        config = make_config()
+        user_dir = config.nextcloud_mount_path / "Users" / "alice"
+        document = user_dir / "health" / "uploads" / "7" / "original.png"
+        document.parent.mkdir(parents=True)
+        document.write_bytes(b"\x89PNG\r\n\x1a\n")
+        document = document.resolve()
+
+        module._call_brain(
+            "extract this", config, read_path=document, user_id="alice"
+        )
+
+        argv = _wrapped(capture_request[0], ["claude"])
+        covering = _effective_mount(argv, user_dir.resolve())
+        doc_mount = _effective_mount(argv, document)
+        assert covering is not None, "the user's own directory should be bound"
+        assert covering[1] == "--bind"
+        assert doc_mount is not None
+        assert doc_mount[1] == "--ro-bind"
+        assert doc_mount[0] > covering[0], (
+            "the document's read-only bind must come after the read-write bind "
+            "of the directory holding it, or the later mount takes the write back"
+        )
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_namespace_is_scoped_to_one_user(
+        self, module, capture_request, make_config, tmp_path, _bwrap_flag_cache
+    ):
+        """``config.temp_dir`` is the shared root; the sandbox binds one level down."""
+        config = make_config()
+        document = _document(tmp_path)
+
+        module._call_brain(
+            "extract this", config, read_path=document, user_id="alice"
+        )
+
+        req = capture_request[0]
+        user_temp = (config.temp_dir / "alice").resolve()
+        argv = _wrapped(req, ["claude"])
+        assert _effective_mount(argv, user_temp) == (
+            _effective_mount(argv, user_temp)[0], "--bind"
+        )
+        assert _effective_mount(argv, config.temp_dir.resolve()) is None
+        assert str(config.temp_dir.resolve()) not in [
+            src for _i, _f, src, _d in _mounts(argv)
+        ]
+        # The cwd travels with the bind: bwrap chdirs into the same directory,
+        # so a request naming the shared root would disagree with its own wrap.
+        assert Path(req.cwd) == user_temp
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_no_wrap_where_there_is_no_sandbox(
+        self, module, capture_request, make_config, tmp_path
+    ):
+        """The operator switched it off, so nothing here is confined either.
+
+        This is the *flag*, not the platform: on macOS and on the shipped
+        Docker stack the flag reads true and the wrap is a non-``None`` closure
+        that `build_bwrap_cmd` renders inert when the bwrap probe fails. Either
+        way OCR ends up equal to an ordinary task on that host, which is the
+        whole claim.
+        """
+        config = make_config()
+        config.security.sandbox_enabled = False
+
+        module._call_brain(
+            "extract this", config, read_path=_document(tmp_path), user_id="alice"
+        )
+
+        assert capture_request[0].sandbox_wrap is None
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_a_tool_grant_that_cannot_be_confined_does_not_run(
+        self, module, capture_request, make_config, tmp_path
+    ):
+        """Fail closed. An empty ``user_id`` joins to the shared temp root.
+
+        Wrapping there would bind every user's scratch directory into one
+        namespace, and *not* wrapping is byte for byte the ISSUE-397 exposure
+        this change exists to close — so the call does not happen. The caller
+        renders "extraction unavailable, add the rows by hand", which is the
+        recoverable answer. No shipped caller reaches this; all three routes
+        pass ``ctx.user_id``.
+        """
+        result = module._call_brain(
+            "extract this", make_config(), read_path=_document(tmp_path), user_id=""
+        )
+
+        assert result is None
+        assert capture_request == [], "the brain must not have been invoked"
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_text_only_branch_still_runs_when_it_cannot_be_confined(
+        self, module, capture_request, make_config
+    ):
+        """The refusal is about the tool grant, not about the call.
+
+        A text-native document grants no tool, so there is nothing a namespace
+        would be protecting and nothing to refuse.
+        """
+        module._call_brain("extract this", make_config(), user_id="")
+
+        assert len(capture_request) == 1
+        assert capture_request[0].allowed_tools == []
+
+
+class TestTheDaemonWorkDir:
+    """The one rule both the wrap and the two upload routes read.
+
+    A path that escapes ``config.temp_dir`` is not merely untidy here: it is
+    what :func:`build_daemon_sandbox` binds read-write into the namespace, and
+    the shared root holds every user's scratch space.
+    """
+
+    def test_it_names_and_creates_the_per_user_directory(self, make_config):
+        from istota.executor import daemon_work_dir
+
+        config = make_config()
+
+        work_dir = daemon_work_dir(config, "alice")
+
+        assert work_dir == (config.temp_dir / "alice").resolve()
+        assert work_dir.is_dir()
+
+    @pytest.mark.parametrize(
+        "user_id",
+        ["", ".", "..", "../elsewhere", "nested/deeper", "/etc"],
+        ids=["empty", "dot", "dotdot", "escape", "nested", "absolute"],
+    )
+    def test_an_id_that_does_not_name_a_child_falls_back_to_the_root(
+        self, make_config, user_id
+    ):
+        """Truthiness alone lets ``.``, ``..`` and an absolute component through.
+
+        The fallback value is also the refusal signal — ``build_daemon_sandbox``
+        declines to wrap when it gets the root back.
+        """
+        from istota.executor import build_daemon_sandbox, daemon_work_dir
+
+        config = make_config()
+
+        assert daemon_work_dir(config, user_id) == config.temp_dir.resolve()
+        sandbox = build_daemon_sandbox(config, user_id)
+        assert sandbox.wrap is None
+        assert sandbox.refused, "a wanted namespace that could not be built"
+
+    def test_a_symlinked_per_user_directory_is_refused(self, make_config):
+        """The case ``resolved.parent == root`` alone lets through.
+
+        ``{temp_dir}/alice -> {temp_dir}/bob`` resolves to another child of the
+        root, so a parent-only test accepts it — and the resolved path is what
+        gets bound read-write and used as the cwd, which would put bob's
+        scratch directory in alice's namespace. ``get_user_repos_dir`` runs
+        both halves for this reason and so does this.
+        """
+        from istota.executor import build_daemon_sandbox, daemon_work_dir
+
+        config = make_config()
+        root = config.temp_dir
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "bob").mkdir()
+        (root / "alice").symlink_to(root / "bob")
+
+        assert daemon_work_dir(config, "alice") == root.resolve()
+        assert build_daemon_sandbox(config, "alice").refused
+
+    def test_the_sandbox_flag_being_off_is_not_a_refusal(self, make_config):
+        """Two reasons for a ``None`` wrap, and only one of them fails closed.
+
+        ``sandbox_enabled = false`` is a deployment that confines no task at
+        all; extraction runs there the way everything else does.
+        """
+        from istota.executor import build_daemon_sandbox
+
+        config = make_config()
+        config.security.sandbox_enabled = False
+
+        sandbox = build_daemon_sandbox(config, "alice")
+        assert sandbox.wrap is None
+        assert not sandbox.refused
 
 
 class TestTheOcrRequestEnvironment:
@@ -383,6 +723,39 @@ class TestNoBuilderPassesTheDaemonEnvironment:
             "environment. Use executor.build_model_cli_env(config) instead "
             "(ISSUE-395): " + ", ".join(offenders)
         )
+
+
+class TestNoBuilderGrantsAFileToolWithoutASandbox:
+    """The guard that holds the ISSUE-397 half of the class.
+
+    ``fs_read_roots`` closes the grant on ``NativeBrain`` and on nothing else:
+    the two Claude brains ignore it and take their filesystem boundary from
+    bubblewrap. So a builder granting a file tool has to pass both, and a
+    seventh one passing only the roots would reproduce ISSUE-397 exactly while
+    the guard below stayed green.
+    """
+
+    def test_a_file_tool_grant_carries_a_sandbox_wrap(self):
+        offenders = []
+        for path, node in _brain_request_calls():
+            tools = _keyword(node, "allowed_tools")
+            if not _grants_file_tool(tools):
+                continue
+            value = _keyword(node, "sandbox_wrap")
+            if value is None or _is_literal_none(value):
+                rel = path.relative_to(SRC.parent.parent)
+                offenders.append(f"{rel}:{node.lineno}")
+        assert not offenders, (
+            "These BrainRequest builders grant a file tool with no bubblewrap "
+            "wrap. On claude_code / tmux_claude that is the CLI's whole default "
+            "toolset running host-side as the daemon user — fs_read_roots is "
+            "read by NativeBrain alone. Use executor.build_daemon_sandbox "
+            "(ISSUE-397): " + ", ".join(offenders)
+        )
+
+
+def _is_literal_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
 
 
 class TestNoBuilderGrantsAFileToolWithoutRoots:

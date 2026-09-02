@@ -281,6 +281,62 @@ class TestTheContextRecordNamesTheRealSource:
         assert self._source(tmp_path, None, tools=()) == "empty"
 
 
+class TestTheComposedFileIsNamedByALabel:
+    """The executor's composed system file is recorded as `composed`, not by
+    its path.
+
+    Every other part names itself: the built-in block is `builtin` and an
+    operator file is its own absolute path, which is stable across tasks and is
+    the thing an operator would grep for. The composed file is not — it is
+    `task_<id>_system_prompt.txt` under a per-user temp directory, so recording
+    the path would put a task-specific string in a field whose whole use is
+    comparing one run against another.
+    """
+
+    def _run(self, tmp_path, *, composed=None, custom=None, tools=("Read",)):
+        root = tmp_path / "logs"
+        provider = MockProvider([_text_turn("ok")])
+        _brain(provider, root).execute(
+            _req(
+                "hi",
+                tmp_path,
+                tools=list(tools),
+                composed_system_prompt_path=composed,
+                custom_system_prompt_path=custom,
+            )
+        )
+        return _read(root)[1]
+
+    def _composed(self, tmp_path):
+        p = tmp_path / "task_4471_system_prompt.txt"
+        p.write_text("COMPOSED-SENTINEL\nYou are Istota.")
+        return p
+
+    def test_builtin_plus_composed(self, tmp_path):
+        record = self._run(tmp_path, composed=self._composed(tmp_path))
+        assert record["system_prompt_source"] == "builtin+composed"
+
+    def test_the_operator_file_is_still_named_after_it(self, tmp_path):
+        custom = tmp_path / "system-prompt.md"
+        custom.write_text("operator guidance")
+        record = self._run(
+            tmp_path, composed=self._composed(tmp_path), custom=custom
+        )
+        assert record["system_prompt_source"] == f"builtin+composed+{custom}"
+
+    def test_a_tool_less_run_with_a_composed_file(self, tmp_path):
+        record = self._run(tmp_path, composed=self._composed(tmp_path), tools=())
+        assert record["system_prompt_source"] == "composed"
+
+    def test_the_logged_system_text_carries_the_composed_content(self, tmp_path):
+        """The sentinel is at the head of the composed file and the assembled
+        prompt is far under `max_content_chars`, so this cannot start passing
+        or failing on a truncation policy the test never names."""
+        record = self._run(tmp_path, composed=self._composed(tmp_path))
+        assert "COMPOSED-SENTINEL" in record["system_prompt"]
+        assert record.get("truncated") in (None, False)
+
+
 class TestPromptCaching:
     """`make_provider` reads a `None` config as "on for api.anthropic.com",
     which is the default deployment — so recording the config field would write

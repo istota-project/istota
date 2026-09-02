@@ -1,11 +1,19 @@
 """Brain protocol — the boundary between executor orchestration and model invocation.
 
-The executor builds a fully composed prompt + env + sandbox configuration
-and hands a BrainRequest to the brain. The brain owns everything from
-"we have a prompt and an env" through "we have a result + trace": building
-the model call, running it, parsing streaming events, and retrying on
-transient API errors. Result post-processing (malformed-output detection,
-CM-aware composition) and deferred file processing stay in the executor.
+The executor composes the prompt, the env and the sandbox configuration and
+hands a BrainRequest to the brain. The brain owns everything from "we have a
+prompt and an env" through "we have a result + trace": building the model call,
+running it, parsing streaming events, and retrying on transient API errors.
+Result post-processing (malformed-output detection, CM-aware composition) and
+deferred file processing stay in the executor.
+
+The prompt is not one string. It reaches the brain on three channels with
+different authority — the task material as ``prompt``, Istota's own standing
+instructions as ``composed_system_prompt_path``, and the operator's file as
+``custom_system_prompt_path`` — so that a brain which compacts its own message
+history cannot compact away the instructions that define the assistant.
+``BrainRequest`` documents each one. A direct text-only caller supplies only
+the first and is unaffected.
 """
 
 from collections.abc import Callable
@@ -46,8 +54,24 @@ class ImageInput:
 
 @dataclass
 class BrainRequest:
-    """Inputs the brain needs to execute one task attempt."""
+    """Inputs the brain needs to execute one task attempt.
 
+    Three text channels reach the model, and they are distinct on purpose:
+
+    - ``prompt`` — the task material, sent as the model's user turn (stdin on
+      the headless CLI path, the pane injection on tmux, the initial
+      ``UserMessage`` on the native path). Native compaction may summarize it.
+    - ``composed_system_prompt_path`` — Istota's own standing instructions,
+      composed by the executor and sent with *system* authority, outside
+      anything compaction can reach.
+    - ``custom_system_prompt_path`` — the operator's own file, with each
+      backend's existing override semantics preserved.
+    """
+
+    # The user turn. When ``composed_system_prompt_path`` is set, Istota's
+    # standing instructions travel there instead of being prefixed onto this,
+    # so what remains here is task material: retrieved memory, conversation and
+    # confirmation history, the request itself and its attachments.
     prompt: str
     allowed_tools: list[str]
     cwd: Path
@@ -65,8 +89,52 @@ class BrainRequest:
     # can't turn an advisor on behind this field's back. NativeBrain ignores it.
     advisor: str = ""
 
-    # Optional: override system prompt with a file's contents
+    # Optional: override system prompt with a file's contents.
+    #
+    # The *operator's* file (`config/system-prompt.md` under
+    # `custom_system_prompt`), and the older of the two system channels. It
+    # stays optional in the strict sense: a configured path that no longer
+    # exists is omitted rather than failing the attempt, which is the behaviour
+    # every deployment has today. Each backend keeps its own override position
+    # for it — ClaudeCodeBrain passes `--system-prompt-file`, which *replaces*
+    # the CLI's default harness prompt; NativeBrain appends it after its
+    # built-in coding block.
     custom_system_prompt_path: Path | None = None
+
+    # Istota's own composed standing instructions, written by the executor to
+    # `task_<id>_system_prompt.txt` in the task temp dir. The system half of
+    # `executor.ComposedPrompt`: identity, execution constraints, emissaries,
+    # persona, accessible resources, tool descriptions, rules, response
+    # guidelines, the skills changelog and the eager skill bodies.
+    #
+    # A third channel rather than a reuse of the field above, because the two
+    # have different owners and different contracts:
+    #
+    # - `None` means this caller has no Istota-composed standing instructions.
+    #   That is the default and it is what every direct text-only caller (the
+    #   sleep cycle, shared-block synthesis, health OCR and explanation, the
+    #   code reviewer, conversation triage) passes, so their behaviour is
+    #   unchanged.
+    # - A non-`None` value is *required* input. A brain must not quietly ignore
+    #   it because the file disappeared: the Claude CLI path emits its flag and
+    #   lets the CLI refuse to start, and the native path reads the file with no
+    #   `exists()` branch. The existing brain error boundary turns either into
+    #   an ordinary failed `BrainResult`. Silent omission would run the task
+    #   with the user half alone — no persona, no rules, no tool descriptions —
+    #   which is ISSUE-375 recreated by a filesystem race.
+    #
+    # Carried across a reroute by `_run_fallback`'s `dataclasses.replace`, which
+    # names it nowhere, so both prompt channels reach the fallback brain intact
+    # and each backend consumes the split its own way.
+    #
+    # **Must be absolute**, and the producer is what has to guarantee it: a
+    # relative value names a different file on each backend and would survive a
+    # reroute between them. NativeBrain opens it in the *daemon* process, so it
+    # would resolve against the daemon's cwd; the Claude CLI resolves it itself,
+    # inside the sandbox, against the task's chdir target — and the tmux path
+    # puts another `cd` in front of that. `custom_system_prompt_path` never had
+    # the problem because it comes from a resolved config path.
+    composed_system_prompt_path: Path | None = None
 
     # Whether the brain should stream events for progress callbacks. When
     # False, the brain may pick a faster non-streaming path if it has one.

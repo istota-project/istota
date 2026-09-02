@@ -67,6 +67,14 @@ The **policy the wrappers enforce**, which is the half that is easy to overlook:
 
 The deny root is appended unconditionally rather than only when the directory exists. bwrap re-checks on every Bash call and self-heals; this list is built once, so an existence gate would hand a task that started before `.developer` existed an empty deny set for its whole life — and `Write` creates parent directories, so the model could then make the directory itself. A refused write reports read-only rather than "outside the allowed workspace", which is the one thing it is not.
 
+### The composed system prompt
+
+The second carve-out in the same scratch space, and the same mechanism for a different reason. Istota's standing instructions — identity, persona, tool descriptions, rules, response guidelines, skill bodies — reach the model as a *system* prompt rather than as its first message, so a native compaction cannot summarize them away. The handoff is a file: the executor writes `task_<id>_system_prompt.txt` next to the task's other artifacts and names it on the brain request, which each backend then reads or passes to the CLI.
+
+That puts the instructions a task is running under inside a directory the task itself can write. The two guards are the ones above, applied to one file rather than a directory: `build_bwrap_cmd` re-binds that exact path read-only after the read-write bind of its parent, and `ToolEnv` carries it as a second `write_denied_roots` entry. Both are needed and neither substitutes for the other — the bind covers the sandboxed `Bash` tool and the file tools reach `ToolEnv` without entering a namespace at all. Unlike `.developer`, the deny entry is seeded whether or not filesystem confinement is active, because the shapes that skip bwrap (macOS, the standalone install, the shipped Docker stack) are exactly the ones with no bind behind it.
+
+Two limits are worth stating plainly. The scratch directory is per *user*, not per task, so both guards name one exact path and neither can express a filename pattern: a second concurrent task of the same user is denied only its own file and could overwrite another task's. And the file is opened `O_NOFOLLOW`, which is what stops a symlink planted at a not-yet-started task's filename turning the write into an arbitrary write as the daemon user — the same exposure still sits, unchanged, on `task_<id>_prompt.txt` and on the deferred-op files.
+
 ## Credential proxy
 
 When `skill_proxy_enabled = true` (default), secret env vars are stripped from Claude's environment and routed through a Unix socket proxy instead. See [credentials](../configuration/credentials.md) for the full inventory of which credentials are global vs per-user and how they're provisioned.

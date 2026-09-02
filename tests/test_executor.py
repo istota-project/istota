@@ -40,6 +40,25 @@ from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig
 from istota import db
 
 
+def _system_half(config, user_id="alice", task_id=1) -> str:
+    """The standing instructions `execute_task` wrote for this task.
+
+    Since the prompt split, `input=` on the CLI subprocess carries the *user*
+    half alone — the request, retrieved memory and conversation history. Skill
+    bodies, the skills changelog and the workspace vocabulary are standing
+    instructions and travel as `task_<id>_system_prompt.txt`, which the brain
+    passes with `--append-system-prompt-file`. A test asserting on one of those
+    reads this file, and a *negative* assertion about one has to read it or it
+    passes for the wrong reason.
+    """
+    from istota.executor import get_user_temp_dir
+
+    return (
+        get_user_temp_dir(config, user_id) / f"task_{task_id}_system_prompt.txt"
+    ).read_text(encoding="utf-8")
+
+
+
 # ---------------------------------------------------------------------------
 # TestParseApiError
 # ---------------------------------------------------------------------------
@@ -371,14 +390,14 @@ class TestBuildPromptSkillsChangelog:
         prompt = build_prompt(
             task, [], config,
             skills_changelog="## 2026-02-08\n- New feature added",
-        )
+        ).system
         assert "## What's New in Skills" in prompt
         assert "New feature added" in prompt
 
     def test_changelog_not_included_when_none(self, tmp_path):
         config = self._make_config(tmp_path)
         task = self._make_task()
-        prompt = build_prompt(task, [], config, skills_changelog=None)
+        prompt = build_prompt(task, [], config, skills_changelog=None).system
         assert "What's New in Skills" not in prompt
 
     def test_changelog_appears_before_skills_doc(self, tmp_path):
@@ -388,7 +407,7 @@ class TestBuildPromptSkillsChangelog:
             task, [], config,
             skills_doc="## Skills Reference (v: abc123)\n\n### Files\n\nFile ops.",
             skills_changelog="## 2026-02-08\n- Updated files skill",
-        )
+        ).system
         changelog_pos = prompt.index("What's New in Skills")
         skills_pos = prompt.index("Skills Reference")
         assert changelog_pos < skills_pos
@@ -517,10 +536,9 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        # Verify changelog was in the prompt
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]  # prompt passed via stdin
-        assert "What's New in Skills" in prompt_text
+        # The changelog is a standing instruction, so it is in the system
+        # half — the file, not stdin.
+        assert "What's New in Skills" in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_when_fingerprint_matches(self, mock_run, tmp_path):
@@ -539,9 +557,7 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
-        assert "What's New in Skills" not in prompt_text
+        assert "What's New in Skills" not in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_for_briefing(self, mock_run, tmp_path):
@@ -555,9 +571,7 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
-        assert "What's New in Skills" not in prompt_text
+        assert "What's New in Skills" not in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_for_scheduled(self, mock_run, tmp_path):
@@ -571,9 +585,7 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
-        assert "What's New in Skills" not in prompt_text
+        assert "What's New in Skills" not in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_fingerprint_updated_after_success(self, mock_run, tmp_path):
@@ -1326,9 +1338,12 @@ class TestWebsitePromptSection:
         with db.get_db(db_path) as conn:
             task_id = db.create_task(conn, prompt="build my website", user_id="alice", source_type="talk")
             task = db.get_task(conn, task_id)
-        prompt = build_prompt(task, [], config)
-        assert "Web Root" not in prompt
-        assert "istota.example.com" not in prompt
+        # Both halves: the claim is that the primitive is gone from the prompt,
+        # not that it landed on one side of the split.
+        composed = build_prompt(task, [], config)
+        whole = composed.system + composed.user
+        assert "Web Root" not in whole
+        assert "istota.example.com" not in whole
 
 
 # ---------------------------------------------------------------------------
@@ -1361,9 +1376,13 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=is_admin)
-        assert str(config.db_path) not in prompt
-        assert "Database: reachable only through skill CLIs" in prompt
+        # Both halves: "the prompt never names the database path" is a boundary
+        # claim about everything the model is shown, not a claim about where a
+        # layer was classified. A half-scoped assertion would go quiet the day
+        # a path started leaking through the other one.
+        composed = build_prompt(task, [], config, is_admin=is_admin)
+        assert str(config.db_path) not in composed.system + composed.user
+        assert "Database: reachable only through skill CLIs" in composed.system
 
     @pytest.mark.parametrize("is_admin", [True, False])
     def test_absence_claim_only_when_sandbox_is_in_effect(self, tmp_path, is_admin):
@@ -1373,7 +1392,7 @@ class TestAdminPromptIsolation:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         with patch("istota.executor._bwrap_available", return_value=True):
-            prompt = build_prompt(task, [], config, is_admin=is_admin)
+            prompt = build_prompt(task, [], config, is_admin=is_admin).system
         assert "the directories that hold them are empty here" in prompt
 
     @pytest.mark.parametrize("is_admin", [True, False])
@@ -1390,7 +1409,7 @@ class TestAdminPromptIsolation:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         with patch("istota.executor._bwrap_available", return_value=False):
-            prompt = build_prompt(task, [], config, is_admin=is_admin)
+            prompt = build_prompt(task, [], config, is_admin=is_admin).system
         assert "the directories that hold them are empty here" not in prompt
         assert "Never open a database file directly" in prompt
         assert "no filesystem sandbox" in prompt
@@ -1400,7 +1419,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True)
+        prompt = build_prompt(task, [], config, is_admin=True).system
         assert "Privileges: admin" in prompt
 
     def test_non_admin_prompt_states_standard_privileges(self, tmp_path):
@@ -1408,7 +1427,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False)
+        prompt = build_prompt(task, [], config, is_admin=False).system
         assert "Privileges: standard user" in prompt
         assert "Privileges: admin" not in prompt
 
@@ -1418,7 +1437,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True)
+        prompt = build_prompt(task, [], config, is_admin=True).system
         assert "sqlite3 for the task database" not in prompt
 
     def test_admin_prompt_no_subtask_instructions(self, tmp_path):
@@ -1430,7 +1449,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True)
+        prompt = build_prompt(task, [], config, is_admin=True).system
         assert "create subtasks" not in prompt.lower()
 
     def test_non_admin_prompt_no_subtask_rule(self, tmp_path):
@@ -1438,7 +1457,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False)
+        prompt = build_prompt(task, [], config, is_admin=False).system
         assert "create subtasks" not in prompt
 
     def test_admin_prompt_has_full_mount_path(self, tmp_path):
@@ -1446,7 +1465,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True)
+        prompt = build_prompt(task, [], config, is_admin=True).system
         assert f"mounted at '{config.nextcloud_mount_path}'" in prompt
 
     def test_non_admin_prompt_has_scoped_mount_path(self, tmp_path):
@@ -1455,7 +1474,7 @@ class TestAdminPromptIsolation:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         scoped = str(config.nextcloud_mount_path / "Users" / "alice")
-        prompt = build_prompt(task, [], config, is_admin=False)
+        prompt = build_prompt(task, [], config, is_admin=False).system
         assert f"mounted at '{scoped}'" in prompt
 
     def test_non_admin_prompt_has_restricted_access_rule(self, tmp_path):
@@ -1463,7 +1482,7 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False)
+        prompt = build_prompt(task, [], config, is_admin=False).system
         assert "You can ONLY access files under" in prompt
         assert "do NOT have access to the task database" in prompt
 
@@ -1475,7 +1494,7 @@ class TestAdminPromptIsolation:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         for is_admin in (True, False):
-            prompt = build_prompt(task, [], config, is_admin=is_admin)
+            prompt = build_prompt(task, [], config, is_admin=is_admin).system
             assert re.search(r"Current UTC: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", prompt), (
                 "Current UTC ISO 8601 line missing from prompt header"
             )
@@ -1490,7 +1509,7 @@ class TestAdminPromptIsolation:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         for is_admin in (True, False):
-            prompt = build_prompt(task, [], config, is_admin=is_admin)
+            prompt = build_prompt(task, [], config, is_admin=is_admin).system
             assert "publication or authorship dates" in prompt, (
                 "Fetched-content date rule missing from rules section"
             )
@@ -1612,8 +1631,7 @@ class TestAdminEnvVarIsolation:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Admin scheduling reference" in prompt_text
+        assert "Admin scheduling reference" in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_non_admin_skills_exclude_admin_only(self, mock_run, tmp_path):
@@ -1634,8 +1652,7 @@ class TestAdminEnvVarIsolation:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Admin scheduling reference" not in prompt_text
+        assert "Admin scheduling reference" not in _system_half(config)
 
 
 class TestDeferredDirEnvVar:
@@ -1875,11 +1892,11 @@ class TestUserIdSubstitution:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        # The prompt is passed via stdin — check it contains the substituted user_id
-        call_kwargs = mock_run.call_args[1]
-        prompt_input = call_kwargs.get("input", "")
-        assert "/Users/alice/bot/config/USER.md" in prompt_input
-        assert "{user_id}" not in prompt_input
+        # The skill body carrying the placeholder is a standing instruction,
+        # so the substitution is visible in the system half.
+        composed = _system_half(config)
+        assert "/Users/alice/bot/config/USER.md" in composed
+        assert "{user_id}" not in composed
 
 
 # ---------------------------------------------------------------------------
@@ -2148,7 +2165,7 @@ class TestEmissariesInPrompt:
         task = self._make_task()
         result = build_prompt(
             task, [], Config(), emissaries="# Emissaries\n\nBe good.",
-        )
+        ).system
         assert "# Emissaries" in result
         assert "Be good." in result
 
@@ -2162,14 +2179,14 @@ class TestEmissariesInPrompt:
 
         result = build_prompt(
             task, [], config, emissaries="# Emissaries\n\nBe good.",
-        )
+        ).system
         emissaries_pos = result.index("# Emissaries")
         persona_pos = result.index("# Persona")
         assert emissaries_pos < persona_pos
 
     def test_emissaries_absent_when_no_file(self):
         task = self._make_task()
-        result = build_prompt(task, [], Config())
+        result = build_prompt(task, [], Config()).system
         assert "Emissaries" not in result
 
 
@@ -2392,7 +2409,7 @@ class TestPromptOutputTarget:
         result = build_prompt(
             task, [], Config(),
             source_type="talk", output_target="talk",
-        )
+        ).system
         assert "Source: talk" in result
         assert "Output target: talk" in result
 
@@ -2401,19 +2418,19 @@ class TestPromptOutputTarget:
         result = build_prompt(
             task, [], Config(),
             source_type="scheduled", output_target="email",
-        )
+        ).system
         assert "Source: scheduled" in result
         assert "Output target: email" in result
 
     def test_defaults_when_no_output_target(self):
         task = self._make_task(source_type="cli")
-        result = build_prompt(task, [], Config())
+        result = build_prompt(task, [], Config()).system
         assert "Source: cli" in result
         assert "Output target: text" in result
 
     def test_email_tool_line_distinguishes_send_and_output(self):
         task = self._make_task(source_type="talk")
-        result = build_prompt(task, [], Config())
+        result = build_prompt(task, [], Config()).system
         assert "email send" in result
         assert "email output" in result
         assert "Only use `output` when this task arrived as an incoming email" in result
@@ -2861,7 +2878,7 @@ class TestBuildPromptRecalledMemories:
         prompt = build_prompt(
             task, [], config,
             recalled_memories="- [memory_file] User prefers dark mode\n- [conversation] Discussed project X",
-        )
+        ).user
         assert "Recalled memories (from search)" in prompt
         assert "User prefers dark mode" in prompt
         assert "Discussed project X" in prompt
@@ -2869,13 +2886,13 @@ class TestBuildPromptRecalledMemories:
     def test_recalled_section_absent_when_none(self):
         task = self._make_task()
         config = Config()
-        prompt = build_prompt(task, [], config, recalled_memories=None)
+        prompt = build_prompt(task, [], config, recalled_memories=None).user
         assert "Recalled memories" not in prompt
 
     def test_recalled_section_absent_when_empty_string(self):
         task = self._make_task()
         config = Config()
-        prompt = build_prompt(task, [], config, recalled_memories="")
+        prompt = build_prompt(task, [], config, recalled_memories="").user
         assert "Recalled memories" not in prompt
 
     def test_recalled_section_after_dated_memories(self):
@@ -2885,7 +2902,7 @@ class TestBuildPromptRecalledMemories:
             task, [], config,
             dated_memories="- Dated memory entry",
             recalled_memories="- Recalled entry",
-        )
+        ).user
         dated_pos = prompt.index("Recent context (from previous days)")
         recalled_pos = prompt.index("Recalled memories (from search)")
         assert dated_pos < recalled_pos
@@ -3181,7 +3198,7 @@ class TestConfirmationContext:
         prompt = build_prompt(
             task, [], config,
             confirmation_context=previous_output,
-        )
+        ).user
 
         assert "## Confirmed action" in prompt
         assert "How about Tuesday at 3pm?" in prompt
@@ -3192,7 +3209,7 @@ class TestConfirmationContext:
         config = self._make_config(tmp_path)
         task = self._make_task()
 
-        prompt = build_prompt(task, [], config, confirmation_context=None)
+        prompt = build_prompt(task, [], config, confirmation_context=None).user
 
         assert "## Confirmed action" not in prompt
 
@@ -3203,7 +3220,7 @@ class TestConfirmationContext:
         prompt = build_prompt(
             task, [], config,
             confirmation_context="Previous draft here",
-        )
+        ).user
 
         confirmed_pos = prompt.index("## Confirmed action")
         request_pos = prompt.index("## User's request")
@@ -3990,15 +4007,17 @@ class TestPerUserEmailInPrompt:
             bot_email="istota@example.com",
         )
         task = self._make_task(user_id="carol")
-        result = build_prompt(task, [], config)
+        result = build_prompt(task, [], config).system
         assert "istota+carol@example.com" in result
 
     def test_per_user_email_not_shown_when_email_disabled(self):
         config = Config()
         config.email = AppEmailConfig(enabled=False)
         task = self._make_task(user_id="carol")
-        result = build_prompt(task, [], config)
-        assert "+carol@" not in result
+        # Both halves: a plus-address appearing anywhere in the prompt is the
+        # thing being ruled out, whichever section it came from.
+        composed = build_prompt(task, [], config)
+        assert "+carol@" not in composed.system + composed.user
 
     def test_per_user_email_not_shown_when_no_bot_email(self):
         config = Config()
@@ -4009,8 +4028,10 @@ class TestPerUserEmailInPrompt:
             bot_email="",
         )
         task = self._make_task(user_id="carol")
-        result = build_prompt(task, [], config)
-        assert "+carol@" not in result
+        # Both halves: a plus-address appearing anywhere in the prompt is the
+        # thing being ruled out, whichever section it came from.
+        composed = build_prompt(task, [], config)
+        assert "+carol@" not in composed.system + composed.user
 
 
 # =============================================================================
@@ -4207,7 +4228,13 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
         # the REPL bind path).
         assert mock_bwrap.called
         assert mock_bwrap.call_args.kwargs["workspace_dir"] is None
-        # And the {workspace} placeholder still resolved in the prompt.
+        # And the {workspace} placeholder still resolved in the prompt. The
+        # skill body it lives in is a standing instruction, so it is in the
+        # system half — which reaches the CLI as a file rather than on stdin.
+        composed = (
+            tmp_path / "temp" / "alice" / "task_1_system_prompt.txt"
+        ).read_text(encoding="utf-8")
         prompt_text = mock_run.call_args.kwargs["input"]
+        assert "{workspace}" not in composed
         assert "{workspace}" not in prompt_text
-        assert str((config.nextcloud_mount_path / "Users" / "alice")) in prompt_text
+        assert str((config.nextcloud_mount_path / "Users" / "alice")) in composed
