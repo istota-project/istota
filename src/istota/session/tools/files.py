@@ -35,6 +35,19 @@ from .env import ToolEnv, ToolPathError
 _BINARY_SNIFF_BYTES = 8192
 _MAX_LINE_CHARS = 2000
 
+# The five schemas below are module-level constants rather than literals inside
+# their factories, because there are now two things that bind a tool by the
+# same name: these factories, which the tool server runs inside the sandbox,
+# and `session/tools/remote.py`, whose proxy tools are what the model is shown.
+# A second copy of a schema is how a model ends up offered a parameter the
+# executor does not implement — `config_mapper.py`'s header enumerates the
+# three defect classes a duplicated schema carries in this repo, and "a field
+# the loader never read" is exactly the shape it would take here.
+# `tests/test_tool_schema_parity.py` holds the two ends equal.
+#
+# The extraction is mechanical: every one of them was already a static literal
+# closing over nothing from its factory's `env` argument.
+
 
 def _text(s: str) -> list[TextContent]:
     return [TextContent(text=s)]
@@ -80,19 +93,22 @@ def _safe_mtime(p: Path) -> float:
 # --------------------------------------------------------------------------- #
 
 
+READ_SCHEMA = ToolSchema(
+    name="Read",
+    description=(
+        "Read a file from the filesystem. Returns content with line numbers "
+        "in `cat -n` format. Use `offset`/`limit` to page through large files."
+    ),
+    parameters=[
+        ToolParameter(name="file_path", type="string", description="Absolute path to the file."),
+        ToolParameter(name="offset", type="integer", description="1-based first line to read.", required=False),
+        ToolParameter(name="limit", type="integer", description="Max lines to read.", required=False),
+    ],
+)
+
+
 def make_read_tool(env: ToolEnv) -> AgentTool:
-    schema = ToolSchema(
-        name="Read",
-        description=(
-            "Read a file from the filesystem. Returns content with line numbers "
-            "in `cat -n` format. Use `offset`/`limit` to page through large files."
-        ),
-        parameters=[
-            ToolParameter(name="file_path", type="string", description="Absolute path to the file."),
-            ToolParameter(name="offset", type="integer", description="1-based first line to read.", required=False),
-            ToolParameter(name="limit", type="integer", description="Max lines to read.", required=False),
-        ],
-    )
+    schema = READ_SCHEMA
 
     def _read(args: dict) -> ToolResult:
         try:
@@ -142,15 +158,18 @@ def make_read_tool(env: ToolEnv) -> AgentTool:
 # --------------------------------------------------------------------------- #
 
 
+WRITE_SCHEMA = ToolSchema(
+    name="Write",
+    description="Write (or overwrite) a file with the given content. Creates parent directories.",
+    parameters=[
+        ToolParameter(name="file_path", type="string", description="Absolute path to write."),
+        ToolParameter(name="content", type="string", description="Full file content."),
+    ],
+)
+
+
 def make_write_tool(env: ToolEnv) -> AgentTool:
-    schema = ToolSchema(
-        name="Write",
-        description="Write (or overwrite) a file with the given content. Creates parent directories.",
-        parameters=[
-            ToolParameter(name="file_path", type="string", description="Absolute path to write."),
-            ToolParameter(name="content", type="string", description="Full file content."),
-        ],
-    )
+    schema = WRITE_SCHEMA
 
     def _write(args: dict) -> ToolResult:
         try:
@@ -176,60 +195,94 @@ def make_write_tool(env: ToolEnv) -> AgentTool:
 # --------------------------------------------------------------------------- #
 
 
-def make_edit_tool(env: ToolEnv) -> AgentTool:
-    schema = ToolSchema(
-        name="Edit",
-        description=(
-            "Replace exact text in a file. Pass a single `old_string`/`new_string` "
-            "(must be unique unless `replace_all` is true), or an `edits` array of "
-            "`{old_string, new_string}` to make several disjoint changes in one "
-            "call. Matching tolerates trailing-whitespace and smart-quote/dash "
-            "drift; it does not tolerate indentation changes."
+EDIT_SCHEMA = ToolSchema(
+    name="Edit",
+    description=(
+        "Replace exact text in a file. Pass a single `old_string`/`new_string` "
+        "(must be unique unless `replace_all` is true), or an `edits` array of "
+        "`{old_string, new_string}` to make several disjoint changes in one "
+        "call. Matching tolerates trailing-whitespace and smart-quote/dash "
+        "drift; it does not tolerate indentation changes."
+    ),
+    parameters=[
+        ToolParameter(name="file_path", type="string", description="Absolute path to edit."),
+        ToolParameter(
+            name="old_string", type="string", description="Exact text to replace.", required=False
         ),
-        parameters=[
-            ToolParameter(name="file_path", type="string", description="Absolute path to edit."),
-            ToolParameter(
-                name="old_string", type="string", description="Exact text to replace.", required=False
-            ),
-            ToolParameter(
-                name="new_string", type="string", description="Replacement text.", required=False
-            ),
-            ToolParameter(
-                name="edits",
-                type="array",
-                description="Array of {old_string, new_string} for multiple disjoint edits.",
+        ToolParameter(
+            name="new_string", type="string", description="Replacement text.", required=False
+        ),
+        ToolParameter(
+            name="edits",
+            type="array",
+            description="Array of {old_string, new_string} for multiple disjoint edits.",
+            required=False,
+            # Declared so strict providers (Google Gemini) accept the
+            # array — an undeclared ``items`` is ``INVALID_ARGUMENT``.
+            items=ToolParameter(
+                name="edit",
+                type="object",
+                description="A single find-and-replace edit.",
                 required=False,
-                # Declared so strict providers (Google Gemini) accept the
-                # array — an undeclared ``items`` is ``INVALID_ARGUMENT``.
-                items=ToolParameter(
-                    name="edit",
-                    type="object",
-                    description="A single find-and-replace edit.",
-                    required=False,
-                    properties={
-                        "old_string": ToolParameter(
-                            name="old_string",
-                            type="string",
-                            description="Exact text to find.",
-                            required=False,
-                        ),
-                        "new_string": ToolParameter(
-                            name="new_string",
-                            type="string",
-                            description="Replacement text.",
-                            required=False,
-                        ),
-                    },
-                ),
+                properties={
+                    "old_string": ToolParameter(
+                        name="old_string",
+                        type="string",
+                        description="Exact text to find.",
+                        required=False,
+                    ),
+                    "new_string": ToolParameter(
+                        name="new_string",
+                        type="string",
+                        description="Replacement text.",
+                        required=False,
+                    ),
+                },
             ),
-            ToolParameter(
-                name="replace_all",
-                type="boolean",
-                description="Replace every occurrence (exact match only; ignored with `edits`).",
-                required=False,
-            ),
-        ],
-    )
+        ),
+        ToolParameter(
+            name="replace_all",
+            type="boolean",
+            description="Replace every occurrence (exact match only; ignored with `edits`).",
+            required=False,
+        ),
+    ],
+)
+
+
+def prepare_edit_arguments(args: dict) -> dict:
+    """Coerce arg types, then the two shapes weaker models emit for a
+    multi-edit call:
+
+    - ``edits`` sent as a JSON *string* → parsed to a list (coercion does
+      this via the ``array`` param type).
+    - Legacy top-level ``{old_string, new_string}`` with no ``edits`` and no
+      ``replace_all`` → synthesize a one-element ``edits`` batch so a single
+      legacy call flows through the same fuzzy engine as a batch.
+      ``replace_all`` stays on the exact single-edit path (fuzzy +
+      replace_all is disallowed).
+
+    Module-level, and it lifted verbatim: it closed over exactly one name from
+    ``make_edit_tool``, the enclosing ``schema``, and ``coerce_arguments``
+    reads only ``schema.parameters``. Both proxy and real Edit therefore hand
+    the loop the *same* callable rather than two coercion shims — which is the
+    half of the schema-duplication problem a schema constant alone does not
+    solve, since a divergent coercion would let the two ends disagree about
+    what the model's arguments meant while every schema assertion stayed green.
+    """
+    out = coerce_arguments(args, EDIT_SCHEMA)
+    if (
+        out.get("edits") is None
+        and not out.get("replace_all")
+        and out.get("old_string") is not None
+        and out.get("new_string") is not None
+    ):
+        out["edits"] = [{"old_string": out["old_string"], "new_string": out["new_string"]}]
+    return out
+
+
+def make_edit_tool(env: ToolEnv) -> AgentTool:
+    schema = EDIT_SCHEMA
 
     def _edit(args: dict) -> ToolResult:
         try:
@@ -291,28 +344,6 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
         n = len(edit_objs)
         return _ok(f"Edited {path} ({n} block(s) replaced).")
 
-    def _prepare(args: dict) -> dict:
-        """Coerce arg types, then the two shapes weaker models emit for a
-        multi-edit call:
-
-        - ``edits`` sent as a JSON *string* → parsed to a list (coercion does
-          this via the ``array`` param type).
-        - Legacy top-level ``{old_string, new_string}`` with no ``edits`` and no
-          ``replace_all`` → synthesize a one-element ``edits`` batch so a single
-          legacy call flows through the same fuzzy engine as a batch.
-          ``replace_all`` stays on the exact single-edit path (fuzzy +
-          replace_all is disallowed).
-        """
-        out = coerce_arguments(args, schema)
-        if (
-            out.get("edits") is None
-            and not out.get("replace_all")
-            and out.get("old_string") is not None
-            and out.get("new_string") is not None
-        ):
-            out["edits"] = [{"old_string": out["old_string"], "new_string": out["new_string"]}]
-        return out
-
     async def _execute(call_id, args, on_update, abort):
         return await asyncio.to_thread(_edit, args)
 
@@ -320,7 +351,7 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
         schema=schema,
         execute=_execute,
         execution_mode="sequential",
-        prepare_arguments=_prepare,
+        prepare_arguments=prepare_edit_arguments,
     )
 
 
@@ -329,18 +360,21 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
 # --------------------------------------------------------------------------- #
 
 
+GLOB_SCHEMA = ToolSchema(
+    name="Glob",
+    description=(
+        "Find files matching a glob pattern (e.g. `**/*.py`), newest first. "
+        "Searches under `path` (defaults to the working directory)."
+    ),
+    parameters=[
+        ToolParameter(name="pattern", type="string", description="Glob pattern."),
+        ToolParameter(name="path", type="string", description="Root directory to search.", required=False),
+    ],
+)
+
+
 def make_glob_tool(env: ToolEnv) -> AgentTool:
-    schema = ToolSchema(
-        name="Glob",
-        description=(
-            "Find files matching a glob pattern (e.g. `**/*.py`), newest first. "
-            "Searches under `path` (defaults to the working directory)."
-        ),
-        parameters=[
-            ToolParameter(name="pattern", type="string", description="Glob pattern."),
-            ToolParameter(name="path", type="string", description="Root directory to search.", required=False),
-        ],
-    )
+    schema = GLOB_SCHEMA
 
     def _glob(args: dict) -> ToolResult:
         try:
@@ -370,43 +404,46 @@ def make_glob_tool(env: ToolEnv) -> AgentTool:
 # --------------------------------------------------------------------------- #
 
 
-def make_grep_tool(env: ToolEnv) -> AgentTool:
-    schema = ToolSchema(
-        name="Grep",
-        description=(
-            "Search file contents with a regular expression. `output_mode` is "
-            "`files_with_matches` (default), `content`, or `count`. Restrict scope "
-            "with `path` and `glob`; `-i` for case-insensitive; `-C` for context "
-            "lines around each match (content mode); `literal` to match `pattern` "
-            "as a plain string."
+GREP_SCHEMA = ToolSchema(
+    name="Grep",
+    description=(
+        "Search file contents with a regular expression. `output_mode` is "
+        "`files_with_matches` (default), `content`, or `count`. Restrict scope "
+        "with `path` and `glob`; `-i` for case-insensitive; `-C` for context "
+        "lines around each match (content mode); `literal` to match `pattern` "
+        "as a plain string."
+    ),
+    parameters=[
+        ToolParameter(name="pattern", type="string", description="Regular expression."),
+        ToolParameter(name="path", type="string", description="File or directory to search.", required=False),
+        ToolParameter(name="glob", type="string", description="Filter files by glob, e.g. `*.py`.", required=False),
+        ToolParameter(
+            name="output_mode",
+            type="string",
+            description="files_with_matches | content | count",
+            required=False,
+            enum=["files_with_matches", "content", "count"],
         ),
-        parameters=[
-            ToolParameter(name="pattern", type="string", description="Regular expression."),
-            ToolParameter(name="path", type="string", description="File or directory to search.", required=False),
-            ToolParameter(name="glob", type="string", description="Filter files by glob, e.g. `*.py`.", required=False),
-            ToolParameter(
-                name="output_mode",
-                type="string",
-                description="files_with_matches | content | count",
-                required=False,
-                enum=["files_with_matches", "content", "count"],
-            ),
-            ToolParameter(name="-i", type="boolean", description="Case-insensitive.", required=False),
-            ToolParameter(
-                name="-C",
-                type="integer",
-                description="Lines of context around each match (content mode only).",
-                required=False,
-            ),
-            ToolParameter(
-                name="literal",
-                type="boolean",
-                description="Treat `pattern` as a literal string, not a regex.",
-                required=False,
-            ),
-            ToolParameter(name="head_limit", type="integer", description="Cap result lines.", required=False),
-        ],
-    )
+        ToolParameter(name="-i", type="boolean", description="Case-insensitive.", required=False),
+        ToolParameter(
+            name="-C",
+            type="integer",
+            description="Lines of context around each match (content mode only).",
+            required=False,
+        ),
+        ToolParameter(
+            name="literal",
+            type="boolean",
+            description="Treat `pattern` as a literal string, not a regex.",
+            required=False,
+        ),
+        ToolParameter(name="head_limit", type="integer", description="Cap result lines.", required=False),
+    ],
+)
+
+
+def make_grep_tool(env: ToolEnv) -> AgentTool:
+    schema = GREP_SCHEMA
 
     def _iter_files(root: Path, glob_filter: str | None):
         if root.is_file():
