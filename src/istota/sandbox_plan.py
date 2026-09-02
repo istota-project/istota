@@ -106,7 +106,9 @@ class Mount:
     #: Whether the projection must carry this entry as a write-deny root even
     #: when the source is absent. Read by :func:`project_fs_roots`. One entry
     #: sets it — see the ``.developer`` emission in :func:`build_mount_plan`
-    #: for the window that costs.
+    #: for the window that costs. **Inert on its own**: the projection walks
+    #: ``user_data`` entries, so an entry setting only this one is never
+    #: reached. Set both.
     always_deny: bool = False
     #: Whether the *render* requires the source to be a directory rather than
     #: merely to exist. Only ``.developer`` sets it, and only because
@@ -115,7 +117,10 @@ class Mount:
     #: ``user_temp_dir`` is per user rather than per task, so a model in one
     #: task can leave a regular file named ``.developer`` there for the next.
     #: Without this the render's plain ``exists()`` would bind that file and
-    #: the argv would differ from the argv this module promises not to change.
+    #: the argv would differ from the argv this module promises not to change
+    #: — and, on a symlink loop at that name, would raise out of ``resolve()``
+    #: rather than producing an argv at all. The render therefore applies it
+    #: to the *unresolved* source, before resolving.
     require_dir: bool = False
 
 
@@ -872,9 +877,19 @@ def render_bwrap_argv(
                 "entirely where nothing else binds it", entry.source,
             )
             continue
+        if entry.require_dir and not entry.source.is_dir():
+            # Before the `resolve()` below, never after, and that ordering is
+            # the whole point of the flag. The gate this reproduces ran in the
+            # builder, so the path was never resolved when it failed; a
+            # symlink loop at that name makes `is_dir()` answer False and
+            # `resolve()` raise `RuntimeError`, and `user_temp_dir` is bound
+            # read-write into every sandbox of that user — so checking after
+            # resolving would let one task plant a loop and make every later
+            # sandbox build for that user raise instead of returning an argv.
+            continue
         original = str(entry.source)
         src = entry.source.resolve()
-        if not (src.is_dir() if entry.require_dir else src.exists()):
+        if not src.exists():
             continue
         dest = str(entry.dest.resolve()) if entry.dest else original
         args.extend(["--ro-bind" if entry.mode == "ro" else "--bind", str(src), dest])
@@ -963,18 +978,29 @@ def project_fs_roots(
 
     1. **An ``always_deny`` entry is carried whether or not its source
        exists**, and is carried *as written* rather than resolved. That is
-       ``.developer``, and both halves matter. ``build_bwrap_cmd`` re-reads the
-       filesystem on every invocation while these roots are built once per
-       task, so an existence gate leaves a window in which a ``.developer``
-       created mid-run is read-only for Bash and writable here; and resolving
-       it would follow a symlink planted at that name, denying the target
-       instead of the name the tools will use.
+       ``.developer``. The existence half is what closes a real window:
+       ``build_bwrap_cmd`` re-reads the filesystem on every invocation while
+       these roots are built once per task, so a gate here leaves a
+       ``.developer`` created mid-run read-only for Bash and writable for the
+       file tools. The as-written half is behaviour preservation and nothing
+       more — it is the value this function has always returned and the value
+       the bind names — and it is worth being explicit that it does **not**
+       make the denial symlink-proof: ``ToolEnv`` realpaths every deny root
+       before comparing, so a symlink planted at that name still relocates the
+       denial. Closing that means changing the enforcer, which is a decision
+       about ``ToolEnv`` rather than about this projection.
     2. **A read-only entry nested inside an earlier read-write one is a
        write-deny root, not a read root.** That is what bwrap's ordering does —
        the later ``--ro-bind`` lands on top of the earlier ``--bind`` — and
-       containment is how it is expressed where there are no mounts. *Earlier*
-       is load-bearing: a nesting the other way round is not read-only in the
-       namespace either.
+       containment is how it is expressed where there are no mounts. The rule
+       is deliberately one-directional and the other direction is a known gap
+       rather than a case it handles: a read-only entry *containing* an earlier
+       read-write one also wins in the namespace, because the later mount
+       covers the earlier mountpoint, and the inner path stays a write root
+       here. Reachable only by two per-resource rows arranged that way, outside
+       ``Users/{user_id}``; it predates the projection, and expressing it means
+       dropping a root rather than adding one, which is the direction that
+       breaks a working deployment.
     3. **The derived package cache is not a write root**, because it is inside
        the repos subtree which already is one, and adding it would make a
        symlink planted at ``.package-caches`` a write root of its own once
@@ -994,7 +1020,11 @@ def project_fs_roots(
     and under confinement the directory is inside no write root, so without the
     read entry a task could not open its own prepared attachment.
 
-    Raises nothing.
+    Raises nothing for a plan :func:`build_mount_plan` produced. That is a
+    precondition rather than a guarantee about any input: ``Path.resolve()``
+    raises on a symlink loop, and what keeps it out of reach is that every
+    entry reaching it was either existence-gated by the builder or resolved
+    there already. A hand-built plan can break that.
     """
     plan_write: list[Path] = []
     plan_read_only: list[Path] = []

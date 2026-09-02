@@ -7,7 +7,8 @@ projection are decisions rather than consequences, and each is here because a
 future simplification would look correct and be wrong:
 
 - ``.developer`` is a deny root whether or not the directory exists, and the
-  argv is unchanged in all three states the path can be in;
+  argv is unchanged in every state the path can be in, including a symlink
+  loop, where a check after `resolve()` raises instead;
 - a read-only entry nested in an earlier read-write one is a *write-deny* root
   rather than a read root, which is what bwrap's ordering already does;
 - the derived package cache is not a write root of its own;
@@ -108,22 +109,45 @@ class TestTheDeveloperCarveOut:
             user_temp.resolve() / ".developer"
         ]
 
-    @pytest.mark.parametrize("shape", ["absent", "file"])
+    @pytest.mark.parametrize("shape", ["absent", "file", "symlink_loop"])
     def test_the_argv_binds_nothing_unless_it_is_a_directory(
         self, config, task, user_temp, shape,
     ):
         """The control for the entry being emitted unconditionally.
 
-        `user_temp_dir` is per user rather than per task, so a model in one
-        task can leave a regular file at this name for the next one. The render
-        skips a *missing* source on its own; only `require_dir` skips this one.
+        `user_temp_dir` is per user rather than per task and is bound
+        read-write into every sandbox of that user, so a model in one task can
+        leave any of these three at this name for the next one. The render
+        skips a *missing* source on its own; only `require_dir` skips the other
+        two — and `symlink_loop` is why it is applied before `resolve()`, which
+        raises `RuntimeError` on one. A raise here fails every later sandbox
+        build for that user, which is worse than the wrong bind it was added to
+        prevent.
         """
+        dev = user_temp / ".developer"
         if shape == "file":
-            (user_temp / ".developer").write_text("not a directory")
+            dev.write_text("not a directory")
+        elif shape == "symlink_loop":
+            dev.symlink_to(user_temp / "loop")
+            (user_temp / "loop").symlink_to(dev)
 
         argv = _argv(config, task, user_temp)
 
         assert str(user_temp.resolve() / ".developer") not in argv
+
+    def test_a_symlink_loop_does_not_break_the_roots_either(
+        self, config, task, user_temp,
+    ):
+        """The projection's own half of the same input. It reaches the
+        `always_deny` branch, which returns before resolving, so it never had
+        the render's problem — asserted rather than assumed."""
+        dev = user_temp / ".developer"
+        dev.symlink_to(user_temp / "loop")
+        (user_temp / "loop").symlink_to(dev)
+
+        assert self._denied(config, task, user_temp) == [
+            user_temp.resolve() / ".developer"
+        ]
 
     def test_a_real_directory_is_still_bound_read_only(
         self, config, task, user_temp,
@@ -139,12 +163,16 @@ class TestTheDeveloperCarveOut:
             for src, _ in _binds(argv, "--ro-bind")
         )
 
-    def test_the_deny_root_is_not_resolved(self, config, task, user_temp, tmp_path):
-        """A symlink at that name must deny the *name*, not its target.
+    def test_the_deny_root_is_the_path_as_written(self, config, task, user_temp, tmp_path):
+        """Carried unresolved, matching the bind and matching what this
+        function has always returned.
 
-        `ToolEnv` realpaths what it is handed, so resolving here would move the
-        denial onto whatever the link points at and leave the path the tools
-        actually use writable.
+        Behaviour preservation, and deliberately not a claim that the denial is
+        symlink-proof: `ToolEnv` realpaths every deny root before comparing, so
+        a symlink planted at this name still relocates the denial downstream.
+        Closing that is a decision about the enforcer, not about the
+        projection. What this pins is that the projection did not start
+        resolving a value it never used to resolve.
         """
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()

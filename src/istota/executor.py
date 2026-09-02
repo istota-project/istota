@@ -29,7 +29,6 @@ from .claude_runtime_env import (
 )
 from .config import Config
 from .sandbox_plan import (
-    MountPlan,
     SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
     build_mount_plan,
     project_fs_roots,
@@ -3450,8 +3449,12 @@ def native_fs_roots(
     ``build_bwrap_cmd``'s user-data binds exactly (not the system/venv binds,
     which are irrelevant to the file tools): writable roots are the RW binds,
     read roots additionally the RO binds (Talk attachments, read-only
-    resources). No database root of any kind — the sandbox masks those, and
-    these tools have no masks.
+    resources) — with one qualification the projection added: a read-only bind
+    nested inside an earlier read-write one is a *write-deny* root instead,
+    since that is what bwrap's ordering already makes it, so it is reachable
+    for reading through the root containing it rather than named on its own
+    (rule 2 in ``project_fs_roots``). No database root of any kind — the
+    sandbox masks those, and these tools have no masks.
 
     **It no longer restates them.** This function builds the same
     :class:`~istota.sandbox_plan.MountPlan` ``build_bwrap_cmd`` renders and
@@ -3467,11 +3470,18 @@ def native_fs_roots(
     The third element carries the RO carve-outs bwrap gets by re-binding a
     path read-only *after* the RW bind that would otherwise cover it.
     Containment alone cannot express those, so they are returned separately and
-    threaded onto ``ToolEnv.write_denied_roots``. Two entries today.
+    threaded onto ``ToolEnv.write_denied_roots``. Two *named* entries, plus
+    every read-only user-data mount nested inside an earlier read-write one,
+    which ``project_fs_roots`` derives rather than naming (rule 2 there).
+    The two named ones:
     ``.developer`` — the credential-fetch helper and the git credential helpers
     — which the claude_code path has protected since the RO re-bind was added
     and which this function silently left writable until it grew this return
-    value. And ``control_dir``, the task's own
+    value. It is carried at the path *as written*, matching the bind, which is
+    the same value this function has always returned; note that it is not the
+    value enforcement compares against, since ``ToolEnv`` realpaths every deny
+    root, so a symlink planted at that name relocates the denial. That gap
+    predates the projection and is not closed here. And ``control_dir``, the task's own
     ``{temp_dir}/.control/{user_id}/task_{id}``: every file the daemon authors
     for this task, which is to say both prompt halves, the briefing metadata
     and the prepared image renditions.
@@ -3548,31 +3558,34 @@ def native_fs_roots(
     blocklist refuses fails the task, because the alternative is a namespace
     that silently lacks the directory the user asked to work in. Here the roots
     are an error-message layer over the same plan, so the answer is to log and
-    carry on without it — which means rebuilding the plan without the
-    workspace, not returning nothing. ``_validate_workspace_dir`` is the only
-    ``ValueError`` :func:`~istota.sandbox_plan.build_mount_plan` raises, so the
-    retry cannot raise again.
+    carry on without it. The validation therefore runs *before* the build
+    rather than as a ``try`` around it: catching there would either lose every
+    other root or mean building the plan a second time, and the plan build is
+    not free — ``resolve_sandbox_cache_dir`` creates a directory and
+    ``plan_masks`` logs a refused mask, both of which would then happen twice
+    per task. It is also the narrower catch, which matters more: a ``ValueError``
+    from anywhere else in the build (``Path.resolve`` raises one on an embedded
+    NUL, and a ``user_resources`` row is row data) still propagates instead of
+    being reported as a blocklist rejection that never happened.
     """
+    if workspace_dir is not None:
+        try:
+            _validate_workspace_dir(config, workspace_dir)
+        except ValueError:
+            logger.warning(
+                "native_fs_roots: workspace %s rejected by blocklist", workspace_dir,
+            )
+            workspace_dir = None
 
-    def _plan(workspace: Path | None) -> MountPlan:
-        return build_mount_plan(
-            config,
-            task,
-            is_admin,
-            user_resources,
-            user_temp_dir,
-            profile=SandboxProfile.NATIVE,
-            workspace_dir=workspace,
-        )
-
-    try:
-        plan = _plan(workspace_dir)
-    except ValueError:
-        # Not fatal here, unlike in `build_bwrap_cmd` — see the docstring. The
-        # workspace is the only thing dropped; every other root still stands.
-        logger.warning("native_fs_roots: workspace %s rejected by blocklist", workspace_dir)
-        plan = _plan(None)
-
+    plan = build_mount_plan(
+        config,
+        task,
+        is_admin,
+        user_resources,
+        user_temp_dir,
+        profile=SandboxProfile.NATIVE,
+        workspace_dir=workspace_dir,
+    )
     return project_fs_roots(plan, control_dir)
 
 
