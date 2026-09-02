@@ -4137,7 +4137,6 @@ class TestSessionLogDir:
         assert r.status in (WARN, FAIL)
 
 
-
 class TestTaskControlDir:
     """`runtime.task_control_dir` — the daemon-owned tree the framework writes
     each task's prompt halves, briefing metadata and prepared image attachments
@@ -4215,6 +4214,7 @@ class TestTaskControlDir:
         root.mkdir(parents=True)
         os.chmod(root, 0o700)
         (root / "alice").mkdir()
+        os.chmod(root / "alice", 0o700)
         r = self._run(config)
         assert r.status == OK
         assert not r.remedy
@@ -4273,11 +4273,17 @@ class TestTaskControlDir:
     def test_reports_a_root_owned_by_another_account(
         self, make_config, tmp_path, monkeypatch,
     ):
-        # `_ensure_control_level` fails closed on a uid mismatch, so this is
-        # every task failing rather than a widened permission. The daemon's own
-        # uid is what moves, since a test cannot chown to another account — and
-        # the real one is read *before* the patch, because `doctor.os` is the
-        # `os` module itself and a lambda calling through it recurses.
+        # `_ensure_control_level` fails closed on a uid mismatch, so this
+        # predicts every task under the level failing. It is still a WARN: the
+        # only uid available is this process's, `istota doctor` is commonly run
+        # from an operator's own account, and a FAIL sets `exit_code` and mails
+        # every admin from the scheduler's sweep — the same reason
+        # `check_subscription_usage` never fails on a busy plan.
+        #
+        # The daemon's own uid is what moves, since a test cannot chown to
+        # another account, and the real one is read *before* the patch, because
+        # `doctor.os` is the `os` module itself and a lambda calling through it
+        # recurses.
         config = self._config(make_config, tmp_path)
         root = self._root(config)
         root.mkdir(parents=True)
@@ -4285,9 +4291,53 @@ class TestTaskControlDir:
         mine = os.geteuid()
         monkeypatch.setattr(doctor.os, "geteuid", lambda: mine + 1)
         r = self._run(config)
-        assert r.status == FAIL
-        assert "uid" in r.detail
+        assert r.status == WARN
+        # Both uids, so a reader can tell which of the two cases they are in.
+        assert f"owned by uid {mine}" in r.detail
+        assert f"runs as uid {mine + 1}" in r.detail
         assert r.remedy
+
+    def test_a_correctly_owned_tree_is_not_reported(self, make_config, tmp_path):
+        # The other half of the pair. Without it the arm above would pass on a
+        # check that reported a uid line unconditionally.
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        root.mkdir(parents=True)
+        os.chmod(root, 0o700)
+        r = self._run(config)
+        assert r.status == OK
+        assert "uid" not in r.detail
+
+    def test_reports_a_per_user_level_the_daemon_does_not_own(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # `_ensure_control_level` asserts type, ownership and mode at all three
+        # levels and fails the task from any of them, so inspecting only the
+        # root reports a healthy deployment while every task of one user fails.
+        # `get_task_control_dir`'s containment equality does not cover it: it
+        # compares paths and says nothing about who owns one.
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        (root / "alice").mkdir(parents=True)
+        os.chmod(root, 0o700)
+        os.chmod(root / "alice", 0o755)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "control directory of user 'alice'" in r.detail
+        assert "0755" in r.detail
+        assert r.remedy
+
+    def test_fails_when_a_per_user_level_is_a_regular_file(
+        self, make_config, tmp_path,
+    ):
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        root.mkdir(parents=True)
+        os.chmod(root, 0o700)
+        (root / "alice").write_text("not a directory")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "control directory of user 'alice'" in r.detail
 
     # -- question two: is anything model-writable above it ------------------
 
@@ -4317,8 +4367,13 @@ class TestTaskControlDir:
         # with nothing in the config pointing at why.
         config = self._config(make_config, tmp_path, users=("alice", ".control"))
         r = self._run(config)
-        assert r.status in (WARN, FAIL)
-        assert ".control" in r.detail
+        assert r.status == FAIL
+        # Both arms by name, because the refusal alone satisfies a loose
+        # `".control" in detail` and the test would then stay green with the
+        # overlap comparison deleted — the branch its comment is about.
+        assert "no control directory can be named for '.control'" in r.detail
+        assert "the workspace of user '.control'" in r.detail
+        assert "overlaps the control tree" in r.detail
         assert r.remedy
 
     def test_reports_a_resource_row_that_would_bind_the_control_tree(
@@ -4441,6 +4496,48 @@ class TestTaskControlDir:
         )
         assert self._run(config).status == OK
 
+    def test_reports_a_repos_subtree_that_holds_the_control_tree(
+        self, make_config, tmp_path,
+    ):
+        # Measured during review: with `temp_dir` under `{repos_dir}/{user}`
+        # the whole control tree sits inside a read-write bind and the check
+        # reported `ok`. `build_bwrap_cmd` binds that subtree for an admin
+        # developer task, so it belongs on this axis with the other binds.
+        from istota.config import DeveloperConfig, SecurityConfig
+
+        repos = tmp_path / "repos"
+        temp = repos / "alice" / "tmp"
+        temp.mkdir(parents=True)
+        config = self._config(
+            make_config, tmp_path,
+            temp_dir=temp,
+            security=SecurityConfig(sandbox_enabled=True),
+            developer=DeveloperConfig(enabled=True, repos_dir=str(repos)),
+        )
+        r = self._run(config)
+        assert r.status == WARN
+        assert "overlaps the control tree" in r.detail
+        assert "repos subtree" in r.detail
+
+    def test_reports_a_sandbox_ro_paths_entry_over_the_control_tree(
+        self, make_config, tmp_path,
+    ):
+        # `config._warn_ro_paths_over_control_tree` already says this at load,
+        # once per process, into a log. Doctor is the surface an operator
+        # reads, and the axis already reports a read-only resource row, so
+        # leaving the one entry that is bound verbatim off it was inconsistent
+        # with its own rule.
+        from istota.config import SecurityConfig
+
+        config = self._config(make_config, tmp_path)
+        config.security = SecurityConfig(
+            sandbox_enabled=True, sandbox_ro_paths=[str(config.temp_dir)],
+        )
+        r = self._run(config)
+        assert r.status == WARN
+        assert "sandbox_ro_paths entry" in r.detail
+        assert "overlaps the control tree" in r.detail
+
     # -- question two, second half: the database mask -----------------------
 
     def _bwrap(self, monkeypatch, *, available=True, cached=True):
@@ -4489,8 +4586,29 @@ class TestTaskControlDir:
         self._bwrap(monkeypatch, available=True)
         r = self._run(self._masked_shape(make_config, tmp_path))
         assert r.status == WARN
-        assert "masked out of every sandbox" in r.detail
+        # The established prefix by name. "masked out of every sandbox" alone
+        # is a substring of the "would be" prefix too, so it cannot separate
+        # the two states the constants exist to keep apart.
+        assert doctor._CONTROL_MASKED in r.detail
         assert r.remedy
+
+    def test_reports_a_mask_that_lands_inside_the_control_tree(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The other direction. A mask above the tree takes every user's away; a
+        # mask inside it takes one user's, and it is emitted rather than
+        # refused, since `{temp_dir}/.control/{user}` shadows nothing in
+        # `mask_protected_paths`. A one-directional test reported nothing here.
+        self._bwrap(monkeypatch, available=True)
+        config = self._config(make_config, tmp_path)
+        inside = self._root(config) / "alice"
+        inside.mkdir(parents=True)
+        config.db_path = inside / "istota.db"
+        config.db_path.touch()
+        r = self._run(config)
+        assert r.status == WARN
+        assert doctor._CONTROL_MASKED in r.detail
+        assert str(inside) in r.detail
 
     def test_a_mask_that_is_refused_does_not_produce_a_finding(
         self, make_config, tmp_path, monkeypatch,
@@ -4574,7 +4692,10 @@ class TestTaskControlDir:
         (temp / "bob").symlink_to(temp)
         r = self._run(config)
         assert r.status == WARN
-        assert "0755" in r.detail
+        # `"0755"` alone appears in the unconditional `observed` prefix, so it
+        # is satisfied with the mode finding deleted — which is the half this
+        # test is named for. Assert on wording only the finding produces.
+        assert "rather than 0700" in r.detail
         assert "overlaps the control tree" in r.detail
 
     # -- it never raises ----------------------------------------------------
@@ -4595,6 +4716,7 @@ class TestTaskControlDir:
         config.nextcloud_mount_path = None
         r = doctor.check_task_control_dir(config, True)
         assert r.status in (OK, WARN, FAIL, SKIP)
+
 
 class TestSandboxMasksUsesTheNativeProfile:
     """The `sandbox.masks` probe execs `/bin/sh`, not the `claude` CLI.

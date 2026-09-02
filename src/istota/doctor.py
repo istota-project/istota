@@ -952,8 +952,19 @@ _CONTROL_OVERLAP_REMEDY = (
 
 _CONTROL_TREE_REMEDY = (
     "The daemon creates each level 0700 and re-asserts the mode on every task, "
-    "so a level it does not own is one it cannot repair: chown the tree to the "
-    "daemon's user, or move it aside and let the next task recreate it."
+    "so it repairs a widened mode by itself: move aside anything standing at "
+    "one of these paths that is not a directory, and the next task recreates it."
+)
+
+# Separate from the one above, because the action depends on something only the
+# reader knows. The check compares against its own euid and cannot tell whether
+# this process is the daemon, so the remedy has to offer both readings rather
+# than sending an operator to chown a tree that was already correct.
+_CONTROL_TREE_UID_REMEDY = (
+    "Check which account the daemon runs as. If it is the uid that owns the "
+    "directory, nothing is wrong and this line is only the account you ran the "
+    "check from; if it is not, chown the tree to the daemon's user, since the "
+    "daemon refuses a level it does not own."
 )
 
 _CONTROL_MASK_REMEDY = (
@@ -976,72 +987,105 @@ def _overlaps(a: Path, b: Path) -> bool:
     Both directions, exactly as ``config._warn_ro_paths_over_control_tree``
     compares: above the control tree reaches every user's, inside it reaches
     one user's or one task's — which is smaller and no more acceptable.
+
+    A plain ``PurePath`` comparison, so it does **not** mirror
+    ``get_task_control_dir``'s case-folded refusal of a ``user_id`` equal to
+    ``CONTROL_DIR_NAME``. On a case-insensitive filesystem a name differing
+    only in case reaches the same directory and this returns False. Left as
+    written rather than case-folded: the comparison would then be wrong on
+    every case-*sensitive* filesystem, which is where bubblewrap runs and
+    therefore where a bind exists at all.
     """
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 
-def _control_tree_findings(root: Path) -> list[tuple[str, str, str]]:
-    """Is ``{temp_dir}/.control`` itself a directory the daemon owns, at 0700.
+# Every path this module resolves is a config value or a join of one, and
+# `Path.resolve()` answers with a different exception per failure and per
+# interpreter. `RuntimeError` is in the tuple for CPython 3.11, whose pathlib
+# raises it on a symlink loop rather than returning; 3.12 delegates to
+# `os.path.realpath` and does not. `pyproject.toml` floors at 3.11, and this
+# module's contract is that it never raises.
+_PATH_ERRORS = (OSError, ValueError, TypeError, AttributeError, RuntimeError)
 
-    ``(status, finding, remedy)`` triples, empty when the tree is healthy. The
-    root is the level the guarantee rests on: 0700 there is what stops any
-    other local account on the host walking down into a user's control files,
-    and the shipped default ``temp_dir`` of ``/tmp/istota`` has a
-    world-writable sticky parent, so on a host where the daemon has not run yet
-    another account can pre-create it.
 
-    A missing root is not a finding. ``ensure_task_control_dir`` creates it on
-    the first task, so an install that has not run one is healthy;
+def _control_level_findings(path: Path, label: str) -> list[tuple[str, str, str]]:
+    """One level of the control tree: a real directory, ours, at 0700.
+
+    ``(status, finding, remedy)`` triples, empty when the level is healthy.
+    Applied to the root **and to each configured user's level**, because
+    ``_ensure_control_level`` asserts type, ownership and mode at all three and
+    fails the task from any of them — so inspecting only the root reports a
+    healthy deployment while every task of one user fails at start-up.
+    ``get_task_control_dir``'s containment equality does not cover it either:
+    it compares paths and says nothing about who owns one.
+
+    A missing level is not a finding. ``ensure_task_control_dir`` creates the
+    tree on the first task, so an install that has not run one is healthy, and
+    a user who has never had a task has no level yet.
     ``runtime.writable_dirs.temp_dir`` is the check that says whether it will
     be creatable.
 
-    ``lstat`` rather than ``stat``, because a symlink at this level is one of
-    the two states ``get_task_control_dir`` refuses and following it would
-    report the mode and owner of whatever it points at.
+    ``lstat`` rather than ``stat``, because a symlink here is one of the two
+    states ``get_task_control_dir`` refuses and following it would report the
+    mode and owner of whatever it points at.
+
+    **The ownership arm is a WARN and the type arms are FAILs**, which is not
+    an inconsistency. A symlink or a regular file at a level is a fact about
+    the filesystem and reads the same from any process. A uid comparison is
+    not: the only uid available here is *this process's*, and doctor has four
+    entry points of which ``istota doctor`` is commonly run by an operator's
+    own account or by root. A FAIL there would set ``exit_code`` to 1 and, on
+    the scheduler's sweep, mail every admin about a tree that is exactly
+    correct — the precedent `check_subscription_usage` states for never
+    failing on a fact that is not a defect in the host. So the finding reports
+    both uids and lets the reader see which case they are in.
     """
     try:
-        st = os.lstat(root)
+        st = os.lstat(path)
     except FileNotFoundError:
         return []
     except OSError as exc:
         return [(
             WARN,
-            f"{root} could not be inspected ({exc.strerror or exc})",
+            f"{label} ({path}) could not be inspected ({exc.strerror or exc})",
             _CONTROL_TREE_REMEDY,
         )]
 
     if stat.S_ISLNK(st.st_mode):
         return [(
             FAIL,
-            f"{root} is a symlink rather than a directory the daemon owns, so "
-            f"no task can name a control directory under it",
+            f"{label} ({path}) is a symlink rather than a directory the daemon "
+            f"owns, so no task can name a control directory under it",
             _CONTROL_TREE_REMEDY,
         )]
     if not stat.S_ISDIR(st.st_mode):
         return [(
             FAIL,
-            f"{root} exists and is not a directory, so every task fails at "
-            f"start-up",
+            f"{label} ({path}) exists and is not a directory, so every task "
+            f"under it fails at start-up",
             _CONTROL_TREE_REMEDY,
         )]
 
     out: list[tuple[str, str, str]] = []
-    if st.st_uid != os.geteuid():
-        # Ahead of the mode, and a FAIL rather than a WARN: the daemon refuses
-        # a level it does not own, so this is every task of every user failing
-        # rather than a permission that is wider than it should be.
+    # `hasattr` because the module's contract is that it never raises and
+    # `os.geteuid` does not exist on every platform — the same guard the
+    # devbox identity check uses.
+    euid = os.geteuid() if hasattr(os, "geteuid") else None
+    if euid is not None and st.st_uid != euid:
         out.append((
-            FAIL,
-            f"{root} is owned by uid {st.st_uid} rather than by the daemon "
-            f"(uid {os.geteuid()}), which refuses a level it does not own",
-            _CONTROL_TREE_REMEDY,
+            WARN,
+            f"{label} ({path}) is owned by uid {st.st_uid} while this process "
+            f"runs as uid {euid}: if the daemon is not uid {st.st_uid} it will "
+            f"refuse a level it does not own and every task under it fails at "
+            f"start-up",
+            _CONTROL_TREE_UID_REMEDY,
         ))
     mode = stat.S_IMODE(st.st_mode)
     if mode != 0o700:
         out.append((
             WARN,
-            f"{root} is mode {mode:04o} rather than 0700, so another local "
-            f"account can reach every user's control files",
+            f"{label} ({path}) is mode {mode:04o} rather than 0700, so another "
+            f"local account can reach the control files under it",
             _CONTROL_TREE_REMEDY,
         ))
     return out
@@ -1050,7 +1094,7 @@ def _control_tree_findings(root: Path) -> list[tuple[str, str, str]]:
 def _control_overlap_findings(
     config: "Config", users: list[str], root: Path,
 ) -> list[tuple[str, str, str]]:
-    """Anything model-writable at or above the control tree.
+    """Anything the model can reach at or above the control tree.
 
     This is the axis the whole change rests on. The tree is a *sibling* of the
     per-user workspaces rather than a child of one, which is what removes the
@@ -1058,7 +1102,11 @@ def _control_overlap_findings(
     property of the rendered config, not of the code, so it is a property the
     suite cannot see and doctor can.
 
-    Three producers of a path the model can write, compared in both directions:
+    **Every bind `build_bwrap_cmd` emits whose path a config alone determines**,
+    compared in both directions. Enumerating fewer was the first draft's defect
+    and it was not a cosmetic one: with ``temp_dir`` set under
+    ``{developer.repos_dir}/{user_id}`` the whole tree sits inside a read-write
+    bind and the check reported ``ok``.
 
     - ``{temp_dir}/{user_id}``, the sandbox's ``--chdir`` target and
       ``ISTOTA_DEFERRED_DIR``. Checked whatever the sandbox setting says,
@@ -1067,74 +1115,122 @@ def _control_overlap_findings(
       join — ``get_task_control_dir`` refuses that name, and this is what says
       why out loud rather than leaving an operator with a user whose every task
       fails and nothing in the config pointing at the cause.
-    - ``{mount}/Users/{user_id}``, bound read-write into that user's sandbox.
-    - the **per-resource mounts**, and they are the reason this axis reports
-      more than the first two. A ``user_resources`` row resolves to ``mount /
-      resource_path``, bounded by the Nextcloud mount root and nothing else, so
-      on a layout where ``temp_dir`` sits under the mount a row naming the tree
-      binds it — read-write or read-only — and neither ``native_fs_roots`` entry
-      nor the ``extra_ro_binds`` bind covers a sibling task's directory.
-      ``native_fs_roots``' docstring records that as a known gap on the grounds
-      that no shipped shape produces the layout and that refusing a resource
-      path is a decision about resources. Reporting it is neither of those: it
-      costs one comparison per row, it is silent on every shape that ships, and
-      a gap named only in a docstring is one nothing would ever notice.
+    - ``security.sandbox_ro_paths``, bound verbatim.
+      ``config._warn_ro_paths_over_control_tree`` already warns at load; this
+      repeats it because that warning goes to a log once per process and
+      doctor is the surface an operator reads.
+    - ``{repos_dir}/{user_id}`` and the package cache under it, read-write for
+      an admin developer task.
+    - ``{mount}/Users/{user_id}`` read-write, ``{mount}/Talk`` read-only, and
+      ``{mount}/Channels`` — the last as the whole directory, since the bind is
+      per conversation token and doctor has no task to take one from.
+    - the **per-resource mounts**, which are the reason this axis reports more
+      than the guards themselves cover. A ``user_resources`` row resolves to
+      ``mount / resource_path``, bounded by the Nextcloud mount root and
+      nothing else, so on a layout where ``temp_dir`` sits under the mount a
+      row naming the tree binds it — read-write or read-only — and neither
+      ``native_fs_roots`` entry nor the ``extra_ro_binds`` bind covers a
+      sibling task's directory. ``native_fs_roots``' docstring records that as
+      a known gap on the grounds that no shipped shape produces the layout and
+      that refusing a resource path is a decision about resources. Reporting it
+      is neither of those: it costs one comparison per row, it is silent on
+      every shape that ships, and a gap named only in a docstring is one
+      nothing would ever notice.
 
-    The last two are gated on the *requested* ``sandbox_enabled`` — the same
-    gate ``config._warn_ro_paths_over_control_tree`` takes, and for the same
-    two reasons: with the sandbox off nothing is bound at all, so there is no
-    bind for a row to widen, and the effective predicate spawns.
+    A read-only bind is reported as readily as a read-write one. Read-only over
+    the tree is the read exposure rather than the write vector — one task
+    reading every other task of that user's assembled prompt — which is the
+    same thing the load-time ``sandbox_ro_paths`` warning is about.
 
-    Never raises: an unresolvable path is skipped rather than reported, since a
-    path this cannot resolve is one no bind can name either.
+    Everything but the first is gated on the *requested* ``sandbox_enabled`` —
+    the same gate ``config._warn_ro_paths_over_control_tree`` takes, and for
+    the same two reasons: with the sandbox off nothing is bound at all, so
+    there is no bind for an entry to widen, and the effective predicate spawns.
+
+    Never raises: a path that cannot be resolved is skipped rather than
+    reported, since a path this cannot resolve is one no bind can name either.
     """
-    from .executor import get_user_temp_dir  # noqa: PLC0415 - executor pulls in most of the package
+    from .executor import (  # noqa: PLC0415 - executor pulls in most of the package
+        get_user_repos_dir,
+        get_user_temp_dir,
+        resolve_sandbox_cache_dir,
+    )
 
     out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
 
-    def _check(label: str, path: Path) -> None:
-        if _overlaps(path, root):
-            out.append((
-                WARN, f"{label} ({path}) overlaps the control tree",
-                _CONTROL_OVERLAP_REMEDY,
-            ))
+    def _check(label: str, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            resolved = Path(path).resolve()
+        except _PATH_ERRORS:
+            return
+        if not _overlaps(resolved, root):
+            return
+        finding = f"{label} ({resolved}) overlaps the control tree"
+        if finding in seen:
+            return
+        seen.add(finding)
+        out.append((WARN, finding, _CONTROL_OVERLAP_REMEDY))
 
     for user_id in users:
         try:
-            _check(
-                f"the workspace of user {user_id!r}",
-                get_user_temp_dir(config, user_id).resolve(),
-            )
-        except (OSError, ValueError, TypeError):
+            _check(f"the workspace of user {user_id!r}", get_user_temp_dir(config, user_id))
+        except _PATH_ERRORS:
             continue
 
-    if not getattr(getattr(config, "security", None), "sandbox_enabled", False):
+    security = getattr(config, "security", None)
+    if not getattr(security, "sandbox_enabled", False):
         return out
+
+    for entry in getattr(security, "sandbox_ro_paths", None) or ():
+        try:
+            _check(f"the sandbox_ro_paths entry {entry!r}", Path(entry))
+        except _PATH_ERRORS:
+            continue
+
+    for user_id in users:
+        for label, resolver in (
+            ("the repos subtree", get_user_repos_dir),
+            ("the package cache", resolve_sandbox_cache_dir),
+        ):
+            try:
+                _check(f"{label} of user {user_id!r}", resolver(config, user_id))
+            except Exception:  # noqa: BLE001 - a diagnostic must not raise
+                continue
 
     mount = getattr(config, "nextcloud_mount_path", None)
     if not mount:
         return out
-    mount = Path(mount)
+    try:
+        mount = Path(mount)
+    except _PATH_ERRORS:
+        return out
 
+    _check("the Talk directory on the mount", mount / "Talk")
+    # The whole directory rather than one token's: the bind is per
+    # conversation and doctor has no task to take a token from, so the
+    # question it can answer is whether the tree is reachable from any of them.
+    _check("the Channels directory on the mount", mount / "Channels")
+
+    users_map = getattr(config, "users", None)
     for user_id in users:
+        _check(f"the mounted home of user {user_id!r}", mount / "Users" / user_id)
         try:
-            _check(
-                f"the mounted home of user {user_id!r}",
-                (mount / "Users" / user_id).resolve(),
-            )
-        except (OSError, ValueError, TypeError):
-            pass
-        user_config = (getattr(config, "users", {}) or {}).get(user_id)
+            user_config = users_map.get(user_id)
+        except AttributeError:
+            continue
         for resource in getattr(user_config, "resources", None) or ():
             path = getattr(resource, "path", "")
-            if not path:
+            if not path or not isinstance(path, str):
                 continue
             try:
                 # `lstrip("/")` exactly as `build_bwrap_cmd` and
                 # `native_fs_roots` do: an absolute `resource_path` is
                 # re-rooted under the mount rather than escaping it.
-                resolved = (mount / path.lstrip("/")).resolve()
-            except (OSError, ValueError, TypeError):
+                candidate = mount / path.lstrip("/")
+            except _PATH_ERRORS:
                 continue
             # Deliberately not gated on the path existing, unlike the two
             # binds themselves. A row naming a directory that is not there yet
@@ -1143,7 +1239,7 @@ def _control_overlap_findings(
             _check(
                 f"the {getattr(resource, 'type', '?')} resource {path!r} of "
                 f"user {user_id!r} ({getattr(resource, 'permissions', '?')})",
-                resolved,
+                candidate,
             )
     return out
 
@@ -1162,6 +1258,14 @@ def _control_mask_finding(
     three shipped shapes; this is what checks the claim against the config a
     deployment actually rendered rather than against the one it was written
     from.
+
+    **Both directions**, through `_overlaps`, for the reason that function's
+    docstring gives. A mask *above* the tree takes every user's away; a mask
+    *inside* it takes one user's or one task's, which is smaller and no more
+    acceptable — and it is emitted rather than refused, since
+    ``{temp_dir}/.control/{user}`` shadows nothing in ``mask_protected_paths``.
+    Testing only the upward direction was the first draft and it reported no
+    finding on a ``db_path`` inside a user's own control subtree.
 
     **The shape question is asked first and the availability question only
     where its answer can change the verdict.** Availability is
@@ -1182,7 +1286,13 @@ def _control_mask_finding(
     and that is the safe direction here where it would not be in the session-log
     check: there the absence of a mask is the exposure, so silence would hide
     one; here the presence of a mask is, so an unanswerable question cannot
-    have found one.
+    have found one. No ``db_path`` is the same answer for the same reason —
+    there is no database directory to mask.
+
+    A **relative** ``db_path`` is out of scope, as a relative ``temp_dir`` is
+    for the caller: ``resolve()`` would answer against the calling process's
+    working directory, so the same config would report a finding in the daemon
+    and none in a skill CLI.
     """
     try:
         from .executor import (  # noqa: PLC0415 - executor pulls in most of the package
@@ -1193,9 +1303,18 @@ def _control_mask_finding(
         logger.debug("task control dir: the sandbox builder could not be consulted")
         return None
 
+    db_path = getattr(config, "db_path", None)
+    if not db_path:
+        return None
+    try:
+        if not Path(db_path).is_absolute():
+            return None
+    except _PATH_ERRORS:
+        return None
+
     try:
         protected = mask_protected_paths(config)
-        candidates: list[Path] = [Path(config.db_path).parent]
+        candidates: list[Path] = [Path(db_path).parent]
         try:
             candidates.append(config.module_db_root())
         except Exception:  # noqa: BLE001 - a misconfigured module_data_dir raises
@@ -1212,7 +1331,7 @@ def _control_mask_finding(
                 seen.append(name)
                 if mask_shadowed_by(name, protected):
                     continue  # the builder refuses this one, so it masks nothing
-                if root == name or root.is_relative_to(name):
+                if _overlaps(root, name):
                     swallowing.append(name)
     except Exception as exc:  # noqa: BLE001 - a diagnostic must not raise
         # Not `OSError` alone: `mask_protected_paths` resolves paths from a
@@ -1232,8 +1351,9 @@ def _control_mask_finding(
         prefix = _CONTROL_WOULD_BE_MASKED
     else:
         prefix = _CONTROL_MASK_UNKNOWN
+    where = "inside" if root != swallowing[0] and root.is_relative_to(swallowing[0]) else "at or over"
     finding = (
-        f"{prefix} — {root} is inside {swallowing[0]}, which the sandbox masks "
+        f"{prefix} — {root} is {where} {swallowing[0]}, which the sandbox masks "
         f"with an empty read-only tmpfs as its last mount operation"
     )
     if why:
@@ -1255,12 +1375,12 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
     model-writable is above it.
 
     **Two independent questions, both answered on every run**, following
-    ``runtime.session_log_dir``. Is the tree itself a directory the daemon owns
-    at 0700, and is anything model-writable at or above it — including the
-    database mask, which reaches it from the other direction by taking it away.
-    Neither pre-empts the other: an operator who reads one reason and fixes it
-    would otherwise be told nothing about the second and would still have the
-    tree exposed.
+    ``runtime.session_log_dir``. Is the tree itself made of directories the
+    daemon owns at 0700, and is anything the model can reach at or above it —
+    including the database mask, which reaches it from the other direction by
+    taking it away. Neither pre-empts the other: an operator who reads one
+    reason and fixes it would otherwise be told nothing about the second and
+    would still have the tree exposed.
 
     ``SKIP`` with no configured users, because nothing names a control
     directory until a task runs for somebody and a check with no subject must
@@ -1269,6 +1389,12 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
     ``probe=False`` spawns nothing, and on every layout that ships neither does
     ``probe=True`` — see `_control_mask_finding`.
 
+    **The one FAIL is a fact about the filesystem, never about a uid.** A
+    ``user_id`` with no resolvable control directory, and a level that is a
+    symlink or not a directory, read the same from any process; a uid
+    comparison reads differently depending on who ran the check, and doctor is
+    also run by hand. See `_control_level_findings`.
+
     Never raises. It runs on the daemon's start-up path, and it deliberately
     reports rather than repairs: ``ensure_task_control_dir`` is what creates and
     re-asserts the tree, and a diagnostic that quietly chmod'd a directory
@@ -1276,7 +1402,14 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
     """
     name = "runtime.task_control_dir"
 
-    users = sorted(getattr(config, "users", {}) or {})
+    # Normalised once rather than at each use: `config.users` reaches here
+    # from a TOML file and a database overlay, and every later reader would
+    # otherwise need its own guard against a value that is not a mapping.
+    users_map = getattr(config, "users", None)
+    try:
+        users = sorted(users_map or {})
+    except TypeError:
+        users = []
     if not users:
         return CheckResult(
             name, SKIP,
@@ -1291,7 +1424,14 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
             name, FAIL, "no temp_dir is configured, so no control tree can exist",
             remedy="Set temp_dir to an absolute path the daemon owns.",
         )
-    if not Path(temp_dir).is_absolute():
+    try:
+        absolute = Path(temp_dir).is_absolute()
+    except _PATH_ERRORS as exc:
+        return CheckResult(
+            name, FAIL, f"the control tree under {temp_dir!r} cannot be named: {exc}",
+            remedy="Set temp_dir to an absolute path the daemon can resolve.",
+        )
+    if not absolute:
         # Out of scope rather than guessed at, the same way
         # `config._warn_ro_paths_over_control_tree` skips it: `resolve()` would
         # answer against the calling process's cwd, which differs between the
@@ -1304,7 +1444,7 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
         )
     try:
         root = Path(temp_dir).resolve() / CONTROL_DIR_NAME
-    except (OSError, ValueError, TypeError) as exc:
+    except _PATH_ERRORS as exc:
         return CheckResult(
             name, FAIL, f"the control tree under {temp_dir} cannot be named: {exc}",
             remedy="Set temp_dir to an absolute path the daemon can resolve.",
@@ -1322,7 +1462,7 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
         if remedy and remedy not in remedies:
             remedies.append(remedy)
 
-    for triple in _control_tree_findings(root):
+    for triple in _control_level_findings(root, "the control tree"):
         _note(triple)
 
     # Resolution, per user rather than for a representative one: the refusals
@@ -1331,10 +1471,22 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
     # other user is fine — and the id is the thing an operator would change.
     from .executor import get_task_control_dir  # noqa: PLC0415
 
-    unresolvable = [
-        user_id for user_id in users
-        if get_task_control_dir(config, user_id, 0) is None
-    ]
+    unresolvable: list[str] = []
+    for user_id in users:
+        try:
+            resolved = get_task_control_dir(config, user_id, 0)
+        except Exception:  # noqa: BLE001 - a diagnostic must not raise
+            resolved = None
+        if resolved is None:
+            unresolvable.append(user_id)
+            continue
+        # The per-user level, which `_ensure_control_level` asserts over
+        # exactly as it does the root. A resolvable path says nothing about
+        # who owns the directory at it.
+        for triple in _control_level_findings(
+            resolved.parent, f"the control directory of user {user_id!r}",
+        ):
+            _note(triple)
     if unresolvable:
         _note((
             FAIL,
@@ -1355,10 +1507,19 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
 
     plural = "" if len(users) == 1 else "s"
     try:
-        mode = f"mode {stat.S_IMODE(os.lstat(root).st_mode):04o}"
+        st = os.lstat(root)
     except OSError:
-        mode = "not created yet"
-    observed = f"{root}: {mode}, {len(users)} configured user{plural}"
+        shape = "not created yet"
+    else:
+        # Only a directory's mode is worth printing. A symlink's is 0777 by
+        # convention and would sit in the observed line contradicting the
+        # finding beside it that says the root is a symlink.
+        shape = (
+            f"mode {stat.S_IMODE(st.st_mode):04o}"
+            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+            else "not a directory"
+        )
+    observed = f"{root}: {shape}, {len(users)} configured user{plural}"
 
     if not findings:
         return CheckResult(name, OK, observed)
