@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
 
+- Switching the credential proxy off while the sandbox is on now warns about what that really costs. The startup message named only the visible half — skill commands lose the databases they read — and said nothing about the quiet half: every service credential you have configured stays in the task's own environment, where the model can read it from inside the boundary you just switched on. The settings reference, the example settings file and the deployment guide gave the same partial answer and now give both halves. Nothing changes for an install running both switches off, which is the single-user shape and is unaffected.
+
 ### Security
 
 - A task running on the native brain could read the bot's Claude subscription token out of its own shell environment, and anything a task reads becomes text sent to the model. The native brain talks to whichever provider you configured it for, which on most setups is not the company that issued that token. The token is set for every task whatever brain will run it, because the two Claude brains sign in with it; it is now taken back out both on the way into the native brain's tools and on the way into the skills the bot runs on your behalf, neither of which ever read it. Deployments that keep the token in the service environment and run the native brain were affected; one authenticating the Claude CLI by its credentials file alone was not.

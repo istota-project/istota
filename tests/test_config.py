@@ -499,6 +499,97 @@ class TestConfigLoading:
         assert cfg.security.skill_proxy_timeout == 300
 
 
+class TestTheSandboxWithoutTheProxyWarning:
+    """`sandbox_enabled` with `skill_proxy_enabled = false` is the one pairing
+    where the sandbox is a real boundary and every configured credential rides
+    past it in the environment: `_split_credential_env` only removes them under
+    the proxy branch. The warning has to say that, because it is the silent half
+    — the masked databases fail loudly on their own."""
+
+    def test_the_pairing_names_the_credential_consequence(self, tmp_path, caplog):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            "skill_proxy_enabled = false\n"
+        )
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(p)
+        pairing = [
+            r.getMessage() for r in caplog.records
+            if "sandbox_enabled with skill_proxy_enabled = false" in r.getMessage()
+        ]
+        assert pairing, [r.getMessage() for r in caplog.records]
+        assert any("credential" in m for m in pairing), pairing
+
+    def test_the_pairing_still_names_the_masked_databases(self, tmp_path, caplog):
+        """Widening must not drop what was already there: an operator whose
+        skill CLIs have stopped working needs the functional half too."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            "skill_proxy_enabled = false\n"
+        )
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(p)
+        # Scoped to the pairing message rather than to every record: `caplog`
+        # collects whatever else `load_config` warned about, so an unscoped
+        # substring search would pass on somebody else's warning.
+        pairing = [
+            r.getMessage() for r in caplog.records
+            if "sandbox_enabled with skill_proxy_enabled = false" in r.getMessage()
+        ]
+        assert pairing, [r.getMessage() for r in caplog.records]
+        assert any("masked out" in m for m in pairing), pairing
+
+    def test_no_warning_when_the_proxy_is_on(self, tmp_path, caplog):
+        """Keyed on the pairing prefix rather than on `skill_proxy_enabled =
+        false`, which `doctor.check_skill_proxy` also emits and
+        `_validate_forge_clis` routes into this same logger. Paired with a
+        control: a bare negative assertion passes just as well when nothing was
+        captured at all."""
+        p = tmp_path / "config.toml"
+        p.write_text("[security]\nsandbox_enabled = true\n")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(p)
+        assert not any(
+            "sandbox_enabled with skill_proxy_enabled = false" in r.getMessage()
+            for r in caplog.records
+        )
+        # Control: the same capture does see the pairing warning when it fires.
+        caplog.clear()
+        q = tmp_path / "warns.toml"
+        q.write_text(
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            "skill_proxy_enabled = false\n"
+        )
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(q)
+        assert any(
+            "sandbox_enabled with skill_proxy_enabled = false" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_no_warning_when_both_are_off(self, tmp_path, caplog):
+        """The single-user install writes both switches off together. There is
+        no boundary there for a credential to cross, so this shape is a trust
+        decision rather than a defect and must stay silent."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[security]\n"
+            "sandbox_enabled = false\n"
+            "skill_proxy_enabled = false\n"
+        )
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(p)
+        assert not any(
+            "sandbox_enabled with skill_proxy_enabled" in r.getMessage()
+            for r in caplog.records
+        )
+
+
 class TestConfigMethods:
     def test_find_user_by_email_found(self):
         cfg = Config(users={
