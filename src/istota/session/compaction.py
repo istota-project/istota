@@ -15,6 +15,13 @@ Key decisions:
 - File-operation tracking across cycles: ``CompactionDetails`` (read / modified
   files) is carried forward so the model keeps awareness of files touched early.
 - Compaction failure never crashes the loop — it returns the previous summary.
+- Everything here operates on ``ctx.messages`` and nothing else. Istota's
+  standing instructions — identity, emissaries, persona, tool descriptions,
+  skill inventory, rules — are the *system* half and live in
+  ``AgentContext.system_prompt``, so no cut and no summary can reach them. They
+  used to be the head of the first user message, which is the first thing
+  ``find_cut_point`` drops (ISSUE-375). What is left in ``messages`` is task
+  material the structured summary is designed to carry forward.
 
 Prior art: Pi's compact() (compaction.ts) — cut-point detection, incremental
 summaries, file-operation tracking, structured prompt format.
@@ -222,11 +229,13 @@ def find_image_message(messages: list):
 
 
 # What the carried-over blocks are introduced as. The pin is deliberately *not*
-# the original message: that one leads with the fully composed prompt
-# (emissaries, persona, memory, skills, the request), and pinning the whole
+# the original message: that one is the task's user half (retrieved memory,
+# conversation history, the request and its attachments), and pinning the whole
 # thing would make the largest text in the conversation the one piece
 # compaction can never reclaim — while the summary is already the mechanism for
-# carrying that text forward in reduced form.
+# carrying that text forward in reduced form. Istota's standing instructions
+# are no longer in it to lose: they are the system half, which lives in
+# `AgentContext.system_prompt` and which nothing here can reach (ISSUE-375).
 _PIN_LABEL = "[Images attached to this task, carried across compaction]"
 
 # The pin only works because it is small next to the tail budget the cut is
