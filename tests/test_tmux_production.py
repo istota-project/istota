@@ -19,6 +19,7 @@ import pytest
 from istota.brain._types import BrainRequest, BrainResult
 from istota.brain import claude_code
 from istota.brain.claude_code import build_claude_cli_flags
+from istota.brain import tmux_claude
 from istota.brain.tmux_claude import (
     TmuxClaudeBrain,
     _CircuitBreaker,
@@ -141,6 +142,89 @@ class TestFlagHelper:
         flags = build_claude_cli_flags(_req(tmp_path, allowed_tools=[]))
         assert "--allowedTools" not in flags
         assert "--disallowedTools" not in flags
+
+
+class TestComposedSystemPromptReachesTmux:
+    """Istota's composed system half rides the same shared helper the headless
+    path uses, so the tmux brain inherits it with no branch of its own.
+
+    Production keeps `_TMUX_UNSUPPORTED_FLAGS` empty for this flag on purpose:
+    a measured parser rejection in the interactive TUI is a release blocker,
+    not a reason to drop the standing instructions on one backend only.
+    """
+
+    def _files(self, tmp_path):
+        custom = tmp_path / "operator-system-prompt.md"
+        custom.write_text("operator override")
+        composed = tmp_path / "task_7_system_prompt.txt"
+        composed.write_text("You are Istota.")
+        return custom, composed
+
+    def test_the_production_set_does_not_drop_the_append_flag(self):
+        assert "--append-system-prompt-file" not in tmux_claude._TMUX_UNSUPPORTED_FLAGS
+
+    def test_the_tmux_argv_carries_both_files(self, tmp_path):
+        custom, composed = self._files(tmp_path)
+        req = _req(
+            tmp_path,
+            allowed_tools=["Bash"],
+            custom_system_prompt_path=custom,
+            composed_system_prompt_path=composed,
+        )
+        flags = build_claude_cli_flags(
+            req, unsupported=tmux_claude._TMUX_UNSUPPORTED_FLAGS
+        )
+        assert flags[flags.index("--system-prompt-file") + 1] == str(custom)
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
+
+    def test_only_the_composed_file(self, tmp_path):
+        _, composed = self._files(tmp_path)
+        flags = build_claude_cli_flags(
+            _req(
+                tmp_path, allowed_tools=["Bash"], composed_system_prompt_path=composed
+            ),
+            unsupported=tmux_claude._TMUX_UNSUPPORTED_FLAGS,
+        )
+        assert "--system-prompt-file" not in flags
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
+
+    def test_neither_file(self, tmp_path):
+        flags = build_claude_cli_flags(
+            _req(tmp_path, allowed_tools=["Bash"]),
+            unsupported=tmux_claude._TMUX_UNSUPPORTED_FLAGS,
+        )
+        assert "--append-system-prompt-file" not in flags
+
+    def test_a_missing_composed_file_still_reaches_the_pane(self, tmp_path):
+        """Fail closed on this backend too: the CLI refuses to start rather
+        than running the task with no standing instructions."""
+        missing = tmp_path / "gone.txt"
+        flags = build_claude_cli_flags(
+            _req(tmp_path, allowed_tools=["Bash"], composed_system_prompt_path=missing),
+            unsupported=tmux_claude._TMUX_UNSUPPORTED_FLAGS,
+        )
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(missing)
+
+    def test_an_unsupported_append_flag_is_dropped_by_the_shared_helper(
+        self, tmp_path, caplog
+    ):
+        """The mechanism, exercised against a hand-built set rather than the
+        production one — so this stays a test of `_add`'s drop behaviour and
+        not a restatement of what production currently declares."""
+        claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
+        _, composed = self._files(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            flags = build_claude_cli_flags(
+                _req(
+                    tmp_path,
+                    allowed_tools=["Bash"],
+                    composed_system_prompt_path=composed,
+                ),
+                unsupported=frozenset({"--append-system-prompt-file"}),
+            )
+        assert "--append-system-prompt-file" not in flags
+        assert str(composed) not in flags
+        assert any("unsupported_flag" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------

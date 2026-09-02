@@ -2382,25 +2382,49 @@ class NativeBrain:
         rather than replacing it, and a configured path that does not exist
         contributes nothing at all. Naming the file in either case would have
         the record describe a prompt the run did not use.
+
+        Values are ``builtin``, ``composed`` and the operator file's absolute
+        path, joined with ``+`` in composition order — so ``builtin+composed``,
+        ``builtin+composed+/etc/istota/system-prompt.md``, ``composed`` for a
+        tool-less executor task, and ``empty`` for an unchanged direct
+        text-only call.
         """
         return "+".join(name for name, _ in self._system_prompt_parts(req)) or "empty"
 
     def _system_prompt_parts(self, req: BrainRequest) -> list[tuple[str, str]]:
         """Compose the native brain's system prompt.
 
-        Tool-bearing tasks (non-empty ``allowed_tools``) get the coding-guidance
-        block; a text-only invocation (empty ``allowed_tools``, e.g. the sleep
-        cycle) keeps an empty prompt — no behavioural change to that path. When
-        the turn-budget nudge is enabled the coding block also carries a
-        non-numeric "don't die mid-stream" pacing line (ISSUE-187 mechanism A;
-        compaction-safe since the system prompt lives outside ``ctx.messages``).
-        An operator's ``custom_system_prompt_path`` is appended after the base so
-        it still applies.
+        Three parts, in this order:
+
+        1. ``CODING_SYSTEM_PROMPT``, for tool-bearing tasks (non-empty
+           ``allowed_tools``). A text-only invocation (empty ``allowed_tools``,
+           e.g. the sleep cycle) skips it. When the turn-budget nudge is enabled
+           the coding block also carries a non-numeric "don't die mid-stream"
+           pacing line (ISSUE-187 mechanism A; compaction-safe since the system
+           prompt lives outside ``ctx.messages``).
+        2. ``composed_system_prompt_path`` — Istota's standing instructions,
+           written by the executor. Read with no ``exists()`` branch: it is
+           required input, so a file that has gone missing must raise here and
+           be converted into a failed ``BrainResult`` by ``_execute_sync``'s
+           catch-all, rather than leaving the task running with no persona, no
+           rules and no tool descriptions (ISSUE-375 by another route).
+        3. The operator's ``custom_system_prompt_path``, still last so its
+           existing final-override position on this backend is unchanged, and
+           still omitted when the configured file is absent.
+
+        Part 2 is deliberately *not* gated on ``allowed_tools``: an empty tool
+        list suppresses the coding block alone. A direct text-only caller is
+        unaffected because it supplies no composed path at all, while a future
+        tool-less executor task would still receive Istota's instructions.
 
         Returns ``(name, text)`` pairs so the ``context`` record can say what the
         prompt was made of without a second copy of these conditions deciding it
         — a checker with its own copy of the rule is free to disagree with the
-        thing it describes.
+        thing it describes. The composed part reports the stable label
+        ``composed`` rather than its path: unlike the operator file, that path is
+        task-specific (``task_<id>_system_prompt.txt`` under a per-user temp
+        directory), and the whole use of the recorded source is comparing one
+        run against another.
         """
         parts: list[tuple[str, str]] = []
         if req.allowed_tools:
@@ -2408,6 +2432,9 @@ class NativeBrain:
             if self._config.turn_budget_nudge and self._config.max_turns:
                 coding = f"{coding}\n\n- {_TURN_BUDGET_UPFRONT}"
             parts.append(("builtin", coding))
+        composed = req.composed_system_prompt_path
+        if composed is not None:
+            parts.append(("composed", Path(composed).read_text()))
         path = req.custom_system_prompt_path
         if path is not None and Path(path).exists():
             parts.append((str(path), Path(path).read_text()))

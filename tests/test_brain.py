@@ -114,6 +114,7 @@ class TestBrainRequestDefaults:
         assert req.sandbox_wrap is None
         assert req.result_file is None
         assert req.custom_system_prompt_path is None
+        assert req.composed_system_prompt_path is None
 
 
 class TestBrainResultDefaults:
@@ -209,6 +210,149 @@ class TestAdvisorFlag:
         )
         flags = build_claude_cli_flags(req)
         assert flags.index("--effort") < flags.index("--advisor")
+
+
+class TestComposedSystemPromptFlag:
+    """`--append-system-prompt-file` carries Istota's composed system half.
+
+    Not `--system-prompt-file`. That one *replaces* Claude Code's default
+    harness prompt, so using it for the composed half would silently discard the
+    harness on the default deployment, where no operator file is configured. The
+    two flags are independent on the pinned CLI: 2.1.241 rejects only
+    `--system-prompt` against `--system-prompt-file` and `--append-system-prompt`
+    against `--append-system-prompt-file`, so passing an operator file and a
+    composed file together is legal.
+
+    The composed path is *required* input created by the executor, so unlike
+    `custom_system_prompt_path` it gets no `exists()` gate: a file that has gone
+    missing must reach the CLI and fail the attempt (the pinned binary answers
+    `Error: Append system prompt file not found: <path>` and exits without
+    running), never be dropped quietly — a run with the user half alone is a
+    task with no persona, no rules and no tool descriptions, which is ISSUE-375
+    in a smaller frame.
+    """
+
+    def _req(self, tmp_path, *, custom=None, composed=None, streaming=False):
+        return BrainRequest(
+            prompt="hi",
+            allowed_tools=["Bash"],
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+            streaming=streaming,
+            custom_system_prompt_path=custom,
+            composed_system_prompt_path=composed,
+        )
+
+    def _files(self, tmp_path):
+        custom = tmp_path / "operator-system-prompt.md"
+        custom.write_text("operator override")
+        composed = tmp_path / "task_7_system_prompt.txt"
+        composed.write_text("You are Istota.")
+        return custom, composed
+
+    def test_neither_file_emits_neither_flag(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        flags = build_claude_cli_flags(self._req(tmp_path))
+        assert "--system-prompt-file" not in flags
+        assert "--append-system-prompt-file" not in flags
+
+    def test_only_the_operator_file_emits_only_the_replace_flag(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        custom, _ = self._files(tmp_path)
+        flags = build_claude_cli_flags(self._req(tmp_path, custom=custom))
+        assert flags[flags.index("--system-prompt-file") + 1] == str(custom)
+        assert "--append-system-prompt-file" not in flags
+
+    def test_only_the_composed_file_emits_only_the_append_flag(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        _, composed = self._files(tmp_path)
+        flags = build_claude_cli_flags(self._req(tmp_path, composed=composed))
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
+        assert "--system-prompt-file" not in flags
+
+    def test_both_files_each_appear_exactly_once(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        custom, composed = self._files(tmp_path)
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, custom=custom, composed=composed)
+        )
+        assert flags.count("--system-prompt-file") == 1
+        assert flags.count("--append-system-prompt-file") == 1
+        assert flags[flags.index("--system-prompt-file") + 1] == str(custom)
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
+        # The operator file's replace semantics come first; the composed block
+        # is appended beside it.
+        assert flags.index("--system-prompt-file") < flags.index(
+            "--append-system-prompt-file"
+        )
+
+    def test_a_missing_composed_file_still_emits_the_flag(self, tmp_path):
+        """Fail closed. The CLI opens the path and refuses to run."""
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        missing = tmp_path / "gone.txt"
+        assert not missing.exists()
+        flags = build_claude_cli_flags(self._req(tmp_path, composed=missing))
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(missing)
+
+    def test_a_missing_operator_file_is_still_omitted(self, tmp_path):
+        """The control for the case above: the optional file keeps its existing
+        `exists()` gate, so the two contracts stay visibly different."""
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        missing = tmp_path / "absent.md"
+        flags = build_claude_cli_flags(self._req(tmp_path, custom=missing))
+        assert "--system-prompt-file" not in flags
+
+    def test_a_text_only_call_still_carries_a_composed_file(self, tmp_path):
+        """`allowed_tools=[]` suppresses the tool flags, not the standing
+        instructions. A direct text-only caller is unaffected because it
+        supplies no composed path at all."""
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        _, composed = self._files(tmp_path)
+        req = self._req(tmp_path, composed=composed)
+        req.allowed_tools = []
+        flags = build_claude_cli_flags(req)
+        assert "--disallowedTools" not in flags
+        assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
+
+    def test_unsupported_drops_the_flag_and_warns(self, tmp_path, caplog):
+        """Exercised independently of the production tmux set, which keeps the
+        flag supported. This is the shared helper's own drop behaviour."""
+        import logging
+
+        from istota.brain import claude_code
+
+        claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
+        _, composed = self._files(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            flags = claude_code.build_claude_cli_flags(
+                self._req(tmp_path, composed=composed),
+                unsupported=frozenset({"--append-system-prompt-file"}),
+            )
+        assert "--append-system-prompt-file" not in flags
+        assert str(composed) not in flags
+        assert any("unsupported_flag" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_the_headless_argv_carries_both_flags(self, tmp_path, streaming):
+        custom, composed = self._files(tmp_path)
+        req = self._req(
+            tmp_path, custom=custom, composed=composed, streaming=streaming
+        )
+        cmd = ClaudeCodeBrain._build_command(req)
+        assert cmd[:3] == ["claude", "-p", "-"]
+        assert cmd[cmd.index("--append-system-prompt-file") + 1] == str(composed)
+        assert cmd[cmd.index("--system-prompt-file") + 1] == str(custom)
+        # The user half is still what goes on stdin: `-p -` reads the prompt
+        # from there, and neither half is concatenated onto the other.
+        assert req.prompt not in cmd
 
 
 class TestRootSkipPermissionsEnv:

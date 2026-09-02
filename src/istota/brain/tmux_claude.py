@@ -156,6 +156,16 @@ _USAGE_LIMIT_MARKERS = (
 # --system-prompt-file successfully, so the default gap set is empty. Populate
 # here (or override behavior via build_claude_cli_flags) if a CLI version starts
 # rejecting one.
+#
+# `--append-system-prompt-file` is deliberately *not* in here and must not be
+# added as a convenience. It carries Istota's composed standing instructions
+# (`BrainRequest.composed_system_prompt_path`), so dropping it on this backend
+# alone would run tmux tasks with no persona, no rules and no tool descriptions
+# while the headless path kept them. A measured parser rejection in the
+# interactive TUI is a release blocker, not a reason to omit them here. The
+# handler is present in the pinned 2.1.241 bundle, verified by grepping the
+# binary for its own `Append system prompt file not found:` error string rather
+# than by a `--version` probe, which exits zero on any unrecognised option.
 _TMUX_UNSUPPORTED_FLAGS: frozenset[str] = frozenset()
 
 # Per-process session-name counter (BrainRequest carries no task id by default).

@@ -256,6 +256,107 @@ class TestCodingSystemPrompt:
         assert sp.index("coding agent") < sp.index("Operator override.")
 
 
+class TestComposedSystemPrompt:
+    """The executor's composed standing instructions, as a system message.
+
+    `AgentContext.system_prompt` lives outside `ctx.messages`, so compaction
+    never reaches it — which is the whole point: index 0 of `messages` used to
+    hold Istota's identity, rules, tool descriptions and skill inventory, and
+    the first compaction replaced them with a model-written summary
+    (ISSUE-375).
+
+    The composed part is *not* gated on `allowed_tools`: an empty tool list
+    suppresses `CODING_SYSTEM_PROMPT` alone. A direct text-only caller (the
+    sleep cycle, health OCR) is unchanged because it supplies no composed path.
+
+    Ordering is built-in, composed, then operator, which preserves the operator
+    file's existing final-override position on this backend.
+    """
+
+    def _run(self, tmp_path, req):
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
+        )
+        result = _brain(provider).execute(req)
+        return result, provider
+
+    def _composed(self, tmp_path, text="ISTOTA-COMPOSED-SENTINEL"):
+        p = tmp_path / "task_4471_system_prompt.txt"
+        p.write_text(text)
+        return p
+
+    def test_composed_follows_the_coding_block(self, tmp_path):
+        composed = self._composed(tmp_path)
+        req = _req("do a thing", tmp_path, tools=["Read"])
+        req.composed_system_prompt_path = composed
+        _, provider = self._run(tmp_path, req)
+        sp = provider.calls[0]["system_prompt"]
+        assert "coding agent" in sp
+        assert "ISTOTA-COMPOSED-SENTINEL" in sp
+        assert sp.index("coding agent") < sp.index("ISTOTA-COMPOSED-SENTINEL")
+
+    def test_the_operator_file_still_comes_last(self, tmp_path):
+        composed = self._composed(tmp_path)
+        custom = tmp_path / "sys.md"
+        custom.write_text("Operator override.")
+        req = _req("do a thing", tmp_path, tools=["Read"])
+        req.composed_system_prompt_path = composed
+        req.custom_system_prompt_path = custom
+        _, provider = self._run(tmp_path, req)
+        sp = provider.calls[0]["system_prompt"]
+        assert sp.index("coding agent") < sp.index("ISTOTA-COMPOSED-SENTINEL")
+        assert sp.index("ISTOTA-COMPOSED-SENTINEL") < sp.index("Operator override.")
+        assert sp.rstrip().endswith("Operator override.")
+
+    def test_a_tool_less_task_still_gets_the_composed_block(self, tmp_path):
+        """`allowed_tools=[]` drops only the coding block."""
+        composed = self._composed(tmp_path)
+        req = _req("summarize", tmp_path, tools=[])
+        req.composed_system_prompt_path = composed
+        _, provider = self._run(tmp_path, req)
+        assert provider.calls[0]["system_prompt"] == "ISTOTA-COMPOSED-SENTINEL"
+
+    def test_a_direct_text_only_call_is_unchanged(self, tmp_path):
+        """The control: no composed path, so nothing new appears."""
+        _, provider = self._run(tmp_path, _req("summarize", tmp_path, tools=[]))
+        assert provider.calls[0]["system_prompt"] == ""
+
+    def test_the_composed_text_is_not_in_the_user_message(self, tmp_path):
+        """`req.prompt` is the user half and stays the initial user message."""
+        composed = self._composed(tmp_path)
+        req = _req("REQUEST-SENTINEL", tmp_path, tools=["Read"])
+        req.composed_system_prompt_path = composed
+        _, provider = self._run(tmp_path, req)
+        messages = provider.calls[0]["messages"]
+        rendered = str(messages)
+        assert "REQUEST-SENTINEL" in rendered
+        assert "ISTOTA-COMPOSED-SENTINEL" not in rendered
+
+    def test_a_missing_composed_file_fails_the_attempt(self, tmp_path):
+        """Required input. Silent omission would recreate ISSUE-375 under a
+        filesystem race or a cleanup bug, so the read is unguarded and the
+        brain's existing catch-all turns it into a failed result rather than a
+        crashed worker."""
+        req = _req("do a thing", tmp_path, tools=["Read"])
+        req.composed_system_prompt_path = tmp_path / "never-written.txt"
+        result, provider = self._run(tmp_path, req)
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert provider.calls == []
+
+    def test_a_missing_operator_file_is_still_tolerated(self, tmp_path):
+        """The control for the case above: the optional file keeps its
+        `exists()` gate, so an enabled-but-absent operator prompt is still an
+        omission rather than a new task failure."""
+        composed = self._composed(tmp_path)
+        req = _req("do a thing", tmp_path, tools=["Read"])
+        req.composed_system_prompt_path = composed
+        req.custom_system_prompt_path = tmp_path / "absent.md"
+        result, provider = self._run(tmp_path, req)
+        assert result.success is True
+        assert "ISTOTA-COMPOSED-SENTINEL" in provider.calls[0]["system_prompt"]
+
+
 class TestModelUsed:
     def test_reports_requested_model(self, tmp_path):
         provider = MockProvider(

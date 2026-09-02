@@ -974,6 +974,22 @@ def build_claude_cli_flags(
         _add("--advisor", req.advisor)
     if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():
         _add("--system-prompt-file", str(req.custom_system_prompt_path))
+    # Istota's composed standing instructions (`BrainRequest`'s three-channel
+    # note). *Append*, never replace: with no operator file configured — the
+    # default deployment — `--system-prompt-file` here would discard Claude
+    # Code's own default harness prompt. The two flags are independent on the
+    # pinned CLI, which enforces only `--system-prompt` against
+    # `--system-prompt-file` and `--append-system-prompt` against this one, so
+    # an operator file and the composed file may both be passed.
+    #
+    # No `exists()` gate, unlike the optional operator file above. This is
+    # required input: a path that no longer resolves must reach the CLI, which
+    # answers `Error: Append system prompt file not found: <path>` and exits
+    # without running. Dropping it instead would run the task with the user half
+    # alone — no persona, no rules, no tool descriptions — which is ISSUE-375
+    # reintroduced by a cleanup bug, and silently.
+    if req.composed_system_prompt_path is not None:
+        _add("--append-system-prompt-file", str(req.composed_system_prompt_path))
     return flags
 
 
