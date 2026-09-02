@@ -127,3 +127,39 @@ class TestFetchBasics:
         assert items[0].url == "https://blog.tumblr.com/post/42"
         assert items[0].author == "blog"
         assert items[0].published_at == "2026-07-16T10:00:00+00:00"
+
+
+class TestPayloadValidation:
+    """A response that is not a post collection must not read as "no posts".
+
+    ``.get("response", {}).get("posts", [])`` turned every malformed payload
+    into an empty list, which is indistinguishable from a blog that really has
+    no posts — so a broken API reported a clean poll, cleared ``last_error``
+    and kept the ordinary cadence (ISSUE-388). A valid empty list is a real
+    answer and still succeeds; the two lead to the same observation state and
+    to different error state.
+    """
+
+    def test_a_valid_empty_collection_succeeds(self, stub_get):
+        stub_get({"response": {"posts": []}})
+        assert tumblr_provider.fetch("blog", api_key="k") == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({}, id="response-missing"),
+            pytest.param({"response": None}, id="response-null"),
+            pytest.param({"response": []}, id="response-list"),
+            pytest.param({"response": "posts"}, id="response-scalar"),
+            pytest.param({"response": {}}, id="posts-missing"),
+            pytest.param({"response": {"posts": None}}, id="posts-null"),
+            pytest.param({"response": {"posts": {}}}, id="posts-object"),
+            pytest.param({"response": {"posts": 3}}, id="posts-scalar"),
+            pytest.param({"response": {"posts": "none"}}, id="posts-string"),
+            pytest.param([], id="payload-list"),
+        ],
+    )
+    def test_a_malformed_collection_is_rejected(self, stub_get, payload):
+        stub_get(payload)
+        with pytest.raises(ValueError):
+            tumblr_provider.fetch("blog", api_key="k")

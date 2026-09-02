@@ -23,6 +23,7 @@ istota-skill feeds remove --url URL                      # or --id N
 istota-skill feeds refresh [--id N]                      # Clear next_poll_at to mark feeds due now
 istota-skill feeds poll [--limit N]                      # Poll every feed whose next_poll_at is past
 istota-skill feeds run-scheduled [--limit N]             # Wrapper used by the scheduler module-job
+istota-skill feeds prune [--dry-run]                     # Apply the entry retention policy
 istota-skill feeds import-opml PATH                      # Import OPML; rewrites bridger URLs
 istota-skill feeds export-opml [--output PATH]           # Export as OPML 2.0
 ```
@@ -40,9 +41,13 @@ OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provide
 | Variable | Description |
 |---|---|
 | `FEEDS_USER` | Istota user id (set by the executor) |
-| `TUMBLR_API_KEY` | Tumblr API v2 key (optional). Can also be set via `extra.tumblr_api_key` on the user's `[[resources]] type = "feeds"` entry — context value wins, env var is a fallback for the migration window when the production deploy still has the key in the bridger systemd unit. |
+| `TUMBLR_API_KEY` | Tumblr API v2 key (optional). Stored per user in the encrypted secrets store under service `feeds`, key `tumblr_api_key` — set it with `istota secret ensure -u USER --service feeds --key tumblr_api_key --value ...` or from the feeds settings page. The manifest resolves it (`from: secret`) and the skill proxy injects it here, so this variable is what the skill reads; a `TUMBLR_API_KEY` in the daemon's own environment is the declared fallback when nothing is stored. |
 
 ## Notes
 
 - The per-user SQLite is the only source of truth. `add` / `remove` mutate it directly. Don't read or write `feeds.toml` — any pre-existing file gets imported once on first touch then stops being read.
-- `run-scheduled` runs every 15 minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has a `[[resources]] type = "feeds"` entry.
+- `run-scheduled` runs every five minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has the feeds module enabled.
+- `prune` runs once a day via the `_module.feeds.prune` job, seeded the same way, so you rarely need to call it by hand. It makes two passes, and they protect different things — don't describe them to a user as one rule:
+  - **Age.** Deletes read and removed entries whose age is past the retention window. Starred entries, unread entries, and anything the feed's most recent response still returned are never deleted here, and a feed is never taken below a floor of 50 entries (or below the configured maximum, when that is lower). Age counts from when the entry was added to this reader, not from when it was published.
+  - **Maximum.** Trims each feed to its configured maximum stored entries, keeping the most recently added ones. It does not read status at all, so an **unread entry can be deleted here** once the feed is over its maximum, ahead of a newer read one. Starred entries are the only exemption, and a feed's stars can never take its budget below 50 unstarred entries (or below the configured maximum, when that is lower) — a feed whose stars fill its maximum goes on storing new entries and stands above the maximum — by its stars, and by the unstarred entries that floor keeps. This pass honours no floor on total rows.
+- On a database upgraded to schema v8 both passes are deferred for 90 days; the envelope reports that as `entry_pruning_deferred_until` and every count is zero. `--dry-run` runs both passes and rolls them back, so it reports the counts a real run would delete and changes nothing.
