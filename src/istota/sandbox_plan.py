@@ -64,7 +64,22 @@ class Mount:
     ``tests/test_sandbox_argv_golden.py``'s ``symlinked_deployment_root`` case.
 
     A source that does not exist is carried on the plan and skipped by the
-    render, matching what the old ``_ro_bind`` closure did inline.
+    render rather than omitted here, because a projection needs to see an entry
+    whose source is momentarily absent. The cost is that the check and the
+    emission are no longer adjacent: everything the builder does — including
+    ``resolve_sandbox_cache_dir``'s ``mkdir`` — now happens before the first
+    ``exists()`` runs. One reachable spelling changes because of it, a REPL
+    ``--workspace`` naming a directory that ``mkdir`` is about to create, which
+    used to be skipped and is now bound. It is the calling user's own subtree
+    and the cache or repos bind covers the same path read-write a few entries
+    later, so the namespace is unchanged; the old argv merely reached that path
+    through the covering bind instead of its own.
+
+    The three flags below all default to the *permissive* answer, which is
+    worth knowing before setting one: an entry that forgets ``protected`` may
+    be shadowed by a late mask, and one that forgets ``always_deny`` is not
+    carried as a write-deny root. Both fail open. ``user_data`` fails closed —
+    a missing root is a missing capability.
     """
 
     mode: Mode
@@ -311,6 +326,17 @@ def build_mount_plan(
     deliberate asymmetry rather than an oversight: a REPL workspace the sandbox
     refuses must fail the task, while the native brain's roots degrade to the
     unvalidated shape and log.
+
+    **This is not a free function to call.** It is deliberately outside the
+    ``_bwrap_available()`` gate, because ``native_fs_roots`` has to build a
+    plan on the shapes with no bwrap — there the roots are the only confinement
+    there is — but it has two side effects a caller inherits.
+    ``resolve_sandbox_cache_dir`` creates the user's cache directory, and
+    ``plan_masks`` logs a refused mask at ERROR and a misplaced
+    ``module_data_dir`` at WARNING. Both were previously reachable only from a
+    host that was going to build a sandbox; a second consumer calling this per
+    task on macOS or the standalone install turns the first into a directory
+    nothing will mount and the second into the same two lines forever.
     """
     from . import config as istota_config
     from . import executor
@@ -745,6 +771,13 @@ def render_bwrap_argv(
     exist is skipped, because bwrap fails the whole namespace on a missing
     source and one cleanup race would otherwise fail every task instead of one.
 
+    Raises nothing for a plan :func:`build_mount_plan` produced — which is the
+    only kind there is on any product path, and the precondition the ``assert``
+    below states rather than assumes. A hand-built plan whose ``ro``/``rw``/
+    ``tmpfs`` entry carries no source is a programming error and is not made to
+    render as a silently dropped bind, since a dropped bind is exactly the
+    failure this module is here to make visible.
+
     The three things after the mounts are not plan data. The masks' companion
     ``--remount-ro`` and the ``--unshare-user`` / ``--disable-userns`` pair are
     properties of the host's bwrap binary rather than of this task, and the
@@ -762,7 +795,15 @@ def render_bwrap_argv(
         if entry.mode == "symlink":
             args.extend(["--symlink", str(entry.source), str(entry.dest)])
             continue
-        assert entry.source is not None
+        if entry.source is None:
+            # Not an assert: those vanish under `python -O`, and the next line
+            # would then be an AttributeError from inside a sandbox spawn. A
+            # sourceless bind is a programming error in whatever produced the
+            # plan, and it is raised rather than skipped because a dropped bind
+            # is the failure this module exists to make visible.
+            raise ValueError(
+                f"mount {entry.reason!r} has mode {entry.mode!r} and no source"
+            )
         if entry.mode == "tmpfs":
             args.extend(["--tmpfs", str(entry.source.resolve())])
             continue

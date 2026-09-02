@@ -2720,16 +2720,16 @@ class TestSessionLogContainment:
     def test_the_standalone_shape_refuses_the_mask_and_the_test_says_so(
         self, tmp_path, make_sandbox_task, caplog,
     ):
-        # Not a wish: `_mask_dir` logs an error and returns covered=False when
-        # the candidate contains the workspace and the temp dir, and on this
-        # shape it always does. Asserting the refusal is what stops a later
-        # change from quietly regressing the Ansible case into this one.
+        # Not a wish: `sandbox_plan.plan_masks` logs an error and reports the
+        # candidate refused when it contains the workspace and the temp dir,
+        # and on this shape it always does. Asserting the refusal is what stops
+        # a later change from quietly regressing the Ansible case into this one.
         import logging
 
         config = self._standalone_shape(tmp_path)
         log_dir = self._log_dir(config)
 
-        with caplog.at_level(logging.ERROR, logger="istota.executor"):
+        with caplog.at_level(logging.ERROR, logger="istota.sandbox_plan"):
             result = _run_bwrap(config, make_sandbox_task(), is_admin=False)
 
         assert not self._masked(result, log_dir)
