@@ -139,6 +139,24 @@ class TestMergeProxyEnv:
         assert merge_proxy_env(None, {}) is None
         assert merge_proxy_env({"A": "b"}, {}) == {"A": "b"}
 
+    def test_an_emptied_env_stays_empty_and_does_not_become_inheritance(self):
+        """`{}` and `None` are opposite instructions, and this is the layer
+        between the two places that say so.
+
+        `without_claude_runtime_env` can reduce a task env to `{}`, and both
+        `brain/native.py` and `claude_runtime_env.py` spend paragraphs on why
+        that must not collapse to `None` — `ToolEnv` reads `None` as "inherit
+        the parent environment", and the parent is where the credential came
+        from. The hello frame asserts it and `ToolEnv` asserts it; nothing
+        asserted it survived the round trip through here.
+        """
+        assert merge_proxy_env({}, {}) == {}
+        # And with a bridge present it gains the proxy and nothing else, rather
+        # than materializing the server's whole environment as `None` would.
+        assert merge_proxy_env({}, {"HTTPS_PROXY": "http://127.0.0.1:8080"}) == {
+            "HTTPS_PROXY": "http://127.0.0.1:8080"
+        }
+
     def test_none_plus_a_bridge_becomes_the_whole_process_environment(self):
         """The one case where `None` cannot survive: the children must get the
         proxy, and the only way to add a key to "inherit everything" is to

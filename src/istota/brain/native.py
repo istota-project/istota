@@ -2177,11 +2177,23 @@ class NativeBrain:
         what the *server process itself* carries. Stripping only this one leaves
         the token in the server's own environment inside the namespace, where a
         Bash child — same uid, same PID namespace — reads it out of
-        ``/proc/<server-pid>/environ``. It also reaches a child by a second
-        route: ``tool_server.merge_proxy_env`` answers a ``None``
-        ``subprocess_env`` with ``dict(os.environ)``, which is the server's whole
-        environment. A task always sends a mapping so it does not take that
-        branch, but a direct caller does.
+        ``/proc/<server-pid>/environ``.
+
+        **The empty case is the one to be careful with, and it is why neither
+        strip is followed by ``or None``.** ``ToolEnv`` reads ``None`` as
+        "inherit the parent environment" and ``create_subprocess_exec`` reads it
+        the same way, so collapsing a stripped ``{}`` back to ``None`` would not
+        merely undo this strip — it would hand the server, and through
+        ``merge_proxy_env`` the Bash child, the daemon's *whole* environment:
+        ``ISTOTA_SECRET_KEY``, the mail passwords, every forge token. That is a
+        much larger hole than the one this function closes, reached by writing
+        three characters that look like a tidy-up. No in-tree caller supplies a
+        falsy ``env`` today — every direct caller passes ``dict(os.environ)`` —
+        so the guard is against a future one rather than a live path.
+
+        ``merge_proxy_env`` is not a second route here: it returns its argument
+        untouched when the bridge set no proxy variable, and builds
+        ``dict(os.environ)`` only from a ``None`` it was already given.
 
         Stripping further up, where the env is built, looks tidier and is wrong:
         ``_run_fallback`` rebuilds the request with ``dataclasses.replace`` and
@@ -2253,7 +2265,15 @@ class NativeBrain:
             # redundant: this is what the server process itself carries, and a
             # Bash child reads its parent's `/proc/<pid>/environ` from inside the
             # same namespace at the same uid. See `_hello_payload`.
-            env=without_claude_runtime_env(req.env or None),
+            #
+            # `or {}`, never `or None`: `create_subprocess_exec` reads `None` as
+            # "inherit", and what it would inherit is the *daemon's* environment
+            # — `ISTOTA_SECRET_KEY`, the mail passwords, every forge token — put
+            # inside the namespace where the model's own Bash child can read it
+            # back off `/proc`. An empty task env therefore spawns an empty
+            # server env: the tools stop working, which is the correct direction
+            # to fail on a boundary, and no in-tree caller reaches it.
+            env=without_claude_runtime_env(req.env) if req.env else {},
             on_pid=req.on_pid,
             loop_abort=abort,
         )

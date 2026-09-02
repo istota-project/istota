@@ -14,7 +14,6 @@ import pytest
 
 from istota import db
 from istota.brain import BrainRequest, make_brain
-from istota.claude_runtime_env import without_claude_runtime_env
 from istota.brain._events import TextEvent
 from istota.brain.native import NativeBrain
 from istota.config import BrainConfig, NativeBrainConfig
@@ -1335,7 +1334,7 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
         self, tmp_path
     ):
         """End to end through a real server, which is where it actually matters."""
-        from tests.test_tool_server import _Server, _call, _text
+        from tests.test_tool_server import _call, _text
 
         req = self._req_with_env(
             tmp_path,
@@ -1343,11 +1342,13 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
             ISTOTA_USER_ID="alice",
         )
         brain = _brain(MockProvider([]))
-        async with _Server(
-            hello=brain._hello_payload(req),
-            env=without_claude_runtime_env(req.env),
-            loop_abort=asyncio.Event(),
-        ) as server:
+        # The production spawn, not a hand-assembled one: an earlier version of
+        # this test built the server itself and passed
+        # `env=without_claude_runtime_env(req.env)`, which made the test apply
+        # the fix it was meant to be checking. `_start_tool_server` is what the
+        # loop calls, so a strip removed from it now fails here.
+        server = await brain._start_tool_server(req, asyncio.Event())
+        try:
             result = await _call(
                 server,
                 "Bash",
@@ -1356,6 +1357,8 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
                                'uid=[${ISTOTA_USER_ID:-EMPTY}]"'
                 },
             )
+        finally:
+            await server.aclose()
         text = _text(result)
         assert "tok=[EMPTY]" in text
         assert "sk-ant-oat-fake-for-tests" not in text
@@ -1387,6 +1390,32 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
 
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in (seen["env"] or {})
         assert seen["env"]["PATH"]
+        # The other carrier, recorded on the same call: neither may hold it.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in (seen["hello"]["subprocess_env"] or {})
+
+    def test_an_empty_task_env_does_not_become_the_daemons(self, tmp_path):
+        """The spawn's `or {}`, which is a bigger hole than the one it guards.
+
+        `create_subprocess_exec(env=None)` inherits, and what it would inherit
+        is the daemon's environment — the secret key, the mail passwords, every
+        forge token — placed inside the namespace where the model's own Bash
+        child reads it back off `/proc`. Failing closed is the right direction
+        here, so an empty task env spawns an empty server env.
+        """
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = {}
+        seen = {}
+
+        async def _record(hello, **kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("stop here")
+
+        brain = _brain(MockProvider([]))
+        with patch("istota.session.tools.start_tool_server", _record):
+            with contextlib.suppress(Exception):
+                asyncio.run(brain._start_tool_server(req, asyncio.Event()))
+
+        assert seen["env"] == {}, "an empty task env must not spawn an inheriting server"
 
     def test_the_requests_own_env_is_left_alone(self, tmp_path):
         """The copy matters as much as the strip.

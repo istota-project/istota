@@ -165,7 +165,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `prompt: str` | Fully composed prompt (emissaries+persona+memory+skills+context+request) |
 | `allowed_tools: list[str]` | From `executor.build_allowed_tools()`. For ClaudeCodeBrain / TmuxClaudeBrain this is now effectively a **non-empty = give the model tools** signal (they run with `--dangerously-skip-permissions`, not an allowlist); the specific names only matter to NativeBrain, which filters its in-process tool set by them. Empty list = text-only invocation: ClaudeCodeBrain emits no tool flags and no skip-permissions (sleep-cycle path). |
 | `cwd: Path` | Subprocess working dir (`config.temp_dir`) |
-| `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled). The one thing that split does **not** take out is the Claude runtime credential, which `build_clean_env` sets for every task whatever brain runs it and which no skill manifest declares — `NativeBrain._build_tools` removes it on its own way into `ToolEnv.subprocess_env` (see `CLAUDE_RUNTIME_ENV_VARS` below), so the field as the two CLI brains read it still carries the token they authenticate with. Mutable and shared: `ClaudeCodeBrain` writes `IS_SANDBOX` / `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` onto this dict in place, and `_run_fallback` hands the same object to the fallback brain, so anything filtering it must copy. |
+| `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled). The one thing that split does **not** take out is the Claude runtime credential, which `build_clean_env` sets for every task whatever brain runs it and which no skill manifest declares — `NativeBrain` removes it on both its ways into the tool server — the `hello` frame and the spawn env (see `CLAUDE_RUNTIME_ENV_VARS` below), so the field as the two CLI brains read it still carries the token they authenticate with. Mutable and shared: `ClaudeCodeBrain` writes `IS_SANDBOX` / `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` onto this dict in place, and `_run_fallback` hands the same object to the fallback brain, so anything filtering it must copy. |
 | `timeout_seconds: int` | `config.scheduler.task_timeout_minutes * 60` |
 | `model: str` | `task.model` or `config.model`; brain default if empty |
 | `effort: str` | `task.effort` or `config.effort`; brain default if empty |
@@ -789,9 +789,13 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   ISSUE-389 describes for the mounted `~/.claude/.credentials.json`, by the
   other mechanism. `claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names what a
   task env carries only because the outer process is the `claude` CLI, and
-  `without_claude_runtime_env` takes it back out. **Two call sites, not one**:
-  `_build_tools`, for the tool subprocesses, and `execute_task`'s
-  `proxy_base_env`, which is what every host-side skill CLI gets — the model
+  `without_claude_runtime_env` takes it back out. **Three call sites, not one**:
+  `_hello_payload`, for what a Bash child is handed; `_start_tool_server`, for
+  what the tool-server process itself carries, since a Bash child runs at the
+  same uid in the same PID namespace and reads its parent's
+  `/proc/<pid>/environ` — so stripping only the frame leaves the token
+  reachable; and `execute_task`'s `proxy_base_env`, which is what every
+  host-side skill CLI gets — the model
   reaches those through the same Bash tool, they run unsandboxed as the daemon
   user, and none of them reads the variable or invokes the `claude` binary.
   Four things about the shape are deliberate. It is a **name list, not a

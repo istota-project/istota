@@ -5814,7 +5814,7 @@ def execute_task(
             # declared in no skill manifest, so neither `derive_credential_set`
             # nor `derive_proxy_only_set` takes it out of this snapshot, and the
             # model reaches every host-side skill CLI through the same Bash tool
-            # the strip in `NativeBrain._build_tools` just cleaned. No skill
+            # the strips in `NativeBrain` just cleaned. No skill
             # invokes the `claude` binary and none reads the variable, so it has
             # no reader here either — and unlike a tool subprocess these run
             # *unsandboxed as the daemon user*, which is the reason to be strict
