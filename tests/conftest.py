@@ -264,6 +264,36 @@ def db_conn(db_path):
 
 
 @pytest.fixture
+def fake_talk(db_path):
+    """A `FakeTalkClient` behind both of the `get_talk_client` bindings.
+
+    `get_talk_client` is imported at module level in two places —
+    `transport/talk/__init__.py` and `transport/talk/inbound.py` — so this
+    patches **both names**. Patching only the package one leaves the entire
+    poller and `_post_ack` talking to the real factory, which is a hole shaped
+    exactly like the bug the double exists to catch;
+    `tests/test_support_talk_double.py` has a control for it.
+
+    **Not autouse.** An autouse patch would change every existing test's
+    behaviour in one commit and make the conversion unreviewable.
+
+    Bound to the `db_path` fixture, which `make_config` also builds on
+    (`tmp_path / "test.db"`), so a test using both gets a double reading the
+    same database. A test whose database is elsewhere assigns
+    `fake_talk.db_path`; the binding lookup happens per call, so that takes
+    effect immediately.
+    """
+    from unittest.mock import patch
+
+    from .support.talk_double import FakeTalkClient
+
+    client = FakeTalkClient(db_path)
+    with patch("istota.transport.talk.get_talk_client", return_value=client), \
+         patch("istota.transport.talk.inbound.get_talk_client", return_value=client):
+        yield client
+
+
+@pytest.fixture
 def make_task():
     """Factory fixture that creates Task dataclass instances with defaults."""
     def _make_task(**overrides):
