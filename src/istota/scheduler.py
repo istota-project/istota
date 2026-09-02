@@ -5459,6 +5459,30 @@ def _run_sleep_cycles(config: Config) -> None:
         logger.error("Error running channel sleep cycles: %s", e)
 
 
+def _run_heartbeat_checks(config: Config) -> None:
+    """One heartbeat sweep, on a background thread with its own connection.
+
+    Called from both the daemon loop (spawned) and the one-shot
+    `run_scheduler` path (directly), so the two cannot drift — the precedent
+    `_run_email_poll` and `_run_sleep_cycles` set for the same pair.
+
+    Exceptions are contained by `_spawn_background_check` and logged as
+    `background_check_failed`; the try/except here is kept so the log names
+    heartbeats specifically, which is what an operator greps for, and so the
+    one-shot caller — which has no `_spawn_background_check` around it — is
+    covered too.
+    """
+    from .heartbeat import check_heartbeats
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            checked_users = check_heartbeats(conn, config)
+            if checked_users:
+                logger.debug("Checked heartbeats for %d user(s)", len(checked_users))
+    except Exception as e:
+        logger.error("Error checking heartbeats: %s", e)
+
+
 def _spawn_background_check(
     name: str,
     fn: Callable[[], object],
@@ -7445,15 +7469,10 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     except Exception as e:
         logger.error("Error polling TASKS.md files: %s", e)
 
-    # Check heartbeats
-    try:
-        from .heartbeat import check_heartbeats
-        with db.get_db(config.db_path) as conn:
-            checked_users = check_heartbeats(conn, config)
-            if checked_users:
-                logger.info("Checked heartbeats for %d user(s)", len(checked_users))
-    except Exception as e:
-        logger.error("Error checking heartbeats: %s", e)
+    # Check heartbeats. Through the same helper the daemon loop spawns, so the
+    # two cannot drift — the precedent `_run_email_poll` and `_run_sleep_cycles`
+    # set for exactly this pair of call sites.
+    _run_heartbeat_checks(config)
 
     # Process tasks
     while True:
@@ -8320,16 +8339,30 @@ def run_daemon(
             )
             last_pressure_sample = now
 
-        # Check heartbeats periodically
+        # Check heartbeats periodically.
+        #
+        # Backgrounded, like the sweeps above and for the reason
+        # `_spawn_background_check` documents: it blocked `pool.dispatch()` for
+        # its whole duration. That was fair while the six check types were
+        # cheap and stopped being fair when `self-check` grew into the whole
+        # doctor registry — process spawns, a socket per configured service and
+        # optionally a live model call, once per user with one configured.
+        #
+        # Taking it off the loop is only half of it, and the half that is easy
+        # to stop at. The sweep also held one write transaction for its whole
+        # length, which self-serialized harmlessly while it *was* the loop and
+        # becomes contention against the loop and the workers once it is not.
+        # `check_heartbeats` therefore commits per check; see the comment on
+        # that commit for what it buys besides.
+        #
+        # `overlap_expected` because the cadence is 60s and one sweep can
+        # legitimately exceed it, the same reason the email poll and the sleep
+        # cycles pass it.
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:
-            try:
-                from .heartbeat import check_heartbeats
-                with db.get_db(config.db_path) as conn:
-                    checked_users = check_heartbeats(conn, config)
-                    if checked_users:
-                        logger.debug("Checked heartbeats for %d user(s)", len(checked_users))
-            except Exception as e:
-                logger.error("Error checking heartbeats: %s", e)
+            _spawn_background_check(
+                "heartbeats", lambda: _run_heartbeat_checks(config),
+                background_checks, overlap_expected=True,
+            )
             last_heartbeat_check = now
 
         # Sleep out the rest of the base tick, re-dispatching in sub-tick slices

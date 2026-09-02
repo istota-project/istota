@@ -498,3 +498,142 @@ class TestDaemonLoopNotBlocked:
             release.set()
             sched.request_shutdown()
             t.join(timeout=10.0)
+
+
+# ---------------------------------------------------------------------------
+# _run_heartbeat_checks
+# ---------------------------------------------------------------------------
+
+
+class TestTheHeartbeatSweepIsOffTheLoop:
+    """The heartbeat sweep joined the list above, and for the same reason.
+
+    It ran inline in ``run_daemon``, inside ``with db.get_db(...)``. That was
+    fair while the six check types were cheap; ``self-check`` now renders the
+    whole doctor registry — process spawns, a socket per configured service,
+    optionally a live model call — once per user with one configured. Inline
+    that blocked ``pool.dispatch()`` for the whole of it *and* held the batch's
+    write transaction open across it, so every other writer in the daemon
+    queued behind a health check.
+    """
+
+    def test_the_sweep_opens_its_own_connection(self, tmp_path):
+        """Not handed the caller's, which is the deadlock this move avoids.
+
+        A second connection opened under a caller's held write lock waits out
+        the full busy timeout and then raises. The signature is the guard: a
+        future refactor that reintroduces a ``conn`` parameter has to come past
+        this test and read the reason.
+        """
+        import inspect
+
+        from istota.scheduler import _run_heartbeat_checks
+
+        params = list(inspect.signature(_run_heartbeat_checks).parameters)
+        assert params == ["config"], (
+            "the background heartbeat sweep must resolve its own connection; "
+            f"it now takes {params}"
+        )
+
+    def test_the_daemon_loop_does_not_call_check_heartbeats_inline(self):
+        """The regression this move exists to prevent.
+
+        Asserted against the source of ``run_daemon`` rather than by driving a
+        tick: the inline call and the backgrounded one produce identical
+        observable behaviour on a deployment with no heartbeats configured,
+        which is exactly what a test fixture looks like.
+        """
+        import inspect
+
+        from istota import scheduler
+
+        source = inspect.getsource(scheduler.run_daemon)
+        assert "check_heartbeats(" not in source, (
+            "run_daemon calls check_heartbeats directly again — it belongs on "
+            "a background thread via _spawn_background_check"
+        )
+        assert '"heartbeats"' in source, (
+            "run_daemon no longer spawns the heartbeat sweep at all"
+        )
+
+    def test_the_sweep_commits_per_check_not_once_at_the_end(self, tmp_path, monkeypatch):
+        """The half of the move that is easy to stop short of.
+
+        `get_db` is in legacy implicit-transaction mode, so the first state
+        write opens the daemon's single SQLite write transaction. With no
+        commit until the sweep ended, that transaction was held across every
+        remaining check — `_check_self`'s whole doctor registry among them —
+        and across `send_heartbeat_alert`, which opens its own connection to
+        the same database on the web and Talk legs. Self-serializing while the
+        sweep *was* the loop; lock contention once it is not.
+
+        Asserted by watching the connection, because the observable symptom is
+        a timing one: a test that merely ran the sweep would pass either way.
+        """
+        import istota.heartbeat as hb
+
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        cfg = Config(
+            db_path=path,
+            security=SecurityConfig(),
+            users={"alice": UserConfig()},
+        )
+
+        checks = [
+            hb.HeartbeatCheck(name=f"c{i}", type="file-watch", config={})
+            for i in range(3)
+        ]
+        monkeypatch.setattr(
+            hb, "load_heartbeat_config",
+            lambda config, user_id: (hb.HeartbeatSettings(), checks),
+        )
+        # Unhealthy, and suppressed rather than alerted. That path is the one
+        # carried by the *first* commit alone: the healthy branch has its own,
+        # and so does the alert branch, so a sweep of passing checks proves
+        # nothing about the write that opens the transaction. Verified by
+        # control — with only the first commit removed, a healthy-check version
+        # of this test still passes.
+        monkeypatch.setattr(
+            hb, "run_check",
+            lambda check, config, user_id: hb.CheckResult(
+                healthy=False, message="down",
+            ),
+        )
+        monkeypatch.setattr(hb, "should_alert", lambda *a, **kw: False)
+
+        commits_at_check: list[int] = []
+        real_run_check = hb.run_check
+
+        def counting_run_check(check, config, user_id):
+            # Every check but the first must start with no transaction open.
+            commits_at_check.append(conn.in_transaction)
+            return real_run_check(check, config, user_id)
+
+        monkeypatch.setattr(hb, "run_check", counting_run_check)
+
+        with db.get_db(path) as conn:
+            hb.check_heartbeats(conn, cfg)
+
+        assert commits_at_check == [False, False, False], (
+            "a check began with an open write transaction, so the previous "
+            "check's writes were still uncommitted: "
+            f"{commits_at_check}"
+        )
+
+    def test_a_raising_sweep_is_contained(self, tmp_path, caplog):
+        """One user's broken HEARTBEAT.md must not kill the thread silently."""
+        from istota.scheduler import _run_heartbeat_checks
+
+        cfg = Config(db_path=tmp_path / "istota.db", security=SecurityConfig())
+        with patch(
+            "istota.heartbeat.check_heartbeats", side_effect=RuntimeError("boom"),
+        ) as sweep:
+            _run_heartbeat_checks(cfg)  # must not raise
+
+        # Naming the exception, not just the log line: that line is what
+        # `_run_heartbeat_checks` logs for *any* failure, including one raised
+        # by `db.get_db` before the sweep is reached, so asserting on it alone
+        # cannot show that the patched error was what got contained.
+        assert sweep.called
+        assert "boom" in caplog.text

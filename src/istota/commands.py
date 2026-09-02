@@ -3,10 +3,8 @@
 import json
 import logging
 import re
-import shutil
 import signal
 import sqlite3
-import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -992,7 +990,9 @@ async def cmd_usage(ctx: CommandContext):
 
     # Both halves block — SQLite queries, and on a cache miss an HTTPS GET — and
     # this coroutine runs on the loop that polls every Talk conversation. Hence
-    # `to_thread` rather than `cmd_check`'s bare `subprocess.run`.
+    # `to_thread`. This comment used to name `cmd_check`'s bare
+    # `subprocess.run` as the counterexample; that handler now does both of
+    # these, so the precedent runs the other way.
     lines = await asyncio.to_thread(_usage_token_sections, config, user_id, is_admin)
 
     if is_admin:
@@ -1651,123 +1651,81 @@ def _format_skill_detail(meta, name, disabled, is_admin):
     return "\n".join(lines)
 
 
-@command("check", "Run Claude Code health check")
+@command("check", "Run a deployment health check")
 async def cmd_check(ctx: CommandContext):
-    config, conn = ctx.config, ctx.conn
-    user_id, conversation_token = ctx.user_id, ctx.conversation_token
-    from .executor import SandboxProfile, build_bwrap_cmd, build_model_cli_env
+    """The doctor registry, rendered into a room.
 
-    lines = ["**Health Check**", ""]
+    This used to be a hand-rolled copy of the same five probes
+    `heartbeat._check_self` ran, drifting from doctor's registry and from the
+    other copy. Both are gone; this selects and renders and asserts nothing of
+    its own. Deliberately not an alias for `istota doctor`, which has a
+    different audience: this posts into a room, must redact, and answers a
+    non-admin differently.
 
-    # 1. Claude binary
-    claude_path = shutil.which("claude")
-    if claude_path:
+    **A non-admin gets the verdict line, not the registry.** The command is
+    registered with no admin gate and must not grow one silently — a non-admin
+    asking whether the bot is healthy is a reasonable question with a one-line
+    answer. But the whole registry is a different thing from the five lines they
+    used to get: `runtime.subscription_usage` reports plan utilization, which
+    `cmd_usage` above deliberately withholds from a non-admin;
+    `config.skill_overlays` labels overlays by user id across users;
+    `developer.container` and `developer.repos_layout` describe other people's
+    trees. `redact` covers configured credential values, not cross-user facts.
+    An allowlist of non-admin-safe check names was the alternative and is worse:
+    a second list to keep in step with a registry that grows, and a check whose
+    detail widens later leaks with nothing going red. A count is a count.
+
+    **`live=True`, and `deep` deliberately not passed.** `live` restores the
+    execution test this command used to run inline. `deep` would add
+    `sandbox.masks` at 30 seconds on top, and neither surface has room:
+    the web chat client aborts the very POST that returns this result at
+    `SEND_TIMEOUT_MS` (30s) and withholds Retry for a `!`-prefixed body, and the
+    Talk path has no timeout but is worse — dispatch runs on the process-global
+    asyncio loop inside the poll batch's open write transaction, on the only
+    Talk poll thread. That loss is real and compensated:
+    `security.sandbox_effective` runs on the shallow path, answers the same
+    availability question from the warm memo at no cost, and is the line an
+    operator needs. An operator who wants the namespace probe itself runs
+    `istota doctor`, which has no surface timeout.
+
+    **The body is fenced.** `render_text` is aligned plain text; posted as
+    markdown its two-space indents collapse into one run-on paragraph and its
+    eight-space remedy lines become code blocks. A fence costs one line and
+    preserves the alignment, where a second renderer in `doctor.py` would be a
+    layout to keep in step with `render_text` for one caller.
+    """
+    import asyncio
+
+    from . import doctor
+
+    # Commit the caller's transaction before blocking, exactly as `cmd_usage`
+    # does above and for the same reason. The Talk poller wraps its whole batch
+    # in one transaction and hands `dispatch` that connection already mid-write,
+    # so holding its write lock across a multi-second probe stalls every other
+    # writer in the daemon — scheduler, workers, web — on their busy timeout.
+    # Nothing here writes, so there is no durability question, only the lock.
+    # This handler is the one `cmd_usage`'s comment named as the anti-pattern:
+    # a bare `subprocess.run` on the loop, at ~34 seconds, with the lock held.
+    if ctx.conn is not None:
         try:
-            result = subprocess.run(
-                ["claude", "--version"],
-                capture_output=True, text=True, timeout=2,
-            )
-            version = result.stdout.strip() or result.stderr.strip()
-            lines.append(f"- Claude binary: PASS ({version})")
-        except Exception as e:
-            lines.append(f"- Claude binary: PASS (found at {claude_path}, version check failed: {e})")
-    else:
-        lines.append("- Claude binary: **FAIL** (not found in PATH)")
+            ctx.conn.commit()
+        except sqlite3.Error:
+            logger.debug("!check could not commit the caller's transaction", exc_info=True)
 
-    # 2. Sandbox (bwrap)
-    if config.security.sandbox_enabled:
-        bwrap_path = shutil.which("bwrap")
-        if bwrap_path:
-            try:
-                result = subprocess.run(
-                    ["bwrap", "--version"],
-                    capture_output=True, text=True, timeout=2,
-                )
-                version = result.stdout.strip() or result.stderr.strip()
-                lines.append(f"- Sandbox (bwrap): PASS ({version})")
-            except Exception as e:
-                lines.append(f"- Sandbox (bwrap): **FAIL** (found but version check failed: {e})")
-        else:
-            lines.append("- Sandbox (bwrap): **FAIL** (not found in PATH)")
-    else:
-        lines.append("- Sandbox: skipped (not enabled)")
+    config = ctx.config
 
-    # 3. DB health
-    try:
-        row = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
-        lines.append(f"- Database: PASS ({row[0]} total tasks)")
-    except Exception as e:
-        lines.append(f"- Database: **FAIL** ({e})")
+    if not config.is_admin(ctx.user_id):
+        results = await asyncio.to_thread(doctor.run_checks, config)
+        healthy, summary = doctor.verdict(results)
+        return f"**Health Check**\n\n{'OK' if healthy else 'PROBLEMS'} — {summary}"
 
-    # 4. Recent task stats (last hour)
-    try:
-        stats = conn.execute(
-            """
-            SELECT
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-            FROM tasks
-            WHERE created_at > datetime('now', '-1 hour')
-            """,
-        ).fetchone()
-        completed = stats[0] or 0
-        failed = stats[1] or 0
-        stat_line = f"- Recent tasks (1h): {completed} completed, {failed} failed"
-        if failed > 0 and failed >= completed:
-            stat_line += " **[warning: high failure rate]**"
-        lines.append(stat_line)
-    except Exception as e:
-        lines.append(f"- Recent tasks: **FAIL** ({e})")
+    def _run():
+        results = doctor.run_checks(config, live=True)
+        # `render_text` redacts internally through the `secrets` it is handed,
+        # so this must not also call `redact` — that would double-scrub.
+        return doctor.render_text(results, secrets=doctor.config_secrets(config))
 
-    # 5. Claude execution check (actual invocation)
-    lines.append("")
-    lines.append("**Execution test:**")
-    try:
-        cmd = [
-            "claude", "-p", "Run: echo healthcheck-ok",
-            "--allowedTools", "Bash",
-            "--output-format", "text",
-        ]
-
-        env = build_model_cli_env(config)
-
-        # Wrap in sandbox if enabled
-        if config.security.sandbox_enabled:
-            fake_task = db.Task(
-                id=0, status="running", source_type="cli",
-                user_id=user_id, prompt="healthcheck",
-                conversation_token=conversation_token,
-            )
-            user_resources = db.get_user_resources(conn, user_id)
-            user_temp = config.temp_dir / user_id
-            user_temp.mkdir(parents=True, exist_ok=True)
-            is_admin = config.is_admin(user_id)
-            # CLAUDE: this probe runs the `claude` CLI itself.
-            cmd = build_bwrap_cmd(
-                cmd, config, fake_task, is_admin, user_resources, user_temp,
-                profile=SandboxProfile.CLAUDE,
-            )
-
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, env=env,
-        )
-        output = result.stdout.strip()
-        if "healthcheck-ok" in output:
-            lines.append("- Claude + Bash: PASS")
-        else:
-            stderr_preview = (result.stderr.strip()[:200]) if result.stderr else ""
-            stdout_preview = output[:200] if output else "(empty)"
-            lines.append("- Claude + Bash: **FAIL** (expected 'healthcheck-ok')")
-            if stderr_preview:
-                lines.append(f"  stderr: {stderr_preview}")
-            else:
-                lines.append(f"  stdout: {stdout_preview}")
-    except subprocess.TimeoutExpired:
-        lines.append("- Claude + Bash: **FAIL** (timed out after 30s)")
-    except Exception as e:
-        lines.append(f"- Claude + Bash: **FAIL** ({e})")
-
-    return "\n".join(lines)
+    return "**Health Check**\n\n```\n" + await asyncio.to_thread(_run) + "\n```"
 
 
 # =============================================================================

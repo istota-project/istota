@@ -9,9 +9,16 @@ what the runtime was — and none of them was a Python defect.
 
 This module writes those assumptions down. Each check answers one question
 about the host, returns a :class:`CheckResult`, and never raises. It runs at
-daemon start-up, on a scheduler interval, from ``istota doctor``, and from the
-admin dashboard. It is also the oracle the image and smoke test tiers reuse
-instead of hand-writing assertions that drift from the code.
+daemon start-up, on a scheduler interval, from ``istota doctor``, from the admin
+dashboard, from ``!check`` and from the ``self-check`` heartbeat. It is also the
+oracle the image and smoke test tiers reuse instead of hand-writing assertions
+that drift from the code.
+
+The last two are recent. ``commands.cmd_check`` and ``heartbeat._check_self``
+each carried a near-verbatim copy of the other — the same five probes in the
+same order, about 180 duplicated lines — and both had drifted from this registry
+and from each other. ``tests/test_doctor.py::test_no_hand_rolled_health_probe``
+is what stops them growing back.
 
 Two constraints shape the design and are easy to violate by accident:
 
@@ -75,6 +82,12 @@ PROBE_TIMEOUT = 10
 # The deep sandbox probe spawns bubblewrap around a shell. Bounded separately
 # and more generously, and a timeout is reported as FAIL rather than hanging.
 DEEP_TIMEOUT = 30
+
+# How long the live model probe gets. The same 30s both hand-rolled health
+# probes used, kept as its own name rather than borrowing DEEP_TIMEOUT: that
+# one is the deep phase's budget and `web_app._doctor_deep_timeout` does
+# arithmetic on it, so sharing the constant would couple two unrelated waits.
+MODEL_PROBE_TIMEOUT = 30
 
 # Below this length a configured "credential" is a placeholder or a mode string,
 # not something worth scanning rendered output for.
@@ -1125,6 +1138,313 @@ def _setting_float(settings: object, field: str, default: float) -> float:
     return as_float if math.isfinite(as_float) else default
 
 
+#: The last hour's task outcomes. Lifted verbatim off the two hand-rolled
+#: health probes this check replaces, so the answer does not change with the
+#: source of truth.
+_RECENT_TASK_OUTCOMES_SQL = """
+    SELECT SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END)
+    FROM tasks
+    WHERE created_at > datetime('now', '-1 hour')
+"""
+
+
+def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
+    """Are the last hour's tasks mostly failing?
+
+    The query and the ``failed > 0 and failed >= completed`` predicate both come
+    verbatim off ``heartbeat._check_self`` and ``commands.cmd_check``, which ran
+    the same SQL and compared it the same way.
+
+    ``WARN``, never ``FAIL``, on the rate itself: a failure rate is a symptom,
+    and a check that failed the daemon's start-up report because one task failed
+    an hour ago is noise on a path an operator has to be able to trust. ``FAIL``
+    is for the database not answering the question at all — which is also the
+    "does the schema exist" half of the old probe, and a gap
+    :func:`check_framework_db` leaves open: ``PRAGMA quick_check`` never reads
+    ``tasks``, so a database with no schema passes it and a missing table
+    surfaces here.
+    """
+    import sqlite3
+
+    name = "runtime.task_failure_rate"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        # `check_framework_db` already reports the absence and owns its remedy.
+        return CheckResult(name, SKIP, f"{db_path} does not exist")
+    try:
+        # Read-only via the URI form, for `check_framework_db`'s reason: a
+        # read-write open of a WAL database materializes the `-wal` / `-shm`
+        # sidecars, so `sudo istota doctor` against a stopped daemon would leave
+        # root-owned files the daemon's own user then cannot open.
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return CheckResult(
+            name,
+            FAIL,
+            f"{db_path} could not be opened: {exc}",
+            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+        )
+    try:
+        row = conn.execute(_RECENT_TASK_OUTCOMES_SQL).fetchone()
+    except sqlite3.OperationalError as exc:
+        # A missing or renamed table, which is the half `check_framework_db`
+        # cannot see: `quick_check` never reads `tasks`.
+        return CheckResult(
+            name,
+            FAIL,
+            f"{db_path}: the tasks table could not be queried: {exc}",
+            remedy="Run `istota init` to create or migrate the framework schema.",
+        )
+    except sqlite3.Error as exc:
+        # Corruption, not a schema gap. `connect` under the URI form opens
+        # lazily, so a file that is not a database — or a torn restore —
+        # surfaces here rather than above, and `istota init` is the wrong
+        # advice for it.
+        return CheckResult(
+            name,
+            FAIL,
+            f"{db_path} could not be read: {exc}",
+            remedy="Restore the database from a snapshot (`python -m istota.db_restore`).",
+        )
+    finally:
+        conn.close()
+
+    # `SUM` over an empty window is NULL, not 0, and an idle deployment is the
+    # common case rather than a corner. Both copies coalesce before comparing.
+    completed = (row[0] if row else 0) or 0
+    failed = (row[1] if row else 0) or 0
+    detail = f"last hour: {completed} completed, {failed} failed"
+    if failed > 0 and failed >= completed:
+        return CheckResult(
+            name,
+            WARN,
+            detail,
+            remedy="Inspect the failures: `istota list --status failed`.",
+        )
+    return CheckResult(name, OK, detail)
+
+
+#: What the live probe asks the model to echo back through its Bash tool. The
+#: same marker both hand-rolled probes used.
+_MODEL_PROBE_MARKER = "healthcheck-ok"
+
+
+def _read_user_resources(config: "Config", user_id: str) -> list:
+    """The user's resource rows, for the probe's sandbox plan. Never raises.
+
+    Read-only through the URI form rather than through ``db.get_db``, which
+    connects read-write and commits on exit: on a WAL database that
+    materializes the ``-wal`` / ``-shm`` sidecars, and ``sudo istota doctor``
+    against a stopped daemon would leave them owned by root. That is
+    :func:`check_framework_db`'s rule, and a check reached from the same CLI
+    does not get an exemption from it for being a port of daemon-side code.
+
+    An empty list on any failure only narrows the mounts the probe's namespace
+    gets; a check about the model must not fail on the resource table.
+    """
+    import sqlite3
+
+    from . import db
+
+    try:
+        conn = sqlite3.connect(f"file:{Path(config.db_path)}?mode=ro", uri=True)
+    except Exception:  # noqa: BLE001 - deliberate: doctor never raises
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        return db.get_user_resources(conn, user_id)
+    except Exception:  # noqa: BLE001 - deliberate: doctor never raises
+        return []
+    finally:
+        conn.close()
+
+
+def _probe_user(config: "Config") -> str:
+    """The user a deployment-level probe runs as, or ``""`` for none.
+
+    An admin who is also a configured user, else the first configured user,
+    else a sole admin. Alphabetically first at each step rather than
+    insertion-ordered, so the answer does not depend on how the config happened
+    to be assembled.
+
+    **An admin id is not necessarily a user.** ``admin_users`` is read from
+    ``/etc/istota/admins`` by ``load_admin_users`` and has no relationship to
+    ``config.users``, so an admin with no ``UserConfig`` behind it gets a
+    namespace built around a workspace that does not exist — a failure about
+    the deployment's user list wearing a model-failure label. That is why the
+    intersection is preferred over either list, and why "several admins" does
+    not fall straight through to an arbitrary user: it takes an admin from
+    among the configured ones first, so the probe runs in the sandbox shape the
+    operator asked about. An empty ``admin_users`` means *everyone* is admin
+    (:meth:`Config.is_admin`) and so names nobody in particular, which is why it
+    falls through rather than picking.
+
+    Deliberately not :attr:`Config.local_user_id`, which puts ``users`` ahead of
+    ``admin_users`` because it answers a different question — the sole user of
+    the no-auth standalone shape, where there is one by construction.
+
+    A narrowing from the two probes this replaces, which ran as the invoking
+    user and as the heartbeat check's owner respectively. Deliberate, and not a
+    knob to restore: a health probe answers a question about the deployment, and
+    neither caller's behaviour depended on which user the echo ran as — both
+    only read whether the marker came back.
+    """
+    admins = set(getattr(config, "admin_users", None) or ())
+    users = sorted(getattr(config, "users", None) or ())
+    configured_admins = [user_id for user_id in users if user_id in admins]
+    if configured_admins:
+        return configured_admins[0]
+    if users:
+        return users[0]
+    sole_admin = sorted(admins)
+    return sole_admin[0] if len(sole_admin) == 1 else ""
+
+
+def check_model_execution(config: "Config", probe: bool) -> CheckResult:
+    """The model answers: ``claude -p`` echoes a marker back through Bash.
+
+    The one member of :data:`LIVE_CHECKS`. It reaches a model and therefore
+    costs money, so no caller gets it without naming the axis. It honours
+    ``probe`` as well: ``probe=False`` ``SKIP``s whatever ``live`` says, because
+    the no-spawn rule at the top of this module is unconditional and this is the
+    most expensive possible way to break it.
+
+    Lifted off ``heartbeat._check_self`` and ``commands.cmd_check``, with two
+    corrections. It gates the sandbox wrap on
+    :func:`executor.effective_sandboxing` rather than on
+    ``security.sandbox_enabled``: on the shipped Docker stack the flag is true
+    and no namespace can be created, so the copies' spelling built a wrap that
+    failed for a reason having nothing to do with the model. And it ``SKIP``s on
+    a brain that runs no CLI, on :func:`check_model_cli`'s own predicate — both
+    copies exec ``claude`` unconditionally, so on a ``native`` deployment (which
+    is what ``docker/.env`` ships) they tested a binary nothing uses.
+
+    One property of the FAIL detail is worth stating rather than assuming. It
+    quotes a bounded excerpt of the CLI's own stderr, which is what makes the
+    finding actionable and is what ``commands.cmd_check`` already printed. The
+    redaction pass behind :func:`config_secrets` scrubs values it can find in
+    the loaded ``Config``, and the credentials this particular call carries are
+    not among them — ``CLAUDE_CODE_OAUTH_TOKEN`` comes from the daemon's own
+    environment, as do the proxy and TLS names :func:`build_model_cli_env`
+    passes through. So the excerpt is safe because the CLI does not print its
+    own credential, not because anything here checks. If that stops being true,
+    classify the failure instead of quoting it, the way
+    ``security.devbox_netfilter`` does with ``iptables``.
+    """
+    name = "runtime.model_execution"
+    if not probe:
+        return CheckResult(
+            name, SKIP, "probing is disabled; the model was not invoked"
+        )
+    kind = getattr(config.brain, "kind", "claude_code")
+    if kind not in ("claude_code", "tmux_claude"):
+        return CheckResult(
+            name,
+            SKIP,
+            f"brain.kind = {kind!r} runs the agent loop in-process (native); no CLI to exercise",
+        )
+    user_id = _probe_user(config)
+    if not user_id:
+        return CheckResult(
+            name, SKIP, "no user to run a probe as (no single admin, no configured user)"
+        )
+
+    from . import db
+    from .executor import (
+        SandboxProfile,
+        build_bwrap_cmd,
+        build_model_cli_env,
+        effective_sandboxing,
+    )
+
+    cmd = [
+        "claude",
+        "-p",
+        f"Run: echo {_MODEL_PROBE_MARKER}",
+        "--allowedTools",
+        "Bash",
+        "--output-format",
+        "text",
+    ]
+    try:
+        env = build_model_cli_env(config)
+        if effective_sandboxing(config):
+            # Both probes this replaces created this directory. This one does
+            # not: doctor is a diagnostic and its entry points include an
+            # operator shell, so a `sudo istota doctor` would leave a
+            # root-owned `{temp_dir}/{user_id}` that every later task for that
+            # user then binds read-write and cannot write to — the same
+            # ownership hazard `check_framework_db` opens read-only to avoid,
+            # and worse, because it persists. A directory the daemon has not
+            # made yet means no task has run as this user, which is a fact
+            # worth reporting rather than papering over.
+            user_temp = Path(config.temp_dir) / user_id
+            if not user_temp.is_dir():
+                return CheckResult(
+                    name,
+                    SKIP,
+                    f"the sandbox wrap needs {user_temp}, which the daemon has not created yet",
+                )
+            fake_task = db.Task(
+                id=0,
+                status="running",
+                source_type="cli",
+                user_id=user_id,
+                prompt="healthcheck",
+                conversation_token="",
+            )
+            user_resources = _read_user_resources(config, user_id)
+            # CLAUDE: the command being wrapped *is* the `claude` CLI, so it
+            # needs its own binary, its credential and its state directory.
+            cmd = build_bwrap_cmd(
+                cmd,
+                config,
+                fake_task,
+                config.is_admin(user_id),
+                user_resources,
+                user_temp,
+                profile=SandboxProfile.CLAUDE,
+            )
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=MODEL_PROBE_TIMEOUT, env=env
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            name,
+            FAIL,
+            f"`claude -p` timed out after {MODEL_PROBE_TIMEOUT}s (as {user_id})",
+            remedy="Check the model credential and network egress, then retry.",
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberate: doctor never raises
+        return CheckResult(
+            name,
+            FAIL,
+            f"`claude -p` could not be run (as {user_id}): {type(exc).__name__}: {exc}",
+            remedy="Check the model credential and network egress, then retry.",
+        )
+
+    if _MODEL_PROBE_MARKER in (result.stdout or ""):
+        return CheckResult(
+            name, OK, f"`claude -p` echoed {_MODEL_PROBE_MARKER!r} through Bash (as {user_id})"
+        )
+    observed = (
+        _probe_output_line(result.stderr) or _probe_output_line(result.stdout) or "(no output)"
+    )
+    return CheckResult(
+        name,
+        FAIL,
+        f"`claude -p` exited {result.returncode} without {_MODEL_PROBE_MARKER!r} "
+        f"(as {user_id}): {observed}",
+        remedy="Check the model credential and network egress, then retry.",
+    )
+
+
+def _probe_output_line(text: str | None, limit: int = 160) -> str:
+    """One capped line, for a subprocess stream quoted into a ``detail``."""
+    return " ".join((text or "").split())[:limit]
+
+
 # ---------------------------------------------------------------------------
 # security.*
 # ---------------------------------------------------------------------------
@@ -1351,6 +1671,138 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
             "credentials are injected per call, or turn the sandbox off if this "
             "is a trusted single-user install."
         ),
+    )
+
+
+# The one repair line for a deployment that asked for a sandbox and did not get
+# one. It names both hosts because an operator meets this on either and the fix
+# differs: a container needs the two `security_opt` settings the shipped
+# `docker/docker-compose.yml` does not grant, a bare-metal host needs
+# unprivileged user namespaces. A remedy naming one sends half its readers to
+# the wrong file.
+_SANDBOX_EFFECTIVE_REMEDY = (
+    "On Docker, grant the istota service both seccomp:unconfined and "
+    "systempaths=unconfined (security_opt) — bubblewrap needs the first to "
+    "create the namespace and the second to mount a procfs inside it. On a "
+    "host, allow unprivileged user namespaces "
+    "(sysctl kernel.unprivileged_userns_clone=1) and install a working "
+    "bubblewrap. Or set [security] sandbox_enabled = false to say the "
+    "deployment is deliberately unconfined."
+)
+
+
+def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
+    """Whether the sandbox the operator asked for is actually in force.
+
+    ``runtime.bwrap`` answers whether bubblewrap is installed and runnable, and
+    that is all it answers. On the shipped Docker stack the binary is present
+    and runs, ``sandbox_enabled`` reads true, and every task still runs with the
+    daemon's own filesystem access, because ``docker-compose.yml`` grants
+    neither ``seccomp:unconfined`` nor ``systempaths=unconfined`` and the
+    namespace probe fails (ISSUE-381). Both hand-rolled health probes report
+    "Sandbox (bwrap): PASS" on exactly that deployment, and so did every doctor
+    surface before this check.
+
+    **A check of its own rather than a capability arm on ``check_bwrap``, and
+    the reason is scope.** "Is bubblewrap installed and runnable" is a property
+    of the *image*; "can this host create a namespace" is a property of the
+    *deployment* — the container's ``security_opt``, the host's sysctl. Folding
+    the second into the first would fail every correct image:
+    ``tests/image/test_istota_image.py::TestGroupATheDoctorUmbrella::test_no_check_fails``
+    runs ``istota doctor --json --scope image`` inside a bare ``docker run``
+    with no ``security_opt``, ``cmd_doctor`` passes ``probe=True``
+    unconditionally, and ``render-config.sh`` defaults ``sandbox_enabled``
+    true. ``DEPLOYMENT`` scope is filtered out before invocation, so the image
+    tier never reaches this, and an operator running the whole registry gets
+    both lines with the remedy on the one that has a repair.
+
+    **Three states, not two**, following ``_session_log_sandbox_availability``
+    and ``_sandbox_in_force_clause``. Under ``probe=False`` the answer would
+    cost a spawn, so it comes from ``effective_sandboxing_if_known`` — warm in
+    the daemon, which probes at start-up — and a genuinely cold memo is
+    reported as unestablished rather than as either answer. A boundary check
+    must not pass on a question it could not settle, and must not assert an
+    exposure it did not observe.
+
+    Not in ``DEEP_CHECKS``: ``effective_sandboxing`` memoizes its probe and the
+    daemon has already paid for it during prompt assembly, so inside the daemon
+    this costs nothing. Its consumers today are the four that run the registry
+    — ``cli.cmd_doctor``, the scheduler's start-up report and hourly sweep, and
+    the admin Health pane. Being free is also what will let a surface on a
+    per-user cadence afford it, where ``sandbox.masks`` — which builds a real
+    namespace — could not.
+
+    **On the shipped Docker stack the FAIL is permanent rather than drift**, and
+    that is accepted rather than overlooked. ``scheduler.run_startup_checks``
+    alerts on every failure unconditionally, where the hourly sweep alerts only
+    on a transition, so that deployment gets one alert per daemon start until it
+    grants the two settings or turns the sandbox off. Reporting a real
+    unconfined deployment quietly would be the ISSUE-381 defect with a flag on
+    it; the CHANGELOG says so where an operator meets it.
+
+    ``SKIP`` when ``sandbox_enabled`` is false: the operator turned it off and
+    knows, and ``check_bwrap`` skips on the same setting.
+    """
+    name = "security.sandbox_effective"
+    if not getattr(config.security, "sandbox_enabled", False):
+        return CheckResult(
+            name,
+            SKIP,
+            (
+                "[security] sandbox_enabled = false; the deployment is "
+                "deliberately unconfined, so there is nothing to be in force"
+            ),
+        )
+
+    unestablished = CheckResult(
+        name,
+        WARN,
+        (
+            "[security] sandbox_enabled is set but whether bubblewrap can "
+            "create a namespace here was not established on this run, so "
+            "whether tasks are confined is unknown"
+        ),
+        remedy=(
+            "Run `istota doctor`, which probes, to settle it. "
+            + _SANDBOX_EFFECTIVE_REMEDY
+        ),
+    )
+
+    try:
+        from .executor import effective_sandboxing, effective_sandboxing_if_known
+
+        # `effective_sandboxing` consults the bwrap capability probe, which
+        # spawns. `probe=False` forbids that, so read the memo instead.
+        effective = (
+            effective_sandboxing(config) if probe
+            else effective_sandboxing_if_known(config)
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic must not raise
+        logger.debug("sandbox effective: availability lookup failed", exc_info=True)
+        return unestablished
+
+    if effective is None:
+        return unestablished
+    if not effective:
+        return CheckResult(
+            name,
+            FAIL,
+            (
+                "[security] sandbox_enabled is set but a bubblewrap namespace "
+                "could not be created here, so every task runs unsandboxed "
+                "with the daemon's own filesystem access"
+            ),
+            remedy=_SANDBOX_EFFECTIVE_REMEDY,
+        )
+    # Hedged to what was actually observed, like the two branches above it.
+    # `effective_sandboxing` is the flag and a process-memoized capability
+    # probe, which may have run some time ago; "tasks run sandboxed" would be
+    # asserting a live property from a cached one, and this is the line an
+    # operator quotes back.
+    return CheckResult(
+        name,
+        OK,
+        "bubblewrap can create a namespace here, so tasks are confined by the sandbox",
     )
 
 
@@ -4142,11 +4594,14 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.model_cli", check_model_cli),
     ("runtime.tmux", check_tmux),
     ("runtime.framework_db", check_framework_db),
+    ("runtime.task_failure_rate", check_task_failure_rate),
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.subscription_usage", check_subscription_usage),
+    ("runtime.model_execution", check_model_execution),
     ("security.skill_proxy", check_skill_proxy),
+    ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
@@ -4169,6 +4624,18 @@ CHECKS: tuple[tuple[str, Check], ...] = (
 # name to function and stays readable as one.
 DEEP_CHECKS = frozenset({"sandbox.masks"})
 
+LIVE_CHECKS = frozenset({"runtime.model_execution"})
+"""Checks that reach a model, and therefore cost money.
+
+Separate from ``DEEP_CHECKS``, which means "spawns a namespace". The two axes
+look alike and are not: ``sandbox.masks`` is free and slow, this is billed and
+slow, and no caller wants them selected by the same flag. ``web_app``'s deep
+phase in particular runs every ``DEEP_CHECKS`` member under a budget sized for
+one 30s check, and would bill a model call every time an admin opened the Health
+pane. The vocabulary matches the ``live`` pytest marker, which draws the same
+line for the same reason.
+"""
+
 # Each check's scope, so `scope=` can select *before* invoking. Filtering the
 # results afterwards would mean `--scope image` in a volume-less `docker run`
 # still opened the framework DB and stat'd a mount that isn't there — paying for
@@ -4181,6 +4648,9 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.model_cli": IMAGE,
     "runtime.tmux": IMAGE,
     "runtime.framework_db": DEPLOYMENT,
+    # Deployment, not image: it queries the `tasks` table of an install's own
+    # database, which a bare `docker run` has none of.
+    "runtime.task_failure_rate": DEPLOYMENT,
     "runtime.writable_dirs": DEPLOYMENT,
     "runtime.mount_liveness": DEPLOYMENT,
     # Deployment, not image: it walks a directory on the install's own disk and
@@ -4190,7 +4660,18 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment, not image: it needs a credential and network egress, neither of
     # which a bare `docker run` has. Not in DEEP_CHECKS — it spawns no namespace.
     "runtime.subscription_usage": DEPLOYMENT,
+    # Deployment, not image: it needs a credential, a configured user and
+    # network egress. In LIVE_CHECKS, so `--scope image` never reaches it
+    # anyway — the scope is stated for the same reason every other one is.
+    "runtime.model_execution": DEPLOYMENT,
     "security.skill_proxy": DEPLOYMENT,
+    # Deployment, not image: "can this host create a namespace" is a property of
+    # the deployment — the container's `security_opt`, the host's sysctl — where
+    # `runtime.bwrap`'s "is the binary installed and runnable" is a property of
+    # the image. The image tier runs `--scope image` in a bare `docker run` with
+    # no `security_opt` and asserts no check fails, so an IMAGE scope here would
+    # fail every correct image. See `check_sandbox_effective`.
+    "security.sandbox_effective": DEPLOYMENT,
     # Deployment, not image: it reaches `istota.executor` for the bwrap
     # capability probe, and the pairing it reports is a posture an operator
     # chose in a rendered config. The image tier asserts over `--scope image`
@@ -4230,6 +4711,7 @@ def run_checks(
     skip: tuple[str, ...] = (),
     scope: str = "",
     deep: bool = False,
+    live: bool = False,
     probe: bool = True,
 ) -> list[CheckResult]:
     """Run the registry, in order, and return every result.
@@ -4237,7 +4719,9 @@ def run_checks(
     ``only`` selects by registry-name prefix (all checks when empty); ``skip``
     excludes by the same kind of prefix and wins over ``only``, for a caller
     that wants nearly everything. ``scope`` narrows to ``IMAGE`` or
-    ``DEPLOYMENT``. ``deep`` opts into the checks that spawn a namespace.
+    ``DEPLOYMENT``. ``deep`` opts into the checks that spawn a namespace, and
+    ``live`` into the ones that reach a model and bill for it — two axes, not
+    one, because no caller wants both from the same flag.
     ``probe=False`` forbids spawning anything: a check that would exec something
     answers from the filesystem alone and says so in its ``detail``.
 
@@ -4251,6 +4735,10 @@ def run_checks(
     results: list[CheckResult] = []
     for name, func in CHECKS:
         if name in DEEP_CHECKS and not deep:
+            continue
+        # Before invoking, like every other selector — a live check discarded
+        # after the fact is a live check that already billed.
+        if name in LIVE_CHECKS and not live:
             continue
         if only and not any(name.startswith(prefix) for prefix in only):
             continue
@@ -4463,6 +4951,33 @@ def summarize(results: list[CheckResult]) -> dict[str, int]:
     for r in results:
         counts[r.status] = counts.get(r.status, 0) + 1
     return counts
+
+
+def verdict(results: list[CheckResult]) -> tuple[bool, str]:
+    """``(healthy, one-line summary)`` — for a caller that reports pass/fail.
+
+    ``healthy`` is False when any result is ``FAIL``, matching :func:`exit_code`
+    exactly, so a caller reading the bool and a caller reading the int never
+    disagree about the same deployment. A ``WARN`` is named in the summary and
+    does not make the verdict unhealthy: a warning that pages someone is a
+    failure wearing the wrong label. That is a deliberate change from
+    ``heartbeat._check_self``, which appended its high-failure-rate finding to
+    the same list as its real failures and so paged for it.
+
+    Built on :func:`summarize`'s counts rather than re-walking the list, which
+    is also what keeps the two in step.
+
+    Named ``verdict`` rather than ``summarize`` because that name is taken and
+    returns a different type, and rather than ``health`` because ``healthy`` is
+    already the field it produces. On an empty list it says "no checks ran"
+    rather than rendering four zeroes: a run that checked nothing must not read
+    as a run that passed everything.
+    """
+    if not results:
+        return True, "no checks ran"
+    counts = summarize(results)
+    summary = ", ".join(f"{counts.get(status, 0)} {status}" for status in (OK, WARN, FAIL, SKIP))
+    return counts.get(FAIL, 0) == 0, summary
 
 
 def failing(results: list[CheckResult]) -> list[CheckResult]:

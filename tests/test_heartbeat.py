@@ -1,7 +1,6 @@
 """Configuration loading for istota.heartbeat module."""
 
 import os
-import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
@@ -1139,6 +1138,15 @@ class TestHeartbeatStateDB:
 
 
 class TestCheckSelf:
+    """`self-check` renders `doctor.run_checks`; it asserts nothing of its own.
+
+    Every case here patches `doctor.run_checks` and asserts on the kwargs it
+    was handed, rather than running the registry — the same shape as
+    `tests/test_cli_doctor.py`, which tests `cmd_doctor` by capturing the call.
+    What the checks themselves do is `tests/test_doctor.py`'s job, and running
+    the real registry from here would make this file pay for it twice.
+    """
+
     def _make_check(self, **config_overrides):
         return HeartbeatCheck(
             name="system-health",
@@ -1152,158 +1160,333 @@ class TestCheckSelf:
             security=SecurityConfig(sandbox_enabled=sandbox_enabled),
         )
 
-    def test_claude_binary_missing(self, db_path):
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path)
+    def _capture(self, results, check, config, user_id="alice"):
+        """Run `_check_self` against a stubbed registry; return (result, kwargs)."""
+        calls = {}
 
-        with patch("istota.heartbeat.shutil.which", return_value=None):
-            result = _check_self(check, config, "alice")
+        def fake_run_checks(cfg, **kwargs):
+            calls["config"] = cfg
+            calls["kwargs"] = kwargs
+            return list(results)
 
-        assert not result.healthy
-        assert "Claude binary not found" in result.message
+        with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
+            result = _check_self(check, config, user_id)
+        return result, calls
 
-    def test_bwrap_missing_when_sandbox_enabled(self, db_path):
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path, sandbox_enabled=True)
+    def _result(self, name, status, detail="detail", remedy=""):
+        from istota.doctor import CheckResult as DoctorResult
 
-        def which_side_effect(name):
-            if name == "claude":
-                return "/usr/bin/claude"
-            return None  # bwrap not found
+        return DoctorResult(name, status, detail, remedy=remedy)
 
-        with patch("istota.heartbeat.shutil.which", side_effect=which_side_effect):
-            result = _check_self(check, config, "alice")
+    def test_execution_test_selects_live(self, db_path):
+        """`execution_test` gates exactly one thing — the live model call — and
+        `live` is exactly one thing. Mapping it to `deep` would have widened
+        `execution_test: false` from "spawn nothing" to "run the whole
+        registry"."""
+        from istota.doctor import OK
 
-        assert not result.healthy
-        assert "bwrap not found" in result.message
+        _, calls = self._capture(
+            [self._result("runtime.platform", OK)],
+            self._make_check(execution_test=True),
+            self._make_config(db_path),
+        )
 
-    def test_bwrap_not_checked_when_sandbox_disabled(self, db_path):
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path)
+        assert calls["kwargs"]["live"] is True
 
-        def which_side_effect(name):
-            if name == "claude":
-                return "/usr/bin/claude"
-            return None
+    def test_execution_test_false_clears_live(self, db_path):
+        from istota.doctor import OK
 
-        with patch("istota.heartbeat.shutil.which", side_effect=which_side_effect):
-            result = _check_self(check, config, "alice")
+        _, calls = self._capture(
+            [self._result("runtime.platform", OK)],
+            self._make_check(execution_test=False),
+            self._make_config(db_path),
+        )
 
-        assert result.healthy
+        assert calls["kwargs"]["live"] is False
 
-    def test_db_health_failure(self, db_path):
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path)
+    def test_live_defaults_on(self, db_path):
+        """`execution_test` keeps its current default of True, so a
+        `HEARTBEAT.md` that never mentioned the key behaves as it did."""
+        from istota.doctor import OK
 
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.db.get_db", side_effect=Exception("DB corrupt")):
-            result = _check_self(check, config, "alice")
+        _, calls = self._capture(
+            [self._result("runtime.platform", OK)],
+            self._make_check(),
+            self._make_config(db_path),
+        )
 
-        assert not result.healthy
-        assert "Database error" in result.message
+        assert calls["kwargs"]["live"] is True
 
-    def test_high_failure_rate(self, db_path):
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path)
+    def test_deep_is_never_asked_for(self, db_path):
+        """`self-check` is not admin-gated (`run_check` gates only
+        `shell-command`), so any user's `HEARTBEAT.md` reaches this on a
+        cadence they choose. A namespace spawn here multiplies by users and by
+        check definitions; `security.sandbox_effective` answers the
+        availability question from the warm memo at no cost instead."""
+        from istota.doctor import OK
 
-        # Create tasks: more failed than completed in last hour
-        with db.get_db(db_path) as conn:
-            for _ in range(3):
-                tid = db.create_task(conn, "fail task", "alice")
-                db.update_task_status(conn, tid, "failed", error="boom")
-            tid = db.create_task(conn, "ok task", "alice")
-            db.update_task_status(conn, tid, "completed", result="ok")
+        _, calls = self._capture(
+            [self._result("runtime.platform", OK)],
+            self._make_check(execution_test=True),
+            self._make_config(db_path),
+        )
 
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"):
-            result = _check_self(check, config, "alice")
+        assert calls["kwargs"].get("deep", False) is False
 
-        assert not result.healthy
-        assert "High failure rate" in result.message
+    def test_the_skip_list_is_passed(self, db_path):
+        from istota.doctor import OK
+        from istota.heartbeat import _SELF_CHECK_SKIPPED
 
-    def test_execution_test_pass(self, db_path):
-        check = self._make_check(execution_test=True)
-        config = self._make_config(db_path)
+        _, calls = self._capture(
+            [self._result("runtime.platform", OK)],
+            self._make_check(),
+            self._make_config(db_path),
+        )
 
-        mock_result = MagicMock()
-        mock_result.stdout = "healthcheck-ok\n"
+        assert calls["kwargs"]["skip"] == _SELF_CHECK_SKIPPED
+        # Each entry is a real registry name, not a prefix nothing matches: a
+        # typo here is a check that goes on running per user, silently.
+        from istota.doctor import CHECKS
 
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.subprocess.run", return_value=mock_result) as mock_run, \
-             patch("istota.executor.os.environ", {
-                 "ANTHROPIC_API_KEY": "test-key",
-                 "ISTOTA_SECRET_KEY": "k" * 64,
-             }):
-            result = _check_self(check, config, "alice")
+        names = {name for name, _ in CHECKS}
+        for skipped in _SELF_CHECK_SKIPPED:
+            assert skipped in names, f"{skipped} is not a registry name"
 
-        assert result.healthy
-        # The execution test spawns `claude`, so it gets the CLI's own
-        # credential and nothing else from the daemon environment.
-        env = mock_run.call_args.kwargs["env"]
-        assert env["ANTHROPIC_API_KEY"] == "test-key"
-        assert "ISTOTA_SECRET_KEY" not in env
+    def test_a_clean_registry_is_healthy(self, db_path):
+        from istota.doctor import OK, SKIP
 
-    def test_execution_test_fail(self, db_path):
-        check = self._make_check(execution_test=True)
-        config = self._make_config(db_path)
-
-        mock_result = MagicMock()
-        mock_result.stdout = "some garbage output"
-
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.subprocess.run", return_value=mock_result), \
-             patch("istota.executor.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            result = _check_self(check, config, "alice")
-
-        assert not result.healthy
-        assert "healthcheck-ok" in result.message
-
-    def test_execution_test_timeout(self, db_path):
-        check = self._make_check(execution_test=True)
-        config = self._make_config(db_path)
-
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 30)), \
-             patch("istota.executor.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            result = _check_self(check, config, "alice")
-
-        assert not result.healthy
-        assert "timed out" in result.message
-
-    def test_execution_test_disabled(self, db_path):
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path)
-
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.subprocess.run") as mock_run:
-            result = _check_self(check, config, "alice")
+        result, _ = self._capture(
+            [
+                self._result("runtime.platform", OK),
+                self._result("runtime.bwrap", SKIP),
+            ],
+            self._make_check(execution_test=False),
+            self._make_config(db_path),
+        )
 
         assert result.healthy
-        mock_run.assert_not_called()
+        assert "1 ok" in result.message
 
-    def test_all_pass(self, db_path):
-        check = self._make_check(execution_test=True)
-        config = self._make_config(db_path)
+    def test_the_message_names_the_failing_checks(self, db_path):
+        """Today's message is a semicolon-joined list of the specific
+        failures, and that is what makes the alert actionable. A count alone
+        would be a regression, so `failing` supplies the content."""
+        from istota.doctor import FAIL, OK
 
-        mock_result = MagicMock()
-        mock_result.stdout = "healthcheck-ok\n"
+        result, _ = self._capture(
+            [
+                self._result("runtime.platform", OK),
+                self._result("security.sandbox_effective", FAIL, "no namespace"),
+                self._result("runtime.model_execution", FAIL, "marker not in output"),
+            ],
+            self._make_check(),
+            self._make_config(db_path),
+        )
 
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.subprocess.run", return_value=mock_result), \
-             patch("istota.executor.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            result = _check_self(check, config, "alice")
+        assert not result.healthy
+        assert "security.sandbox_effective: no namespace" in result.message
+        assert "runtime.model_execution: marker not in output" in result.message
+        assert result.details["failures"] == [
+            "runtime.model_execution",
+            "security.sandbox_effective",
+        ]
+
+    def test_a_warning_does_not_page(self, db_path):
+        """The deliberate behaviour change: the old copy appended its
+        high-failure-rate finding to `failures` and returned unhealthy for it.
+        `runtime.task_failure_rate` is a WARN and a WARN is not a page."""
+        from istota.doctor import OK, WARN
+
+        result, _ = self._capture(
+            [
+                self._result("runtime.platform", OK),
+                self._result("runtime.task_failure_rate", WARN, "3 failed, 1 completed"),
+            ],
+            self._make_check(execution_test=False),
+            self._make_config(db_path),
+        )
 
         assert result.healthy
-        assert "All self-checks passed" in result.message
+        assert "1 warn" in result.message
+
+    def test_it_redacts_before_the_message_leaves(self, db_path):
+        """This path delivers to a user. `scheduler` and `web_app` both redact
+        before anything leaves the process and there was no reason for the
+        heartbeat to be the exception."""
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        config.nextcloud = NextcloudConfig(
+            url="https://cloud.example.com",
+            username="bot",
+            app_password="s3cr3t-app-password",
+        )
+
+        result, _ = self._capture(
+            [self._result("web.static", FAIL, "upstream said s3cr3t-app-password")],
+            self._make_check(execution_test=False),
+            config,
+        )
+
+        assert "s3cr3t-app-password" not in result.message
+        assert "web.static" in result.message
+
+    def test_it_spawns_no_probe_of_its_own(self, db_path):
+        """The whole point of the stage: no `shutil.which`, no
+        `subprocess.run`, no `build_bwrap_cmd` on this path. Whatever probing
+        happens is the registry's, behind the flags above.
+
+        `execution_test=True` deliberately, which is the arm that used to exec
+        `claude` — with `execution_test=False` this assertion is equally true
+        of the copy it replaces and proves nothing.
+        """
+        from istota.doctor import OK
+
+        with patch("subprocess.run") as spawned, patch("shutil.which") as looked_up:
+            self._capture(
+                [self._result("runtime.platform", OK)],
+                self._make_check(execution_test=True),
+                self._make_config(db_path),
+            )
+
+        spawned.assert_not_called()
+        looked_up.assert_not_called()
+
+
+    def test_a_non_admin_gets_the_count_and_no_details(self, db_path):
+        """The disclosure boundary `cmd_check` draws, drawn here too.
+
+        `self-check` is not admin-gated and `check_heartbeats` delivers the
+        message to whichever user's `HEARTBEAT.md` defined the check, so a
+        registry detail reaches a non-admin. Several of them are cross-user:
+        `config.skill_overlays` labels overlays `{user_id}/{filename}` across
+        every user's tree, `developer.repos_layout` names what is filed on disk,
+        and `runtime.model_execution` names the admin it probed as.
+        """
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        config.admin_users = {"boss"}
+
+        result, _ = self._capture(
+            [
+                self._result(
+                    "config.skill_overlays", FAIL, "bob/coding.md (unknown skill)"
+                ),
+                self._result(
+                    "developer.repos_layout", FAIL, "/srv/repos still holds acme, widgets"
+                ),
+            ],
+            self._make_check(execution_test=False),
+            config,
+            user_id="alice",
+        )
+
+        assert not result.healthy, "the alert must still fire, only quieter"
+        assert "bob" not in result.message
+        assert "coding.md" not in result.message
+        assert "acme" not in result.message
+        assert "/srv/repos" not in result.message
+        assert "2 fail" in result.message
+
+    def test_an_admin_still_gets_the_details(self, db_path):
+        """The control for the case above. Without it, the absence assertions
+        pass against a handler that returns nothing at all — and naming the
+        failures is what makes the alert actionable for whoever can act."""
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        config.admin_users = {"alice"}
+
+        result, _ = self._capture(
+            [
+                self._result(
+                    "config.skill_overlays", FAIL, "bob/coding.md (unknown skill)"
+                )
+            ],
+            self._make_check(execution_test=False),
+            config,
+            user_id="alice",
+        )
+
+        assert "config.skill_overlays: bob/coding.md (unknown skill)" in result.message
+
+    def test_an_empty_admin_list_means_everyone(self, db_path):
+        """`Config.is_admin` reads an empty `admin_users` as "everyone is
+        admin", which is the single-user shape. The gate must inherit that
+        rather than reading the empty list as "nobody"."""
+        from istota.doctor import FAIL
+
+        config = self._make_config(db_path)
+        assert not config.admin_users
+
+        result, _ = self._capture(
+            [self._result("web.static", FAIL, "no built frontend")],
+            self._make_check(execution_test=False),
+            config,
+            user_id="alice",
+        )
+
+        assert "web.static: no built frontend" in result.message
+
+    def test_a_doctor_defect_does_not_page_the_user(self, db_path):
+        """`run_checks` is not exception-proof end to end: a check returning a
+        non-iterable escapes the per-check `try`, and `redact` sits outside it.
+        Both scheduler callers wrap this pair; `run_check`'s blanket handler
+        would otherwise turn a defect in doctor into an alert for every user
+        with a `self-check`."""
+        config = self._make_config(db_path)
+
+        with patch("istota.doctor.run_checks", side_effect=TypeError("boom")):
+            result = _check_self(
+                self._make_check(execution_test=False), config, "alice"
+            )
+
+        assert result.healthy, "a broken diagnostic must not page a user"
+        assert "could not be run" in result.message
+        assert result.details["failures"] == []
+
+    def test_a_redaction_failure_is_caught_too(self, db_path):
+        """The half that is easy to miss: `redact` is outside `run_checks`'
+        own per-check guard, so it is the call that actually reaches a user."""
+        from istota.doctor import OK
+
+        config = self._make_config(db_path)
+
+        with (
+            patch(
+                "istota.doctor.run_checks",
+                return_value=[self._result("runtime.platform", OK)],
+            ),
+            patch("istota.doctor.redact", side_effect=RuntimeError("boom")),
+        ):
+            result = _check_self(
+                self._make_check(execution_test=False), config, "alice"
+            )
+
+        assert result.healthy
+        assert "could not be run" in result.message
 
     def test_run_check_dispatches_self_check(self, db_path):
         """Verify run_check() correctly dispatches self-check with user_id."""
-        check = self._make_check(execution_test=False)
-        config = self._make_config(db_path)
+        from istota.doctor import OK
 
-        with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"):
-            result = run_check(check, config, "alice")
+        calls = {}
+
+        def fake_run_checks(cfg, **kwargs):
+            calls["kwargs"] = kwargs
+            return [self._result("runtime.platform", OK)]
+
+        with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
+            result = run_check(
+                self._make_check(execution_test=False),
+                self._make_config(db_path),
+                "alice",
+            )
 
         assert result.healthy
+        assert calls["kwargs"]["live"] is False
+
 
 
 
@@ -1343,3 +1526,190 @@ class TestHeartbeatPlantedPaths:
         assert result is not None
         _settings, checks = result
         assert [c.name for c in checks] == ["site"]
+
+
+# ---------------------------------------------------------------------------
+# TestTheStandingFailureGate
+# ---------------------------------------------------------------------------
+
+
+class TestTheStandingFailureGate:
+    """A failure that has not changed since the last page does not page again.
+
+    `should_alert`'s cooldown rate-limits a standing failure; it never ends it.
+    That was right while `_check_self` ran five probes that were all expected to
+    pass, and it stopped being right when it started running the doctor
+    registry: `security.sandbox_effective` FAILs *by design* on the shipped
+    Docker stack (AGENTS.md documents that as the normal state there), so every
+    user with a `self-check` would be paged once per cooldown, forever, for a
+    condition nobody can act on from that surface and which the scheduler's own
+    doctor sweep already reports with a real transition gate.
+
+    The gate is opt-in through `CheckResult.alert_signature`, and that is the
+    whole reason it is safe. A check that leaves it `None` — the other five
+    types — keeps today's cooldown behaviour exactly, which is what a
+    `url-health` check wants: a site that is still down an hour later is worth
+    saying again. Only a check that can name *what* is failing gets to claim
+    that an unchanged answer is not news.
+    """
+
+    def _self_check(self):
+        return HeartbeatCheck(name="self", type="self-check", config={})
+
+    def test_an_unchanged_failure_set_does_not_page_twice(self, db_path):
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            result = CheckResult(
+                healthy=False,
+                message="security.sandbox_effective: unsandboxed",
+                alert_signature="security.sandbox_effective",
+            )
+
+            # First time: nobody has been told.
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+            db.update_heartbeat_state(
+                conn, "alice", "self",
+                last_alert_at=True,
+                last_alert_signature=result.alert_signature,
+            )
+
+            # Cooldown is zero, so only the signature can suppress this.
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is False
+
+    def test_a_changed_failure_set_pages_again(self, db_path):
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            db.update_heartbeat_state(
+                conn, "alice", "self",
+                last_alert_at=True,
+                last_alert_signature="security.sandbox_effective",
+            )
+
+            worse = CheckResult(
+                healthy=False,
+                message="two checks failing",
+                alert_signature="runtime.model_cli|security.sandbox_effective",
+            )
+            assert should_alert(conn, "alice", check, worse, settings, "UTC") is True
+
+    def test_a_check_with_no_signature_is_unaffected(self, db_path):
+        """The other five types must behave exactly as they did."""
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = HeartbeatCheck(name="site", type="url-health", config={})
+            result = CheckResult(healthy=False, message="down")
+            assert result.alert_signature is None
+
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+            db.update_heartbeat_state(conn, "alice", "site", last_alert_at=True)
+            # No signature to compare, cooldown expired: still pages.
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+
+    def test_recovery_then_the_same_failure_pages_again(self, db_path):
+        """A signature is cleared on recovery, so a recurrence is news again.
+
+        Without this, a deployment that broke, was fixed, and broke the same way
+        a month later would stay silent for ever.
+        """
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            db.update_heartbeat_state(
+                conn, "alice", "self",
+                last_alert_at=True,
+                last_alert_signature="security.sandbox_effective",
+            )
+            # Recovered: the handler clears the signature.
+            db.update_heartbeat_state(
+                conn, "alice", "self", last_healthy_at=True, clear_alert_signature=True,
+            )
+
+            again = CheckResult(
+                healthy=False,
+                message="unsandboxed again",
+                alert_signature="security.sandbox_effective",
+            )
+            assert should_alert(conn, "alice", check, again, settings, "UTC") is True
+
+    def _config(self, db_path):
+        return Config(db_path=db_path, security=SecurityConfig(sandbox_enabled=False))
+
+    def _doctor_result(self, name, status, detail="detail"):
+        from istota.doctor import CheckResult as DoctorResult
+
+        return DoctorResult(name, status, detail, remedy="")
+
+    def test_suppression_expires_so_a_standing_failure_is_reported_again(self, db_path):
+        """The bound that makes this a rate limit rather than an off switch.
+
+        The signature is the failing *names*, so a condition getting steadily
+        worse without changing which checks fail produces the same string; and
+        an alert delivered to one of two configured surfaces reports success.
+        Neither should be silenced for ever.
+        """
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            conn.execute(
+                """
+                INSERT INTO heartbeat_state
+                    (user_id, check_name, last_alert_at, last_alert_signature)
+                VALUES (?, ?, datetime('now', '-48 hours'), ?)
+                """,
+                ("alice", "self", "security.sandbox_effective"),
+            )
+            result = CheckResult(
+                healthy=False,
+                message="still unsandboxed",
+                alert_signature="security.sandbox_effective",
+            )
+
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+
+    def test_an_unparseable_alert_time_reports_rather_than_silences(self, db_path):
+        """A gate whose job is withholding must fail towards a duplicate."""
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            conn.execute(
+                """
+                INSERT INTO heartbeat_state
+                    (user_id, check_name, last_alert_at, last_alert_signature)
+                VALUES (?, ?, 'not-a-timestamp', ?)
+                """,
+                ("alice", "self", "security.sandbox_effective"),
+            )
+            result = CheckResult(
+                healthy=False,
+                message="still unsandboxed",
+                alert_signature="security.sandbox_effective",
+            )
+
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+
+    def test_the_self_check_names_its_failures_as_the_signature(self, db_path):
+        """The signature is the sorted failing names, so it is order-stable.
+
+        Sorted rather than as-returned: `run_checks` walks the registry in
+        declaration order, so inserting a check between two failing ones would
+        otherwise change the signature and page everybody about a failure set
+        that had not changed.
+        """
+        results = [
+            self._doctor_result("security.sandbox_effective", "fail", "unsandboxed"),
+            self._doctor_result("runtime.model_cli", "fail", "missing"),
+        ]
+        with patch("istota.doctor.run_checks", return_value=results):
+            result = _check_self(self._self_check(), self._config(db_path), "alice")
+
+        assert result.healthy is False
+        assert result.alert_signature == "runtime.model_cli|security.sandbox_effective"
+
+    def test_a_healthy_self_check_carries_no_signature(self, db_path):
+        with patch("istota.doctor.run_checks", return_value=[]):
+            result = _check_self(self._self_check(), self._config(db_path), "alice")
+
+        assert result.healthy is True
+        assert result.alert_signature is None

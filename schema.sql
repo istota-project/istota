@@ -342,6 +342,13 @@ CREATE TABLE IF NOT EXISTS heartbeat_state (
     last_healthy_at TEXT,         -- When check last passed (for recovery detection)
     last_error_at TEXT,           -- When check implementation itself failed
     consecutive_errors INTEGER DEFAULT 0,
+    -- What the last alert was *about*, for a check that can name its own
+    -- failures (`CheckResult.alert_signature`). The cooldown above rate-limits
+    -- a standing failure; this ends it, so a condition documented as normal on
+    -- a deployment pages once rather than once per cooldown for ever. NULL for
+    -- every check type that does not opt in, which is all of them but
+    -- `self-check`.
+    last_alert_signature TEXT,
     PRIMARY KEY (user_id, check_name)
 );
 
