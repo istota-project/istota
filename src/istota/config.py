@@ -3150,13 +3150,38 @@ def load_config(config_path: Path | None = None) -> Config:
                 "through skill CLIs and deferred ops. Remove the key."
             )
         # The second is a pair of settings that are each individually valid and
-        # wrong together.
+        # wrong together. The credential half leads, because it is the half an
+        # operator will not otherwise find out about: `_split_credential_env`
+        # removes the secret variables only under the proxy branch in
+        # `execute_task`, so with the proxy off they stay in the environment
+        # handed to the model — and with the sandbox on there is a real boundary
+        # for them to sit inside, which is the opposite of what switching a
+        # sandbox on is for. The masked-database half stays because it is what
+        # an operator whose skill CLIs have stopped working needs to read; it
+        # fails loudly on its own, which is why it does not lead.
+        #
+        # Both switches off together is a different shape and is deliberately
+        # not warned about: `setup_wizard` writes that pair for the single-user
+        # install, the task then runs unconfined as the daemon user, and there is
+        # no boundary for an environment variable to cross. See ISSUE-393.
+        #
+        # "inside the sandbox" is the *requested* flag, not the effective one:
+        # `effective_sandboxing` reads false where the bwrap probe fails, which
+        # is the shipped Docker stack, and it may not be consulted here because
+        # it spawns and this path runs on every CLI invocation. The credential
+        # half of the message is true on that shape too — the variables are in
+        # the task environment either way — and an operator who asked for a
+        # sandbox is the right person to tell. `doctor` is where the difference
+        # between asked-for and in-force gets reported.
         if config.security.sandbox_enabled and not config.security.skill_proxy_enabled:
             logger.warning(
                 "[security] sandbox_enabled with skill_proxy_enabled = false: "
-                "skill CLIs will run inside the sandbox, where the databases "
-                "they read are masked out. Enable the skill proxy, or disable "
-                "the sandbox for a trusted single-user install."
+                "every configured service credential stays in the task "
+                "environment, readable by the model from inside the sandbox "
+                "rather than injected per call; and skill CLIs will run inside "
+                "the sandbox, where the databases they read are masked out. "
+                "Enable the skill proxy, or disable the sandbox for a trusted "
+                "single-user install."
             )
 
     config.admin_users = load_admin_users()

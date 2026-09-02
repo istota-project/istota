@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Turning off native session transcripts now stops new writes without abandoning transcripts already on disk. The configured age and disk limits keep deleting old files until both are set to zero.
 
+- Switching the credential proxy off while the sandbox is on now warns about what that really costs. The startup message named only the visible half — skill commands lose the databases they read — and said nothing about the quiet half: every service credential you have configured stays in the task's own environment, where the model can read it from inside the boundary you just switched on. The settings reference, the example settings file and the deployment guide gave the same partial answer and now give both halves. Nothing changes for an install running both switches off, which is the single-user shape and is unaffected.
+
 ### Security
 
 - Shell commands run by the bot's own agent loop no longer land in a sandbox with the Claude Code login file mounted into it. That sandbox was built for the Claude Code CLI and carried everything the CLI needs, the stored login among it — read-only, which stops it being changed but not read, so a task could simply print the file and the text went off to whichever model provider the loop is pointed at. There are now two sandboxes: the CLI keeps the one it needs, and the bot's own loop gets one with no Claude installation mounted in — no login file, no settings, no session logs. Only affects a Linux install with the sandbox working; nothing changes for the Claude Code path.
