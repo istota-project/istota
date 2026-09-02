@@ -25,7 +25,6 @@ Run with `scripts/test-linux.sh`. Carries the `linux` marker.
 """
 
 import asyncio
-import os
 import shlex
 import sys
 from pathlib import Path
@@ -617,18 +616,18 @@ class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
     def _spawn_env(self, user_temp, **extra):
         """A minimal spawn env that can still start the server.
 
-        `PYTHONPATH` is carried through when the harness set one: this tier's
-        image installs the dependencies but not the project, so `istota` is
-        importable only from it. A deployment installs the package into the
-        venv and needs nothing here — but a spawn env that omits it starts no
-        server at all, and the handshake failure that follows looks exactly
-        like the boundary failure this class exists to detect.
+        Nothing is carried across from the harness, and that is now the point
+        rather than a detail (ISSUE-398). This used to copy `PYTHONPATH`
+        through, because the tier's image installed the dependencies without the
+        project and `istota` was importable from nowhere else — a workaround
+        that existed in this one file, which is why the tier looked like it
+        covered the tool server while 47 tests elsewhere never started one. The
+        image now installs the project, so a spawn env holding two variables
+        must start a server; if it does not, the install regressed, and this
+        class is where that surfaces before the handshake failure gets mistaken
+        for the boundary holding.
         """
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(user_temp), **extra}
-        pythonpath = os.environ.get("PYTHONPATH")
-        if pythonpath:
-            env["PYTHONPATH"] = pythonpath
-        return env
+        return {"PATH": "/usr/bin:/bin", "HOME": str(user_temp), **extra}
 
     def _ask(self, layout, task, user_temp, spawn_env):
         async def _go():

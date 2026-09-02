@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -258,6 +259,52 @@ class TestWithoutClaudeRuntimeEnv:
         out = without_claude_runtime_env(env)
         assert out == {}
         assert out is not env
+
+
+class TestTheTaskEnvCanImportIstota:
+    """ISSUE-398. The task env is what the tool server is spawned with.
+
+    `NativeBrain._start_tool_server` hands `req.env` — the env this function
+    builds — straight to `create_subprocess_exec`, and the argv is
+    `[sys.executable, "-m", "istota.tool_server"]`. So the env has to be one
+    that interpreter can import `istota` from. Nothing in the env says so, and
+    nothing needs to: `PATH` is built from `sys.prefix` because the venv it
+    names is where the package is installed. That is a fact about the
+    *install*, and it was written down nowhere, so an install could stop
+    meeting it in silence.
+
+    One did. `docker/test/Dockerfile` synced the dependencies with
+    `--no-install-project`, and the Linux tier's whole native surface failed at
+    the handshake with `ModuleNotFoundError: No module named 'istota'` — 47
+    tests reading as a code regression on a clean `main`, while `pythonpath =
+    ["src", "."]` kept the pytest process itself importing fine. Every shipped
+    shape does meet it: Ansible runs `uv sync` and the runtime image runs
+    `uv sync --frozen --no-dev --extra all`, both of which install the root
+    project.
+
+    Against a real subprocess rather than against the mapping, because the
+    mapping cannot show it — what is missing lives in the venv, not in the env.
+    """
+
+    def test_a_subprocess_started_with_it_imports_the_tool_server(self, tmp_path):
+        env = build_clean_env(Config())
+        # Stated, not incidental: carrying `PYTHONPATH` here would make this
+        # pass on an uninstalled layout, and it is an import inlet into every
+        # python the model runs inside the sandbox — the class `BASH_ENV` is
+        # stripped for a few lines above. The install is what has to be right.
+        assert "PYTHONPATH" not in env
+        # `cwd` outside the tree, because `python -c` puts the working
+        # directory on `sys.path`: run from anywhere holding an `istota/`, the
+        # import would succeed without the venv having anything to do with it.
+        proc = subprocess.run(
+            [sys.executable, "-c", "import istota.tool_server"],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr
 
 
 class TestBuildCleanEnvTurnsPipefailOn:

@@ -501,12 +501,22 @@ run_in_container() {
     # --tmpfs /tmp because the source bind is read-only and pytest's tmp_path,
     # the sandbox probes and the uv cache all need somewhere to write.
     #
-    # PYTHONPATH because the image installs dependencies but not the project
-    # (`--no-install-project`), so `istota` is importable only through pytest's
-    # `pythonpath = ["src"]` — and that ini setting applies to the pytest
-    # process, not to the dozens of tests that spawn `python -m istota.skills.X`
-    # as a subprocess. Without it those exit with ModuleNotFoundError and read
-    # as ~170 unrelated failures.
+    # There is deliberately no `-e PYTHONPATH` here (ISSUE-398). The image puts
+    # the project on /venv's import path as an entry naming /src/src — the bind
+    # below, which is the only thing making that path true, so the two move
+    # together — and `istota` is therefore importable by that interpreter in
+    # every child however its environment was built. Setting the variable as
+    # well would be a second mechanism that only reaches processes inheriting
+    # this one's environment, which is not the tool-server spawn: that one gets
+    # the task env, and `build_clean_env` builds it from scratch. It would mask
+    # a broken install for most of the suite and for none of the native brain.
+    #
+    # The narrowing this costs, so it is written down rather than discovered:
+    # only /venv/bin/python can import the project now. The base image's
+    # /usr/local/bin/python3 cannot, where the variable used to serve every
+    # interpreter. Nothing needs it today — every in-repo spawn of the package
+    # is `[sys.executable, "-m", …]`, and /venv/bin precedes /usr/local/bin on
+    # the image PATH so a bare `python3` resolves to the venv anyway.
     #
     # A git identity as environment variables rather than a global config: a
     # dozen tests build throwaway repositories and commit into them, and they
@@ -537,7 +547,6 @@ run_in_container() {
         --security-opt seccomp=unconfined \
         --security-opt apparmor=unconfined \
         -v "$REPO_ROOT:/src:ro" \
-        -e PYTHONPATH=/src/src \
         -e ISTOTA_LINUX_TIER=1 \
         -e GIT_AUTHOR_NAME=istota-test -e GIT_AUTHOR_EMAIL=test@istota.invalid \
         -e GIT_COMMITTER_NAME=istota-test -e GIT_COMMITTER_EMAIL=test@istota.invalid \

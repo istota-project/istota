@@ -216,9 +216,10 @@ class TestParser:
         """`--version` is built while the parser is, so its failure took everything.
 
         `importlib.metadata.version` raises when istota is importable but not
-        installed — running off a source tree on PYTHONPATH, which is what
-        `scripts/test-linux.sh` does. That raise happened during
-        `add_argument`, so no subcommand could parse at all, not even `--help`.
+        installed — the Linux tier's image, which reaches the source through a
+        path entry in its venv and so carries no distribution metadata for the
+        package. That raise happened during `add_argument`, so no subcommand
+        could parse at all, not even `--help`.
         """
         import importlib.metadata
 

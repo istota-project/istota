@@ -269,7 +269,12 @@ class TestContainment:
         target.write_text("not a directory")
         assert sweep(target) == []
 
+    @pytest.mark.requires_dac
     def test_an_unreadable_root_never_raises(self, tmp_path, toolbox):
+        """`requires_dac` because the premise is a permission bit. As uid 0 —
+        which is what the Linux tier's container runs as — the bits do not
+        apply, the root enumerates, and the sweeper returns a real outcome
+        rather than the `[]` this asserts."""
         toolbox("uv")
         root = tmp_path / "caches"
         _cache(root, "alice", uv=4 * MB)
