@@ -76,7 +76,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `model` | `task.model` or `config.model`; brain default if empty |
 | `effort` | `task.effort` or `config.effort`; brain default if empty |
 | `custom_system_prompt_path` | The operator's own system-prompt file. Optional: a configured path that no longer exists is omitted rather than failing the attempt. `ClaudeCodeBrain` passes it as `--system-prompt-file`, which replaces the CLI's default harness prompt; `NativeBrain` appends it after its built-in coding block. |
-| `composed_system_prompt_path` | Istota's own composed standing instructions, written per task to `task_<id>_system_prompt.txt`. Required input when set — a brain fails the attempt rather than running without it. Absolute, because the two backends resolve it in different working directories. `None` for every direct text-only caller. |
+| `composed_system_prompt_path` | Istota's own composed standing instructions, written per task to `system_prompt.txt` in the task's daemon-owned control directory. Required input when set — a brain fails the attempt rather than running without it. Absolute, because the two backends resolve it in different working directories. `None` for every direct text-only caller. |
 | `streaming` | True when the executor wants per-event progress callbacks |
 | `on_progress` | Per-event callback receiving `StreamEvent`s (the brain handles filtering) |
 | `cancel_check` | Polled between events; True → kill subprocess, return `cancelled` |
@@ -86,7 +86,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `result_file` | claude_code-specific fallback file path |
 | `advisor` | Advisor-model config: a stronger model the cheap default can consult at moments the advisor tool picks. Anthropic-namespace brains only; skipped when the task pins its own model |
 | `fs_read_roots` / `fs_write_roots` | Filesystem roots the in-process tools may read from and write to (NativeBrain — it has no bwrap wrapper of its own) |
-| `fs_write_denied_roots` | Read-only carve-outs *inside* a write root; containment alone cannot express a hole in a root. Up to two entries: the task's `task_<id>_system_prompt.txt`, the composed standing instructions the row above names, on every shape; plus its `.developer` directory, which holds the scripts that fetch its own credentials, on a confined one. See [the `.developer` carve-out](../deployment/security.md#the-developer-carve-out) |
+| `fs_write_denied_roots` | Read-only carve-outs the write roots cannot express. Up to two entries: the task's control directory, which holds the composed standing instructions the row above names and every other per-task file the daemon writes, on every shape; plus its `.developer` directory, which holds the scripts that fetch its own credentials, on a confined one. See [the `.developer` carve-out](../deployment/security.md#the-developer-carve-out) |
 | `db_path` | Handed to the brain rather than to the model: `env` no longer carries `ISTOTA_DB_PATH` |
 | `session_label` | Label for the session transcript, so a run is identifiable in the logs |
 

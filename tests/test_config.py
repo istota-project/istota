@@ -590,6 +590,145 @@ class TestTheSandboxWithoutTheProxyWarning:
         )
 
 
+class TestTheReadOnlyPathThatWouldExposeTheControlTree:
+    """`sandbox_ro_paths` is bound verbatim, and one broad entry has already
+    cost this project every database once.
+
+    `sandbox_ro_paths = ["/srv/app"]` was the shipped default, `db_path` and
+    `module_data_dir` lived under it, and one read-only bind that mentioned no
+    database exposed the framework DB, every module DB and the local backups.
+    The masks were the fix for that. The task control tree has no mask behind
+    it and cannot have one — the model has to be able to *read* its own
+    directory — so the only thing standing between a broad entry and every
+    task of every user's assembled prompt is that nobody writes one.
+
+    An entry at or above `{temp_dir}/.control` binds the whole tree; an entry
+    inside it binds part of one. Both are warned about, and only where a
+    sandbox is asked for, since with no sandbox nothing is bound at all.
+    """
+
+    _MARKER = "would bind the task control tree"
+
+    @pytest.fixture(autouse=True)
+    def _clear_the_latch(self):
+        """The warning is said once per process per entry, so a test that did
+        not clear it would depend on whether an earlier one had already used
+        the same path — and under xdist, on which worker it landed."""
+        from istota.config import _RO_PATH_CONTROL_TREE_WARNED
+
+        _RO_PATH_CONTROL_TREE_WARNED.clear()
+        yield
+        _RO_PATH_CONTROL_TREE_WARNED.clear()
+
+    def _warnings(self, path, caplog):
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(path)
+        return [
+            r.getMessage() for r in caplog.records if self._MARKER in r.getMessage()
+        ]
+
+    def test_an_entry_above_the_control_root_is_named(self, tmp_path, caplog):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            f'sandbox_ro_paths = ["{tmp_path}/tmp"]\n'
+            "\n"
+        )
+        hits = self._warnings(p, caplog)
+        assert hits, [r.getMessage() for r in caplog.records]
+        # The entry as written, so an operator can find the line to delete.
+        assert any(f"{tmp_path}/tmp" in m for m in hits), hits
+
+    def test_an_entry_inside_the_control_root_is_named(self, tmp_path, caplog):
+        """One user's tree rather than every user's, and still every task of
+        theirs. Warned about for the same reason, and it is the shape a
+        well-meaning "let the model read its own control dir" edit takes."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            f'sandbox_ro_paths = ["{tmp_path}/tmp/.control/alice"]\n'
+            "\n"
+        )
+        assert self._warnings(p, caplog), [r.getMessage() for r in caplog.records]
+
+    def test_a_narrow_entry_is_silent(self, tmp_path, caplog):
+        """The control: a path beside the temp root is what the setting is
+        for, and warning on it would train an operator to ignore the message.
+        """
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            f'sandbox_ro_paths = ["{tmp_path}/srv/app"]\n'
+            "\n"
+        )
+        assert not self._warnings(p, caplog)
+        # Control: the same capture does see it when the entry is broad.
+        caplog.clear()
+        q = tmp_path / "broad.toml"
+        q.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            f'sandbox_ro_paths = ["{tmp_path}/tmp"]\n'
+            "\n"
+        )
+        assert self._warnings(q, caplog)
+
+    def test_no_sandbox_no_warning(self, tmp_path, caplog):
+        """`build_bwrap_cmd` hands the command back unwrapped with the sandbox
+        off, so the entry binds nothing and there is no boundary for it to
+        widen. Same reasoning the credential pairing above uses, and the same
+        *requested* flag: the effective one costs a subprocess and this path
+        runs on every CLI invocation."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = false\n"
+            f'sandbox_ro_paths = ["{tmp_path}/tmp"]\n'
+            "\n"
+        )
+        assert not self._warnings(p, caplog)
+
+
+    def test_it_is_said_once_per_process_not_once_per_load(self, tmp_path, caplog):
+        """`load_config` runs on every host-side skill CLI the proxy spawns,
+        which is once per model tool call. A multi-line warning on each of
+        those is noise on a path the model reads, so the notice latches the way
+        `_validate_brain_fallback`'s does."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'temp_dir = "{tmp_path}/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            f'sandbox_ro_paths = ["{tmp_path}/tmp"]\n'
+        )
+        assert self._warnings(p, caplog)
+        caplog.clear()
+        assert not self._warnings(p, caplog)
+
+    def test_a_relative_temp_dir_is_skipped_rather_than_guessed_at(
+        self, tmp_path, caplog,
+    ):
+        """`Path.resolve()` on a relative value answers against the calling
+        process's cwd, which differs between the daemon, the web app and a
+        skill CLI — so the same config would warn in one and not another."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'temp_dir = "relative/tmp"\n'
+            "[security]\n"
+            "sandbox_enabled = true\n"
+            'sandbox_ro_paths = ["relative"]\n'
+        )
+        assert not self._warnings(p, caplog)
+
+
 class TestConfigMethods:
     def test_find_user_by_email_found(self):
         cfg = Config(users={

@@ -46,15 +46,15 @@ def _system_half(config, user_id="alice", task_id=1) -> str:
     Since the prompt split, `input=` on the CLI subprocess carries the *user*
     half alone — the request, retrieved memory and conversation history. Skill
     bodies, the skills changelog and the workspace vocabulary are standing
-    instructions and travel as `task_<id>_system_prompt.txt`, which the brain
-    passes with `--append-system-prompt-file`. A test asserting on one of those
-    reads this file, and a *negative* assertion about one has to read it or it
-    passes for the wrong reason.
+    instructions and travel as `system_prompt.txt` in the task's control
+    directory, which the brain passes with `--append-system-prompt-file`. A
+    test asserting on one of those reads this file, and a *negative* assertion
+    about one has to read it or it passes for the wrong reason.
     """
-    from istota.executor import get_user_temp_dir
+    from istota.executor import get_task_control_dir
 
     return (
-        get_user_temp_dir(config, user_id) / f"task_{task_id}_system_prompt.txt"
+        get_task_control_dir(config, user_id, task_id) / "system_prompt.txt"
     ).read_text(encoding="utf-8")
 
 
@@ -4232,9 +4232,262 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
         # skill body it lives in is a standing instruction, so it is in the
         # system half — which reaches the CLI as a file rather than on stdin.
         composed = (
-            tmp_path / "temp" / "alice" / "task_1_system_prompt.txt"
+            tmp_path / "temp" / ".control" / "alice" / "task_1"
+            / "system_prompt.txt"
         ).read_text(encoding="utf-8")
         prompt_text = mock_run.call_args.kwargs["input"]
         assert "{workspace}" not in composed
         assert "{workspace}" not in prompt_text
         assert str((config.nextcloud_mount_path / "Users" / "alice")) in composed
+
+
+class TestImagePreparationWritesIntoTheControlDirectory:
+    """The destination `execute_task` hands `prepare_image_attachments`.
+
+    The prepared renditions used to land in `{temp_dir}/{user_id}/attachments/
+    task_<id>/` — inside the sandbox's own working directory, where the model
+    could rewrite the picture it was about to be asked about, and where the
+    previous task's renditions were still readable. The function no longer
+    derives that layout at all: it takes the directory to write into, and the
+    caller is what names it.
+
+    Asserted through the argument rather than through a written file, so the
+    wiring is pinned on a deployment with no Pillow and on every case where an
+    attachment is screened out before anything is written.
+    `tests/test_executor_images.py` is where the real renditions are followed
+    to disk.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            skills_dir=tmp_path / "_empty_skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+        )
+
+    def test_the_out_dir_is_inside_the_task_control_directory(self, tmp_path):
+        from istota.executor import execute_task, get_task_control_dir, get_user_temp_dir
+        from istota.image_attachments import ImagePreparation
+
+        config = self._make_config(tmp_path)
+        img = tmp_path / "inbox" / "shot.png"
+        img.parent.mkdir(parents=True)
+        img.write_bytes(b"not really a png")
+
+        with patch("istota.executor.prepare_image_attachments") as prep, \
+                patch("istota.executor.subprocess.run") as mock_run:
+            prep.return_value = ImagePreparation([str(img)], [], [])
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt="what is this?", user_id="alice",
+                    source_type="talk", attachments=[str(img)],
+                )
+                task = db.get_task(conn, task_id)
+                execute_task(task, config, [], conn=conn, use_context=False)
+
+        assert prep.called, "the image pass never ran"
+        out_dir = prep.call_args.args[1]
+        control = get_task_control_dir(config, "alice", task.id)
+        assert out_dir == control / "attachments"
+        # And not in the directory the sandbox binds read-write, which is the
+        # whole point of the move.
+        assert not out_dir.is_relative_to(
+            get_user_temp_dir(config, "alice").resolve()
+        )
+
+
+class TestAnUnusableControlDirectoryFailsTheTask:
+    """Fail-closed, and *how* it fails closed.
+
+    A task whose control directory cannot be created has nowhere to put its
+    standing instructions, so it must not run — but raising out of
+    `execute_task` is not the way to say so. `process_one_task` has no handler
+    of its own, so the exception reaches the worker's catch-all, which logs and
+    moves on with the row still `running`: the task is then recovered only by
+    the stuck-worker sweep, minutes later, with the reason nowhere but the
+    daemon log. Returning the failure keeps the ordinary accounting and puts
+    the path in front of whoever asked.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            skills_dir=tmp_path / "_empty_skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+        )
+
+    def test_a_control_root_that_is_a_file_fails_the_task_by_return(self, tmp_path):
+        from istota.executor import CONTROL_DIR_NAME, execute_task
+
+        config = self._make_config(tmp_path)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        # A real corrupt-state case rather than a patched one: `O_DIRECTORY`
+        # is what refuses it, several layers below the assertion.
+        (config.temp_dir / CONTROL_DIR_NAME).write_text("not a directory\n")
+
+        with patch("istota.executor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt="hi", user_id="alice", source_type="talk",
+                )
+                task = db.get_task(conn, task_id)
+                success, result, actions, trace = execute_task(
+                    task, config, [], conn=conn, use_context=False,
+                )
+
+        assert success is False
+        assert (actions, trace) == (None, None)
+        assert CONTROL_DIR_NAME in result, result
+        # And the model was never reached: a task that cannot hold its own
+        # standing instructions must not run without them.
+        assert not mock_run.called
+
+
+class TestTheControlDirectoryIsGuardedOnEveryShape:
+    """`execute_task`'s two guard entries, read from the request it built.
+
+    They are enforced under different conditions and neither subsumes the
+    other, which is the one thing about this pair that is easy to get wrong:
+
+    - `fs_read_roots` is `None` when confinement is off, and `None` means
+      *unconfined* in `ToolEnv` — both root lists are then inert. A `read_only`
+      entry alone protects nothing on the standalone install or the shipped
+      Docker stack.
+    - `fs_write_denied_roots` is checked ahead of that unconfined return, so it
+      holds on every shape. That is why `execute_task` seeds it outside the
+      `native_fs_confinement_active` branch.
+    - Under confinement the control directory is inside no write root, so the
+      `read_only` entry is what makes it readable while leaving it unwritable.
+
+    `tests/test_sandbox.py::TestNativeFsRootsTaskControlDirectory` is the unit
+    half; this is the wiring.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            skills_dir=tmp_path / "_empty_skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+        )
+
+    def _run(self, tmp_path, confined):
+        from istota.executor import execute_task
+
+        config = self._make_config(tmp_path)
+        captured = {}
+
+        class _Brain:
+            model_namespace = "anthropic"
+            supports_steering = False
+            kind = "claude_code"
+
+            def execute(self, req):
+                captured["req"] = req
+                return BrainResult(
+                    success=True, result_text="answer", stop_reason="completed",
+                )
+
+            def resolve_model_name(self, name):
+                return (name or "").strip()
+
+            def resolve_alias(self, alias):
+                return None
+
+        with patch("istota.executor.make_brain", return_value=_Brain()), \
+                patch(
+                    "istota.executor.native_fs_confinement_active",
+                    return_value=confined,
+                ):
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt="hi", user_id="alice", source_type="talk",
+                )
+                task = db.get_task(conn, task_id)
+                execute_task(task, config, [], conn=conn, use_context=False)
+
+        assert "req" in captured, "the brain was never called"
+        return config, task, captured["req"]
+
+    def test_the_unconditional_seed_is_the_control_directory(self, tmp_path):
+        """The shapes with nothing else behind it. `build_bwrap_cmd` hands the
+        command back unwrapped on macOS, on the standalone install and on the
+        shipped Docker stack, and `native_fs_roots` is not called there at all
+        — so this seed is the only guard the control directory has."""
+        from istota.executor import get_task_control_dir
+
+        config, task, req = self._run(tmp_path, confined=False)
+
+        control = get_task_control_dir(config, task.user_id, task.id)
+        assert req.fs_read_roots is None, (
+            "the fixture is not actually unconfined, so this asserts nothing "
+            "about the shape it is named for"
+        )
+        assert req.fs_write_denied_roots == [control], req.fs_write_denied_roots
+
+    def test_the_confined_shape_gets_both_entries_once(self, tmp_path):
+        from istota.executor import get_task_control_dir
+
+        config, task, req = self._run(tmp_path, confined=True)
+
+        control = get_task_control_dir(config, task.user_id, task.id)
+        assert req.fs_write_denied_roots.count(control) == 1, (
+            f"fs_write_denied_roots was {req.fs_write_denied_roots!r}; two "
+            "producers seeding the same root is the shape of a drift"
+        )
+        assert control in (req.fs_read_roots or []), req.fs_read_roots
+        assert not any(
+            control == r or control.is_relative_to(r)
+            for r in (req.fs_write_roots or [])
+        ), req.fs_write_roots
+
+    def test_the_guard_covers_the_framework_files_and_not_the_model_s(
+        self, tmp_path,
+    ):
+        """The point of a per-directory guard, asserted in both directions.
+
+        Read off the paths `execute_task` put on the *request* rather than off
+        a `rglob` of the control directory: enumerating the directory and then
+        asserting its contents are under the deny root that is the directory
+        is true by construction, and would stay green on exactly the failure
+        worth catching — a framework file written somewhere else.
+
+        The result file is the discriminating half. It is written by the model
+        from inside the sandbox and read back by the daemon, so it lives in the
+        model's own working directory by definition; a guard that covered it
+        would break every task, and a test that only checked the deny side
+        would pass equally against a task whose whole temp tree was refused.
+        """
+        from istota.executor import get_task_control_dir
+
+        config, task, req = self._run(tmp_path, confined=True)
+
+        control = get_task_control_dir(config, task.user_id, task.id)
+        denied = req.fs_write_denied_roots
+
+        composed = req.composed_system_prompt_path
+        assert composed is not None, "nothing named the composed system prompt"
+        assert any(composed.is_relative_to(root) for root in denied), (
+            f"{composed} is under no deny root: {denied}"
+        )
+        # The user half, named by no request field, so read from the directory
+        # the request's own path points into.
+        assert (control / "prompt.txt").exists()
+
+        assert req.result_file is not None
+        assert not any(
+            Path(req.result_file).is_relative_to(root) for root in denied
+        ), f"the result file {req.result_file} was denied: {denied}"

@@ -153,6 +153,9 @@ def no_ocr(monkeypatch):
 
 
 def _prep(attachments, tmp_path, task_id=7, cancel_check=None) -> ImagePreparation:
+    # `out_dir` is the directory to write into, whole. The caller derives it
+    # (`execute_task` names `{control_dir}/attachments`); this module no longer
+    # builds a layout of its own out of a temp dir and a task id.
     return prepare_image_attachments(
         [str(a) for a in attachments],
         tmp_path / "usertmp",
@@ -460,13 +463,20 @@ class TestNormalization:
             assert out.size == (60, 120)
             assert out.getexif().get(0x0112, 1) in (0, 1)
 
-    def test_the_normalized_copy_lands_in_the_task_temp_directory(self, tmp_path, ocr_calls):
+    def test_the_normalized_copy_lands_in_the_out_dir_it_was_given(self, tmp_path, ocr_calls):
+        """The directory is the caller's to name, not this module's to derive.
+
+        It used to build `{user_temp}/attachments/task_<id>` itself, which put
+        the renditions inside the sandbox's own working directory. The caller
+        now passes the destination, so this asserts the file lands exactly
+        there and nowhere below it.
+        """
         src = _jpeg(tmp_path / "pano.jpg", size=(3000, 2000))
 
         prep = _prep([src], tmp_path, task_id=42)
 
         out = prep.images[0].path
-        assert out.parent == (tmp_path / "usertmp" / "attachments" / "task_42").resolve()
+        assert out.parent == (tmp_path / "usertmp").resolve()
 
     def test_two_files_sharing_a_stem_do_not_overwrite_each_other(self, tmp_path, ocr_calls):
         one = tmp_path / "one"
@@ -1104,7 +1114,7 @@ class TestBudgets:
 
         assert prep.images == []
         assert _block(prep, "scan.jpg").kind == KIND_OMITTED
-        out_dir = tmp_path / "usertmp" / "attachments" / "task_7"
+        out_dir = tmp_path / "usertmp"
         assert list(out_dir.glob("*")) == []
 
     def test_a_capacity_omission_leaves_the_file_in_attachments(

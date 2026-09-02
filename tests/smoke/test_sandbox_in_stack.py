@@ -247,8 +247,59 @@ class TestTheDatabaseMasks:
 
 
 # --------------------------------------------------------------------------
-# The composed system prompt, read from inside a live task in the shipped image
+# The task control directory, read from inside a live task in the shipped image
 # --------------------------------------------------------------------------
+
+#: `temp_dir` is the literal `/data/tmp` on both container shapes
+#: (`render-config.sh:130`) and `Stack.submit` submits as `testuser`, so the
+#: task temp dir — `ISTOTA_DEFERRED_DIR`, a read-write bind and therefore a
+#: `native_fs_roots` write root — is this. It is also the sandbox's `--chdir`
+#: target *on this stack*, which is a narrower claim than it looks:
+#: `chdir_target = workspace_resolved or user_temp_dir.resolve()`
+#: (`executor.py:3973`), so a deployment with a REPL workspace chdirs
+#: somewhere else and `control_in_cwd` below would be asking about that
+#: directory instead. The `cwd=` answer is what holds the two together.
+#:
+#: Named as a literal because the `Read` call further down has to carry an
+#: absolute path, and a scripted turn is fixed before the task exists. Both
+#: probes echo the variable back and the tests compare, so a layout change
+#: says so here rather than surfacing as an unexplained "File not found" from
+#: the Read tool.
+TASK_TEMP_DIR = "/data/tmp/testuser"
+
+#: `{temp_dir}/.control/{user_id}/task_{task_id}` — `executor
+#: .get_task_control_dir`, with this stack's `temp_dir` and user id filled in.
+#: The task id is appended by the test, because it is only known once the task
+#: has been submitted. The probe derives the same path from
+#: `$ISTOTA_DEFERRED_DIR` and `$ISTOTA_TASK_ID` rather than being told it, and
+#: the test compares the two on a whole line: a probe that computed the wrong
+#: directory would otherwise report every absence below as a boundary, and an
+#: unanchored prefix match would accept `task_41` for task 4.
+#:
+#: The probe's derivation is *lexical* (`dirname` of an environment variable)
+#: where the product resolves (`Path(temp_dir).resolve()`, `executor.py:449`),
+#: so a symlink anywhere in `/data/tmp` would diverge the two. Nothing in
+#: either container shape has one, and the divergence is loud rather than
+#: silent — it lands on the `control=` comparison, not on a boundary answer.
+CONTROL_DIR_PREFIX = "/data/tmp/.control/testuser/task_"
+
+#: A control directory belonging to no task, planted in *this user's* control
+#: subtree from the daemon's own view before the task is submitted, and
+#: required to be absent from the namespace. This is the isolation half, and
+#: without it nothing here would notice a bind widened from the task's own
+#: directory to `{temp_dir}/.control` or `{temp_dir}/.control/{user_id}` —
+#: every other answer in the probe is unchanged by that, while every other
+#: task's assembled prompt (which carries `USER.md` and the channel context)
+#: becomes readable. `tests/smoke/test_sandbox_repos_isolation.py` seeds
+#: another user's tree the same way and for the same reason.
+#:
+#: The id is far above anything the stack will reach, so it can never collide
+#: with a real task's directory.
+NEIGHBOUR_TASK_DIR = "/data/tmp/.control/testuser/task_999999"
+
+#: Written into the planted directory, so "absent" can be told from "present
+#: but empty" and so the read half is asserted as well as the stat.
+NEIGHBOUR_SENTINEL = "SMOKE_NEIGHBOUR_TASK_CONTROL_SENTINEL"
 
 #: A string that exists only in the system half of the composed prompt
 #: (`executor.build_rules_section`). Grepped for inside the task and looked for
@@ -261,25 +312,82 @@ COMPOSED_SENTINEL = "## Important rules"
 #: if each half holds one thing.
 REQUEST_SENTINEL = "SMOKE_COMPOSED_REQUEST_SENTINEL"
 
-#: `ISTOTA_DEFERRED_DIR` is the task temp dir and `ISTOTA_TASK_ID` names the
-#: task, both already in the sandbox environment — so this is the executor's
-#: own naming convention read back from inside the namespace rather than a
-#: path this test invented.
+#: `ISTOTA_DEFERRED_DIR` is the task temp dir and the sandbox's `--chdir`
+#: target, and `ISTOTA_TASK_ID` names the task; both are already in the
+#: sandbox environment. The control directory is derived from them the way
+#: `executor.get_task_control_dir` derives it — a sibling `.control` of the
+#: per-user directories, then the user id, then `task_<id>` — so this is the
+#: executor's own naming convention read back from inside the namespace rather
+#: than a path this test invented. The derived path is echoed and the test
+#: compares it against `CONTROL_DIR_PREFIX`, because a probe aimed at a
+#: directory that does not exist reports every absence below as a boundary.
 #:
-#: Four facts, and each one is needed. `composed=` says the standing
-#: instructions are on disk where the brain was told to find them.
-#: `request_in_system=` says the user half did not leak into the permanent
-#: message. `append=` is the boundary: the file lives inside the task's own
-#: read-write temp directory, so only the later `--ro-bind` makes it refuse.
-#: And `sibling=` is the control for that one — without it a refusal is
-#: equally consistent with the whole directory having been made read-only,
-#: which would break every task rather than protect one file.
+#: The five the spec's `### The smoke witness` names, each of which passes in
+#: a state the others refuse:
+#:
+#: - `exists=` / `composed=` say the standing instructions are on disk where
+#:   the brain was told to find them. Read as one fact: `exists=` is the
+#:   cheaper failure message, and it is the answer the first control below
+#:   moved. Alone the pair is equally true of a file nothing bound.
+#: - `append=` is half the boundary: a write to that same file is refused.
+#: - `sibling=` is the control for `append=`. A file in the *per-user temp
+#:   dir* stays writable, which is what tells a working control bind from a
+#:   task directory made read-only wholesale — that would break every task
+#:   rather than protect the framework's files.
+#: - `control_in_cwd=` is the positive claim of the move: the model's working
+#:   directory holds no prompt half any more, under the retired
+#:   `task_<id>_prompt.txt` / `task_<id>_system_prompt.txt` spelling *or* the
+#:   new bare one. It deliberately does not match `task_<id>_result.txt`,
+#:   which the model writes and which stays there.
+#: - `control_dir=` is the per-directory claim the old per-file assertion
+#:   could not make: a file the daemon has never written is refused as well,
+#:   so anything added to the directory later is covered without a new guard.
+#:
+#: Three more, each closing a gap the stage review found:
+#:
+#: - `user_half=` turns `control_in_cwd=` from an absence into a move. Without
+#:   it, an `execute_task` that stopped writing `prompt.txt` at all leaves
+#:   every answer here green.
+#: - `cwd_glob_control=` is `control_in_cwd=`'s own control, run in the same
+#:   command: plant the retired name, glob, require `yes`, remove it, glob
+#:   again. `no` is otherwise equally true of a broken glob, a missing `ls`
+#:   and the property holding, and neither negative control below moves it.
+#: - `neighbour=` / `neighbour_readable=` are the isolation half; see
+#:   `NEIGHBOUR_TASK_DIR`.
+#:
+#: `request_in_system=` is none of them. It rides along because the file is
+#: open anyway and it is the disk-side half of the split ISSUE-375 made;
+#: `test_each_half_reached_the_model_on_its_own_channel` is the other.
+#:
+#: Both write answers carry the error text rather than discarding it, because
+#: `refused` and `unwritable` each collapse EROFS and ENOENT into one token —
+#: which is exactly what made the first negative control below unreadable
+#: until the probe was re-run by hand.
+#:
+#: The two sentinels are interpolated into single-quoted shell words, so
+#: neither may contain an apostrophe; one that did would produce a malformed
+#: command whose failure reads as `composed=absent`, i.e. as a product
+#: regression.
 SYSPROMPT_PROBE = f"""
-COMPOSED="$ISTOTA_DEFERRED_DIR/task_${{ISTOTA_TASK_ID}}_system_prompt.txt"
+CONTROL_ROOT="$(dirname "$ISTOTA_DEFERRED_DIR")/.control"
+CONTROL="$CONTROL_ROOT/$(basename "$ISTOTA_DEFERRED_DIR")/task_${{ISTOTA_TASK_ID}}"
+COMPOSED="$CONTROL/system_prompt.txt"
 SIBLING="$ISTOTA_DEFERRED_DIR/sysprompt-sibling-probe.txt"
+PLANTED="./task_${{ISTOTA_TASK_ID}}_prompt.txt"
+cwd_control_files() {{
+  ls -d ./task_*_prompt.txt ./prompt.txt ./system_prompt.txt 2>/dev/null \
+    | tr '\\n' ' '
+}}
 echo SYSPROMPT_PROBE_BEGIN
+echo "cwd=$(pwd)"
+echo "control=$CONTROL"
 echo "path=$COMPOSED"
 if [ -f "$COMPOSED" ]; then echo "exists=yes"; else echo "exists=no"; fi
+if [ -f "$CONTROL/prompt.txt" ]; then
+  echo "user_half=present"
+else
+  echo "user_half=absent"
+fi
 if grep -qF '{COMPOSED_SENTINEL}' "$COMPOSED" 2>/dev/null; then
   echo "composed=present"
 else
@@ -290,10 +398,10 @@ if grep -qF '{REQUEST_SENTINEL}' "$COMPOSED" 2>/dev/null; then
 else
   echo "request_in_system=no"
 fi
-if echo tampered >> "$COMPOSED" 2>/dev/null; then
+if err=$( {{ echo tampered >> "$COMPOSED"; }} 2>&1 ); then
   echo "append=accepted"
 else
-  echo "append=refused"
+  echo "append=refused [$err]"
 fi
 if echo probe > "$SIBLING" 2>/dev/null; then
   echo "sibling=writable"
@@ -301,6 +409,38 @@ if echo probe > "$SIBLING" 2>/dev/null; then
 else
   echo "sibling=refused"
 fi
+touch "$PLANTED" 2>/dev/null
+HITS="$(cwd_control_files)"
+if [ -n "$HITS" ]; then
+  echo "cwd_glob_control=yes [$HITS]"
+else
+  echo "cwd_glob_control=no"
+fi
+rm -f "$PLANTED"
+HITS="$(cwd_control_files)"
+if [ -n "$HITS" ]; then
+  echo "control_in_cwd=yes [$HITS]"
+else
+  echo "control_in_cwd=no"
+fi
+if err=$(touch "$CONTROL/planted-probe" 2>&1); then
+  echo "control_dir=writable"
+  rm -f "$CONTROL/planted-probe"
+else
+  echo "control_dir=unwritable [$err]"
+fi
+if [ -e '{NEIGHBOUR_TASK_DIR}' ]; then
+  echo "neighbour=present"
+else
+  echo "neighbour=absent"
+fi
+if grep -qF '{NEIGHBOUR_SENTINEL}' '{NEIGHBOUR_TASK_DIR}/system_prompt.txt' \
+    2>/dev/null; then
+  echo "neighbour_readable=yes"
+else
+  echo "neighbour_readable=no"
+fi
+echo "control_user_dir=[$(ls -A "$(dirname "$CONTROL")" 2>&1 | tr '\\n' ' ')]"
 echo SYSPROMPT_PROBE_END
 """
 
@@ -334,23 +474,93 @@ def marked_block(stack, begin: str, end: str, what: str) -> str:
 
 
 class TestTheComposedSystemPromptInTheStack:
-    """`task_<id>_system_prompt.txt`, observed from inside a live task.
+    """The task control directory, observed from inside a live task.
 
     Istota's standing instructions travel to the brain as a file so they land
     with system authority rather than as the first user message, which native
-    compaction summarizes away (ISSUE-375). The file is written into the task's
-    own read-write temp directory and re-bound read-only on top of it, which is
-    a property no unit test can observe: the default suite patches
-    `_bwrap_available` and asserts argv.
+    compaction summarizes away (ISSUE-375). That file, the user half beside it,
+    the briefing metadata and the prepared image renditions are all written by
+    the daemon into `{temp_dir}/.control/{user_id}/task_{id}` — a directory
+    outside the model's own per-user temp directory. That is a property no unit
+    test can observe: the default suite patches `_bwrap_available` and asserts
+    argv.
 
-    Read the four probe answers together. Any one of them passes in states the
+    **What this witnesses is the read-only bind**, which is one of the change's
+    two guards. The other is the pair of `native_fs_roots` entries, and nothing
+    here can see it: the probe reaches the filesystem through the Bash tool,
+    which is confined by the mount namespace, so a regression dropping the deny
+    root would be masked by the bind on this shape — and on the shapes where
+    the deny root is the *only* guard there is no sandbox to run this in.
+    `tests/test_executor.py` holds that half.
+
+    Read the probe answers together. Any one of them passes in states the
     others refuse — `append=refused` alone is equally true of a directory that
-    was made read-only wholesale, and `composed=present` alone is equally true
-    of a file nothing bound at all.
+    was made read-only wholesale, `composed=present` alone is equally true of a
+    file nothing bound at all, and `control_in_cwd=no` alone is equally true of
+    a task whose prompt files were never written, of a glob that matches
+    nothing by construction, and of a shell that landed in another directory.
+
+    **The controls, and what each turned red. Three were needed, and finding
+    out why is the useful part.** The obvious one — seed `_extra_ro_binds` with
+    `[]` in `execute_task`, rebuild, run — turned
+    `test_the_control_directory_is_readable_but_not_writable` red on
+    `exists=yes`, with the probe reporting `exists=no` and `composed=absent`.
+    It did *not* touch the two write answers, and could not have: nothing else
+    binds the control directory, so with no `--ro-bind` the path is absent from
+    the namespace altogether, `append` and `touch` fail on ENOENT, and both
+    read `refused` / `unwritable` for a reason that has nothing to do with a
+    boundary. A control that leaves an assertion passing has not exercised it.
+    That is also why both write answers now carry the error text.
+
+    So the second control keeps the bind and removes only the boundary:
+    `--ro-bind` becomes `--bind` in `build_bwrap_cmd`'s `extra_ro_binds` loop.
+    Against that image the probe answered `exists=yes composed=present
+    append=accepted control_dir=writable`, and
+    `test_the_control_directory_is_readable_but_not_writable` failed on
+    `append=refused`; with that one assertion neutered so the run could reach
+    past it, it failed again on `control_dir=unwritable`. Both write answers
+    are therefore proven able to fail, separately.
+
+    The third is for the isolation half, which neither of the first two moves:
+    `_extra_ro_binds = [control_dir.parent]`, a bind one level wide. Every
+    other answer was unchanged — `exists=yes`, `composed=present`,
+    `append=refused [Read-only file system]`, `control_dir=unwritable`,
+    `control_in_cwd=no` — while `control_user_dir` listed
+    `[task_2 task_3 task_4 task_5 task_999999]`, and the scenario failed on
+    `neighbour=absent` and then, with that assertion neutered, on
+    `neighbour_readable=no`. That is the finding this control exists for: a
+    bind widened from one task to one user leaks every other task's assembled
+    prompt and leaves the whole rest of the probe green.
+
+    Under all three controls `test_each_half_reached_the_model_on_its_own_
+    channel` stayed green, correctly — it reads the endpoint transcript and
+    knows nothing about binds — and so did every other scenario in this file.
+    `control_in_cwd=no` went red under none of them, and that is what
+    `cwd_glob_control=` is for: the move out of the working directory happens
+    in `execute_task` and holds with no sandbox at all, so no bind-shaped
+    control can reach that answer and it carries its own instead.
     """
 
     @pytest.mark.script(SYSPROMPT_SCRIPT)
-    def test_the_composed_file_is_readable_but_not_writable(self, stack):
+    def test_the_control_directory_is_readable_but_not_writable(self, stack):
+        # The neighbour goes in before the task runs, from the daemon's own
+        # view, and this call is also the in-session control for it: a `cat`
+        # that comes back with the sentinel is what makes the probe's
+        # `neighbour=absent` the difference the bind makes rather than a
+        # statement about a directory nobody created.
+        seeded = stack.exec([
+            "sh", "-c",
+            f"mkdir -p {NEIGHBOUR_TASK_DIR} && "
+            f"printf '%s\\n' {NEIGHBOUR_SENTINEL} "
+            f"> {NEIGHBOUR_TASK_DIR}/system_prompt.txt && "
+            f"cat {NEIGHBOUR_TASK_DIR}/system_prompt.txt",
+        ])
+        assert seeded.returncode == 0 and NEIGHBOUR_SENTINEL in seeded.stdout, (
+            "could not plant a neighbouring task's control directory in the "
+            "daemon's own view, so the isolation assertions below would pass "
+            f"against nothing\n{seeded.stdout}\n{seeded.stderr}"
+        )
+
         task_id = stack.submit(
             f"{REQUEST_SENTINEL} look at your own system prompt file"
         )
@@ -362,15 +572,46 @@ class TestTheComposedSystemPromptInTheStack:
             "the composed system prompt probe's output",
         )
 
+        # Where the probe looked, before anything about what it found. Both of
+        # these are aim rather than boundary: a probe pointed at a directory
+        # the executor does not use would report every absence below as a
+        # refusal, and `control_in_cwd` is a claim about the *model's working
+        # directory* rather than about whatever directory the shell landed in.
+        #
+        # Matched with the trailing newline, so the answer is the whole line:
+        # an unanchored `task_4` is a prefix of `task_41`, and an unanchored
+        # `/data/tmp/testuser` is a prefix of another user's directory.
+        assert f"control={CONTROL_DIR_PREFIX}{task_id}\n" in observed, (
+            "the probe derived a control directory that is not the one "
+            f"`get_task_control_dir` names for task {task_id}, so nothing "
+            "below is about the executor's own layout\n"
+            f"--- probe ---\n{observed}"
+        )
+        assert f"cwd={TASK_TEMP_DIR}\n" in observed, (
+            "the task did not run with the per-user temp directory as its "
+            "working directory, so `control_in_cwd` was asked of the wrong "
+            f"directory\n--- probe ---\n{observed}"
+        )
+        assert "cwd_glob_control=yes" in observed, (
+            "planting a `task_<id>_prompt.txt` in the working directory did "
+            "not make the glob find one, so `control_in_cwd=no` below is a "
+            f"broken probe rather than a property\n--- probe ---\n{observed}"
+        )
+
         assert "exists=yes" in observed, (
             "the executor wrote no composed system prompt for this task, or it "
-            "is not at the path the brain was given\n"
+            "is not in the control directory the brain was given\n"
             f"--- probe ---\n{observed}\n"
             f"--- daemon logs ---\n{stack.logs(120)}"
         )
         assert "composed=present" in observed, (
             "the file exists but carries none of Istota's standing "
             f"instructions\n--- probe ---\n{observed}"
+        )
+        assert "user_half=present" in observed, (
+            "the user half is not in the control directory, so "
+            "`control_in_cwd=no` below would only say it was written nowhere "
+            f"rather than that it moved\n--- probe ---\n{observed}"
         )
         assert "request_in_system=no" in observed, (
             "the user's request is inside the system file, which would make "
@@ -379,14 +620,41 @@ class TestTheComposedSystemPromptInTheStack:
         )
         assert "append=refused" in observed, (
             "the model can append to its own standing instructions — the "
-            "later `--ro-bind` is missing, or bwrap was skipped entirely "
-            "(check the daemon log for `Sandbox enabled but bubblewrap "
-            f"unavailable`)\n--- probe ---\n{observed}"
+            "`--ro-bind` of the control directory is missing, or bwrap was "
+            "skipped entirely (check the daemon log for `Sandbox enabled but "
+            f"bubblewrap unavailable`)\n--- probe ---\n{observed}"
         )
         assert "sibling=writable" in observed, (
-            "a sibling file in the same directory is not writable either, so "
+            "a file in the per-user temp directory is not writable either, so "
             "the refusal above is a read-only task directory rather than the "
-            f"one-file carve-out\n--- probe ---\n{observed}"
+            f"control directory's own bind\n--- probe ---\n{observed}"
+        )
+        assert "control_in_cwd=no\n" in observed, (
+            "a prompt half is still in the model's working directory, so the "
+            "executor wrote it to the per-user temp directory rather than to "
+            "the control directory — every task of this user can read it "
+            f"there\n--- probe ---\n{observed}"
+        )
+        assert "control_dir=unwritable" in observed, (
+            "the model can create a file in the control directory, so the "
+            "guard is still per-file rather than per-directory and anything "
+            "the framework writes there later starts unprotected\n"
+            f"--- probe ---\n{observed}"
+        )
+        # The isolation half. Without these two, widening the bind from the
+        # task's own directory to `{temp_dir}/.control/{user_id}` — or to
+        # `.control` whole — leaves every answer above unchanged while every
+        # other task's assembled prompt becomes readable in the namespace.
+        assert "neighbour=absent" in observed, (
+            "another task's control directory is in this task's namespace, so "
+            "the read-only bind is wider than one task and the per-task "
+            "isolation the layout exists for is not there\n"
+            f"--- probe ---\n{observed}"
+        )
+        assert "neighbour_readable=no" in observed, (
+            "another task's system prompt is readable from inside this task — "
+            "that file carries USER.md and the channel context\n"
+            f"--- probe ---\n{observed}"
         )
 
     @pytest.mark.script(SYSPROMPT_SCRIPT)
@@ -493,16 +761,6 @@ class TestDoctorAnswersFromInsideTheStack:
 # --------------------------------------------------------------------------
 # One tool server, one namespace, for the whole attempt
 # --------------------------------------------------------------------------
-
-#: `temp_dir` is the literal `/data/tmp` on both container shapes
-#: (`render-config.sh:130`) and `Stack.submit` submits as `testuser`, so the
-#: task temp dir — `ISTOTA_DEFERRED_DIR`, a read-write bind and therefore a
-#: `native_fs_roots` write root — is this. Named as a literal because the
-#: `Read` call below has to carry an absolute path, and a scripted turn is
-#: fixed before the task exists. The probe echoes the variable back and the
-#: test compares, so a layout change says so here rather than surfacing as an
-#: unexplained "File not found" from the Read tool.
-TASK_TEMP_DIR = "/data/tmp/testuser"
 
 #: Written to the namespace's `/tmp` by the first Bash call and read back by
 #: the second. `/tmp` is a `--tmpfs` inside the sandbox: with one namespace per

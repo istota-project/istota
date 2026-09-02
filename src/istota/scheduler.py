@@ -3874,14 +3874,37 @@ def _maybe_archive_briefing(
         return
 
     # Per-block provenance the executor stashed (best-effort).
+    #
+    # The one consumer that outlives its task: `execute_task` has returned by
+    # the time this runs, which is why nothing deletes the control directory
+    # on the way out and why the unlink below is here rather than there.
+    #
+    # `get_task_control_dir`, not `ensure_*`: this is a read, and creating a
+    # directory to discover it is empty would be the wrong shape. `None` (an
+    # unresolvable user id) leaves `block_meta` empty, the same as a missing
+    # file.
+    #
+    # The `except` swallows a wrong path silently — the archive is written
+    # either way and nothing is logged — so the only thing that catches this
+    # end pointing somewhere the writer does not is
+    # `tests/test_briefings_generate.py::TestSchedulerArchive` asserting the
+    # archived `block_meta` is non-empty.
     block_meta: dict = {}
     try:
-        from .executor import get_user_temp_dir
-        user_temp_dir = get_user_temp_dir(config, task.user_id)
-        meta_path = user_temp_dir / f"task_{task.id}_briefing_meta.json"
-        if meta_path.exists():
+        from .executor import get_task_control_dir
+        control_dir = get_task_control_dir(config, task.user_id, task.id)
+        meta_path = control_dir / "briefing_meta.json" if control_dir else None
+        if meta_path is not None and meta_path.exists():
             import json as _json
-            block_meta = _json.loads(meta_path.read_text()).get("block_meta", {})
+            # `encoding="utf-8"` rather than the locale's, to match the
+            # writer: `_write_control_file` names UTF-8 explicitly. Moot only
+            # while `json.dumps` keeps its `ensure_ascii=True` default, and a
+            # later `ensure_ascii=False` would otherwise lose provenance
+            # silently on a non-UTF-8 daemon — swallowed by the `except`
+            # below, which is the failure this whole stage is shaped around.
+            block_meta = _json.loads(
+                meta_path.read_text(encoding="utf-8")
+            ).get("block_meta", {})
             meta_path.unlink()
     except Exception:  # noqa: BLE001
         block_meta = {}

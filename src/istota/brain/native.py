@@ -2457,7 +2457,7 @@ class NativeBrain:
         — a checker with its own copy of the rule is free to disagree with the
         thing it describes. The composed part reports the stable label
         ``composed`` rather than its path: unlike the operator file, that path is
-        task-specific (``task_<id>_system_prompt.txt`` under a per-user temp
+        task-specific (``system_prompt.txt`` under the task's own control
         directory), and the whole use of the recorded source is comparing one
         run against another.
         """
