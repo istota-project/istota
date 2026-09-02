@@ -599,7 +599,17 @@ class TestPathsAndBinds:
     def test_the_paths_named_to_the_model_are_the_ones_bwrap_binds(
         self, tmp_path, ocr, monkeypatch
     ):
-        """`temp_dir` behind a symlink: an unresolved path names no file inside."""
+        """The path the model is told to open exists inside the namespace.
+
+        Read off the argv `execute_task` itself built — `req.sandbox_wrap` is
+        that closure — rather than off a command this test assembles, because
+        a hand-built one can only assert the binds the test supplied. That is
+        the difference between checking the executor and checking the
+        fixture.
+
+        Also covers `temp_dir` behind a symlink: an unresolved path names no
+        file inside.
+        """
         real = tmp_path / "real-temp"
         real.mkdir()
         link = tmp_path / "temp-link"
@@ -616,19 +626,59 @@ class TestPathsAndBinds:
         with db.get_db(config.db_path) as conn:
             task = _task(conn, attachments=[str(img)])
             _run(config, task, brain, conn)
-            cmd = executor.build_bwrap_cmd(
-                ["true"], config, task, True, [], executor.get_user_temp_dir(config, "alice"),
-                profile=executor.SandboxProfile.CLAUDE,
-            )
 
-        prepared = brain.reqs[-1].images[0].path
+        req = brain.reqs[-1]
+        assert req.sandbox_wrap is not None, (
+            "no namespace was built, so this asserts nothing about binds"
+        )
+        cmd = req.sandbox_wrap(["true"])
+        prepared = req.images[0].path
+        # Both bind flags. The model's own working directory is read-write and
+        # the control directory can only ever be read-only, so a set built from
+        # `--bind` alone would answer a narrower question than the one the
+        # class is named for.
         binds = {
             cmd[i + 2] for i, tok in enumerate(cmd)
-            if tok == "--bind" and i + 2 < len(cmd)
+            if tok in ("--bind", "--ro-bind") and i + 2 < len(cmd)
         }
         assert any(
             prepared.is_relative_to(Path(dest)) for dest in binds
         ), f"{prepared} is under none of {sorted(binds)}"
+
+    def test_the_rendition_lands_in_the_task_control_directory(
+        self, tmp_path, ocr,
+    ):
+        """Where the prepared file goes, and that the prompt says so.
+
+        Two halves of one claim. The rendition is written into the
+        daemon-owned control directory rather than into the sandbox's own
+        working directory, where the model could rewrite the picture it was
+        about to be asked about and where the previous task's renditions were
+        still readable. And the path interpolated into the `Attached files:`
+        section is the path the file is actually at — a move that updated one
+        and not the other would name the model a file that is not there.
+        """
+        config = _make_config(tmp_path)
+        # Big enough that the area cap binds, so a rendition is written rather
+        # than the source being named as-is.
+        img = _png(tmp_path / "inbox" / "pano.png", size=(3000, 2000))
+        brain = _CaptureBrain()
+
+        with db.get_db(config.db_path) as conn:
+            task = _task(conn, attachments=[str(img)])
+            _run(config, task, brain, conn)
+
+        control = executor.get_task_control_dir(config, "alice", task.id)
+        prepared = brain.reqs[-1].images[0].path
+        assert prepared != img.resolve()
+        assert prepared.is_relative_to(control / "attachments")
+        assert prepared.is_file()
+        assert not prepared.is_relative_to(
+            executor.get_user_temp_dir(config, "alice").resolve()
+        )
+        # The rendered line, from the same run: one half of this without the
+        # other passes on a run that named the model nothing at all.
+        assert str(prepared) in _prompt_of(brain)
 
     def test_an_attachment_outside_every_bind_is_copied_in(
         self, tmp_path, ocr, monkeypatch

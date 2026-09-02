@@ -674,8 +674,8 @@ class TestWhatTheBrainIsHanded:
             "them"
         )
         assert path == (
-            executor.get_user_temp_dir(config, task.user_id).resolve()
-            / f"task_{task.id}_system_prompt.txt"
+            executor.get_task_control_dir(config, task.user_id, task.id)
+            / "system_prompt.txt"
         )
         text = path.read_text(encoding="utf-8")
         for marker in self.SYSTEM_MARKERS:
@@ -706,14 +706,47 @@ class TestWhatTheBrainIsHanded:
         read when something has already gone wrong.
         """
         config, task, req = self._run(tmp_path)
-        temp = executor.get_user_temp_dir(config, task.user_id)
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
 
-        user_artifact = temp / f"task_{task.id}_prompt.txt"
+        user_artifact = control / "prompt.txt"
         assert user_artifact.read_text(encoding="utf-8") == req.prompt
 
-        system_artifact = temp / f"task_{task.id}_system_prompt.txt"
+        system_artifact = control / "system_prompt.txt"
         assert system_artifact.exists()
         assert system_artifact.resolve() == req.composed_system_prompt_path
+
+    def test_neither_artifact_is_left_in_the_model_s_own_directory(
+        self, tmp_path,
+    ):
+        """The regression guard for the whole move.
+
+        `{temp_dir}/{user_id}` is the sandbox `--chdir` target, bound
+        read-write and exported as `ISTOTA_DEFERRED_DIR`, so anything the
+        framework writes there is readable by every later task of that user
+        and writable by every concurrent one. The assembled user half is the
+        material file — retrieved memory, knowledge facts, playbooks and the
+        request itself — and it is per task, so a second task reading it
+        reads something it was never given.
+
+        Asserted as an absence in the directory rather than as a presence in
+        the new one, because the presence is what the test above already
+        pins and an absence is what a half-applied move would break.
+        """
+        config, task, _req = self._run(tmp_path)
+        temp = executor.get_user_temp_dir(config, task.user_id)
+
+        assert temp.is_dir(), "the fixture never ran the executor"
+        assert not list(temp.glob("task_*_prompt.txt")), sorted(
+            p.name for p in temp.iterdir()
+        )
+        assert not list(temp.glob("task_*_system_prompt.txt")), sorted(
+            p.name for p in temp.iterdir()
+        )
+        # The control root is a *sibling* of the per-user directory, not a
+        # child of it: a directory inside a model-writable parent can be
+        # swapped for a symlink between the daemon's mkdir and bwrap's mount.
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert not control.is_relative_to(temp.resolve())
 
     def test_a_dry_run_writes_neither_artifact(self, tmp_path):
         """The dry-run return still happens before both writes, not just the
@@ -735,16 +768,30 @@ class TestWhatTheBrainIsHanded:
         assert temp.is_dir()
         assert not list(temp.glob("task_*_prompt.txt"))
         assert not list(temp.glob("task_*_system_prompt.txt"))
+        # And neither half in the control directory. It is created above the
+        # dry-run return, unconditionally, so its *existence* pins nothing.
+        # The two filenames rather than emptiness: image preparation also runs
+        # above the return and creates `attachments/` on its first write, so a
+        # dry run of a task carrying an image would fail an emptiness check for
+        # a reason that has nothing to do with the property named here.
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert control.is_dir()
+        assert not (control / "prompt.txt").exists()
+        assert not (control / "system_prompt.txt").exists()
 
-    def test_the_sandbox_wrap_carries_the_composed_file_as_a_ro_bind(
+    def test_the_sandbox_wrap_carries_the_control_dir_as_a_ro_bind(
         self, tmp_path,
     ):
         """`_extra_ro_binds` had no production consumer until this stage.
 
         `tests/test_sandbox.py` proves `build_bwrap_cmd` re-binds whatever it
-        is handed, after the read-write bind of the directory. This proves the
-        executor hands it the composed file — the two halves of a claim that
-        neither test makes alone.
+        is handed, after every other bind and before the masks. This proves
+        the executor hands it the task control directory — the two halves of a
+        claim that neither test makes alone.
+
+        The entry is the *directory*, not the composed file: a bind names one
+        exact path and cannot express a filename pattern, so a per-file entry
+        left every other framework file in that directory unguarded.
         """
         captured = {}
 
@@ -753,33 +800,40 @@ class TestWhatTheBrainIsHanded:
             return raw_cmd
 
         with patch("istota.executor.build_bwrap_cmd", side_effect=fake_bwrap):
-            _config, _task, req = self._run(tmp_path, sandbox=True)
+            config, task, req = self._run(tmp_path, sandbox=True)
             req.sandbox_wrap(["true"])
             req.native_sandbox_wrap(["true"])
 
-        assert req.composed_system_prompt_path in captured["extra_ro_binds"], (
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert captured["extra_ro_binds"] == [control], (
             f"extra_ro_binds was {captured.get('extra_ro_binds')!r}"
         )
+        assert req.composed_system_prompt_path.parent == control
 
-    def test_the_native_file_tools_are_denied_the_composed_file(self, tmp_path):
+    def test_the_native_file_tools_are_denied_the_control_dir(self, tmp_path):
         """The other mechanism, from the same run.
 
-        The bind covers Bash. `Write` and `Edit` resolve through `ToolEnv` and
-        enter no namespace, so the deny list is what stops a native task
-        rewriting its own standing instructions. Both, or neither is worth
-        having.
+        The bind covers Bash. `Read`, `Write` and `Edit` resolve through
+        `ToolEnv` and enter no namespace on the unsandboxed shapes, so the
+        deny list is what stops a native task rewriting its own standing
+        instructions. Both, or neither is worth having.
         """
         with patch("istota.executor.native_fs_confinement_active", return_value=True):
-            _config, _task, req = self._run(tmp_path, sandbox=True)
+            config, task, req = self._run(tmp_path, sandbox=True)
 
-        assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert control in req.fs_write_denied_roots, (
             f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
         )
         # Once, not twice: `native_fs_roots` returns it and the executor seeds
         # it, and a duplicate would be the shape of two producers drifting.
-        assert req.fs_write_denied_roots.count(
-            req.composed_system_prompt_path
-        ) == 1, req.fs_write_denied_roots
+        assert req.fs_write_denied_roots.count(control) == 1, (
+            req.fs_write_denied_roots
+        )
+        # Denied but readable. The control directory is inside no write root,
+        # so without the read entry a confined task could not open the image
+        # attachment its own prompt named.
+        assert control in (req.fs_read_roots or []), req.fs_read_roots
 
     def test_the_deny_entry_survives_an_unsandboxed_deployment(self, tmp_path):
         """The shapes with nothing else, and the ones easiest to miss.
@@ -796,13 +850,14 @@ class TestWhatTheBrainIsHanded:
         with patch(
             "istota.executor.native_fs_confinement_active", return_value=False,
         ):
-            _config, _task, req = self._run(tmp_path)
+            config, task, req = self._run(tmp_path)
 
         assert req.fs_read_roots is None, (
             "the roots are an allowlist and mean nothing unconfined; this test "
             "is about the deny set, so the fixture has to actually be unconfined"
         )
-        assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert control in req.fs_write_denied_roots, (
             f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
         )
 
@@ -815,37 +870,55 @@ class TestWhatTheBrainIsHanded:
         with patch(
             "istota.executor.native_fs_confinement_active", return_value=False,
         ):
-            _config, _task, req = self._run(tmp_path)
+            config, task, req = self._run(tmp_path)
 
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
         env = ToolEnv(
-            cwd=req.composed_system_prompt_path.parent,
-            write_denied_roots=tuple(req.fs_write_denied_roots),
+            cwd=control, write_denied_roots=tuple(req.fs_write_denied_roots),
         )
         assert env.confined is False
         with pytest.raises(ToolPathError, match="read-only"):
             env.resolve(str(req.composed_system_prompt_path), write=True)
-        # The sibling control: nothing else in the directory became read-only.
+        # And a name nothing has written yet, which is the per-directory claim
+        # the old per-file entry could not make.
+        with pytest.raises(ToolPathError, match="read-only"):
+            env.resolve(str(control / "planted.txt"), write=True)
+        # The sibling control: the model's own working directory is untouched.
+        # Without it this test would pass equally against a task whose whole
+        # temp tree had been refused, which is a different mechanism.
         env.resolve(
-            str(req.composed_system_prompt_path.parent / "notes.txt"), write=True,
+            str(executor.get_user_temp_dir(config, task.user_id) / "notes.txt"),
+            write=True,
         )
 
+    @pytest.mark.parametrize("name", ["prompt.txt", "system_prompt.txt"])
     def test_a_planted_symlink_fails_the_write_rather_than_following_it(
-        self, tmp_path,
+        self, tmp_path, name,
     ):
-        """`user_temp_dir` is per user, not per task, and task ids are
-        sequential and in the environment — so a concurrent task of the same
-        user can leave a *dangling* symlink named after a task that has not
-        started. A plain `write_text` follows it and writes the composed prompt
-        wherever it points, as the daemon user. `O_NOFOLLOW` refuses instead.
+        """`O_NOFOLLOW` on *both* halves, kept after the files moved.
+
+        The vector it was answering is gone: the control directory is 0700
+        under a 0700 root the daemon owns, it is a sibling of the per-user
+        directories rather than a child of one, and it is bound into no
+        sandbox — so no task of any user can leave an entry in it, dangling
+        or otherwise. A guard dropped on the strength of a property held
+        somewhere else is one nobody notices the loss of, so both writes keep
+        the flag and this keeps proving it fires. The plant is by hand
+        because that is now the only way one gets there.
+
+        Both halves, because the user half never had the flag: it carries
+        retrieved memory, knowledge facts, playbooks and the request, and a
+        plain `write_text` following a link writes all of that wherever the
+        link points, as the daemon user.
         """
         for existing in (True, False):
-            config = self._config(tmp_path / f"plant-{existing}")
-            temp = executor.get_user_temp_dir(config, "alice")
-            temp.mkdir(parents=True, exist_ok=True)
-            victim = tmp_path / f"victim-{existing}.txt"
+            config = self._config(tmp_path / f"plant-{name}-{existing}")
+            control = executor.get_task_control_dir(config, "alice", 1)
+            control.mkdir(parents=True, exist_ok=True)
+            victim = tmp_path / f"victim-{name}-{existing}.txt"
             if existing:
                 victim.write_text("do not overwrite me\n")
-            (temp / "task_1_system_prompt.txt").symlink_to(victim)
+            (control / name).symlink_to(victim)
 
             with db.get_db(config.db_path) as conn:
                 task_id = db.create_task(

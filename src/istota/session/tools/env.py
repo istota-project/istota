@@ -89,12 +89,17 @@ class ToolEnv:
     - ``write_roots`` — the writable subset (Write/Edit). Reads are allowed in
       ``read_roots`` (which the constructor unions with ``write_roots``); writes
       only in ``write_roots``. Ignored when ``read_roots`` is ``None``.
-    - ``write_denied_roots`` — read-only carve-outs nested *inside* a write
-      root. A path under one of these is readable but never writable, which is
-      what ``build_bwrap_cmd`` gets for free by re-binding a subdirectory
-      ``--ro-bind`` after its parent's read-write bind. Containment alone can't
-      express that: ``.developer`` sits inside ``user_temp_dir``, so without
-      this the model could rewrite ``credential-fetch``. Unlike the two above,
+    - ``write_denied_roots`` — a path that must never be writable, whether or
+      not it is inside a write root. A path under one of these is readable but
+      never writable, which is what ``build_bwrap_cmd`` gets for free by
+      re-binding a path ``--ro-bind`` after the read-write bind that would
+      otherwise cover it. Two producers, and only one of them is nested:
+      ``.developer`` sits inside ``user_temp_dir``, which containment alone
+      cannot express, so without this the model could rewrite
+      ``credential-fetch``; the task control directory is a *sibling* of
+      ``user_temp_dir`` and inside no write root at all, which is why
+      ``native_fs_roots`` also returns it among the read roots — read it there
+      before concluding that either entry is redundant. Unlike the two above,
       this one is enforced whether or not confinement is active, and its empty
       value is ``()`` rather than ``None`` — a deny set has no unconfined
       meaning to signal.
@@ -141,13 +146,16 @@ class ToolEnv:
         # Resolved unconditionally, and consulted unconditionally: the deny
         # check in ``resolve``/``contains`` runs ahead of the unconfined early
         # return. That used to be insurance against a hypothetical caller and
-        # now has a real one: ``execute_task`` seeds the composed system prompt
+        # now has a real one: ``execute_task`` seeds the task control directory
         # onto ``fs_write_denied_roots`` *outside* its
         # ``native_fs_confinement_active`` branch, so on macOS, the standalone
         # install and the shipped Docker stack a ``ToolEnv`` arrives with a deny
         # root and no ``read_roots`` at all. Those are precisely the shapes with
-        # no bwrap re-bind behind the file, so this is the only thing standing
-        # between the model and a ``Write`` over its own standing instructions.
+        # no bwrap re-bind behind that directory, so this is the only thing
+        # standing between the model and a ``Write`` over the standing
+        # instructions it is running under — or over its own assembled prompt,
+        # its briefing metadata or a prepared image attachment, all of which
+        # live in there beside them.
         self._write_denied_real = [_realpath(p) for p in self.write_denied_roots]
         if self.read_roots is None:
             self._read_real = None

@@ -1,6 +1,7 @@
 """Claude Code execution wrapper."""
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -311,16 +312,28 @@ def _make_cancel_check(config: Config, task_id: int) -> "Callable[[], bool]":
     return _check
 
 
-def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list[Path]:
+def image_bind_roots(
+    config: Config, task: db.Task, user_temp_dir: Path,
+    control_dir: Path | None = None,
+) -> list[Path]:
     """The roots an image attachment can live under and still be openable.
 
     `build_bwrap_cmd` binds the user temp dir plus `{mount}/Users/{user}`,
-    `{mount}/Talk` and `{mount}/Channels/{token}` — and nothing else. The
+    `{mount}/Talk` and `{mount}/Channels/{token}`, and re-binds the task
+    control directory read-only after all of them — and nothing else. The
     scheduler's nc-data fallback hands out `/mnt/nc-data/<user>/files/Talk/...`,
     which is under none of them, so a small in-limits screenshot arriving that
     way would be named in the Claude Code directive and be unreadable. Naming
     the roots here is what lets `prepare_image_attachments` copy such a file in
     even when it needs no resize and no conversion.
+
+    `control_dir` is where the prepared renditions are *written*, and it is in
+    this list to keep an invariant rather than to decide a copy: `_within_binds`
+    tests the source, so nothing today reaches it. The output directory has
+    always been inside `bind_roots` — it used to be, via `user_temp_dir` — and a
+    destination outside the roots the same call is told about is the shape of a
+    later copy loop or a second-pass rendition landing somewhere unreadable.
+    `user_temp_dir` stays: source attachments still arrive there.
 
     Resolved, because `_bind` resolves its source and uses the *resolved* path
     as the in-namespace destination: on a deployment where `temp_dir` sits
@@ -328,6 +341,8 @@ def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list
     the namespace, and every `Read` fails.
     """
     roots = [user_temp_dir]
+    if control_dir is not None:
+        roots.append(control_dir)
     mount = config.nextcloud_mount_path
     if mount:
         mount = Path(mount)
@@ -347,6 +362,299 @@ def image_bind_roots(config: Config, task: db.Task, user_temp_dir: Path) -> list
 def get_user_temp_dir(config: Config, user_id: str) -> Path:
     """Get the per-user temp directory path."""
     return config.temp_dir / user_id
+
+
+CONTROL_DIR_NAME = ".control"
+
+
+def get_task_control_dir(
+    config: Config, user_id: str, task_id: int
+) -> Path | None:
+    """The daemon-owned directory for one task's framework-authored files.
+
+    ``{config.temp_dir}/.control/{user_id}/task_{task_id}``, resolved.
+
+    Framework-authored per-task files — the two prompt halves, the briefing
+    metadata, the prepared image attachments — are written by the daemon and
+    must not be modified by the model. They live here rather than in
+    :func:`get_user_temp_dir` because that directory is the sandbox's
+    ``--chdir`` target, bound read-write, and it is per *user* rather than per
+    task: a concurrent task of the same user can create an entry in it, task
+    ids are sequential and exported as ``ISTOTA_TASK_ID``, so the entry can be
+    a dangling symlink named after a task that has not started yet.
+
+    **A sibling of the per-user directories, not a child of one.** That is the
+    whole of it: a directory inside a model-writable parent can be replaced
+    with a symlink between the daemon's ``mkdir`` and bwrap's ``mount``, which
+    is ISSUE-320 exactly. ``.developer`` survives that only because a later
+    bind buries the swap; this directory would have no bind behind it. The
+    shared temp root is bound at no path, so being one level up removes the
+    window rather than racing it.
+
+    **Resolved, unlike :func:`get_user_repos_dir`**, which returns its
+    candidate as written. ``_ro_bind(src)`` with no explicit ``dest`` uses the
+    *unresolved* string it was handed as the in-namespace destination, and
+    ``BrainRequest.composed_system_prompt_path`` is a single value read by
+    ``NativeBrain`` in the daemon and by the ``claude`` CLI inside the
+    namespace — so host path and namespace path must be one string, which
+    means the caller must hand over an already-resolved one. The last
+    component is deliberately *not* resolved: :func:`ensure_task_control_dir`
+    opens it ``O_NOFOLLOW``, and resolving here would follow a planted symlink
+    and leave that open inspecting an ordinary directory.
+
+    Returns None when ``user_id`` is empty or would escape the root — the same
+    containment equality :func:`get_user_repos_dir` and :func:`daemon_work_dir`
+    use, both halves of it, because truthiness alone lets ``.``, ``..`` and an
+    absolute component through and the lexical half alone lets a symlink
+    through. Also refuses a ``user_id`` that *casefolds* to
+    :data:`CONTROL_DIR_NAME`: :func:`get_user_temp_dir` is a plain join, so a
+    user of that name would put its model-writable scratch directory exactly
+    where the control root goes, and on a case-insensitive filesystem
+    ``.Control`` is that same directory — the equality has to be case-folded
+    or the guard is defeated by the shift key on every developer host. A
+    leading dot is not a legal user id anywhere one is produced; the refusal
+    is explicit rather than relying on that.
+
+    **The refusal covers a corrupt control root too, and that is why the two
+    reasons are logged apart.** ``root`` is deliberately *not* resolved, so a
+    symlink planted at ``.control`` makes ``candidate.resolve()`` resolve
+    through it and the equality fails — the right answer, since resolving the
+    root would instead accept the planted symlink and hand back a path outside
+    the tree altogether. But the fault there is a symlink the daemon owns the
+    parent of, not a bad user id, and a message blaming the user id sends an
+    operator looking in the wrong place.
+
+    ``task_id`` is coerced with ``int()`` before it is interpolated, and that
+    is a containment check rather than tidiness: the equality above covers the
+    ``user_id`` component and stops there, ``PurePath`` does not collapse
+    ``..``, and the kernel resolves it at ``mkdir``. A ``task_id`` of
+    ``"1/../../.."`` would otherwise name a directory outside the user's
+    subtree, which is the one thing this function exists to prevent. Today's
+    callers pass ``task.id`` off a SQLite row and the heartbeat's synthetic
+    ``0``, so it is unreachable now and would be reached the first time a
+    caller takes the id from a deferred-op JSON or a CLI argument — the same
+    reason the notification resolvers coerce ``object_id``. ``task_0`` is a
+    legal directory name and needs no special case.
+
+    Does not create anything. Never raises — not for a hostile ``user_id`` and
+    not for one of the wrong type, which is why the join is inside the ``try``
+    and ``TypeError`` is caught beside ``OSError`` and ``ValueError``.
+    """
+    temp_dir = getattr(config, "temp_dir", None)
+    if not temp_dir or not user_id:
+        return None
+    if isinstance(user_id, str) and user_id.casefold() == CONTROL_DIR_NAME.casefold():
+        return None
+    try:
+        root = Path(temp_dir).resolve() / CONTROL_DIR_NAME
+        candidate = root / user_id
+        # Two checks, because neither catches the other's cases. The lexical
+        # one refuses a component that never became a child (`.` is dropped by
+        # `PurePath`, an absolute one replaces the root, a nested one goes
+        # deeper); the resolved one refuses `..` and every symlink, which are
+        # children by name and somewhere else on disk — including a symlink at
+        # the control root itself, which is a different fault and is reported
+        # as one below.
+        contained = candidate.parent == root and candidate.resolve() == root / user_id
+        leaf = f"task_{int(task_id)}"
+    except (OSError, ValueError, TypeError):
+        logger.warning(
+            "task control dir: cannot name a directory under %s for user id "
+            "%r, task id %r; not using it.",
+            temp_dir, user_id, task_id,
+        )
+        return None
+    if not contained:
+        # Two reasons, one refusal. Which one it is decides where an operator
+        # looks, so they are not collapsed into a single sentence.
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            logger.warning(
+                "task control dir: %s is not a directory the daemon owns "
+                "(a symlink or a non-directory is in its place); refusing to "
+                "use it for user id %r.",
+                root, user_id,
+            )
+        else:
+            logger.warning(
+                "task control dir: %s does not resolve to the subtree named "
+                "by user id %r; not using it. A symlink or a path component "
+                "in the user id would reach outside that user's own control "
+                "directory.",
+                candidate, user_id,
+            )
+        return None
+    return candidate / leaf
+
+
+def _ensure_control_level(path: Path, *, parents: bool) -> None:
+    """One level of the control directory: a real directory, ours, at 0700.
+
+    ``Path.mkdir(exist_ok=True)`` swallows ``FileExistsError`` whenever
+    ``is_dir()`` says yes, and ``is_dir()`` follows a symlink — so a symlink
+    pointing at a directory sails straight through the create, and a plain
+    ``os.chmod`` afterwards would follow it too. ``O_NOFOLLOW | O_DIRECTORY``
+    is what refuses both that and a regular file (and a FIFO, which would
+    otherwise block the open), and ``fchmod`` then acts on the descriptor
+    rather than on the name, so the mode lands on the inode that was opened or
+    on nothing at all.
+
+    **The uid is checked on the same descriptor**, before the mode is set. A
+    directory type check alone says the level is a directory, not that it is
+    *ours*: ``Config.temp_dir`` defaults to ``/tmp/istota``, whose parent is
+    world-writable and sticky, so on a host where the daemon has not run yet
+    any local account can pre-create a level and the tree meant to be
+    unreadable by the model lands somewhere another user owns. The fd is
+    already in hand, so ``fstat`` costs nothing, and it fails closed. What
+    this cannot cover is a symlink at ``temp_dir`` *itself*: that is resolved
+    before any of this runs, and the operator's configured root is trusted as
+    given here exactly as ``security.sandbox_cache_dir`` is. The shipped
+    deployment shapes put it under a directory the daemon owns
+    (``{istota_home}/tmp`` under Ansible, ``/data/tmp`` under Docker); the
+    ``/tmp`` default is a single-host convenience and not a shape this
+    directory's guarantee is claimed on.
+
+    The mode is re-asserted on every call because ``mkdir(exist_ok=True)``
+    leaves an existing directory's mode alone: a directory created under a
+    different umask, or widened by hand, would otherwise stay widened for the
+    life of the deployment.
+
+    Raises ``OSError`` — the caller turns it into the ``RuntimeError`` that
+    fails the task.
+    """
+    with contextlib.suppress(FileExistsError):
+        path.mkdir(mode=0o700, parents=parents)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        owner = os.fstat(fd).st_uid
+        if owner != os.geteuid():
+            raise PermissionError(
+                errno.EPERM,
+                f"directory is owned by uid {owner}, not by the daemon",
+            )
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
+def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
+    """Create the directory :func:`get_task_control_dir` names, 0700 the whole
+    way down, and return the resolved path.
+
+    Raises ``RuntimeError`` when the path cannot be resolved or created. The
+    caller is ``execute_task``, and a control directory that does not exist is
+    a task that must fail rather than run with its standing instructions
+    reachable by nothing — the same fail-closed argument ISSUE-375 made for
+    ``composed_system_prompt_path``.
+
+    All three levels are created and mode-asserted, not just the last: the
+    control root and the per-user level are what keep one user's control files
+    out of another's reach, and ``mkdir(parents=True)`` applies its ``mode``
+    to the leaf only, creating every intermediate with the ambient umask.
+
+    **Two mechanisms refuse a corrupt level, and which one covers which case
+    is not what it looks like.** A *symlink* at the control root or at the
+    per-user level is refused by :func:`get_task_control_dir`, whose
+    containment equality resolves through both — this function is never
+    reached. A *regular file* at those same levels is not, because
+    ``Path.resolve()`` is non-strict and returns the lexical path even when an
+    ancestor is not a directory, so the equality holds and it arrives here for
+    ``O_DIRECTORY`` to refuse with ENOTDIR. And the whole ``task_{id}`` level
+    arrives here whatever is at it, since the resolver deliberately leaves the
+    last component unresolved — which makes ``O_NOFOLLOW`` the sole guard for
+    a symlink there, and nowhere else. Removing it turns exactly that one case
+    red, which is what the negative control in
+    ``tests/test_task_control_dir.py`` records. The mode and ownership
+    assertions apply at all three levels.
+
+    Idempotent: a retry of the same task reuses the same directory, which is
+    what makes it safe for ``execute_task`` to call unconditionally and for
+    ``_build_module_briefing_prompt`` to call again underneath it.
+
+    **One retry, and it is for the sweep rather than for flakiness.**
+    ``cleanup_old_temp_files`` recurses into every subdirectory of
+    ``temp_dir`` — ``.control`` included, since ``iterdir`` yields dotted
+    entries — and ``rmdir``s any empty directory past
+    ``temp_file_retention_days``. Neither ``mkdir`` on an existing directory
+    nor ``fchmod`` updates an mtime, so a per-user level left empty and idle
+    stays a valid candidate *while* this function is walking down through it,
+    and the second level's ``mkdir(parents=False)`` then raises
+    ``FileNotFoundError`` and fails a task for a directory that was collected
+    underneath it. The retry restarts from the top so every level is
+    re-created and re-asserted; ``parents=True`` on the lower levels would
+    have papered over it while recreating the levels above with the ambient
+    umask instead of 0700.
+
+    The message names the path and never the contents of anything found there.
+    """
+    control_dir = get_task_control_dir(config, user_id, task_id)
+    if control_dir is None:
+        raise RuntimeError(
+            f"cannot name a task control directory for user {user_id!r}, "
+            f"task {task_id!r}: the user id is empty, is not a child of "
+            f"{getattr(config, 'temp_dir', None)}/{CONTROL_DIR_NAME}, or that "
+            f"directory is not one the daemon owns"
+        )
+    user_level = control_dir.parent
+    root = user_level.parent
+    # The shared temp root may not exist yet, so the control root takes
+    # `parents=True` — the same posture `daemon_work_dir` takes for the
+    # per-user directories beside it. `mkdir` applies its mode to the leaf
+    # only, so this creates `temp_dir` with the ambient umask and `.control`
+    # itself at 0700.
+    levels = ((root, True), (user_level, False), (control_dir, False))
+    for attempt in (1, 2):
+        try:
+            for level, parents in levels:
+                _ensure_control_level(level, parents=parents)
+        except FileNotFoundError as exc:
+            # A level was collected under us between two iterations. Start
+            # again once; a second occurrence is not a sweep race.
+            if attempt == 2:
+                raise RuntimeError(
+                    f"task control directory {control_dir} kept disappearing "
+                    f"while it was being created: {exc.strerror or exc}"
+                ) from exc
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                f"task control directory {level} is unusable: "
+                f"{exc.strerror or exc}"
+            ) from exc
+        return control_dir
+    return control_dir
+
+
+def _write_control_file(path: Path, text: str) -> None:
+    """Write one framework-authored file: `O_NOFOLLOW`, `O_TRUNC`, mode 0600.
+
+    Both prompt halves go through here so the rule is stated once. `O_TRUNC`
+    is what makes a retry of the same task overwrite rather than append; 0600
+    because these hold the persona, the user's own overlays, their email
+    address, their retrieved memory and their request, and no other local
+    account has any reason to read them.
+
+    ``O_NOFOLLOW`` is belt-and-braces since the files moved out of the
+    model-writable directory — see the call sites — and it is kept because a
+    guard dropped on the strength of a property held somewhere else is the one
+    nobody notices the loss of.
+
+    The descriptor is closed by hand only on the path where ``os.fdopen``
+    itself raises: it takes ownership when it returns, so closing after a
+    successful call would be a double close, and a double close on a
+    long-running daemon closes whatever fd the number was reused for.
+    """
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(text)
 
 
 class DaemonSandbox(NamedTuple):
@@ -3096,9 +3404,9 @@ def build_bwrap_cmd(
     generic, including the ordering, which is load-bearing in four places
     (cache bind before repos bind, ``.developer`` re-bind after
     ``user_temp_dir``, ``extra_ro_binds`` after *every* bind — its two entries
-    are a document a daemon-side OCR call names and the task's own composed
-    system prompt, and both live inside a read-write bind that would otherwise
-    bury them — and masks last with ``--remount-ro`` after each).
+    are a document a daemon-side OCR call names, which lives inside a
+    read-write bind that would otherwise bury it, and the task's own control
+    directory — and masks last with ``--remount-ro`` after each).
     Omitting the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
@@ -3492,27 +3800,38 @@ def build_bwrap_cmd(
     # test_the_document_stays_read_only_under_a_later_bind`.
     #
     # It has one task-path entry now, and being last is what that entry wants
-    # too. `execute_task` appends the task's own `task_<id>_system_prompt.txt`,
-    # which holds Istota's composed standing instructions and sits *inside* the
-    # read-write `user_temp_dir` bind — so only a later read-only bind of the
-    # file makes it read-only, and an earlier one is simply overmounted by its
-    # parent. That needed the loop after `user_temp_dir`; being after every
-    # bind satisfies it and more. (This comment used to say the loop was free
-    # to move because the list was always empty on the task path. It was true
-    # when written and stopped being true in the same release.)
+    # too. `execute_task` appends the task's own control directory,
+    # `{temp_dir}/.control/{user_id}/task_{id}` — both prompt halves, the
+    # briefing metadata and the prepared image renditions, everything the
+    # daemon authors for this task. It is a sibling of `user_temp_dir` rather
+    # than a child, so nothing binds over it today; being after every bind is
+    # what keeps that true of any bind added later. (The entry used to be one
+    # file *inside* the read-write `user_temp_dir` bind, where a later
+    # read-only bind was the only thing that made it read-only at all. That
+    # ordering requirement is gone with the file, and the loop stays where it
+    # is because the property is worth having unconditionally. This comment
+    # used to say the loop was free to move because the list was always empty
+    # on the task path. It was true when written and stopped being true in the
+    # same release.)
     #
     # A missing entry is skipped rather than raising, because bwrap fails the
     # whole namespace on a bind whose source is absent — one cleanup race would
     # otherwise fail every task instead of one. It is logged, because the entry
-    # is a boundary: a silently dropped read-only bind leaves the writable copy
-    # of the same path in the namespace and nothing anywhere says so.
+    # is a boundary and the two callers lose different things by it. The OCR
+    # document sits inside a read-write bind, so a skipped entry leaves the
+    # writable copy in the namespace and nothing else says so. The control
+    # directory is bound by nothing else, so a skipped entry leaves the path
+    # *absent*: the CLI then exits at `--append-system-prompt-file` and a
+    # `Read` of a prepared attachment gets ENOENT. Fail-closed either way,
+    # which is why the message names both rather than picking one.
     for path in (extra_ro_binds or []):
         if path.exists():
             _ro_bind(path)
         else:
             logger.warning(
                 "sandbox: extra read-only bind %s does not exist; the path is "
-                "left as its parent bind has it", path,
+                "left as its parent bind has it, or absent from the namespace "
+                "entirely where nothing else binds it", path,
             )
 
     # --- Database masks (must be the LAST mount operations) ---
@@ -3707,7 +4026,7 @@ def native_fs_roots(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
-    composed_system_prompt_path: Path | None = None,
+    control_dir: Path | None = None,
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """File-access roots for a native-brain task.
 
@@ -3740,51 +4059,69 @@ def native_fs_roots(
     path gets, and on an unsandboxed one the drift is the whole policy.
 
     The third element carries the RO carve-outs bwrap gets by re-binding a
-    subdirectory read-only *after* its parent's RW bind. Containment alone
-    cannot express those, so they are returned separately and threaded onto
-    ``ToolEnv.write_denied_roots``. Two entries today. ``.developer`` — the
-    credential-fetch helper and the git credential helpers — which the
-    claude_code path has protected since the RO re-bind was added and which
-    this function silently left writable until it grew this return value. And
-    ``composed_system_prompt_path``, the task's own
-    ``task_<id>_system_prompt.txt``: Istota's standing instructions, written
-    into ``user_temp_dir`` and therefore inside a write root. bwrap re-binds it
-    read-only through ``extra_ro_binds``, which covers Bash and covers nothing
-    that goes through ``ToolEnv`` — so without this entry a native task
-    rewrites the instructions it is running under with one ``Write`` call, and
-    a ``native -> claude_code`` reroute reads the rewrite, since the reroute
-    keeps the same path. That is the ``.developer`` asymmetry above, repeated,
-    which is why it is closed in the same commit that opens it.
+    path read-only *after* the RW bind that would otherwise cover it.
+    Containment alone cannot express those, so they are returned separately and
+    threaded onto ``ToolEnv.write_denied_roots``. Two entries today.
+    ``.developer`` — the credential-fetch helper and the git credential helpers
+    — which the claude_code path has protected since the RO re-bind was added
+    and which this function silently left writable until it grew this return
+    value. And ``control_dir``, the task's own
+    ``{temp_dir}/.control/{user_id}/task_{id}``: every file the daemon authors
+    for this task, which is to say both prompt halves, the briefing metadata
+    and the prepared image renditions.
 
-    **The deny entry is the task's own exact path, and that is narrower than
-    the shape.** ``user_temp_dir`` is per *user*, not per task, so a second
-    concurrent task of the same user has this directory in its write roots and
-    is denied only its own file. Nothing here expresses
-    ``task_*_system_prompt.txt`` as a shape: a deny root is compared by
-    equality or containment (``ToolEnv._in_denied``), and the same is true of
-    the bwrap bind.
+    **``control_dir`` goes in two lists, and neither covers the other's case.**
+    It is also appended to ``read_only``, and the reason is the whole shape of
+    ``ToolEnv``:
 
-    That was reviewed and the flat path was kept deliberately, because **the
-    exposure is not specific to this file**. ``task_<id>_prompt.txt`` carries
-    the user half and therefore what the task was asked to do; the result file
-    and every deferred-op JSON sit in the same directory on the same terms. A
-    dedicated denied subdirectory for the system half closes one member of that
-    class, adds a mechanism to keep in sync forever, and leaves the larger
-    member open. What the entry above *does* close is the case this spec
-    introduced and the one a single task can reach on its own: a native task
-    rewriting the instructions it is itself running under, which a
-    ``native -> claude_code`` reroute would read back. The cross-task case needs
-    two concurrent tasks of the same user and yields no privilege that user does
-    not already hold — only the chance to strip another in-flight task's rules.
-    It is a residual of the artifact directory, to be closed if that directory
-    ever moves out of the model-writable tree, and it is stated rather than
-    implied.
+    - ``read_roots`` is ``None`` when confinement is off, and ``None`` means
+      *unconfined* — both root lists are then inert. So a ``read_only`` entry
+      alone protects nothing on the standalone install or the shipped Docker
+      stack.
+    - ``write_denied_roots`` is checked *ahead of* that unconfined return, so
+      it is enforced whether or not confinement is active; its empty value is
+      ``()`` rather than ``None``, because a deny set has no unconfined meaning
+      to signal.
+    - Under confinement the control directory is inside no write root — that is
+      the design, it is a sibling of ``user_temp_dir`` rather than a child — so
+      ``read_only`` is what makes it *readable* while leaving it unwritable.
+      Without it a confined task could not open its own prepared image
+      attachment, on a path its own prompt named.
+
+    **Only this task's own directory, and the routes that could widen that.**
+    ``{temp_dir}/.control`` and ``{temp_dir}/.control/{user_id}`` are named
+    here by nothing, so a task reaches no other task's control files. Two
+    things could put a wider path back in, and only one of them is guarded.
+    ``security.sandbox_ro_paths`` is bound verbatim and now warns at config
+    load (``config._warn_ro_paths_over_control_tree``). The **per-resource
+    mounts** below are not: a ``user_resources`` row is ``mount /
+    resource_path``, bounded by the Nextcloud mount root and nothing else, so
+    on a layout where ``config.temp_dir`` sits *under*
+    ``nextcloud_mount_path`` a row naming the control tree would bind it
+    read-write and neither entry here would cover a sibling task's directory.
+    That is the same residual ``.claude/rules/brain.md`` records for the
+    session-log directory, and it is out of scope on the same grounds: no
+    shipped shape produces the layout (Ansible and Docker both put
+    ``temp_dir`` outside the mount; on the standalone install the two coincide
+    but ``sandbox_enabled`` is false, so this function is never called), and
+    refusing a resource path is a decision about resources rather than about
+    this guard. Stated so it is a known gap rather than an assumed absence.
+
+    **The entry is a directory, and that is what retired the per-file one.**
+    It used to be ``composed_system_prompt_path``, one exact path, because
+    neither this list nor a bwrap bind can express a filename pattern — so
+    ``task_<id>_prompt.txt``, the briefing metadata and every rendition sat
+    beside it unguarded, and a *second concurrent task of the same user* could
+    overwrite another task's file, ``user_temp_dir`` being per user rather than
+    per task. ``ToolEnv._in_denied`` compares realpaths with ``is_relative_to``,
+    so one directory entry covers every file nested under it and a framework
+    file added later needs no new entry here.
 
     **This function is not the only producer of that deny entry, and must not
     become it.** ``execute_task`` calls this only under
     ``native_fs_confinement_active``, so on an unsandboxed shape — macOS, the
     standalone install, the shipped Docker stack — nothing here runs at all.
-    The composed path is therefore seeded onto ``fs_write_denied_roots``
+    The control directory is therefore seeded onto ``fs_write_denied_roots``
     *outside* that branch, which is where it does the most work: those are the
     deployments with no bwrap re-bind behind it. ``ToolEnv`` enforces a deny
     root whether or not confinement is on, precisely so that seeding means
@@ -3826,16 +4163,23 @@ def native_fs_roots(
     # into existence costs one failed comparison.
     write_denied.append(user_temp_dir.resolve() / ".developer")
 
-    # The composed system prompt (RO carve-out inside the same workspace).
-    # Mirrors the `extra_ro_binds` entry `execute_task` passes to
-    # `build_bwrap_cmd`. Appended directly rather than through `_add`, for the
-    # reason `.developer` is: `_add` skips a path that does not exist, and a
-    # deny root that only appears once the file does would leave a window in
-    # which the file is writable. The executor writes it before this is called,
-    # so the window is theoretical — which is exactly when it is cheapest to
-    # close.
-    if composed_system_prompt_path is not None:
-        write_denied.append(composed_system_prompt_path.resolve())
+    # The task control directory. Mirrors the `extra_ro_binds` entry
+    # `execute_task` passes to `build_bwrap_cmd`, and takes two entries here
+    # rather than one — see the docstring for why `read_only` and
+    # `write_denied` are enforced under different conditions.
+    #
+    # Both appended directly rather than through `_add`, for the reason
+    # `.developer` is: `_add` skips a path that does not exist, and a deny root
+    # that only appears once the directory does would leave a window in which
+    # it is writable. `ensure_task_control_dir` runs before this is called, so
+    # the window is theoretical — which is exactly when it is cheapest to
+    # close. A read root that never comes into existence costs one failed
+    # comparison.
+    if control_dir is not None:
+        _control_real = control_dir.resolve()
+        write_denied.append(_control_real)
+        if _control_real not in read_only:
+            read_only.append(_control_real)
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
@@ -5492,8 +5836,13 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     (running the one-time components→blocks migration first); ``None`` when the
     module is disabled for the user, the briefing has no blocks, or any error
     occurs — the caller treats ``None`` as a task failure. Also stashes
-    per-block provenance in a deferred file the scheduler reads when archiving
-    the rendered briefing.
+    per-block provenance in the task's control directory, which the scheduler
+    reads when archiving the rendered briefing.
+
+    Not "a deferred file", which it used to be and which means something
+    specific here: a deferred op is model-authored, lives in the writable
+    per-user directory, is named in ``_KNOWN_DEFERRED_SUFFIXES`` and is purged
+    on retry. This one is none of those.
     """
     try:
         from . import briefings as briefings_module
@@ -5529,18 +5878,49 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
         return None  # no blocks after migration → task fails (quiet retry)
 
     # Stash per-block provenance for the scheduler's archive write.
+    #
+    # In the control directory rather than the model's working directory, for
+    # the reason every framework-authored per-task file is there: the daemon
+    # writes it and the daemon reads it back. The old location was per *user*
+    # and bound read-write into the sandbox, so a concurrent task of the same
+    # user could plant a dangling symlink at a not-yet-started task's filename
+    # and redirect this write, which `write_text` would have followed.
+    #
+    # `ensure_task_control_dir` rather than threading the path through
+    # `build_deferred_briefing_prompt`: it is idempotent, and `execute_task`
+    # created this exact directory a few dozen lines above the call that
+    # reaches here. A second call is one `mkdir(exist_ok=True)` and three mode
+    # assertions per briefing task, against a parameter on two signatures with
+    # one caller between them.
+    #
+    # Still best-effort, and the `RuntimeError` this can now raise is caught
+    # by the same `except`: the archive works with empty `block_meta`. The
+    # *reader* swallows its own failure identically
+    # (`scheduler._maybe_archive_briefing`), which is why both ends moved in
+    # one commit and why the test asserts the archived provenance is
+    # non-empty rather than that the archive ran.
     try:
         import json as _json
 
-        user_temp_dir = get_user_temp_dir(config, task.user_id)
-        user_temp_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = user_temp_dir / f"task_{task.id}_briefing_meta.json"
-        meta_path.write_text(_json.dumps({
+        control_dir = ensure_task_control_dir(config, task.user_id, task.id)
+        _write_control_file(control_dir / "briefing_meta.json", _json.dumps({
             "briefing_name": task.briefing_name,
             "block_meta": assembled.block_meta,
         }))
-    except Exception:  # noqa: BLE001
-        pass  # best-effort; archive still works with empty block_meta
+    except Exception as e:  # noqa: BLE001
+        # Best-effort — the archive still works with empty `block_meta` — but
+        # not silent. `execute_task` has already created this directory for
+        # this same `(user_id, task_id)` and failed the task if it could not,
+        # so the only way the `ensure_` call here raises is that a level was
+        # removed, replaced or re-owned *during* the task: the conditions the
+        # resolver's guards exist to detect. Swallowing that without a word
+        # made it indistinguishable from a briefings-module hiccup, and since
+        # the reader swallows its own miss too, the whole operator-visible
+        # trace was an archive row with no provenance in it.
+        logger.warning(
+            "briefing provenance not stashed for task %s (%s): %s",
+            task.id, task.briefing_name, e,
+        )
 
     return assembled.prompt
 
@@ -5571,6 +5951,43 @@ def execute_task(
     # Ensure per-user temp directory exists
     user_temp_dir = get_user_temp_dir(config, task.user_id)
     user_temp_dir.mkdir(parents=True, exist_ok=True)
+
+    # And the daemon-owned directory beside it, for the files the framework
+    # authors and the model must not touch: both prompt halves and the prepared
+    # image attachments. Created here, before anything is written into it.
+    #
+    # Nothing deletes it. `cleanup_old_temp_files` already recurses into every
+    # subdirectory of `temp_dir` — `.control` included — unlinks files past
+    # `temp_file_retention_days` and only `rmdir`s a directory that is empty
+    # *and* itself past that window, which is the age gate an in-flight task
+    # needs. The accepted cost is that unlinking the last file updates the
+    # directory's own mtime, so a leaf survives about two retention windows
+    # rather than one and the tree carries an inode per task in between —
+    # bounded, self-clearing, and on the volume that sweep already manages.
+    # A cleanup callback here would also be wrong rather than merely
+    # redundant: the briefing metadata is read by the *scheduler*, after this
+    # function has returned, inside a bare `except Exception`, so deleting it
+    # on the way out would lose every briefing's per-block provenance silently.
+    #
+    # Fail-closed. A task with no resolvable control directory has nowhere to
+    # put its standing instructions, and falling back to the model-writable
+    # directory is the exposure this exists to remove.
+    #
+    # Failed rather than raised, though. Nothing between here and
+    # `UserWorker.run`'s catch-all handles an exception — `process_one_task`
+    # has no handler of its own — so a raise leaves the row `running` with its
+    # heartbeat stopped, recovered only by the stuck-worker sweep
+    # `scheduler.worker_stuck_minutes` later, three times over, with the
+    # reason nowhere but the daemon log. The conditions are deterministic
+    # (a level that is not a directory, one owned by another account, an
+    # unresolvable user id), so retrying at all is generous; doing it slowly
+    # and anonymously is not. Returning the failure keeps the normal
+    # accounting and puts the path and the reason in front of whoever asked.
+    try:
+        control_dir = ensure_task_control_dir(config, task.user_id, task.id)
+    except RuntimeError as exc:
+        logger.error("Task %s: %s", task.id, exc)
+        return False, str(exc), None, None
 
     # Build resources: merge config-defined resources with dynamic DB resources
     user_config = config.get_user(task.user_id)
@@ -5633,7 +6050,7 @@ def execute_task(
     # and the same OCR context the model will.
     image_prep = prepare_image_attachments(
         task.attachments,
-        user_temp_dir,
+        control_dir / "attachments",
         task.id,
         cancel_check=_cancel_check,
         # Only where there is a namespace to be outside of. Without effective
@@ -5642,7 +6059,7 @@ def execute_task(
         # replacing the user's own file path with a temp one in the prompt —
         # on the standalone single-user shape, for every image.
         bind_roots=(
-            image_bind_roots(config, task, user_temp_dir)
+            image_bind_roots(config, task, user_temp_dir, control_dir)
             if effective_sandboxing(config)
             else None
         ),
@@ -6129,27 +6546,36 @@ def execute_task(
         rendered = render_composed_prompt(composed)
         return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
-    # Both halves on disk before anything is built from them. The user half
-    # keeps its filename: it is still the exact text sent on stdin, injected
-    # into the tmux pane, or used as the native initial user message.
-    prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"
-    prompt_file.write_text(prompt, encoding="utf-8")
+    # Both halves on disk before anything is built from them, in the
+    # daemon-owned control directory rather than in the model's own working
+    # directory.
+    #
+    # The user half is a debugging artifact and nothing in the product reads it
+    # back — the prompt reaches ClaudeCodeBrain on stdin, TmuxClaudeBrain
+    # through its own `workdir/prompt.txt`, and NativeBrain as the initial user
+    # message. It is kept as one, and it is the half that had to move: it
+    # carries retrieved memory, knowledge facts, playbooks, conversation
+    # history and the request itself, it differs per task, and where it used to
+    # sit every later task of that user could read it for the length of the
+    # retention window.
+    prompt_file = control_dir / "prompt.txt"
+    _write_control_file(prompt_file, prompt)
 
     # The system half, and the file the brain is handed by path.
     #
     # **The directory is resolved and the filename is not**, and the split is
     # the whole point rather than an oversight.
     #
-    # Resolving the ancestors is what makes the path absolute — `BrainRequest`
-    # requires that, since NativeBrain opens it in the daemon process while the
-    # Claude CLI opens it inside the sandbox, against two different working
-    # directories, and a reroute carries one value between them — and it is
-    # also what makes it the *in-namespace* path: `build_bwrap_cmd` binds
-    # `user_temp_dir.resolve()` at its own resolved name, and `_ro_bind` uses
-    # the string it is handed as the destination, so an unresolved ancestor on
-    # a deployment whose `temp_dir` sits behind a symlink would land the
-    # read-only bind somewhere the CLI never looks. `ImageInput.path` records
-    # that half of the rule for the same reason.
+    # `control_dir` arrives resolved from `ensure_task_control_dir`, and that
+    # is what makes the path absolute — `BrainRequest` requires that, since
+    # NativeBrain opens it in the daemon process while the Claude CLI opens it
+    # inside the sandbox, against two different working directories, and a
+    # reroute carries one value between them — and it is also what makes it the
+    # *in-namespace* path: `_ro_bind` uses the string it is handed as the
+    # destination, so an unresolved ancestor on a deployment whose `temp_dir`
+    # sits behind a symlink would land the read-only bind somewhere the CLI
+    # never looks. `ImageInput.path` records that half of the rule for the same
+    # reason.
     #
     # Resolving the *last* component would undo the guard below. `.resolve()`
     # follows a symlink, so a planted one would silently become its target and
@@ -6161,31 +6587,25 @@ def execute_task(
     # naming a file that was not written is the fail-closed contract firing on
     # our own bug.
     #
-    # `O_NOFOLLOW`, and that is not decoration. `user_temp_dir` is per *user*,
-    # bound read-write into every one of that user's sandboxes and exported as
-    # `ISTOTA_DEFERRED_DIR`, so a concurrent task of the same user can create
-    # entries in it — and task ids are sequential and in the environment, so
-    # the entry it creates can be a *dangling* symlink named after a task that
-    # has not started yet. A plain `write_text` follows that on open and writes
-    # the composed prompt through it, which is an arbitrary write as the daemon
-    # user with substantially task-controlled content. `ELOOP` fails the task
-    # instead, which is the direction to fail in. The same hazard is latent on
-    # `task_<id>_prompt.txt` above and on every deferred-op file; it is not
-    # this stage's to fix, and is recorded rather than quietly matched.
+    # `O_NOFOLLOW` on this half and on the one above, and it is belt-and-braces
+    # now rather than load-bearing. What it answered was that `user_temp_dir` is
+    # per *user*, bound read-write into every one of that user's sandboxes and
+    # exported as `ISTOTA_DEFERRED_DIR`, so a concurrent task of the same user
+    # could create entries in it — and task ids are sequential and in the
+    # environment, so the entry could be a *dangling* symlink named after a
+    # task that had not started yet, which a plain `write_text` follows on open.
+    # `control_dir` is 0700 under a 0700 root the daemon owns, is a sibling of
+    # the per-user directories rather than a child of one, and is bound into no
+    # sandbox read-write, so there is no task that can plant anything here. The flag stays
+    # because a guard dropped on the strength of a property held somewhere else
+    # is the one nobody notices the loss of. The deferred-op files still carry
+    # the original exposure and are model-authored by design.
     #
     # `0o600` because the file holds the persona, the user's own overlays and
     # the per-user email address, and there is no reason for it to be readable
     # by other local accounts.
-    system_prompt_file = (
-        Path(user_temp_dir).resolve() / f"task_{task.id}_system_prompt.txt"
-    )
-    _fd = os.open(
-        system_prompt_file,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-        0o600,
-    )
-    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-        _f.write(composed.system)
+    system_prompt_file = control_dir / "system_prompt.txt"
+    _write_control_file(system_prompt_file, composed.system)
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"
@@ -6522,20 +6942,31 @@ def execute_task(
 
         # Collect extra paths to RO bind-mount into the sandbox.
         #
-        # The composed system prompt is this parameter's first production
-        # consumer. `build_bwrap_cmd` binds `user_temp_dir` read-write and
-        # applies these twenty-odd lines further down, after the `.developer`
-        # carve-out that established the pattern — so the later read-only bind
-        # of this one file shadows the read-write bind of its directory, and
-        # the model's own Bash tool cannot rewrite the standing instructions it
-        # is running under. A `native -> claude_code` reroute keeps the same
-        # path, so a rewrite would survive the reroute too.
+        # The task control directory is this parameter's production consumer,
+        # and it is a *directory* rather than the composed system prompt file
+        # it started as. A bind names one exact path and cannot express a
+        # filename pattern, so the per-file entry guarded the standing
+        # instructions and left `prompt.txt`, the briefing metadata and every
+        # prepared image rendition beside it unguarded — each one a thing
+        # somebody had to remember into this list by hand.
         #
-        # This is half the protection and on the native brain it is the half
-        # that matters least: `Write` and `Edit` run through `ToolEnv` and
-        # enter no mount namespace. The other half is the matching deny entry
-        # `native_fs_roots` returns, some four hundred lines below.
-        _extra_ro_binds: list[Path] = [system_prompt_file]
+        # `build_bwrap_cmd` applies these after every other bind, which is what
+        # keeps a read-only entry read-only under any bind added later; the
+        # `.developer` carve-out established the pattern. The directory is a
+        # sibling of `user_temp_dir` rather than a child, so nothing binds over
+        # it today either.
+        #
+        # Emitted under both profiles. Nothing inside a NATIVE namespace opens
+        # the system prompt — NativeBrain reads it in the daemon — but both
+        # backends put the prepared attachment paths into the prompt's
+        # `Attached files:` section, so a model that decides to `Read` one has
+        # to find it, and the tool server runs in there.
+        #
+        # This is half the protection: `Read`, `Write` and `Edit` run through
+        # `ToolEnv` and enter no mount namespace on the unsandboxed shapes. The
+        # other half is the pair of entries `native_fs_roots` returns, some
+        # four hundred lines below, plus the unconditional seed beside them.
+        _extra_ro_binds: list[Path] = [control_dir]
 
         # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
@@ -6911,7 +7342,7 @@ def execute_task(
         # cwd choice below uses. Other brains ignore these fields.
         _fs_read_roots: "list[Path] | None" = None
         _fs_write_roots: "list[Path] | None" = None
-        # The composed system prompt is denied **whether or not confinement is
+        # The task control directory is denied **whether or not confinement is
         # active**, which is why it is seeded here rather than only inside the
         # branch. The two root lists are an allowlist and mean nothing without
         # confinement, but a deny root is a statement about a path: `ToolEnv`
@@ -6925,10 +7356,15 @@ def execute_task(
         # the standalone install and on the shipped Docker stack (which grants
         # neither `seccomp:unconfined` nor `systempaths=unconfined`, so the
         # bwrap probe fails and every task runs uncontained). Gating this on
-        # sandboxing would leave the file with no guard at all on precisely
-        # those deployments. The confined branch below returns a list that
-        # already contains it, so there is no duplicate.
-        _fs_write_denied_roots: "list[Path]" = [system_prompt_file]
+        # sandboxing would leave the directory with no guard at all on
+        # precisely those deployments. The confined branch below returns a list
+        # that already contains it, so there is no duplicate.
+        #
+        # No matching *read* seed, and that is not an omission: `read_roots`
+        # left as None is what `ToolEnv` reads as unconfined, so adding one
+        # here would turn an unconfined shape into a confined one whose only
+        # readable path is this directory.
+        _fs_write_denied_roots: "list[Path]" = [control_dir]
         if native_fs_confinement_active(config):
             _fs_read_roots, _fs_write_roots, _fs_write_denied_roots = native_fs_roots(
                 config,
@@ -6937,7 +7373,7 @@ def execute_task(
                 user_resources,
                 Path(user_temp_dir),
                 workspace_dir,
-                composed_system_prompt_path=system_prompt_file,
+                control_dir=control_dir,
             )
 
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller

@@ -14,6 +14,8 @@ from istota.executor import (
     _build_network_allowlist,
     build_bwrap_cmd,
     custom_system_prompt_path,
+    ensure_task_control_dir,
+    get_task_control_dir,
     native_fs_confinement_active,
     native_fs_roots,
     resolve_sandbox_cache_dir,
@@ -477,94 +479,199 @@ class TestBuildBwrapCmdDeveloperDir:
         assert ".developer" not in result_str
 
 
-class TestBuildBwrapCmdComposedSystemPrompt:
-    """The composed system prompt, re-bound read-only inside its own directory.
+class TestBuildBwrapCmdTaskControlDirectory:
+    """The task control directory, re-bound read-only inside the temp root.
 
-    `task_<id>_system_prompt.txt` is Istota's standing instructions, and the
-    Claude CLI opens it *inside* the namespace. It sits in `user_temp_dir`,
-    which is bound read-write, so without a later `--ro-bind` the model's own
-    Bash tool could rewrite the instructions it is running under and a
-    `native -> claude_code` reroute would read the rewrite. This is the same
-    carve-out shape `.developer` uses, arriving through `extra_ro_binds` —
-    which had no production consumer until the executor grew this one.
+    `{temp_dir}/.control/{user_id}/task_{id}` holds the two prompt halves, the
+    briefing metadata and the prepared image renditions — every file the
+    daemon authors for one task. The Claude CLI opens the system half *inside*
+    the namespace and the model may be asked to `Read` a prepared attachment,
+    so the directory has to be in the namespace; nothing in it may be
+    writable, so it arrives read-only through `extra_ro_binds`.
+
+    It replaced a single-file entry (`task_<id>_system_prompt.txt`, inside the
+    read-write `user_temp_dir` bind). The ordering argument is unchanged and
+    the guard is now per directory: a framework file added later is covered
+    without a new entry.
+
+    **Every test here passes `extra_ro_binds` itself, so none of them can fail
+    if `execute_task` stopped naming the control directory.** They check the
+    loop — that it binds what it is handed, after every other bind and before
+    the masks. The executor half is one assertion elsewhere,
+    `tests/test_prompt_split.py::TestWhatTheBrainIsHanded::
+    test_the_sandbox_wrap_carries_the_control_dir_as_a_ro_bind`, which patches
+    `build_bwrap_cmd` and reads the argument off both wrap closures. Said here
+    because `.claude/rules/testbed.md` records this exact shape as the way a
+    sandbox assertion stops being able to fail, and eight green tests in this
+    file are easy to mistake for cover the executor does not have.
     """
 
-    def _bind(self, config, task, composed):
+    def _control(self, config, task):
+        control = ensure_task_control_dir(config, task.user_id, task.id)
+        (control / "system_prompt.txt").write_text("standing instructions")
+        return control
+
+    def _bind(self, config, task, control, profile=SandboxProfile.CLAUDE):
+        user_temp = config.temp_dir / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
         with _patch_linux():
             return build_bwrap_cmd(
                 ["claude", "-p", "test"],
-                config, task, False, [], composed.parent,
-                extra_ro_binds=[composed],
-                profile=SandboxProfile.CLAUDE,
+                config, task, False, [], user_temp,
+                extra_ro_binds=[control],
+                profile=profile,
             )
 
-    def _composed(self, config, task):
-        user_temp = config.temp_dir / task.user_id
-        user_temp.mkdir(parents=True, exist_ok=True)
-        f = user_temp / f"task_{task.id}_system_prompt.txt"
-        f.write_text("standing instructions")
-        return f.resolve()
+    def _ro_index(self, result, src):
+        for i, arg in enumerate(result):
+            if arg == "--ro-bind" and i + 1 < len(result) and result[i + 1] == str(src):
+                return i
+        return None
 
-    def test_the_file_is_ro_bound_after_the_user_temp_bind(
+    def test_the_directory_is_ro_bound_after_the_user_temp_bind(
         self, sandbox_config, make_sandbox_task,
     ):
         """Order is the whole mechanism: an earlier read-only bind is simply
-        overwritten by the read-write bind of its parent."""
-        task = make_sandbox_task()
-        composed = self._composed(sandbox_config, task)
-        result = self._bind(sandbox_config, task, composed)
+        overwritten by a later read-write bind covering the same path.
 
-        temp_resolved = str(composed.parent.resolve())
-        bind_idx = ro_idx = None
+        The control directory is a *sibling* of `user_temp_dir` rather than
+        inside it, so nothing binds over it today — but `extra_ro_binds` being
+        last is what keeps that true of every bind added later, and it is the
+        property the loop's own comment claims.
+        """
+        task = make_sandbox_task()
+        control = self._control(sandbox_config, task)
+        result = self._bind(sandbox_config, task, control)
+
+        temp_resolved = str((sandbox_config.temp_dir / task.user_id).resolve())
+        bind_idx = None
         for i, arg in enumerate(result):
             if arg == "--bind" and i + 1 < len(result) and result[i + 1] == temp_resolved:
                 bind_idx = i
-            if arg == "--ro-bind" and i + 1 < len(result) and result[i + 1] == str(composed):
-                ro_idx = i
+        ro_idx = self._ro_index(result, control)
         assert bind_idx is not None, "user_temp --bind not found"
         assert ro_idx is not None, (
-            f"the composed system prompt was never --ro-bind'ed: {result}"
+            f"the control directory was never --ro-bind'ed: {result}"
         )
         assert ro_idx > bind_idx, (
-            f"--ro-bind for the composed file ({ro_idx}) must come after the "
-            f"read-write --bind of its directory ({bind_idx})"
+            f"--ro-bind for the control directory ({ro_idx}) must come after "
+            f"the read-write --bind of the task workspace ({bind_idx})"
+        )
+
+    def test_the_bind_is_emitted_before_the_database_masks(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """The other end of the ordering claim, and the one that would fail
+        silently. The masks are the last mount operations and a mask cannot be
+        worked around, so a bind emitted after one would name a path that is
+        not in the namespace at all — the composed prompt would then be
+        missing and every claude_code task would exit at open."""
+        task = make_sandbox_task()
+        control = self._control(sandbox_config, task)
+        result = self._bind(sandbox_config, task, control)
+
+        ro_idx = self._ro_index(result, control)
+        mask_idxs = [
+            i for i, arg in enumerate(result)
+            if arg == "--tmpfs"
+            and i + 1 < len(result)
+            and result[i + 1] in (
+                str(sandbox_config.db_path.parent),
+                str(sandbox_config.db_path.parent.resolve()),
+            )
+        ]
+        assert ro_idx is not None
+        assert mask_idxs, f"the database mask was never emitted: {result}"
+        assert ro_idx < min(mask_idxs), (
+            f"--ro-bind for the control directory ({ro_idx}) must come before "
+            f"the database masks ({mask_idxs})"
         )
 
     def test_the_bind_lands_on_the_same_path_the_brain_is_given(
         self, sandbox_config, make_sandbox_task,
     ):
         """Destination, not just source. The CLI opens the path the executor
-        put on the request, so a bind whose destination differed would leave it
-        reading the writable copy."""
+        put on the request and the prompt names the rendition paths verbatim,
+        so a bind whose destination differed would leave both pointing at
+        nothing."""
         task = make_sandbox_task()
-        composed = self._composed(sandbox_config, task)
-        result = self._bind(sandbox_config, task, composed)
+        control = self._control(sandbox_config, task)
+        result = self._bind(sandbox_config, task, control)
 
         ro_pairs = _get_bind_pairs(result, "--ro-bind")
-        assert (str(composed), str(composed)) in ro_pairs, ro_pairs
+        assert (str(control), str(control)) in ro_pairs, ro_pairs
 
-    def test_no_directory_is_newly_read_only(
+    @pytest.mark.parametrize(
+        "profile", [SandboxProfile.CLAUDE, SandboxProfile.NATIVE]
+    )
+    def test_it_is_emitted_under_both_profiles(
+        self, sandbox_config, make_sandbox_task, profile,
+    ):
+        """`NATIVE` needs it too, for a different reason than `CLAUDE` does.
+
+        NativeBrain reads the composed prompt in the daemon and base64-encodes
+        images into content blocks, so nothing in that namespace opens the
+        system prompt. But both backends put the prepared attachment paths
+        into the prompt's `Attached files:` section, so a model that decides
+        to `Read` one must find it — and the tool server runs inside the
+        namespace.
+        """
+        task = make_sandbox_task()
+        control = self._control(sandbox_config, task)
+        result = self._bind(sandbox_config, task, control, profile=profile)
+
+        assert self._ro_index(result, control) is not None, (
+            f"no control-directory bind under {profile}: {result}"
+        )
+
+    def test_the_files_inside_ride_on_the_directory_entry(
         self, sandbox_config, make_sandbox_task,
     ):
-        """One file, not its directory. The sibling result file and the task
-        workspace stay writable, which is what the rest of the task needs."""
+        """The per-directory claim the per-file entry could not make. Nothing
+        names `system_prompt.txt`, and it is read-only anyway."""
         task = make_sandbox_task()
-        composed = self._composed(sandbox_config, task)
-        result = self._bind(sandbox_config, task, composed)
+        control = self._control(sandbox_config, task)
+        result = self._bind(sandbox_config, task, control)
 
         ro_srcs = [src for src, _ in _get_bind_pairs(result, "--ro-bind")]
-        assert str(composed.parent.resolve()) not in ro_srcs, ro_srcs
+        assert str(control / "system_prompt.txt") not in ro_srcs, ro_srcs
+        assert str(control) in ro_srcs, ro_srcs
 
-    def test_a_missing_file_binds_nothing(
+    def test_the_task_workspace_is_not_newly_read_only(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """The control directory, not the model's own. `task_<id>_result.txt`
+        and every deferred-op JSON are written from inside the sandbox, so
+        `user_temp_dir` has to stay writable — which is also what tells a
+        working control bind apart from a workspace made read-only wholesale.
+        """
+        task = make_sandbox_task()
+        control = self._control(sandbox_config, task)
+        result = self._bind(sandbox_config, task, control)
+
+        ro_srcs = [src for src, _ in _get_bind_pairs(result, "--ro-bind")]
+        user_temp = (sandbox_config.temp_dir / task.user_id).resolve()
+        assert str(user_temp) not in ro_srcs, ro_srcs
+        # And not the whole control root either: only this task's own
+        # directory is in the namespace, so no task can reach another's.
+        assert str(control.parent) not in ro_srcs, ro_srcs
+        assert str(control.parent.parent) not in ro_srcs, ro_srcs
+
+    def test_a_missing_directory_binds_nothing(
         self, sandbox_config, make_sandbox_task,
     ):
         """`extra_ro_binds` skips what does not exist, and must keep doing so:
         bwrap fails the whole namespace on a bind whose source is absent, which
-        would turn a cleanup race into every task failing rather than one."""
+        would turn one cleanup race into every task failing rather than one."""
         task = make_sandbox_task()
         user_temp = sandbox_config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
-        missing = (user_temp / f"task_{task.id}_system_prompt.txt").resolve()
+        missing = get_task_control_dir(sandbox_config, task.user_id, task.id)
+        # `get_task_control_dir` returns `Path | None`, and `str(None)` is
+        # `"None"` — which is in no argv, so a refusal would make the assertion
+        # below pass while testing nothing at all.
+        assert missing is not None
+        assert not missing.exists()
 
         with _patch_linux():
             result = build_bwrap_cmd(
@@ -577,60 +684,106 @@ class TestBuildBwrapCmdComposedSystemPrompt:
         assert str(missing) not in result
 
 
-class TestNativeFsRootsComposedSystemPrompt:
-    """The native half of the same carve-out.
+class TestNativeFsRootsTaskControlDirectory:
+    """The native half of the same carve-out, and it takes two entries.
 
     The bind covers every bwrap-wrapped child, which includes the native Bash
-    tool. It does not cover `Write` and `Edit`, which resolve through
-    `ToolEnv` — and `native_fs_roots` puts `user_temp_dir` in the writable
-    list. Without a deny entry a native task rewrites its own standing
-    instructions with one tool call. `native_fs_roots`' docstring records this
-    exact asymmetry for `.developer`.
+    tool. It does not cover `Read`, `Write` and `Edit` on the unsandboxed
+    shapes, which resolve through `ToolEnv`. The two lists are enforced under
+    different conditions and neither subsumes the other:
+
+    - `read_roots` is `None` when confinement is off, and `None` means
+      *unconfined* — both root lists are then inert.
+    - `write_denied_roots` is checked ahead of that unconfined return, so it
+      holds on every shape.
+    - Under confinement the control directory is inside no write root, so the
+      `read_only` entry is what makes it readable while leaving it unwritable.
+      Without it a confined task could not open the image the prompt named.
     """
 
-    def _roots(self, config, task, composed):
+    def _control(self, config, task):
+        return ensure_task_control_dir(config, task.user_id, task.id)
+
+    def _roots(self, config, task, control):
         user_temp = config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
         return native_fs_roots(
-            config, task, False, [], user_temp,
-            composed_system_prompt_path=composed,
+            config, task, False, [], user_temp, control_dir=control,
         )
 
-    def test_the_composed_file_is_write_denied(
+    def test_the_control_directory_is_write_denied(
         self, sandbox_config, make_sandbox_task,
     ):
         task = make_sandbox_task()
-        user_temp = sandbox_config.temp_dir / task.user_id
-        user_temp.mkdir(parents=True, exist_ok=True)
-        composed = (user_temp / f"task_{task.id}_system_prompt.txt").resolve()
-        composed.write_text("standing instructions")
+        control = self._control(sandbox_config, task)
 
-        _read, write, denied = self._roots(sandbox_config, task, composed)
+        _read, _write, denied = self._roots(sandbox_config, task, control)
 
-        assert composed in denied, denied
-        # Still readable, through the writable root that contains it — the
-        # carve-out denies writes only, as `.developer` does.
-        assert any(composed.is_relative_to(r) for r in write), write
+        assert control in denied, denied
 
-    def test_the_deny_entry_does_not_wait_for_the_file(
+    def test_the_control_directory_is_readable(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """It is in no write root — that is the design — so without a
+        `read_only` entry a confined task could not open its own prepared
+        image attachment, on a path the prompt itself named."""
+        task = make_sandbox_task()
+        control = self._control(sandbox_config, task)
+
+        read, write, _denied = self._roots(sandbox_config, task, control)
+
+        assert control in read, read
+        assert not any(
+            control == r or control.is_relative_to(r) for r in write
+        ), write
+
+    def test_a_nested_file_is_denied_by_containment(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """A directory deny root covers everything under it, which is what
+        retires the per-file entry. Asserted through `ToolEnv` rather than
+        through the list, so the claim is the refusal."""
+        from istota.session.tools.env import ToolEnv, ToolPathError
+
+        task = make_sandbox_task()
+        control = self._control(sandbox_config, task)
+        (control / "system_prompt.txt").write_text("standing instructions")
+
+        read, write, denied = self._roots(sandbox_config, task, control)
+        env = ToolEnv(
+            cwd=control,
+            read_roots=tuple(read),
+            write_roots=tuple(write),
+            write_denied_roots=tuple(denied),
+        )
+
+        env.resolve(str(control / "system_prompt.txt"))
+        with pytest.raises(ToolPathError, match="read-only"):
+            env.resolve(str(control / "system_prompt.txt"), write=True)
+        # Including a name nothing has heard of, which is the whole point of a
+        # per-directory guard.
+        with pytest.raises(ToolPathError, match="read-only"):
+            env.resolve(str(control / "planted.txt"), write=True)
+
+    def test_the_entries_do_not_wait_for_the_directory(
         self, sandbox_config, make_sandbox_task,
     ):
         """Appended unconditionally, like `.developer`'s. A deny root that
         never comes into existence costs one failed comparison; an existence
         gate leaves a window where the path is writable."""
         task = make_sandbox_task()
-        user_temp = sandbox_config.temp_dir / task.user_id
-        user_temp.mkdir(parents=True, exist_ok=True)
-        composed = (user_temp / f"task_{task.id}_system_prompt.txt").resolve()
+        control = get_task_control_dir(sandbox_config, task.user_id, task.id)
+        assert not control.exists()
 
-        _read, _write, denied = self._roots(sandbox_config, task, composed)
+        read, _write, denied = self._roots(sandbox_config, task, control)
 
-        assert composed in denied, denied
+        assert control in denied, denied
+        assert control in read, read
 
-    def test_no_composed_path_denies_only_developer(
+    def test_no_control_dir_denies_only_developer(
         self, sandbox_config, make_sandbox_task,
     ):
-        """A direct caller with no composed prompt is unchanged."""
+        """A direct caller with no control directory is unchanged."""
         task = make_sandbox_task()
         user_temp = sandbox_config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
