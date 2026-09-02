@@ -281,16 +281,34 @@ def fake_talk(db_path):
     (`tmp_path / "test.db"`), so a test using both gets a double reading the
     same database. A test whose database is elsewhere assigns
     `fake_talk.db_path`; the binding lookup happens per call, so that takes
-    effect immediately.
+    effect immediately. Point it at a database `db.init_db` has run against —
+    the double raises `BrokenTalkDouble`, which is a `BaseException` and so
+    escapes the product's `except Exception`, rather than letting a missing
+    `room_bindings` table read as a 404.
+
+    It also clears the two process-lifetime caches that sit *in front of* the
+    seams, because a cache hit is a call the double never sees. Both are module
+    globals nothing else resets, and an xdist worker runs many tests in one
+    process: `scheduler._channel_name_cache` (token -> displayName, no
+    expiry) and `transport.talk.inbound._participant_cache` (TTL). Cleared
+    on the way in and on the way out, so this fixture neither inherits nor
+    leaves a hit.
     """
     from unittest.mock import patch
+
+    from istota import scheduler as scheduler_module
+    from istota.transport.talk import inbound as talk_inbound
 
     from .support.talk_double import FakeTalkClient
 
     client = FakeTalkClient(db_path)
+    scheduler_module._channel_name_cache.clear()
+    talk_inbound._participant_cache.clear()
     with patch("istota.transport.talk.get_talk_client", return_value=client), \
          patch("istota.transport.talk.inbound.get_talk_client", return_value=client):
         yield client
+    scheduler_module._channel_name_cache.clear()
+    talk_inbound._participant_cache.clear()
 
 
 @pytest.fixture

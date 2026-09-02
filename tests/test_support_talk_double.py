@@ -2,8 +2,8 @@
 
 A double that cannot refuse is worse than no double: it reports coverage that
 does not exist, which is the failure `.claude/rules/testbed.md` records four
-instances of. So the tests here are mostly about what `FakeTalkClient` *rejects*
-— a canonical room token, a dead ref, a string naming nothing — and about the
+instances of. So the tests here are mostly about what `FakeTalkClient` *rejects* — a canonical
+room token, a string naming nothing, an unseeded attachment path — and about the
 two properties everything built on it depends on:
 
 - **the swallowing control**, that a refusal is still observable after the
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import db, talk
+from istota import async_runtime, db, talk
 from istota.config import NextcloudConfig, TalkConfig
 from istota.scheduler import edit_talk_message
 from istota.transport import talk as talk_pkg
@@ -29,11 +29,22 @@ from istota.transport.talk import inbound as talk_inbound
 
 from .support.rooms import plain_talk_room, promoted_room
 from .support.talk_double import (
+    BrokenTalkDouble,
     FakeTalkClient,
     TalkCall,
+    UnknownTalkAttachment,
     UnknownTalkRoom,
     talk_refs_in,
 )
+
+
+def _module_name_for(path: Path) -> str:
+    """`src/istota/transport/talk/inbound.py` -> `istota.transport.talk.inbound`."""
+    root = Path(async_runtime.__file__).parent.parent
+    parts = path.relative_to(root).with_suffix("").parts
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
 
 
 @pytest.fixture
@@ -141,17 +152,26 @@ class TestTheRule:
         await fake_talk.send_message(room.talk_ref, "hello")
         assert fake_talk.refusals == []
 
-    async def test_a_dead_binding_is_accepted(self, fake_talk, db_path):
+    async def test_the_double_cannot_see_a_deleted_conversation(
+        self, fake_talk, db_path,
+    ):
         """ISSUE-401's shape, and explicitly out of scope.
 
-        A binding whose Nextcloud conversation has been deleted is
-        indistinguishable from a live one at the database level, so the double
-        accepts it. Nothing here covers 401, and this test exists so that is
-        not mistaken.
+        A binding whose Nextcloud conversation has been deleted looks exactly
+        like a live one in `room_bindings` — there is no column for it — so the
+        double accepts it and nothing here covers 401. This test exists so that
+        is not mistaken for coverage.
+
+        It archives the room to make a second, separate claim: `rooms.archived`
+        is *our* state, not Nextcloud's, and the double deliberately does not
+        consult it. The Talk conversation outlives our archive flag, so
+        refusing here would be the double being stricter than the thing it
+        stands in for.
         """
         with db.get_db(db_path) as conn:
             room = plain_talk_room(conn, "alice")
             db.set_room_archived(conn, room.canonical, True)
+            assert db.get_room(conn, room.canonical).archived
         await fake_talk.send_message(room.talk_ref, "hello")
         assert fake_talk.refusals == []
 
@@ -284,6 +304,133 @@ class TestTheSwallowingControl:
         assert fake_talk.refusals == []
 
 
+class TestTheDeliverPath:
+    """`TalkTransport.deliver` is the path most of the eleven files to be
+    converted will drive, and the second of the three swallowing handlers.
+
+    Also the only test that exercises the OCS envelope through the code that
+    unwraps it. Asserting the literal `{"ocs": {"data": {"id": n}}}` in
+    `TestReturnShapes` cannot catch a wrong envelope: `deliver` would return
+    None, its documented failure value, with every test here green.
+    """
+
+    async def test_it_returns_the_minted_id_for_the_talk_ref(
+        self, fake_talk, rooms, talk_config,
+    ):
+        msg_id = await talk_pkg.TalkTransport(talk_config).deliver(
+            rooms["promoted"].talk_ref, "the answer",
+        )
+        assert isinstance(msg_id, int)
+        assert fake_talk.refusals == []
+
+    async def test_it_returns_none_for_the_canonical_token(
+        self, fake_talk, rooms, talk_config,
+    ):
+        """ISSUE-400 through the real delivery path. `deliver` catches and
+        returns None, so the refusal is only visible in `calls`."""
+        room = rooms["promoted"]
+        msg_id = await talk_pkg.TalkTransport(talk_config).deliver(
+            room.canonical, "the answer",
+        )
+        assert msg_id is None
+        assert [c.refused for c in fake_talk.calls_to(room.canonical)] == [True]
+
+    async def test_resolve_channel_name_reads_the_display_name(
+        self, fake_talk, rooms, talk_config,
+    ):
+        """The `get_conversation_info` consumer, through its own seam."""
+        name = await talk_pkg.TalkTransport(talk_config).resolve_channel_name(
+            rooms["plain"].talk_ref,
+        )
+        assert name == rooms["plain"].name
+
+
+class TestABrokenDoubleIsNotARefusal:
+    """A database with no schema must abort the test, not look like a 404.
+
+    `db_path` is the only fixture that runs `db.init_db`, so the fixture's own
+    documented `fake_talk.db_path = ...` escape hatch lands here easily. A
+    `sqlite3.OperationalError` escaping as-is is caught by
+    `TalkTransport.deliver` and reported as a Talk failure, with no call
+    recorded — the one failure mode the "assert on `calls`" doctrine cannot
+    see.
+    """
+
+    async def test_an_uninitialised_database_raises_past_the_product(
+        self, fake_talk, tmp_path, talk_config, rooms,
+    ):
+        fake_talk.db_path = tmp_path / "never-initialised.db"
+        with pytest.raises(BrokenTalkDouble):
+            await talk_pkg.TalkTransport(talk_config).deliver("anything", "hi")
+
+    async def test_and_the_attempt_is_still_recorded(
+        self, fake_talk, tmp_path, rooms,
+    ):
+        fake_talk.db_path = tmp_path / "never-initialised.db"
+        with pytest.raises(BrokenTalkDouble):
+            await fake_talk.send_message("anything", "hi")
+        assert [c.refused for c in fake_talk.calls] == [True]
+
+    def test_it_is_not_catchable_as_an_exception(self):
+        """The property that makes it work: every product handler is
+        `except Exception`, so this must not be one."""
+        assert not issubclass(BrokenTalkDouble, Exception)
+        assert issubclass(BrokenTalkDouble, BaseException)
+
+
+class TestAttachments:
+    async def test_an_unseeded_path_is_refused(self, fake_talk, talk_config, tmp_path):
+        """The real client GETs and calls `raise_for_status`, so a path naming
+        nothing must fail rather than leave a zero-byte file a test can assert
+        exists."""
+        local = tmp_path / "out.bin"
+        with pytest.raises(UnknownTalkAttachment):
+            await talk_pkg.TalkTransport(talk_config).download_attachment(
+                "Talk/nothing.png", str(local),
+            )
+        assert not local.exists()
+        assert [c.refused for c in fake_talk.calls] == [True]
+
+    async def test_a_seeded_path_is_written(self, fake_talk, talk_config, tmp_path):
+        fake_talk.attachments["Talk/photo.png"] = b"\x89PNG"
+        local = tmp_path / "nested" / "out.png"
+        await talk_pkg.TalkTransport(talk_config).download_attachment(
+            "Talk/photo.png", str(local),
+        )
+        assert local.read_bytes() == b"\x89PNG"
+        assert fake_talk.refusals == []
+
+    async def test_an_empty_body_is_asked_for_explicitly(self, fake_talk, tmp_path):
+        fake_talk.attachments["Talk/empty.txt"] = b""
+        local = tmp_path / "empty.txt"
+        await fake_talk.download_attachment("Talk/empty.txt", str(local))
+        assert local.read_bytes() == b""
+
+
+class TestPollMessages:
+    """`last_known_message_id` is the difference between a poller that makes
+    progress and one that re-ingests the same turns for ever."""
+
+    async def test_no_id_returns_the_seeded_history(self, fake_talk, rooms):
+        token = rooms["plain"].talk_ref
+        fake_talk.messages[token] = [{"id": 1}, {"id": 2}, {"id": 3}]
+        assert await fake_talk.poll_messages(token) == [
+            {"id": 1}, {"id": 2}, {"id": 3},
+        ]
+
+    async def test_an_id_returns_only_what_is_newer(self, fake_talk, rooms):
+        token = rooms["plain"].talk_ref
+        fake_talk.messages[token] = [{"id": 1}, {"id": 2}, {"id": 3}]
+        assert await fake_talk.poll_messages(token, last_known_message_id=2) == [
+            {"id": 3},
+        ]
+
+    async def test_nothing_newer_is_the_real_clients_304(self, fake_talk, rooms):
+        token = rooms["plain"].talk_ref
+        fake_talk.messages[token] = [{"id": 1}, {"id": 2}]
+        assert await fake_talk.poll_messages(token, last_known_message_id=2) == []
+
+
 class TestTheSeamControl:
     """`get_talk_client` is imported at module level in two places.
 
@@ -304,42 +451,104 @@ class TestTheSeamControl:
         await talk_inbound._post_ack(talk_config, rooms["promoted"].canonical, "ok")
         assert [c.refused for c in fake_talk.calls] == [True]
 
-    def test_both_modules_still_import_the_name_at_module_level(self):
-        """If either stops, the fixture is patching a name nothing reads and
-        every control above becomes vacuous."""
-        assert talk_pkg.get_talk_client is not None
-        assert talk_inbound.get_talk_client is not None
+    def test_the_fixture_patches_every_module_level_importer(self):
+        """The set is walked, not asserted `is not None`.
+
+        A third module importing `get_talk_client` at module level would leave
+        `fake_talk` patching a proper subset, and a test built on it would
+        reach the real singleton — which constructs a real client against the
+        configured Nextcloud URL and then has its failure swallowed, so the
+        escape reads as a refusal *and* attempts a socket. Identity against
+        `async_runtime` is checked too, since a name rebound to something else
+        would satisfy a `is not None`.
+        """
+        patched = {"istota.transport.talk", "istota.transport.talk.inbound"}
+        importers = set()
+        for path in Path(async_runtime.__file__).parent.rglob("*.py"):
+            source = path.read_text()
+            # Module level, i.e. not indented. A function-local import (web_app,
+            # commands) is out of the fixture's reach by construction and is
+            # documented as uncovered rather than pinned here.
+            if re.search(r"^from [.\w]*async_runtime import .*get_talk_client",
+                         source, re.MULTILINE):
+                importers.add(_module_name_for(path))
+        assert importers == patched
+        assert talk_pkg.get_talk_client is async_runtime.get_talk_client
+        assert talk_inbound.get_talk_client is async_runtime.get_talk_client
+
+
+# The methods the two patched seams call on their client, written down so a
+# *shrink* is red as well as a growth. The walk below catches a method added to
+# a seam; this catches one that moved out of reach of the walk's regex — which
+# only sees a receiver literally named `client`, so `talk = get_talk_client(...)`
+# or `get_talk_client(cfg).mark_conversation_read(...)` would be invisible and
+# leave a non-empty `called` behind.
+SEAM_METHODS = {
+    "download_attachment",
+    "edit_message",
+    "fetch_chat_history",
+    "get_conversation_info",
+    "get_latest_message_id",
+    "get_participants",
+    "list_conversations",
+    "poll_messages",
+    "send_message",
+}
+
+# Public on the double and on no real client — helpers for the tests, not part
+# of the shadowed surface.
+DOUBLE_ONLY = {"calls_to", "refusals"}
 
 
 class TestPinnedAgainstTheSeams:
     """A method a seam calls and the double lacks is an `AttributeError` raised
     inside the same `except Exception` that swallows a 404 — a false pass, of
-    exactly the kind this whole spec is about. So the list is walked, not
-    written down."""
+    exactly the kind this whole spec is about. So the list is walked *and*
+    written down: the walk catches a growth, the literal catches a shrink, and
+    neither on its own catches both."""
 
     @staticmethod
     def _methods_called_on_the_client(module) -> set[str]:
         source = Path(module.__file__).read_text()
         return set(re.findall(r"\bclient\.([a-z_][a-z_0-9]*)\(", source))
 
-    def test_every_method_the_two_seams_call_exists_on_the_double(self):
+    def test_the_walked_set_is_the_written_down_set(self):
         called = (
             self._methods_called_on_the_client(talk_pkg)
             | self._methods_called_on_the_client(talk_inbound)
         )
-        assert called, "the regex found nothing; it has stopped matching"
-        missing = {m for m in called if not hasattr(FakeTalkClient, m)}
+        assert called == SEAM_METHODS
+
+    def test_every_method_the_two_seams_call_exists_on_the_double(self):
+        missing = {m for m in SEAM_METHODS if not hasattr(FakeTalkClient, m)}
         assert missing == set()
 
-    @pytest.mark.parametrize("name", sorted(
-        m for m, value in vars(FakeTalkClient).items()
-        if not m.startswith("_") and callable(value)
-        and callable(getattr(talk.TalkClient, m, None))
-    ))
+    def test_every_shadowing_method_still_exists_on_the_real_client(self):
+        """The direction the parametrization below cannot see.
+
+        Filtering the parameter list on `hasattr(TalkClient, name)` means a
+        method *renamed away* on the real client drops a case rather than
+        failing one — 9 params become 8, all green, while the double keeps a
+        method shadowing nothing.
+        """
+        shadowing = {
+            m for m, value in vars(FakeTalkClient).items()
+            if not m.startswith("_") and callable(value)
+        } - DOUBLE_ONLY
+        assert shadowing == SEAM_METHODS
+        orphaned = {m for m in shadowing if not hasattr(talk.TalkClient, m)}
+        assert orphaned == set()
+
+    @pytest.mark.parametrize("name", sorted(SEAM_METHODS))
     def test_each_shadowed_signature_matches_the_real_client(self, name):
         """A parameter renamed or reordered on `TalkClient` would leave the
         double accepting calls the real client rejects. Names and kinds only —
-        the double's defaults and annotations are its own business."""
+        the double's defaults and annotations are its own business.
+
+        Parametrized over the written-down set rather than over an intersection,
+        so a method vanishing from either side is a failure and not a silently
+        smaller run.
+        """
         def shape(fn):
             return [
                 (p.name, p.kind)

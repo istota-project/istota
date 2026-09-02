@@ -45,16 +45,46 @@ construction-site patch rather than a factory patch. Two further function-local
 Also not covered: ISSUE-401, a binding whose Talk conversation has been deleted.
 It is indistinguishable from a live binding at the database level, so the double
 accepts it, exactly as this module's rule says it should.
+
+**Reads and writes are not connected**, deliberately. `send_message` mints an id
+and returns it but appends nothing to `self.messages`, so `get_latest_message_id`
+after a send still answers from the seed alone. Wiring them would mean inventing
+an `actorId` the double has no way to know and would overwrite what a poller test
+seeded. A test that needs post-then-read consistency seeds both halves.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from istota import db
+
+
+class BrokenTalkDouble(BaseException):
+    """The double itself could not answer — not a refusal, and never swallowed.
+
+    A `BaseException` on purpose. Everything this double raises normally is
+    caught by the product's `except Exception` handlers, which is the whole
+    design; but a database with no `room_bindings` table is the *instrument*
+    being broken, and letting that arrive at `TalkTransport.deliver` as a
+    swallowed `sqlite3.OperationalError` makes a misconfigured test
+    indistinguishable from a 404. Reached most easily through the `fake_talk`
+    fixture's documented `db_path` reassignment, since `db_path` is the only
+    fixture that runs `db.init_db`.
+    """
+
+
+class UnknownTalkAttachment(Exception):
+    """The 404 a WebDAV GET gets for a file path naming nothing.
+
+    Ordinary `Exception`, like `UnknownTalkRoom`: `TalkTransport.download_attachment`
+    does not catch, so this propagates exactly as the real `raise_for_status`
+    would.
+    """
 
 
 class UnknownTalkRoom(Exception):
@@ -88,7 +118,18 @@ class TalkCall:
 
     `token` is None for the two methods that take no conversation token
     (`list_conversations`, `download_attachment`), so a test filtering by token
-    never has to special-case them.
+    never has to special-case them. It is annotated `str | None` but carries
+    whatever the caller passed — the product hands tokens off database rows and
+    a test may pass junk deliberately, so nothing coerces it.
+
+    `refused` means *this double raised*, not *this token was unbound*. Under
+    `strict=False` nothing raises, so `refused` is False on every row and
+    `refusals` says nothing at all; that is a second reason to reach for
+    `known_channels` instead.
+
+    Frozen but **not hashable** — `args` is a dict, so `set(client.calls)` and
+    `TalkCall(...) in {…}` raise `TypeError`. Compare the list, or compare
+    fields.
     """
 
     method: str
@@ -130,6 +171,7 @@ class FakeTalkClient:
         # Seedable, so a test can drive the poller or name a channel whose
         # display name is not its room's registered name.
         self.display_names: dict[str, str] = {}
+        self.conversation_info: dict[str, dict] = {}
         self.messages: dict[str, list[dict]] = {}
         self.participants: dict[str, list[dict]] = {}
         self.conversations: list[dict] = []
@@ -140,7 +182,13 @@ class FakeTalkClient:
 
     @property
     def is_closed(self) -> bool:
-        """`get_talk_client`'s singleton cache reads this on the real client."""
+        """Kept so a patch at the *construction* site also works.
+
+        `get_talk_client`'s singleton cache reads this on the real client, but
+        the `fake_talk` fixture replaces the whole factory, so nothing consults
+        it today — Stage 10's construction-site patch for `web_app` is what
+        would. Not evidence of a live coupling.
+        """
         return False
 
     def _live_talk_refs(self) -> list[str]:
@@ -162,12 +210,7 @@ class FakeTalkClient:
             # Nextcloud conversation outlives our archive flag, so refusing it
             # would be the double being stricter than the thing it stands in
             # for.
-            with db.get_db(self.db_path) as conn:
-                bound = conn.execute(
-                    "SELECT 1 FROM room_bindings "
-                    "WHERE surface = 'talk' AND surface_ref = ?",
-                    (token,),
-                ).fetchone() is not None
+            bound = self._is_bound(method, token, args)
         if bound or not self.strict:
             self.calls.append(TalkCall(method, token, args))
             return
@@ -176,8 +219,36 @@ class FakeTalkClient:
             token,
             method=method,
             live_refs=self._live_talk_refs(),
-            known_channels=sorted(self.known_channels),
+            # `key=str` because a caller may put a non-`str` in the set, and a
+            # bare `sorted` would then raise `TypeError` *on the refusal path*
+            # — swallowed by the product, with the refusal lost.
+            known_channels=sorted(self.known_channels, key=str),
         )
+
+    def _is_bound(self, method: str, token: str, args: dict[str, Any]) -> bool:
+        """The lookup, with a database failure kept out of the product's reach.
+
+        The call is recorded before the raise so the transcript is complete
+        even on this path, but the raise is what matters: a `sqlite3.Error`
+        escaping as-is is caught by `TalkTransport.deliver` and reported as a
+        Talk failure, so a test pointed at an uninitialised database would read
+        as a clean refusal and record nothing.
+        """
+        try:
+            with db.get_db(self.db_path) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM room_bindings "
+                    "WHERE surface = 'talk' AND surface_ref = ?",
+                    (token,),
+                ).fetchone() is not None
+        except sqlite3.Error as exc:
+            self.calls.append(TalkCall(method, token, args, refused=True))
+            raise BrokenTalkDouble(
+                f"talk.{method}: could not read room_bindings from "
+                f"{self.db_path}: {exc!r}. This is the double failing, not a "
+                "refusal — point `db_path` at a database `db.init_db` has run "
+                "against."
+            ) from exc
 
     # --- the methods the two patched seams call ---------------------------
 
@@ -210,7 +281,18 @@ class FakeTalkClient:
         name = self.display_names.get(conversation_token)
         if name is None:
             name = self._registered_name(conversation_token)
-        return {"displayName": name or conversation_token}
+        # The real client returns the whole `ocs.data` object, and
+        # `inbound._get_participants` branches on `type`. Returning
+        # `displayName` alone would give a caller reading `type` a `KeyError`
+        # that the product swallows and reports as a Talk failure. A test that
+        # cares about the room type seeds the whole dict here.
+        seeded = self.conversation_info.get(conversation_token, {})
+        return {
+            "token": conversation_token,
+            "type": 2,  # group; Talk's ROOM_TYPE_GROUP
+            "displayName": name or conversation_token,
+            **seeded,
+        }
 
     async def poll_messages(
         self,
@@ -223,7 +305,16 @@ class FakeTalkClient:
             "last_known_message_id": last_known_message_id,
             "timeout": timeout, "limit": limit,
         })
-        return list(self.messages.get(conversation_token, []))
+        seeded = list(self.messages.get(conversation_token, []))
+        if not last_known_message_id:
+            # `lookIntoFuture=0` — recent history, oldest first.
+            return seeded[-limit:]
+        # `lookIntoFuture=1` — only what is newer, and `[]` on the real
+        # client's 304. Without this the poller re-ingests the same turns on
+        # every tick, which is a false pass in the direction that matters.
+        return [
+            m for m in seeded if (m.get("id") or 0) > last_known_message_id
+        ][:limit]
 
     async def fetch_chat_history(
         self, conversation_token: str, limit: int = 100,
@@ -245,12 +336,23 @@ class FakeTalkClient:
         return list(self.conversations)
 
     async def download_attachment(self, file_path: str, local_path: str) -> None:
-        # A WebDAV path, not a conversation token — no room to check.
+        # A WebDAV path, not a conversation token — no room to check, but the
+        # same rule in spirit: the real client GETs and calls
+        # `raise_for_status`, so an unseeded path must fail rather than leave a
+        # zero-byte file behind for a test to assert exists. Seed `b""` to ask
+        # for an empty body on purpose.
+        known = file_path in self.attachments
         self.calls.append(TalkCall("download_attachment", None, {
             "file_path": file_path, "local_path": local_path,
-        }))
+        }, refused=not known))
+        if not known:
+            raise UnknownTalkAttachment(
+                f"talk.download_attachment: {file_path!r} is in no test's "
+                f"`attachments`. Seed it (b'' for an empty body); Nextcloud "
+                "would answer 404."
+            )
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(local_path).write_bytes(self.attachments.get(file_path, b""))
+        Path(local_path).write_bytes(self.attachments[file_path])
 
     # --- helpers ----------------------------------------------------------
 
