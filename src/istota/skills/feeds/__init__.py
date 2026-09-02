@@ -144,6 +144,13 @@ def cmd_run_scheduled(args):
     _output(_run(cli_args))
 
 
+def cmd_prune(args):
+    cli_args = ["prune"]
+    if args.dry_run:
+        cli_args += ["--dry-run"]
+    _output(_run(cli_args))
+
+
 def cmd_import_opml(args):
     cli_args = ["import-opml", args.path]
     _output(_run(cli_args))
@@ -201,6 +208,14 @@ def build_parser():
     p_run = sub.add_parser("run-scheduled", help="Periodic poll entry point used by the scheduler")
     p_run.add_argument("--limit", type=int)
 
+    p_prune = sub.add_parser(
+        "prune", help="Apply the entry retention policy (run daily by the scheduler)",
+    )
+    p_prune.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would go; delete nothing",
+    )
+
     p_imp = sub.add_parser("import-opml", help="Import an OPML file")
     p_imp.add_argument("path", help="Path to OPML file")
 
@@ -223,6 +238,7 @@ def main(argv=None):
         "refresh": cmd_refresh,
         "poll": cmd_poll,
         "run-scheduled": cmd_run_scheduled,
+        "prune": cmd_prune,
         "import-opml": cmd_import_opml,
         "export-opml": cmd_export_opml,
     }

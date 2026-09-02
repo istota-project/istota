@@ -80,6 +80,51 @@ DEFAULT_JITTER_FRACTION = 0.1
 # larger backlog drains over consecutive ticks rather than being dropped.
 DEFAULT_SCHEDULED_POLL_LIMIT = 50
 
+
+# -- retention (ISSUE-388) ----------------------------------------------------
+#
+# A feed's entries used to leave only with the feed. These are the two limits
+# that bound them instead, both per user and both resolved from the stored
+# setting when there is one. `0` disables a limit; a missing value takes the
+# constant.
+
+# How long a read entry is kept after it entered *this reader*. The clock is
+# `fetched_at`, not `published_at`: an Are.na block created in 2019 and added
+# to a channel today arrives with a 2019 date and would be purged on the day it
+# appeared. Never applies to a starred or unread row, and never to an entry the
+# most recent response returned.
+DEFAULT_ENTRY_RETENTION_DAYS = 90
+
+# How long an upgraded database deletes nothing at all. Deliberately its own
+# constant rather than a reuse of the retention default above: they happen to
+# be the same number, and coupling them would mean lowering the age window
+# silently shortened the safety period an upgrade gets.
+UPGRADE_GRACE_DAYS = 90
+
+# Total stored rows for one feed, stars excepted, and the size of the window
+# admitted from one response — one budget at both ends, which is what stops a
+# response larger than the maximum reinserting everything the count pass just
+# deleted. `feeds_db.unstarred_budget` is that budget and is where the two
+# qualifications live: stars come off this total, and the remainder is floored
+# at `min(MIN_ENTRIES_PER_FEED, this)`, so a feed can stand above the number
+# below by its stars and by the rows that floor holds. At or below the floor
+# the clamp is the maximum itself, so stars take nothing off it there.
+DEFAULT_MAX_ENTRIES_PER_FEED = 5000
+
+# The fewest entries a feed keeps whatever their age. Deliberately not a user
+# setting: it is a safety floor rather than a preference — its whole job is to
+# stop a low-volume feed emptying out — and the quantity a user has an opinion
+# about is the ceiling, which is already exposed. Where `max_entries_per_feed`
+# is set below this, the ceiling wins: an explicit instruction to store at most
+# twenty entries must not be overridden by a default that says fifty.
+MIN_ENTRIES_PER_FEED = 50
+
+# How long one process's claim on a feed lasts. Longer than a single feed's
+# 30-second network timeout and scoped to the individual fetch rather than the
+# paced batch, so a crashed poll costs one lease rather than the feed. Nothing
+# holds a database lock for this long — the claim is one committed row.
+POLL_CLAIM_SECONDS = 300
+
 # Ceiling on how long one run may spend *asleep* pacing itself, in seconds.
 # Bounds a cost the feed cap alone does not: the poll is a background skill
 # task, `user_max_background_workers` defaults to 1, and 50 same-host channels
@@ -219,6 +264,15 @@ class FeedRecord:
     # `last_error`, which a throttle deliberately does not write: a throttled
     # channel is healthy, but it is not silent either (ISSUE-347).
     last_throttled_at: str | None = None
+    # The poll time of the most recent response that returned at least one
+    # item. An entry stamped with exactly this value was in that response and
+    # is never age-deleted; anything older was not, which is the only thing
+    # that makes a row a deletion candidate (ISSUE-388). NULL means no response
+    # has ever returned an item, so nothing about this feed is deletable.
+    last_items_seen_at: str | None = None
+    # A lease held by whichever process is fetching this feed now. Bounded, so
+    # a process that dies mid-fetch delays the feed rather than stranding it.
+    poll_claimed_until: str | None = None
 
 
 @dataclass

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from click.testing import CliRunner
@@ -601,3 +603,183 @@ class TestOpml:
         assert out["status"] == "ok"
         text = out_path.read_text()
         assert "tumblr:nemfrog" in text
+
+
+# ---------------------------------------------------------------------------
+# feeds prune (ISSUE-388)
+# ---------------------------------------------------------------------------
+
+
+_PRUNE_NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _prune_iso(days_ago):
+    return (_PRUNE_NOW - timedelta(days=days_ago)).isoformat()
+
+
+def _seed_prune_candidates(ctx, *, cap=4, grace=None):
+    """One feed holding four age candidates and six count candidates."""
+    _seed_db(ctx, feeds=[{"url": "https://p.test/feed"}])
+    with feeds_db.connect(ctx.db_path) as conn:
+        feed_id = feeds_db.list_feeds(conn)[0].id
+        for i in range(4):
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                "last_seen_at, status) VALUES (?, ?, ?, ?, ?, 'read')",
+                (feed_id, f"age{i}", f"age{i}", _prune_iso(300 + i),
+                 _prune_iso(200)),
+            )
+        for i in range(6):
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                "last_seen_at, status) VALUES (?, ?, ?, ?, ?, 'read')",
+                (feed_id, f"cap{i}", f"cap{i}", _prune_iso(1 + i),
+                 _prune_iso(1)),
+            )
+        conn.execute(
+            "UPDATE feeds SET last_items_seen_at = ? WHERE id = ?",
+            (_prune_iso(1), feed_id),
+        )
+        feeds_db.set_max_entries_per_feed(conn, cap)
+        if grace is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+                (feeds_db.ENTRY_PRUNE_NOT_BEFORE_KEY, grace),
+            )
+        conn.commit()
+
+
+def _freeze_now(monkeypatch):
+    """Pin the clock the Click command passes to ``prune_feeds``."""
+    from istota.feeds import retention
+
+    real = retention.prune_feeds
+    monkeypatch.setattr(
+        retention, "prune_feeds",
+        lambda ctx, **kw: real(ctx, **{**kw, "now": _PRUNE_NOW}),
+    )
+
+
+class TestPrune:
+    def test_a_real_run_reports_every_field_and_commits_the_deletion(
+        self, ctx, monkeypatch,
+    ):
+        _seed_prune_candidates(ctx)
+        _freeze_now(monkeypatch)
+
+        r = _invoke(ctx, ["prune"])
+        out = json.loads(r.output)
+
+        assert out["status"] == "ok"
+        assert out["dry_run"] is False
+        assert out["retention_days"] == 90
+        assert out["max_entries_per_feed"] == 4
+        assert out["entries_deleted_by_age"] == 4
+        assert out["entries_deleted_by_cap"] == 2
+        assert out["entries_held_by_floor"] == 0
+        assert out["entry_pruning_deferred_until"] is None
+        assert out["images_deleted_by_cascade"] == 0
+        assert out["feeds_over_cap_after"] == 0
+        assert out["protected_excess_entries"] == 0
+        assert "reusable_pages" in out and "page_size" in out
+        with feeds_db.connect(ctx.db_path) as conn:
+            remaining = [
+                row["guid"]
+                for row in conn.execute("SELECT guid FROM feed_entries ORDER BY guid")
+            ]
+        assert remaining == ["cap0", "cap1", "cap2", "cap3"]
+
+    def test_a_dry_run_plans_the_same_counts_and_changes_nothing(
+        self, ctx, monkeypatch,
+    ):
+        _seed_prune_candidates(ctx)
+        _freeze_now(monkeypatch)
+
+        r = _invoke(ctx, ["prune", "--dry-run"])
+        out = json.loads(r.output)
+
+        assert out["status"] == "ok"
+        assert out["dry_run"] is True
+        assert out["entries_deleted_by_age"] == 4
+        assert out["entries_deleted_by_cap"] == 2
+        with feeds_db.connect(ctx.db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM feed_entries"
+            ).fetchone()["c"]
+        assert count == 10
+
+    def test_a_deferred_run_is_ok_and_names_the_boundary(self, ctx, monkeypatch):
+        boundary = (_PRUNE_NOW + timedelta(days=30)).isoformat()
+        _seed_prune_candidates(ctx, grace=boundary)
+        _freeze_now(monkeypatch)
+
+        r = _invoke(ctx, ["prune"])
+        out = json.loads(r.output)
+
+        assert out["status"] == "ok"
+        assert out["entry_pruning_deferred_until"] == boundary
+        assert out["entries_deleted_by_age"] == 0
+        assert out["entries_deleted_by_cap"] == 0
+        with feeds_db.connect(ctx.db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM feed_entries"
+            ).fetchone()["c"]
+        assert count == 10
+
+    def test_a_no_op_run_on_an_empty_database_is_ok(self, ctx, monkeypatch):
+        _freeze_now(monkeypatch)
+        r = _invoke(ctx, ["prune"])
+        out = json.loads(r.output)
+        assert out["status"] == "ok"
+        assert out["entries_deleted_by_age"] == 0
+        assert out["entries_deleted_by_cap"] == 0
+
+    def test_protected_overage_is_reported_rather_than_deleted(
+        self, ctx, monkeypatch,
+    ):
+        _seed_db(ctx, feeds=[{"url": "https://p.test/feed"}])
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.list_feeds(conn)[0].id
+            for i in range(5):
+                conn.execute(
+                    "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                    "last_seen_at, status, starred) "
+                    "VALUES (?, ?, ?, ?, ?, 'read', 1)",
+                    (feed_id, f"star{i}", f"star{i}", _prune_iso(10 + i),
+                     _prune_iso(1)),
+                )
+            feeds_db.set_max_entries_per_feed(conn, 3)
+            conn.execute(
+                "UPDATE feeds SET last_items_seen_at = ? WHERE id = ?",
+                (_prune_iso(1), feed_id),
+            )
+            conn.commit()
+        _freeze_now(monkeypatch)
+
+        out = json.loads(_invoke(ctx, ["prune"]).output)
+
+        assert out["status"] == "ok"
+        assert out["entries_deleted_by_cap"] == 0
+        assert out["feeds_over_cap_after"] == 1
+        assert out["protected_excess_entries"] == 2
+
+    def test_a_prune_failure_is_a_json_error_envelope(self, ctx, monkeypatch):
+        """A raised exception must still reach the caller as JSON.
+
+        The skill facade and a standalone caller both read stdout and the exit
+        code; a traceback gives them neither.
+        """
+        from istota.feeds import retention
+
+        def _boom(context, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(retention, "prune_feeds", _boom)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["prune"], obj=ctx)
+
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert "database is locked" in out["error"]
+        assert result.exit_code == 1

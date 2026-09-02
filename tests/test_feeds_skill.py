@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from istota.config import Config, UserConfig
@@ -29,6 +31,48 @@ def istota_config(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FEEDS_USER", "alice")
     return config
+
+
+def _feeds_ctx(config):
+    from istota.feeds import resolve_for_user
+    return resolve_for_user("alice", config)
+
+
+def _seed_over_cap(config):
+    """One feed holding five read entries against a maximum of two.
+
+    Uses the count pass rather than the age pass: it needs no observation
+    marker and no floor arithmetic, so the fixture stays small while still
+    exercising a committed delete.
+    """
+    from istota.feeds import db as feeds_db
+    from istota.skills.feeds import _run
+
+    assert _run(["add", "--url", "https://feed.example.com/rss"])["status"] == "ok"
+    ctx = _feeds_ctx(config)
+    with feeds_db.connect(ctx.db_path) as conn:
+        feed_id = feeds_db.list_feeds(conn)[0].id
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                "last_seen_at, status) VALUES (?, ?, ?, ?, ?, 'read')",
+                (feed_id, f"e{i}", f"e{i}",
+                 f"2026-08-0{i + 1}T00:00:00+00:00",
+                 f"2026-08-0{i + 1}T00:00:00+00:00"),
+            )
+        feeds_db.set_max_entries_per_feed(conn, 2)
+        conn.commit()
+
+
+def _entry_guids(config):
+    from istota.feeds import db as feeds_db
+    ctx = _feeds_ctx(config)
+    with feeds_db.connect(ctx.db_path) as conn:
+        return [
+            r["guid"] for r in conn.execute(
+                "SELECT guid FROM feed_entries ORDER BY guid"
+            )
+        ]
 
 
 class TestSkillRun:
@@ -83,8 +127,8 @@ class TestParser:
         from istota.skills.feeds import build_parser
         p = build_parser()
         for cmd in ["list", "categories", "entries", "add", "remove",
-                    "refresh", "poll", "run-scheduled", "import-opml",
-                    "export-opml"]:
+                    "refresh", "poll", "run-scheduled", "prune",
+                    "import-opml", "export-opml"]:
             args = p.parse_args([cmd] + (["--url", "u"] if cmd == "add"
                                           else ["x"] if cmd == "import-opml"
                                           else []))
@@ -95,6 +139,99 @@ class TestParser:
         p = build_parser()
         with pytest.raises(SystemExit):
             p.parse_args(["add"])
+
+
+class TestPrune:
+    """The facade half of `feeds prune`. The scheduler dispatches this daily
+    and unattended, so what the parser accepts and what the handler forwards
+    are the whole contract — a dropped `--dry-run` deletes for real."""
+
+    def test_parses_dry_run(self):
+        from istota.skills.feeds import build_parser
+        args = build_parser().parse_args(["prune", "--dry-run"])
+        assert args.command == "prune"
+        assert args.dry_run is True
+
+    def test_dry_run_defaults_off(self):
+        """The scheduled job passes no flag, and it must delete for real."""
+        from istota.skills.feeds import build_parser
+        args = build_parser().parse_args(["prune"])
+        assert args.command == "prune"
+        assert args.dry_run is False
+
+    def test_dispatch_forwards_dry_run_to_the_click_command(self, monkeypatch):
+        from istota.skills import feeds as skill
+        sent = []
+        monkeypatch.setattr(
+            skill, "_run", lambda a: sent.append(a) or {"status": "ok"},
+        )
+        skill.main(["prune", "--dry-run"])
+        assert sent == [["prune", "--dry-run"]]
+
+    def test_dispatch_without_the_flag_sends_a_bare_prune(self, monkeypatch):
+        from istota.skills import feeds as skill
+        sent = []
+        monkeypatch.setattr(
+            skill, "_run", lambda a: sent.append(a) or {"status": "ok"},
+        )
+        skill.main(["prune"])
+        assert sent == [["prune"]]
+
+    def test_an_error_envelope_still_exits_nonzero(self, monkeypatch):
+        """A failed prune is a failed scheduled task. `_sync_module_jobs`
+        counts failures off the return code, so a prune that raised and
+        exited 0 would look like a daily job doing its work."""
+        from istota.skills import feeds as skill
+        monkeypatch.setattr(
+            skill, "_run",
+            lambda a: {"status": "error", "error": "database is locked"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            skill.main(["prune"])
+        assert exc_info.value.code == 1
+
+    def test_prune_deletes_for_real_through_the_facade(self, istota_config, capsys):
+        """Through `_run` and the Click command, not a mock, and against data
+        that actually has something to delete.
+
+        Asserting zero counts on an empty database was the earlier shape of
+        this test, and it could not fail: zero is what a correct prune, a
+        no-op prune and a stubbed-out `prune_feeds` all return. This is the
+        no-flag argv the scheduled job sends, so it is the one that has to be
+        shown deleting.
+
+        Driven through `main`, not `_run`: `_run` takes an argv the test wrote
+        itself, so it steps over `cmd_prune` — the very code that decides
+        whether `--dry-run` is appended. Measured, a `cmd_prune` forced to
+        always send `--dry-run` left this test green while it called `_run`.
+        """
+        from istota.skills.feeds import main
+        _seed_over_cap(istota_config)
+
+        main(["prune"])
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["dry_run"] is False
+        assert out["entries_deleted_by_cap"] == 3
+        assert _entry_guids(istota_config) == ["e3", "e4"]
+
+    def test_dry_run_plans_the_same_deletion_and_leaves_the_rows(
+        self, istota_config, capsys,
+    ):
+        """The control for the test above, on identical data: same planned
+        count, nothing gone. Without it, a `--dry-run` that quietly deleted
+        would look exactly like a `--dry-run` that worked."""
+        from istota.skills.feeds import main
+        _seed_over_cap(istota_config)
+
+        main(["prune", "--dry-run"])
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["dry_run"] is True
+        assert out["entries_deleted_by_cap"] == 3
+        assert _entry_guids(istota_config) == ["e0", "e1", "e2", "e3", "e4"]
 
 
 class TestLoaderEnvFirst:
