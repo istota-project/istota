@@ -18,9 +18,12 @@ The double is what makes the two shapes distinguishable at all: it refuses a
 token that is not a live `talk` `surface_ref`, exactly as Nextcloud does, where
 the `AsyncMock` this file used to patch in accepted anything. Because the
 product swallows that refusal — `edit_talk_message` returns False,
-`TalkTransport.deliver` returns None — every assertion below names the room the
-API was addressed with, or the return value, and never the absence of a raise.
-`TestEditTargetToken`'s first case is the in-file control for that.
+`TalkTransport.deliver` returns None — no assertion in the two classes that
+reach the seam rests on nothing having raised: each names the room the API was
+addressed with, or the return value. `TestEditTargetToken`'s first case is the
+in-file control for that. `TestTheAck` is the exception and says so in its own
+docstring: four of its five cases assert at the keyword the scheduler hands
+down, and the fifth is there because that is not enough.
 """
 
 import asyncio
@@ -70,13 +73,24 @@ def promoted(config):
     """A web room later bound to Talk: canonical token is the web one."""
     with db.get_db(config.db_path) as conn:
         shape = promoted_room(conn, "testuser")
-    assert shape.diverges, "the promoted shape must not collapse to one token"
+        # Not `shape.diverges`, which cannot fail — `promoted_room` raises
+        # rather than return a collapsed shape. What every refusal assertion in
+        # this file actually rests on is the stronger claim: the canonical token
+        # is bound on no `talk` row, so the double refuses it.
+        assert db.resolve_room_token(conn, "talk", shape.canonical) is None
     return shape
 
 
 @pytest.fixture
 def plain(config):
-    """An ordinary Talk room: the canonical token *is* the Talk ref."""
+    """An ordinary Talk room: the canonical token *is* the Talk ref.
+
+    Assertions using this shape do not distinguish a resolved binding from the
+    fallback, because both produce the same string — that is what makes it the
+    old-behaviour guard rather than the regression case. `promoted` is the shape
+    that tells the two apart, so `plain` is never the only shape in a test that
+    is about routing.
+    """
     with db.get_db(config.db_path) as conn:
         return plain_talk_room(conn, "testuser")
 
@@ -127,8 +141,15 @@ def _record_sent_ids(fake_talk):
     sent = []
     inner = fake_talk.send_message
 
-    async def _send(*args, **kwargs):
-        response = await inner(*args, **kwargs)
+    # The real signature rather than `*args, **kwargs`:
+    # `tests/test_support_talk_double.py` pins signatures against the class, so
+    # an instance-level replacement is invisible to that guard and a call-shape
+    # change would pass through here unnoticed.
+    async def _send(conversation_token, message, reply_to=None, reference_id=None):
+        response = await inner(
+            conversation_token, message,
+            reply_to=reply_to, reference_id=reference_id,
+        )
         sent.append(response["ocs"]["data"]["id"])
         return response
 
@@ -142,13 +163,40 @@ def _record_sent_ids(fake_talk):
 
 
 class TestTheAck:
-    """Asserted at `post_result_to_talk`'s keyword, which is patched out here.
+    """Mostly asserted at `post_result_to_talk`'s keyword, which is patched out.
 
-    Unlike the two classes below, these never reach the Talk seam: `run_coro`
-    is patched to a fixed id, so no coroutine runs and the double would record
-    nothing at all. What is under test is the scheduler's choice of target
-    token, which is the argument it hands down.
+    Four of these never reach the Talk seam: `run_coro` is patched to a fixed
+    id, so no coroutine runs and the double records nothing. That keeps them
+    cheap and keeps the unregistered-token case expressible at all, but it also
+    means they would pass unchanged against a permissive double — which is the
+    thing this file's other two classes exist not to do. So the ack site, the
+    one that actually 404'd in ISSUE-400, gets one case that runs the delivery
+    path for real and asserts the room `send_message` was addressed with.
     """
+
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
+    def test_the_ack_reaches_the_talk_api_on_the_bound_room(
+        self, mock_run, config, fake_talk, promoted,
+    ):
+        """The seam case, and the reason the other four are not enough.
+
+        With `post_result_to_talk` mocked out, every assertion in this class is
+        about an argument rather than about a destination — the shape
+        `TestSubscriberRouting`'s docstring calls proving nothing on its own.
+        Here the real coroutine runs down through `TalkTransport.deliver`, so a
+        scheduler handing down the canonical token is refused by the double and
+        `send_message` never appears against `talk_ref` at all.
+        """
+        _queue_talk_task(config, promoted.canonical)
+        with patch(
+            "istota.scheduler.execute_task", return_value=(True, "done", None, None),
+        ):
+            process_one_task(config)
+
+        talk_calls = [(c.method, c.token) for c in fake_talk.calls]
+        assert ("send_message", promoted.talk_ref) in talk_calls
+        assert promoted.canonical not in [c.token for c in fake_talk.calls]
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.run_coro", return_value=414)
     @patch("istota.scheduler.post_result_to_talk")
@@ -207,7 +255,11 @@ class TestTheAck:
         """The half of the guard the resolution did not replace. `task.
         conversation_token` stays in front of it so a resolver rung that answers
         from somewhere else — `tasks.talk_delivery_token` is returned absolutely
-        — cannot start posting acks for a task that had nowhere to put one."""
+        — cannot start posting acks for a task that had nowhere to put one.
+
+        The delivery token is a *live* Talk room here, not the old bare literal,
+        which is the stronger form of the claim: a postable destination is still
+        not enough on its own."""
         with db.get_db(config.db_path) as conn:
             task_id = db.create_task(
                 conn, prompt="x", user_id="testuser", source_type="talk",
@@ -262,6 +314,10 @@ class TestEditTargetToken:
         to refuse it, so the guard the rest of the file leans on is
         demonstrated here rather than assumed.
         """
+        # The coupling the `config` fixture's comment describes, checked rather
+        # than described: a double pointed at another database refuses every
+        # token, and the product swallows that into an ordinary-looking miss.
+        assert fake_talk.db_path == config.db_path
         ok = await edit_talk_message(
             config, _talk_task(promoted.canonical), 42, "Updated",
             target_token=promoted.canonical,
@@ -305,6 +361,7 @@ class TestEditTargetToken:
         )
         assert ok is True
         assert _addressed(fake_talk) == [("edit_message", promoted.talk_ref)]
+        assert fake_talk.calls[0].args == {"message_id": 42, "message": "Updated"}
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +424,8 @@ class TestSubscriberRouting:
         # The edit addresses the message the send created, not the ack (100).
         assert len(sent) == 1
         assert fake_talk.calls[1].args["message_id"] == sent[0]
+        # `_addressed` includes refused calls, so this is not implied above.
+        assert fake_talk.refusals == []
 
     @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
     def test_a_failed_ack_still_streams_text_to_the_bound_room(
