@@ -1019,9 +1019,18 @@ for the renderer's grammar + safety rules.
   `transport.capabilities.supports_progress_ack` (resolved via the registry),
   keeping the `source_type == "talk"` guard so only interactive Talk tasks get
   an editable ack (briefings / scheduled / subtasks that also resolve to the
-  Talk surface do not). Result + email delivery still call the
-  `post_result_to_*` shims (extensive introspection-test coverage depends on the
-  call shape).
+  Talk surface do not). Where that ack is *posted* is
+  `_talk_target_for_delivery`, resolved once behind those guards and carried on
+  `TalkEventSubscriber.target_token` into every later edit — never
+  `conversation_token`, which is the room's canonical token (ISSUE-400). Once,
+  because the resolution reads the database and an edit fires per tool call;
+  behind the guards, so a briefing or email task never pays the query.
+  `conversation_token` stays in the guard on top of the resolution, so the
+  resolution can only redirect an ack that would have been posted anyway —
+  rung 0 returns `tasks.talk_delivery_token` absolutely, and no shipped path
+  writes that column on a talk-sourced row. Result + email delivery still call
+  the `post_result_to_*` shims (extensive introspection-test coverage depends on
+  the call shape).
 - **`LogChannelSubscriber`** delivers the verbose execution log to the user's
   resolved log destinations via the registry (`notifications.effective_log_destinations`
   — opt-in: `routing["log"]` > legacy `log_channel` > disabled). Delivery is
@@ -1052,7 +1061,13 @@ of them.
   post-drop plan for an interactive source type falls back to reply-to-origin so
   a misconfigured `output_target` can't silently eat a reply.
 - **`talk_channel_for_task(config, task) -> str | None`** — which Talk room a
-  task's result goes to. Four rungs, in order: **(0)** `tasks.talk_delivery_token`
+  task's Talk traffic goes to: the result, and since ISSUE-400 the progress
+  surface too (the ack, every progress edit, the terminal summary edit and the
+  streamed intermediate text). Those four used to post `conversation_token`
+  raw, which is the room's *canonical* token and only postable when it happens
+  to equal the room's Talk ref — so on a promoted room the ack 404'd, came back
+  with no message id, and every edit behind it silently no-opped. Four rungs, in
+  order: **(0)** `tasks.talk_delivery_token`
   when set, absolutely; **(1)** the task's room's `talk` binding; **(2)**
   `conversation_token` itself, when the task has one and is not email-sourced;
   **(3)** `notifications.resolve_conversation_token` (alerts → briefing →
@@ -1162,8 +1177,10 @@ already-documented case (user-scoped OAuth, web process only).
 `TalkTransport.deliver`/`.edit` and `transport.email.outbound.deliver_email_result`
 rather than collapsing into bare `registry.get(surface).deliver(...)` calls at
 each site. They centralize three genuine impedance-matches that a uniform
-`Transport.deliver` can't carry: the Talk `target_token` override (the
-email-source-task-replying-into-Talk synthetic-token case), the email
+`Transport.deliver` can't carry: the Talk `target_token` override — carried by
+`edit_talk_message` as well as `post_result_to_talk` since ISSUE-400, and
+covering two cases, the email-source-task-replying-into-Talk synthetic token and
+a promoted room whose canonical token is not its Talk ref — the email
 bool-vs-`int|None` mismatch (the protocol returns a message id, but email has no
 message-id concept and its two callers branch on a success bool), and the Talk
 url/token guard + exception→`False` in `edit`. The event consumers

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A room that started on the web and was later opened in Talk shows its progress again. The "working on it" line was addressed using the room's internal identity rather than its Talk address, so Nextcloud rejected it, and every progress update after that quietly did nothing because there was no message left to edit. The answer itself always arrived — final delivery resolves the room correctly and always did.
+
 - A failure while checking a chat room for new messages now says what went wrong. One unhelpful line covered three different upstream failures — an empty reply, an error page and a reply in the wrong format all produced identical text — so a deployment logging a hundred of them a day had nothing to go on. The line now carries the response status, its declared type and a short excerpt of what actually came back.
 
 - The Linux test tier is usable as a gate again. It came back 60 red on a clean checkout from three unrelated causes, so a real regression would have arrived as one more line in a wall of noise. The largest was the test image installing the dependencies but not the project itself, which left 47 tests failing on a missing-module error that read as a code fault — and meant the built-in agent loop's tool process had never once started there. The image now puts the project on its interpreter's import path, the way every deployment already does. The other two were a one-shot regression guard whose own header had marked it for deletion once the code it froze changed on purpose, and a test whose premise is a file permission bit failing as root inside the container.
