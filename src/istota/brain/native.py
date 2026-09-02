@@ -8,12 +8,18 @@ module + ``istota.session``).
 
 What the executor still owns and ``NativeBrain`` consumes: the fully-composed
 prompt (``req.prompt`` → the user message), the optional system-prompt file, the
-per-task env, the cwd, the cancel check, and ``native_sandbox_wrap`` — the
-sandbox under the *native* profile, which the Bash tool applies per execution.
-What it ignores: ``sandbox_wrap`` (the *Claude* profile: that namespace carries
-the `claude` CLI's runtime state and its credential, which this brain's tools
-have no use for and must not be handed — ISSUE-389), ``on_pid`` and
-``result_file`` (subprocess concerns).
+per-task env, the cwd, the cancel check, ``task_cgroup``, ``on_pid``, and
+``native_sandbox_wrap`` — the sandbox under the *native* profile. The last three
+go to one place: the tool server this brain spawns once per attempt
+(``session/tools/remote.py``), wrapped by that profile, placed in the cgroup
+from ``preexec_fn``, and reported through ``on_pid`` as the pid ``!stop``, the
+web cancel endpoint and ``host_pressure.read_sandbox_shm`` reach for. Before
+that server existed this brain called ``on_pid`` never, so every native task
+carried ``worker_pid`` 0.
+
+What it still ignores: ``sandbox_wrap`` (the *Claude* profile — that namespace
+carries the `claude` CLI's runtime state and its credential, which this brain's
+tools have no use for and must not be handed, ISSUE-389) and ``result_file``.
 
 Wired here: compaction via the loop's ``prepare_next_turn`` hook, output-aware
 loop detection + a max-turns cap as composable stop conditions, transient-error
@@ -1707,24 +1713,39 @@ class NativeBrain:
             steering_queue_mode="one_at_a_time",
         )
 
-        context = AgentContext(
-            system_prompt=self._extract_system_prompt(req),
-            messages=[],
-            tools=self._build_tools(req),
-        )
-        # Line 2 of the file, before the loop emits anything: the system prompt
-        # and the tool surface, recorded once rather than on every turn.
-        log.context(
-            context.system_prompt,
-            [t.schema.name for t in (context.tools or [])],
-            _tools_schema_sha(context.tools),
-            system_prompt_source=self._system_prompt_source(req),
-        )
-        prompt_msg = UserMessage(
-            content=_initial_user_content(
-                req.prompt, req.images, supports_vision, model
+        # One sandboxed tool server for the whole attempt, spawned before the
+        # context that holds its proxies. `None` for a text-only invocation.
+        #
+        # The `try` runs from the spawn to the last statement that can raise,
+        # because everything after it is inside the loop's own `try/finally`
+        # below, which is where the ordinary shutdown lives. Without it a
+        # failure in this window would leave a server running until the daemon
+        # itself exited (`--die-with-parent` is the backstop, not the rule).
+        tool_server = None
+        try:
+            tool_server = await self._start_tool_server(req, abort)
+            context = AgentContext(
+                system_prompt=self._extract_system_prompt(req),
+                messages=[],
+                tools=self._build_tools(req, tool_server),
             )
-        )
+            # Line 2 of the file, before the loop emits anything: the system
+            # prompt and the tool surface, recorded once rather than every turn.
+            log.context(
+                context.system_prompt,
+                [t.schema.name for t in (context.tools or [])],
+                _tools_schema_sha(context.tools),
+                system_prompt_source=self._system_prompt_source(req),
+            )
+            prompt_msg = UserMessage(
+                content=_initial_user_content(
+                    req.prompt, req.images, supports_vision, model
+                )
+            )
+        except BaseException:
+            if tool_server is not None:
+                await tool_server.aclose()
+            raise
 
         # The loop captures agent_end's stop_reason; we sniff it from the final
         # event by subscribing through a wrapper sink.
@@ -1884,6 +1905,13 @@ class NativeBrain:
                 transcript = recovery_ctx.messages
         finally:
             abort.set()
+            if tool_server is not None:
+                # After `abort.set()`, so a Bash call still running is asked to
+                # stop before the socket goes. `aclose` is idempotent and never
+                # raises: it sends `shutdown`, waits the graceful window, then
+                # kills the *group* — everything the tools forked is in it, and
+                # `--die-with-parent` only fires when the daemon goes.
+                await tool_server.aclose()
             for _bg in (cancel_task, steer_task):
                 if _bg is not None:
                     _bg.cancel()
@@ -1904,6 +1932,33 @@ class NativeBrain:
         if pending_tools:
             trace.extend(pending_tools)
             pending_tools.clear()
+
+        # Ahead of every other classification, deliberately. A dead tool server
+        # sets the loop's abort (so the run stops at the next boundary), and the
+        # loop reports that as `aborted` — which `_build_result` turns into
+        # "Cancelled by user", a *success-shaped* terminal state the scheduler
+        # neither retries nor reports. A broken sandbox must not read as a user
+        # pressing stop. It also outranks `timed_out` for the same reason: the
+        # cause is the server, and the timeout is what the abort led to.
+        #
+        # Failing rather than degrading each tool call to an error result is the
+        # decision here: with an error per call the model narrates around a
+        # broken sandbox and answers confidently.
+        if tool_server is not None and tool_server.failure is not None:
+            from istota.session.tools.remote import attempt_failure_text
+
+            return self._build_result(
+                "error",
+                "",
+                # Not an f-string here: a signal death has to keep
+                # `is_signal_termination`'s prefix at the *front* of the text,
+                # or a deploy restart fails every in-flight task instead of
+                # requeuing it. See `attempt_failure_text`.
+                attempt_failure_text(tool_server.failure),
+                trace, actions, usage, model,
+                cost_reported=_all_turns_costed(),
+                partial_text=last_assistant_text,
+            )
 
         if timed_out:
             timeout_min = req.timeout_seconds // 60
@@ -2051,70 +2106,136 @@ class NativeBrain:
         except asyncio.CancelledError:
             return
 
-    def _build_tools(self, req: BrainRequest):
-        """Default tools bound to a per-task ToolEnv, filtered by allowed_tools.
+    def _tool_workspace(self, req: BrainRequest):
+        """The confinement roots and the working directory for one request.
 
-        Empty ``allowed_tools`` means a text-only invocation (e.g. sleep cycle) —
-        no tools are exposed.
+        Filesystem confinement (NB-1): when the executor supplies file-access
+        roots, the tools are confined to them. Relative paths then resolve under
+        the user's own writable dir rather than the shared temp root. Shared by
+        the ``hello`` frame and the daemon-side ``ToolEnv`` that ``WebFetch``
+        is bound to, so the two cannot disagree about where a task is.
         """
-        if not req.allowed_tools:
-            return []
-        from istota.session.tools import ToolEnv, build_default_tools
-
-        # Filesystem confinement (NB-1): when the executor supplies file-access
-        # roots, the in-process file tools are confined to them (the native
-        # stand-in for bwrap's filesystem isolation). Relative paths then resolve
-        # under the user's own writable dir rather than the shared temp root.
         read_roots = tuple(req.fs_read_roots) if req.fs_read_roots else None
         write_roots = tuple(req.fs_write_roots) if req.fs_write_roots else None
         write_denied_roots = tuple(req.fs_write_denied_roots or ())
         cwd = write_roots[0] if write_roots else Path(req.cwd)
+        return cwd, read_roots, write_roots, write_denied_roots
 
-        policy = self._web_fetch_policy()
-        # Provenance corpus (Stage 3b): only assembled when the knob is on, so
-        # the default path threads nothing new. v1 corpus = URLs present in the
-        # task prompt (task text + prior conversation context already folded into
-        # req.prompt by the executor).
-        corpus = None
-        if policy is not None and policy.require_url_provenance:
-            corpus = _extract_urls(req.prompt)
+    def _hello_payload(self, req: BrainRequest) -> dict:
+        """What the tool server is told about this task.
 
+        ``subprocess_env`` is ``req.env``, and that is the **environment** route
+        to the Claude subscription token rather than the mount one — worth
+        naming here because the mount route is closed and this one is not.
+        ``executor.build_clean_env`` copies ``CLAUDE_CODE_OAUTH_TOKEN`` out of
+        the daemon's environment into ``req.env`` for every brain; no skill
+        manifest declares it, so neither ``derive_credential_set`` nor
+        ``derive_proxy_only_set`` splits it out; and this is what Bash hands its
+        child. So ``echo "$CLAUDE_CODE_OAUTH_TOKEN"`` still returns the token on
+        the shape where the Ansible role writes it into the unit's
+        EnvironmentFile. Pre-existing, filed as ISSUE-390, and left alone
+        deliberately: which variables a brain may pass to a tool subprocess is a
+        separate decision from which paths a namespace holds, and it reaches
+        every brain and every direct caller.
+
+        The three caps come from ``ToolEnv``'s own defaults rather than from a
+        second set of numbers here, because they were never request-derived:
+        this frame is the only thing that now decides them, and restating them
+        would be a silent second default the day one of them changes.
+        """
+        from istota.session.tools import ToolEnv, hello_payload
+
+        defaults = ToolEnv(cwd=Path(req.cwd))
+        cwd, read_roots, write_roots, write_denied_roots = self._tool_workspace(req)
         deferred = (req.env or {}).get("ISTOTA_DEFERRED_DIR")
-        env = ToolEnv(
+        return hello_payload(
             cwd=cwd,
-            # The native profile, never `req.sandbox_wrap`: that one builds the
-            # `claude` CLI's namespace, credential and all, and this brain's
-            # Bash tool has no business in it (ISSUE-389). `None` where the
-            # caller built no task env, which is the unsandboxed posture.
-            #
-            # **This closes the mount route to that credential and not the
-            # environment one**, which is worth knowing before reading the
-            # profile split as a boundary. `executor.build_clean_env` copies
-            # `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's environment into
-            # `req.env` for every brain; no skill manifest declares it, so
-            # neither `derive_credential_set` nor `derive_proxy_only_set`
-            # splits it out; and `subprocess_env` below is what Bash hands its
-            # child. So `echo "$CLAUDE_CODE_OAUTH_TOKEN"` still returns the
-            # subscription token, on the shape where the Ansible role writes it
-            # into the unit's EnvironmentFile. Pre-existing rather than
-            # introduced by the split, and left alone here deliberately: which
-            # variables a brain may pass to a tool subprocess is a separate
-            # decision from which paths a namespace holds, and it reaches every
-            # brain and every direct caller.
-            sandbox_wrap=req.native_sandbox_wrap,
             subprocess_env=req.env or None,
-            bash_timeout_seconds=max(1, req.timeout_seconds),
             read_roots=read_roots,
             write_roots=write_roots,
             write_denied_roots=write_denied_roots,
-            web_fetch=policy,
-            web_fetch_url_corpus=corpus,
             deferred_dir=Path(deferred) if deferred else None,
-            bash_spill_full_output=getattr(self._config, "bash_spill_full_output", True),
-            task_cgroup=req.task_cgroup,
+            bash_timeout_seconds=max(1, req.timeout_seconds),
+            max_output_bytes=defaults.max_output_bytes,
+            max_read_lines=defaults.max_read_lines,
+            max_read_bytes=defaults.max_read_bytes,
+            bash_spill_full_output=getattr(
+                self._config, "bash_spill_full_output", True
+            ),
         )
+
+    async def _start_tool_server(self, req: BrainRequest, abort: asyncio.Event):
+        """One sandboxed tool server for this attempt, or ``None``.
+
+        ``None`` for a text-only invocation (empty ``allowed_tools`` — the sleep
+        cycle, health OCR, briefing synthesis, conversation triage), which is
+        the early return ``_build_tools`` has always had: those callers spawn
+        nothing at all.
+
+        The wrap is ``req.native_sandbox_wrap``, never ``req.sandbox_wrap``:
+        that one builds the `claude` CLI's namespace, credential and all
+        (ISSUE-389). ``None`` where the caller built no task env, which is the
+        unsandboxed posture and where ``build_bwrap_cmd`` hands the command back
+        unchanged anyway.
+
+        A failure raises ``ToolServerError``, which fails the attempt. It
+        deliberately does not fall back to in-process tools: that would be the
+        second execution path this seam exists to remove, and it would run the
+        model's file operations in the daemon on the one deployment that asked
+        for a sandbox and did not get one.
+        """
+        if not req.allowed_tools:
+            return None
+        from istota.session.tools import start_tool_server
+
+        return await start_tool_server(
+            self._hello_payload(req),
+            sandbox_wrap=req.native_sandbox_wrap,
+            task_cgroup_path=req.task_cgroup,
+            cwd=Path(req.cwd),
+            env=req.env or None,
+            on_pid=req.on_pid,
+            loop_abort=abort,
+        )
+
+    def _build_tools(self, req: BrainRequest, server=None):
+        """The tool surface for one request, filtered by ``allowed_tools``.
+
+        The six core tools are proxies onto ``server``; ``WebFetch`` is built
+        here and runs in the daemon, unchanged — it makes a credential-free
+        network request whose whole hardening is about the IPs it resolves, and
+        a namespace helps with none of that.
+
+        ``server=None`` yields no core tools. That is the text-only case (empty
+        ``allowed_tools``) and it is also what a caller that skipped
+        ``_start_tool_server`` gets, which is honest rather than convenient: the
+        six live in the server now, so with no server there are none.
+        """
+        if not req.allowed_tools:
+            return []
+        from istota.session.tools import ToolEnv, build_remote_tools, make_web_fetch_tool
+
+        tools = list(build_remote_tools(server)) if server is not None else []
+
+        policy = self._web_fetch_policy()
+        if policy is not None and policy.enabled:
+            # Provenance corpus (Stage 3b): only assembled when the knob is on,
+            # so the default path threads nothing new. v1 corpus = URLs present
+            # in the task prompt (task text + prior conversation context already
+            # folded into req.prompt by the executor).
+            corpus = _extract_urls(req.prompt) if policy.require_url_provenance else None
+            cwd, read_roots, write_roots, write_denied_roots = self._tool_workspace(req)
+            tools.append(make_web_fetch_tool(ToolEnv(
+                cwd=cwd,
+                read_roots=read_roots,
+                write_roots=write_roots,
+                write_denied_roots=write_denied_roots,
+                web_fetch=policy,
+                web_fetch_url_corpus=corpus,
+            )))
+
         allowed = set(req.allowed_tools)
-        return [t for t in build_default_tools(env) if t.schema.name in allowed]
+        return [t for t in tools if t.schema.name in allowed]
 
     def _web_fetch_policy(self):
         """Map the configured ``WebFetchConfig`` → the tool's ``WebFetchPolicy``.

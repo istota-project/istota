@@ -409,10 +409,24 @@ class TestProviderLifecycle:
 
 
 class TestFsConfinement:
-    """NB-1: fs_read_roots/fs_write_roots thread into the file tools' ToolEnv."""
+    """NB-1: the request's roots reach the tools that enforce them.
+
+    The tools moved into `istota.tool_server`, so the seam under test moved
+    with them: `BrainRequest` → `NativeBrain._hello_payload` → the `hello`
+    frame → `tool_server.build_env` → `ToolEnv`. These drive that translation
+    directly rather than through a subprocess, which keeps the file fast and
+    keeps the assertion on the plumbing; `tests/test_tool_server.py` runs the
+    same refusals through a real server over a real socket, and
+    `tests/linux/test_tool_server_real.py` is where an outside path is asserted
+    *absent* rather than refused.
+    """
 
     def _tool(self, brain, req, name):
-        return next(t for t in brain._build_tools(req) if t.schema.name == name)
+        from istota.session.tools import build_default_tools
+        from istota.tool_server import build_env
+
+        env = build_env(brain._hello_payload(req))
+        return next(t for t in build_default_tools(env) if t.schema.name == name)
 
     def test_roots_confine_read_tool(self, tmp_path):
         ws = tmp_path / "ws"
@@ -433,9 +447,8 @@ class TestFsConfinement:
         assert "workspace" in blocked.content[0].text.lower()
 
     def test_write_denied_roots_thread_through_to_the_tools(self, tmp_path):
-        """The seam the executor actually uses: BrainRequest → _build_tools →
-        ToolEnv. Dropping either plumbing line leaves the ToolEnv-level tests
-        green, so this is where the carve-out is proven to arrive."""
+        """Dropping either plumbing line leaves the ToolEnv-level tests green,
+        so this is where the carve-out is proven to arrive."""
         ws = tmp_path / "ws"
         carve = ws / ".developer"
         carve.mkdir(parents=True)
@@ -476,6 +489,25 @@ class TestFsConfinement:
         write = self._tool(_brain(MockProvider([])), req, "Write")
         asyncio.run(write.execute("c", {"file_path": "rel.txt", "content": "x"}, None, None))
         assert (ws / "rel.txt").read_text() == "x"
+
+    def test_none_means_none_rather_than_an_empty_allowlist(self, tmp_path):
+        """The one translation with two plausible spellings and only one right
+        answer. `read_roots=None` is *unconfined*; `read_roots=()` refuses
+        every path. JSON has no tuple, so both would arrive as a list unless
+        `None` is carried as `null` — and an unconfined dev machine that
+        started refusing every read would look like a broken tool rather than
+        like a bad translation."""
+        from istota.tool_server import build_env
+
+        brain = _brain(MockProvider([]))
+        unconfined = build_env(brain._hello_payload(_req("hi", tmp_path, tools=["Read"])))
+        assert unconfined.read_roots is None and unconfined.confined is False
+
+        req = _req("hi", tmp_path, tools=["Read"])
+        req.fs_read_roots = [tmp_path]
+        req.fs_write_roots = [tmp_path]
+        confined = build_env(brain._hello_payload(req))
+        assert confined.read_roots == (tmp_path,) and confined.confined is True
 
 
 class TestErrorAndStops:

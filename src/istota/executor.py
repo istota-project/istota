@@ -3386,12 +3386,31 @@ def native_fs_roots(
 
     Returns ``(read_roots, write_roots, write_denied_roots)``.
 
-    Mirrors ``build_bwrap_cmd``'s user-data binds (not the system/venv binds,
-    which are irrelevant to the file tools) so the native file tools reach
-    exactly what the claude_code path's bwrap would allow — no more, no less.
-    Writable roots are the RW binds; read roots additionally include the RO
-    binds (Talk attachments, read-only resources). No database root of any
-    kind — build_bwrap_cmd masks those, and these tools have no masks.
+    **These are no longer the boundary, and that changes what this function is
+    for.** It was written when the native file tools ran on daemon worker
+    threads with no namespace around them, so it was a second filesystem policy
+    written in Python — one that had to be kept in step with every bind
+    ``build_bwrap_cmd`` emits, and one whose check and open were separate
+    syscalls, so an ancestor could be swapped between them. The tools now run
+    inside ``istota.tool_server``, in the one bwrap namespace the attempt gets
+    (ISSUE-389), where a path outside the binds is *absent* rather than
+    refused.
+
+    What these roots still do is produce the error the model reads. "Cannot
+    read /etc/shadow: path is outside the allowed workspace" is a better answer
+    than ENOENT, and it is the answer on the unsandboxed shapes too — macOS,
+    the standalone install, a Docker stack without the two container settings —
+    where ``build_bwrap_cmd`` hands the command back unwrapped and this list is
+    once again the only confinement there is. So it still mirrors
+    ``build_bwrap_cmd``'s user-data binds exactly (not the system/venv binds,
+    which are irrelevant to the file tools): writable roots are the RW binds,
+    read roots additionally the RO binds (Talk attachments, read-only
+    resources). No database root of any kind — ``build_bwrap_cmd`` masks those,
+    and these tools have no masks.
+
+    Drifting from the binds is therefore no longer a boundary failure and is
+    still a bug: on a sandboxed host the two would disagree about which error a
+    path gets, and on an unsandboxed one the drift is the whole policy.
 
     The third element carries the RO carve-outs bwrap gets by re-binding a
     subdirectory read-only *after* its parent's RW bind. Containment alone

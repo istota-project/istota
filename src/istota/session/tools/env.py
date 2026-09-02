@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,14 +59,23 @@ def _realpath(p: Path) -> Path:
 class ToolEnv:
     """Per-task context every tool closes over.
 
+    Built in two places and they are not the same process. ``tool_server.py``
+    builds one from the ``hello`` frame, inside the bwrap namespace, and binds
+    the six core tools to it; ``NativeBrain`` builds a second one in the daemon
+    holding only what the in-daemon ``WebFetch`` tool reads.
+
+    It carries neither a sandbox wrap nor a task cgroup any more, and the two
+    retirements are one fact: both existed because the file tools ran in the
+    daemon and Bash rebuilt a namespace per call, so containment had to be
+    re-applied at every execution. The tools now run inside a namespace that
+    was built once for the attempt, and a forked child inherits both — so a
+    per-call wrap would nest bubblewrap inside `--disable-userns` (failing
+    every call) and a per-call placement would open a `cgroup.procs` no sandbox
+    binds. Where bwrap is unavailable the server is an ordinary child and the
+    roots below are the confinement, exactly as they were.
+
     - ``cwd`` — working directory; relative paths resolve against it and Bash
       runs in it.
-    - ``sandbox_wrap`` — wraps a raw argv (``["bash", "-o", "pipefail", "-c", …]``) with bwrap.
-      ``None`` on macOS / when the sandbox is disabled (the wrap is a no-op).
-      `NativeBrain` fills this from ``BrainRequest.native_sandbox_wrap``, the
-      **NATIVE** sandbox profile, so the namespace holds none of the `claude`
-      CLI's runtime state and not its credential (ISSUE-389). Never from
-      ``BrainRequest.sandbox_wrap``, which builds that CLI's own namespace.
     - ``subprocess_env`` — environment for Bash subprocesses (already
       credential-stripped by the caller). ``None`` inherits the parent env.
     - ``bash_timeout_seconds`` — default per-command wall-clock cap.
@@ -98,7 +106,6 @@ class ToolEnv:
     """
 
     cwd: Path
-    sandbox_wrap: Callable[[list[str]], list[str]] | None = None
     subprocess_env: dict[str, str] | None = None
     bash_timeout_seconds: int = 120
     max_output_bytes: int = 30_000
@@ -116,14 +123,6 @@ class ToolEnv:
     deferred_dir: Path | None = None
     # Whether Bash spills over-cap output to a file (vs. cap-only truncation).
     bash_spill_full_output: bool = True
-    # Per-task cgroup v2 directory (A6), or ``None`` where the deployment has
-    # no delegated subtree. Each child Bash spawns places *itself* into it from
-    # ``preexec_fn``, before it execs — membership is inherited at ``fork``, so
-    # moving it afterwards would leave everything the child had already forked
-    # outside the group for good (ISSUE-285). This is the only way this brain's
-    # subprocesses get contained: it has no single long-lived child for the
-    # executor's ``on_pid`` path to place.
-    task_cgroup: Path | None = None
 
     # Native WebFetch policy. ``None`` → the tool is omitted from
     # ``build_default_tools`` (the model never sees it). See WebFetchPolicy.

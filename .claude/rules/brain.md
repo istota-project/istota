@@ -174,9 +174,9 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `streaming: bool` | True when `on_progress` callback is supplied |
 | `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `TextDeltaEvent` (per-token incremental answer text — NativeBrain per provider `TextDelta`, ClaudeCodeBrain via the CLI's `--include-partial-messages` `text_delta` frames) \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only) \| `ThinkingEvent` (whole reasoning block) \| `ThinkingDeltaEvent` (incremental reasoning — NativeBrain `reasoning` deltas, ClaudeCodeBrain `thinking_delta` partials). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`): `TextDeltaEvent` → coalesced `text_delta` on stream surfaces (web/repl), dropped on push surfaces; `ThinkingDeltaEvent`/`ThinkingEvent` → coalesced `thinking`, stream surfaces only. A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). Both brains stay surface-agnostic — they emit both per-token deltas *and* whole-block `TextEvent`/`ThinkingEvent`s; the executor dedupes deltas-vs-whole-block per surface (stream: keep deltas, drop the redundant whole block; push: drop deltas, forward intermediate `TextEvent`s as `progress_text`, drop thinking). NativeBrain additionally suppresses the **final** turn's `TextEvent` (its text becomes the result); if the final turn carries no text the held block is released as progress instead, since it is no longer the answer. |
 | `cancel_check: Callable[[], bool] \| None` | Polled between events; True → kill subprocess, return `cancelled` |
-| `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn |
+| `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn. `NativeBrain` calls it too now, with the outer bwrap pid of its tool server — it used to call it never, so every native task carried `worker_pid` 0 and neither `!stop`, the web cancel endpoint nor `host_pressure.read_sandbox_shm` could reach it |
 | `sandbox_wrap: Callable[[list[str]], list[str]] \| None` | Wraps raw cmd (e.g. with bwrap); no-op if not provided. The **CLAUDE** profile (`executor.SandboxProfile`): the namespace it builds carries the `claude` CLI's own runtime state — `~/.local/bin`, `~/.local/share/claude`, `~/.local/state/claude`, the `~/.claude` tmpfs base with `.credentials.json`, `settings.json`, `projects`/`debug`/`todos` through it — plus the `custom_system_prompt_path` bind, because the process being wrapped *is* that CLI. Read by `ClaudeCodeBrain` and `TmuxClaudeBrain` only. |
-| `native_sandbox_wrap: Callable[[list[str]], list[str]] \| None` | The same sandbox under the **NATIVE** profile: istota's own code is the outer process, so no Claude runtime block, no credential, no system-prompt bind. Read by `NativeBrain`, for the commands its Bash tool runs. **Two fields rather than one field plus a profile argument**, and structurally so: `executor._run_fallback` reroutes an attempt with `dataclasses.replace(req, model=…, effort=…, advisor=…, is_fallback=True)`, which names neither — so a single field would carry the Claude profile into NativeBrain on the shipped `claude_code → native` reroute, handing the model's Bash tool the credential the split exists to withhold (ISSUE-389). Two names each carry across harmlessly, because each brain reads only its own. `tests/test_brain_types.py` holds that. |
+| `native_sandbox_wrap: Callable[[list[str]], list[str]] \| None` | The same sandbox under the **NATIVE** profile: istota's own code is the outer process, so no Claude runtime block, no credential, no system-prompt bind. Read by `NativeBrain`, and applied **once per attempt** to the argv of the tool server that holds all six of its tools (see "The tool server" below) rather than per Bash call. **Two fields rather than one field plus a profile argument**, and structurally so: `executor._run_fallback` reroutes an attempt with `dataclasses.replace(req, model=…, effort=…, advisor=…, is_fallback=True)`, which names neither — so a single field would carry the Claude profile into NativeBrain on the shipped `claude_code → native` reroute, handing the model's Bash tool the credential the split exists to withhold (ISSUE-389). Two names each carry across harmlessly, because each brain reads only its own. `tests/test_brain_types.py` holds that. |
 | `fs_read_roots: list[Path] \| None` / `fs_write_roots: list[Path] \| None` | NativeBrain-only file-tool path allowlist (NB-1). Populated by the executor (`native_fs_roots`) only under effective sandboxing; other brains ignore them (bwrap already confines their tools). `None` = unconfined (dev / no bwrap). |
 | `fs_write_denied_roots: list[Path]` | RO carve-outs nested inside a write root — what bwrap gets by re-binding a subdirectory `--ro-bind` after its parent's RW bind, and what containment alone cannot express. Today `{user_temp_dir}/.developer`. Note the different empty semantics from the pair above: `[]`, not `None`, because a deny set has no unconfined meaning to signal. Enforced on the write path only (the directory stays readable) and ahead of `ToolEnv`'s unconfined early return. |
 | `result_file: Path \| None` | claude_code-specific fallback file path |
@@ -1078,6 +1078,59 @@ Both brains populate it, or the vocabulary splits: `NativeBrain` from the same
 `TextEvent` its streaming path already appends to the trace. That path also
 stopped dropping `actions_taken` and `execution_trace` on its cancel and timeout
 returns, which is the ISSUE-183 fix it had never received.
+
+### The tool server (native-only)
+
+`NativeBrain` no longer runs the model's tool calls in the daemon. It spawns
+`python -m istota.tool_server` once per task attempt, through
+`build_bwrap_cmd(..., profile=NATIVE)`, places it in the task cgroup from
+`preexec_fn`, records its pid via `req.on_pid`, and returns six proxy tools
+onto it (`session/tools/remote.py`). `WebFetch` stays in the daemon.
+
+**Why, in one paragraph.** The five file tools ran on daemon worker threads
+confined by `ToolEnv`'s symlink-resolved root allowlist — a second filesystem
+policy written in Python, which every bwrap bind change had to be copied into,
+whose check and open were separate syscalls so an ancestor could be swapped
+between them, and under which `Grep`/`Glob` walked the daemon's own filesystem
+view and filtered afterwards. `Bash` was contained, but by a *fresh namespace
+per call* carrying the Claude CLI's runtime block — `~/.claude/.credentials.json`
+included, read-only, which stops the token being rewritten and not read
+(ISSUE-389). One namespace per attempt fixes both at once and is what
+`ClaudeCodeBrain` has always had.
+
+**What it changes that is visible.** A hostile path is *absent* rather than
+refused. The ancestor-swap race stops mattering, because the host path is not in
+the namespace to reach. Everything `Bash` forks is in the task cgroup, placed
+before it could fork. `/tmp` and a backgrounded process now live for the attempt
+instead of dying with each call — real, observable, and the same as the CLI
+brains. Bash is also faster: one namespace setup per attempt rather than one per
+call. And `worker_pid` names a real long-lived process for the first time.
+
+**The transport** is an inherited `AF_UNIX`/`SOCK_STREAM` socketpair whose
+number is passed in argv with `pass_fds`. Nothing nameable, so nothing to
+replace and no peer to authenticate; `close_fds` keeps it out of every Bash
+child. Framing and the eight messages are `tool_server_protocol.py`.
+
+**Failure is not degradation.** A dead server, a `fatal`, or a malformed frame
+errors every in-flight call (so nothing raises into the loop), sets the loop's
+abort, and fails the attempt with a message naming the tool server — checked
+*ahead* of `timed_out` and of the loop's own `aborted`, because the abort this
+sets would otherwise be reported as "Cancelled by user", a success-shaped
+terminal state the scheduler neither retries nor reports. Degrading each call to
+an error result instead would let the model narrate around a broken sandbox and
+answer confidently.
+
+**No enable/disable flag**, deliberately: a flag choosing between in-process and
+out-of-process tools would keep two tool-execution paths alive for ever, which
+is the thing being removed. `build_bwrap_cmd` already returns the command
+unchanged where bwrap is unavailable, so macOS, the standalone install and a
+Docker stack without the two container settings run the server unsandboxed with
+`ToolEnv` doing exactly what it did — which is also what lets the default suite
+exercise this seam on every developer machine. Rollback is a revert.
+
+**Text-only invocations spawn nothing.** Empty `allowed_tools` (the sleep cycle,
+health OCR, briefing synthesis, conversation triage) returns before the spawn,
+so none of those pays for a namespace.
 
 ### Native WebFetch tool (daemon-side, SSRF-hardened)
 

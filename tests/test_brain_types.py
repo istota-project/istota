@@ -19,6 +19,7 @@ note predicts; the three reader tests are what make the guard mean anything,
 since carrying a field nothing reads proves nothing.
 """
 
+import asyncio
 import dataclasses
 from pathlib import Path
 
@@ -85,31 +86,43 @@ class TestTheFallbackCopyCarriesBothWraps:
 
 
 class TestNativeBrainReadsTheNativeWrap:
-    """`_build_tools` is where the wrap reaches the Bash tool."""
+    """`_start_tool_server` is where the wrap reaches bubblewrap now.
 
-    def _captured_env(self, monkeypatch, req):
+    It used to be `_build_tools`, which put the closure on `ToolEnv` for the
+    Bash tool to apply per call. The tools moved into one sandboxed server per
+    attempt, so the wrap is applied once, to that server's argv — but *which*
+    of the request's two closures gets applied is unchanged and is what this
+    class holds.
+    """
+
+    def _captured_wrap(self, monkeypatch, req):
+        """Spy on the spawn without performing one.
+
+        `start_tool_server` is patched at the name `native.py` imports it
+        under, so the assertion is about the argument NativeBrain passes rather
+        than about anything the spawn does with it.
+        """
+        seen = {}
+
+        async def _spy(hello, **kwargs):
+            seen["kwargs"] = kwargs
+            raise AssertionError("stop here; the spawn itself is not under test")
+
         import istota.session.tools as tools_mod
 
-        real = tools_mod.ToolEnv
-        seen = []
-
-        def _spy(**kwargs):
-            env = real(**kwargs)
-            seen.append(env)
-            return env
-
-        monkeypatch.setattr(tools_mod, "ToolEnv", _spy)
+        monkeypatch.setattr(tools_mod, "start_tool_server", _spy)
         brain = NativeBrain(NativeBrainConfig(model="m"), provider=object())
-        brain._build_tools(req)
-        assert seen, "_build_tools built no ToolEnv"
-        return seen[-1]
+        with pytest.raises(AssertionError, match="stop here"):
+            asyncio.run(brain._start_tool_server(req, asyncio.Event()))
+        assert "kwargs" in seen, "_start_tool_server spawned nothing"
+        return seen["kwargs"]["sandbox_wrap"]
 
-    def test_the_tool_env_gets_the_native_wrap(self, monkeypatch, tmp_path):
+    def test_the_tool_server_is_spawned_through_the_native_wrap(self, monkeypatch, tmp_path):
         req = _req(tmp_path, allowed_tools=["Bash"])
-        env = self._captured_env(monkeypatch, req)
+        wrap = self._captured_wrap(monkeypatch, req)
 
-        assert env.sandbox_wrap is _native_wrap
-        assert env.sandbox_wrap is not _claude_wrap
+        assert wrap is _native_wrap
+        assert wrap is not _claude_wrap
 
     def test_it_survives_the_fallback_copy(self, monkeypatch, tmp_path):
         """The reroute this design exists for: a request assembled for
@@ -118,23 +131,39 @@ class TestNativeBrainReadsTheNativeWrap:
             _req(tmp_path, allowed_tools=["Bash"]),
             model="m", effort="high", advisor="", is_fallback=True,
         )
-        env = self._captured_env(monkeypatch, req)
 
-        assert env.sandbox_wrap is _native_wrap
+        assert self._captured_wrap(monkeypatch, req) is _native_wrap
 
-    def test_a_request_with_no_native_wrap_leaves_the_tools_unwrapped(
+    def test_a_request_with_no_native_wrap_leaves_the_server_unwrapped(
         self, monkeypatch, tmp_path,
     ):
         """The control. Without it the assertions above would pass on a
-        `_build_tools` that had hardcoded the wrap from somewhere else.
+        `_start_tool_server` that had hardcoded the wrap from somewhere else.
 
         `sandbox_wrap` is still set here, so a build that fell back to it would
         be visible rather than reading as "unsandboxed".
         """
         req = _req(tmp_path, allowed_tools=["Bash"], native_sandbox_wrap=None)
-        env = self._captured_env(monkeypatch, req)
 
-        assert env.sandbox_wrap is None
+        assert self._captured_wrap(monkeypatch, req) is None
+
+    def test_a_text_only_request_spawns_no_server_at_all(self, monkeypatch, tmp_path):
+        """Empty `allowed_tools` is the sleep cycle, health OCR, briefing
+        synthesis and conversation triage. They get no tools, so they must also
+        get no subprocess — an unconditional spawn would put a bwrap namespace
+        behind every one of those."""
+        spawned = []
+
+        async def _spy(hello, **kwargs):
+            spawned.append(kwargs)
+
+        import istota.session.tools as tools_mod
+
+        monkeypatch.setattr(tools_mod, "start_tool_server", _spy)
+        brain = NativeBrain(NativeBrainConfig(model="m"), provider=object())
+        server = asyncio.run(brain._start_tool_server(_req(tmp_path), asyncio.Event()))
+
+        assert server is None and spawned == []
 
 
 class TestTheClaudeBrainsReadTheClaudeWrap:
