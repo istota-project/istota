@@ -2097,6 +2097,281 @@ class TestSandboxCredentials:
         assert self.NAME not in results
 
 
+class TestSandboxEffective:
+    """`security.sandbox_effective` — the flag versus what the deployment got.
+
+    `runtime.bwrap` answers "is bubblewrap installed and runnable", which is a
+    property of the *image* and is why it stays `IMAGE`-scoped. Whether a
+    namespace can actually be created here is a property of the *deployment*:
+    the shipped `docker/docker-compose.yml` grants neither `seccomp:unconfined`
+    nor `systempaths=unconfined`, so the probe fails and every task runs
+    unsandboxed while `sandbox_enabled` still reads true (ISSUE-381). Both
+    hand-rolled health probes report `Sandbox (bwrap): PASS` on exactly that
+    deployment.
+
+    Two properties of the class are load-bearing rather than decorative. The
+    scope exclusion is asserted directly, because folding this answer onto
+    `runtime.bwrap` would turn `tests/image/test_istota_image.py` red for a
+    reason that has nothing to do with the image under test. And the
+    `probe=False` case is asserted to be neither a pass nor a FAIL: a boundary
+    check must not report a protection it did not look for, nor assert an
+    exposure it did not observe. `runtime.session_log_dir` set that precedent.
+    """
+
+    NAME = "security.sandbox_effective"
+
+    def _config(self, make_config, *, sandbox=True):
+        from istota.config import SecurityConfig
+
+        return make_config(security=SecurityConfig(sandbox_enabled=sandbox))
+
+    def _run(self, config, **kwargs):
+        return run_checks(config, only=(self.NAME,), **kwargs)[0]
+
+    # -- the three answers under a probing run -----------------------------
+
+    def test_a_namespace_that_cannot_be_created_fails(self, make_config, monkeypatch):
+        """The ISSUE-381 shape, and the finding this check exists for.
+
+        Before the check existed this name produced no result at all, so the
+        `only=` run came back empty and `_run`'s indexing raised — the negative
+        control for the whole class.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        r = self._run(self._config(make_config))
+
+        assert r.status == FAIL
+        assert "unsandboxed" in r.detail
+        assert r.remedy.strip()
+
+    def test_the_remedy_names_both_halves(self, make_config, monkeypatch):
+        """An operator meets this on one of two hosts and the fix differs.
+
+        A container wants the two `security_opt` settings; a bare-metal host
+        wants unprivileged user namespaces enabled. A remedy naming only one
+        sends half the readers to the wrong file.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        r = self._run(self._config(make_config))
+
+        assert "seccomp:unconfined" in r.remedy
+        assert "systempaths=unconfined" in r.remedy
+        assert "unprivileged_userns_clone" in r.remedy
+
+    def test_a_working_namespace_is_ok(self, make_config, monkeypatch):
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setattr(executor, "_bwrap_checked", True)
+        r = self._run(self._config(make_config))
+
+        assert r.status == OK
+        assert not r.remedy
+
+    def test_the_sandbox_being_off_skips(self, make_config):
+        """The operator turned it off and knows. `check_bwrap` SKIPs here too.
+
+        No availability patch: this branch must return before anything reaches
+        `executor`, and taking one would imply a dependency the code does not
+        have.
+        """
+        r = self._run(self._config(make_config, sandbox=False))
+
+        assert r.status == SKIP
+        assert "sandbox_enabled" in r.detail
+
+    # -- the third state, which is the reason it is not a bool -------------
+
+    def test_an_unprobed_run_with_a_cold_memo_settles_nothing(
+        self, make_config, monkeypatch
+    ):
+        """`probe=False` may not spawn, so a cold memo has no answer to give.
+
+        The requirement is symmetric and both halves are asserted: not a FAIL,
+        because nothing observed an exposure; and not a silent OK, because
+        nothing observed the boundary either. The detail has to say so.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_checked", None)
+        r = self._run(self._config(make_config), probe=False)
+
+        assert r.status != FAIL
+        assert r.status != OK
+        assert "not established" in r.detail
+        assert r.remedy.strip()
+
+    def test_an_unprobed_run_with_a_warm_memo_answers(self, make_config, monkeypatch):
+        """The daemon probes at start-up, so `probe=False` there is not blind.
+
+        Without this, "unestablished" would be the answer on the one process
+        whose start-up report and hourly sweep are the check's main consumers.
+        """
+        from istota import executor
+
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        r = self._run(self._config(make_config), probe=False)
+
+        assert r.status == FAIL
+        assert "unsandboxed" in r.detail
+
+    def test_probe_false_spawns_nothing(self, make_config, monkeypatch):
+        """The memo is read directly rather than through `_bwrap_available`.
+
+        `TestRegistry.test_probe_false_spawns_no_subprocess` sweeps the whole
+        registry for this, but only with whatever memo state the worker happens
+        to carry. A cold memo is the state that would spawn.
+        """
+        from istota import executor
+
+        spawns = []
+
+        def _spy(*args, **kwargs):
+            spawns.append(args[0] if args else kwargs.get("args"))
+            raise OSError("no subprocesses in this test")
+
+        monkeypatch.setattr(executor, "_bwrap_checked", None)
+        monkeypatch.setattr(subprocess, "run", _spy)
+        self._run(self._config(make_config), probe=False)
+
+        assert spawns == []
+
+    def test_a_broken_availability_lookup_does_not_raise(self, make_config, monkeypatch):
+        """A diagnostic must not raise, and must not pass on a question it
+        could not ask either."""
+        from istota import executor
+
+        def _boom(config):
+            raise RuntimeError("probe exploded")
+
+        monkeypatch.setattr(executor, "effective_sandboxing", _boom)
+        r = self._run(self._config(make_config))
+
+        assert r.status != OK
+        assert "the check itself raised" not in r.detail
+        assert "not established" in r.detail
+
+    # -- the scope guarantee, which is the whole reason for a separate check -
+
+    def test_scope_image_never_selects_it(self, make_config, monkeypatch):
+        """`tests/image/test_istota_image.py::test_no_check_fails` runs
+        `istota doctor --json --scope image` in a bare `docker run` with no
+        `security_opt`, and `cmd_doctor` passes `probe=True`. A capability arm
+        on `runtime.bwrap` would turn that red across all three shapes.
+
+        Asserted before invocation, not after: the availability lookup is the
+        first thing the check reaches past the `sandbox_enabled` gate, so a
+        recorder there catches a run that happened and was filtered out of the
+        results afterwards.
+        """
+        asked = self._record_availability(monkeypatch)
+        config = self._config(make_config)
+
+        results = run_checks(config, scope=IMAGE)
+
+        assert self.NAME not in {r.name for r in results}
+        assert asked == [], "the check ran and was discarded rather than filtered"
+
+    def test_the_scope_exclusion_control(self, make_config, monkeypatch):
+        """Positive control for the test above.
+
+        Both of its assertions pass against a check that was deleted, so the
+        unscoped run has to show the same recorder firing and the same name
+        present.
+        """
+        asked = self._record_availability(monkeypatch)
+        config = self._config(make_config)
+
+        results = run_checks(config, only=(self.NAME,))
+
+        assert self.NAME in {r.name for r in results}
+        assert asked == ["probed"]
+
+    @staticmethod
+    def _record_availability(monkeypatch):
+        """Record every route the check has to the availability answer.
+
+        Both of them, which is the point: the check calls `effective_sandboxing`
+        under `probe=True` and `effective_sandboxing_if_known` under
+        `probe=False`, so a recorder on one leaves the other blind and a
+        filtering test built on it would pass while the check ran.
+        """
+        from istota import executor
+
+        asked = []
+
+        def _probed(config):
+            asked.append("probed")
+            return False
+
+        def _memo(config):
+            asked.append("memo")
+            return False
+
+        monkeypatch.setattr(executor, "effective_sandboxing", _probed)
+        monkeypatch.setattr(executor, "effective_sandboxing_if_known", _memo)
+        return asked
+
+    def test_the_recorder_sees_the_unprobed_route_too(self, make_config, monkeypatch):
+        """Positive control for `_record_availability`'s second half.
+
+        Without this, the `probe=False` recorder is an untested claim and the
+        filtering tests above rest on it.
+        """
+        asked = self._record_availability(monkeypatch)
+
+        self._run(self._config(make_config), probe=False)
+
+        assert asked == ["memo"]
+
+    def test_it_is_registered_deployment_scoped(self):
+        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
+        assert self.NAME in {name for name, _ in CHECKS}
+
+    def test_it_is_neither_deep_nor_live(self):
+        """`effective_sandboxing` memoizes its probe and the daemon has already
+        paid for it at start-up, so this needs no opt-in axis. `DEEP_CHECKS`
+        must also keep exactly one member — `web_app._doctor_deep_timeout`
+        budgets for its contents and cannot see a change here."""
+        assert self.NAME not in DEEP_CHECKS
+        assert self.NAME not in LIVE_CHECKS
+        assert DEEP_CHECKS == frozenset({"sandbox.masks"})
+
+    def test_the_bwrap_check_is_unchanged(self, make_config, tmp_path, monkeypatch):
+        """The capability answer moved to a check of its own rather than onto
+        this one.
+
+        An installed, runnable bwrap on a host where the namespace is refused —
+        the ISSUE-381 shape exactly — must still leave `runtime.bwrap` `OK` and
+        `IMAGE`-scoped. That is what the image tier depends on, and softening
+        it here is the failure `doctor.py`'s own scope comment warns about, in
+        reverse.
+        """
+        from istota import executor
+
+        fake = _fake_bin(tmp_path / "bin" / "bwrap", "bubblewrap 0.11.0")
+        monkeypatch.setattr(
+            doctor.shutil, "which", lambda name: str(fake) if name == "bwrap" else None
+        )
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        results = _by_name(
+            run_checks(self._config(make_config), only=("runtime.bwrap", self.NAME))
+        )
+
+        assert results["runtime.bwrap"].status == OK
+        assert results["runtime.bwrap"].scope == IMAGE
+        assert doctor.CHECK_SCOPES["runtime.bwrap"] == IMAGE
+        # And the deployment-scoped one is where the finding landed instead.
+        assert results[self.NAME].status == FAIL
+
+
 class TestForgeGating:
     """Every `developer.*` check inherits today's gating. Without this, a
     tokenless developer-skill deployment goes from silent to alerting."""

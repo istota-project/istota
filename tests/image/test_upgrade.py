@@ -27,7 +27,10 @@ and that is the fix working rather than a gap in the test. What is asserted is:
 
   * no `FAIL` on any check, in either shape — the regression assertion, and the
     one that would go red if a future migration or config rename broke the old
-    file;
+    file. One exemption, by name and with its own guard:
+    `TestTheUpgradeStaysClean.NOT_ABOUT_THE_UPGRADE`. This is the only tier that
+    runs doctor unscoped, so it is the only one where a check about the *host*
+    lands inside an assertion about the *upgrade*;
   * `developer.forge_config_drift` reports `WARN` naming both paths on the
     volume shape — the *positive* assertion, and the signal that would have
     named ISSUE-263's condition out loud;
@@ -404,16 +407,67 @@ class TestTheAssertionsHaveASubject:
 class TestTheUpgradeStaysClean:
     """The regression assertion, in both shapes."""
 
+    #: Checks whose FAIL is a property of *this tier's container* rather than of
+    #: the upgrade, and which the "no FAIL" assertion below therefore excludes.
+    #:
+    #: Every other tier that runs doctor against the image passes
+    #: `--scope image`, which filters a DEPLOYMENT-scoped check out before it is
+    #: invoked. This one deliberately runs unscoped, because the drift it exists
+    #: to catch lives in the deployment-scoped checks — so it is the one place a
+    #: check about the *host* lands inside an assertion about the *upgrade*.
+    #:
+    #: `security.sandbox_effective` is the first such check. It reports whether
+    #: bubblewrap can actually create a namespace here, and `_docker_run` boots a
+    #: bare `docker run` with no `security_opt`, so the answer is a correct FAIL
+    #: on every image including a perfectly good one — the same condition
+    #: `docker/docker-compose.yml` ships with (ISSUE-381). Granting the
+    #: container `seccomp:unconfined` and `systempaths=unconfined` to make it
+    #: green would weaken the container to satisfy an assertion about something
+    #: else, and softening the check itself is the failure `doctor.py`'s scope
+    #: comment warns about.
+    #:
+    #: An exclusion by name, never by scope or by status: a DEPLOYMENT-wide
+    #: exemption would discard the drift findings that are this tier's subject.
+    NOT_ABOUT_THE_UPGRADE = ("security.sandbox_effective",)
+
     @pytest.mark.parametrize("shape", ["code", "volume"])
     def test_no_check_fails(self, shape, request):
         result = request.getfixturevalue(f"{shape}_upgrade")
-        failed = [row for row in result.doctor if row["status"] == "fail"]
+        failed = [
+            row
+            for row in result.doctor
+            if row["status"] == "fail" and row["name"] not in self.NOT_ABOUT_THE_UPGRADE
+        ]
         assert not failed, (
             f"[{shape}] upgrading from {result.anchor.ref} "
             f"({result.anchor.short}) left {len(failed)} failing check(s). "
             f"A config key renamed between releases surfaces here, and the fix "
             f"is a migration in config.py rather than a change to this test.\n"
             + result.report()
+        )
+
+    @pytest.mark.parametrize("shape", ["code", "volume"])
+    def test_the_excluded_checks_still_ran(self, shape, request):
+        """An exclusion nothing watches is an exclusion that quietly widens.
+
+        `NOT_ABOUT_THE_UPGRADE` is a name list, so a rename or a deletion in
+        `doctor.CHECKS` would leave it exempting nothing while still reading as
+        a considered exception — and the next reader would take the assertion
+        above to be narrower than it is. This requires each excluded name to be
+        a check that actually produced a result in this run.
+
+        Only presence, deliberately not a status. If somebody later grants the
+        container the two `security_opt` settings, the row turns `ok`, the
+        exclusion becomes harmless rather than wrong, and this still passes.
+        """
+        result = request.getfixturevalue(f"{shape}_upgrade")
+        reported = {row["name"] for row in result.doctor}
+        missing = [n for n in self.NOT_ABOUT_THE_UPGRADE if n not in reported]
+        assert not missing, (
+            f"[{shape}] excluded from the no-FAIL assertion but absent from the "
+            f"doctor run: {missing}. Either the check was renamed or removed, or "
+            f"it is being filtered before invocation — in both cases the "
+            f"exclusion above is exempting nothing.\n" + result.report()
         )
 
     @pytest.mark.parametrize("shape", ["code", "volume"])

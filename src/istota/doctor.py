@@ -1667,6 +1667,138 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+# The one repair line for a deployment that asked for a sandbox and did not get
+# one. It names both hosts because an operator meets this on either and the fix
+# differs: a container needs the two `security_opt` settings the shipped
+# `docker/docker-compose.yml` does not grant, a bare-metal host needs
+# unprivileged user namespaces. A remedy naming one sends half its readers to
+# the wrong file.
+_SANDBOX_EFFECTIVE_REMEDY = (
+    "On Docker, grant the istota service both seccomp:unconfined and "
+    "systempaths=unconfined (security_opt) — bubblewrap needs the first to "
+    "create the namespace and the second to mount a procfs inside it. On a "
+    "host, allow unprivileged user namespaces "
+    "(sysctl kernel.unprivileged_userns_clone=1) and install a working "
+    "bubblewrap. Or set [security] sandbox_enabled = false to say the "
+    "deployment is deliberately unconfined."
+)
+
+
+def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
+    """Whether the sandbox the operator asked for is actually in force.
+
+    ``runtime.bwrap`` answers whether bubblewrap is installed and runnable, and
+    that is all it answers. On the shipped Docker stack the binary is present
+    and runs, ``sandbox_enabled`` reads true, and every task still runs with the
+    daemon's own filesystem access, because ``docker-compose.yml`` grants
+    neither ``seccomp:unconfined`` nor ``systempaths=unconfined`` and the
+    namespace probe fails (ISSUE-381). Both hand-rolled health probes report
+    "Sandbox (bwrap): PASS" on exactly that deployment, and so did every doctor
+    surface before this check.
+
+    **A check of its own rather than a capability arm on ``check_bwrap``, and
+    the reason is scope.** "Is bubblewrap installed and runnable" is a property
+    of the *image*; "can this host create a namespace" is a property of the
+    *deployment* — the container's ``security_opt``, the host's sysctl. Folding
+    the second into the first would fail every correct image:
+    ``tests/image/test_istota_image.py::TestGroupATheDoctorUmbrella::test_no_check_fails``
+    runs ``istota doctor --json --scope image`` inside a bare ``docker run``
+    with no ``security_opt``, ``cmd_doctor`` passes ``probe=True``
+    unconditionally, and ``render-config.sh`` defaults ``sandbox_enabled``
+    true. ``DEPLOYMENT`` scope is filtered out before invocation, so the image
+    tier never reaches this, and an operator running the whole registry gets
+    both lines with the remedy on the one that has a repair.
+
+    **Three states, not two**, following ``_session_log_sandbox_availability``
+    and ``_sandbox_in_force_clause``. Under ``probe=False`` the answer would
+    cost a spawn, so it comes from ``effective_sandboxing_if_known`` — warm in
+    the daemon, which probes at start-up — and a genuinely cold memo is
+    reported as unestablished rather than as either answer. A boundary check
+    must not pass on a question it could not settle, and must not assert an
+    exposure it did not observe.
+
+    Not in ``DEEP_CHECKS``: ``effective_sandboxing`` memoizes its probe and the
+    daemon has already paid for it during prompt assembly, so inside the daemon
+    this costs nothing. Its consumers today are the four that run the registry
+    — ``cli.cmd_doctor``, the scheduler's start-up report and hourly sweep, and
+    the admin Health pane. Being free is also what will let a surface on a
+    per-user cadence afford it, where ``sandbox.masks`` — which builds a real
+    namespace — could not.
+
+    **On the shipped Docker stack the FAIL is permanent rather than drift**, and
+    that is accepted rather than overlooked. ``scheduler.run_startup_checks``
+    alerts on every failure unconditionally, where the hourly sweep alerts only
+    on a transition, so that deployment gets one alert per daemon start until it
+    grants the two settings or turns the sandbox off. Reporting a real
+    unconfined deployment quietly would be the ISSUE-381 defect with a flag on
+    it; the CHANGELOG says so where an operator meets it.
+
+    ``SKIP`` when ``sandbox_enabled`` is false: the operator turned it off and
+    knows, and ``check_bwrap`` skips on the same setting.
+    """
+    name = "security.sandbox_effective"
+    if not getattr(config.security, "sandbox_enabled", False):
+        return CheckResult(
+            name,
+            SKIP,
+            (
+                "[security] sandbox_enabled = false; the deployment is "
+                "deliberately unconfined, so there is nothing to be in force"
+            ),
+        )
+
+    unestablished = CheckResult(
+        name,
+        WARN,
+        (
+            "[security] sandbox_enabled is set but whether bubblewrap can "
+            "create a namespace here was not established on this run, so "
+            "whether tasks are confined is unknown"
+        ),
+        remedy=(
+            "Run `istota doctor`, which probes, to settle it. "
+            + _SANDBOX_EFFECTIVE_REMEDY
+        ),
+    )
+
+    try:
+        from .executor import effective_sandboxing, effective_sandboxing_if_known
+
+        # `effective_sandboxing` consults the bwrap capability probe, which
+        # spawns. `probe=False` forbids that, so read the memo instead.
+        effective = (
+            effective_sandboxing(config) if probe
+            else effective_sandboxing_if_known(config)
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic must not raise
+        logger.debug("sandbox effective: availability lookup failed", exc_info=True)
+        return unestablished
+
+    if effective is None:
+        return unestablished
+    if not effective:
+        return CheckResult(
+            name,
+            FAIL,
+            (
+                "[security] sandbox_enabled is set but a bubblewrap namespace "
+                "could not be created here, so every task runs unsandboxed "
+                "with the daemon's own filesystem access"
+            ),
+            remedy=_SANDBOX_EFFECTIVE_REMEDY,
+        )
+    # Hedged to what was actually observed, like the two branches above it.
+    # `effective_sandboxing` is the flag and a process-memoized capability
+    # probe, which may have run some time ago; "tasks run sandboxed" would be
+    # asserting a live property from a cached one, and this is the line an
+    # operator quotes back.
+    return CheckResult(
+        name,
+        OK,
+        "bubblewrap can create a namespace here, so tasks are confined by the sandbox",
+    )
+
+
 # ---------------------------------------------------------------------------
 # developer.*
 # ---------------------------------------------------------------------------
@@ -4462,6 +4594,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.subscription_usage", check_subscription_usage),
     ("runtime.model_execution", check_model_execution),
     ("security.skill_proxy", check_skill_proxy),
+    ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
@@ -4525,6 +4658,13 @@ CHECK_SCOPES: dict[str, str] = {
     # anyway — the scope is stated for the same reason every other one is.
     "runtime.model_execution": DEPLOYMENT,
     "security.skill_proxy": DEPLOYMENT,
+    # Deployment, not image: "can this host create a namespace" is a property of
+    # the deployment — the container's `security_opt`, the host's sysctl — where
+    # `runtime.bwrap`'s "is the binary installed and runnable" is a property of
+    # the image. The image tier runs `--scope image` in a bare `docker run` with
+    # no `security_opt` and asserts no check fails, so an IMAGE scope here would
+    # fail every correct image. See `check_sandbox_effective`.
+    "security.sandbox_effective": DEPLOYMENT,
     # Deployment, not image: it reaches `istota.executor` for the bwrap
     # capability probe, and the pairing it reports is a posture an operator
     # chose in a rendered config. The image tier asserts over `--scope image`
