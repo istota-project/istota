@@ -1203,6 +1203,157 @@ def check_skill_proxy(config: "Config", probe: bool) -> list[CheckResult]:
     return results
 
 
+def _sandbox_in_force_clause(config: "Config", probe: bool) -> str:
+    """Whether the sandbox the operator asked for is actually in force.
+
+    Appended to the credential finding rather than gating it, because the two
+    facts are independent and only one of them is in doubt. The credentials are
+    in the task environment on the strength of ``skill_proxy_enabled`` alone —
+    ``_split_credential_env`` runs only inside the proxy branch of
+    ``execute_task`` — so that half is established whatever bubblewrap does
+    here. What the sandbox state changes is how much the exposure costs, which
+    is a clause, not a condition.
+
+    Three states, following ``_session_log_sandbox_availability``: in force, not
+    in force, and not established on this run. The third is why the answer is
+    not a bool — a check whose subject is a boundary must not report "fine"
+    where it did not look, and must not assert an exposure it did not observe.
+
+    Never raises: every branch returns a clause, so the caller appends
+    unconditionally.
+    """
+    try:
+        from .executor import effective_sandboxing, effective_sandboxing_if_known
+
+        # `effective_sandboxing` spawns the bwrap capability probe. Under
+        # `probe=False` ask the memo instead — warm in the daemon, which probes
+        # at start-up — and report a genuinely cold one as unlooked-at.
+        effective = (
+            effective_sandboxing(config) if probe
+            else effective_sandboxing_if_known(config)
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic must not raise
+        logger.debug("sandbox credentials: availability failed", exc_info=True)
+        return (
+            "whether bubblewrap works here could not be determined, so whether "
+            "the sandbox is actually in force is unestablished"
+        )
+
+    if effective is None:
+        return (
+            "whether bubblewrap works here was not probed on this run, so "
+            "whether the sandbox is actually in force is unestablished"
+        )
+    if effective:
+        return (
+            "the sandbox is in force, so they sit inside the boundary that was "
+            "switched on to keep them out"
+        )
+    return (
+        "bubblewrap does not work here (see runtime.bwrap), so the task is "
+        "unconfined as well and every credential on the host is reachable"
+    )
+
+
+def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
+    """What ``skill_proxy_enabled = false`` costs when the sandbox is on.
+
+    ``_split_credential_env`` is called only inside the proxy branch of
+    ``execute_task``, so with the proxy off every configured service credential
+    — the Nextcloud password, the mail passwords, the forge tokens — stays in
+    the environment handed to the model. ``load_config`` warns on exactly this
+    pairing (ISSUE-393), but the boot log is read once at install; the Health
+    pane and ``istota doctor`` are the surfaces an operator returns to, and
+    before this check they said nothing (ISSUE-396).
+
+    **A registry entry of its own rather than a third result inside
+    ``check_skill_proxy``**, for two reasons that both come from that check
+    being in ``config.CONFIG_LOAD_CHECKS``. It runs inside every
+    ``load_config`` — the daemon, the web app, every CLI invocation, every
+    host-side skill CLI the proxy spawns per call — which forbids reaching
+    ``istota.executor`` for ``effective_sandboxing``
+    (``TestConfigLoadPathStaysCheap`` asserts that import never happens). And
+    ``_validate_forge_clis`` logs every WARN those checks return, which would
+    print this finding beside the ISSUE-393 warning already on that path,
+    twice per load.
+
+    **Gated on the pairing, not on the proxy alone.** Both switches off together
+    is the single-user install's deliberate trust decision — ``setup_wizard``
+    writes the pair, the task runs unconfined as the daemon user, and removing a
+    variable from an environment it can read out of ``/proc`` anyway is
+    decorative. That shape stays silent here as it does in the warning.
+
+    ``DEPLOYMENT`` scope, which is also what keeps the image tier out of it: a
+    posture an operator chose must not turn a tier red, and ``--scope image``
+    never selects this.
+
+    **It overlaps ``security.skill_proxy.forge_posture`` and both are kept.**
+    A deployment with the developer skill, a forge token and this pairing gets
+    two WARNs for one setting. They answer different questions: that one fires
+    with the sandbox off as well, and names a specific token an operator can go
+    and rotate; this one is about the whole credential set and only where there
+    is a boundary for it to sit inside. Narrowing the forge check to the
+    sandbox-off case would remove the rotate-this-token line from the
+    deployment most likely to need it, which is a change to a security warning's
+    coverage rather than part of adding a missing one.
+
+    **It does not gate on a credential actually being configured**, unlike
+    ``forge_posture``'s ``_forge_token_gate``. The subject is the posture, not
+    an inventory: a credential added to a running deployment lands in the task
+    environment with nothing new to warn about, so a check that went quiet on
+    an empty set would be silent for exactly as long as it took to become
+    wrong. The sentence stays conditional — "every *configured* credential" —
+    so it asserts nothing about how many there are.
+    """
+    sandbox = getattr(config.security, "sandbox_enabled", False)
+    proxy = getattr(config.security, "skill_proxy_enabled", True)
+
+    if not sandbox:
+        return CheckResult(
+            "security.sandbox_credentials",
+            SKIP,
+            (
+                "[security] sandbox_enabled = false; the task runs unconfined "
+                "by design, so there is no boundary for a credential to sit "
+                "inside"
+            ),
+        )
+    if proxy:
+        return CheckResult(
+            "security.sandbox_credentials",
+            OK,
+            (
+                "the skill proxy is enabled; service credentials are injected "
+                "per call and are not in the task environment"
+            ),
+        )
+
+    # Deliberately *not* the load_config warning's opening phrase. That message
+    # begins "[security] sandbox_enabled with skill_proxy_enabled = false", and
+    # `tests/test_config.py::TestTheSandboxWithoutTheProxyWarning` filters
+    # `caplog` on exactly that substring. A byte-identical prefix here would not
+    # fail anything today — this check is off the config-load path — but the
+    # moment it were moved onto it those filters would match two records and
+    # weaken to `any(...)` over both rather than turning red. The settings are
+    # named in the other order, so both remain greppable and neither collides.
+    detail = (
+        "[security] skill_proxy_enabled = false with sandbox_enabled = true: "
+        "every configured service credential stays in the task environment, "
+        "readable by the model"
+    )
+    detail = f"{detail} — {_sandbox_in_force_clause(config, probe)}"
+    return CheckResult(
+        "security.sandbox_credentials",
+        WARN,
+        detail,
+        remedy=(
+            "Enable the skill proxy ([security] skill_proxy_enabled = true) so "
+            "credentials are injected per call, or turn the sandbox off if this "
+            "is a trusted single-user install."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # developer.*
 # ---------------------------------------------------------------------------
@@ -3996,6 +4147,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.subscription_usage", check_subscription_usage),
     ("security.skill_proxy", check_skill_proxy),
+    ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -4039,6 +4191,11 @@ CHECK_SCOPES: dict[str, str] = {
     # which a bare `docker run` has. Not in DEEP_CHECKS — it spawns no namespace.
     "runtime.subscription_usage": DEPLOYMENT,
     "security.skill_proxy": DEPLOYMENT,
+    # Deployment, not image: it reaches `istota.executor` for the bwrap
+    # capability probe, and the pairing it reports is a posture an operator
+    # chose in a rendered config. The image tier asserts over `--scope image`
+    # and must not go red for a deployment's own decision.
+    "security.sandbox_credentials": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,
