@@ -1,12 +1,15 @@
 """Chrome process and CDP connection management.
 
 Chrome is launched directly via subprocess with --remote-debugging-port.
-Patchright connects lazily via connect_over_cdp for content extraction,
-and disconnects before navigation so Cloudflare cannot detect a debugger.
+Patchright connects lazily via connect_over_cdp for content extraction.
+Navigation itself is driven by xdotool keystrokes into the omnibox rather than
+by CDP (see xdotool.navigate), which is what keeps a debugger out of the
+navigation path; the connection is not torn down around it.
 """
 
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -56,6 +59,44 @@ _chrome_proc = None
 # DevTools endpoint isn't serving yet, so a deep liveness probe must not read
 # that window as a wedge (ISSUE-149).
 _launching = False
+
+# How many times Chrome has been launched in this process, counting the first.
+#
+# It exists because a session in browse_api is a *tab index*, not a page object,
+# and a relaunch resets Chrome to a single about:blank tab while leaving the
+# session table untouched. Every request carrying a pre-kill session id then
+# resolved to a tab that no longer exists and returned "Tab not found" for the
+# rest of the 600s TTL -- a recovery that worked, reported to the client as a
+# fault, for ten minutes after the fact.
+#
+# A counter rather than a callback into browse_api, for two reasons. It keeps
+# the dependency pointing one way (browse_api imports chrome, never the
+# reverse), and it means the invalidation happens on the Flask thread, when the
+# session is next looked up, rather than from the watchdog thread that did the
+# relaunch. Mutating the session table from that thread would be a smaller
+# version of the mistake ISSUE-382 is about.
+#
+# Written under _chrome_lock, which every launch already holds. Read without it:
+# an int assignment is atomic under the GIL and a reader comparing against a
+# value one generation stale errs towards discarding a live session, which costs
+# a new tab and nothing else.
+_launch_generation = 0
+
+# When the browse watchdog last had to kill and relaunch Chrome.
+#
+# One recovery is the watchdog working: a page wedged, it was killed, the next
+# request succeeded. A *run* of them is a container that cannot stay up, and
+# before ISSUE-394 nothing anywhere could tell the two apart -- the deep probe's
+# CDP arm only observes connect_cdp(), and the successful connect after each
+# relaunch zeroes its counter, so a wedge every 90s read as healthy forever and
+# only a human noticed.
+#
+# The list is capped rather than pruned by age here: pruning needs the window,
+# the window is the probe's policy and lives in browse_api, and this module
+# records without drawing conclusions -- the same split as _cdp_health above.
+WEDGE_HISTORY_MAX = 64
+_wedge_recoveries = []
+_wedge_lock = threading.Lock()
 
 # Patchright CDP connection (lazy)
 _pw = None
@@ -207,9 +248,152 @@ def cdp_health():
         return dict(_cdp_health)
 
 
+def launch_generation():
+    """How many times Chrome has been launched in this process. Any thread."""
+    return _launch_generation
+
+
+def record_wedge_recovery():
+    """Note that the browse watchdog had to kill and relaunch Chrome.
+
+    Safe from any thread: one append under a leaf lock, nothing that can block.
+    """
+    with _wedge_lock:
+        _wedge_recoveries.append(time.monotonic())
+        if len(_wedge_recoveries) > WEDGE_HISTORY_MAX:
+            del _wedge_recoveries[:-WEDGE_HISTORY_MAX]
+
+
+def wedge_recovery_history():
+    """Copy of the recovery timestamps (time.monotonic). Safe from any thread."""
+    with _wedge_lock:
+        return list(_wedge_recoveries)
+
+
+def _signal_group(proc, sig):
+    """Signal the whole process group Chrome leads. Returns whether it did.
+
+    Chrome's renderers, GPU process, zygotes and utility processes are children
+    of the *browser* process, not of this one, so signalling the handle alone
+    orphans every one of them -- they reparent to PID 1, which in this container
+    is ``su`` and reaps nothing. ``start_new_session=True`` at launch puts the
+    whole tree in a group of its own so one signal reaches all of it.
+
+    The leadership check is a safety interlock, not a formality. If the process
+    somehow shares this one's group -- ``start_new_session`` unsupported, a
+    handle that came from somewhere else -- then killpg on that group would
+    signal the API process itself. Returning False sends the caller to the
+    single-process fallback instead.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        return False
+    if pgid != proc.pid:
+        return False
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except Exception:
+        return False
+
+
+def _kill_chrome_proc(proc, timeout=5):
+    """Stop Chrome and reap it. Never raises.
+
+    The reap is the part that was missing. The old shape was ``terminate()``,
+    ``wait(timeout=5)``, and on the exception ``kill()`` with nothing after it --
+    so the one case that reached ``kill()`` was exactly the case that left a
+    zombie: a Chrome whose UI thread is blocked ignores SIGTERM, times out the
+    wait, takes SIGKILL, and is never collected. This process is not PID 1 and
+    reaps nothing implicitly, so that child stayed defunct for the life of the
+    process. 43 of them accumulated in 40 minutes of production.
+
+    Never raises because one caller is the browse watchdog's thread, where an
+    exception is reported as a heal that did not happen.
+    """
+    if proc is None:
+        return
+    try:
+        if not _signal_group(proc, signal.SIGTERM):
+            proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        if not _signal_group(proc, signal.SIGKILL):
+            proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:
+        log.warning("Chrome pid %s did not reap after SIGKILL", getattr(proc, "pid", "?"))
+
+
+def _dismiss_dialog(dialog):
+    """Answer a JavaScript dialog so it cannot hold the renderer main thread.
+
+    An alert, confirm, prompt or beforeunload blocks the renderer's main thread
+    until something answers it, and in this container nothing can: Xvfb runs
+    with no window manager, and xdotool targets the largest window on the
+    display -- the browser, never a modal child of it. The compositor keeps
+    animating and DevTools keeps answering, so the container reads healthy
+    throughout. Dismiss rather than accept: a beforeunload is the common case
+    and dismissing it is the one that lets navigation proceed.
+
+    Never raises. It runs on Patchright's event dispatcher, where an exception
+    is not attributable to any request and can take the connection with it.
+    """
+    try:
+        log.info(
+            "Dismissing %s dialog: %s",
+            getattr(dialog, "type", "?"), (getattr(dialog, "message", "") or "")[:200],
+        )
+    except Exception:
+        pass
+    try:
+        dialog.dismiss()
+    except Exception:
+        pass
+
+
+def _install_dialog_guards(context):
+    """Register the dialog handler on a context and every page it opens.
+
+    Patchright dismisses dialogs by default only on pages it is attached to and
+    only silently, which is why this is explicit: a popup opened by the page
+    under test was covered by nothing, and a dismissal nobody logged was
+    invisible when diagnosing a wedge.
+
+    Never raises. A page can close between being listed and being registered,
+    and a connect must not fail because of it.
+    """
+    def _guard(page):
+        try:
+            page.on("dialog", _dismiss_dialog)
+        except Exception:
+            pass
+
+    try:
+        context.on("page", _guard)
+    except Exception:
+        pass
+    try:
+        pages = list(context.pages)
+    except Exception:
+        pages = []
+    for page in pages:
+        _guard(page)
+
+
 def launch_chrome():
     """Launch Chrome directly with debugging port and stealth extension."""
-    global _chrome_proc, _launching
+    global _chrome_proc, _launching, _launch_generation
 
     chrome_path = os.environ.get(
         "CHROME_EXECUTABLE", "/usr/bin/google-chrome-stable",
@@ -237,12 +421,49 @@ def launch_chrome():
         "--disable-features=DnsOverHttps",
         "--disable-client-side-phishing-detection",
         "--disable-component-update",
-        "--enable-logging=stderr",
-        "--v=0",
+        # Modal browser UI nothing in this container can dismiss. Xvfb runs with
+        # no window manager, xdotool addresses the largest window on the display
+        # rather than a modal child of it, and each of these blocks Chrome's UI
+        # or renderer main thread while the compositor keeps animating and
+        # DevTools keeps answering -- so the container reads healthy for as long
+        # as it lasts. --disable-hang-monitor is the load-bearing one: without it
+        # a slow renderer earns a "Page unresponsive" dialog, which is a wedge
+        # produced by the recovery UI for a wedge. The crash bubble matters here
+        # specifically because the browse watchdog hard-kills Chrome against a
+        # persistent --user-data-dir, so every relaunch is a crash-restore boot.
+        "--noerrdialogs",
+        "--disable-hang-monitor",
+        "--disable-prompt-on-repost",
+        "--disable-session-crashed-bubble",
+        "--disable-print-preview",
         f"--disable-extensions-except={EXTENSION_DIR}",
         f"--load-extension={EXTENSION_DIR}",
         "about:blank",
     ]
+
+    # Chrome's log goes nowhere by default, and that is the fix rather than an
+    # oversight (ISSUE-394). It used to be `--enable-logging=stderr` into
+    # `stderr=subprocess.PIPE`, with no reader anywhere in this package: the
+    # wrapper script at /usr/bin/google-chrome-stable routes Chrome's stderr
+    # through a `cat` into that pipe, the 64 KiB buffer filled after two or three
+    # page renders -- measured on the production container at 15900, then 46445,
+    # then 63199 of 65536 bytes across three renders, with the `cat` blocked in
+    # pipe_write -- and the next log write on Chrome's browser UI thread blocked
+    # forever. CDP hung, xdotool clicks did nothing, CSS animations kept running
+    # on the compositor thread of another process, and /json/version kept
+    # answering on the browser IO thread, so all three arms of /live?deep=1
+    # stayed green while the container was unusable.
+    #
+    # CHROME_LOG_STDERR is the way back to the log, and it *inherits* rather than
+    # pipes: the container's own stderr is drained by the Docker log collector,
+    # so it cannot fill. subprocess.PIPE must never appear here again -- it is
+    # the production wedge, and behind a flag it would read like a debugging
+    # convenience.
+    log_stderr = os.environ.get("CHROME_LOG_STDERR", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if log_stderr:
+        args[-1:-1] = ["--enable-logging=stderr", "--v=0"]
 
     env = {**os.environ, "DISPLAY": ":99"}
     with _chrome_lock:
@@ -251,12 +472,17 @@ def launch_chrome():
             _chrome_proc = subprocess.Popen(
                 args, env=env,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                # None means inherit the container's stderr; never PIPE.
+                stderr=None if log_stderr else subprocess.DEVNULL,
+                # A session of its own, so _signal_group can reach the renderers,
+                # GPU process and zygotes in one signal instead of orphaning them.
+                start_new_session=True,
             )
+            _launch_generation += 1
             _wait_for_chrome_ready()
             log.info(
-                "Chrome launched (pid=%d, debug_port=%d)",
-                _chrome_proc.pid, CHROME_PORT,
+                "Chrome launched (pid=%d, debug_port=%d, generation=%d)",
+                _chrome_proc.pid, CHROME_PORT, _launch_generation,
             )
         finally:
             _launching = False
@@ -323,15 +549,7 @@ def restart_chrome():
     global _chrome_proc
     with _chrome_lock:
         disconnect_cdp()
-        if _chrome_proc:
-            try:
-                _chrome_proc.terminate()
-                _chrome_proc.wait(timeout=5)
-            except Exception:
-                try:
-                    _chrome_proc.kill()
-                except Exception:
-                    pass
+        _kill_chrome_proc(_chrome_proc)
         _chrome_proc = None
         launch_chrome()
 
@@ -368,16 +586,12 @@ def recover_wedged_chrome():
         # Patchright call.
         _pw_thread_id = None
         proc, _chrome_proc = _chrome_proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        _kill_chrome_proc(proc)
         launch_chrome()
+    # Recorded after the relaunch, and outside the lock, so the record describes
+    # a recovery that actually happened. The verdict drawn from it lives in
+    # browse_api with the rest of the liveness policy.
+    record_wedge_recovery()
 
 
 def is_chrome_running():
@@ -476,6 +690,7 @@ def connect_cdp(retries=3, record=True):
             )
             contexts = _pw_browser.contexts
             _pw_context = contexts[0] if contexts else _pw_browser.new_context()
+            _install_dialog_guards(_pw_context)
             log.debug("CDP connected")
             _record_cdp_success()
             return
@@ -572,12 +787,5 @@ def cleanup():
     with _chrome_lock:
         disconnect_cdp()
         if _chrome_proc:
-            try:
-                _chrome_proc.terminate()
-                _chrome_proc.wait(timeout=5)
-            except Exception:
-                try:
-                    _chrome_proc.kill()
-                except Exception:
-                    pass
+            _kill_chrome_proc(_chrome_proc)
             _chrome_proc = None
