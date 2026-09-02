@@ -23,14 +23,22 @@ drift a name list buys is covered mechanically instead:
 `tests/test_security.py::TestBuildCleanEnv` requires every Claude-family or
 credential-shaped key `build_clean_env` puts in a task env to be named here.
 
-**What this is not.** It is not "no credential crosses into a native tool". With
-`security.skill_proxy_enabled` off — the shipped standalone/local install —
-`_split_credential_env` never runs, so a task env still holds `NC_PASS`, the
-SMTP and IMAP passwords, the forge tokens and every other configured service
-credential, and the argument above applies to each of them word for word. That
-is a wider decision than this one (those credentials are in that env so the
-skill CLIs can use them on a deployment with no proxy to inject them), and it is
-deliberately not made here.
+**What this is not.** It is not a general credential filter. The skill
+credentials — `NC_PASS`, the mail passwords, the forge tokens — are taken out of
+the model's environment by `_split_credential_env`, gated on
+`security.skill_proxy_enabled`, which defaults on. This set exists because the
+Claude token is the one name that gating never reaches: `build_clean_env` sets
+it unconditionally and no skill manifest declares it, so `derive_credential_set`
+cannot see it and it survived on the *sandboxed* production shape where every
+other credential was already gone. That is the whole of the gap, and it is why
+ISSUE-390 was live where it was.
+
+Two neighbouring shapes are deliberately not this module's problem. Where the
+proxy is off, `setup_wizard` also writes `sandbox_enabled = false`, so nothing
+is confined and there is no boundary for an environment variable to cross — the
+task runs as the user and can read the config file. Where the proxy is off *and*
+a sandbox is on, credentials do reach inside a real boundary; `load_config`
+already warns on that pairing (ISSUE-393 is about what that warning says).
 
 A stdlib-only leaf that imports nothing from the package, so `brain/native.py`
 can reach the rule at module scope: `executor` imports `.brain`, so the reverse
