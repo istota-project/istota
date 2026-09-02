@@ -812,14 +812,20 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   -> claude_code` fallback and leave the CLI unauthenticated on the Ansible
   shape, where that token is the credential. Inert where the variable is unset,
   including a deployment authenticating the CLI by credentials file alone.
-  **The property is about this one credential, not about credentials in
-  general.** With `security.skill_proxy_enabled` off — the shipped
-  standalone/local install — `_split_credential_env` never runs, so a task env
-  still carries `NC_PASS`, the mail passwords, the forge tokens and every other
-  configured service credential into the same Bash tool, and the argument above
-  applies to each of them word for word. Widening the strip to cover them is a
-  separate decision with its own blast radius (on that shape those credentials
-  are in the env so the skill CLIs can use them), and it has not been made.
+  **The property is about this one credential, and that is not an arbitrary
+  scope.** The skill credentials — `NC_PASS`, the mail passwords, the forge
+  tokens — are already removed from the model's env by `_split_credential_env`,
+  gated on `security.skill_proxy_enabled`, which defaults on. The Claude token
+  is the one name that gating never reaches: `build_clean_env` sets it
+  unconditionally and no manifest declares it, so `derive_credential_set` cannot
+  see it, and it therefore survived on the *sandboxed* production shape where
+  every other credential was already gone. Two neighbouring shapes look like the
+  same bug and are not. With the proxy off, `setup_wizard` also sets
+  `sandbox_enabled = false`, so nothing is confined and there is no boundary for
+  an env var to cross — the task runs as the user and can read `config.toml`
+  directly, which makes stripping decorative. With the proxy off *and* a sandbox
+  on, credentials do land inside a real boundary; `load_config` warns on that
+  pairing today, and whether the warning says enough is ISSUE-393.
 - **Bash `exclude_from_context`.** The Bash tool takes an optional
   `exclude_from_context` boolean: the full output still streams to the user via
   `on_update`, but the model gets a short `[output shown to user; N bytes
