@@ -4395,47 +4395,234 @@ def _room_talk_binding(username: str, room_id: int) -> str | None:
     return binding.surface_ref if binding else None
 
 
-async def _chat_promote_to_talk(username: str, room_id: int) -> dict | None:
+async def _talk_conversation_verdict(
+    client, conversation_token: str, username: str,
+) -> str:
+    """What Nextcloud says about the conversation a binding names.
+
+    `live` still there, `gone` really deleted, `bot_removed` still there but the
+    bot is no longer in it, `unknown` could not tell. Only `gone` authorizes
+    replacing a binding, and the other three exist because collapsing any of
+    them into it destroys something.
+
+    **The bot's own 404 is ambiguous and must not be read as "deleted".** Talk's
+    `GET /room/{token}` is participant-scoped, so it answers 404 both for a
+    conversation that no longer exists and for one the bot has been removed
+    from — a first-class state in this deployment, which
+    `transport/talk/inbound.py` handles explicitly where it un-hides a room the
+    bot is "demonstrably back in". Both leave the binding unusable, but only one
+    is unrecoverable: a removed bot is fixed by adding it back, whereas minting
+    a replacement forks a live conversation that keeps its history and its other
+    participants and is then reachable by nothing — the binding no longer names
+    it and the poller only sees rooms the bot is in.
+
+    So a 404 is settled by asking again **as the requesting user**, who was made
+    a participant when the room was promoted. Seeing it means the bot alone was
+    removed. Not seeing it means it is gone for the person who would recover it.
+    No user token, or any other answer, is `unknown` — refusing preserves both
+    the binding and the conversation, and the user can retry.
+    """
+    try:
+        await client.get_conversation_info(conversation_token)
+        return "live"
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else 0
+        if status != 404:
+            logger.warning(
+                "promote: liveness probe for %s returned HTTP %s",
+                conversation_token, status,
+            )
+            return "unknown"
+    except Exception as e:
+        logger.warning(
+            "promote: liveness probe for %s failed: %s", conversation_token, e,
+        )
+        return "unknown"
+    return await _talk_conversation_seen_by_user(conversation_token, username)
+
+
+async def _talk_conversation_seen_by_user(
+    conversation_token: str, username: str,
+) -> str:
+    """Settle the bot's ambiguous 404 with the user's own OAuth token.
+
+    `bot_removed` if the user can still see the conversation, `gone` if they
+    get a 404 too, `unknown` for anything else — including no configured token,
+    which is a fact about this deployment rather than about the conversation.
+    """
+    from . import web_tokens
+    from .talk import TalkClient
+
+    if not _config or not web_tokens.feature_enabled(_config):
+        return "unknown"
+    access = await asyncio.to_thread(
+        web_tokens.get_access_token, _config.db_path, _config, username,
+    )
+    if not access:
+        logger.warning(
+            "promote: no user token for %s, so the 404 on %s cannot be told "
+            "apart from the bot having been removed; refusing to replace",
+            username, conversation_token,
+        )
+        return "unknown"
+    user_client = TalkClient(_config, bearer_token=access, timeout=5)
+    try:
+        await user_client.get_conversation_info(conversation_token)
+        return "bot_removed"
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else 0
+        if status == 404:
+            return "gone"
+        logger.warning(
+            "promote: user-scoped probe for %s returned HTTP %s",
+            conversation_token, status,
+        )
+        return "unknown"
+    except Exception as e:
+        logger.warning(
+            "promote: user-scoped probe for %s failed: %s", conversation_token, e,
+        )
+        return "unknown"
+    finally:
+        await user_client.aclose()
+
+
+async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict | None]:
     """"Also open in Talk": create a real Nextcloud Talk conversation for a
     web-origin room, add the requesting user, bind it, and seed a single pointer
-    post (older history stays in web — open question 4's lean). Returns the
-    updated room dict, or None if the room is unknown / not owned / not a
-    web-origin room / already bound to Talk / Talk is unconfigured."""
+    post (older history stays in web — open question 4's lean).
+
+    Also the recovery path for a binding whose conversation was deleted
+    (ISSUE-401). An existing binding used to refuse outright, which is right for
+    a live conversation and permanent for a dead one — the ref was never
+    revisited, so every Talk delivery for that room 404'd with no way back short
+    of deleting the room and its whole web transcript. The guard now asks
+    Nextcloud which case it is and only replaces a ref the server says is gone.
+
+    Returns `(status, room dict | None)`:
+
+    - `ok` — promoted a room that was not bound before.
+    - `reconnected` — the bound conversation was gone; the ref now names a new one.
+    - `live` — already bound to a conversation that still exists. Nothing changed.
+    - `bot_removed` — the conversation is there but the bot is not in it. Adding
+      the bot back is the repair; replacing the ref would fork a live room.
+    - `unreachable` — could not check the existing binding. Nothing changed.
+    - `raced` — another promote bound the room while this one was creating its
+      conversation. Its ref stands.
+    - `not_found` — unknown / not owned / not web-origin / Talk unconfigured.
+    - `failed` — Nextcloud created no conversation.
+    """
     from . import db
     from .talk import TalkClient
 
     with db.get_db(_config.db_path) as conn:
         handle = db.get_web_chat_room(conn, room_id)
         if handle is None or handle.user_id != username:
-            return None
+            return "not_found", None
         token = handle.token
         reg = db.get_room(conn, token)
         if reg is None or reg.origin != "web":
-            return None  # only web-origin rooms promote
-        if db.get_room_binding(conn, token, "talk") is not None:
-            return None  # already bound
+            return "not_found", None  # only web-origin rooms promote
+        existing = db.get_room_binding(conn, token, "talk")
         name = reg.name or handle.name
     if not _config.nextcloud.url:
-        return None
+        return "not_found", None
 
     # One-off OCS calls from the web process (not the scheduler delivery path),
     # so a dedicated short-lived client is fine here.
     client = TalkClient(_config)
     try:
+        # The probe costs a round trip and only an already-bound room needs it,
+        # so an ordinary first promote never pays for it.
+        expected_ref = existing.surface_ref if existing else None
+        if existing is not None:
+            verdict = await _talk_conversation_verdict(
+                client, existing.surface_ref, username,
+            )
+            if verdict != "gone":
+                # Only a conversation Nextcloud says is really gone may be
+                # replaced. `bot_removed` in particular is repaired by adding
+                # the bot back, and minting a room here would fork a live one.
+                status = {
+                    "live": "live",
+                    "bot_removed": "bot_removed",
+                }.get(verdict, "unreachable")
+                if status == "unreachable":
+                    return status, None
+                return status, _promoted_room_dict(
+                    room_id, token, existing.surface_ref,
+                )
+
         room = await client.create_conversation(name)
         talk_token = room.get("token")
         if not talk_token:
-            return None
+            return "failed", None
         # Persist the binding *immediately* — before the best-effort
         # add_participant / seed-post steps, which can hang or crash. Otherwise a
         # failure between the OCS create and a binding write that trailed those
         # slow calls would leave an orphaned Talk room with no binding, and a
         # re-promote (which only checks for a missing binding) would create a
         # *second* Talk room. The write is its own short transaction; the
-        # subsequent steps are recoverable, the binding is not. Idempotent
-        # (INSERT OR IGNORE), so the trailing re-read block is safe too.
+        # subsequent steps are recoverable, the binding is not.
+        #
+        # Compare-and-set on what the guard above read, so a concurrent promote
+        # that landed during `create_conversation` keeps its ref: this request
+        # has orphaned a Talk room either way, and overwriting would point the
+        # room at a conversation the winner is not using.
         with db.get_db(_config.db_path) as conn:
-            db.add_room_binding(conn, token, "talk", talk_token)
+            won = db.replace_room_binding(
+                conn, token, "talk", talk_token, expected_ref=expected_ref,
+            )
+            if won and expected_ref is not None:
+                # The room's recorded Talk message ids belong to the
+                # conversation just replaced. Talk ids are per-conversation, so
+                # a stale one can name a different message in the new room
+                # rather than simply failing — and `get_message_external_id`
+                # feeds a web reply's `replyTo`. Same transaction as the CAS.
+                cleared = db.clear_room_external_ids(conn, token, "talk")
+                # Rung 0 of `talk_channel_for_task` returns
+                # `tasks.talk_delivery_token` before the binding is consulted,
+                # so an in-flight task carrying the dead ref would keep
+                # delivering there whatever the binding now says.
+                requeued = db.clear_stale_talk_delivery_token(
+                    conn, token, expected_ref,
+                )
+        if not won:
+            logger.warning(
+                "promote: room %s was bound by another request while this one "
+                "created conversation %s; leaving the existing binding",
+                token, talk_token,
+            )
+            # The conversation just created is bound to nothing and never will
+            # be, so take it back out rather than leaving a participant-less
+            # room in Nextcloud that only the log names. Best-effort, and safe
+            # to name directly: this request created it moments ago and the CAS
+            # proved something else owns the binding.
+            try:
+                await client.delete_conversation(talk_token)
+            except Exception as e:
+                logger.warning(
+                    "promote: could not remove orphaned conversation %s: %s",
+                    talk_token, e,
+                )
+            # Hand back the winner's ref, so the loser's client stops rendering
+            # the ref it read before the race — often the dead one — instead of
+            # waiting out the 30s rooms poll.
+            with db.get_db(_config.db_path) as conn:
+                winner = db.get_room_binding(conn, token, "talk")
+            if winner is None:
+                return "raced", None
+            return "raced", _promoted_room_dict(room_id, token, winner.surface_ref)
+        if existing is not None:
+            # The only breadcrumb for the conversation this replaced —
+            # `room_bindings` keeps no updated_at, so after this the row reads
+            # as though it had always pointed here.
+            logger.info(
+                "promote: room %s rebound from Talk conversation %s to %s "
+                "(%d stale Talk message ids cleared, %d in-flight tasks "
+                "repointed)",
+                token, expected_ref, talk_token, cleared, requeued,
+            )
         try:
             await client.add_participant(talk_token, username)
         except Exception as e:
@@ -4450,10 +4637,35 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> dict | None:
     finally:
         await client.aclose()
 
+    status = "reconnected" if existing is not None else "ok"
+    return status, _promoted_room_dict(room_id, token, talk_token)
+
+
+def _promoted_room_dict(room_id: int, token: str, talk_token: str) -> dict | None:
+    """The room as the client should now see it, re-read so a change that landed
+    during the OCS calls is not rolled back by the answer.
+
+    **The name comes from the registry first, as the listing builds it.**
+    `_room_to_dict` reads the `web_chat_rooms` handle, but `db.rename_room`
+    writes `rooms.name` only — and `transport.ingest` calls it whenever Talk
+    reports a different channel name — so a Talk-side rename landing during the
+    OCS calls would come back as the stale handle name and be adopted by the
+    client's spread-merge. `model` and `effort` ride along for the reason the
+    room PATCH carries them (ISSUE-342): this dict is merged into the client's
+    record, so a key the listing sends and this omits reads as absent to any
+    consumer that replaces rather than spreads.
+    """
+    from . import db
     with db.get_db(_config.db_path) as conn:
         handle = db.get_web_chat_room(conn, room_id)
         reg = db.get_room(conn, token)
+    if handle is None:
+        return None
     d = _room_to_dict(handle)
+    if reg is not None:
+        d["name"] = reg.name or handle.name
+        d["model"] = reg.model
+        d["effort"] = reg.effort
     d["origin"] = reg.origin if reg else "web"
     d["talk_token"] = talk_token
     return d
@@ -6049,14 +6261,26 @@ async def chat_promote_room(
     _csrf: None = Depends(_verify_origin),
 ):
     """Create a real Nextcloud Talk conversation for a web-origin room and bind
-    it, so the conversation is reachable from the Talk mobile clients too."""
-    result = await _chat_promote_to_talk(user["username"], room_id)
-    if result is None:
+    it, so the conversation is reachable from the Talk mobile clients too. Also
+    the repair path for a room whose bound conversation was deleted (ISSUE-401).
+
+    Answers `{status, room}` rather than a bare room, because the outcomes the
+    client has to tell apart are not all errors: "already connected" and
+    "couldn't check" both left the room untouched, and rendering either as the
+    404 this used to return is what made a dead binding read as a button that
+    does nothing.
+    """
+    status, room = await _chat_promote_to_talk(user["username"], room_id)
+    if status == "not_found":
         return JSONResponse(
             {"error": "room not found or not eligible for promotion"},
             status_code=404,
         )
-    return result
+    if status == "failed":
+        return JSONResponse(
+            {"error": "Nextcloud created no conversation"}, status_code=502,
+        )
+    return {"status": status, "room": room}
 
 
 @api_router.delete("/chat/rooms/{room_id}")

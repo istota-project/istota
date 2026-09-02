@@ -93,12 +93,17 @@ class TestTalkClientRoomMethods:
 
 
 def _fake_talk_client():
-    """A TalkClient whose OCS calls are mocked; create returns a fixed token."""
+    """A TalkClient whose OCS calls are mocked; create returns a fixed token.
+
+    `get_conversation_info` is the liveness probe the promote guard runs over an
+    existing binding (ISSUE-401); answering it is what makes an already-bound
+    room read as still connected rather than as unreachable."""
     fake = MagicMock()
     fake.create_conversation = AsyncMock(return_value={"token": "promoted-tok"})
     fake.add_participant = AsyncMock(return_value={})
     fake.send_message = AsyncMock(return_value={})
     fake.rename_conversation = AsyncMock()
+    fake.get_conversation_info = AsyncMock(return_value={"token": "existing"})
     fake.aclose = AsyncMock()
     return fake
 
@@ -111,7 +116,8 @@ class TestPromote:
             room = db.create_web_chat_room(conn, "alice", "Ideas")
         fake = _fake_talk_client()
         with patch("istota.talk.TalkClient", return_value=fake):
-            result = await web_app._chat_promote_to_talk("alice", room.id)
+            status, result = await web_app._chat_promote_to_talk("alice", room.id)
+        assert status == "ok"
         assert result is not None
         assert result["talk_token"] == "promoted-tok"
         fake.create_conversation.assert_awaited_once()
@@ -132,16 +138,18 @@ class TestPromote:
         fake = _fake_talk_client()
         fake.add_participant = AsyncMock(side_effect=RuntimeError("NC down"))
         with patch("istota.talk.TalkClient", return_value=fake):
-            result = await web_app._chat_promote_to_talk("alice", room.id)
+            status, result = await web_app._chat_promote_to_talk("alice", room.id)
+        assert status == "ok"
         assert result is not None
         with db.get_db(db_path) as conn:
             binding = db.get_room_binding(conn, room.token, "talk")
         assert binding is not None and binding.surface_ref == "promoted-tok"
-        # A second promote attempt sees the binding and creates no new Talk room.
+        # A second promote attempt sees the binding, finds the conversation
+        # still there, and creates no new Talk room.
         fake2 = _fake_talk_client()
         with patch("istota.talk.TalkClient", return_value=fake2):
-            again = await web_app._chat_promote_to_talk("alice", room.id)
-        assert again is None
+            again_status, _ = await web_app._chat_promote_to_talk("alice", room.id)
+        assert again_status == "live"
         fake2.create_conversation.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -152,8 +160,8 @@ class TestPromote:
             db.add_room_binding(conn, room.token, "talk", "existing")
         fake = _fake_talk_client()
         with patch("istota.talk.TalkClient", return_value=fake):
-            result = await web_app._chat_promote_to_talk("alice", room.id)
-        assert result is None
+            status, _ = await web_app._chat_promote_to_talk("alice", room.id)
+        assert status == "live"
         fake.create_conversation.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -164,13 +172,13 @@ class TestPromote:
             handle = db.ensure_web_chat_handle(conn, "alice", "cpz", "#x")
         fake = _fake_talk_client()
         with patch("istota.talk.TalkClient", return_value=fake):
-            result = await web_app._chat_promote_to_talk("alice", handle.id)
-        assert result is None
+            status, _ = await web_app._chat_promote_to_talk("alice", handle.id)
+        assert status == "not_found"
 
     @pytest.mark.asyncio
     async def test_promote_unknown_room(self, web_config):
         from istota import web_app
-        assert await web_app._chat_promote_to_talk("alice", 99999) is None
+        assert await web_app._chat_promote_to_talk("alice", 99999) == ("not_found", None)
 
 
 class TestTalkBindingLookup:
