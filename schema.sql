@@ -303,6 +303,12 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     -- NULL = not suspended. The daemon's column: CRON.md cannot express it
     -- and the sync never writes it. `enabled` is the user's intent alone.
     auto_disabled_at TEXT,
+    -- When the user last switched this job off with `!cron disable`; NULL =
+    -- they have not. `enabled` says a job is off and this says who said so,
+    -- which `enabled` alone cannot: the CRON.md sync writes that column from
+    -- the file and the daemon used to write it too. Only meaningful while
+    -- `enabled = 0`; `enable_scheduled_job` clears it.
+    disabled_at TEXT,
     once INTEGER DEFAULT 0,                 -- One-time job: auto-removed after successful execution
     skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
     model TEXT,                             -- Per-job model override; empty = use config default

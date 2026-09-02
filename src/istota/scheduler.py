@@ -6923,20 +6923,36 @@ def _sync_module_jobs(
         # `!cron enable` needs a name that is in somebody's file, and
         # `should_notify` means nobody is ever told.
         #
-        # So this is today's predicate, kept verbatim for exactly the row shape
-        # today's code produces, plus `auto_disabled_at IS NULL` to scope it to
-        # that shape. The `consecutive_failures > 0` term is the inference the
-        # old rescue always made — a `_module.*` row has no operator-pause UI,
-        # so a failure count means the daemon stopped it — and it is no worse
-        # here than it has been in production for as long as it has shipped.
-        # It cannot fire twice for one row: a rescued row has `enabled = 1` and
-        # no failures, and if it fails again the new code suspends it into the
-        # arm above. Delete this once no deployment predates the split.
+        # So this is today's predicate, scoped to that shape by
+        # `auto_disabled_at IS NULL` and `disabled_at IS NULL`. The
+        # `consecutive_failures > 0` term is the inference the old rescue always
+        # made — a `_module.*` row has no operator-pause UI, so a failure count
+        # means the daemon stopped it — and `disabled_at` is what makes it sound
+        # again rather than merely plausible: `!cron disable` accepts a
+        # `_module.` name and gives the user exactly that UI, so on a row that
+        # had already failed the inference read the user's own off switch as the
+        # daemon's and reverted it on the next tick past the cooldown,
+        # indefinitely (ISSUE-392). The claim this comment used to make — that
+        # the arm cannot fire twice for one row — held only for the case it was
+        # written for; the user can disable again, and it fired again.
+        #
+        # Not scoped by `command IS NOT NULL` instead, which looks like it names
+        # the pre-split shape and does not: module rows moved from command-tasks
+        # to skill-tasks in May 2026 and the column split landed at the end of
+        # August, so every release in between produced skill-shaped rows with
+        # pre-split `enabled` semantics — exactly the set this arm exists for.
+        #
+        # `disabled_at` is not backfilled, so a row that predates the upgrade
+        # has it NULL and is still reached. The residual is bounded and
+        # deliberate: a module row a user had disabled by hand *before* the
+        # upgrade is rescued once, which is what the old code did to it on every
+        # tick. Delete this arm once no deployment predates the split.
         legacy = conn.execute(
             "UPDATE scheduled_jobs "
             "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
             "WHERE user_id = ? AND name LIKE ? "
             "AND enabled = 0 AND auto_disabled_at IS NULL "
+            "AND disabled_at IS NULL "
             "AND consecutive_failures > 0 "
             "AND (last_run_at IS NULL "
             "     OR last_run_at < datetime('now', '-1 hour'))",
@@ -6948,13 +6964,19 @@ def _sync_module_jobs(
                 "code", legacy, user_id,
             )
 
+        # Read by name, not by position. Two of these columns decide whether
+        # the branch below writes `enabled = 1` over the row, and a column
+        # inserted anywhere but the end of this list would silently re-point
+        # them — the failure mode is not an exception but a wrong boolean
+        # feeding that write. Every caller reaches this through `db.get_db`,
+        # which sets `sqlite3.Row`.
         existing_rows = list(conn.execute(
             "SELECT id, name, cron_expression, command, skill, skill_args, "
-            "skip_log_channel "
+            "skip_log_channel, disabled_at "
             "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
             (user_id, f"{module_prefix}%"),
         ))
-        existing_by_name = {row[1]: row for row in existing_rows}
+        existing_by_name = {row["name"]: row for row in existing_rows}
 
         for name, j in wanted_by_name.items():
             row = existing_by_name.get(name)
@@ -6972,20 +6994,20 @@ def _sync_module_jobs(
                 if on_first_seed is not None:
                     on_first_seed(conn, user_id, j)
             else:
-                legacy_command = row[3] is not None
+                legacy_command = row["command"] is not None
                 drift = (
-                    row[2] != j["cron"]
+                    row["cron_expression"] != j["cron"]
                     or legacy_command  # legacy command shape — migrate
-                    or row[4] != j["skill"]
-                    or row[5] != j["skill_args"]
-                    or not bool(row[6])
+                    or row["skill"] != j["skill"]
+                    or row["skill_args"] != j["skill_args"]
+                    or not bool(row["skip_log_channel"])
                 )
                 if drift:
                     # Don't bump last_run_at here — backfilling skip_log_channel
                     # on existing rows would otherwise defer the next scheduled
                     # run by one full cron interval (up to 24h for daily jobs).
                     extra_sql = ""
-                    if legacy_command:
+                    if legacy_command and row["disabled_at"] is None:
                         # Non-admin users hit the admin gate on the old
                         # command-task path and got auto-disabled. The migration
                         # to skill-task shape removes that failure mode, so
@@ -6993,6 +7015,19 @@ def _sync_module_jobs(
                         # update. `enabled = 1` stays: a row stopped by the old
                         # code is off in the user's column and nothing else will
                         # turn it back on.
+                        #
+                        # Gated on `disabled_at`, which is the same rule the
+                        # legacy arm above takes and for the same reason: this
+                        # is the second path that writes `enabled = 1` over a
+                        # `_module.*` row, so leaving it ungated would revert a
+                        # user's `!cron disable` on the command-shaped subset
+                        # and reopen ISSUE-392 through a narrower door. Gating
+                        # rather than clearing the stamp, because the shape
+                        # migration in the same UPDATE is wanted either way —
+                        # only the enabled/failure rescue is the user's to
+                        # refuse. It also keeps the invariant the column is
+                        # documented under: nothing ever leaves a row
+                        # `enabled = 1` with `disabled_at` still set.
                         extra_sql = (
                             ", enabled = 1, consecutive_failures = 0, "
                             "last_error = NULL, auto_disabled_at = NULL"
@@ -7003,17 +7038,20 @@ def _sync_module_jobs(
                         "skill = ?, skill_args = ?, skip_log_channel = 1"
                         f"{extra_sql} "
                         "WHERE id = ?",
-                        (j["cron"], j["skill"], j["skill_args"], row[0]),
+                        (j["cron"], j["skill"], j["skill_args"], row["id"]),
                     )
                     logger.info(
                         "Updated module job '%s' for user %s%s",
                         name, user_id,
-                        " (rescued from auto-disable)" if legacy_command else "",
+                        # `extra_sql`, not `legacy_command`: the rescue is now
+                        # gated, so a migrated row the user had switched off
+                        # keeps its off switch and must not be logged as rescued.
+                        " (rescued from auto-disable)" if extra_sql else "",
                     )
 
         for name, row in existing_by_name.items():
             if name not in wanted_by_name:
-                conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row[0],))
+                conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row["id"],))
                 logger.info(
                     "Removed obsolete module job '%s' for user %s",
                     name, user_id,

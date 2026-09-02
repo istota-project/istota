@@ -479,7 +479,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
 | `processed_emails` | `ProcessedEmail` | id, uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method; `UNIQUE (uidvalidity, email_id)` — a UID is unique only within a folder's UIDVALIDITY (ISSUE-250) |
 | `istota_file_tasks` | `IstotaFileTask` | id, user_id, content_hash, original_line, normalized_content, status, task_id, file_path |
-| `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, auto_disabled_at, silent_unless_action, consecutive_failures, model, effort. `enabled` is the user's intent (CRON.md authors it); `auto_disabled_at` is the scheduler's suspension. A job fires only when `enabled = 1 AND auto_disabled_at IS NULL` |
+| `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, auto_disabled_at, disabled_at, silent_unless_action, consecutive_failures, model, effort. `enabled` is the user's intent (CRON.md authors it); `auto_disabled_at` is the scheduler's suspension. A job fires only when `enabled = 1 AND auto_disabled_at IS NULL`. `disabled_at` records that `!cron disable` was what wrote an `enabled = 0`, which that column cannot say on its own — the module sync's legacy rescue arm reads it to tell a user's off switch from a pre-split auto-disable (ISSUE-392). Not backfilled, meaningful only while `enabled = 0`. The CRON.md sync never writes it *from the file* — the file has no way to say the verb did this — but does clear it alongside an `enabled = 1`, since a file that re-enables a job retracts the disable; it reaches no `_module.*` row either way. Two readers: the arm's `IS NULL` test, and the `!cron` listing, which renders `DISABLED since …` where there is a stamp and a bare `DISABLED` where there is not |
 | `talk_poll_state` | — | conversation_token, last_known_message_id |
 | `sleep_cycle_state` | — | user_id, last_run_at, last_processed_task_id |
 | `channel_sleep_cycle_state` | — | conversation_token, last_run_at, last_processed_task_id |
@@ -670,7 +670,7 @@ set_briefing_last_run(conn, user_id, briefing_name) -> None
 get_enabled_scheduled_jobs(conn) -> list[ScheduledJob]
 increment_scheduled_job_failures(conn, job_id, error) -> int
 reset_scheduled_job_failures(conn, job_id) -> None   # also lifts a suspension
-disable_scheduled_job(conn, job_id) -> None          # the user's verb: enabled = 0
+disable_scheduled_job(conn, job_id) -> None          # the user's verb: enabled = 0 + disabled_at
 suspend_scheduled_job(conn, job_id) -> None          # the daemon's: auto_disabled_at
 
 # Cleanup

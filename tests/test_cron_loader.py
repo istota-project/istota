@@ -674,6 +674,75 @@ class TestColumnOwnership:
             == len(declared)
         ), "a column is claimed by more than one owner"
 
+    def test_a_file_re_enable_clears_the_user_disable_stamp(self, db_path):
+        """`disabled_at` says the `!cron disable` verb stopped this job. A file
+        that now says `enabled = true` retracts that, so the stamp must go —
+        a running job carrying one misreports who last stopped it.
+        """
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled, disabled_at) "
+                "VALUES (?, ?, ?, ?, 0, datetime('now'))",
+                ("alice", "digest", "0 9 * * *", "p"),
+            )
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="digest", cron="0 9 * * *", prompt="p")],
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+
+        assert job.enabled is True
+        assert job.disabled_at is None
+
+    def test_a_file_disable_leaves_an_existing_user_stamp_alone(self, db_path):
+        """The leg that discriminates: the clear has to be conditional.
+
+        Deleting the `if file_values["enabled"]` guard keeps every other test
+        here green — the three legs of the daemon-column sweep all use the
+        `CronJob` default `enabled=True`, and the forge test below starts from
+        an unstamped row, which an unconditional clear also satisfies. This is
+        the one shape that tells a guarded clear from an ungated one.
+        """
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled, disabled_at) "
+                "VALUES (?, ?, ?, ?, 0, ?)",
+                ("alice", "digest", "0 9 * * *", "p", "2026-01-04T00:00:00"),
+            )
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="digest", cron="0 9 * * *", prompt="p",
+                         enabled=False)],
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+
+        assert job.enabled is False
+        assert job.disabled_at == "2026-01-04T00:00:00"
+
+    def test_a_file_disable_does_not_forge_a_user_disable_stamp(self, db_path):
+        """The converse, and the half the split forbids: CRON.md has no way to
+        say the verb did this, so the sync must not write the column from the
+        file. A file-authored disable is recorded in the file.
+        """
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs "
+                "(user_id, name, cron_expression, prompt, enabled) "
+                "VALUES (?, ?, ?, ?, 1)",
+                ("alice", "digest", "0 9 * * *", "p"),
+            )
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="digest", cron="0 9 * * *", prompt="p",
+                         enabled=False)],
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "digest")
+
+        assert job.enabled is False
+        assert job.disabled_at is None
+
     def test_the_file_owned_value_map_names_no_daemon_column(self):
         values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
         assert set(values) & DAEMON_OWNED_COLUMNS == set()
@@ -685,16 +754,20 @@ class TestColumnOwnership:
         assert set(values) == FILE_OWNED_COLUMNS
 
     _DISPATCH_RESET = {"auto_disabled_at", "consecutive_failures", "last_error"}
+    # The file says `enabled = true` on every leg below (the CronJob default),
+    # and that retracts a `!cron disable`, so this one clears throughout
+    # rather than riding on either branch.
+    _ENABLED_RESET = {"disabled_at"}
 
     @pytest.mark.parametrize("file_cron,file_prompt,cleared", [
         # The file changed nothing the job dispatches. Every daemon-owned
         # column survives, suspension included.
-        ("0 9 * * *", "old", set()),
+        ("0 9 * * *", "old", _ENABLED_RESET),
         # A prompt edit: the suspension and the failure history it was charged
         # against go, and nothing else moves.
-        ("0 9 * * *", "new", _DISPATCH_RESET),
+        ("0 9 * * *", "new", _DISPATCH_RESET | _ENABLED_RESET),
         # A cron edit: last_run_at is reset, and the dispatch reset rides along.
-        ("30 9 * * *", "old", _DISPATCH_RESET | {"last_run_at"}),
+        ("30 9 * * *", "old", _DISPATCH_RESET | _ENABLED_RESET | {"last_run_at"}),
     ])
     def test_the_sync_leaves_every_daemon_owned_column_alone(
         self, db_path, file_cron, file_prompt, cleared,
@@ -715,6 +788,7 @@ class TestColumnOwnership:
             "consecutive_failures": 3,
             "last_error": "oops",
             "auto_disabled_at": "2026-01-02T00:00:00",
+            "disabled_at": "2026-01-03T00:00:00",
         }
         assert set(state) == DAEMON_OWNED_COLUMNS, "seed every daemon-owned column here"
 
@@ -746,6 +820,7 @@ class TestColumnOwnership:
         assert (row["last_run_at"] != state["last_run_at"]) is ("last_run_at" in cleared)
         assert (row["auto_disabled_at"] is None) is ("auto_disabled_at" in cleared)
         assert (row["consecutive_failures"] == 0) is ("consecutive_failures" in cleared)
+        assert (row["disabled_at"] is None) is ("disabled_at" in cleared)
 
     _BOOLEAN_COLUMNS = (
         "enabled",

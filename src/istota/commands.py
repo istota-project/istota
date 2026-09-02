@@ -1418,11 +1418,19 @@ async def cmd_memory(ctx: CommandContext):
 @command("cron", "List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`, `!cron disable <name>`")
 async def cmd_cron(ctx: CommandContext):
     config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
-    from .cron_loader import update_job_enabled_in_cron_md
+    from .cron_loader import _MODULE_JOB_PREFIX, update_job_enabled_in_cron_md
 
     parts = args.strip().split(maxsplit=1)
     subcmd = parts[0].lower() if parts else ""
     job_name = parts[1].strip() if len(parts) > 1 else ""
+
+    # A `_module.*` row is seeded by its module and appears in nobody's
+    # CRON.md, so the file write below is not merely a no-op for it — it
+    # returns False and drops the user into the fallback branch, whose whole
+    # message is that the change is DB-only and may not persist. For a module
+    # row the DB is the only authority there is, and the change does persist
+    # (ISSUE-392), so that note is the opposite of true. Skip the file.
+    is_module_job = job_name.startswith(_MODULE_JOB_PREFIX)
 
     if subcmd == "enable" and job_name:
         job = db.get_scheduled_job_by_name(conn, user_id, job_name)
@@ -1431,6 +1439,13 @@ async def cmd_cron(ctx: CommandContext):
         # Write to CRON.md (source of truth); DB updated on next sync
         from .notification_resolvers import cron_job as cron_job_source
 
+        if is_module_job:
+            db.enable_scheduled_job(conn, job.id)
+            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
+            return (
+                f"Enabled module job '{job_name}' (failure count reset; "
+                "any scheduler suspension lifted)."
+            )
         if update_job_enabled_in_cron_md(config, user_id, job_name, True):
             db.enable_scheduled_job(conn, job.id)
             # The suspension this lifts is the inbox row's close predicate, so
@@ -1468,6 +1483,10 @@ async def cmd_cron(ctx: CommandContext):
         # suspension would keep telling the user to re-enable a job they have
         # just switched off on purpose — forever, since object-backed rows are
         # never age-swept.
+        if is_module_job:
+            db.disable_scheduled_job(conn, job.id)
+            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
+            return f"Disabled module job '{job_name}'."
         if update_job_enabled_in_cron_md(config, user_id, job_name, False):
             db.disable_scheduled_job(conn, job.id)
             cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
@@ -1487,8 +1506,18 @@ async def cmd_cron(ctx: CommandContext):
         # Three states, two columns. `DISABLED` wins over `SUSPENDED` when a
         # job is both: the user's own intent is the more informative of the
         # two, and it is the one they can act on from here.
+        #
+        # `disabled_at` renders alongside it where there is one, symmetrically
+        # with the suspension below. Without it the column would be write-only
+        # — the legacy rescue arm's `IS NULL` test would be its sole reader —
+        # and a `_module.*` row is exactly where an operator needs to see which
+        # of the two stopped a job, since only one of them is theirs to undo.
+        # An unstamped row predates the column or was switched off some other
+        # way, and stays a bare `DISABLED` rather than claiming an author.
         if not job.enabled:
             status = "DISABLED"
+            if job.disabled_at:
+                status += f" since {job.disabled_at[:16]}"
         elif job.auto_disabled_at:
             status = f"SUSPENDED since {job.auto_disabled_at[:16]}"
         else:
