@@ -64,6 +64,10 @@ class ToolEnv:
       runs in it.
     - ``sandbox_wrap`` — wraps a raw argv (``["bash", "-o", "pipefail", "-c", …]``) with bwrap.
       ``None`` on macOS / when the sandbox is disabled (the wrap is a no-op).
+      `NativeBrain` fills this from ``BrainRequest.native_sandbox_wrap``, the
+      **NATIVE** sandbox profile, so the namespace holds none of the `claude`
+      CLI's runtime state and not its credential (ISSUE-389). Never from
+      ``BrainRequest.sandbox_wrap``, which builds that CLI's own namespace.
     - ``subprocess_env`` — environment for Bash subprocesses (already
       credential-stripped by the caller). ``None`` inherits the parent env.
     - ``bash_timeout_seconds`` — default per-command wall-clock cap.

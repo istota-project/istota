@@ -9,8 +9,10 @@ sandbox. The two isolation mechanisms are asymmetric, because only one tool
 spawns a subprocess:
 
 - ``Bash`` runs its subprocess through ``ToolEnv.sandbox_wrap`` (bwrap on Linux,
-  a no-op on macOS / when the sandbox is disabled) — the same per-execution
-  bwrap the claude_code path uses.
+  a no-op on macOS / when the sandbox is disabled) — a per-execution bwrap under
+  the **NATIVE** profile. Not the same namespace the claude_code path builds:
+  that one carries the `claude` CLI's runtime state and its credential, and
+  handing it to a tool the model parameterises is ISSUE-389.
 - ``Read`` / ``Write`` / ``Edit`` / ``Grep`` / ``Glob`` do their file I/O in the
   daemon process (``asyncio.to_thread``), so bwrap can't confine them. Instead
   they honor ``ToolEnv.read_roots`` / ``write_roots`` — a symlink-resolved path

@@ -8,8 +8,11 @@ module + ``istota.session``).
 
 What the executor still owns and ``NativeBrain`` consumes: the fully-composed
 prompt (``req.prompt`` → the user message), the optional system-prompt file, the
-per-task env, the cwd, and the cancel check. What it ignores: ``sandbox_wrap``
-(each tool sandboxes its own subprocess per-execution), ``on_pid`` and
+per-task env, the cwd, the cancel check, and ``native_sandbox_wrap`` — the
+sandbox under the *native* profile, which the Bash tool applies per execution.
+What it ignores: ``sandbox_wrap`` (the *Claude* profile: that namespace carries
+the `claude` CLI's runtime state and its credential, which this brain's tools
+have no use for and must not be handed — ISSUE-389), ``on_pid`` and
 ``result_file`` (subprocess concerns).
 
 Wired here: compaction via the loop's ``prepare_next_turn`` hook, output-aware
@@ -2079,7 +2082,11 @@ class NativeBrain:
         deferred = (req.env or {}).get("ISTOTA_DEFERRED_DIR")
         env = ToolEnv(
             cwd=cwd,
-            sandbox_wrap=req.sandbox_wrap,
+            # The native profile, never `req.sandbox_wrap`: that one builds the
+            # `claude` CLI's namespace, credential and all, and this brain's
+            # Bash tool has no business in it (ISSUE-389). `None` where the
+            # caller built no task env, which is the unsandboxed posture.
+            sandbox_wrap=req.native_sandbox_wrap,
             subprocess_env=req.env or None,
             bash_timeout_seconds=max(1, req.timeout_seconds),
             read_roots=read_roots,
