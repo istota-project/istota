@@ -48,15 +48,6 @@ from .storage import (
     read_user_memory_v2,
 )
 from .brain import (
-    ContextManagementEvent,
-    StreamEvent,
-    TextDeltaEvent,
-    TextEvent,
-    ThinkingDeltaEvent,
-    ThinkingEvent,
-    ToolEndEvent,
-    ToolProgressEvent,
-    ToolUseEvent,
     CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
@@ -71,6 +62,7 @@ from .brain._fallback import (
 )
 from .agent.events import READ_DESCRIPTION_PREFIX
 from .events import EventWriter, random_progress_message
+from .executor_stream import TaskStreamAdapter
 from .image_attachments import (
     KIND_OMITTED,
     ImagePreparation,
@@ -7001,261 +6993,12 @@ def execute_task(
         _sandbox_wrap = _build_wrap(SandboxProfile.CLAUDE)
         _native_sandbox_wrap = _build_wrap(SandboxProfile.NATIVE)
 
-        # Adapt the brain's (widened) StreamEvent stream to TaskEvents. Called
-        # by the brain in place of the old string callback. For loop-based
-        # brains (NativeBrain) this fires on a worker thread, not the brain's
-        # event loop (Layer 3 invariant) — the body stays plain-synchronous
-        # either way. progress_show_tool_use / progress_show_text gate whether
-        # tool_* and progress_text events are emitted at all.
-        show_tool_use = config.scheduler.progress_show_tool_use
-        show_text = config.scheduler.progress_show_text
-
-        # Stream surfaces (web chat, repl) get the answer text streamed live as
-        # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
-        # completely untouched — no text_delta rows. Computed once per task.
-        from .transport.registry import task_is_stream_surface
-        is_stream_surface = task_is_stream_surface(config, task)
-
-        # Per-task coalescing buffer for streamed answer text. Incoming deltas
-        # (NativeBrain's TextDeltaEvent, or ClaudeCodeBrain's block TextEvent)
-        # are buffered and flushed as one ``text_delta`` event every ~250 ms or
-        # ~120 chars, plus a forced flush on each tool/CM boundary and a final
-        # flush after the brain finishes. This bounds row volume to tens per
-        # answer (not thousands of token rows); the scheduler prunes them once
-        # the canonical ``result`` lands, so steady state retains zero. Events
-        # arrive serialized (NativeBrain awaits each run_in_executor hop;
-        # ClaudeCodeBrain's parse loop is sequential), so no lock is needed.
-        #
-        # Narration gate: a text run emits NOTHING until it crosses
-        # ``_DELTA_GATE_CHARS`` without an intervening tool call. This splits a
-        # text-then-tool block into two cases at the boundary (see
-        # ``_settle_deltas_at_tool_boundary``): a short lead-in ("Let me check…")
-        # stays under the ceiling, never streams, and is dropped; a SUBSTANTIAL
-        # block crosses the ceiling, "unlocks" (the held buffer flushes and
-        # subsequent deltas stream live at the cadence below), and is KEPT —
-        # flushed at the tool boundary so the full block reaches the stream
-        # surface, where the web client renders it as its own prose block rather
-        # than throwaway narration. The gate is thus a substance classifier, not
-        # an answer-vs-narration one: the final answer (after the last tool)
-        # always streams, and a short *final* answer that never crosses the gate
-        # still arrives via the canonical ``result`` event (and the final flush
-        # in the ``finally`` releases the held buffer), so gating costs only
-        # token-by-token animation on text too short to benefit. Threshold is
-        # the ``[scheduler]`` knob ``stream_text_gate_chars`` (0 disables —
-        # deltas stream immediately, legacy behaviour); the ``stream_gate:``
-        # telemetry below records every flush / discard so the value can be
-        # tuned against production.
-        _DELTA_FLUSH_MS = 250
-        _DELTA_FLUSH_CHARS = 120
-        _DELTA_GATE_CHARS = config.scheduler.stream_text_gate_chars
-        _delta_buf: list[str] = []
-        # ``unlocked``: this text run has crossed the narration gate; deltas now
-        # stream live. Reset to False at every tool boundary (new run re-gates).
-        _delta_state = {"chars": 0, "last_flush": time.monotonic(), "unlocked": False}
-        # True once any TextDeltaEvent has streamed this task. Used to dedupe a
-        # NativeBrain whole-turn TextEvent against the deltas that already
-        # carried the same text: the brain stays surface-agnostic (it always
-        # emits both per-token deltas and intermediate-turn TextEvents); the
-        # executor — which alone knows the surface — drops the redundant
-        # TextEvent on a stream surface once deltas have flowed, and forwards it
-        # as progress_text on a push surface (where deltas were dropped).
-        _delta_seen = {"value": False}
-        # Symmetric flag for reasoning: True once any ThinkingDeltaEvent has
-        # streamed. A brain that streams thinking deltas (NativeBrain, or
-        # ClaudeCodeBrain with --include-partial-messages) may *also* emit the
-        # whole-block ThinkingEvent afterward; on a stream surface that whole
-        # block is then a redundant re-render, so it is dropped here. Thinking is
-        # stream-surface-only either way (push drops both), so no push fallback.
-        _thinking_seen = {"value": False}
-
-        def _flush_deltas() -> None:
-            if event_writer is None or not _delta_buf:
-                return
-            text = "".join(_delta_buf)
-            _delta_buf.clear()
-            _delta_state["chars"] = 0
-            _delta_state["last_flush"] = time.monotonic()
-            # Best-effort: a flush failure means slightly less live text, never
-            # a failed task (matches EventWriter.emit's own swallow).
-            try:
-                event_writer.emit("text_delta", {"text": text})
-            except Exception:
-                logger.debug("text_delta flush failed", exc_info=True)
-
-        def _buffer_delta(text: str) -> None:
-            if not text:
-                return
-            _delta_buf.append(text)
-            _delta_state["chars"] += len(text)
-            if not _delta_state["unlocked"]:
-                # Gated: hold everything (emit nothing) until the run crosses
-                # the narration ceiling. Crucially NO time-based flush here —
-                # that was the race that leaked narration. A tool boundary
-                # before the ceiling discards the buffer; crossing it unlocks.
-                if _delta_state["chars"] >= _DELTA_GATE_CHARS:
-                    _delta_state["unlocked"] = True
-                    logger.debug(
-                        "stream_gate: unlocked at %d chars (task %s, gate=%d)",
-                        _delta_state["chars"], task.id, _DELTA_GATE_CHARS,
-                    )
-                    _flush_deltas()
-                return
-            now = time.monotonic()
-            if (
-                _delta_state["chars"] >= _DELTA_FLUSH_CHARS
-                or (now - _delta_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
-            ):
-                _flush_deltas()
-
-        def _settle_deltas_at_tool_boundary() -> None:
-            # Resolve the buffered answer text at a tool boundary. Text before a
-            # tool is one of two things, and the narration gate already told them
-            # apart:
-            #   (a) a SUBSTANTIAL block (the run crossed _DELTA_GATE_CHARS and
-            #       unlocked — analysis the model wrote, then acted on). It has
-            #       been streaming; FLUSH its unflushed tail so the full block
-            #       reaches the stream surface and renders as its own prose block
-            #       (the web client keeps substantial intermediate blocks — they
-            #       are not narration). A token-streaming brain (NativeBrain)
-            #       leaves up to one flush-window buffered here; a whole-block
-            #       brain already flushed everything on unlock, so this is a
-            #       no-op for it.
-            #   (b) a short LEAD-IN ("Let me search…", under the gate). It was
-            #       held and never emitted; DROP it intact so it doesn't flash in
-            #       the prominent answer area. Only reasoning + tool actions land
-            #       in the activity chip.
-            held = _delta_state["chars"]
-            if _delta_state["unlocked"]:
-                if held:
-                    logger.debug(
-                        "stream_gate: flushed %d-char tail of a substantial "
-                        "block at a tool boundary (task %s)", held, task.id,
-                    )
-                _flush_deltas()  # clears buf + resets chars/last_flush
-            else:
-                if held:
-                    logger.debug(
-                        "stream_gate: discarded %d chars of held narration at a "
-                        "tool boundary (task %s, gate=%d)",
-                        held, task.id, _DELTA_GATE_CHARS,
-                    )
-                _delta_buf.clear()
-                _delta_state["chars"] = 0
-                _delta_state["last_flush"] = time.monotonic()
-            _delta_state["unlocked"] = False  # next text run re-gates
-
-        # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
-        # text. It must be independent of the answer-text buffer above because the
-        # two render to different places on a stream surface: thinking folds into
-        # the activity chip, the answer streams prominent. Same flush cadence /
-        # boundaries; emits ``thinking`` task events instead of ``text_delta``.
-        _thinking_buf: list[str] = []
-        _thinking_state = {"chars": 0, "last_flush": time.monotonic()}
-
-        def _flush_thinking() -> None:
-            if event_writer is None or not _thinking_buf:
-                return
-            text = "".join(_thinking_buf)
-            _thinking_buf.clear()
-            _thinking_state["chars"] = 0
-            _thinking_state["last_flush"] = time.monotonic()
-            try:
-                event_writer.emit("thinking", {"text": text})
-            except Exception:
-                logger.debug("thinking flush failed", exc_info=True)
-
-        def _buffer_thinking(text: str) -> None:
-            if not text:
-                return
-            _thinking_buf.append(text)
-            _thinking_state["chars"] += len(text)
-            now = time.monotonic()
-            if (
-                _thinking_state["chars"] >= _DELTA_FLUSH_CHARS
-                or (now - _thinking_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
-            ):
-                _flush_thinking()
-
-        def _on_event(event: StreamEvent) -> None:
-            if event_writer is None:
-                return
-            if isinstance(event, ToolUseEvent):
-                # A tool boundary settles the reasoning chip and drops any
-                # pre-tool narration. This is a property of the STREAM SURFACE,
-                # not of whether the tool row is shown — so it must run even when
-                # progress_show_tool_use is off, or pre-tool narration would
-                # flush and flash in the answer area with no tool chip to explain
-                # it.
-                if is_stream_surface:
-                    _flush_thinking()  # tool boundary: settle the reasoning chip
-                    _settle_deltas_at_tool_boundary()  # keep substantial, drop lead-ins
-                if show_tool_use:
-                    event_writer.emit("tool_start", {
-                        "tool_name": event.tool_name,
-                        "description": event.description,
-                        "tool_call_id": event.tool_call_id,  # "" under ClaudeCodeBrain
-                    })
-            elif isinstance(event, ToolEndEvent) and show_tool_use:
-                event_writer.emit("tool_end", {
-                    "tool_name": event.tool_name,
-                    "tool_call_id": event.tool_call_id,
-                    "success": event.success,
-                    "duration_ms": event.duration_ms,
-                })
-            elif isinstance(event, ToolProgressEvent):
-                # Web SSE only; Talk/log subscribers ignore this kind.
-                event_writer.emit("tool_progress", {
-                    "tool_name": event.tool_name,
-                    "tool_call_id": event.tool_call_id,
-                    "text": event.text,
-                })
-            elif isinstance(event, ThinkingDeltaEvent):
-                # Incremental reasoning (NativeBrain, or ClaudeCodeBrain with
-                # --include-partial-messages). Stream surfaces only; a push task
-                # drops it (thinking is web/repl-only — no progress_text
-                # fallback).
-                if is_stream_surface:
-                    _thinking_seen["value"] = True
-                    _buffer_thinking(event.thinking)
-            elif isinstance(event, ThinkingEvent):
-                # Whole reasoning block. Stream surfaces only. Dropped when
-                # thinking deltas already carried this turn's reasoning live
-                # (mirrors the TextEvent-vs-deltas dedup above).
-                if is_stream_surface:
-                    if _thinking_seen["value"]:
-                        return
-                    _buffer_thinking(event.text)
-            elif isinstance(event, TextDeltaEvent):
-                # NativeBrain incremental answer text. Stream surfaces only; a
-                # push task drops it (the final result is delivered once).
-                if is_stream_surface:
-                    _flush_thinking()  # thinking → answer boundary: keep order
-                    _delta_seen["value"] = True
-                    _buffer_delta(event.text)
-            elif isinstance(event, TextEvent):
-                if is_stream_surface:
-                    if _delta_seen["value"]:
-                        # NativeBrain: the per-token deltas already carried this
-                        # intermediate turn's text live, so the whole-turn
-                        # TextEvent is a redundant re-render — drop it.
-                        return
-                    # ClaudeCodeBrain (no deltas): coarse streaming, one
-                    # TextEvent per completed block — route through the same
-                    # delta channel rather than progress_text so it renders live.
-                    _flush_thinking()  # thinking → answer boundary: keep order
-                    _buffer_delta(event.text)
-                elif show_text:
-                    # Push surface: deltas are dropped, so intermediate-turn
-                    # TextEvents are how NativeBrain narration reaches Talk. The
-                    # brain holds back the final turn's text (it becomes the
-                    # result); ClaudeCodeBrain's ResultEvent is a distinct frame.
-                    # Neither double-renders against the result.
-                    event_writer.emit("progress_text", {"text": event.text})
-            elif isinstance(event, ContextManagementEvent):
-                if is_stream_surface:
-                    _flush_thinking()  # turn/CM boundary
-                    _flush_deltas()  # turn/CM boundary
-                event_writer.emit("context_management")
+        # Adapts the brain's (widened) StreamEvent stream to TaskEvents:
+        # the coalescing buffers for answer text and reasoning, the
+        # narration gate and the delta-vs-whole-turn dedupe all live in
+        # `executor_stream`. `stream.on_event` is what goes on
+        # `BrainRequest.on_progress`.
+        stream = TaskStreamAdapter(config, task, event_writer)
 
         # Per-task cgroup (A6). Created before the brain is asked for anything,
         # because the pid it hands back has already been spawned and every
@@ -7450,7 +7193,7 @@ def execute_task(
             # and the fallback brain makes its own capability decision.
             images=image_prep.images,
             streaming=use_streaming,
-            on_progress=_on_event if use_streaming else None,
+            on_progress=stream.on_event if use_streaming else None,
             cancel_check=_cancel_check,
             # Steering channel — only for a brain that can act on it mid-run
             # (`!steer`). A non-steerable brain leaves this None (no extra DB
@@ -7535,9 +7278,9 @@ def execute_task(
                 # about the daemon's own buffers rather than the sentence: a
                 # retry that called the primary and watched it fail again has a
                 # tail held here that must not open the fallback's answer.
-                if is_stream_surface:
-                    _flush_thinking()
-                    _settle_deltas_at_tool_boundary()
+                if stream.is_stream_surface:
+                    stream.flush_thinking()
+                    stream.settle_at_tool_boundary()
                 # ISSUE-361: once per turn, not once per failover attempt. The
                 # retry ladder re-runs this same task id, and every attempt
                 # after the breaker opens takes the cooldown path, so the
@@ -7722,8 +7465,7 @@ def execute_task(
             # a lower seq than any trailing answer text. On success this precedes
             # the canonical ``result`` (which replaces the answer in the UI); on
             # an exception the finally still drains both buffers.
-            _flush_thinking()
-            _flush_deltas()
+            stream.finish()
 
         success = brain_result.success
         result = brain_result.result_text
