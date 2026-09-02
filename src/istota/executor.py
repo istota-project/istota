@@ -2292,14 +2292,35 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
 
 
 def _source_and_venv_paths() -> tuple[Path, Path]:
-    """``(src/, .venv)`` for the running install, both of them read-only binds.
+    """``(src/, venv)`` for the running install, both of them read-only binds.
 
     Two callers derive these — the binds themselves and
     :func:`mask_protected_paths` — and a second copy of the deployed-layout
     fallback is how they would come to disagree about which directory a mask
     must not swallow.
+
+    **The venv comes from the running interpreter, not from the source layout.**
+    ``sys.prefix`` *is* the venv root inside a virtual environment, which is
+    what :func:`build_clean_env` already builds ``PATH`` from a few hundred
+    lines above. The two used to disagree: ``PATH`` named ``{sys.prefix}/bin``
+    while the bind covered ``{istota_home}/.venv``, and on any install where
+    those are not the same directory the bind covered nothing — ``_ro_bind``
+    skips a path that does not exist, silently, so the namespace simply had no
+    Python interpreter in it.
+
+    That cost nothing while the only things executed inside the sandbox were
+    ``claude`` and ``bash``, both under the unconditional ``/usr`` bind.
+    ``istota.tool_server`` is the first thing istota runs in there with its own
+    interpreter (ISSUE-389), so the disagreement became "the tool server cannot
+    start" — ``bwrap: execvp /venv/bin/python3: No such file or directory``,
+    every native task, on any layout the convention does not describe. The
+    conventional paths remain as a fallback for a non-venv install, where
+    ``sys.prefix`` is ``/usr`` and already bound.
     """
     istota_src = Path(__file__).resolve().parent.parent  # src/
+    if sys.prefix != sys.base_prefix:
+        # In a venv: sys.prefix is its root, whatever the source tree looks like.
+        return istota_src, Path(sys.prefix).resolve()
     istota_home = istota_src.parent  # project root or install root
     venv_path = istota_home / ".venv"
     if not venv_path.exists():

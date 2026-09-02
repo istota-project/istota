@@ -668,16 +668,19 @@ async def start_tool_server(
             _await_ready(server, reader, handshake), timeout=startup_timeout
         )
     except asyncio.TimeoutError:
-        await _abandon(server)
+        detail = await _abandon(server)
         raise ToolServerError(
             f"the tool server did not become ready within {startup_timeout:.0f}s"
+            f"{detail}"
         ) from None
     except ToolServerError:
         await _abandon(server)
         raise
     except Exception as exc:  # noqa: BLE001
-        await _abandon(server)
-        raise ToolServerError(f"the tool server handshake failed: {exc}") from exc
+        detail = await _abandon(server)
+        raise ToolServerError(
+            f"the tool server handshake failed: {exc}{detail}"
+        ) from exc
 
     server.tools = [str(t) for t in (ready.get("tools") or [])]
     # The reader takes over the socket only after the handshake, so the two
@@ -732,13 +735,40 @@ async def _await_ready(
             )
 
 
-async def _abandon(server: RemoteToolServer) -> None:
-    """Tear down a server that never became usable, without raising."""
+async def _abandon(server: RemoteToolServer) -> str:
+    """Tear down a server that never became usable, and say why if it said.
+
+    Returns the tail of the server's stderr, already formatted for appending to
+    a ``ToolServerError`` message, or ``""`` when it wrote nothing.
+
+    **The return value is the whole point.** A handshake failure reports what
+    the *socket* did — "Connection reset by peer" — which is the same sentence
+    for a server that died on `execvp`, one that could not import its own
+    package, and one the kernel killed. The cause is on stderr and the drain
+    task has it; discarding it here meant the only way to learn why a native
+    task failed was to reproduce the spawn by hand, which is not available to
+    an operator reading a task error. The exit status alone is not enough
+    either: bwrap exits 1 for every mount failure it has.
+
+    Read before the drain task is cancelled, because cancelling it is what
+    stops anything else arriving.
+    """
     server._stopping = True
     with contextlib.suppress(Exception):
         kill_process_group(server._proc.pid)
     with contextlib.suppress(Exception):
         await asyncio.wait_for(server._proc.wait(), timeout=5)
+    detail = ""
+    with contextlib.suppress(Exception):
+        rc = server._proc.returncode
+        tail = bytes(server._stderr[-2000:]).decode("utf-8", "replace").strip()
+        bits = []
+        if rc is not None:
+            bits.append(f"exit {rc}")
+        if tail:
+            bits.append(tail)
+        if bits:
+            detail = " (" + ": ".join(bits) + ")"
     if server._stderr_task is not None:
         server._stderr_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -748,6 +778,7 @@ async def _abandon(server: RemoteToolServer) -> None:
     with contextlib.suppress(Exception):
         server._sock.close()
     server._closed = True
+    return detail
 
 
 def build_remote_tools(server: RemoteToolServer) -> list[AgentTool]:
