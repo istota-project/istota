@@ -1626,7 +1626,7 @@ def _format_skill_detail(meta, name, disabled, is_admin):
 async def cmd_check(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
     user_id, conversation_token = ctx.user_id, ctx.conversation_token
-    from .executor import build_bwrap_cmd, build_model_cli_env
+    from .executor import SandboxProfile, build_bwrap_cmd, build_model_cli_env
 
     lines = ["**Health Check**", ""]
 
@@ -1713,7 +1713,11 @@ async def cmd_check(ctx: CommandContext):
             user_temp = config.temp_dir / user_id
             user_temp.mkdir(parents=True, exist_ok=True)
             is_admin = config.is_admin(user_id)
-            cmd = build_bwrap_cmd(cmd, config, fake_task, is_admin, user_resources, user_temp)
+            # CLAUDE: this probe runs the `claude` CLI itself.
+            cmd = build_bwrap_cmd(
+                cmd, config, fake_task, is_admin, user_resources, user_temp,
+                profile=SandboxProfile.CLAUDE,
+            )
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=30, env=env,

@@ -20,6 +20,7 @@ import pytest
 from istota import db
 from istota.config import Config, SecurityConfig
 from istota.executor import (
+    SandboxProfile,
     _validate_workspace_dir,
     build_bwrap_cmd,
     native_fs_roots,
@@ -71,6 +72,7 @@ def _bwrap(config, task, is_admin):
     with patch("istota.executor._bwrap_available", return_value=True):
         return build_bwrap_cmd(
             ["claude", "-p", "test"], config, task, is_admin, [], user_temp,
+            profile=SandboxProfile.CLAUDE,
         )
 
 

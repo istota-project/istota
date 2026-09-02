@@ -547,7 +547,7 @@ class TestThePackageCacheRoot:
         from unittest.mock import patch
 
         from istota.db import Task
-        from istota.executor import build_bwrap_cmd
+        from istota.executor import SandboxProfile, build_bwrap_cmd
 
         repos = tmp_path / "repos"
         (repos / "alice").mkdir(parents=True)
@@ -562,7 +562,10 @@ class TestThePackageCacheRoot:
         task = Task(id=1, prompt="x", user_id="alice", source_type="cli", status="running")
 
         with patch("istota.executor._bwrap_available", return_value=True):
-            argv = build_bwrap_cmd(["claude"], config, task, True, [], user_temp)
+            argv = build_bwrap_cmd(
+                ["claude"], config, task, True, [], user_temp,
+                profile=SandboxProfile.CLAUDE,
+            )
 
         binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
         cache = str(repos / "alice" / ".package-caches")

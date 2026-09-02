@@ -36,7 +36,7 @@ from istota.config import (
     DevboxConfig,
     SecurityConfig,
 )
-from istota.executor import build_bwrap_cmd
+from istota.executor import SandboxProfile, build_bwrap_cmd
 
 
 @pytest.fixture
@@ -77,6 +77,7 @@ def _argv(config, task, authorized, *, is_admin=True):
         return build_bwrap_cmd(
             ["echo", "hi"], config, task, is_admin, [], user_temp,
             authorized_skills=frozenset(authorized),
+            profile=SandboxProfile.CLAUDE,
         )
 
 

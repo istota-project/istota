@@ -2094,7 +2094,7 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
         import tempfile
 
         from . import db
-        from .executor import build_bwrap_cmd
+        from .executor import SandboxProfile, build_bwrap_cmd
 
         # Both directories `build_bwrap_cmd` masks, not just the framework one —
         # the message says "directories" and `module_db_root()` is the one that
@@ -2139,6 +2139,12 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
                 is_admin=False,
                 user_resources=[],
                 user_temp_dir=Path(user_temp),
+                # NATIVE, because this probe execs `/bin/sh` and not the
+                # `claude` CLI — there is no reason for a diagnostic to build a
+                # namespace holding the subscription credential. The masks it
+                # asserts on are part of the generic plan and identical under
+                # both profiles, so the verdict is unchanged.
+                profile=SandboxProfile.NATIVE,
             )
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=DEEP_TIMEOUT, check=False
