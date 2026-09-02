@@ -1326,9 +1326,12 @@ class TestWebsitePromptSection:
         with db.get_db(db_path) as conn:
             task_id = db.create_task(conn, prompt="build my website", user_id="alice", source_type="talk")
             task = db.get_task(conn, task_id)
-        prompt = build_prompt(task, [], config).system
-        assert "Web Root" not in prompt
-        assert "istota.example.com" not in prompt
+        # Both halves: the claim is that the primitive is gone from the prompt,
+        # not that it landed on one side of the split.
+        composed = build_prompt(task, [], config)
+        whole = composed.system + composed.user
+        assert "Web Root" not in whole
+        assert "istota.example.com" not in whole
 
 
 # ---------------------------------------------------------------------------
@@ -1361,9 +1364,13 @@ class TestAdminPromptIsolation:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=is_admin).system
-        assert str(config.db_path) not in prompt
-        assert "Database: reachable only through skill CLIs" in prompt
+        # Both halves: "the prompt never names the database path" is a boundary
+        # claim about everything the model is shown, not a claim about where a
+        # layer was classified. A half-scoped assertion would go quiet the day
+        # a path started leaking through the other one.
+        composed = build_prompt(task, [], config, is_admin=is_admin)
+        assert str(config.db_path) not in composed.system + composed.user
+        assert "Database: reachable only through skill CLIs" in composed.system
 
     @pytest.mark.parametrize("is_admin", [True, False])
     def test_absence_claim_only_when_sandbox_is_in_effect(self, tmp_path, is_admin):
@@ -3997,8 +4004,10 @@ class TestPerUserEmailInPrompt:
         config = Config()
         config.email = AppEmailConfig(enabled=False)
         task = self._make_task(user_id="carol")
-        result = build_prompt(task, [], config).system
-        assert "+carol@" not in result
+        # Both halves: a plus-address appearing anywhere in the prompt is the
+        # thing being ruled out, whichever section it came from.
+        composed = build_prompt(task, [], config)
+        assert "+carol@" not in composed.system + composed.user
 
     def test_per_user_email_not_shown_when_no_bot_email(self):
         config = Config()
@@ -4009,8 +4018,10 @@ class TestPerUserEmailInPrompt:
             bot_email="",
         )
         task = self._make_task(user_id="carol")
-        result = build_prompt(task, [], config).system
-        assert "+carol@" not in result
+        # Both halves: a plus-address appearing anywhere in the prompt is the
+        # thing being ruled out, whichever section it came from.
+        composed = build_prompt(task, [], config)
+        assert "+carol@" not in composed.system + composed.user
 
 
 # =============================================================================

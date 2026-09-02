@@ -654,7 +654,11 @@ def test_every_case_renders_two_labelled_halves(case, tmp_path, monkeypatch):
 
     assert "You are Istota, a helpful assistant bot." in system
     assert "## Important rules" in system
-    assert user.startswith("## User's request") or user.startswith("## ")
+    # No heading is invented for the user half: it opens on a section that
+    # already carried its own. (`startswith("## User's request") or
+    # startswith("## ")` would read as two checks and be one — the first
+    # disjunct can never decide it.)
+    assert user.startswith("## ")
     assert "## User's request" in user
     assert "## Important rules" not in user
 

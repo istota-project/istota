@@ -4139,13 +4139,20 @@ def load_channel_guidelines(
     a literal ``{user_id}`` reaching the model is worse than no example. Skill
     bodies already substitute it; this brings guidelines in line with the set
     AGENTS.md documents.
+
+    The substituted value is flattened. The *file* is an instruction block and
+    stays multiline — its structure is lines — but a scalar interpolated into
+    it is not part of that structure, and the result is now `build_prompt`'s
+    system half: a `user_id` carrying `\\n\\n## Important rules\\n\\n1. …`
+    renders a second rules heading inside the message compaction never
+    touches. Same rule, and the same `_one_line`, as the header scalars there.
     """
     config_dir = config.skills_dir.parent
     guidelines_path = config_dir / "guidelines" / f"{source_type}.md"
     if guidelines_path.exists():
         text = _apply_bot_name(guidelines_path.read_text().strip(), config)
         if user_id:
-            text = text.replace("{user_id}", user_id)
+            text = text.replace("{user_id}", _one_line(user_id))
         return text
     return None
 
@@ -4775,8 +4782,15 @@ def build_prompt(
     # Calendars stay discovery-driven (CalDAV); the resource-typed fallback
     # is gone.
     if discovered_calendars:
+        # The calendar name and URL are the least trusted scalars in this
+        # block and the only ones that come off a remote server: a *shared*
+        # calendar's display name is set by whoever shared it, and CalDAV puts
+        # no constraint on it. One list item per line, so a newline in a name
+        # forges a line inside `## User's accessible resources` — the section
+        # rule 1 names, in the half that survives compaction.
         cal_list = "\n".join(
-            f"  - {name}: {url} ({'read/write' if writable else 'read-only'})"
+            f"  - {_one_line(name)}: {_one_line(url)} "
+            f"({'read/write' if writable else 'read-only'})"
             for name, url, writable in discovered_calendars
         )
         resource_sections.append(
@@ -4934,10 +4948,11 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
   - Write: Use standard file operations (Python, bash, etc.)
   - All Nextcloud paths are accessible as local filesystem paths"""
     else:
-        file_tools = f"""- rclone for Nextcloud files: remote name is '{config.rclone_remote}'
-  - List: rclone ls {config.rclone_remote}:/path/
-  - Copy from NC: rclone copy {config.rclone_remote}:/path/file.txt /tmp/
-  - Copy to NC: rclone copy /tmp/file.txt {config.rclone_remote}:/path/"""
+        remote = _one_line(config.rclone_remote)
+        file_tools = f"""- rclone for Nextcloud files: remote name is '{remote}'
+  - List: rclone ls {remote}:/path/
+  - Copy from NC: rclone copy {remote}:/path/file.txt /tmp/
+  - Copy to NC: rclone copy /tmp/file.txt {remote}:/path/"""
 
     # Browser tool line (only when enabled)
     browser_tool = ""
@@ -5087,6 +5102,7 @@ Output target: {display_output_target}{per_user_email_line}
 ## User's accessible resources
 
 {resources_text}
+
 ## Available tools
 
 You have access to:
@@ -5765,6 +5781,15 @@ def execute_task(
     # compaction-safe-composed-prompts spec; splitting assembly and wiring the
     # consumer in one step would mean a stage that ships a task with no persona,
     # no rules and no tool descriptions.
+    #
+    # Two consumers downstream read `req.prompt` as "everything the model was
+    # shown", and both are correct only while this line joins them:
+    # `NativeBrain`'s `_extract_urls(req.prompt)` builds the
+    # `require_url_provenance` corpus, and `build_image_prompt` prepends the
+    # image `Read` directive to it. When the halves travel apart, provenance
+    # must come from the user half by decision (a URL named only in tool
+    # documentation is not user-provided) while the image directive has to keep
+    # leading the user message rather than trailing the tool descriptions.
     prompt = f"{composed.system}\n\n{composed.user}"
 
     # Log prompt size breakdown

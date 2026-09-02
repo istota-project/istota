@@ -15,6 +15,7 @@ Privileges: admin
 ## User's accessible resources
 
 Your workspace is at Users/alice/, containing shared/, inbox/, memories/, and your bot dir (istota/). Notes live in istota/notes/.
+
 ## Available tools
 
 You have access to:
