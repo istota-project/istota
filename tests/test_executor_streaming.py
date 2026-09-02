@@ -1597,6 +1597,9 @@ class TestPerUserTempDir:
         assert user_temp.exists()
         prompt_file = user_temp / "task_1_prompt.txt"
         assert prompt_file.exists()
+        # Both halves, since the split. The system half is a second artifact
+        # under the same task-id convention and the same overwrite lifecycle.
+        assert (user_temp / "task_1_system_prompt.txt").exists()
 
 
 class TestDatedMemoriesInPrompt:

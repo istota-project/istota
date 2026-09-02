@@ -40,6 +40,25 @@ from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig
 from istota import db
 
 
+def _system_half(config, user_id="alice", task_id=1) -> str:
+    """The standing instructions `execute_task` wrote for this task.
+
+    Since the prompt split, `input=` on the CLI subprocess carries the *user*
+    half alone — the request, retrieved memory and conversation history. Skill
+    bodies, the skills changelog and the workspace vocabulary are standing
+    instructions and travel as `task_<id>_system_prompt.txt`, which the brain
+    passes with `--append-system-prompt-file`. A test asserting on one of those
+    reads this file, and a *negative* assertion about one has to read it or it
+    passes for the wrong reason.
+    """
+    from istota.executor import get_user_temp_dir
+
+    return (
+        get_user_temp_dir(config, user_id) / f"task_{task_id}_system_prompt.txt"
+    ).read_text(encoding="utf-8")
+
+
+
 # ---------------------------------------------------------------------------
 # TestParseApiError
 # ---------------------------------------------------------------------------
@@ -517,10 +536,9 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        # Verify changelog was in the prompt
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]  # prompt passed via stdin
-        assert "What's New in Skills" in prompt_text
+        # The changelog is a standing instruction, so it is in the system
+        # half — the file, not stdin.
+        assert "What's New in Skills" in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_when_fingerprint_matches(self, mock_run, tmp_path):
@@ -539,9 +557,7 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
-        assert "What's New in Skills" not in prompt_text
+        assert "What's New in Skills" not in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_for_briefing(self, mock_run, tmp_path):
@@ -555,9 +571,7 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
-        assert "What's New in Skills" not in prompt_text
+        assert "What's New in Skills" not in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_changelog_not_included_for_scheduled(self, mock_run, tmp_path):
@@ -571,9 +585,7 @@ class TestSkillsFingerprintIntegration:
             from istota.executor import execute_task
             success, result, _actions, _trace = execute_task(task, config, [], conn=conn)
 
-        call_args = mock_run.call_args
-        prompt_text = call_args.kwargs["input"]
-        assert "What's New in Skills" not in prompt_text
+        assert "What's New in Skills" not in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_fingerprint_updated_after_success(self, mock_run, tmp_path):
@@ -1619,8 +1631,7 @@ class TestAdminEnvVarIsolation:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Admin scheduling reference" in prompt_text
+        assert "Admin scheduling reference" in _system_half(config)
 
     @patch("istota.executor.subprocess.run")
     def test_non_admin_skills_exclude_admin_only(self, mock_run, tmp_path):
@@ -1641,8 +1652,7 @@ class TestAdminEnvVarIsolation:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        prompt_text = mock_run.call_args.kwargs["input"]
-        assert "Admin scheduling reference" not in prompt_text
+        assert "Admin scheduling reference" not in _system_half(config)
 
 
 class TestDeferredDirEnvVar:
@@ -1882,11 +1892,11 @@ class TestUserIdSubstitution:
             from istota.executor import execute_task
             execute_task(task, config, [], conn=conn)
 
-        # The prompt is passed via stdin — check it contains the substituted user_id
-        call_kwargs = mock_run.call_args[1]
-        prompt_input = call_kwargs.get("input", "")
-        assert "/Users/alice/bot/config/USER.md" in prompt_input
-        assert "{user_id}" not in prompt_input
+        # The skill body carrying the placeholder is a standing instruction,
+        # so the substitution is visible in the system half.
+        composed = _system_half(config)
+        assert "/Users/alice/bot/config/USER.md" in composed
+        assert "{user_id}" not in composed
 
 
 # ---------------------------------------------------------------------------
@@ -4218,7 +4228,13 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
         # the REPL bind path).
         assert mock_bwrap.called
         assert mock_bwrap.call_args.kwargs["workspace_dir"] is None
-        # And the {workspace} placeholder still resolved in the prompt.
+        # And the {workspace} placeholder still resolved in the prompt. The
+        # skill body it lives in is a standing instruction, so it is in the
+        # system half — which reaches the CLI as a file rather than on stdin.
+        composed = (
+            tmp_path / "temp" / "alice" / "task_1_system_prompt.txt"
+        ).read_text(encoding="utf-8")
         prompt_text = mock_run.call_args.kwargs["input"]
+        assert "{workspace}" not in composed
         assert "{workspace}" not in prompt_text
-        assert str((config.nextcloud_mount_path / "Users" / "alice")) in prompt_text
+        assert str((config.nextcloud_mount_path / "Users" / "alice")) in composed

@@ -6825,6 +6825,9 @@ class TestWarnUnconsumedDeferredFiles:
             "task_123_user_alerts.json",
             "task_123_email_output.json",
             "task_123_prompt.txt",
+            # The system half, written beside the user half since the prompt
+            # split. Unrecognised, it would warn on every task that ran.
+            "task_123_system_prompt.txt",
             "task_123_result.txt",
         ):
             (tmp_path / name).write_text("{}")

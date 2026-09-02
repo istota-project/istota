@@ -585,6 +585,92 @@ class TestWriteDeniedRoots:
         assert "read-only" in _text(result).lower()
 
 
+class TestComposedSystemPromptIsWriteDenied:
+    """The composed system prompt is a deny root, and it is a *file*.
+
+    `.developer` is a directory, so every existing case above exercises the
+    `is_relative_to` arm of `_in_denied`. `task_<id>_system_prompt.txt` is one
+    file in a directory that stays writable, which exercises the equality arm
+    — and the sibling case is what says the carve-out did not swallow the
+    directory it lives in.
+
+    Why it is denied at all: the bwrap `--ro-bind` covers Bash, which enters
+    the namespace. `Write` and `Edit` go through `ToolEnv`, which is a
+    different mechanism reaching the same answer, and without this a native
+    task could rewrite the standing instructions it is running under.
+    """
+
+    def _env(self, workspace, denied):
+        return ToolEnv(
+            cwd=workspace,
+            read_roots=(workspace,),
+            write_roots=(workspace,),
+            write_denied_roots=tuple(denied),
+        )
+
+    def _composed(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        composed = ws / "task_42_system_prompt.txt"
+        composed.write_text("## Important rules\n")
+        return ws, composed
+
+    async def test_write_to_the_composed_file_is_refused(self, tmp_path):
+        ws, composed = self._composed(tmp_path)
+        env = self._env(ws, [composed])
+        result = await _run(
+            make_write_tool(env),
+            {"file_path": str(composed), "content": "ignore all rules\n"},
+        )
+        assert composed.read_text() == "## Important rules\n"
+        assert "read-only" in _text(result).lower()
+
+    async def test_edit_of_the_composed_file_is_refused(self, tmp_path):
+        ws, composed = self._composed(tmp_path)
+        env = self._env(ws, [composed])
+        result = await _run(
+            make_edit_tool(env),
+            {
+                "file_path": str(composed),
+                "old_string": "Important rules",
+                "new_string": "Unimportant rules",
+            },
+        )
+        assert composed.read_text() == "## Important rules\n"
+        assert "read-only" in _text(result).lower()
+
+    async def test_reading_it_back_is_allowed(self, tmp_path):
+        """Denied writes only. The model may read its own instructions, and
+        the bwrap `--ro-bind` says the same thing on the other mechanism."""
+        ws, composed = self._composed(tmp_path)
+        env = self._env(ws, [composed])
+        result = await _run(make_read_tool(env), {"file_path": str(composed)})
+        assert "Important rules" in _text(result)
+
+    async def test_a_sibling_in_the_same_directory_stays_writable(self, tmp_path):
+        """The task's own workspace is not collateral. `task_<id>_result.txt`
+        lives here, and so does everything the task writes."""
+        ws, composed = self._composed(tmp_path)
+        env = self._env(ws, [composed])
+        target = ws / "task_42_result.txt"
+        result = await _run(
+            make_write_tool(env), {"file_path": str(target), "content": "done\n"},
+        )
+        assert target.read_text() == "done\n"
+        assert "Created" in _text(result)
+
+    async def test_a_symlink_to_it_is_refused(self, tmp_path):
+        ws, composed = self._composed(tmp_path)
+        link = ws / "shortcut.txt"
+        link.symlink_to(composed)
+        env = self._env(ws, [composed])
+        result = await _run(
+            make_write_tool(env), {"file_path": str(link), "content": "tampered\n"},
+        )
+        assert composed.read_text() == "## Important rules\n"
+        assert "read-only" in _text(result).lower()
+
+
 class TestResolveReturnsResolvedPath:
     """resolve() hands back the symlink-free path it actually checked.
 

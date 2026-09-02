@@ -49,6 +49,12 @@ SENTINELS = {
     "attachment": "SENTINEL_ATTACHMENT.txt",
 }
 
+#: Two URLs, one per half. `require_url_provenance` builds its corpus from
+#: `req.prompt`, so which half a URL lands in decides whether the model may
+#: fetch it.
+SYSTEM_ONLY_URL = "https://standing-instructions.example/doc"
+USER_HALF_URL = "https://asked-for.example/page"
+
 #: Every family whose text must survive compaction verbatim.
 SYSTEM_FAMILIES = (
     "emissaries", "persona", "guidelines", "skills_changelog", "skills_doc",
@@ -566,20 +572,21 @@ class TestWhatTheBrainIsHanded:
 
     Every other test in this file, and every prompt golden, reaches assembly
     through `build_prompt` or through `dry_run=True` — and the dry-run branch
-    returns *before* `execute_task` joins the halves. So the line that decides
-    what a running task actually receives is covered by none of them, and
-    `prompt = composed.user` would ship a task with no persona, no rules and no
-    tool descriptions while the whole suite stayed green. That is the failure
-    class this repository has a rule about: a probe whose success is
-    indistinguishable from a no-op.
+    returns *before* `execute_task` writes either artifact or builds a request.
+    So the lines that decide what a running task actually receives are covered
+    by none of them, and a flip that dropped the system half on the floor would
+    ship a task with no persona, no rules and no tool descriptions while the
+    whole suite stayed green. That is the failure class this repository has a
+    rule about: a probe whose success is indistinguishable from a no-op.
 
-    The join is Stage 1's whole safety claim — nothing about model behavior
-    changes here, which is what makes a green suite mean anything. When a later
-    stage moves the system half onto its own channel, this is the test that
-    goes red and has to be rewritten deliberately rather than drifting.
+    Stage 1 joined the halves back into `req.prompt` and this class asserted
+    the join. The halves now travel apart — `req.prompt` is the user half and
+    the system half reaches the brain as `composed_system_prompt_path` — so
+    every assertion here names *which channel* a layer arrived on. A layer that
+    reaches neither, or that reaches both, fails by name.
     """
 
-    def _config(self, tmp_path) -> Config:
+    def _config(self, tmp_path, sandbox=False) -> Config:
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         config_dir = tmp_path / "config"
@@ -587,7 +594,11 @@ class TestWhatTheBrainIsHanded:
         skills_dir.mkdir(parents=True)
         (skills_dir / "_index.toml").write_text("")
         (config_dir / "persona.md").write_text(
-            f"{SENTINELS['persona']} persona text.\n"
+            # The URL is load-bearing for the provenance test below: it is a
+            # URL that reaches the model only through a standing instruction
+            # layer, which is exactly the population that must *not* become
+            # user-supplied provenance.
+            f"{SENTINELS['persona']} persona text. See {SYSTEM_ONLY_URL}\n"
         )
         config = Config(
             db_path=db_path,
@@ -596,18 +607,19 @@ class TestWhatTheBrainIsHanded:
             temp_dir=tmp_path / "temp",
             users={"alice": UserConfig()},
             security=SecurityConfig(
-                skill_proxy_enabled=False, sandbox_enabled=False,
+                skill_proxy_enabled=False, sandbox_enabled=sandbox,
             ),
         )
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         return config
 
-    def _run(self, tmp_path):
-        config = self._config(tmp_path)
+    def _run(self, tmp_path, request_text=None, sandbox=False):
+        config = self._config(tmp_path, sandbox=sandbox)
         brain = _CaptureBrain()
         with db.get_db(config.db_path) as conn:
             task_id = db.create_task(
-                conn, prompt=f"{SENTINELS['request']} do the thing",
+                conn,
+                prompt=request_text or f"{SENTINELS['request']} do the thing",
                 user_id="alice", source_type="talk", conversation_token="room1",
             )
             task = db.get_task(conn, task_id)
@@ -619,47 +631,207 @@ class TestWhatTheBrainIsHanded:
         assert brain.reqs, "the brain was never called"
         return config, task, brain.reqs[-1]
 
-    def test_both_halves_reach_the_request_in_order(self, tmp_path):
-        _config, _task, req = self._run(tmp_path)
+    #: Layers whose loss is the bug the spec exists to fix, named one by one
+    #: rather than behind a single marker.
+    SYSTEM_MARKERS = (
+        "You are Istota, a helpful assistant bot.",
+        "## User's accessible resources",
+        "## Available tools",
+        "## Important rules",
+        SENTINELS["persona"],
+    )
 
-        # System-half material, named individually rather than by one marker:
-        # each is a layer whose loss is the bug the spec exists to fix.
-        for marker in (
-            "You are Istota, a helpful assistant bot.",
-            "## User's accessible resources",
-            "## Available tools",
-            "## Important rules",
-            SENTINELS["persona"],
-        ):
-            assert marker in req.prompt, marker
+    def test_the_request_prompt_is_the_user_half_alone(self, tmp_path):
+        """The flip. `req.prompt` is task material and nothing else.
+
+        This is the assertion that would have gone green on the old joined
+        string too, in the direction that matters least — so the refusals below
+        it are the half that says the flip happened.
+        """
+        _config, _task, req = self._run(tmp_path)
 
         assert SENTINELS["request"] in req.prompt
-        assert req.prompt.index("## Important rules") < req.prompt.index(
-            "## User's request"
-        ), "the system half must lead the user half in the joined string"
-        assert "## Important rules\n" in req.prompt
+        assert req.prompt.lstrip().startswith("## User's request")
+        for marker in self.SYSTEM_MARKERS:
+            assert marker not in req.prompt, (
+                f"{marker!r} is still on the user turn, where compaction can "
+                "summarize it away — the whole defect ISSUE-375 records"
+            )
 
-    def test_the_two_halves_are_joined_by_exactly_one_blank_line(self, tmp_path):
-        """The joiner, stated as the spec states it, so a change is deliberate."""
+    def test_the_system_half_reaches_the_brain_by_path(self, tmp_path):
+        config, task, req = self._run(tmp_path)
+
+        path = req.composed_system_prompt_path
+        assert path is not None, (
+            "nothing populated composed_system_prompt_path, so the standing "
+            "instructions reached the model on no channel at all"
+        )
+        assert path.is_absolute(), (
+            f"{path} is relative: NativeBrain opens it in the daemon process "
+            "and the Claude CLI opens it inside the sandbox, against two "
+            "different working directories, and a reroute carries it between "
+            "them"
+        )
+        assert path == (
+            executor.get_user_temp_dir(config, task.user_id).resolve()
+            / f"task_{task.id}_system_prompt.txt"
+        )
+        text = path.read_text(encoding="utf-8")
+        for marker in self.SYSTEM_MARKERS:
+            assert marker in text, marker
+        assert SENTINELS["request"] not in text, (
+            "the request text is in the system file, which would make it "
+            "permanent rather than summarizable"
+        )
+
+    def test_nothing_was_dropped_at_the_flip(self, tmp_path):
+        """The union, because two half-assertions do not add up to one whole.
+
+        Each test above can pass while a layer falls out of *both* channels:
+        absent from the user half is what one asserts and present in the system
+        file is what the other asserts of a different list.
+        """
         _config, _task, req = self._run(tmp_path)
-        head, _, tail = req.prompt.partition("\n\n## User's request")
-        assert tail, "the user half is not in the joined string at all"
-        # Whatever precedes the user half is the whole system half, ending on
-        # its own last line rather than on padding this join invented.
-        assert not head.endswith("\n")
+        both = req.prompt + "\n" + req.composed_system_prompt_path.read_text(
+            encoding="utf-8"
+        )
+        for marker in (*self.SYSTEM_MARKERS, SENTINELS["request"]):
+            assert marker in both, marker
 
-    def test_the_prompt_artifact_holds_the_same_string(self, tmp_path):
-        """`task_<id>_prompt.txt` is the debugging record of what was sent.
+    def test_both_artifacts_hold_exactly_what_was_sent(self, tmp_path):
+        """The two debugging records, each matching its own channel.
 
         A file holding half of what the brain got is worse than no file: it is
         read when something has already gone wrong.
         """
         config, task, req = self._run(tmp_path)
-        artifact = (
-            executor.get_user_temp_dir(config, task.user_id)
-            / f"task_{task.id}_prompt.txt"
+        temp = executor.get_user_temp_dir(config, task.user_id)
+
+        user_artifact = temp / f"task_{task.id}_prompt.txt"
+        assert user_artifact.read_text(encoding="utf-8") == req.prompt
+
+        system_artifact = temp / f"task_{task.id}_system_prompt.txt"
+        assert system_artifact.exists()
+        assert system_artifact.resolve() == req.composed_system_prompt_path
+
+    def test_a_dry_run_writes_neither_artifact(self, tmp_path):
+        """The dry-run return still happens before both writes, not just the
+        one that was there when it was written."""
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt=f"{SENTINELS['request']} do the thing",
+                user_id="alice", source_type="talk", conversation_token="room1",
+            )
+            task = db.get_task(conn, task_id)
+            success, result, _a, _t = execute_task(
+                task, config, [], conn=conn, use_context=False, dry_run=True,
+            )
+
+        assert success
+        assert executor.PROMPT_SYSTEM_LABEL in result
+        temp = executor.get_user_temp_dir(config, task.user_id)
+        assert temp.is_dir()
+        assert not list(temp.glob("task_*_prompt.txt"))
+        assert not list(temp.glob("task_*_system_prompt.txt"))
+
+    def test_the_sandbox_wrap_carries_the_composed_file_as_a_ro_bind(
+        self, tmp_path,
+    ):
+        """`_extra_ro_binds` had no production consumer until this stage.
+
+        `tests/test_sandbox.py` proves `build_bwrap_cmd` re-binds whatever it
+        is handed, after the read-write bind of the directory. This proves the
+        executor hands it the composed file — the two halves of a claim that
+        neither test makes alone.
+        """
+        captured = {}
+
+        def fake_bwrap(raw_cmd, *args, **kwargs):
+            captured.update(kwargs)
+            return raw_cmd
+
+        with patch("istota.executor.build_bwrap_cmd", side_effect=fake_bwrap):
+            _config, _task, req = self._run(tmp_path, sandbox=True)
+            req.sandbox_wrap(["true"])
+            req.native_sandbox_wrap(["true"])
+
+        assert req.composed_system_prompt_path in captured["extra_ro_binds"], (
+            f"extra_ro_binds was {captured.get('extra_ro_binds')!r}"
         )
-        assert artifact.read_text(encoding="utf-8") == req.prompt
+
+    def test_the_native_file_tools_are_denied_the_composed_file(self, tmp_path):
+        """The other mechanism, from the same run.
+
+        The bind covers Bash. `Write` and `Edit` resolve through `ToolEnv` and
+        enter no namespace, so the deny list is what stops a native task
+        rewriting its own standing instructions. Both, or neither is worth
+        having.
+        """
+        with patch("istota.executor.native_fs_confinement_active", return_value=True):
+            _config, _task, req = self._run(tmp_path, sandbox=True)
+
+        assert req.composed_system_prompt_path in req.fs_write_denied_roots, (
+            f"fs_write_denied_roots was {req.fs_write_denied_roots!r}"
+        )
+
+    def test_url_provenance_derives_from_the_user_half(self, tmp_path):
+        """`_extract_urls(req.prompt)` is the `require_url_provenance` corpus.
+
+        It read the joined string until the flip, so a URL named only in a
+        persona, a skill body or a tool description was user-supplied
+        provenance. The classification decides this, not the extractor: the
+        corpus is now whatever is on the user turn.
+        """
+        from istota.brain.native import _extract_urls
+
+        _config, _task, req = self._run(
+            tmp_path,
+            request_text=f"{SENTINELS['request']} fetch {USER_HALF_URL}",
+        )
+
+        corpus = _extract_urls(req.prompt)
+        assert USER_HALF_URL in corpus
+        assert SYSTEM_ONLY_URL not in corpus, (
+            "a URL that reaches the model only through standing instructions "
+            "became user-provided provenance"
+        )
+        # The control: the system half is where that URL actually is, so the
+        # absence above is the split and not a typo in the fixture.
+        assert SYSTEM_ONLY_URL in req.composed_system_prompt_path.read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_image_directive_still_leads_the_user_message(self, tmp_path):
+        """`build_image_prompt` prepends to `req.prompt`.
+
+        That was the front of the whole composed string and is now the front of
+        the user turn, which is where the directive has to stay — trailing the
+        tool descriptions would put it in the message the model reads last.
+        """
+        import dataclasses
+
+        from istota.brain._types import ImageInput
+        from istota.brain.claude_code import IMAGE_DIRECTIVE_HEADER, build_image_prompt
+
+        _config, _task, req = self._run(tmp_path)
+        with_image = dataclasses.replace(
+            req,
+            images=[
+                ImageInput(
+                    path=tmp_path / "shot.png",
+                    media_type="image/png",
+                    display_name="shot.png",
+                )
+            ],
+            allowed_tools=["Read"],
+        )
+
+        text = build_image_prompt(with_image)
+        assert text.startswith(IMAGE_DIRECTIVE_HEADER)
+        assert SENTINELS["request"] in text
+        for marker in self.SYSTEM_MARKERS:
+            assert marker not in text
 
 
 # ----------------------------------------------------------- the dry-run render

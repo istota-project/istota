@@ -3450,6 +3450,7 @@ def native_fs_roots(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
+    composed_system_prompt_path: Path | None = None,
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """File-access roots for a native-brain task.
 
@@ -3484,10 +3485,30 @@ def native_fs_roots(
     The third element carries the RO carve-outs bwrap gets by re-binding a
     subdirectory read-only *after* its parent's RW bind. Containment alone
     cannot express those, so they are returned separately and threaded onto
-    ``ToolEnv.write_denied_roots``. Today that is ``.developer`` — the
+    ``ToolEnv.write_denied_roots``. Two entries today. ``.developer`` — the
     credential-fetch helper and the git credential helpers — which the
     claude_code path has protected since the RO re-bind was added and which
-    this function silently left writable until it grew this return value.
+    this function silently left writable until it grew this return value. And
+    ``composed_system_prompt_path``, the task's own
+    ``task_<id>_system_prompt.txt``: Istota's standing instructions, written
+    into ``user_temp_dir`` and therefore inside a write root. bwrap re-binds it
+    read-only through ``extra_ro_binds``, which covers Bash and covers nothing
+    that goes through ``ToolEnv`` — so without this entry a native task
+    rewrites the instructions it is running under with one ``Write`` call, and
+    a ``native -> claude_code`` reroute reads the rewrite, since the reroute
+    keeps the same path. That is the ``.developer`` asymmetry above, repeated,
+    which is why it is closed in the same commit that opens it.
+
+    **The deny entry is the task's own exact path, and that is narrower than
+    the shape.** ``user_temp_dir`` is per *user*, not per task, so a second
+    concurrent task of the same user has this directory in its write roots and
+    is denied only its own file. Nothing here expresses
+    ``task_*_system_prompt.txt`` as a shape: a deny root is compared by
+    equality or containment (``ToolEnv._in_denied``), and the same is true of
+    the bwrap bind. Closing it fully would mean either moving the artifact into
+    a denied subdirectory or teaching ``ToolEnv`` and the tool-server protocol
+    a pattern; neither is in scope here, so the residual is stated rather than
+    implied.
 
     Carve-outs here deny *writes* only. bwrap's other nested override, the
     tmpfs masks over ``db_path.parent`` and ``module_db_root()``, is a total
@@ -3523,6 +3544,17 @@ def native_fs_roots(
     # for Bash and writable for the file tools. A deny root that never comes
     # into existence costs one failed comparison.
     write_denied.append(user_temp_dir.resolve() / ".developer")
+
+    # The composed system prompt (RO carve-out inside the same workspace).
+    # Mirrors the `extra_ro_binds` entry `execute_task` passes to
+    # `build_bwrap_cmd`. Appended directly rather than through `_add`, for the
+    # reason `.developer` is: `_add` skips a path that does not exist, and a
+    # deny root that only appears once the file does would leave a window in
+    # which the file is writable. The executor writes it before this is called,
+    # so the window is theoretical — which is exactly when it is cheapest to
+    # close.
+    if composed_system_prompt_path is not None:
+        write_denied.append(composed_system_prompt_path.resolve())
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
@@ -5776,40 +5808,66 @@ def execute_task(
         attachment_status=image_attachment_status(image_prep),
     )
 
-    # The two halves are still concatenated into the one string the brains take
-    # today. `BrainRequest` learns to carry them apart in a later stage of the
-    # compaction-safe-composed-prompts spec; splitting assembly and wiring the
-    # consumer in one step would mean a stage that ships a task with no persona,
-    # no rules and no tool descriptions.
+    # The two halves travel apart from here. `req.prompt` is the user half; the
+    # system half reaches the brain as a *path*
+    # (`BrainRequest.composed_system_prompt_path`), so it lands with system
+    # authority, outside anything native compaction can reach (ISSUE-375).
     #
     # Two consumers downstream read `req.prompt` as "everything the model was
-    # shown", and both are correct only while this line joins them:
-    # `NativeBrain`'s `_extract_urls(req.prompt)` builds the
-    # `require_url_provenance` corpus, and `build_image_prompt` prepends the
-    # image `Read` directive to it. When the halves travel apart, provenance
-    # must come from the user half by decision (a URL named only in tool
-    # documentation is not user-provided) while the image directive has to keep
-    # leading the user message rather than trailing the tool descriptions.
-    prompt = f"{composed.system}\n\n{composed.user}"
+    # shown", and both now read the user half by decision rather than by
+    # accident. `NativeBrain`'s `_extract_urls(req.prompt)` builds the
+    # `require_url_provenance` corpus: a URL named only in a persona, a skill
+    # body or a tool description is not user-provided provenance, so the
+    # narrower corpus is the intended one. `build_image_prompt` prepends the
+    # image `Read` directive to it, which keeps that directive leading the user
+    # message instead of trailing eight kilobytes of tool documentation.
+    prompt = composed.user
 
-    # Log prompt size breakdown
+    # Log prompt size breakdown. No `other` line: the prompt is two strings
+    # with different authority now, and a single residual computed across both
+    # would describe a string nothing sends.
     context_chars = len(conversation_context) if conversation_context else 0
     memory_chars = len(user_memory or "") + len(dated_memories or "") + len(channel_memory or "") + len(recalled_memories or "")
     skills_chars = len(skills_doc or "")
-    prompt_chars = len(prompt)
+    system_chars = len(composed.system)
+    user_chars = len(composed.user)
     logger.info(
-        "Prompt for task %d: %d chars total (context: %d, memory: %d, skills: %d, other: %d)",
-        task.id, prompt_chars, context_chars, memory_chars, skills_chars,
-        prompt_chars - context_chars - memory_chars - skills_chars,
+        "Prompt for task %d: %d chars total (system: %d, user: %d; "
+        "context: %d, memory: %d, skills: %d)",
+        task.id, system_chars + user_chars, system_chars, user_chars,
+        context_chars, memory_chars, skills_chars,
     )
 
     if dry_run:
         rendered = render_composed_prompt(composed)
         return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
-    # Write prompt to temp file for debugging
+    # Both halves on disk before anything is built from them. The user half
+    # keeps its filename: it is still the exact text sent on stdin, injected
+    # into the tmux pane, or used as the native initial user message.
     prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
+
+    # The system half, and the file the brain is handed by path.
+    #
+    # Resolved, for two reasons that have to agree. `BrainRequest` documents
+    # the path as absolute — NativeBrain opens it in the daemon process while
+    # the Claude CLI opens it inside the sandbox, against two different working
+    # directories, and a reroute carries the same value between them. And
+    # `build_bwrap_cmd`'s `_ro_bind` uses the path it is given as the
+    # *in-namespace destination* while binding the resolved source, so an
+    # unresolved path on a deployment whose `temp_dir` sits behind a symlink
+    # would land the read-only bind somewhere the CLI never looks — leaving the
+    # writable copy at the path it does look at. `ImageInput.path` records the
+    # same rule for the same reason.
+    #
+    # Written before the request is built and never conditionally: a request
+    # naming a file that was not written is the fail-closed contract firing on
+    # our own bug.
+    system_prompt_file = (
+        user_temp_dir / f"task_{task.id}_system_prompt.txt"
+    ).resolve()
+    system_prompt_file.write_text(composed.system, encoding="utf-8")
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"
@@ -6144,8 +6202,22 @@ def execute_task(
                 _net_proxy_sock, allowed_hosts,
             )
 
-        # Collect extra paths to RO bind-mount into the sandbox
-        _extra_ro_binds: list[Path] = []
+        # Collect extra paths to RO bind-mount into the sandbox.
+        #
+        # The composed system prompt is this parameter's first production
+        # consumer. `build_bwrap_cmd` binds `user_temp_dir` read-write and
+        # applies these twenty-odd lines further down, after the `.developer`
+        # carve-out that established the pattern — so the later read-only bind
+        # of this one file shadows the read-write bind of its directory, and
+        # the model's own Bash tool cannot rewrite the standing instructions it
+        # is running under. A `native -> claude_code` reroute keeps the same
+        # path, so a rewrite would survive the reroute too.
+        #
+        # This is half the protection and on the native brain it is the half
+        # that matters least: `Write` and `Edit` run through `ToolEnv` and
+        # enter no mount namespace. The other half is the matching deny entry
+        # `native_fs_roots` returns, some four hundred lines below.
+        _extra_ro_binds: list[Path] = [system_prompt_file]
 
         # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
@@ -6530,6 +6602,7 @@ def execute_task(
                 user_resources,
                 Path(user_temp_dir),
                 workspace_dir,
+                composed_system_prompt_path=system_prompt_file,
             )
 
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
@@ -6592,6 +6665,12 @@ def execute_task(
                 else ""
             ),
             custom_system_prompt_path=sp_path,
+            # Istota's standing instructions, by path, with system authority.
+            # Required input from here on: a brain that cannot read it fails
+            # the attempt rather than running the user half alone, which would
+            # be ISSUE-375 recreated by a filesystem race. Absolute by
+            # construction — see the `.resolve()` at the write above.
+            composed_system_prompt_path=system_prompt_file,
             # The prepared images, as paths and media types — never bytes. Each
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.
