@@ -121,6 +121,13 @@ _PREPARE: dict[str, Callable[[dict], dict]] = {"Edit": prepare_edit_arguments}
 _TERMINATED_PREFIX = "Claude Code was terminated by "
 
 
+# How long a teardown waits for a `shutdown` to reach the socket, and how long
+# either side waits to reap. Both are small on purpose: they sit on paths that
+# must always complete, and everything they guard has a kill behind it.
+_SHUTDOWN_SEND_TIMEOUT_SECONDS = 1.0
+_REAP_TIMEOUT_SECONDS = 5.0
+
+
 class ToolServerError(Exception):
     """The server could not be started, or died. Fails the attempt."""
 
@@ -242,6 +249,15 @@ class RemoteToolServer:
         self._loop_abort = loop_abort
         self._pending: dict[str, asyncio.Future] = {}
         self._updates: dict[str, Any] = {}
+        # Strong references to in-flight update deliveries, and the tail of
+        # each call's chain. See `_queue_update`.
+        self._update_tasks: set[asyncio.Task] = set()
+        self._update_chain: dict[str, asyncio.Task] = {}
+        # Monotonic, never `len(self._pending)`: that shrinks as calls finish,
+        # so a third call could rebuild a key a live second call still holds
+        # and silently take over its future — which is the exact collision the
+        # suffix exists to prevent.
+        self._next_key = 0
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._stderr = bytearray()
@@ -279,8 +295,8 @@ class RemoteToolServer:
         if self._loop_abort is not None and not self._loop_abort.is_set():
             self._loop_abort.set()
 
-    async def _read_frames(self) -> None:
-        decoder = proto.FrameDecoder()
+    async def _read_frames(self, decoder: "proto.FrameDecoder | None" = None) -> None:
+        decoder = decoder if decoder is not None else proto.FrameDecoder()
         try:
             while True:
                 data = await self._reader.read(65536)
@@ -289,8 +305,20 @@ class RemoteToolServer:
                         # `aclose` asked it to go; a half-written frame on the
                         # way out is not a failure to report.
                         return
-                    decoder.close()  # raises if the peer died mid-frame
-                    self._fail(self._death_reason("the tool server exited"))
+                    # A partial frame at EOF is the peer dying mid-write,
+                    # not a codec disagreement, so it must not outrank the
+                    # death reason: reporting "protocol error: stream
+                    # ended mid-frame" for a SIGTERM would lose the prefix
+                    # `_is_shutdown_collateral` matches on, which is the
+                    # same regression by another route. The truncation is
+                    # still recorded, as a suffix on the real cause.
+                    truncated = ""
+                    try:
+                        decoder.close()
+                    except proto.ProtocolError as exc:
+                        truncated = f" ({exc})"
+                    reason = await self._death_reason("the tool server exited")
+                    self._fail(reason + truncated)
                     return
                 for msg in decoder.feed(data):
                     self._dispatch(msg)
@@ -304,16 +332,15 @@ class RemoteToolServer:
     def _dispatch(self, msg: dict) -> None:
         kind = msg.get("type")
         if kind == proto.MSG_UPDATE:
-            on_update = self._updates.get(str(msg.get("id")))
+            key = str(msg.get("id"))
+            on_update = self._updates.get(key)
             if on_update is not None:
-                # Fire-and-forget: the loop's `on_update` writes a task event,
-                # and awaiting it here would stall every other call's frames
-                # behind one surface's write.
-                asyncio.ensure_future(_safe_update(on_update, str(msg.get("text") or "")))
+                self._queue_update(key, on_update, str(msg.get("text") or ""))
             return
         if kind == proto.MSG_RESULT:
             fut = self._pending.pop(str(msg.get("id")), None)
             self._updates.pop(str(msg.get("id")), None)
+            self._update_chain.pop(str(msg.get("id")), None)
             if fut is not None and not fut.done():
                 fut.set_result(ToolResult(
                     content=content_from_wire(msg.get("content")),
@@ -331,7 +358,52 @@ class RemoteToolServer:
             return  # consumed by the handshake; a second one is noise
         self._fail(f"unexpected message from the tool server: {kind!r}")
 
-    def _death_reason(self, prefix: str) -> str:
+    def _queue_update(self, key: str, on_update, text: str) -> None:
+        """Deliver one `update` chunk without blocking the reader.
+
+        Not a bare `ensure_future`, for two reasons that both bite. **Ordering
+        per call**: two tasks each `await on_update(...)`, the executor's
+        callback writes a `task_events` row, and they interleave at the first
+        await — so a Bash command's streamed output could reach the surface
+        out of order, which the in-process version it replaced could not do.
+        Each call's updates are therefore chained behind the previous one.
+        **And a reference**: asyncio may garbage-collect a task nothing holds,
+        which loses a chunk silently.
+
+        Still not awaited in the reader, deliberately: one surface's slow write
+        would otherwise stall every other call's *result* frames behind it,
+        which is a worse failure than a late progress chunk.
+        """
+        previous = self._update_chain.get(key)
+
+        async def _chained() -> None:
+            if previous is not None:
+                with contextlib.suppress(BaseException):
+                    await previous
+            await _safe_update(on_update, text)
+
+        task = asyncio.ensure_future(_chained())
+        self._update_chain[key] = task
+        self._update_tasks.add(task)
+        task.add_done_callback(self._update_tasks.discard)
+
+    async def _death_reason(self, prefix: str) -> str:
+        """Why the server is gone, in the wording the scheduler classifies on.
+
+        **It waits for the child first, and that await is the whole
+        correctness of the signal case.** EOF on the socketpair is delivered by
+        the selector the moment the child's fd closes, while `returncode` is
+        set from a *different* callback — asyncio's child watcher does a
+        blocking `waitpid` on its own thread and then hands the result back
+        through `call_soon_threadsafe`. Read without waiting, `returncode` is
+        almost always still `None`, the signal branch below never runs, and the
+        `_TERMINATED_PREFIX` this class exists to preserve is never produced —
+        so `_is_shutdown_collateral` stays False and a deploy restart fails and
+        retries every in-flight native task instead of requeuing it. That is
+        ISSUE-191 reappearing through a race rather than through wording.
+        """
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self._proc.wait(), timeout=_REAP_TIMEOUT_SECONDS)
         rc = self._proc.returncode
         if rc is not None and rc < 0:
             signum = -rc
@@ -374,30 +446,53 @@ class RemoteToolServer:
         """
         if self._closed:
             return
-        self._closed = True
         self._stopping = True
-        with contextlib.suppress(Exception):
-            await self._send({"type": proto.MSG_SHUTDOWN})
-        with contextlib.suppress(Exception):
-            self._writer.close()
         try:
-            await asyncio.wait_for(
-                self._proc.wait(), timeout=proto.SHUTDOWN_GRACE_SECONDS
-            )
-        except Exception:  # noqa: BLE001 — TimeoutError included; both kill
-            # The group, not the process: everything Bash forked is in it, and
-            # `--die-with-parent` only fires when the *daemon* goes.
+            # **Bounded.** `_send` takes the write lock and then `drain()`s,
+            # and neither is bounded on its own: a concurrent `call` or an
+            # abort watcher parked inside `drain()` against a server that has
+            # stopped reading would hold the lock indefinitely, and this is the
+            # first thing on a teardown path that must always complete. A
+            # `shutdown` that could not be delivered costs the graceful window
+            # and nothing else — the kill below is what actually ends it.
             with contextlib.suppress(Exception):
-                kill_process_group(self._proc.pid)
+                await asyncio.wait_for(
+                    self._send({"type": proto.MSG_SHUTDOWN}),
+                    timeout=_SHUTDOWN_SEND_TIMEOUT_SECONDS,
+                )
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-        for task in (self._reader_task, self._stderr_task):
-            if task is not None:
+                self._writer.close()
+            try:
+                await asyncio.wait_for(
+                    self._proc.wait(), timeout=proto.SHUTDOWN_GRACE_SECONDS
+                )
+            except BaseException:  # noqa: BLE001 — CancelledError included
+                # The group, not the process: everything Bash forked is in it,
+                # and `--die-with-parent` only fires when the *daemon* goes.
+                # `BaseException` rather than `Exception` because this is
+                # called from a `finally` that runs on the cancellation path by
+                # design, and a `CancelledError` delivered in the graceful
+                # window would otherwise leave the bwrap process and its whole
+                # build tree alive until the daemon exited.
+                with contextlib.suppress(BaseException):
+                    kill_process_group(self._proc.pid)
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(self._proc.wait(), timeout=_REAP_TIMEOUT_SECONDS)
+            for task in (self._reader_task, self._stderr_task):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+            for task in list(self._update_tasks):
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-        with contextlib.suppress(Exception):
-            self._sock.close()
+            with contextlib.suppress(Exception):
+                self._sock.close()
+        finally:
+            # In a `finally`, so a cancellation partway through cannot leave
+            # `_closed` True with the process still alive and every later call
+            # a no-op — which is the same leak the branch above exists to stop,
+            # reached through the flag instead of through the wait.
+            self._closed = True
 
     # -- calls -------------------------------------------------------------
 
@@ -422,7 +517,8 @@ class RemoteToolServer:
         # The loop reuses a tool_call id at most once, but a defensive suffix
         # costs nothing and a collision would deliver one call's result to the
         # other's future.
-        key = f"{call_id}:{len(self._pending)}"
+        self._next_key += 1
+        key = f"{call_id}:{self._next_key}"
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[key] = fut
         if on_update is not None:
@@ -444,6 +540,15 @@ class RemoteToolServer:
                 is_error=True,
             )
         except asyncio.CancelledError:
+            # The daemon side is going; the server does not know that. Without
+            # this the command keeps running — a build, a `sleep 30` — until
+            # `aclose` reaches it, which is the whole rest of the teardown
+            # away and, on the path where `aclose` itself is cancelled, never.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    self._send({"type": proto.MSG_ABORT, "id": key}),
+                    timeout=_SHUTDOWN_SEND_TIMEOUT_SECONDS,
+                )
             raise
         except Exception as exc:  # noqa: BLE001 — nothing raises into the loop
             self._fail(f"tool call failed: {exc}")
@@ -454,6 +559,7 @@ class RemoteToolServer:
         finally:
             self._pending.pop(key, None)
             self._updates.pop(key, None)
+            self._update_chain.pop(key, None)
             if watcher is not None:
                 watcher.cancel()
 
@@ -544,13 +650,22 @@ async def start_tool_server(
         with contextlib.suppress(OSError):
             os.close(raw)
 
-    reader, writer = await asyncio.open_connection(sock=parent)
+    try:
+        reader, writer = await asyncio.open_connection(sock=parent)
+    except BaseException:
+        # Outside the block above, so nothing there closes either of these.
+        with contextlib.suppress(BaseException):
+            kill_process_group(proc.pid)
+        with contextlib.suppress(BaseException):
+            parent.close()
+        raise
     server = RemoteToolServer(proc, parent, reader, writer, loop_abort=loop_abort)
     server._stderr_task = asyncio.ensure_future(server._drain_stderr())
+    handshake = proto.FrameDecoder()
     try:
         await server._send(hello)
         ready = await asyncio.wait_for(
-            _await_ready(server, reader), timeout=startup_timeout
+            _await_ready(server, reader, handshake), timeout=startup_timeout
         )
     except asyncio.TimeoutError:
         await _abandon(server)
@@ -566,8 +681,13 @@ async def start_tool_server(
 
     server.tools = [str(t) for t in (ready.get("tools") or [])]
     # The reader takes over the socket only after the handshake, so the two
-    # never race for the same bytes.
-    server._reader_task = asyncio.ensure_future(server._read_frames())
+    # never race for the same bytes — and it takes over the handshake's
+    # *decoder* rather than starting a fresh one, which is the other half of
+    # that. A `fatal` arriving in the same read as `ready` would otherwise be
+    # dropped, and a partial frame left in the handshake buffer would leave a
+    # new decoder reading the middle of a JSON payload as a 4-byte length:
+    # a real failure reported with a fabricated cause.
+    server._reader_task = asyncio.ensure_future(server._read_frames(handshake))
     if on_pid is not None:
         with contextlib.suppress(Exception):
             # The outer bwrap pid, which is what `!stop`, the web cancel
@@ -578,14 +698,24 @@ async def start_tool_server(
     return server
 
 
-async def _await_ready(server: RemoteToolServer, reader: asyncio.StreamReader) -> dict:
-    """Read frames until ``ready``. Anything else is a failed start."""
-    decoder = proto.FrameDecoder()
+async def _await_ready(
+    server: RemoteToolServer,
+    reader: asyncio.StreamReader,
+    decoder: proto.FrameDecoder,
+) -> dict:
+    """Read frames until ``ready``. Anything else is a failed start.
+
+    The decoder is the caller's, and is handed on to ``_read_frames``: bytes
+    that arrived in the same read as ``ready`` belong to the stream, not to
+    this function.
+    """
     while True:
         data = await reader.read(65536)
         if not data:
             decoder.close()
-            raise ToolServerError(server._death_reason("the tool server exited at startup"))
+            raise ToolServerError(
+                await server._death_reason("the tool server exited at startup")
+            )
         for msg in decoder.feed(data):
             if msg.get("type") == proto.MSG_READY:
                 got = msg.get("protocol")

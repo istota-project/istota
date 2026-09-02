@@ -32,7 +32,8 @@ the daemon, which has no bridge and no port. Without the merge every
 network-using build inside a task would fail with an error pointing nowhere
 near this file. ``NO_PROXY`` is deliberately the **empty string** in that
 wrapper — it blanks an inherited exemption list — so the merge tests presence,
-never truthiness.
+never truthiness, and the wrapper's value wins a collision because inside
+``--unshare-net`` the bridge on loopback is the only proxy anything can reach.
 
 Nothing here raises past ``main``. A failure at any point sends ``fatal`` and
 exits non-zero, which the daemon turns into a failed attempt; frame *contents*
@@ -71,9 +72,18 @@ def merge_proxy_env(
     environment plus them, since anything less would silently narrow what a
     direct (non-task) caller's Bash children inherit.
 
-    The daemon's value wins on a collision: a deployment that set
-    ``passthrough_env_vars = ["HTTPS_PROXY"]`` meant that one, and the bridge
-    only ever sets these three to its own loopback port.
+    **This process's value wins a collision, not the daemon's**, and the
+    asymmetry is about reachability rather than about precedence in the
+    abstract. The only thing that puts a proxy variable in *this* environment
+    is ``build_bwrap_cmd``'s bridge wrapper, which ``exec env``s it onto the
+    process bwrap runs; and inside ``--unshare-net`` the bridge on loopback is
+    the only proxy any child can reach. A daemon-side value — an operator's
+    ``passthrough_env_vars = ["HTTPS_PROXY"]`` naming a corporate proxy, say —
+    is a host address with no route from in here, so preferring it would point
+    every build at something unreachable and fail it with an error naming
+    neither this file nor the wrapper. Where there is no bridge the wrapper set
+    nothing, ``found`` is empty, and the daemon's value passes through
+    untouched, which is the case that setting was written for.
     """
     env = os.environ if process_env is None else process_env
     found = {k: env[k] for k in _PROXY_ENV_VARS if k in env}
@@ -82,8 +92,8 @@ def merge_proxy_env(
     if subprocess_env is None:
         merged = dict(env)
     else:
-        merged = dict(found)
-        merged.update(subprocess_env)
+        merged = dict(subprocess_env)
+    merged.update(found)
     return merged
 
 
@@ -103,14 +113,25 @@ def build_env(hello: dict[str, Any], process_env: dict[str, str] | None = None):
             return None
         return tuple(Path(p) for p in value)
 
+    # Read off a default `ToolEnv` rather than restated as literals here. The
+    # daemon's `_hello_payload` takes them from the same place and says why:
+    # a second set of numbers is a silent second default the day one of them
+    # changes. `is None` rather than `or`, because `0` is a legitimate value
+    # for the two caps that read it as "no cap".
+    defaults = ToolEnv(cwd=Path(hello["cwd"]))
+
+    def _cap(key: str, fallback: int) -> int:
+        value = hello.get(key)
+        return fallback if value is None else int(value)
+
     deferred = hello.get("deferred_dir")
     return ToolEnv(
         cwd=Path(hello["cwd"]),
         subprocess_env=merge_proxy_env(hello.get("subprocess_env"), process_env),
-        bash_timeout_seconds=int(hello.get("bash_timeout_seconds") or 120),
-        max_output_bytes=int(hello.get("max_output_bytes") or 30_000),
-        max_read_lines=int(hello.get("max_read_lines") or 2000),
-        max_read_bytes=int(hello.get("max_read_bytes") or 25_000_000),
+        bash_timeout_seconds=_cap("bash_timeout_seconds", defaults.bash_timeout_seconds),
+        max_output_bytes=_cap("max_output_bytes", defaults.max_output_bytes),
+        max_read_lines=_cap("max_read_lines", defaults.max_read_lines),
+        max_read_bytes=_cap("max_read_bytes", defaults.max_read_bytes),
         read_roots=_roots("read_roots"),
         write_roots=_roots("write_roots"),
         write_denied_roots=tuple(_roots("write_denied_roots") or ()),
@@ -191,6 +212,12 @@ class _Server:
             await self._on_hello(message)
             return
         if kind == proto.MSG_CALL:
+            if not self._tools:
+                # The `hello`-first rule, which was enforced nowhere: with no
+                # tools bound every name resolves to None and the caller was
+                # told "Unknown tool: Read", which sends the reader looking at
+                # the tool table rather than at the handshake.
+                raise proto.ProtocolError("a call arrived before hello")
             self._on_call(message)
             return
         if kind == proto.MSG_ABORT:
@@ -224,17 +251,27 @@ class _Server:
 
     def _on_call(self, message: dict) -> None:
         call_id = str(message.get("id"))
+        # The abort event is registered **here**, synchronously, not inside the
+        # coroutine below. `decoder.feed` returns a list, so an `abort` frame
+        # arriving in the same read as its `call` is handled on the next line
+        # with no await in between — and `_handle` drops an abort for an id it
+        # cannot find. Registering in the coroutine leaves that window open,
+        # and the daemon closes it routinely: `call()` starts its abort watcher
+        # straight after sending, so an abort already set (the loop's own,
+        # which the failure path sets) produces exactly that frame ordering.
+        abort = asyncio.Event()
+        self._aborts[call_id] = abort
         # A task per call rather than an await: the daemon's loop dispatches a
         # whole batch of parallel-mode tools at once, and serializing them here
         # would silently undo `execution_mode="parallel"` for every one of
         # them while every schema assertion stayed green.
-        self._running[call_id] = asyncio.ensure_future(self._run_call(call_id, message))
+        self._running[call_id] = asyncio.ensure_future(
+            self._run_call(call_id, message, abort)
+        )
 
-    async def _run_call(self, call_id: str, message: dict) -> None:
+    async def _run_call(self, call_id: str, message: dict, abort: asyncio.Event) -> None:
         name = str(message.get("tool"))
         args = message.get("args")
-        abort = asyncio.Event()
-        self._aborts[call_id] = abort
         try:
             tool = self._tools.get(name)
             if tool is None:
@@ -265,14 +302,35 @@ class _Server:
             self._running.pop(call_id, None)
 
     async def _result(self, call_id: str, result) -> None:
+        """Send one `result` frame, or an error result if it will not fit.
+
+        The codec refuses a frame over `MAX_FRAME_BYTES`, and that refusal must
+        be **this call's** problem rather than the attempt's: falling through
+        to the outer handler would send `fatal` and fail the whole task over
+        one oversized `Grep` in content mode. The daemon's `call()` already
+        handles the mirror case this way and says so — "the server is healthy;
+        this call is not" — and the asymmetry was the bug.
+        """
         from istota.session.tools.remote import content_to_wire
 
-        await self._send({
+        frame = {
             "type": proto.MSG_RESULT,
             "id": call_id,
             "content": content_to_wire(result.content),
             "is_error": bool(result.is_error),
             "terminate": bool(result.terminate),
+        }
+        try:
+            await self._send(frame)
+            return
+        except proto.ProtocolError as exc:
+            replacement = _error(f"The result could not be returned: {exc}")
+        await self._send({
+            "type": proto.MSG_RESULT,
+            "id": call_id,
+            "content": content_to_wire(replacement.content),
+            "is_error": True,
+            "terminate": False,
         })
 
 

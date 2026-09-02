@@ -510,6 +510,66 @@ class TestFsConfinement:
         assert confined.read_roots == (tmp_path,) and confined.confined is True
 
 
+class TestADeadToolServerFailsTheAttempt:
+    """Which of two terminal states a broken sandbox produces, and which a
+    stopped task produces, when the two are indistinguishable from the socket.
+
+    A dead tool server sets the loop's abort, and the loop reports an abort as
+    `aborted`, which `_build_result` turns into "Cancelled by user" — a
+    success-shaped state the scheduler neither retries nor reports. So the
+    failure check has to outrank it. But `!stop` and the web cancel endpoint
+    *kill the recorded worker_pid's process group*, which is now the tool
+    server, so a genuine cancellation also produces a dead server — and there
+    the cancellation has to outrank the failure back. Both orderings are here
+    because each is the other's control.
+
+    A stand-in server rather than a killed one: what is under test is the
+    ordering in `_execute_async`, and `tests/test_tool_server.py` is where a
+    real process is killed and the recorded text is checked.
+    """
+
+    class _DeadServer:
+        failure = "the tool server exited (exit 2)"
+        tools: list[str] = []
+
+        async def aclose(self):
+            return None
+
+        async def call(self, *a, **kw):  # pragma: no cover - never reached
+            raise AssertionError("the model in this test calls no tool")
+
+    def _run(self, tmp_path, monkeypatch, cancelled: bool):
+        async def _fake_start(self, req, abort):
+            return TestADeadToolServerFailsTheAttempt._DeadServer()
+
+        monkeypatch.setattr(NativeBrain, "_start_tool_server", _fake_start)
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="done")], stop_reason="end_turn")]
+        )
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.cancel_check = (lambda: cancelled)
+        return _brain(provider).execute(req)
+
+    def test_a_broken_sandbox_fails_the_attempt(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, cancelled=False)
+
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert "tool server" in result.result_text
+        # Not the cancel wording, which the scheduler matches by exact equality
+        # and neither retries nor reports.
+        assert result.result_text != "Cancelled by user"
+
+    def test_a_stopped_task_still_reports_as_cancelled(self, tmp_path, monkeypatch):
+        """`!stop` kills the group the recorded pid leads, so the server dies
+        *because* the user stopped the task. Reporting that as a failed attempt
+        would put the task the user just stopped back on the retry ladder."""
+        result = self._run(tmp_path, monkeypatch, cancelled=True)
+
+        assert result.stop_reason == "cancelled"
+        assert result.result_text == "Cancelled by user"
+
+
 class TestErrorAndStops:
     def test_error_stop(self, tmp_path):
         provider = MockProvider(

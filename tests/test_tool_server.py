@@ -13,14 +13,19 @@ does one thing with the server it was given.
 """
 
 import asyncio
+import contextlib
 import os
 import shutil
+import signal
+import socket
+import subprocess
 import sys
 
 import pytest
 
 from istota.session.tools import ToolEnv, hello_payload, start_tool_server
 from istota.session.tools import remote as remote_mod
+from istota import tool_server_protocol as tsp
 
 pytestmark = pytest.mark.asyncio
 
@@ -281,6 +286,35 @@ class TestFailure:
         assert result.is_error and "Tool server failed" in _text(result)
         assert loop_abort.is_set()
         assert server.failure is not None
+        # And the recorded text names the signal. Asserting only that a failure
+        # exists is what let the reap race hide: EOF arrives from the selector
+        # while `returncode` is set from asyncio's child watcher on another
+        # thread, so a `_death_reason` that read it without waiting produced
+        # the generic "the tool server exited" for every signal death.
+        assert "SIGKILL" in server.failure, server.failure
+
+    async def test_a_sigtermed_server_keeps_the_requeue_marker(self, tmp_path):
+        """The deploy case, end to end rather than over a hand-built string.
+
+        `systemctl restart` SIGTERMs the whole cgroup. `_is_shutdown_collateral`
+        is `_shutdown_requested and is_signal_termination(result_text)`, so if
+        the text does not *start* with the marker the task is failed and
+        retried instead of requeued (ISSUE-191). Three separate things have to
+        hold for that — the constant, the reap, and `attempt_failure_text` not
+        labelling it — and only this test exercises all three together.
+        """
+        from istota.brain.claude_code import is_signal_termination
+
+        async with _Server(hello=_hello(tmp_path), loop_abort=asyncio.Event()) as server:
+            os.kill(server.pid, signal.SIGTERM)
+            for _ in range(300):
+                if server.failure is not None:
+                    break
+                await asyncio.sleep(0.02)
+            failure = server.failure
+
+        assert failure is not None, "the server death was never noticed"
+        assert is_signal_termination(remote_mod.attempt_failure_text(failure)), failure
 
     async def test_a_call_after_the_failure_is_refused_without_hanging(self, tmp_path):
         async with _Server(hello=_hello(tmp_path), loop_abort=asyncio.Event()) as server:
@@ -320,6 +354,97 @@ class TestFailure:
                 sandbox_wrap=lambda cmd: [str(tmp_path / "no-such-binary")],
                 startup_timeout=5.0,
             )
+
+
+class TestAnOversizedResultCostsTheCallOnly:
+    async def test_a_result_over_the_frame_cap_is_an_error_result(self, tmp_path):
+        """The codec refuses a frame over the cap on both ends. On the daemon
+        side that is already handled per call ("the server is healthy; this
+        call is not"); the server used to let it fall through to `fatal` and
+        fail the whole attempt over one oversized Grep.
+
+        Driven by lowering the cap rather than by generating 32 MiB: the branch
+        is the same and the test stays fast. The cap is patched inside the
+        server process via an env-var-free route — a tiny wrap script — because
+        the constant lives in the child.
+        """
+        from istota import tool_server_protocol as p
+
+        big = tmp_path / "big.txt"
+        big.write_text("x" * 4096)
+
+        script = (
+            "import sys, istota.tool_server_protocol as p, istota.tool_server as t;"
+            "p.MAX_FRAME_BYTES = 512;"
+            "sys.exit(t.main(sys.argv[1:]))"
+        )
+
+        def _wrap(cmd):
+            return [sys.executable, "-c", script, *cmd[3:]]
+
+        async with _Server(
+            hello=_hello(tmp_path), sandbox_wrap=_wrap, loop_abort=asyncio.Event()
+        ) as server:
+            result = await _call(server, "Read", {"file_path": str(big)})
+            assert result.is_error, _text(result)
+            assert "could not be returned" in _text(result), _text(result)
+            # The server is still healthy and still answering.
+            assert server.failure is None
+            ok = await _call(server, "Bash", {"command": "echo still-here"})
+            assert "still-here" in _text(ok)
+        assert p.MAX_FRAME_BYTES > 512  # the daemon's own cap is untouched
+
+
+class TestAbortOrdering:
+    async def test_an_abort_arriving_with_its_call_still_cancels_it(self, tmp_path):
+        """`decoder.feed` returns a list, so two frames in one read are handled
+        back to back with no await between them — and the daemon produces
+        exactly that ordering whenever the loop's abort is already set when a
+        call is issued, which is what the tool-server failure path itself does.
+        The event has to be registered before the call coroutine runs, or the
+        abort is looked up, not found, and dropped.
+        """
+        abort = asyncio.Event()
+        abort.set()  # already set, as it is after a `_fail`
+        async with server_for(tmp_path) as server:
+            result = await asyncio.wait_for(
+                _call(server, "Bash", {"command": "sleep 20"}, abort=abort),
+                timeout=15,
+            )
+        assert "aborted" in _text(result), _text(result)
+
+    async def test_a_call_before_hello_is_a_protocol_fault(self, tmp_path):
+        """Not "Unknown tool: Read", which sends the reader to the tool table
+        instead of to the handshake."""
+        parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        raw = child.detach()
+        os.set_inheritable(raw, True)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "istota.tool_server", "--fd", str(raw),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, pass_fds=(raw,),
+        )
+        os.close(raw)
+        try:
+            reader, writer = await asyncio.open_connection(sock=parent)
+            writer.write(tsp.encode({"type": "call", "id": "c", "tool": "Read", "args": {}}))
+            await writer.drain()
+            decoder = tsp.FrameDecoder()
+            messages = []
+            while not messages:
+                data = await asyncio.wait_for(reader.read(65536), timeout=10)
+                if not data:
+                    break
+                messages = decoder.feed(data)
+            assert messages and messages[0]["type"] == "fatal", messages
+            assert "before hello" in messages[0]["message"]
+            assert await asyncio.wait_for(proc.wait(), timeout=10) != 0
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            with contextlib.suppress(Exception):
+                parent.close()
 
 
 class TestTheWrapIsApplied:
@@ -367,13 +492,26 @@ class TestTheDescriptorIsNotInheritedByToolChildren:
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 class TestPersistenceAcrossCalls:
-    async def test_tmp_and_a_background_process_survive_between_calls(self, tmp_path):
-        """The behaviour change one namespace per attempt buys, and it is
-        observable: a per-call sandbox threw both away every time."""
+    async def test_two_calls_are_served_by_one_process(self, tmp_path):
+        """One namespace per attempt reduced to what an unsandboxed host can
+        witness: both commands have the *same parent*, the server.
+
+        The obvious version of this test — write to `/tmp` in one call, read it
+        back in the next — cannot fail here, because with no wrap there is no
+        per-call sandbox to throw `/tmp` away; it holds for the implementation
+        this change replaced just as well. Worse, globbing `/tmp` picks up
+        leftovers from earlier runs, so it can pass while its own write failed.
+        The parent pid is a property only one server per attempt produces, and
+        `tests/linux/test_tool_server_lifecycle.py` makes the namespace-level
+        claim where a namespace exists to make it about.
+        """
         async with server_for(tmp_path) as server:
-            await _call(server, "Bash", {"command": "echo kept > /tmp/istota-probe-$$"})
-            listed = await _call(server, "Bash", {"command": "ls /tmp/istota-probe-* | wc -l"})
-        assert listed.content and _text(listed).strip().splitlines()[0].strip() != "0"
+            first = await _call(server, "Bash", {"command": "echo PPID=$PPID"})
+            second = await _call(server, "Bash", {"command": "echo PPID=$PPID"})
+        a = _text(first).split("PPID=")[1].split()[0]
+        b = _text(second).split("PPID=")[1].split()[0]
+        assert a == b, (a, b)
+        assert int(a) == server.pid, (a, server.pid)
 
 
 class TestEncodeGuardsTheCallPath:

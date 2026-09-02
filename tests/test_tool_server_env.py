@@ -71,6 +71,14 @@ class TestBuildEnv:
         what keeps the server at exactly six tools."""
         assert build_env(_hello(), process_env={}).web_fetch is None
 
+    def test_a_zero_cap_is_carried_rather_than_replaced_by_the_default(self):
+        """`0` means *no cap* on the two content caps, which is the opposite of
+        what it means on the retention limits beside them. Reading the frame
+        with `or` would turn a deliberate "no cap" into the default silently."""
+        env = build_env(_hello(max_read_bytes=0, max_output_bytes=0), process_env={})
+        assert env.max_read_bytes == 0
+        assert env.max_output_bytes == 0
+
     def test_the_caps_the_daemon_sends_are_the_ones_it_would_have_used(self):
         """`hello` is now the only thing that decides these, so a second set of
         numbers written into the frame builder would be a silent second default
@@ -102,15 +110,26 @@ class TestMergeProxyEnv:
         merged = merge_proxy_env({"PATH": "/usr/bin"}, {"NO_PROXY": ""})
         assert "NO_PROXY" in merged and merged["NO_PROXY"] == ""
 
-    def test_the_daemons_value_wins_a_collision(self):
-        """A deployment that put `HTTPS_PROXY` in `passthrough_env_vars` meant
-        that one; the bridge's values go *under* the daemon's, not over."""
+    def test_the_bridge_value_wins_a_collision(self):
+        """Reachability decides this, not precedence in the abstract. The only
+        thing that sets a proxy variable on *this* process is the bwrap bridge
+        wrapper, and inside `--unshare-net` the bridge on loopback is the only
+        proxy a child can reach — so a daemon-side value naming a corporate
+        proxy is a host address with no route from in here, and preferring it
+        would fail every build with an error naming neither end."""
         merged = merge_proxy_env(
             {"HTTPS_PROXY": "http://corp:3128"},
             {"HTTPS_PROXY": "http://127.0.0.1:8118", "NO_PROXY": ""},
         )
-        assert merged["HTTPS_PROXY"] == "http://corp:3128"
+        assert merged["HTTPS_PROXY"] == "http://127.0.0.1:8118"
         assert merged["NO_PROXY"] == ""
+
+    def test_a_daemon_value_survives_where_there_is_no_bridge(self):
+        """The other half, and what keeps `passthrough_env_vars` meaningful: no
+        wrapper means nothing to merge, so the daemon's value passes through
+        untouched rather than being overwritten by an absence."""
+        merged = merge_proxy_env({"HTTPS_PROXY": "http://corp:3128"}, {})
+        assert merged == {"HTTPS_PROXY": "http://corp:3128"}
 
     def test_nothing_to_merge_leaves_the_value_alone(self):
         """`None` means "inherit the parent environment" to `ToolEnv`, and on a

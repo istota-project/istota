@@ -299,6 +299,30 @@ _NATIVE_NETWORK_RE = re.compile(
 )
 
 
+def _cancel_requested(req: BrainRequest) -> bool:
+    """Has the user asked for this task to stop?
+
+    Only consulted on a terminal path, and only to decide whether a tool-server
+    failure is the *cause* of the stop or its *consequence*: `!stop` and the
+    web cancel endpoint kill the recorded `worker_pid`'s process group, which
+    is the tool server, so a cancellation and a crashed sandbox look identical
+    from the socket. Asking the source of truth is the only thing that
+    separates them.
+
+    A raising `cancel_check` (transient SQLite lock contention) reads as "not
+    cancelled", matching `_poll_cancel`: the cost is one failure reported as a
+    tool-server failure rather than as a cancellation, against the cost of an
+    exception on the result-construction path.
+    """
+    if req.cancel_check is None:
+        return False
+    try:
+        return bool(req.cancel_check())
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("cancel_check raised on the terminal path", exc_info=True)
+        return False
+
+
 def _classify_native_error(text: str) -> str:
     """Classify a native error body into ``usage_limit`` / ``transient_api_error``
     / ``error``.
@@ -1944,7 +1968,21 @@ class NativeBrain:
         # Failing rather than degrading each tool call to an error result is the
         # decision here: with an error per call the model narrates around a
         # broken sandbox and answers confidently.
-        if tool_server is not None and tool_server.failure is not None:
+        #
+        # **And a real cancellation outranks it back**, which this brain only
+        # had to learn once it started reporting a pid. `!stop` and the web
+        # cancel endpoint set `cancel_requested` *and* `kill_process_group` the
+        # recorded `worker_pid` — which is now the tool server's outer bwrap,
+        # leading its own group. So a user pressing stop kills the server, the
+        # reader sees EOF, and without this test the task the user just stopped
+        # would come back as a failed attempt on the retry ladder instead of as
+        # "Cancelled by user". `worker_pid` was 0 for every native task before
+        # this stage, so the kill never landed and the question never arose.
+        if (
+            tool_server is not None
+            and tool_server.failure is not None
+            and not _cancel_requested(req)
+        ):
             from istota.session.tools.remote import attempt_failure_text
 
             return self._build_result(

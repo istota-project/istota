@@ -220,12 +220,12 @@ class TestTheProxyVariablesReachABashChild:
         # daemon's own exemption list covers.
         assert "NO_PROXY=[]" in out, out
 
-    def test_the_daemons_own_value_wins_a_collision(
+    def test_the_bridge_value_wins_a_collision(
         self, layout, task, user_temp, proxy, monkeypatch,
     ):
-        """A deployment that put `HTTPS_PROXY` in `passthrough_env_vars` meant
-        that one. The merge is the bridge's values *under* the daemon's, not
-        over them."""
+        """The daemon's own value is a *host* address with no route out of
+        `--unshare-net`, so the bridge's wins. Measured here rather than
+        argued: this is the one place both values exist at once."""
         async def _go():
             hello = _hello(user_temp)
             hello["subprocess_env"]["HTTPS_PROXY"] = "http://192.0.2.1:9"
@@ -241,10 +241,11 @@ class TestTheProxyVariablesReachABashChild:
                 await server.aclose()
 
         out = asyncio.run(_go())
-        assert "HTTPS_PROXY=[http://192.0.2.1:9]" in out, out
-        # And the one the daemon did *not* name still comes from the bridge,
-        # which is what makes this a merge rather than a choice between two
-        # whole environments.
+        assert "HTTPS_PROXY=[http://127.0.0.1:" in out, out
+        assert "192.0.2.1" not in out, out
+        # And the one the daemon did *not* name is there too, which is what
+        # makes this a merge rather than a choice between two whole
+        # environments.
         assert "HTTP_PROXY=[http://127.0.0.1:" in out, out
 
 
