@@ -1,5 +1,6 @@
 """Tests for feeds module job seeding into istota's scheduler."""
 
+import json
 from pathlib import Path
 
 
@@ -50,12 +51,25 @@ def _make_app_config(
 # ---------------------------------------------------------------------------
 
 
+def _job(jobs: list[dict], name: str) -> dict:
+    """The rendered job with this name. Keyed by name rather than index so a
+    reordering of DEFAULT_JOBS cannot silently move an assertion onto the
+    other row."""
+    matches = [j for j in jobs if j["name"] == name]
+    assert len(matches) == 1, f"expected exactly one {name}, got {len(matches)}"
+    return matches[0]
+
+
+
 class TestJobsForUser:
-    def test_seeds_run_scheduled(self, tmp_path):
+    def test_seeds_run_scheduled_and_prune(self, tmp_path):
         ctx = synthesize_feeds_context("alice", tmp_path)
         jobs = jobs_for_user(ctx, "alice")
         names = [j["name"] for j in jobs]
-        assert names == [f"{MODULE_PREFIX}run_scheduled"]
+        assert names == [
+            f"{MODULE_PREFIX}run_scheduled",
+            f"{MODULE_PREFIX}prune",
+        ]
 
     def test_returns_empty_when_no_context(self):
         assert jobs_for_user(None, "alice") == []
@@ -66,15 +80,38 @@ class TestJobsForUser:
         import json
         ctx = synthesize_feeds_context("alice", tmp_path)
         jobs = jobs_for_user(ctx, "alice")
+        assert jobs, "expected at least one rendered job"
         for j in jobs:
             assert "command" not in j
             assert j["skill"] == "feeds"
-            assert json.loads(j["skill_args"]) == ["run-scheduled"]
+            assert isinstance(json.loads(j["skill_args"]), list)
 
-    def test_default_cron_every_5_min(self, tmp_path):
+    def test_poll_job_cron_and_args(self, tmp_path):
+        import json
         ctx = synthesize_feeds_context("alice", tmp_path)
-        jobs = jobs_for_user(ctx, "alice")
-        assert jobs[0]["cron"] == "*/5 * * * *"
+        job = _job(jobs_for_user(ctx, "alice"), f"{MODULE_PREFIX}run_scheduled")
+        assert job["cron"] == "*/5 * * * *"
+        assert json.loads(job["skill_args"]) == ["run-scheduled"]
+
+    def test_prune_job_is_daily_and_takes_no_flags(self, tmp_path):
+        """The prune row's exact shape. The cron is the contract with the
+        scheduler and the args are the contract with the skill facade: a
+        stray flag here would be dispatched to `feeds prune` on every
+        deployment with the module enabled, unattended and daily."""
+        import json
+        ctx = synthesize_feeds_context("alice", tmp_path)
+        job = _job(jobs_for_user(ctx, "alice"), f"{MODULE_PREFIX}prune")
+        assert job["cron"] == "17 3 * * *"
+        assert job["skill"] == "feeds"
+        assert json.loads(job["skill_args"]) == ["prune"]
+
+    def test_the_prune_job_never_runs_in_dry_run(self, tmp_path):
+        """A scheduled dry run would report deletions and delete nothing,
+        so growth would continue while the log said it was handled."""
+        import json
+        ctx = synthesize_feeds_context("alice", tmp_path)
+        job = _job(jobs_for_user(ctx, "alice"), f"{MODULE_PREFIX}prune")
+        assert "--dry-run" not in json.loads(job["skill_args"])
 
 
 # ---------------------------------------------------------------------------
@@ -90,11 +127,19 @@ class TestSyncFeedsModuleJobs:
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         rows = conn.execute(
-            "SELECT name FROM scheduled_jobs WHERE user_id = ? ORDER BY name",
+            "SELECT name, cron_expression, skill, skill_args FROM scheduled_jobs "
+            "WHERE user_id = ? ORDER BY name",
             ("alice",),
         ).fetchall()
-        names = [r[0] for r in rows]
-        assert names == [f"{MODULE_PREFIX}run_scheduled"]
+        assert [r[0] for r in rows] == [
+            f"{MODULE_PREFIX}prune",
+            f"{MODULE_PREFIX}run_scheduled",
+        ]
+        by_name = {r[0]: r for r in rows}
+        assert by_name[f"{MODULE_PREFIX}prune"][1] == "17 3 * * *"
+        assert by_name[f"{MODULE_PREFIX}prune"][2] == "feeds"
+        assert json.loads(by_name[f"{MODULE_PREFIX}prune"][3]) == ["prune"]
+        assert by_name[f"{MODULE_PREFIX}run_scheduled"][1] == "*/5 * * * *"
 
     def test_user_with_feeds_module_disabled_has_no_module_jobs(self, tmp_path):
         app_config = _make_app_config(
@@ -114,11 +159,15 @@ class TestSyncFeedsModuleJobs:
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
         _sync_feeds_module_jobs(conn, app_config)
-        count = conn.execute(
-            "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM scheduled_jobs WHERE user_id = ? AND name LIKE ? "
+            "ORDER BY name",
             ("alice", f"{MODULE_PREFIX}%"),
-        ).fetchone()[0]
-        assert count == 1
+        )]
+        assert names == [
+            f"{MODULE_PREFIX}prune",
+            f"{MODULE_PREFIX}run_scheduled",
+        ]
 
     def test_removes_module_jobs_when_module_disabled(self, tmp_path):
         app_config = _make_app_config(tmp_path, ["alice"])
@@ -142,12 +191,13 @@ class TestSyncFeedsModuleJobs:
         app_config = _make_app_config(tmp_path, ["alice"])
         conn = _conn(tmp_path)
         _sync_feeds_module_jobs(conn, app_config)
-        row = conn.execute(
-            "SELECT skip_log_channel FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
+        rows = conn.execute(
+            "SELECT name, skip_log_channel FROM scheduled_jobs "
+            "WHERE user_id = ? AND name LIKE ? ORDER BY name",
             ("alice", f"{MODULE_PREFIX}%"),
-        ).fetchone()
-        assert row[0] == 1
+        ).fetchall()
+        assert len(rows) == 2
+        assert all(r[1] == 1 for r in rows), dict(rows)
 
     def test_backfills_skip_log_channel_on_existing_row(self, tmp_path):
         # Pre-existing module rows that were seeded before the fix have
@@ -170,8 +220,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT skip_log_channel, last_run_at FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] == 1
         assert row[1] == original_last_run
@@ -209,6 +259,101 @@ class TestSyncFeedsModuleJobs:
         ).fetchone()[0]
         assert count == 1
 
+    def test_upgrade_seeds_prune_beside_an_existing_poll_row(self, tmp_path):
+        """The reconciliation path every existing deployment takes: the poll
+        row is already there in its current shape, and the sync has to add the
+        prune row without rewriting the poll row. `last_run_at` is the one to
+        watch — bumping it would defer the next poll by a full interval."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        original_last_run = "2026-05-03 07:55:00"
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, last_run_at) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1, ?)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]', original_last_run),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        rows = {
+            r[0]: r for r in conn.execute(
+                "SELECT name, cron_expression, skill_args, last_run_at, "
+                "skip_log_channel FROM scheduled_jobs "
+                "WHERE user_id = ? AND name LIKE ?",
+                ("alice", f"{MODULE_PREFIX}%"),
+            )
+        }
+        assert set(rows) == {
+            f"{MODULE_PREFIX}run_scheduled", f"{MODULE_PREFIX}prune",
+        }
+        prune = rows[f"{MODULE_PREFIX}prune"]
+        assert prune[1] == "17 3 * * *"
+        assert json.loads(prune[2]) == ["prune"]
+        assert prune[4] == 1
+        assert rows[f"{MODULE_PREFIX}run_scheduled"][3] == original_last_run
+
+    def test_seeding_prune_queues_no_immediate_task(self, tmp_path):
+        """The first-seed hook fires per newly inserted row, so an upgrade
+        that adds only the prune row runs it — and a prune that ran at
+        upgrade time would delete on a schedule nobody chose, ahead of the
+        daily job. The hook gates on the job name; this is that gate."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel) "
+            "VALUES (?, ?, ?, '', NULL, ?, ?, 1, 1)",
+            ("alice", f"{MODULE_PREFIX}run_scheduled", "*/5 * * * *",
+             "feeds", '["run-scheduled"]'),
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        # The prune row was seeded on this sync...
+        assert conn.execute(
+            "SELECT 1 FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}prune"),
+        ).fetchone() is not None
+        # ...and it queued nothing.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id = ?", ("alice",),
+        ).fetchone()[0] == 0
+
+    def test_first_seed_of_both_rows_queues_only_the_poll_task(self, tmp_path):
+        """A fresh user seeds both rows at once. Exactly one task, and it is
+        the poll — asserted on the args rather than on the count alone, since
+        a count of one is also what a single stray prune task looks like."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        rows = conn.execute(
+            "SELECT skill, skill_args FROM tasks WHERE user_id = ?", ("alice",),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "feeds"
+        assert json.loads(rows[0][1]) == ["run-scheduled"]
+
+    def test_disabling_the_module_removes_both_rows(self, tmp_path):
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()[0] == 2
+        _sync_feeds_module_jobs(
+            conn,
+            _make_app_config(
+                tmp_path, ["alice"], disabled_modules={"alice": ["feeds"]},
+            ),
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
+            ("alice", f"{MODULE_PREFIX}%"),
+        ).fetchone()[0] == 0
+
     def test_migrates_legacy_command_row_to_skill_shape(self, tmp_path):
         """Pre-Phase-1.3 hosts have command-shape rows; the next sync
         rewrites them to the skill/skill_args shape and clears command."""
@@ -228,8 +373,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT command, skill, skill_args FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] is None
         assert row[1] == "feeds"
@@ -260,8 +405,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT auto_disabled_at, consecutive_failures, last_error, enabled "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] is None
         assert row[1] == 0
@@ -292,8 +437,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT auto_disabled_at, consecutive_failures, last_error "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] is None
         assert row[1] == 0
@@ -327,8 +472,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT auto_disabled_at, consecutive_failures FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] is not None
         assert row[1] == 5
@@ -362,8 +507,8 @@ class TestSyncFeedsModuleJobs:
         row = conn.execute(
             "SELECT command, skill, enabled, consecutive_failures, last_error, "
             "auto_disabled_at "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] is None
         assert row[1] == "feeds"
@@ -394,8 +539,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT enabled, consecutive_failures, auto_disabled_at "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] == 0
         assert row[1] == 0
@@ -425,8 +570,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT enabled, auto_disabled_at FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert row[0] == 0, "the rescue must not override an explicit pause"
         assert row[1] is None
@@ -459,13 +604,12 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT enabled, consecutive_failures, last_error, auto_disabled_at "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert tuple(row) == (1, 0, None, None)
-        assert [j.name for j in db.get_enabled_scheduled_jobs(conn)] == [
-            f"{MODULE_PREFIX}run_scheduled"
-        ]
+        enabled = [j.name for j in db.get_enabled_scheduled_jobs(conn)]
+        assert f"{MODULE_PREFIX}run_scheduled" in enabled
 
     def test_the_legacy_arm_keeps_the_old_cooldown(self, tmp_path):
         """It is today's predicate verbatim, `last_run_at` included, so a row
@@ -486,8 +630,8 @@ class TestSyncFeedsModuleJobs:
         _sync_feeds_module_jobs(conn, app_config)
         row = conn.execute(
             "SELECT enabled, consecutive_failures FROM scheduled_jobs "
-            "WHERE user_id = ? AND name LIKE ?",
-            ("alice", f"{MODULE_PREFIX}%"),
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert tuple(row) == (0, 5)
 

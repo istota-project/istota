@@ -23,6 +23,7 @@ istota-skill feeds remove --url URL                      # or --id N
 istota-skill feeds refresh [--id N]                      # Clear next_poll_at to mark feeds due now
 istota-skill feeds poll [--limit N]                      # Poll every feed whose next_poll_at is past
 istota-skill feeds run-scheduled [--limit N]             # Wrapper used by the scheduler module-job
+istota-skill feeds prune [--dry-run]                     # Apply the entry retention policy
 istota-skill feeds import-opml PATH                      # Import OPML; rewrites bridger URLs
 istota-skill feeds export-opml [--output PATH]           # Export as OPML 2.0
 ```
@@ -45,4 +46,5 @@ OPML imports automatically rewrite bridger URLs (`http://127.0.0.1:8900/{provide
 ## Notes
 
 - The per-user SQLite is the only source of truth. `add` / `remove` mutate it directly. Don't read or write `feeds.toml` — any pre-existing file gets imported once on first touch then stops being read.
-- `run-scheduled` runs every 15 minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has a `[[resources]] type = "feeds"` entry.
+- `run-scheduled` runs every five minutes via the `_module.feeds.run_scheduled` job that the scheduler auto-seeds when the user has the feeds module enabled.
+- `prune` runs once a day via the `_module.feeds.prune` job, seeded the same way, so you rarely need to call it by hand. It deletes read and removed entries past the retention age and trims each feed to its maximum stored entries. Starred entries, unread entries and anything the feed's most recent response still returned are never deleted by age, and each feed keeps at least 50 entries whatever their age. The age is counted from when the entry was added to the reader, not from when it was published. `--dry-run` runs the same passes and rolls them back, so it reports the counts a real run would delete and changes nothing.

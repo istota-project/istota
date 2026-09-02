@@ -83,8 +83,8 @@ class TestParser:
         from istota.skills.feeds import build_parser
         p = build_parser()
         for cmd in ["list", "categories", "entries", "add", "remove",
-                    "refresh", "poll", "run-scheduled", "import-opml",
-                    "export-opml"]:
+                    "refresh", "poll", "run-scheduled", "prune",
+                    "import-opml", "export-opml"]:
             args = p.parse_args([cmd] + (["--url", "u"] if cmd == "add"
                                           else ["x"] if cmd == "import-opml"
                                           else []))
@@ -95,6 +95,67 @@ class TestParser:
         p = build_parser()
         with pytest.raises(SystemExit):
             p.parse_args(["add"])
+
+
+class TestPrune:
+    """The facade half of `feeds prune`. The scheduler dispatches this daily
+    and unattended, so what the parser accepts and what the handler forwards
+    are the whole contract — a dropped `--dry-run` deletes for real."""
+
+    def test_parses_dry_run(self):
+        from istota.skills.feeds import build_parser
+        args = build_parser().parse_args(["prune", "--dry-run"])
+        assert args.command == "prune"
+        assert args.dry_run is True
+
+    def test_dry_run_defaults_off(self):
+        """The scheduled job passes no flag, and it must delete for real."""
+        from istota.skills.feeds import build_parser
+        args = build_parser().parse_args(["prune"])
+        assert args.command == "prune"
+        assert args.dry_run is False
+
+    def test_dispatch_forwards_dry_run_to_the_click_command(self, monkeypatch):
+        from istota.skills import feeds as skill
+        sent = []
+        monkeypatch.setattr(
+            skill, "_run", lambda a: sent.append(a) or {"status": "ok"},
+        )
+        skill.main(["prune", "--dry-run"])
+        assert sent == [["prune", "--dry-run"]]
+
+    def test_dispatch_without_the_flag_sends_a_bare_prune(self, monkeypatch):
+        from istota.skills import feeds as skill
+        sent = []
+        monkeypatch.setattr(
+            skill, "_run", lambda a: sent.append(a) or {"status": "ok"},
+        )
+        skill.main(["prune"])
+        assert sent == [["prune"]]
+
+    def test_an_error_envelope_still_exits_nonzero(self, monkeypatch):
+        """A failed prune is a failed scheduled task. `_sync_module_jobs`
+        counts failures off the return code, so a prune that raised and
+        exited 0 would look like a daily job doing its work."""
+        from istota.skills import feeds as skill
+        monkeypatch.setattr(
+            skill, "_run",
+            lambda a: {"status": "error", "error": "database is locked"},
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            skill.main(["prune"])
+        assert exc_info.value.code == 1
+
+    def test_prune_reaches_the_real_cli_end_to_end(self, istota_config):
+        """Through `_run` and the Click command, not a mock: proves the
+        facade's argv is one the CLI actually accepts, which a mocked
+        dispatch test cannot see."""
+        from istota.skills.feeds import _run
+        out = _run(["prune", "--dry-run"])
+        assert out["status"] == "ok"
+        assert out["dry_run"] is True
+        assert out["entries_deleted_by_age"] == 0
+        assert out["entries_deleted_by_cap"] == 0
 
 
 class TestLoaderEnvFirst:
