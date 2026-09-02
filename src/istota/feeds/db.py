@@ -13,7 +13,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator
 
 from istota.feeds.image_dedupe import entry_seen_ts
 from istota.feeds.models import (
@@ -55,12 +55,13 @@ CREATE TABLE IF NOT EXISTS feeds (
     last_modified TEXT,
     last_fetched_at TEXT,
     last_throttled_at TEXT,
-    -- Poll time of the latest response trusted as a complete membership
-    -- snapshot (ISSUE-388). An entry stamped with exactly this value was in
-    -- that snapshot; an older stamp means the source stopped returning it.
-    -- NULL means no trustworthy snapshot has been taken, so nothing about
-    -- the feed's entries can be classified as history.
-    current_document_at TEXT,
+    -- Poll time of the most recent response that returned at least one item
+    -- (ISSUE-388). An entry stamped with exactly this value was in that
+    -- response and is never age-deleted; an older stamp means it was not.
+    -- NULL means no response has ever returned an item here, so nothing about
+    -- the feed's entries is deletable. Deliberately says nothing about whether
+    -- the response was complete, well-formed or a full page.
+    last_items_seen_at TEXT,
     -- Lease held by the process currently fetching this feed. Bounded, so a
     -- process that dies mid-fetch delays the feed by the lease rather than
     -- stranding it.
@@ -105,13 +106,10 @@ CREATE TABLE IF NOT EXISTS feed_entries (
     starred_at TEXT,
     -- The most recent poll time at which this entry was itself observed in a
     -- response (ISSUE-388). Distinct from `fetched_at`, which is the first
-    -- sighting and never moves: retention asks whether the source still
-    -- returns the entry, which only this column answers.
+    -- sighting, never moves and is the retention clock: this column answers
+    -- the churn question instead — was the entry in the feed's most recent
+    -- response, in which case it is never age-deleted.
     last_seen_at TEXT,
-    -- Zero-based position in the source response, assigned only by a complete
-    -- snapshot and meaningless unless `last_seen_at` equals the feed's
-    -- `current_document_at`.
-    document_rank INTEGER,
     UNIQUE(feed_id, guid)
 );
 
@@ -336,8 +334,9 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
         )
 
 
-# "Say nothing about this column." Distinct from `None`, which for both
-# snapshot columns is a meaningful value the poller writes on purpose.
+# "Say nothing about this column." Distinct from `None`, which for both the
+# observation marker and the poll claim is a meaningful value the poller
+# writes on purpose.
 UNCHANGED: Any = object()
 
 
@@ -363,28 +362,30 @@ ENTRY_PRUNE_NOT_BEFORE_KEY = "feeds_internal.entry_prune_not_before"
 
 
 def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
-    """Add the retention membership columns and open the upgrade grace period
+    """Add the retention observation columns and open the upgrade grace period
     (ISSUE-388).
 
-    Four nullable columns, the partial index, and then a data pass, because the
-    columns alone would leave every existing row unclassifiable — and worse,
-    with the count pass having no age predicate of its own, deletable the day
-    the feature ships.
+    Three nullable columns, the partial indexes, and then a data pass, because
+    the columns alone would leave every existing row unclassifiable — and
+    worse, with the count pass having no age predicate of its own, deletable
+    the day the feature ships.
 
     The pass does four things, and each is one half of a pair:
 
     * **Stamp every entry** with one shared observation time. It is not true
       that the source returned each of them at that instant; what it records is
       that this deployment has no earlier evidence, and the marker below is
-      what stops that being read as evidence of anything.
-    * **Leave `current_document_at` null.** Age pruning requires a non-null
-      marker and `last_seen_at < current_document_at`, so until a feed
-      completes one trustworthy post-upgrade fetch, none of its rows can be
-      classified as history. A feed that never polls again keeps everything.
+      what stops that being read as evidence of anything. `fetched_at` is
+      deliberately not touched: it is the retention clock, and rewriting it
+      would reset every entry's age to the upgrade date.
+    * **Leave `last_items_seen_at` null.** Age pruning requires a non-null
+      marker and `last_seen_at < last_items_seen_at`, so until a feed completes
+      one post-upgrade fetch that returns an item, none of its rows are
+      deletable. A feed that never polls again keeps everything.
     * **Clear the conditional validators** and make every feed due. A stored
       ETag would answer the first post-upgrade poll with a 304, which carries
-      no entry list and so can never establish the first snapshot. The next
-      poll has to fetch a full body.
+      no entry list and so can never advance the marker. The next poll has to
+      fetch a full body.
     * **Write the grace deadline.** An observation timestamp alone cannot stop
       the count pass, which has no age predicate. This row does, for both
       passes, for ninety days.
@@ -406,12 +407,10 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
     if "last_seen_at" not in cols:
         conn.execute("ALTER TABLE feed_entries ADD COLUMN last_seen_at TEXT")
-    if "document_rank" not in cols:
-        conn.execute("ALTER TABLE feed_entries ADD COLUMN document_rank INTEGER")
 
     feed_cols = {r["name"] for r in conn.execute("PRAGMA table_info(feeds)")}
-    if "current_document_at" not in feed_cols:
-        conn.execute("ALTER TABLE feeds ADD COLUMN current_document_at TEXT")
+    if "last_items_seen_at" not in feed_cols:
+        conn.execute("ALTER TABLE feeds ADD COLUMN last_items_seen_at TEXT")
     if "poll_claimed_until" not in feed_cols:
         conn.execute("ALTER TABLE feeds ADD COLUMN poll_claimed_until TEXT")
 
@@ -737,11 +736,11 @@ def update_feed_fetch_state(
     last_throttled_at: str | None = None,
     # Sentinel-backed rather than `None`-defaulted, because `None` is a real
     # value for both: clearing the claim is what every handled outcome does,
-    # and only a trustworthy complete response may replace the snapshot marker.
-    # A caller that says nothing must leave both columns exactly as they are —
-    # an error path defaulting the marker to NULL would discard the last good
-    # snapshot on the first 500 (ISSUE-388).
-    current_document_at: Any = UNCHANGED,
+    # and only a response that returned an item may advance the marker. A
+    # caller that says nothing must leave both columns exactly as they are —
+    # an error path defaulting the marker to NULL would discard every entry's
+    # protection on the first 500 (ISSUE-388).
+    last_items_seen_at: Any = UNCHANGED,
     poll_claimed_until: Any = UNCHANGED,
 ) -> None:
     """Persist the outcome of a single poll attempt."""
@@ -761,9 +760,9 @@ def update_feed_fetch_state(
         error_count, next_poll_at, discovered_title,
         discovered_site_url, last_throttled_at,
     ]
-    if current_document_at is not UNCHANGED:
-        sets.append("current_document_at = ?")
-        params.append(current_document_at)
+    if last_items_seen_at is not UNCHANGED:
+        sets.append("last_items_seen_at = ?")
+        params.append(last_items_seen_at)
     if poll_claimed_until is not UNCHANGED:
         sets.append("poll_claimed_until = ?")
         params.append(poll_claimed_until)
@@ -856,8 +855,6 @@ def insert_entries(
     conn: sqlite3.Connection,
     feed_id: int,
     items: Iterable[EntryRecord],
-    *,
-    document_ranks: Mapping[str, int] | None = None,
 ) -> int:
     """Insert new entries and refresh the content of ones we already hold.
 
@@ -885,10 +882,9 @@ def insert_entries(
 
     ``last_seen_at`` moves on every insert and every refresh, taken from the
     incoming record's ``fetched_at`` — the poll clock, not the stored
-    first-sighting. ``document_ranks`` is supplied only by a caller that has
-    validated the response as a complete membership snapshot; when it is
-    absent the stored rank stands, because an incomplete response has
-    established nothing about the feed's window (ISSUE-388).
+    first-sighting. It is the entry-level half of the most-recent-response
+    clause: an entry whose stamp equals its feed's ``last_items_seen_at`` was
+    in the latest response and is never age-deleted (ISSUE-388).
     """
     inserted = 0
     refreshed = 0
@@ -897,7 +893,6 @@ def insert_entries(
         # '' would compare as a timestamp older than every real one, so an
         # unstamped hand-built record must read as "never observed" instead.
         seen_at = item.fetched_at or None
-        rank = document_ranks.get(item.guid) if document_ranks is not None else None
         existing = conn.execute(
             "SELECT id, image_urls, published_at, fetched_at FROM feed_entries "
             "WHERE feed_id = ? AND guid = ?",
@@ -911,9 +906,9 @@ def insert_entries(
                     feed_id, guid, title, url, author, content_html,
                     content_text, image_urls, embed_url, file_url,
                     media_url, media_type, published_at, fetched_at, status,
-                    last_seen_at, document_rank
+                    last_seen_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feed_id,
@@ -932,7 +927,6 @@ def insert_entries(
                     item.fetched_at,
                     item.status,
                     seen_at,
-                    rank,
                 ),
             )
             if cur.rowcount:
@@ -979,17 +973,11 @@ def insert_entries(
                 media_url    = COALESCE(NULLIF(?, ''), media_url),
                 media_type   = COALESCE(NULLIF(?, ''), media_type),
                 published_at = COALESCE(NULLIF(?, ''), published_at),
-                -- The observation moves on any sighting; the rank moves only
-                -- when a complete snapshot supplied one, and NULL from an
-                -- incomplete response must not erase the stored value.
-                last_seen_at = COALESCE(?, last_seen_at),
-                -- Gated on the rank itself rather than on the mapping, so a
-                -- caller supplying a partial map cannot blank the rank of a
-                -- guid it left out. The poller passes ranks for exactly the
-                -- items it passes, so the two readings agree there; the
-                -- difference is for a direct caller, which is the same reader
-                -- the race branch above is written for.
-                document_rank = CASE WHEN ? THEN ? ELSE document_rank END
+                -- The observation moves on any sighting. A record carrying no
+                -- stamp at all (a hand-built one) leaves the stored value
+                -- standing rather than blanking it, which would read as
+                -- "never observed" and make the row undeletable for good.
+                last_seen_at = COALESCE(?, last_seen_at)
             WHERE id = ?
             """,
             (
@@ -1005,8 +993,6 @@ def insert_entries(
                 item.media_type,
                 item.published_at,
                 seen_at,
-                1 if rank is not None else 0,
-                rank,
                 existing["id"],
             ),
         )
@@ -1343,8 +1329,8 @@ def _row_to_feed(row: sqlite3.Row) -> FeedRecord:
         ),
         # Same `.keys()` guard, same reason: a row read before the v8 migration
         # in a mixed-version test carries neither column.
-        current_document_at=(
-            row["current_document_at"] if "current_document_at" in row.keys() else None
+        last_items_seen_at=(
+            row["last_items_seen_at"] if "last_items_seen_at" in row.keys() else None
         ),
         poll_claimed_until=(
             row["poll_claimed_until"] if "poll_claimed_until" in row.keys() else None

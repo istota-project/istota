@@ -94,20 +94,11 @@ def poll_feed(
         if source == "tumblr":
             ident = provider_identifier(feed.url)
             items = tumblr_provider.fetch(ident, api_key=tumblr_api_key)
-            # A provider that returned normally validated its own collection
-            # first, so the list it hands back is the whole window the API was
-            # asked for — a complete membership snapshot (ISSUE-388). A
-            # malformed payload raises out of `fetch` and lands in the generic
-            # handler below, which carries no completeness.
-            return FetchResult(
-                feed_url=feed.url, items=items, membership_complete=True,
-            )
+            return FetchResult(feed_url=feed.url, items=items)
         if source == "arena":
             ident = provider_identifier(feed.url)
             items = arena_provider.fetch(ident)
-            return FetchResult(
-                feed_url=feed.url, items=items, membership_complete=True,
-            )
+            return FetchResult(feed_url=feed.url, items=items)
         return _poll_rss(feed, http_get=http_get)
     except FeedRateLimited as exc:
         # Ahead of the generic handler below, and deliberately not folded into
@@ -166,31 +157,6 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
     for entry in parsed.get("entries", []):
         items.append(_rss_entry_to_item(entry))
 
-    # Whether absence from this response means the source dropped an entry
-    # (ISSUE-388). Two conditions, catching two different failures, neither
-    # substituting for the other.
-    #
-    # `version` rejects a document that is not a feed at all. An HTML error
-    # page served at HTTP 200 parses *cleanly* — `bozo` is False — and yields
-    # zero entries, which is byte for byte what a feed that legitimately
-    # emptied looks like; `version` is the whole of what tells them apart.
-    #
-    # Truncation is the other failure, and `version` cannot see it: a response
-    # cut off in transit still carries the root element at its head and
-    # silently loses its tail. Treating that as complete makes the missing
-    # tail historical, ages it out, and destroys read state.
-    version = parsed.get("version") or ""
-    truncated = _parse_is_truncated(parsed)
-    membership_complete = bool(version) and not truncated
-    if not membership_complete:
-        # No body content and no exception text in the log line: both can carry
-        # the response itself, and this runs for every error page a feed
-        # serves.
-        logger.warning(
-            "poll_rss incomplete document url=%s version=%r truncated=%s items=%d",
-            feed.url, version, truncated, len(items),
-        )
-
     new_etag = None
     new_last_modified = None
     resp_headers = getattr(resp, "headers", {}) or {}
@@ -204,23 +170,6 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
         new_etag = resp_headers.get("etag")
         new_last_modified = resp_headers.get("last-modified")
 
-    if not membership_complete:
-        # Never store a validator taken off a document we could not read
-        # whole. An ETag answers every later request with a 304, and a 304
-        # carries no entries — so the feed could never establish a snapshot
-        # again and could not recover until the publisher happened to change
-        # something.
-        #
-        # This covers a truncated response that *did* yield items, not only
-        # the empty error page the spec names. A truncation happens in
-        # transit, so the ETag is the validator for the full body: storing it
-        # pins the feed at 304 while its stored marker never advances, and a
-        # feed with no marker is exempt from both retention passes — the
-        # unbounded growth this change exists to close. One extra full fetch
-        # is the whole cost of refusing it.
-        new_etag = None
-        new_last_modified = None
-
     feed_meta = parsed.get("feed", {}) or {}
     return FetchResult(
         feed_url=feed.url,
@@ -229,66 +178,7 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
         last_modified=new_last_modified,
         discovered_title=feed_meta.get("title"),
         discovered_site_url=feed_meta.get("link"),
-        membership_complete=membership_complete,
     )
-
-
-# Expat's EOF-class parse errors — the messages it produces when the document
-# simply stopped. Every other well-formedness complaint describes a defect
-# *within* a document that arrived whole.
-_EOF_PARSE_ERRORS = (
-    "no element found",
-    "unclosed token",
-    "unclosed cdata section",
-    "partial character",
-    "unexpected end of file",
-)
-
-
-def _parse_is_truncated(parsed) -> bool:
-    """Whether a bozo parse looks like a response that was cut off.
-
-    ``bozo`` alone is far too blunt to gate membership on, and the reason is
-    the whole point of this predicate. An undeclared entity and a truncation
-    raise the same flag and mean opposite things: the first document arrived
-    whole with every entry recovered, and an undeclared entity is the most
-    common defect in feeds in the wild. Gating on the raw flag would leave a
-    large, unknowable subset of feeds never establishing ``current_document_at``
-    — and since the count pass is gated on that too, *neither* retention pass
-    would ever touch them. The growth this exists to bound would stay unbounded
-    for exactly those feeds, silently.
-
-    So only an EOF-class exception counts. The discriminator is expat's message
-    text, which is not an API and can move across Python or expat versions —
-    that fragility is why the judgement lives in one place, and why
-    ``tests/test_feeds_poller.py`` pins both sides of it with real documents
-    through the real ``feedparser`` rather than a stub. A wording change fails
-    a test instead of silently switching retention off for every imperfect
-    feed, or on for truncated ones.
-
-    A flagged parse it cannot read a message out of at all counts as
-    truncated. That is the safe direction: refusing to advance a snapshot
-    costs one poll cycle, advancing one wrongly deletes entries.
-    """
-    if not parsed.get("bozo"):
-        return False
-    exc = parsed.get("bozo_exception")
-    message = ""
-    if exc is not None:
-        get_message = getattr(exc, "getMessage", None)
-        if callable(get_message):
-            try:
-                message = str(get_message() or "")
-            except Exception:  # noqa: BLE001 — a parse error must not fail a poll
-                message = ""
-        if not message:
-            message = str(exc)
-    if not message.strip():
-        # Flagged, with nothing to inspect. Nothing here establishes that the
-        # document arrived whole, so it is not treated as one.
-        return True
-    lowered = message.lower()
-    return any(marker in lowered for marker in _EOF_PARSE_ERRORS)
 
 
 def _feedparser_parse(raw):
@@ -491,7 +381,7 @@ def poll_due_feeds(
     now = now or datetime.now(timezone.utc)
     # Every timestamp this run writes is compared lexically against another ISO
     # string — the poll claim across processes, and `last_seen_at` against the
-    # feed's snapshot marker — so a caller's non-UTC clock is converted once
+    # feed's observation marker — so a caller's non-UTC clock is converted once
     # here rather than at each of the four writes.
     if now.tzinfo is not None:
         now = now.astimezone(timezone.utc)
@@ -530,7 +420,7 @@ def poll_due_feeds(
         # between that SELECT and this request, which is where a manual poll
         # and the scheduled one actually collide. A refusal is an ordinary
         # skip: the other process is fetching it, and its result is the one
-        # that should decide the feed's membership state.
+        # that should decide the feed's observation state.
         claim_now = now + timedelta(seconds=time.monotonic() - started)
         if not feeds_db.claim_feed_for_poll(conn, feed.id, now=claim_now):
             logger.info(
@@ -598,8 +488,9 @@ def _persist_poll(
             # left it recorded nowhere, so a run turned away on every feed
             # reported a clean poll that happened to find nothing.
             last_throttled_at=fetched_iso,
-            # `current_document_at` is deliberately not named: a throttle
-            # returned no entry list, so the last complete snapshot stands.
+            # `last_items_seen_at` is deliberately not named: a throttle
+            # returned no items, so the last observation stands and every
+            # stored entry keeps its protection.
             poll_claimed_until=None,
         )
         conn.commit()
@@ -621,35 +512,25 @@ def _persist_poll(
             # Preserved: an error says nothing about whether the throttle that
             # preceded it has cleared.
             last_throttled_at=feed.last_throttled_at,
-            # Same as above: an error established nothing about membership, so
-            # the snapshot marker is left alone and only the claim is released.
+            # Same as above: an error returned no items, so the observation
+            # marker is left alone and only the claim is released.
             poll_claimed_until=None,
         )
         conn.commit()
         return 0
 
-    document_ranks: dict[str, int] | None = None
-    if not result.not_modified:
-        items = result.items
-        if result.membership_complete:
-            # A complete response is the feed's window, so its source order is
-            # the rank. Duplicate guids take their first occurrence — later
-            # ones are the same entry, and giving one two ranks would make the
-            # window depend on which copy was written last.
-            #
-            # Stage 2 narrows this to the admitted window; today every
-            # identifiable item is admitted, which is the same thing whenever
-            # the response fits under the per-feed count.
-            deduped: list[FetchedItem] = []
-            document_ranks = {}
-            for item in result.items:
-                if not item.guid or item.guid in document_ranks:
-                    continue
-                document_ranks[item.guid] = len(deduped)
-                deduped.append(item)
-            items = deduped
+    if result.not_modified:
+        items: list[FetchedItem] = []
     else:
+        # Duplicate guids take their first occurrence — later ones are the same
+        # entry — and an item with no guid is not identifiable at all.
+        seen: set[str] = set()
         items = []
+        for item in result.items:
+            if not item.guid or item.guid in seen:
+                continue
+            seen.add(item.guid)
+            items.append(item)
 
     if items:
         records = [
@@ -674,19 +555,19 @@ def _persist_poll(
             for item in items
             if item.guid
         ]
-        new_count = feeds_db.insert_entries(
-            conn, feed.id, records, document_ranks=document_ranks,
-        )
+        new_count = feeds_db.insert_entries(conn, feed.id, records)
 
     interval = max(feed.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES)
     next_poll = _schedule(now, interval, jitter_fraction, rng)
-    # The marker moves only for a response we trusted as a complete snapshot,
-    # and it is exactly the timestamp the admitted entries were stamped with —
-    # that identity is what later tells a current entry from history. A 304 or
-    # an incomplete parse says nothing, so it leaves the last one standing.
-    snapshot_at: object = feeds_db.UNCHANGED
-    if result.membership_complete and not result.not_modified:
-        snapshot_at = fetched_iso
+    # The marker moves only for a response that returned at least one
+    # identifiable item, and it is exactly the timestamp those entries were
+    # stamped with — that identity is what protects them from the age pass. A
+    # 304, or a body that parsed to nothing (an HTML error page does), returned
+    # no item, so it leaves the marker where it was and every stored entry
+    # stays protected.
+    marker_at: object = feeds_db.UNCHANGED
+    if items:
+        marker_at = fetched_iso
     feeds_db.update_feed_fetch_state(
         conn, feed.id,
         etag=result.etag if not result.not_modified else feed.etag,
@@ -700,7 +581,7 @@ def _persist_poll(
         # Cleared: a fetch that got through is the throttle having lifted, so
         # the column means "throttled now" rather than "throttled once".
         last_throttled_at=None,
-        current_document_at=snapshot_at,
+        last_items_seen_at=marker_at,
         poll_claimed_until=None,
     )
     conn.commit()

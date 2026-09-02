@@ -88,8 +88,11 @@ DEFAULT_SCHEDULED_POLL_LIMIT = 50
 # setting when there is one. `0` disables a limit; a missing value takes the
 # constant.
 
-# How long a *historical* entry — one the source no longer returns — is kept
-# after it has been read. Never applies to a starred or unread row.
+# How long a read entry is kept after it entered *this reader*. The clock is
+# `fetched_at`, not `published_at`: an Are.na block created in 2019 and added
+# to a channel today arrives with a 2019 date and would be purged on the day it
+# appeared. Never applies to a starred or unread row, and never to an entry the
+# most recent response returned.
 DEFAULT_ENTRY_RETENTION_DAYS = 90
 
 # How long an upgraded database deletes nothing at all. Deliberately its own
@@ -99,8 +102,8 @@ DEFAULT_ENTRY_RETENTION_DAYS = 90
 UPGRADE_GRACE_DAYS = 90
 
 # Total stored rows for one feed, stars excepted. Also the size of the window
-# admitted from a complete response, which is what stops a growing archive
-# document reinserting everything the count pass just deleted.
+# admitted from one response, which is what stops a response larger than the
+# maximum reinserting everything the count pass just deleted.
 DEFAULT_MAX_ENTRIES_PER_FEED = 5000
 
 # How long one process's claim on a feed lasts. Longer than a single feed's
@@ -248,12 +251,12 @@ class FeedRecord:
     # `last_error`, which a throttle deliberately does not write: a throttled
     # channel is healthy, but it is not silent either (ISSUE-347).
     last_throttled_at: str | None = None
-    # The poll time of the latest response we trusted as a complete membership
-    # snapshot. An entry stamped with exactly this value was in that snapshot;
-    # anything older is history the source no longer returns, which is the only
-    # thing that makes a row a deletion candidate (ISSUE-388). NULL means no
-    # trustworthy snapshot has been taken yet, and nothing can be classified.
-    current_document_at: str | None = None
+    # The poll time of the most recent response that returned at least one
+    # item. An entry stamped with exactly this value was in that response and
+    # is never age-deleted; anything older was not, which is the only thing
+    # that makes a row a deletion candidate (ISSUE-388). NULL means no response
+    # has ever returned an item, so nothing about this feed is deletable.
+    last_items_seen_at: str | None = None
     # A lease held by whichever process is fetching this feed now. Bounded, so
     # a process that dies mid-fetch delays the feed rather than stranding it.
     poll_claimed_until: str | None = None
@@ -339,14 +342,6 @@ class FetchResult:
     # is what the server named, or None when it named nothing.
     rate_limited: bool = False
     retry_after_seconds: int | None = None
-    # Whether this response enumerated the feed's window well enough that a
-    # *missing* entry means the source dropped it (ISSUE-388). Separate from
-    # ordinary success on purpose: an HTML error page, a bozo parse and a
-    # malformed provider payload can all still yield identifiable items worth
-    # storing without proving anything about what they left out. Defaults to
-    # False, so every path that does not establish completeness leaves the
-    # feed's last trustworthy snapshot standing.
-    membership_complete: bool = False
 
 
 def detect_source_type(url: str) -> str:
