@@ -53,6 +53,7 @@ from urllib.parse import urlparse
 
 from istota import __version__ as _ISTOTA_VERSION
 from istota import usage as usage_types
+from istota.claude_runtime_env import without_claude_runtime_env
 from istota.agent.events import AgentEvent, _describe_tool_use, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
@@ -2162,19 +2163,36 @@ class NativeBrain:
     def _hello_payload(self, req: BrainRequest) -> dict:
         """What the tool server is told about this task.
 
-        ``subprocess_env`` is ``req.env``, and that is the **environment** route
-        to the Claude subscription token rather than the mount one — worth
-        naming here because the mount route is closed and this one is not.
-        ``executor.build_clean_env`` copies ``CLAUDE_CODE_OAUTH_TOKEN`` out of
-        the daemon's environment into ``req.env`` for every brain; no skill
-        manifest declares it, so neither ``derive_credential_set`` nor
-        ``derive_proxy_only_set`` splits it out; and this is what Bash hands its
-        child. So ``echo "$CLAUDE_CODE_OAUTH_TOKEN"`` still returns the token on
-        the shape where the Ansible role writes it into the unit's
-        EnvironmentFile. Pre-existing, filed as ISSUE-390, and left alone
-        deliberately: which variables a brain may pass to a tool subprocess is a
-        separate decision from which paths a namespace holds, and it reaches
-        every brain and every direct caller.
+        ``subprocess_env`` is ``req.env`` minus the Claude runtime names, which
+        is the **environment** route to the subscription token rather than the
+        mount one (ISSUE-390). ``build_clean_env`` copies
+        ``CLAUDE_CODE_OAUTH_TOKEN`` into every task's env whatever brain will
+        run it, and nothing on this path reads it — the provider key comes from
+        the config — so its only effect here would be that
+        ``echo "$CLAUDE_CODE_OAUTH_TOKEN"`` comes back as a ``ToolResultMessage``
+        addressed to whatever provider native is pointed at.
+
+        **The strip happens here and at the spawn, and both are needed.** This
+        frame decides what a Bash child is handed; ``_start_tool_server`` decides
+        what the *server process itself* carries. Stripping only this one leaves
+        the token in the server's own environment inside the namespace, where a
+        Bash child — same uid, same PID namespace — reads it out of
+        ``/proc/<server-pid>/environ``. It also reaches a child by a second
+        route: ``tool_server.merge_proxy_env`` answers a ``None``
+        ``subprocess_env`` with ``dict(os.environ)``, which is the server's whole
+        environment. A task always sends a mapping so it does not take that
+        branch, but a direct caller does.
+
+        Stripping further up, where the env is built, looks tidier and is wrong:
+        ``_run_fallback`` rebuilds the request with ``dataclasses.replace`` and
+        never rebuilds ``env``, so a ``native -> claude_code`` reroute would hand
+        the CLI an env with the credential already gone and fail to authenticate
+        on the shape where that token is the only credential there is.
+
+        ``or None`` goes on the **input**, never the output. ``ToolEnv`` reads
+        ``None`` as "inherit the parent environment" and ``{}`` as "an empty
+        environment"; collapsing a fully-stripped ``{}`` back to ``None`` would
+        hand the child an inherited environment and undo the strip.
 
         The three caps come from ``ToolEnv``'s own defaults rather than from a
         second set of numbers here, because they were never request-derived:
@@ -2188,7 +2206,7 @@ class NativeBrain:
         deferred = (req.env or {}).get("ISTOTA_DEFERRED_DIR")
         return hello_payload(
             cwd=cwd,
-            subprocess_env=req.env or None,
+            subprocess_env=without_claude_runtime_env(req.env or None),
             read_roots=read_roots,
             write_roots=write_roots,
             write_denied_roots=write_denied_roots,
@@ -2231,7 +2249,11 @@ class NativeBrain:
             sandbox_wrap=req.native_sandbox_wrap,
             task_cgroup_path=req.task_cgroup,
             cwd=Path(req.cwd),
-            env=req.env or None,
+            # Stripped here as well as in the `hello` frame, and the two are not
+            # redundant: this is what the server process itself carries, and a
+            # Bash child reads its parent's `/proc/<pid>/environ` from inside the
+            # same namespace at the same uid. See `_hello_payload`.
+            env=without_claude_runtime_env(req.env or None),
             on_pid=req.on_pid,
             loop_abort=abort,
         )

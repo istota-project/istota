@@ -17,8 +17,10 @@ from istota.config import (
     load_config,
 )
 from istota.executor import (
+    _CREDENTIAL_ENV_PATTERNS,
     _PROXY_LOOKUP_BLOCKED,
     _SHELL_STARTUP_ENV_VARS,
+    CLAUDE_RUNTIME_ENV_VARS,
     _split_credential_env,
     build_allowed_tools,
     build_clean_env,
@@ -30,6 +32,7 @@ from istota.executor import (
     derive_lookup_allowlist,
     derive_skill_credential_map,
     execute_task,
+    without_claude_runtime_env,
 )
 from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 from istota.skills._env import EnvContext, build_identity_env, build_skill_env
@@ -126,6 +129,62 @@ class TestBuildCleanEnv:
             env = build_clean_env(config)
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
 
+    def test_every_credential_shaped_var_it_injects_is_named_in_the_strip_set(self):
+        """ISSUE-390's drift guard.
+
+        The failure it exists to catch is a second credential-shaped variable
+        hand-set in this function later, which would reach a NativeBrain tool
+        subprocess exactly as the OAuth token did while
+        ``CLAUDE_RUNTIME_ENV_VARS`` went on naming only the first one. Rather
+        than guessing at future names, the environment answers every lookup
+        with a sentinel, so a variable this function copies through is present
+        under its own key whatever the daemon's real environment holds.
+
+        The assertion is over **keys**, not over sentinel values: a value-based
+        test sees only an untransformed identity copy, and misses both a rename
+        and a transformation — ``PATH`` is already transformed a few lines up,
+        so that blind spot is live in the function under test. It covers the
+        credential shapes as well as the ``CLAUDE`` family, because the name
+        that would actually slip through is `ANTHROPIC_API_KEY`-shaped rather
+        than Claude-prefixed.
+
+        This is not a claim about every producer of a task env. `execute_task`
+        adds its own names afterwards and a skill's ``setup_env`` hook can add
+        arbitrary ones; those are the skill proxy's credential split to answer
+        for, not this set's.
+        """
+        class _AnswersEverything(dict):
+            def get(self, key, default=None):
+                return f"sentinel-{key}"
+
+            def __getitem__(self, key):
+                return f"sentinel-{key}"
+
+            def __contains__(self, key):
+                return True
+
+            def keys(self):  # pragma: no cover — see below
+                raise AssertionError(
+                    "build_clean_env enumerated the environment; this fake "
+                    "answers lookups only, so a copy-then-filter refactor "
+                    "would silently find nothing to check"
+                )
+
+            __iter__ = keys
+
+        config = Config()
+        with patch.object(os, "environ", _AnswersEverything()):
+            env = build_clean_env(config)
+
+        suspicious = {
+            k for k in env
+            if k.upper().startswith("CLAUDE")
+            or any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+        }
+        # Positive control: a guard that finds nothing to check is not a guard.
+        assert suspicious, "build_clean_env injected no credential-shaped var"
+        assert suspicious <= CLAUDE_RUNTIME_ENV_VARS
+
     def test_propagates_admins_file_path(self):
         """ISTOTA_ADMINS_FILE (a path, not a secret) reaches subprocesses so a
         custom-namespace deploy's admins file resolves instead of the hardcoded
@@ -161,6 +220,44 @@ class TestBuildCleanEnv:
         with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
             env = build_clean_env(config)
         assert "ISTOTA_CONFIG_PATH" not in env
+
+
+class TestWithoutClaudeRuntimeEnv:
+    """ISSUE-390. The environment half of the profile split ISSUE-389 made for
+    the sandbox mounts: what a task env carries because the outer process is
+    the `claude` CLI, removed where the outer process is istota's own code."""
+
+    def test_strips_every_name_in_the_set(self):
+        env = {k: "secret" for k in CLAUDE_RUNTIME_ENV_VARS}
+        assert without_claude_runtime_env(env) == {}
+
+    def test_keeps_everything_else(self):
+        env = {"PATH": "/usr/bin", "ISTOTA_USER_ID": "alice", "HOME": "/home/a"}
+        assert without_claude_runtime_env(dict(env)) == env
+
+    def test_returns_a_copy_and_never_mutates(self):
+        """`req.env` is shared: `ClaudeCodeBrain` hands it to the CLI, and
+        `_run_fallback` carries it across a reroute with `dataclasses.replace`
+        without rebuilding it. An in-place strip would unauthenticate the brain
+        that needs the token on the deployment where it is the credential."""
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-fake", "PATH": "/usr/bin"}
+        out = without_claude_runtime_env(env)
+        assert out is not env
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in out
+
+    def test_none_stays_none(self):
+        """`ToolEnv.subprocess_env` reads `None` as 'inherit the parent env',
+        which is a different instruction from an empty mapping."""
+        assert without_claude_runtime_env(None) is None
+
+    def test_an_empty_mapping_stays_an_empty_mapping(self):
+        """And is still a copy. `{}` must not degrade into `None`: on this path
+        that would turn 'an empty environment' into 'inherit the daemon's'."""
+        env = {}
+        out = without_claude_runtime_env(env)
+        assert out == {}
+        assert out is not env
 
 
 class TestBuildCleanEnvTurnsPipefailOn:

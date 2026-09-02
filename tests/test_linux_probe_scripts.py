@@ -163,6 +163,7 @@ def test_every_probe_renderer_is_covered_here():
         "test_tool_server_real.presence_probe",
         "test_tool_server_real.listing_probe",
         "test_tool_server_real.write_probe",
+        "test_tool_server_real.parent_env_probe",
         "test_tool_server_lifecycle.background_probe",
         "test_tool_server_lifecycle.read_back_probe",
         "test_tool_server_network.env_probe",
@@ -180,3 +181,46 @@ def test_curl_is_available_or_the_network_probe_tests_would_be_vacuous():
     if which("curl") is None:
         pytest.skip("no curl on this host; the fetch probe cannot be exercised")
     assert Path(which("curl")).exists()
+
+
+class TestTheParentEnvProbe:
+    """ISSUE-390's `/proc/<ppid>/environ` probe, both arms.
+
+    The real path cannot be exercised on this host — macOS has no `/proc` — so
+    the rendered script is run with that path rewritten to a file holding a
+    NUL-separated environment block, which is the byte shape the kernel serves.
+    What that proves is the sentence: the marker prints whether or not the name
+    is there, and the two arms differ. Whether the kernel puts the token in
+    that file is the tier's question, and the tier has a positive control for
+    it.
+    """
+
+    def _run(self, tmp_path, body: bytes) -> str:
+        environ = tmp_path / "environ"
+        environ.write_bytes(body)
+        cmdline = tmp_path / "cmdline"
+        cmdline.write_bytes(b"python3\x00-m\x00istota.tool_server\x00")
+        script = real.parent_env_probe("CLAUDE_CODE_OAUTH_TOKEN")
+        script = script.replace("/proc/$PPID/environ", str(environ))
+        script = script.replace("/proc/$PPID/cmdline", str(cmdline))
+        return _sh(script)
+
+    def test_the_marker_prints_when_the_name_is_absent(self, tmp_path):
+        out = self._run(tmp_path, b"PATH=/usr/bin\x00HOME=/home/x\x00")
+        assert "PARENT_ENV=ABSENT" in out
+
+    def test_the_marker_prints_when_the_name_is_present(self, tmp_path):
+        out = self._run(
+            tmp_path, b"PATH=/usr/bin\x00CLAUDE_CODE_OAUTH_TOKEN=sk-fake\x00"
+        )
+        assert "PARENT_ENV=PRESENT" in out
+
+    def test_a_name_that_merely_ends_with_it_is_not_a_match(self, tmp_path):
+        """The grep is anchored, so `X_CLAUDE_CODE_OAUTH_TOKEN` is not the token."""
+        out = self._run(tmp_path, b"X_CLAUDE_CODE_OAUTH_TOKEN=sk-fake\x00")
+        assert "PARENT_ENV=ABSENT" in out
+
+    def test_it_reports_the_parent_command(self, tmp_path):
+        """Without this the absence arm is a fact about an unknown process."""
+        out = self._run(tmp_path, b"PATH=/usr/bin\x00")
+        assert "istota.tool_server" in out

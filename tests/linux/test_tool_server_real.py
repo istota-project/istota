@@ -103,6 +103,27 @@ def listing_probe(directory) -> str:
     )
 
 
+def parent_env_probe(name: str) -> str:
+    """Whether the *server process* holds ``name``, read from inside a Bash call.
+
+    ISSUE-390's second carrier. A Bash child is handed an explicit environment
+    and so inherits nothing, but it runs at the same uid in the same PID
+    namespace as its parent — the tool server — and ``/proc/<ppid>/environ`` is
+    readable to it. Stripping the ``hello`` frame alone leaves the token there.
+
+    ``PARENT_CMD`` is reported alongside and is not decoration: if ``$PPID`` is
+    ever something other than the server, ``PARENT_ENV=ABSENT`` is true of the
+    wrong process and the assertion passes for no reason. The test asserts on
+    both.
+    """
+    return (
+        f'if tr "\\0" "\\n" < /proc/$PPID/environ 2>/dev/null '
+        f'| grep -q "^{name}="; then echo "PARENT_ENV=PRESENT"; '
+        f'else echo "PARENT_ENV=ABSENT"; fi; '
+        f'echo "PARENT_CMD=[$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)]"'
+    )
+
+
 def write_probe(path) -> str:
     """`WRITE=OK` or `WRITE=FAIL`, printed either way."""
     return (
@@ -212,11 +233,14 @@ class _Session:
         self.server = None
 
     async def __aenter__(self):
+        hello_kw = self._kw.pop("hello", {})
+        spawn_env = self._kw.pop("env", None)
         self.server = await start_tool_server(
-            _hello(self._user_temp, **self._kw.pop("hello", {})),
+            _hello(self._user_temp, **hello_kw),
             sandbox_wrap=_wrap_for(
                 self._layout, self._task, self._user_temp, **self._kw
             ),
+            env=spawn_env,
         )
         return self.server
 
@@ -577,3 +601,52 @@ class TestTheClaudeRuntimeBlockIsStillAbsentHere:
         read, probe = _run(_go())
         assert "sentinel-not-a-real-token" not in read
         assert "CREDS=ABSENT" in probe, probe
+
+
+class TestTheClaudeTokenIsNotInTheServersOwnEnvironment:
+    """ISSUE-390's second carrier, which only a real namespace can settle.
+
+    The daemon-side tests assert what is *passed*. This asserts what a Bash
+    call can actually *read* out of its parent, which is the thing that makes
+    the spawn-env strip load-bearing rather than tidy.
+    """
+
+    _TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"
+
+    def _ask(self, layout, task, user_temp, spawn_env):
+        async def _go():
+            async with _Session(layout, task, user_temp, env=spawn_env) as server:
+                return await server.call(
+                    "Bash", "c1", {"command": parent_env_probe(self._TOKEN)}, None, None
+                )
+        return _text(_run(_go()))
+
+    def test_a_bash_child_cannot_read_it_from_the_servers_environ(
+        self, layout, task, user_temp
+    ):
+        out = self._ask(
+            layout, task, user_temp,
+            {"PATH": "/usr/bin:/bin", "HOME": str(user_temp)},
+        )
+        assert "PARENT_ENV=ABSENT" in out
+        # Without this the absence above is a fact about some other process.
+        assert "istota.tool_server" in out
+
+    def test_the_positive_control_finds_it_when_the_spawn_carries_it(
+        self, layout, task, user_temp
+    ):
+        """Without this the test above passes on a probe that reads nothing.
+
+        Spawning the server with the token present must make the same probe say
+        PRESENT. If it does not, the probe is broken, not the boundary.
+        """
+        out = self._ask(
+            layout, task, user_temp,
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(user_temp),
+                self._TOKEN: "sk-ant-oat-fake-for-tests",
+            },
+        )
+        assert "PARENT_ENV=PRESENT" in out
+        assert "istota.tool_server" in out

@@ -1,16 +1,20 @@
 """NativeBrain — the Brain-protocol adapter over the three-layer stack."""
 
 import asyncio
+import contextlib
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from istota import db
 from istota.brain import BrainRequest, make_brain
+from istota.claude_runtime_env import without_claude_runtime_env
 from istota.brain._events import TextEvent
 from istota.brain.native import NativeBrain
 from istota.config import BrainConfig, NativeBrainConfig
@@ -1284,3 +1288,142 @@ class TestFactory:
         # aliases (see test_native_resolution.py).
         brain = NativeBrain(NativeBrainConfig(model="qwen-x"), provider=object())
         assert brain.resolve_model_name("opus") == "opus"
+
+
+class TestClaudeRuntimeEnvDoesNotReachTheTools:
+    """ISSUE-390: the Claude runtime credential stops at the native profile.
+
+    ``build_clean_env`` sets ``CLAUDE_CODE_OAUTH_TOKEN`` for every task whatever
+    brain will run it. Nothing on the native path reads it — the provider key
+    comes from the config — so the only thing it can do is come back out of a
+    Bash call as a ``ToolResultMessage`` addressed to whatever provider native
+    is pointed at.
+
+    The tools moved into a server process (the tool-server stage), which gives
+    the credential **two** carriers rather than one: the ``hello`` frame's
+    ``subprocess_env``, which is what a Bash child is handed, and the env the
+    server process itself is spawned with. Stripping only the first leaves the
+    token in the server's own environment inside the namespace, where a Bash
+    child at the same uid in the same PID namespace reads it straight out of
+    ``/proc/<server-pid>/environ``. Both are asserted here; the ``/proc`` route
+    itself needs a real namespace and is in ``tests/linux/``.
+    """
+
+    def _env(self, **extra):
+        # PATH is needed for real: ``create_subprocess_exec`` resolves the bare
+        # name ``bash`` through the PATH of the env it is handed.
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **extra}
+
+    def _req_with_env(self, tmp_path, **extra):
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = self._env(**extra)
+        return req
+
+    def test_the_hello_frame_carries_no_token_and_everything_else(self, tmp_path):
+        req = self._req_with_env(
+            tmp_path,
+            CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests",
+            ISTOTA_USER_ID="alice",
+        )
+        hello = _brain(MockProvider([]))._hello_payload(req)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in hello["subprocess_env"]
+        # The strip is the named set and nothing wider — the rest of the task
+        # env is what makes the tools work at all.
+        assert hello["subprocess_env"]["ISTOTA_USER_ID"] == "alice"
+
+    async def test_bash_cannot_read_the_token_and_still_sees_everything_else(
+        self, tmp_path
+    ):
+        """End to end through a real server, which is where it actually matters."""
+        from tests.test_tool_server import _Server, _call, _text
+
+        req = self._req_with_env(
+            tmp_path,
+            CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests",
+            ISTOTA_USER_ID="alice",
+        )
+        brain = _brain(MockProvider([]))
+        async with _Server(
+            hello=brain._hello_payload(req),
+            env=without_claude_runtime_env(req.env),
+            loop_abort=asyncio.Event(),
+        ) as server:
+            result = await _call(
+                server,
+                "Bash",
+                {
+                    "command": 'echo "tok=[${CLAUDE_CODE_OAUTH_TOKEN:-EMPTY}] '
+                               'uid=[${ISTOTA_USER_ID:-EMPTY}]"'
+                },
+            )
+        text = _text(result)
+        assert "tok=[EMPTY]" in text
+        assert "sk-ant-oat-fake-for-tests" not in text
+        assert "uid=[alice]" in text
+
+    def test_the_server_process_is_not_spawned_holding_the_token(self, tmp_path):
+        """The second carrier, and the one the hello-frame strip does not cover.
+
+        A Bash child gets an explicit env and so does not inherit this one, but
+        it runs at the same uid in the same PID namespace as the server and can
+        read ``/proc/<server-pid>/environ``. ``merge_proxy_env`` is a second
+        route out of the same place: it answers a ``None`` ``subprocess_env``
+        with ``dict(os.environ)``.
+        """
+        req = self._req_with_env(
+            tmp_path, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests"
+        )
+        seen = {}
+
+        async def _record(hello, **kwargs):
+            seen.update(kwargs)
+            seen["hello"] = hello
+            raise RuntimeError("stop here; the spawn env is what we came for")
+
+        brain = _brain(MockProvider([]))
+        with patch("istota.session.tools.start_tool_server", _record):
+            with contextlib.suppress(Exception):
+                asyncio.run(brain._start_tool_server(req, asyncio.Event()))
+
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in (seen["env"] or {})
+        assert seen["env"]["PATH"]
+
+    def test_the_requests_own_env_is_left_alone(self, tmp_path):
+        """The copy matters as much as the strip.
+
+        The same mapping is ``req.env``, which ``ClaudeCodeBrain`` hands to the
+        ``claude`` CLI and which ``_run_fallback`` carries across a reroute with
+        ``dataclasses.replace`` without rebuilding it. Stripping in place would
+        take the credential away from the brain that needs it, on the deployment
+        where that token is the only credential there is.
+        """
+        req = self._req_with_env(
+            tmp_path, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-for-tests"
+        )
+        _brain(MockProvider([]))._hello_payload(req)
+        assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake-for-tests"
+
+    def test_an_env_of_nothing_but_the_token_does_not_become_inheritance(
+        self, tmp_path
+    ):
+        """The seam's own failure mode, which the helper's tests cannot see.
+
+        Stripping the only entry leaves `{}`, and `{} or None` is `None` —
+        which `ToolEnv` reads as "inherit the parent environment". The parent is
+        the daemon, whose environment is where `build_clean_env` read the token
+        from, so that collapse would hand the child the whole daemon env and
+        every credential in it. The strip has to make the env emptier, never
+        wider.
+        """
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-fake-for-tests"}
+        hello = _brain(MockProvider([]))._hello_payload(req)
+        assert hello["subprocess_env"] == {}
+
+    def test_no_env_at_all_still_means_inherit(self, tmp_path):
+        """The other side of the same line: an absent env is not the same
+        instruction as an emptied one, and this path must not change."""
+        req = _req("hi", tmp_path, tools=["Bash"])
+        req.env = {}
+        hello = _brain(MockProvider([]))._hello_payload(req)
+        assert hello["subprocess_env"] is None
