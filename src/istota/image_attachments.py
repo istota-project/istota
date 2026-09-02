@@ -307,7 +307,7 @@ class _Rendered:
 
 def prepare_image_attachments(
     attachments: list[str] | None,
-    user_temp_dir: Path,
+    out_dir: Path,
     task_id: int,
     cancel_check: Callable[[], bool] | None = None,
     bind_roots: list[Path] | None = None,
@@ -326,8 +326,15 @@ def prepare_image_attachments(
     `BrainRequest.cancel_check` is not yet in play — without the poll, `!stop`
     and the web cancel button are inert for the whole pre-brain window.
 
+    `out_dir` is where every rendition and every copy is written, whole — this
+    module derives no layout of its own from a temp directory and a task id.
+    The caller names it, because where a framework-authored file may live is
+    the caller's question: `execute_task` passes a directory under the
+    daemon-owned task control directory, which no task can write and no other
+    task can read. Created on first write, not here.
+
     `bind_roots` is what the sandbox can see. An accepted image whose *resolved*
-    source lies under none of them is copied into the task temp directory even
+    source lies under none of them is copied into `out_dir` even
     when it needs no resize and no conversion: the model is told to open the
     path, and a path bound by nothing names no file inside the namespace. The
     scheduler's nc-data fallback is the live example — it hands out
@@ -373,7 +380,6 @@ def prepare_image_attachments(
     _register_heif_opener()
 
     started = time.monotonic()
-    out_dir = user_temp_dir / "attachments" / f"task_{task_id}"
     result = list(attachments)
     prepared: list[tuple[int, ImageInput, Path, str]] = []
     blocks: dict[int, OcrBlock] = {}

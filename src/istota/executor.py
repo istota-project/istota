@@ -5833,6 +5833,25 @@ def execute_task(
     user_temp_dir = get_user_temp_dir(config, task.user_id)
     user_temp_dir.mkdir(parents=True, exist_ok=True)
 
+    # And the daemon-owned directory beside it, for the files the framework
+    # authors and the model must not touch: both prompt halves and the prepared
+    # image attachments. Created here, before anything is written into it.
+    #
+    # Nothing deletes it. `cleanup_old_temp_files` already recurses into every
+    # subdirectory of `temp_dir` — `.control` included — unlinks files past
+    # `temp_file_retention_days` and only `rmdir`s a directory that is empty
+    # *and* itself past that window, which is the age gate an in-flight task
+    # needs. A cleanup callback here would also be wrong rather than merely
+    # redundant: the briefing metadata is read by the *scheduler*, after this
+    # function has returned, inside a bare `except Exception`, so deleting it
+    # on the way out would lose every briefing's per-block provenance silently.
+    #
+    # Fail-closed. A task with no resolvable control directory has nowhere to
+    # put its standing instructions, and falling back to the model-writable
+    # directory is the exposure this exists to remove — so
+    # `ensure_task_control_dir` raises and the task fails.
+    control_dir = ensure_task_control_dir(config, task.user_id, task.id)
+
     # Build resources: merge config-defined resources with dynamic DB resources
     user_config = config.get_user(task.user_id)
     all_resources = list(user_resources)  # start with passed resources (e.g. shared_file from DB)
@@ -5894,7 +5913,7 @@ def execute_task(
     # and the same OCR context the model will.
     image_prep = prepare_image_attachments(
         task.attachments,
-        user_temp_dir,
+        control_dir / "attachments",
         task.id,
         cancel_check=_cancel_check,
         # Only where there is a namespace to be outside of. Without effective
@@ -6390,27 +6409,42 @@ def execute_task(
         rendered = render_composed_prompt(composed)
         return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
-    # Both halves on disk before anything is built from them. The user half
-    # keeps its filename: it is still the exact text sent on stdin, injected
-    # into the tmux pane, or used as the native initial user message.
-    prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"
-    prompt_file.write_text(prompt, encoding="utf-8")
+    # Both halves on disk before anything is built from them, in the
+    # daemon-owned control directory rather than in the model's own working
+    # directory.
+    #
+    # The user half is a debugging artifact and nothing in the product reads it
+    # back — the prompt reaches ClaudeCodeBrain on stdin, TmuxClaudeBrain
+    # through its own `workdir/prompt.txt`, and NativeBrain as the initial user
+    # message. It is kept as one, and it is the half that had to move: it
+    # carries retrieved memory, knowledge facts, playbooks, conversation
+    # history and the request itself, it differs per task, and where it used to
+    # sit every later task of that user could read it for the length of the
+    # retention window.
+    prompt_file = control_dir / "prompt.txt"
+    _fd = os.open(
+        prompt_file,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+        _f.write(prompt)
 
     # The system half, and the file the brain is handed by path.
     #
     # **The directory is resolved and the filename is not**, and the split is
     # the whole point rather than an oversight.
     #
-    # Resolving the ancestors is what makes the path absolute — `BrainRequest`
-    # requires that, since NativeBrain opens it in the daemon process while the
-    # Claude CLI opens it inside the sandbox, against two different working
-    # directories, and a reroute carries one value between them — and it is
-    # also what makes it the *in-namespace* path: `build_bwrap_cmd` binds
-    # `user_temp_dir.resolve()` at its own resolved name, and `_ro_bind` uses
-    # the string it is handed as the destination, so an unresolved ancestor on
-    # a deployment whose `temp_dir` sits behind a symlink would land the
-    # read-only bind somewhere the CLI never looks. `ImageInput.path` records
-    # that half of the rule for the same reason.
+    # `control_dir` arrives resolved from `ensure_task_control_dir`, and that
+    # is what makes the path absolute — `BrainRequest` requires that, since
+    # NativeBrain opens it in the daemon process while the Claude CLI opens it
+    # inside the sandbox, against two different working directories, and a
+    # reroute carries one value between them — and it is also what makes it the
+    # *in-namespace* path: `_ro_bind` uses the string it is handed as the
+    # destination, so an unresolved ancestor on a deployment whose `temp_dir`
+    # sits behind a symlink would land the read-only bind somewhere the CLI
+    # never looks. `ImageInput.path` records that half of the rule for the same
+    # reason.
     #
     # Resolving the *last* component would undo the guard below. `.resolve()`
     # follows a symlink, so a planted one would silently become its target and
@@ -6422,24 +6456,24 @@ def execute_task(
     # naming a file that was not written is the fail-closed contract firing on
     # our own bug.
     #
-    # `O_NOFOLLOW`, and that is not decoration. `user_temp_dir` is per *user*,
-    # bound read-write into every one of that user's sandboxes and exported as
-    # `ISTOTA_DEFERRED_DIR`, so a concurrent task of the same user can create
-    # entries in it — and task ids are sequential and in the environment, so
-    # the entry it creates can be a *dangling* symlink named after a task that
-    # has not started yet. A plain `write_text` follows that on open and writes
-    # the composed prompt through it, which is an arbitrary write as the daemon
-    # user with substantially task-controlled content. `ELOOP` fails the task
-    # instead, which is the direction to fail in. The same hazard is latent on
-    # `task_<id>_prompt.txt` above and on every deferred-op file; it is not
-    # this stage's to fix, and is recorded rather than quietly matched.
+    # `O_NOFOLLOW` on this half and on the one above, and it is belt-and-braces
+    # now rather than load-bearing. What it answered was that `user_temp_dir` is
+    # per *user*, bound read-write into every one of that user's sandboxes and
+    # exported as `ISTOTA_DEFERRED_DIR`, so a concurrent task of the same user
+    # could create entries in it — and task ids are sequential and in the
+    # environment, so the entry could be a *dangling* symlink named after a
+    # task that had not started yet, which a plain `write_text` follows on open.
+    # `control_dir` is 0700 under a 0700 root the daemon owns, is a sibling of
+    # the per-user directories rather than a child of one, and is bound into no
+    # sandbox read-write, so there is no task that can plant anything here. The flag stays
+    # because a guard dropped on the strength of a property held somewhere else
+    # is the one nobody notices the loss of. The deferred-op files still carry
+    # the original exposure and are model-authored by design.
     #
     # `0o600` because the file holds the persona, the user's own overlays and
     # the per-user email address, and there is no reason for it to be readable
     # by other local accounts.
-    system_prompt_file = (
-        Path(user_temp_dir).resolve() / f"task_{task.id}_system_prompt.txt"
-    )
+    system_prompt_file = control_dir / "system_prompt.txt"
     _fd = os.open(
         system_prompt_file,
         os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,

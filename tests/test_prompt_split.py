@@ -674,8 +674,8 @@ class TestWhatTheBrainIsHanded:
             "them"
         )
         assert path == (
-            executor.get_user_temp_dir(config, task.user_id).resolve()
-            / f"task_{task.id}_system_prompt.txt"
+            executor.get_task_control_dir(config, task.user_id, task.id)
+            / "system_prompt.txt"
         )
         text = path.read_text(encoding="utf-8")
         for marker in self.SYSTEM_MARKERS:
@@ -706,14 +706,47 @@ class TestWhatTheBrainIsHanded:
         read when something has already gone wrong.
         """
         config, task, req = self._run(tmp_path)
-        temp = executor.get_user_temp_dir(config, task.user_id)
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
 
-        user_artifact = temp / f"task_{task.id}_prompt.txt"
+        user_artifact = control / "prompt.txt"
         assert user_artifact.read_text(encoding="utf-8") == req.prompt
 
-        system_artifact = temp / f"task_{task.id}_system_prompt.txt"
+        system_artifact = control / "system_prompt.txt"
         assert system_artifact.exists()
         assert system_artifact.resolve() == req.composed_system_prompt_path
+
+    def test_neither_artifact_is_left_in_the_model_s_own_directory(
+        self, tmp_path,
+    ):
+        """The regression guard for the whole move.
+
+        `{temp_dir}/{user_id}` is the sandbox `--chdir` target, bound
+        read-write and exported as `ISTOTA_DEFERRED_DIR`, so anything the
+        framework writes there is readable by every later task of that user
+        and writable by every concurrent one. The assembled user half is the
+        material file — retrieved memory, knowledge facts, playbooks and the
+        request itself — and it is per task, so a second task reading it
+        reads something it was never given.
+
+        Asserted as an absence in the directory rather than as a presence in
+        the new one, because the presence is what the test above already
+        pins and an absence is what a half-applied move would break.
+        """
+        config, task, _req = self._run(tmp_path)
+        temp = executor.get_user_temp_dir(config, task.user_id)
+
+        assert temp.is_dir(), "the fixture never ran the executor"
+        assert not list(temp.glob("task_*_prompt.txt")), sorted(
+            p.name for p in temp.iterdir()
+        )
+        assert not list(temp.glob("task_*_system_prompt.txt")), sorted(
+            p.name for p in temp.iterdir()
+        )
+        # The control root is a *sibling* of the per-user directory, not a
+        # child of it: a directory inside a model-writable parent can be
+        # swapped for a symlink between the daemon's mkdir and bwrap's mount.
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert not control.is_relative_to(temp.resolve())
 
     def test_a_dry_run_writes_neither_artifact(self, tmp_path):
         """The dry-run return still happens before both writes, not just the
@@ -735,6 +768,13 @@ class TestWhatTheBrainIsHanded:
         assert temp.is_dir()
         assert not list(temp.glob("task_*_prompt.txt"))
         assert not list(temp.glob("task_*_system_prompt.txt"))
+        # And nothing in the control directory either. It is created above the
+        # dry-run return, unconditionally, so its *existence* pins nothing —
+        # its emptiness is what says both writes are still downstream of the
+        # return.
+        control = executor.get_task_control_dir(config, task.user_id, task.id)
+        assert control.is_dir()
+        assert list(control.iterdir()) == []
 
     def test_the_sandbox_wrap_carries_the_composed_file_as_a_ro_bind(
         self, tmp_path,
@@ -829,23 +869,34 @@ class TestWhatTheBrainIsHanded:
             str(req.composed_system_prompt_path.parent / "notes.txt"), write=True,
         )
 
+    @pytest.mark.parametrize("name", ["prompt.txt", "system_prompt.txt"])
     def test_a_planted_symlink_fails_the_write_rather_than_following_it(
-        self, tmp_path,
+        self, tmp_path, name,
     ):
-        """`user_temp_dir` is per user, not per task, and task ids are
-        sequential and in the environment — so a concurrent task of the same
-        user can leave a *dangling* symlink named after a task that has not
-        started. A plain `write_text` follows it and writes the composed prompt
-        wherever it points, as the daemon user. `O_NOFOLLOW` refuses instead.
+        """`O_NOFOLLOW` on *both* halves, kept after the files moved.
+
+        The vector it was answering is gone: the control directory is 0700
+        under a 0700 root the daemon owns, it is a sibling of the per-user
+        directories rather than a child of one, and it is bound into no
+        sandbox — so no task of any user can leave an entry in it, dangling
+        or otherwise. A guard dropped on the strength of a property held
+        somewhere else is one nobody notices the loss of, so both writes keep
+        the flag and this keeps proving it fires. The plant is by hand
+        because that is now the only way one gets there.
+
+        Both halves, because the user half never had the flag: it carries
+        retrieved memory, knowledge facts, playbooks and the request, and a
+        plain `write_text` following a link writes all of that wherever the
+        link points, as the daemon user.
         """
         for existing in (True, False):
-            config = self._config(tmp_path / f"plant-{existing}")
-            temp = executor.get_user_temp_dir(config, "alice")
-            temp.mkdir(parents=True, exist_ok=True)
-            victim = tmp_path / f"victim-{existing}.txt"
+            config = self._config(tmp_path / f"plant-{name}-{existing}")
+            control = executor.get_task_control_dir(config, "alice", 1)
+            control.mkdir(parents=True, exist_ok=True)
+            victim = tmp_path / f"victim-{name}-{existing}.txt"
             if existing:
                 victim.write_text("do not overwrite me\n")
-            (temp / "task_1_system_prompt.txt").symlink_to(victim)
+            (control / name).symlink_to(victim)
 
             with db.get_db(config.db_path) as conn:
                 task_id = db.create_task(

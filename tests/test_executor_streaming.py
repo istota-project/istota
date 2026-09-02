@@ -11,7 +11,7 @@ from contextlib import ExitStack
 
 from istota.config import Config, SleepCycleConfig, UserConfig
 from istota import executor
-from istota.executor import execute_task, get_user_temp_dir
+from istota.executor import execute_task, get_task_control_dir, get_user_temp_dir
 
 
 @pytest.fixture(autouse=True)
@@ -1535,15 +1535,21 @@ class TestDryRun:
         # The prompt file is written on the first statement after the dry-run
         # return, so its absence pins that return rather than merely observing
         # that nothing ran.
+        control = get_task_control_dir(config, task.user_id, task.id)
+        # `get_task_control_dir` only names a path; the directory exists
+        # because `execute_task` creates it well above the dry-run return.
+        # Asserted rather than assumed, because `Path.iterdir` on a missing
+        # directory raises and `glob` yields nothing — so if that creation ever
+        # moves below the return (an obvious optimization: a dry run needs no
+        # control directory), the check below would pass forever while testing
+        # nothing.
+        assert control.is_dir()
+        assert list(control.iterdir()) == []
+        # The per-user directory holds neither half any more, so a glob there
+        # would pass whatever the dry-run return did.
         user_temp = get_user_temp_dir(config, task.user_id)
-        # `get_user_temp_dir` only joins paths; the directory exists because
-        # `execute_task` mkdirs it well above the dry-run return. Asserted
-        # rather than assumed, because `Path.glob` on a missing directory
-        # yields nothing and raises nothing — so if that mkdir ever moves below
-        # the return (an obvious optimization: a dry run needs no temp dir),
-        # the check below would pass forever while testing nothing.
         assert user_temp.is_dir()
-        assert not list(user_temp.glob("task_*_prompt.txt"))
+        assert not list(user_temp.glob("task_*prompt.txt"))
 
         # `mock_run.assert_not_called()` used to stand here, and could only
         # ever hold on darwin (ISSUE-308). `build_prompt` consults the bwrap
@@ -1578,8 +1584,15 @@ class TestPerUserTempDir:
         result = get_user_temp_dir(config, "alice")
         assert result == config.temp_dir / "alice"
 
-    def test_temp_files_go_to_user_dir(self, tmp_path):
-        """Prompt and result files should be in user subdirectory."""
+    def test_temp_files_go_to_the_directory_that_owns_them(self, tmp_path):
+        """Two directories, split by who may write which.
+
+        The result file is the model's — it writes it from inside the sandbox
+        and the daemon reads it back — so it stays in the per-user directory
+        bwrap binds read-write. Both prompt halves are the daemon's, and they
+        go in the task control directory, which no task can write and no
+        other task can read.
+        """
         config = _make_config(tmp_path)
         task = _make_task(user_id="alice")
 
@@ -1595,11 +1608,12 @@ class TestPerUserTempDir:
 
         user_temp = config.temp_dir / "alice"
         assert user_temp.exists()
-        prompt_file = user_temp / "task_1_prompt.txt"
-        assert prompt_file.exists()
+        control = get_task_control_dir(config, "alice", 1)
+        assert (control / "prompt.txt").exists()
         # Both halves, since the split. The system half is a second artifact
-        # under the same task-id convention and the same overwrite lifecycle.
-        assert (user_temp / "task_1_system_prompt.txt").exists()
+        # under the same lifecycle: overwritten per attempt, kept afterwards.
+        assert (control / "system_prompt.txt").exists()
+        assert not list(user_temp.glob("task_*prompt.txt"))
 
 
 class TestDatedMemoriesInPrompt:

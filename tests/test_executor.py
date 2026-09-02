@@ -46,15 +46,15 @@ def _system_half(config, user_id="alice", task_id=1) -> str:
     Since the prompt split, `input=` on the CLI subprocess carries the *user*
     half alone — the request, retrieved memory and conversation history. Skill
     bodies, the skills changelog and the workspace vocabulary are standing
-    instructions and travel as `task_<id>_system_prompt.txt`, which the brain
-    passes with `--append-system-prompt-file`. A test asserting on one of those
-    reads this file, and a *negative* assertion about one has to read it or it
-    passes for the wrong reason.
+    instructions and travel as `system_prompt.txt` in the task's control
+    directory, which the brain passes with `--append-system-prompt-file`. A
+    test asserting on one of those reads this file, and a *negative* assertion
+    about one has to read it or it passes for the wrong reason.
     """
-    from istota.executor import get_user_temp_dir
+    from istota.executor import get_task_control_dir
 
     return (
-        get_user_temp_dir(config, user_id) / f"task_{task_id}_system_prompt.txt"
+        get_task_control_dir(config, user_id, task_id) / "system_prompt.txt"
     ).read_text(encoding="utf-8")
 
 
@@ -4232,9 +4232,70 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
         # skill body it lives in is a standing instruction, so it is in the
         # system half — which reaches the CLI as a file rather than on stdin.
         composed = (
-            tmp_path / "temp" / "alice" / "task_1_system_prompt.txt"
+            tmp_path / "temp" / ".control" / "alice" / "task_1"
+            / "system_prompt.txt"
         ).read_text(encoding="utf-8")
         prompt_text = mock_run.call_args.kwargs["input"]
         assert "{workspace}" not in composed
         assert "{workspace}" not in prompt_text
         assert str((config.nextcloud_mount_path / "Users" / "alice")) in composed
+
+
+class TestImagePreparationWritesIntoTheControlDirectory:
+    """The destination `execute_task` hands `prepare_image_attachments`.
+
+    The prepared renditions used to land in `{temp_dir}/{user_id}/attachments/
+    task_<id>/` — inside the sandbox's own working directory, where the model
+    could rewrite the picture it was about to be asked about, and where the
+    previous task's renditions were still readable. The function no longer
+    derives that layout at all: it takes the directory to write into, and the
+    caller is what names it.
+
+    Asserted through the argument rather than through a written file, so the
+    wiring is pinned on a deployment with no Pillow and on every case where an
+    attachment is screened out before anything is written.
+    `tests/test_executor_images.py` is where the real renditions are followed
+    to disk.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            skills_dir=tmp_path / "_empty_skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_enabled=False, skill_proxy_enabled=False),
+        )
+
+    def test_the_out_dir_is_inside_the_task_control_directory(self, tmp_path):
+        from istota.executor import execute_task, get_task_control_dir, get_user_temp_dir
+        from istota.image_attachments import ImagePreparation
+
+        config = self._make_config(tmp_path)
+        img = tmp_path / "inbox" / "shot.png"
+        img.parent.mkdir(parents=True)
+        img.write_bytes(b"not really a png")
+
+        with patch("istota.executor.prepare_image_attachments") as prep, \
+                patch("istota.executor.subprocess.run") as mock_run:
+            prep.return_value = ImagePreparation([str(img)], [], [])
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            with db.get_db(config.db_path) as conn:
+                task_id = db.create_task(
+                    conn, prompt="what is this?", user_id="alice",
+                    source_type="talk", attachments=[str(img)],
+                )
+                task = db.get_task(conn, task_id)
+                execute_task(task, config, [], conn=conn, use_context=False)
+
+        assert prep.called, "the image pass never ran"
+        out_dir = prep.call_args.args[1]
+        control = get_task_control_dir(config, "alice", task.id)
+        assert out_dir == control / "attachments"
+        # And not in the directory the sandbox binds read-write, which is the
+        # whole point of the move.
+        assert not out_dir.is_relative_to(
+            get_user_temp_dir(config, "alice").resolve()
+        )

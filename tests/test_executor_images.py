@@ -616,19 +616,63 @@ class TestPathsAndBinds:
         with db.get_db(config.db_path) as conn:
             task = _task(conn, attachments=[str(img)])
             _run(config, task, brain, conn)
+            # The rendition lands in the task control directory, which is not
+            # the model's working directory and so is not the read-write bind:
+            # it reaches the namespace as the read-only re-bind
+            # `build_bwrap_cmd` emits for `extra_ro_binds`. Handed here
+            # explicitly because this test builds the command by hand rather
+            # than through `execute_task`.
             cmd = executor.build_bwrap_cmd(
                 ["true"], config, task, True, [], executor.get_user_temp_dir(config, "alice"),
                 profile=executor.SandboxProfile.CLAUDE,
+                extra_ro_binds=[
+                    executor.get_task_control_dir(config, "alice", task.id)
+                ],
             )
 
         prepared = brain.reqs[-1].images[0].path
         binds = {
             cmd[i + 2] for i, tok in enumerate(cmd)
-            if tok == "--bind" and i + 2 < len(cmd)
+            if tok in ("--bind", "--ro-bind") and i + 2 < len(cmd)
         }
         assert any(
             prepared.is_relative_to(Path(dest)) for dest in binds
         ), f"{prepared} is under none of {sorted(binds)}"
+
+    def test_the_rendition_lands_in_the_task_control_directory(
+        self, tmp_path, ocr,
+    ):
+        """Where the prepared file goes, and that the prompt says so.
+
+        Two halves of one claim. The rendition is written into the
+        daemon-owned control directory rather than into the sandbox's own
+        working directory, where the model could rewrite the picture it was
+        about to be asked about and where the previous task's renditions were
+        still readable. And the path interpolated into the `Attached files:`
+        section is the path the file is actually at — a move that updated one
+        and not the other would name the model a file that is not there.
+        """
+        config = _make_config(tmp_path)
+        # Big enough that the area cap binds, so a rendition is written rather
+        # than the source being named as-is.
+        img = _png(tmp_path / "inbox" / "pano.png", size=(3000, 2000))
+        brain = _CaptureBrain()
+
+        with db.get_db(config.db_path) as conn:
+            task = _task(conn, attachments=[str(img)])
+            _run(config, task, brain, conn)
+
+        control = executor.get_task_control_dir(config, "alice", task.id)
+        prepared = brain.reqs[-1].images[0].path
+        assert prepared != img.resolve()
+        assert prepared.is_relative_to(control / "attachments")
+        assert prepared.is_file()
+        assert not prepared.is_relative_to(
+            executor.get_user_temp_dir(config, "alice").resolve()
+        )
+        # The rendered line, from the same run: one half of this without the
+        # other passes on a run that named the model nothing at all.
+        assert str(prepared) in _prompt_of(brain)
 
     def test_an_attachment_outside_every_bind_is_copied_in(
         self, tmp_path, ocr, monkeypatch
