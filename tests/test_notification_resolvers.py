@@ -451,18 +451,18 @@ class TestCronJobResolver:
         items, _total = store.list_open(config, conn, "alice")
         assert items == []
 
-    def test_a_module_job_is_not_worth_notifying_about(self):
-        """`_sync_module_jobs` lifts these suspensions hourly whether or not
-        the job works.
+    def test_every_suspension_is_worth_notifying_about(self):
+        """Module jobs included, since ISSUE-391.
 
-        A row would ride that loop — raised on the suspend, `stale` after the
-        rescue cleared the column, then *reopened* an hour later, and the reopen
-        branch delivers. A permanently broken module job would become an hourly
-        push about something with no `!cron enable` to run against it.
+        The exclusion rested on the rescue-reopen loop, which is now closed in
+        the resolver instead, and on the user having no verb to run against a
+        `_module.*` row, which ISSUE-392 retired. `is_module_job` stays: the
+        resolver and the note both still branch on it.
         """
         assert cron_source.should_notify("nightly-digest") is True
-        assert cron_source.should_notify("_module.health.garmin_sync") is False
+        assert cron_source.should_notify("_module.health.garmin_sync") is True
         assert cron_source.is_module_job("_module.feeds.poll") is True
+        assert cron_source.is_module_job("nightly-digest") is False
 
     def test_the_module_prefix_is_matched_on_the_raw_name(self):
         """`flatten` maps `_` to a space, so a flattened name never matches."""
@@ -504,6 +504,388 @@ class TestCronJobResolver:
         assert "http://evil.invalid" not in note
         for ch in "[]()`*_~<>|":
             assert ch not in items[0].title
+
+
+# ---------------------------------------------------------------------------
+# cron_job — the `_module.*` rows (ISSUE-391)
+# ---------------------------------------------------------------------------
+
+_MODULE_JOB = "_module.feeds.prune"
+
+
+def _suspended_module_job(conn, *, name=_MODULE_JOB, failures=5, user="alice"):
+    """A module row in the state the three suspend sites leave behind.
+
+    `skip_log_channel = 1` mirrors what `_sync_module_jobs` seeds, and is half
+    of why this suspension used to be silent; `should_notify` was the other
+    half. Daily cron, because the cadence is what ISSUE-391 was filed about.
+    """
+    conn.execute(
+        "INSERT INTO scheduled_jobs "
+        "(user_id, name, cron_expression, prompt, skill, skill_args, enabled, "
+        " skip_log_channel, consecutive_failures, last_error, auto_disabled_at) "
+        "VALUES (?, ?, ?, '', 'feeds', '[\"prune\"]', 1, 1, ?, ?, datetime('now'))",
+        (user, name, "17 3 * * *", failures, "entry_prune_not_before is malformed"),
+    )
+    return conn.execute(
+        "SELECT id FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+        (user, name),
+    ).fetchone()[0]
+
+
+def _rescue(conn, job_id):
+    """What `_sync_module_jobs` writes an hour after a module row is suspended.
+
+    Spelled out rather than driven through `_sync_feeds_module_jobs`, so the
+    assertion is about the three columns the rescue clears and not about which
+    module happens to seed a daily job today.
+    """
+    conn.execute(
+        "UPDATE scheduled_jobs SET auto_disabled_at = NULL, "
+        "consecutive_failures = 0, last_error = NULL WHERE id = ?",
+        (job_id,),
+    )
+
+
+class TestModuleJobSuspensionIsNotSilent:
+    """ISSUE-391: a permanently failing `_module.*` job told nobody, anywhere.
+
+    `_sync_module_jobs` seeds every module row `skip_log_channel = 1` and
+    `should_notify` excluded the whole prefix, so the only trace of a job that
+    failed on every run was `scheduled_jobs.last_error`, which a human had to
+    go and read. For `_module.feeds.prune` the symptom is a feeds database that
+    grows without bound — the exact condition the job was added to prevent.
+    """
+
+    def test_a_suspended_module_job_raises_a_row(self, conn):
+        job_id = _suspended_module_job(conn)
+        assert cron_source.should_notify(_MODULE_JOB) is True
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        assert _state(conn, "cron_job") == ("open", None)
+
+    def test_the_hourly_rescue_does_not_close_the_row(self, config, conn):
+        """The rescue is a retry, not a repair, so it does not end the condition.
+
+        This is the predicate the whole fix turns on. `auto_disabled_at IS NULL`
+        closes a CRON.md row because only something that fixed the job writes
+        it; on a `_module.*` row `_sync_module_jobs` writes it on a cooldown
+        whether or not anything was fixed.
+        """
+        job_id = _suspended_module_job(conn)
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        _rescue(conn, job_id)
+
+        items, total = store.list_open(config, conn, "alice")
+        assert total == 1 and len(items) == 1
+        assert _state(conn, "cron_job")[0] == "open"
+
+    def test_the_rescue_reopen_loop_cannot_form(self, config, conn):
+        """One push on the first suspension, then silence — the property
+        `should_notify`'s exclusion was protecting, kept without the exclusion.
+
+        A row that went `stale` on the rescue would be *reopened* by the next
+        suspension, and the reopen branch delivers. Holding it open turns that
+        reopen into a bump, which does not. Asserted on `last_delivered_at`
+        rather than on `occurrences` alone: the count climbing is the wanted
+        half, a second delivery is the half that was the hazard.
+        """
+        job_id = _suspended_module_job(conn)
+        first = cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        assert first is not None and first.deliver is True
+
+        # Five more days: rescue, re-fail, re-suspend, panel read in between.
+        for _cycle in range(3):
+            _rescue(conn, job_id)
+            store.list_open(config, conn, "alice")
+            conn.execute(
+                "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now'), "
+                "consecutive_failures = 5, last_error = 'boom' WHERE id = ?",
+                (job_id,),
+            )
+            again = cron_source.write(
+                conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+                cron_expression="17 3 * * *", last_error="boom",
+            )
+            assert again is not None
+            assert again.deliver is False, "a bump must not push again"
+
+        row = conn.execute(
+            "SELECT state, occurrences FROM notifications WHERE source = 'cron_job'",
+        ).fetchone()
+        assert row["state"] == "open"
+        assert row["occurrences"] == 4
+
+    def test_a_module_row_closes_when_the_job_actually_succeeds(self, config, conn):
+        """The backstop, and the only thing that genuinely ends the condition.
+
+        `reset_scheduled_job_failures` is the one writer of `last_success_at`,
+        so a success is the one state change the rescue cannot forge — it wipes
+        `auto_disabled_at`, `consecutive_failures` and `last_error` and leaves
+        that column alone.
+
+        The row is aged a minute first because the comparison is at second
+        precision and everything in this test happens inside one second, which
+        no real sequence does — the row is raised on a failed run and the
+        success is the next fire, minutes to a day later.
+        """
+        job_id = _suspended_module_job(conn)
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        conn.execute(
+            "UPDATE notifications SET updated_at = "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 minute')",
+        )
+        db.reset_scheduled_job_failures(conn, job_id)
+
+        items, total = store.list_open(config, conn, "alice")
+        assert items == [] and total == 0
+        assert _state(conn, "cron_job")[0] == "stale"
+
+    def test_a_success_before_the_row_was_raised_does_not_close_it(
+        self, config, conn,
+    ):
+        """The comparison is *since the row*, not *ever*.
+
+        A module job that worked for months and then broke has
+        `last_success_at` set, and after the rescue it also has zero failures
+        and a null `auto_disabled_at` — the whole row state is back to what a
+        healthy job looks like. Reading `last_success_at IS NOT NULL` alone
+        would close exactly the row this fix exists to keep open.
+        """
+        job_id = _suspended_module_job(conn)
+        conn.execute(
+            "UPDATE scheduled_jobs SET last_success_at = datetime('now', '-30 days') "
+            "WHERE id = ?", (job_id,),
+        )
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        _rescue(conn, job_id)
+
+        items, total = store.list_open(config, conn, "alice")
+        assert total == 1 and len(items) == 1
+
+    def test_the_rendered_row_survives_the_rescue_wiping_the_evidence(
+        self, config, conn,
+    ):
+        """The rescue clears `consecutive_failures` and `last_error`, so
+        recomputing the text from the live job renders "failed 0 times in a row"
+        and no error at all — a row whose whole purpose is to carry that error.
+        The stored text is what was true at the suspension, and every
+        re-suspension refreshes it.
+        """
+        job_id = _suspended_module_job(conn)
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *",
+            last_error="prune cutoff is malformed",
+        )
+        _rescue(conn, job_id)
+
+        items, _total = store.list_open(config, conn, "alice")
+        assert "5 times in a row" in items[0].title
+        assert "prune cutoff is malformed" in items[0].body
+
+        # The control: what the recomputing path would have rendered off the
+        # same live row, so this asserts the difference and not just a string.
+        job = db.get_scheduled_job(conn, job_id)
+        assert job.consecutive_failures == 0 and job.last_error is None
+        assert "0 times in a row" in cron_source.title_for(job.name, 0)
+        assert "prune cutoff" not in cron_source.body_for(
+            job.name, job.cron_expression, job.last_error,
+        )
+
+    def test_the_note_names_a_verb_that_works_on_a_module_job(self, config, conn):
+        """ISSUE-392 gave `_module.*` rows the `!cron` verbs, which is what
+        retired the premise of the old exclusion — that the user had nothing to
+        run against one of these.
+
+        Two things have to be right. The note must not say "re-enable it", since
+        the rescue does that on its own within the hour; and it must name the
+        job, which the generic `note_for` path could never do — `flatten` strips
+        `_`, so `safe == raw` is False for every name starting `_module.`.
+        """
+        job_id = _suspended_module_job(conn)
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        note = store.list_open(config, conn, "alice")[0][0].status_note
+        assert f"`!cron disable {_MODULE_JOB}`" in note
+        assert "<name>" not in note
+
+    @pytest.mark.parametrize(
+        "name",
+        ["_module.", "_module.feeds`; rm -rf /", "_module.feeds\nprune",
+         "_module.feeds prune"],
+    )
+    def test_an_unexpected_module_name_is_not_printed_beside_the_verb(self, name):
+        """The two predicates are not the same test, on purpose.
+
+        `is_module_job` is a bare `startswith`, so it admits anything under the
+        prefix; the allowlist is strictly narrower, so a name the seeder could
+        not have produced degrades to the generic form instead of being emitted
+        into Talk, which renders markdown — a backtick would close the code span
+        the verb is wrapped in. No shipped module can produce one of these; the
+        branch is a guard, and a guard with no test is a claim.
+        """
+        assert cron_source.is_module_job(name) is True
+        note = cron_source.note_for(name)
+        assert "`!cron disable <name>`" in note
+        assert name not in note
+
+    def test_dismissing_the_row_does_not_turn_it_into_a_recurring_push(
+        self, config, conn,
+    ):
+        """The hole the resolver alone does not plug.
+
+        Holding the row open makes a re-suspension a bump, but only while it is
+        open — and a resolver never sees a closed row. `dismiss` writes
+        `dismissed`, `write_notification` reads any non-open state as
+        `reopening`, and a reopen delivers. On a CRON.md job that is harmless
+        because a suspended job never fires again; on a module job the rescue
+        guarantees it will, which is the recurring push the prefix exclusion
+        existed to prevent, reached through the one door the resolver cannot.
+        """
+        job_id = _suspended_module_job(conn)
+        first = cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        assert first is not None and first.deliver is True
+
+        notification_id = conn.execute(
+            "SELECT id FROM notifications WHERE source = 'cron_job'",
+        ).fetchone()[0]
+        assert store.dismiss(conn, notification_id, "alice") is True
+        assert _state(conn, "cron_job")[0] == "dismissed"
+
+        # The rescue puts the job back, it fails again, and it is re-suspended.
+        _rescue(conn, job_id)
+        conn.execute(
+            "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now'), "
+            "consecutive_failures = 5, last_error = 'boom' WHERE id = ?",
+            (job_id,),
+        )
+        again = cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        assert again is None, "the same outage re-delivered after a dismiss"
+        assert _state(conn, "cron_job")[0] == "dismissed"
+
+    def test_a_new_outage_after_a_recovery_does_reopen_and_deliver(
+        self, config, conn,
+    ):
+        """The other half, and why the predicate is not "was it dismissed".
+
+        Suppressing on the state alone would make `dismiss` mean "never again",
+        which contradicts what the store documents it as. Keyed on a success in
+        between, a genuinely new outage is news and still pushes.
+        """
+        job_id = _suspended_module_job(conn)
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        notification_id = conn.execute(
+            "SELECT id FROM notifications WHERE source = 'cron_job'",
+        ).fetchone()[0]
+        store.dismiss(conn, notification_id, "alice")
+        conn.execute(
+            "UPDATE notifications SET updated_at = "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')",
+        )
+
+        # It works again — the one thing the rescue cannot forge.
+        db.reset_scheduled_job_failures(conn, job_id)
+        # Then, later, it breaks again.
+        conn.execute(
+            "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now'), "
+            "consecutive_failures = 5, last_error = 'boom' WHERE id = ?",
+            (job_id,),
+        )
+        again = cron_source.write(
+            conn, "alice", job_id=job_id, job_name=_MODULE_JOB, fail_count=5,
+            cron_expression="17 3 * * *", last_error="boom",
+        )
+        assert again is not None and again.deliver is True
+        assert _state(conn, "cron_job")[0] == "open"
+
+    def test_the_pushed_text_does_not_claim_the_job_has_stopped(self):
+        """`status_note` reaches the panel alone, so a correction made only
+        there never gets to the person who only sees the push — which is the
+        surface ISSUE-391 was filed about.
+
+        Two claims a module row must not make: that it was switched off, and
+        that it will not run again. Both are false within the hour, and the
+        second one invites a dismiss, which is the one shape that would deliver
+        again on the next suspension.
+        """
+        title = cron_source.title_for(_MODULE_JOB, 5)
+        body = cron_source.body_for(_MODULE_JOB, "17 3 * * *", "boom")
+        assert "switched off" not in title
+        assert "will not run again" not in body
+        assert "5 times in a row" in title
+        # The verb has to travel with the alert, not sit in the panel.
+        assert f"`!cron disable {_MODULE_JOB}`" in body
+        assert "boom" in body
+
+    def test_a_cron_md_job_keeps_its_original_wording(self):
+        """The control for the branch above."""
+        title = cron_source.title_for("nightly-digest", 5)
+        body = cron_source.body_for("nightly-digest", "0 7 * * *", "boom")
+        assert "was switched off after 5 failures" in title
+        assert "will not run again" in body
+        assert "!cron disable" not in body
+
+    def test_a_success_check_that_cannot_run_holds_the_row_open(self, conn):
+        """The refusal direction, which the docstring calls load-bearing.
+
+        `_succeeded_since` runs inside `list_open`'s sweep of the whole open
+        set, so it must not take the panel down — and it must not answer "yes,
+        it recovered" on a question it could not settle, which would close a row
+        the user has not read, silently and for good. Both refusals return the
+        same False, so both are asserted.
+        """
+        job_id = _suspended_module_job(conn)
+
+        class _Raises:
+            def execute(self, *_a, **_k):
+                raise RuntimeError("no such column: last_success_at")
+
+        assert cron_source._succeeded_since(_Raises(), job_id, "2026-01-01") is False
+        assert cron_source._succeeded_since(conn, job_id, "") is False
+
+
+    def test_a_cron_md_job_still_closes_when_its_suspension_lifts(
+        self, config, conn,
+    ):
+        """The other half of the split, asserted here so a future edit cannot
+        give every job the module rule by accident. A CRON.md job has no rescue
+        arm behind it, so `auto_disabled_at IS NULL` still means somebody fixed
+        it.
+        """
+        job_id = _disabled_job(conn, name="nightly-digest")
+        conn.execute(
+            "UPDATE scheduled_jobs SET auto_disabled_at = NULL WHERE id = ?",
+            (job_id,),
+        )
+        items, total = store.list_open(config, conn, "alice")
+        assert items == [] and total == 0
+        assert _state(conn, "cron_job")[0] == "stale"
 
 
 # ---------------------------------------------------------------------------

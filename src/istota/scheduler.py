@@ -2282,6 +2282,11 @@ def _note_job_auto_disabled(
         job = db.get_scheduled_job(conn, job_id)
         if job is None:
             return None
+        # Answers True for every name today (ISSUE-391 retired the `_module.*`
+        # exclusion). Kept as a call rather than deleted: it is the one place a
+        # whole class of job can be taken out of this source, the source owns
+        # that decision, and the three suspend sites reach the producer only
+        # through here. Not dead code — a gate with nothing currently behind it.
         if not cron_job_source.should_notify(job.name):
             return None
         return cron_job_source.write(
@@ -6918,10 +6923,14 @@ def _sync_module_jobs(
         # on a CRON.md row separates an operator disable from an auto-disable —
         # but that reasoning does not carry here, and without this arm every
         # `_module.*` row stopped by the running deployment is dead for good:
-        # the arm above cannot see it, the drift branch only rescues the
-        # `command`-shaped rows, the CRON.md sync skips `_module.*` entirely,
-        # `!cron enable` needs a name that is in somebody's file, and
-        # `should_notify` means nobody is ever told.
+        # the arm above cannot see it (it keys on `auto_disabled_at`, which this
+        # shape has NULL), the drift branch only rescues the `command`-shaped
+        # rows, and the CRON.md sync skips `_module.*` entirely. The list used
+        # to carry two more clauses and both have since gone — `!cron enable`
+        # takes a `_module.` name (ISSUE-392) and a module suspension does now
+        # raise a notification (ISSUE-391) — but neither reaches this shape,
+        # which is stopped with `auto_disabled_at` NULL and so was never
+        # suspended by anything that would have raised one.
         #
         # So this is today's predicate, scoped to that shape by
         # `auto_disabled_at IS NULL` and `disabled_at IS NULL`. The

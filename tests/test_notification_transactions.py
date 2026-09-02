@@ -691,14 +691,25 @@ class TestCronAutoDisable:
         assert [r["occurrences"] for r in rows] == [2]
         assert len(sent) == 1, "the second failure pushed a duplicate"
 
-    def test_a_module_job_disable_writes_no_row(self, config, monkeypatch):
-        """`_sync_module_jobs` re-enables these hourly whether or not they work.
+    def test_a_module_job_disable_raises_and_delivers_once(
+        self, config, monkeypatch,
+    ):
+        """ISSUE-391, through the real seam: a `_module.*` suspension is not
+        silent any more, and it still pushes exactly once.
 
-        Raised on the disable, marked `stale` once the rescue zeroes the
-        counter, then reopened — and a reopen delivers — the row would be an
-        hourly push about something with no user-facing verb to fix it. A module
-        job that fails for an actionable reason has a source of its own that
-        says so in terms the user can act on.
+        This used to assert the opposite. `_sync_module_jobs` seeds every module
+        row `skip_log_channel = 1` and `should_notify` excluded the whole prefix,
+        so a job failing on every run left nothing behind but
+        `scheduled_jobs.last_error`. The hazard the exclusion was avoiding — the
+        hourly rescue closing the row so the next suspension *reopens* it, and a
+        reopen delivers — is now handled in the resolver, which does not read a
+        module row's `auto_disabled_at` as a close.
+
+        The second half is what makes that a fix rather than a trade: the rescue
+        runs, the row survives it, and the next suspension bumps instead of
+        reopening. Asserted on `send_notification` calls, because `occurrences`
+        climbing is the wanted half and a second push is the half that was the
+        reason not to do this at all.
         """
         from istota.scheduler import process_one_task
 
@@ -713,13 +724,35 @@ class TestCronAutoDisable:
         process_one_task(config)
 
         with db.get_db(config.db_path) as conn:
-            # The suspension itself still happens — only the notification is
-            # withheld, or the test would pass against a job that never tripped.
             assert db.get_scheduled_job(conn, job_id).auto_disabled_at is not None
             assert conn.execute(
                 "SELECT COUNT(*) FROM notifications WHERE source = 'cron_job'",
-            ).fetchone()[0] == 0
-        assert sent == []
+            ).fetchone()[0] == 1
+        assert len(sent) == 1
+
+        # An hour later: `_sync_module_jobs` lifts the suspension and wipes the
+        # counter, then the job fires again and fails again.
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE scheduled_jobs SET auto_disabled_at = NULL, enabled = 1, "
+                "consecutive_failures = 4, last_error = NULL WHERE id = ?",
+                (job_id,),
+            )
+            task_id = db.create_task(
+                conn, prompt="summarise the news", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?",
+                         (task_id,))
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            rows = conn.execute(
+                "SELECT state, occurrences FROM notifications WHERE dedup_key = ?",
+                (f"job:{job_id}",),
+            ).fetchall()
+        assert [(r["state"], r["occurrences"]) for r in rows] == [("open", 2)]
+        assert len(sent) == 1, "the rescue-reopen loop pushed a second time"
 
     def test_a_recovered_job_closes_its_row_on_the_success_path(
         self, config, monkeypatch,
