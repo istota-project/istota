@@ -86,7 +86,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `result_file` | claude_code-specific fallback file path |
 | `advisor` | Advisor-model config: a stronger model the cheap default can consult at moments the advisor tool picks. Anthropic-namespace brains only; skipped when the task pins its own model |
 | `fs_read_roots` / `fs_write_roots` | Filesystem roots the in-process tools may read from and write to (NativeBrain — it has no bwrap wrapper of its own) |
-| `fs_write_denied_roots` | Read-only carve-outs *inside* a write root; containment alone cannot express a hole in a root. Two entries: the task's `.developer` directory, which holds the scripts that fetch its own credentials, and its `task_<id>_system_prompt.txt`, the composed standing instructions the row above names. See [the `.developer` carve-out](../deployment/security.md#the-developer-carve-out) |
+| `fs_write_denied_roots` | Read-only carve-outs *inside* a write root; containment alone cannot express a hole in a root. Up to two entries: the task's `task_<id>_system_prompt.txt`, the composed standing instructions the row above names, on every shape; plus its `.developer` directory, which holds the scripts that fetch its own credentials, on a confined one. See [the `.developer` carve-out](../deployment/security.md#the-developer-carve-out) |
 | `db_path` | Handed to the brain rather than to the model: `env` no longer carries `ISTOTA_DB_PATH` |
 | `session_label` | Label for the session transcript, so a run is identifiable in the logs |
 
