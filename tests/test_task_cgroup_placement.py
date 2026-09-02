@@ -38,6 +38,8 @@ from istota import task_cgroup
 from istota.brain._types import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain
 
+from .support.cgroups import live_cgroup_task_id
+
 
 @pytest.fixture(autouse=True)
 def _fresh_log_state():
@@ -476,7 +478,9 @@ class TestForkInheritanceAgainstTheKernel:
 
     def test_a_grandchild_forked_after_placement_is_a_member(self, live_root):
         limits = task_cgroup.CgroupLimits(memory_max_mb=2048, pids_max=512, cpu_max_percent=0)
-        path = task_cgroup.create(999998, limits, attempt=0, root=live_root)
+        path = task_cgroup.create(
+            live_cgroup_task_id(), limits, attempt=0, root=live_root
+        )
         assert path is not None, "probe said this would work"
         try:
             # `sh` forks `sleep` and reports its pid, which is the shape bwrap
@@ -513,7 +517,9 @@ class TestForkInheritanceAgainstTheKernel:
         the ordering is what makes it work — and the ordering is the entire bug.
         """
         limits = task_cgroup.CgroupLimits(memory_max_mb=2048, pids_max=512, cpu_max_percent=0)
-        path = task_cgroup.create(999997, limits, attempt=0, root=live_root)
+        path = task_cgroup.create(
+            live_cgroup_task_id(), limits, attempt=1, root=live_root
+        )
         assert path is not None
         try:
             proc = subprocess.Popen(

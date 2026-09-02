@@ -198,7 +198,13 @@ async def _poll_single_conversation(
         )
         return (conversation_token, messages)
     except Exception as e:
-        logger.error("Error polling conversation %s: %s", conversation_token, e)
+        # The type is part of the message because several of the shapes seen in
+        # production stringify to nothing at all (httpx.ReadError and friends),
+        # which logged as "Error polling conversation X: " with no cause.
+        logger.error(
+            "Error polling conversation %s: %s: %s",
+            conversation_token, type(e).__name__, e,
+        )
         return (conversation_token, [])
 
 
