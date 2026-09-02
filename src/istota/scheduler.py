@@ -753,16 +753,25 @@ def get_worker_id(user_id: str | None = None) -> str:
 
 async def edit_talk_message(
     config: Config, task: db.Task, message_id: int, message: str,
+    *, target_token: str | None = None,
 ) -> bool:
     """Edit a Talk message in-place. Returns True on success, False on failure.
 
+    ``target_token`` overrides ``task.conversation_token`` for the edit, exactly
+    as it does for ``post_result_to_talk`` — the message being edited lives in
+    whichever room it was posted to, and on a promoted room that is the room's
+    ``talk`` binding rather than its canonical token (ISSUE-400). The caller
+    resolves it once and hands it down; resolving here would cost a database
+    read per progress edit, which is one per tool call.
+
     Thin shim over ``TalkTransport.edit`` — the surface logic (and the
     ``TalkClient`` construction) lives in ``transport/talk/``."""
-    if not config.nextcloud.url or not task.conversation_token:
+    token = target_token or task.conversation_token
+    if not config.nextcloud.url or not token:
         return False
     from .transport.talk import TalkTransport
     try:
-        await TalkTransport(config).edit(task.conversation_token, message_id, message)
+        await TalkTransport(config).edit(token, message_id, message)
         return True
     except Exception as e:
         logger.debug("Edit message %d failed: %s", message_id, e)
@@ -2520,21 +2529,43 @@ def process_one_task(
                 _delivery_transport
                 and _delivery_transport.capabilities.supports_progress_ack
             )
-            if (_supports_ack and task.source_type == "talk"
-                    and task.conversation_token and not dry_run):
+            # Where the ack goes. `conversation_token` is the room's canonical
+            # token, postable only when it equals the room's Talk ref — false on
+            # a promoted room, where the ack 404'd and every progress edit
+            # behind it silently no-opped (ISSUE-400). Resolved once and carried
+            # rather than per edit: the resolution reads the database and an
+            # edit fires per tool call, so it also sits behind the free guards.
+            # `conversation_token` stays in the guard so this can only redirect
+            # an ack that would have been posted anyway — see the
+            # `process_one_task` bullet in `.claude/rules/transport.md`.
+            ack_token = (
+                _talk_target_for_delivery(config, task)
+                if (_supports_ack and task.source_type == "talk"
+                    and task.conversation_token and not dry_run)
+                else None
+            )
+            if ack_token:
                 ack_text = f"`#{task.id}` *Retrying…*" if is_rerun else f"`#{task.id}` *{random.choice(PROGRESS_MESSAGES)}*"
                 ack_msg_id = run_coro(post_result_to_talk(
                     config, task, ack_text,
                     reference_id=f"istota:task:{task.id}:ack",
+                    target_token=ack_token,
                 ))
                 if ack_msg_id is None:
+                    # Name the room. `_talk_binding_for_task` swallows a
+                    # database failure and falls back to `conversation_token`,
+                    # which on a promoted room is the unpostable one — so this
+                    # warning has to say which token was tried, or a resolution
+                    # failure and a genuine API failure look identical.
                     logger.warning(
                         "Ack message posted but no message ID returned for task %d "
-                        "(progress edits will no-op)",
-                        task.id,
+                        "(room %s; progress edits will no-op)",
+                        task.id, ack_token,
                     )
                 if config.scheduler.progress_updates:
-                    talk_sub = TalkEventSubscriber(config, task, ack_msg_id)
+                    talk_sub = TalkEventSubscriber(
+                        config, task, ack_msg_id, target_token=ack_token,
+                    )
                     event_writer.subscribe(talk_sub)
 
             # Log channel subscriber (no rate limiting, streams every tool call

@@ -44,7 +44,18 @@
 
   // A room is on Talk when it originated there or has been promoted.
   const onTalk = $derived(room.origin === 'talk' || !!room.talk_token);
-  const canPromote = $derived(room.origin !== 'talk' && !room.talk_token);
+  // A *promoted* room keeps the control, relabelled (ISSUE-401). Its binding
+  // can go stale — the Talk conversation deleted out from under it — and the
+  // button is the only way back; hiding it once `talk_token` was set is what
+  // made that state permanent from the app. The server decides whether
+  // anything actually happens: it probes the bound conversation and refuses
+  // unless Nextcloud says it is gone, so pressing this on a healthy room is
+  // answered with "already connected" rather than a second Talk room.
+  // Both keyed off one predicate: `origin` is optional in the type, and an
+  // origin-less room with a talk_token otherwise passed canPromote while
+  // failing isPromoted, mislabelling the button.
+  const canPromote = $derived(room.origin !== 'talk');
+  const isPromoted = $derived(canPromote && !!room.talk_token);
   // An imported (Talk-origin) room is hidden per-user, not destroyed — this
   // must match the backend's hide condition (`reg.origin == 'talk'`), NOT
   // `onTalk`: a promoted web room (origin='web' + talk_token) is still hard-
@@ -177,17 +188,22 @@
       <p class="caption talk-on">
         This room is also open in Nextcloud Talk — replies sync to your phone.
       </p>
-    {:else if onPromote}
-      <button
-        class="talk-btn"
-        type="button"
-        disabled={!canPromote || promoting}
-        onclick={handlePromote}
-      >
-        {promoting ? 'Opening…' : 'Also open in Talk'}
+    {/if}
+    {#if canPromote && onPromote}
+      <button class="talk-btn" type="button" disabled={promoting} onclick={handlePromote}>
+        {#if promoting}
+          {isPromoted ? 'Checking…' : 'Opening…'}
+        {:else}
+          {isPromoted ? 'Reconnect to Talk' : 'Also open in Talk'}
+        {/if}
       </button>
       <p class="caption">
-        Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
+        {#if isPromoted}
+          If the Talk conversation for this room was deleted, this creates a new one and points the
+          room at it. Nothing changes while the existing conversation is still there.
+        {:else}
+          Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
+        {/if}
       </p>
     {/if}
   </div>

@@ -2588,10 +2588,35 @@ export function updateChatRoom(
   });
 }
 
+/** What a promote did. Not all of these are errors, which is why the endpoint
+ * answers with a status rather than a bare room: `live` and `unreachable` both
+ * left the room untouched, and rendering them as a failure is what made a room
+ * with a dead binding look like a button that does nothing (ISSUE-401). */
+export type PromoteStatus =
+  /** Promoted a room that was not bound to Talk before. */
+  | 'ok'
+  /** The bound conversation was gone; the room now points at a new one. */
+  | 'reconnected'
+  /** Already bound to a conversation that still exists. Nothing changed. */
+  | 'live'
+  /** The conversation is there, but the bot was removed from it. Adding the bot
+   * back is the repair — replacing the binding would fork a live room. */
+  | 'bot_removed'
+  /** Nextcloud could not be asked about the existing binding. Nothing changed. */
+  | 'unreachable'
+  /** Another request bound the room first. Its conversation stands. */
+  | 'raced';
+
+export interface PromoteResult {
+  status: PromoteStatus;
+  /** The updated room, or null where nothing usable came back. */
+  room: ChatRoom | null;
+}
+
 /** Create a real Nextcloud Talk conversation for a web-origin room and bind it
- * ("Also open in Talk"). Returns the updated room (now carrying talk_token). */
-export function promoteChatRoom(id: number): Promise<ChatRoom> {
-  return apiFetch<ChatRoom>(`/chat/rooms/${id}/promote`, {
+ * ("Also open in Talk"), or repair a binding whose conversation was deleted. */
+export function promoteChatRoom(id: number): Promise<PromoteResult> {
+  return apiFetch<PromoteResult>(`/chat/rooms/${id}/promote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
