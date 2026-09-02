@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from istota.config import Config, UserConfig
@@ -29,6 +31,48 @@ def istota_config(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FEEDS_USER", "alice")
     return config
+
+
+def _feeds_ctx(config):
+    from istota.feeds import resolve_for_user
+    return resolve_for_user("alice", config)
+
+
+def _seed_over_cap(config):
+    """One feed holding five read entries against a maximum of two.
+
+    Uses the count pass rather than the age pass: it needs no observation
+    marker and no floor arithmetic, so the fixture stays small while still
+    exercising a committed delete.
+    """
+    from istota.feeds import db as feeds_db
+    from istota.skills.feeds import _run
+
+    assert _run(["add", "--url", "https://feed.example.com/rss"])["status"] == "ok"
+    ctx = _feeds_ctx(config)
+    with feeds_db.connect(ctx.db_path) as conn:
+        feed_id = feeds_db.list_feeds(conn)[0].id
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, title, fetched_at, "
+                "last_seen_at, status) VALUES (?, ?, ?, ?, ?, 'read')",
+                (feed_id, f"e{i}", f"e{i}",
+                 f"2026-08-0{i + 1}T00:00:00+00:00",
+                 f"2026-08-0{i + 1}T00:00:00+00:00"),
+            )
+        feeds_db.set_max_entries_per_feed(conn, 2)
+        conn.commit()
+
+
+def _entry_guids(config):
+    from istota.feeds import db as feeds_db
+    ctx = _feeds_ctx(config)
+    with feeds_db.connect(ctx.db_path) as conn:
+        return [
+            r["guid"] for r in conn.execute(
+                "SELECT guid FROM feed_entries ORDER BY guid"
+            )
+        ]
 
 
 class TestSkillRun:
@@ -146,16 +190,48 @@ class TestPrune:
             skill.main(["prune"])
         assert exc_info.value.code == 1
 
-    def test_prune_reaches_the_real_cli_end_to_end(self, istota_config):
-        """Through `_run` and the Click command, not a mock: proves the
-        facade's argv is one the CLI actually accepts, which a mocked
-        dispatch test cannot see."""
-        from istota.skills.feeds import _run
-        out = _run(["prune", "--dry-run"])
+    def test_prune_deletes_for_real_through_the_facade(self, istota_config, capsys):
+        """Through `_run` and the Click command, not a mock, and against data
+        that actually has something to delete.
+
+        Asserting zero counts on an empty database was the earlier shape of
+        this test, and it could not fail: zero is what a correct prune, a
+        no-op prune and a stubbed-out `prune_feeds` all return. This is the
+        no-flag argv the scheduled job sends, so it is the one that has to be
+        shown deleting.
+
+        Driven through `main`, not `_run`: `_run` takes an argv the test wrote
+        itself, so it steps over `cmd_prune` — the very code that decides
+        whether `--dry-run` is appended. Measured, a `cmd_prune` forced to
+        always send `--dry-run` left this test green while it called `_run`.
+        """
+        from istota.skills.feeds import main
+        _seed_over_cap(istota_config)
+
+        main(["prune"])
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["dry_run"] is False
+        assert out["entries_deleted_by_cap"] == 3
+        assert _entry_guids(istota_config) == ["e3", "e4"]
+
+    def test_dry_run_plans_the_same_deletion_and_leaves_the_rows(
+        self, istota_config, capsys,
+    ):
+        """The control for the test above, on identical data: same planned
+        count, nothing gone. Without it, a `--dry-run` that quietly deleted
+        would look exactly like a `--dry-run` that worked."""
+        from istota.skills.feeds import main
+        _seed_over_cap(istota_config)
+
+        main(["prune", "--dry-run"])
+
+        out = json.loads(capsys.readouterr().out)
         assert out["status"] == "ok"
         assert out["dry_run"] is True
-        assert out["entries_deleted_by_age"] == 0
-        assert out["entries_deleted_by_cap"] == 0
+        assert out["entries_deleted_by_cap"] == 3
+        assert _entry_guids(istota_config) == ["e0", "e1", "e2", "e3", "e4"]
 
 
 class TestLoaderEnvFirst:

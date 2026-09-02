@@ -36,9 +36,15 @@ DEFAULT_JOBS: tuple[ModuleJob, ...] = (
         skill="feeds",
         skill_args=("run-scheduled",),
     ),
-    # Entry retention. Daily, at an off-peak minute that is not on the
-    # five-minute poll boundary, so the two jobs do not contend for the
-    # same per-user SQLite write lock on every hour they share.
+    # Entry retention, daily and off-peak. The minute is off the poll's
+    # five-minute boundary so the two are not *dispatched* on the same tick,
+    # which is all a cron offset can buy: the poll's own run is bounded by
+    # pacing plus network time and can outlast it. What actually keeps the
+    # two off one another's write lock is that both are queued
+    # ``background``, a pool that defaults to one worker per user — so a
+    # deployment that raises ``user_max_background_workers`` can run them
+    # together, and then a prune holding its transaction longer than
+    # ``busy_timeout`` fails the poll rather than delaying it.
     ModuleJob(
         name=f"{MODULE_PREFIX}prune",
         cron="17 3 * * *",

@@ -60,7 +60,6 @@ def _job(jobs: list[dict], name: str) -> dict:
     return matches[0]
 
 
-
 class TestJobsForUser:
     def test_seeds_run_scheduled_and_prune(self, tmp_path):
         ctx = synthesize_feeds_context("alice", tmp_path)
@@ -77,7 +76,6 @@ class TestJobsForUser:
     def test_dispatch_shape_is_skill_task(self, tmp_path):
         """Phase 1.3: jobs are skill-tasks, not shell command-tasks. The
         master Fernet key never enters the subprocess env on this path."""
-        import json
         ctx = synthesize_feeds_context("alice", tmp_path)
         jobs = jobs_for_user(ctx, "alice")
         assert jobs, "expected at least one rendered job"
@@ -87,7 +85,6 @@ class TestJobsForUser:
             assert isinstance(json.loads(j["skill_args"]), list)
 
     def test_poll_job_cron_and_args(self, tmp_path):
-        import json
         ctx = synthesize_feeds_context("alice", tmp_path)
         job = _job(jobs_for_user(ctx, "alice"), f"{MODULE_PREFIX}run_scheduled")
         assert job["cron"] == "*/5 * * * *"
@@ -98,7 +95,6 @@ class TestJobsForUser:
         scheduler and the args are the contract with the skill facade: a
         stray flag here would be dispatched to `feeds prune` on every
         deployment with the module enabled, unattended and daily."""
-        import json
         ctx = synthesize_feeds_context("alice", tmp_path)
         job = _job(jobs_for_user(ctx, "alice"), f"{MODULE_PREFIX}prune")
         assert job["cron"] == "17 3 * * *"
@@ -108,7 +104,6 @@ class TestJobsForUser:
     def test_the_prune_job_never_runs_in_dry_run(self, tmp_path):
         """A scheduled dry run would report deletions and delete nothing,
         so growth would continue while the log said it was handled."""
-        import json
         ctx = synthesize_feeds_context("alice", tmp_path)
         job = _job(jobs_for_user(ctx, "alice"), f"{MODULE_PREFIX}prune")
         assert "--dry-run" not in json.loads(job["skill_args"])
@@ -609,7 +604,9 @@ class TestSyncFeedsModuleJobs:
         ).fetchone()
         assert tuple(row) == (1, 0, None, None)
         enabled = [j.name for j in db.get_enabled_scheduled_jobs(conn)]
-        assert f"{MODULE_PREFIX}run_scheduled" in enabled
+        assert set(enabled) == {
+            f"{MODULE_PREFIX}run_scheduled", f"{MODULE_PREFIX}prune",
+        }
 
     def test_the_legacy_arm_keeps_the_old_cooldown(self, tmp_path):
         """It is today's predicate verbatim, `last_run_at` included, so a row
@@ -634,6 +631,108 @@ class TestSyncFeedsModuleJobs:
             ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchone()
         assert tuple(row) == (0, 5)
+
+
+class TestTheArmsSeeBothRows:
+    """Every rescue/pause/drift arm in `_sync_module_jobs` is a predicate over
+    `name LIKE '_module.feeds.%'`, and until this stage that pattern could only
+    ever match one row. The tests above are all scoped to `run_scheduled`, which
+    is right — a `fetchone()` over two rows picks arbitrarily — but it leaves
+    the arms asserted only against the poll. These are the prune row's own
+    cases, and the cross-row one, on the argument that an arm reaching the
+    wrong row here re-enables a delete path rather than a read.
+    """
+
+    def _insert(self, conn, name, **cols):
+        base = {
+            "cron": "*/5 * * * *" if name.endswith("run_scheduled") else "17 3 * * *",
+            "args": ('["run-scheduled"]' if name.endswith("run_scheduled")
+                     else '["prune"]'),
+            "enabled": 1,
+            "failures": 0,
+            "auto_disabled_at": None,
+            "last_run_at": None,
+        }
+        base.update(cols)
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, command, skill, "
+            "skill_args, enabled, skip_log_channel, consecutive_failures, "
+            "last_error, last_run_at, auto_disabled_at) "
+            "VALUES (?, ?, ?, '', NULL, 'feeds', ?, ?, 1, ?, NULL, ?, ?)",
+            ("alice", name, base["cron"], base["args"], base["enabled"],
+             base["failures"], base["last_run_at"], base["auto_disabled_at"]),
+        )
+
+    def _row(self, conn, name):
+        return conn.execute(
+            "SELECT enabled, consecutive_failures, auto_disabled_at "
+            "FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            ("alice", name),
+        ).fetchone()
+
+    def test_a_suspended_prune_row_is_rescued(self, tmp_path):
+        """The daily row has to come back the same way the poll's does: a
+        module job has no `!cron enable` a user can reach for, so if the
+        daemon gives up on the prune, only this sync retries it."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        self._insert(
+            conn, f"{MODULE_PREFIX}prune", failures=5,
+            auto_disabled_at="2020-01-01 00:00:00",
+            last_run_at="2020-01-01 00:00:00",
+        )
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        assert tuple(self._row(conn, f"{MODULE_PREFIX}prune")) == (1, 0, None)
+
+    def test_an_operator_paused_prune_row_stays_paused(self, tmp_path):
+        """`!cron disable _module.feeds.prune` writes `enabled = 0` and leaves
+        `auto_disabled_at` NULL (db.disable_scheduled_job). With no failures
+        behind it, neither arm may touch the row — this is the only off switch
+        a user has for the delete path, and a sync that reverted it would turn
+        deletion back on within the hour."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        self._insert(conn, f"{MODULE_PREFIX}prune", enabled=0)
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        assert tuple(self._row(conn, f"{MODULE_PREFIX}prune")) == (0, 0, None)
+
+    def test_rescuing_the_poll_row_leaves_the_prune_row_alone(self, tmp_path):
+        """The cross-row case. Both arms are per-row predicates, so this
+        should hold by construction; it is asserted because 'by construction'
+        stopped being obvious the moment the pattern matched two rows."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        self._insert(
+            conn, f"{MODULE_PREFIX}run_scheduled", enabled=1, failures=5,
+            auto_disabled_at="2020-01-01 00:00:00",
+            last_run_at="2020-01-01 00:00:00",
+        )
+        self._insert(conn, f"{MODULE_PREFIX}prune", enabled=0)
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        assert tuple(self._row(conn, f"{MODULE_PREFIX}run_scheduled")) == (1, 0, None)
+        assert tuple(self._row(conn, f"{MODULE_PREFIX}prune")) == (0, 0, None)
+
+    def test_a_drifted_prune_cron_is_corrected(self, tmp_path):
+        """A deployment seeded on an earlier minute is moved to the shipped
+        one, and the row keeps its skill shape."""
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        self._insert(conn, f"{MODULE_PREFIX}prune", cron="0 4 * * *")
+        conn.commit()
+        _sync_feeds_module_jobs(conn, app_config)
+        row = conn.execute(
+            "SELECT cron_expression, skill, skill_args, command FROM scheduled_jobs "
+            "WHERE user_id = ? AND name = ?",
+            ("alice", f"{MODULE_PREFIX}prune"),
+        ).fetchone()
+        assert row[0] == "17 3 * * *"
+        assert row[1] == "feeds"
+        assert json.loads(row[2]) == ["prune"]
+        assert row[3] is None
 
 
 # ---------------------------------------------------------------------------
