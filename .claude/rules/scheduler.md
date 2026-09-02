@@ -44,7 +44,7 @@ The lock path is the module constant `DAEMON_LOCK_PATH` (default
    - Organize shared files (every `shared_file_check_interval`)
    - Poll TASKS.md files (every `tasks_file_poll_interval`)
    - Run cleanup checks (every `briefing_check_interval`)
-   - Check heartbeats (every `heartbeat_check_interval`)
+   - Check heartbeats (every `heartbeat_check_interval`, off-thread via `_run_heartbeat_checks`)
    - Sweep SQLite DBs (framework + per-user feeds/health/location/money, all local now) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day). Dispatched **off the loop thread** via `_spawn_background_check` — see below
    - Snapshot local DBs to `{mount}/istota-db-backups/<date>/…` (dated dirs, retention + collapse guard) via the SQLite online-backup API (every `db_backup_interval`, default 24h; off-host durability now that module DBs are local — clock starts at boot, first snapshot after one interval); alerts the operator on any errored/suspect DB and on backup staleness. Also **off the loop thread** (`_run_db_backup` = snapshot + problem alert as one unit)
    - Emit the `scheduler_stats` health line (every `scheduler_stats_interval`, default 60s; first emit after one full interval; `0` disables)
@@ -57,18 +57,33 @@ The lock path is the module constant `DAEMON_LOCK_PATH` (default
 
 ### Off-thread periodic checks (`_spawn_background_check`, ISSUE-144)
 
-Four periodic checks can run long: the DB-health sweep and the DB-backup
+Five periodic checks can run long: the DB-health sweep and the DB-backup
 snapshot both walk every per-user DB (the backup writing to the rclone FUSE
 mount, where latency is unbounded), the nightly sleep cycles make synchronous
-per-user LLM calls, and the inbound email poll makes one IMAP connection per
+per-user LLM calls, the heartbeat sweep runs the whole doctor registry once per
+user with a `self-check` (process spawns, a socket per configured service, and
+optionally a live model call), and the inbound email poll makes one IMAP
+connection per
 message it reads plus another per message with attachments, uploading each
 attachment to Nextcloud over WebDAV — network I/O whose duration an outside
 sender can influence (ISSUE-250). Run synchronously they blocked `pool.dispatch()` for their
 whole duration, and the `LoopWatchdog.suspended()` wrapper needed to keep a
 healthy nightly run from paging left the watchdog blind to *real* stalls in the
-same window. All four now run on short-lived daemon threads (Tier 1 = the DB
-pair, Tier 2 = the sleep cycles, ISSUE-250 = the email poll), and **no `suspended()` call site remains in
+same window. All five now run on short-lived daemon threads (Tier 1 = the DB
+pair, Tier 2 = the sleep cycles, ISSUE-250 = the email poll, and the heartbeat
+sweep once `self-check` became a doctor run), and **no `suspended()` call site remains in
 `run_daemon`** — the watchdog has full coverage.
+
+Moving the heartbeat sweep off the loop was only half of its fix, and the half
+that is easy to stop at. `get_db` is in legacy implicit-transaction mode, so the
+sweep's first state write opened the daemon's single SQLite write transaction
+and held it until the sweep ended — across every remaining check, and across
+`send_heartbeat_alert`, which opens its own connection to the same database on
+the web and Talk legs. That self-serialized harmlessly while the sweep *was* the
+loop and would have become contention against the loop and the workers once it
+was not, so `check_heartbeats` commits per check. Unlike `_run_sleep_cycles`,
+which is recorded below as keeping that hold as a residual, this one does not
+have it.
 
 - `_spawn_background_check(name, fn, inflight, *, overlap_expected=False)` — spawns
   `fn` on a `bgcheck-<name>` daemon thread, unless the previous run under the same
@@ -359,7 +374,7 @@ class UserWorker(threading.Thread):
 | Talk | `_talk_poll_loop()` | `talk_poll_interval` | `talk_poll_state` |
 | Email | `poll_emails()` (transport/email/inbound.py), via off-thread `_run_email_poll` | `email_poll_interval` (batch `email_poll_batch_size`) | `processed_emails`, `email_poll_state` |
 | TASKS.md | `poll_all_tasks_files()` (tasks_file_poller.py) | `tasks_file_poll_interval` | `istota_file_tasks` |
-| Heartbeat | `check_heartbeats()` (heartbeat.py) | `heartbeat_check_interval` | `heartbeat_state` |
+| Heartbeat | `check_heartbeats()` (heartbeat.py), via off-thread `_run_heartbeat_checks` | `heartbeat_check_interval` | `heartbeat_state` |
 | DB health | `check_db_health()` → `db_health.check_and_repair()` | `db_health_check_interval` | — (logs only) |
 | DB backup | `db_backup.backup_databases()` (SQLite online-backup → `{mount}/istota-db-backups/<date>`; retention prune + collapse guard + `_alert_backup_problems` + staleness alert) | `db_backup_interval` | — (logs + operator alerts) |
 | Scheduler stats | `_emit_scheduler_stats()` (daemon-only) | `scheduler_stats_interval` | — (logs only) |
@@ -483,7 +498,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `talk_poll_state` | — | conversation_token, last_known_message_id |
 | `sleep_cycle_state` | — | user_id, last_run_at, last_processed_task_id |
 | `channel_sleep_cycle_state` | — | conversation_token, last_run_at, last_processed_task_id |
-| `heartbeat_state` | `HeartbeatState` | user_id, check_name, last_check_at, last_alert_at, last_healthy_at, consecutive_errors |
+| `heartbeat_state` | `HeartbeatState` | user_id, check_name, last_check_at, last_alert_at, last_healthy_at, last_error_at, consecutive_errors, last_alert_signature |
 | `reminder_state` | `ReminderState` | user_id, queue (JSON), content_hash |
 | `monarch_synced_transactions` | — | id, user_id, monarch_transaction_id, amount, merchant, content_hash |
 | `csv_imported_transactions` | — | id, user_id, content_hash, source_file |

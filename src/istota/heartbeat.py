@@ -663,21 +663,20 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
 #: spawn per configured user, or reaching past a `--version`, is a check this
 #: path must not run.
 #:
-#: **This list is known to be incomplete, and the reason is worth reading before
-#: extending it.** The spec that unified this handler onto the registry argued
-#: the cost was already paid, because `scheduler.check_doctor` runs the same
-#: registry hourly with `probe=True`. That is true of the *work* and false of
-#: the *thread*: `check_doctor` is dispatched through `_spawn_background_check`
-#: (`scheduler.py:8142`), while `check_heartbeats` is called synchronously on
-#: the dispatch loop inside an open transaction (`scheduler.py:8293`). So this
-#: handler blocks the loop for as long as the registry takes, once per user. A
-#: 30s `runtime.model_execution` there is not new — the probe this replaced did
-#: the same on the same thread — but the ~20 other checks are, and `web.basemap`
+#: **What this list is not for, now that the thread question is settled.** The
+#: spec that unified this handler onto the registry argued the cost was already
+#: paid, because `scheduler.check_doctor` runs the same registry hourly with
+#: `probe=True`. That was true of the *work* and false of the *thread*, and the
+#: gap was real: `check_heartbeats` ran synchronously on the dispatch loop,
+#: holding one write transaction for the whole sweep, so this handler blocked
+#: dispatch for as long as the registry took, once per user. Both halves are
+#: fixed where they belonged rather than here — the sweep is spawned through
+#: `_spawn_background_check` and commits per check — so `web.basemap`
 #: (network), `runtime.mount_liveness` (a FUSE stat) and `config.skill_overlays`
-#: (a mount walk) all meet this list's own stated criterion. They are not added
-#: here because the alternative — moving `check_heartbeats` off the loop — is a
-#: better fix that belongs to whoever owns the scheduler's threading, and
-#: choosing between the two is not this constant's decision to make.
+#: (a mount walk) are deliberately **not** skipped: they are slow, and slow is
+#: no longer the thing that hurts. What still belongs here is a check whose cost
+#: is paid per *user* when the answer is deployment-wide, or one that owns its
+#: own cadence elsewhere.
 _SELF_CHECK_SKIPPED = (
     # A `PRAGMA quick_check` over the whole framework database. `check_db_health`
     # owns that on a daily cadence, and `SWEEP_SKIPPED_CHECKS` excludes it from
@@ -721,10 +720,10 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     ``probe`` stays True. ``probe=False`` would map neatly onto the old
     ``shutil.which`` calls, but it would make ``live=True`` self-contradictory.
     :data:`_SELF_CHECK_SKIPPED` names the ones whose cost multiplies badly
-    instead. **Read that constant's second paragraph before adding a caller
-    here**: this handler runs on the scheduler's dispatch loop, not on a
-    background thread, and the registry is much more work than the five probes
-    it replaced.
+    instead. The sweep that calls this runs on a background thread and commits
+    per check, so a slow check here costs its own wall time and nothing else;
+    that was not true when this handler was written, and the constant's first
+    paragraph records what changed.
 
     And it redacts before anything leaves. `scheduler` and `web_app` both do;
     this path delivers to a user and had no reason to be the exception.
@@ -847,6 +846,30 @@ def run_check(
         )
 
 
+#: How long an unchanged failure set stays suppressed before it is reported
+#: again. Deliberately far longer than any `default_cooldown_minutes` and still
+#: finite: see the gate in `should_alert` for the two cases that need the floor.
+MAX_SIGNATURE_SUPPRESSION_HOURS = 24
+
+
+def _within_suppression_window(last_alert_at: str | None) -> bool:
+    """Whether the recorded alert is recent enough to still suppress a repeat.
+
+    An unparseable or absent timestamp reads as *outside* the window, so the
+    alert goes out. Failing towards a duplicate page rather than towards
+    silence is the only safe direction for a gate whose whole job is to
+    withhold notifications.
+    """
+    if not last_alert_at:
+        return False
+    try:
+        last = datetime.fromisoformat(last_alert_at)
+    except (ValueError, TypeError):
+        return False
+    elapsed = (datetime.now(ZoneInfo("UTC")).replace(tzinfo=None) - last).total_seconds()
+    return elapsed < MAX_SIGNATURE_SUPPRESSION_HOURS * 3600
+
+
 def should_alert(
     conn,
     user_id: str,
@@ -860,25 +883,37 @@ def should_alert(
 
     Returns False if:
     - Check is healthy
+    - The failure set is unchanged since the last delivered alert and that
+      alert is within `MAX_SIGNATURE_SUPPRESSION_HOURS` (`alert_signature`)
     - Within cooldown period
     - Within quiet hours
     """
     if result.healthy:
         return False
 
-    # A failure that has not changed since the last page is not news. Only a
+    # A failure that has not changed since the last alert is not news. Only a
     # check that named what it is failing on gets to make that claim; every
     # other type leaves `alert_signature` None and keeps the cooldown-only
-    # behaviour below. Read before quiet hours and before the cooldown because
-    # it is the cheapest of the three and needs no clock.
+    # behaviour below.
+    #
+    # Bounded by `MAX_SIGNATURE_SUPPRESSION_HOURS`, which is what makes this a
+    # rate limit rather than an off switch. The signature is the failing
+    # *names*, so a condition that is getting worse without changing which
+    # checks fail — a disk at 20% and the same disk at 0.5% — produces the same
+    # string; and `_dispatch` reports success when any one destination
+    # succeeded, so a user routed to two surfaces whose second leg failed would
+    # otherwise never see a retry. Neither is worth a page every cooldown, and
+    # both are worth one a day. The window is cleared outright on recovery, so
+    # this only ever governs a failure that is still standing.
     if result.alert_signature is not None:
         state = db.get_heartbeat_state(conn, user_id, check.name)
         if state and state.last_alert_signature == result.alert_signature:
-            logger.debug(
-                "Skipping alert for %s/%s: unchanged failure set (%s)",
-                user_id, check.name, result.alert_signature,
-            )
-            return False
+            if _within_suppression_window(state.last_alert_at):
+                logger.debug(
+                    "Skipping alert for %s/%s: unchanged failure set (%s)",
+                    user_id, check.name, result.alert_signature,
+                )
+                return False
 
     # Check quiet hours
     if is_quiet_hours(user_tz, settings.quiet_hours):
@@ -982,6 +1017,29 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                 conn, user_id, check.name,
                 last_check_at=True,
             )
+            # Commit each write as it is made, rather than once at the end of
+            # the sweep. `get_db` is in Python's legacy implicit-transaction
+            # mode, so this write opens the daemon's single SQLite write
+            # transaction and — with no commit before the loop's next
+            # iteration — held it across every remaining check, `_check_self`'s
+            # whole doctor registry among them: process spawns, a socket per
+            # configured service and an optional live model call. That was
+            # tolerable only while the sweep ran on the dispatch loop and
+            # nothing else could be writing; off the loop it becomes lock
+            # contention against the loop and the workers, who then wait out
+            # `get_db`'s busy timeout. It also has to be released before
+            # `send_heartbeat_alert` below, which opens its own connection to
+            # this database on the web and Talk legs — a second connection
+            # under a held write lock is the busy-timeout deadlock
+            # `notification_store` documents, and it would land on the delivery
+            # path of the alert this sweep exists to send.
+            #
+            # Nothing here needs sweep-wide atomicity: each row is one check's
+            # own state. The gain is also durability — the sweep runs on a
+            # daemon thread now, which a shutdown kills without joining, and an
+            # uncommitted `last_alert_at` for an alert already delivered means
+            # a duplicate page on the next start.
+            conn.commit()
 
             if check_result.healthy:
                 db.update_heartbeat_state(
@@ -993,6 +1051,7 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                     # than being suppressed for ever by a stale signature.
                     clear_alert_signature=True,
                 )
+                conn.commit()
             else:
                 # Check if we should alert
                 if should_alert(conn, user_id, check, check_result, settings, user_tz):
@@ -1032,5 +1091,6 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                             last_error_at=True,
                             increment_errors=True,
                         )
+                    conn.commit()
 
     return checked_users

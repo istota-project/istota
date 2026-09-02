@@ -1641,6 +1641,54 @@ class TestTheStandingFailureGate:
 
         return DoctorResult(name, status, detail, remedy="")
 
+    def test_suppression_expires_so_a_standing_failure_is_reported_again(self, db_path):
+        """The bound that makes this a rate limit rather than an off switch.
+
+        The signature is the failing *names*, so a condition getting steadily
+        worse without changing which checks fail produces the same string; and
+        an alert delivered to one of two configured surfaces reports success.
+        Neither should be silenced for ever.
+        """
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            conn.execute(
+                """
+                INSERT INTO heartbeat_state
+                    (user_id, check_name, last_alert_at, last_alert_signature)
+                VALUES (?, ?, datetime('now', '-48 hours'), ?)
+                """,
+                ("alice", "self", "security.sandbox_effective"),
+            )
+            result = CheckResult(
+                healthy=False,
+                message="still unsandboxed",
+                alert_signature="security.sandbox_effective",
+            )
+
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+
+    def test_an_unparseable_alert_time_reports_rather_than_silences(self, db_path):
+        """A gate whose job is withholding must fail towards a duplicate."""
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            conn.execute(
+                """
+                INSERT INTO heartbeat_state
+                    (user_id, check_name, last_alert_at, last_alert_signature)
+                VALUES (?, ?, 'not-a-timestamp', ?)
+                """,
+                ("alice", "self", "security.sandbox_effective"),
+            )
+            result = CheckResult(
+                healthy=False,
+                message="still unsandboxed",
+                alert_signature="security.sandbox_effective",
+            )
+
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+
     def test_the_self_check_names_its_failures_as_the_signature(self, db_path):
         """The signature is the sorted failing names, so it is order-stable.
 
