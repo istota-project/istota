@@ -78,7 +78,7 @@ def build_prompt(
 The split also raises several interpolated scalars from a user message to a system one, so bot name, user id, source, output target, per-user email, conversation token and the rendered timezone all go through `_one_line()` before they are rendered into a header. That is structural sanitation and not instruction sanitation: persona, emissaries, guidelines, changelog and skill overlays stay multiline, because their structure *is* lines.
 
 **System half** (standing instructions):
-1. Header: role, user_id, datetime, task_id, conversation_token, source, output target, per-user email, privileges, and a database line that names no path (the file is masked out of the sandbox; naming it would point at nothing). Kept whole rather than split at the paragraph — the block is small and fixed for the task
+1. Header: role, user_id, datetime, task_id, conversation_token, source, output target, per-user email, a database line that names no path, and privileges (the file is masked out of the sandbox; naming it would point at nothing). Kept whole rather than split at the paragraph — the block is small and fixed for the task
 2. Emissaries: `config/emissaries.md` constitutional principles (skipped for briefings)
 3. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings or `skip_persona`)
 4. Workspace layout: one static line, plus CalDAV-discovered calendars. The Resources sunset replaced the enumerated Folders / TODO Files / Notes / Reminders sections with that single line. Here rather than in the user half because rule 1 names it and because the file-tool descriptions are written in its vocabulary
@@ -407,7 +407,8 @@ remains in the source as a dead helper but is no longer called.
 
 ## Key Constants
 - Background task types excluded from context: `["scheduled", "briefing"]`
-- Prompt file: `{user_temp_dir}/task_{task_id}_prompt.txt`
+- Prompt file (user half): `{user_temp_dir}/task_{task_id}_prompt.txt`
+- Composed system prompt file (system half): `{user_temp_dir}/task_{task_id}_system_prompt.txt`
 - Result file: `{user_temp_dir}/task_{task_id}_result.txt`
 
 ## Security Functions
