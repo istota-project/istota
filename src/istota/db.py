@@ -364,6 +364,18 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # Column already dropped or doesn't exist
 
+    # Heartbeat state: what the last alert was about, so a standing failure
+    # pages once rather than once per cooldown for ever. Nullable and read as
+    # "no signature recorded", so an upgraded database is simply a deployment
+    # whose next alert establishes one.
+    for col, col_type in [
+        ("last_alert_signature", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE heartbeat_state ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
     # Processed emails migrations
     for col, col_type in [
         ("routing_method", "TEXT"),
@@ -8270,6 +8282,10 @@ class HeartbeatState:
     last_healthy_at: str | None
     last_error_at: str | None
     consecutive_errors: int
+    #: The failing set the last alert was about, for a check type that names
+    #: one. None for every other type, and on a row written before the column
+    #: existed.
+    last_alert_signature: str | None = None
 
 
 def get_heartbeat_state(
@@ -8281,7 +8297,8 @@ def get_heartbeat_state(
     cursor = conn.execute(
         """
         SELECT user_id, check_name, last_check_at, last_alert_at,
-               last_healthy_at, last_error_at, consecutive_errors
+               last_healthy_at, last_error_at, consecutive_errors,
+               last_alert_signature
         FROM heartbeat_state
         WHERE user_id = ? AND check_name = ?
         """,
@@ -8298,6 +8315,7 @@ def get_heartbeat_state(
         last_healthy_at=row["last_healthy_at"],
         last_error_at=row["last_error_at"],
         consecutive_errors=row["consecutive_errors"],
+        last_alert_signature=row["last_alert_signature"],
     )
 
 
@@ -8312,6 +8330,8 @@ def update_heartbeat_state(
     last_error_at: bool = False,
     reset_errors: bool = False,
     increment_errors: bool = False,
+    last_alert_signature: str | None = None,
+    clear_alert_signature: bool = False,
 ) -> None:
     """
     Update heartbeat state fields.
@@ -8319,6 +8339,15 @@ def update_heartbeat_state(
     Pass True for timestamp fields to set them to now.
     Pass reset_errors=True to reset consecutive_errors to 0.
     Pass increment_errors=True to increment consecutive_errors.
+
+    ``last_alert_signature`` records what the alert just sent was *about*;
+    ``clear_alert_signature`` forgets it. They are two parameters rather than
+    one nullable value because ``None`` already means "leave it alone" for
+    every other field here, and a recovery has to be able to say "forget it"
+    without that reading as "don't touch it" — otherwise a deployment that
+    broke, was fixed, and broke the same way again would never page a second
+    time. Passing both is a caller error and the clear wins, since it is the
+    safer of the two: it can only cause an extra alert, never a missing one.
     """
     # Ensure row exists first
     conn.execute(
@@ -8344,6 +8373,11 @@ def update_heartbeat_state(
         updates.append("consecutive_errors = 0")
     if increment_errors:
         updates.append("consecutive_errors = consecutive_errors + 1")
+    if clear_alert_signature:
+        updates.append("last_alert_signature = NULL")
+    elif last_alert_signature is not None:
+        updates.append("last_alert_signature = ?")
+        params.append(last_alert_signature)
 
     if updates:
         params.extend([user_id, check_name])

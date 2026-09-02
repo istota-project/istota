@@ -498,3 +498,72 @@ class TestDaemonLoopNotBlocked:
             release.set()
             sched.request_shutdown()
             t.join(timeout=10.0)
+
+
+# ---------------------------------------------------------------------------
+# _run_heartbeat_checks
+# ---------------------------------------------------------------------------
+
+
+class TestTheHeartbeatSweepIsOffTheLoop:
+    """The heartbeat sweep joined the list above, and for the same reason.
+
+    It ran inline in ``run_daemon``, inside ``with db.get_db(...)``. That was
+    fair while the six check types were cheap; ``self-check`` now renders the
+    whole doctor registry — process spawns, a socket per configured service,
+    optionally a live model call — once per user with one configured. Inline
+    that blocked ``pool.dispatch()`` for the whole of it *and* held the batch's
+    write transaction open across it, so every other writer in the daemon
+    queued behind a health check.
+    """
+
+    def test_the_sweep_opens_its_own_connection(self, tmp_path):
+        """Not handed the caller's, which is the deadlock this move avoids.
+
+        A second connection opened under a caller's held write lock waits out
+        the full busy timeout and then raises. The signature is the guard: a
+        future refactor that reintroduces a ``conn`` parameter has to come past
+        this test and read the reason.
+        """
+        import inspect
+
+        from istota.scheduler import _run_heartbeat_checks
+
+        params = list(inspect.signature(_run_heartbeat_checks).parameters)
+        assert params == ["config"], (
+            "the background heartbeat sweep must resolve its own connection; "
+            f"it now takes {params}"
+        )
+
+    def test_the_daemon_loop_does_not_call_check_heartbeats_inline(self):
+        """The regression this move exists to prevent.
+
+        Asserted against the source of ``run_daemon`` rather than by driving a
+        tick: the inline call and the backgrounded one produce identical
+        observable behaviour on a deployment with no heartbeats configured,
+        which is exactly what a test fixture looks like.
+        """
+        import inspect
+
+        from istota import scheduler
+
+        source = inspect.getsource(scheduler.run_daemon)
+        assert "check_heartbeats(" not in source, (
+            "run_daemon calls check_heartbeats directly again — it belongs on "
+            "a background thread via _spawn_background_check"
+        )
+        assert '"heartbeats"' in source, (
+            "run_daemon no longer spawns the heartbeat sweep at all"
+        )
+
+    def test_a_raising_sweep_is_contained(self, tmp_path, caplog):
+        """One user's broken HEARTBEAT.md must not kill the thread silently."""
+        from istota.scheduler import _run_heartbeat_checks
+
+        cfg = Config(db_path=tmp_path / "istota.db", security=SecurityConfig())
+        with patch(
+            "istota.heartbeat.check_heartbeats", side_effect=RuntimeError("boom"),
+        ):
+            _run_heartbeat_checks(cfg)  # must not raise
+
+        assert "Error checking heartbeats" in caplog.text

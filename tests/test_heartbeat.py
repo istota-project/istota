@@ -1526,3 +1526,142 @@ class TestHeartbeatPlantedPaths:
         assert result is not None
         _settings, checks = result
         assert [c.name for c in checks] == ["site"]
+
+
+# ---------------------------------------------------------------------------
+# TestTheStandingFailureGate
+# ---------------------------------------------------------------------------
+
+
+class TestTheStandingFailureGate:
+    """A failure that has not changed since the last page does not page again.
+
+    `should_alert`'s cooldown rate-limits a standing failure; it never ends it.
+    That was right while `_check_self` ran five probes that were all expected to
+    pass, and it stopped being right when it started running the doctor
+    registry: `security.sandbox_effective` FAILs *by design* on the shipped
+    Docker stack (AGENTS.md documents that as the normal state there), so every
+    user with a `self-check` would be paged once per cooldown, forever, for a
+    condition nobody can act on from that surface and which the scheduler's own
+    doctor sweep already reports with a real transition gate.
+
+    The gate is opt-in through `CheckResult.alert_signature`, and that is the
+    whole reason it is safe. A check that leaves it `None` — the other five
+    types — keeps today's cooldown behaviour exactly, which is what a
+    `url-health` check wants: a site that is still down an hour later is worth
+    saying again. Only a check that can name *what* is failing gets to claim
+    that an unchanged answer is not news.
+    """
+
+    def _self_check(self):
+        return HeartbeatCheck(name="self", type="self-check", config={})
+
+    def test_an_unchanged_failure_set_does_not_page_twice(self, db_path):
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            result = CheckResult(
+                healthy=False,
+                message="security.sandbox_effective: unsandboxed",
+                alert_signature="security.sandbox_effective",
+            )
+
+            # First time: nobody has been told.
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+            db.update_heartbeat_state(
+                conn, "alice", "self",
+                last_alert_at=True,
+                last_alert_signature=result.alert_signature,
+            )
+
+            # Cooldown is zero, so only the signature can suppress this.
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is False
+
+    def test_a_changed_failure_set_pages_again(self, db_path):
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            db.update_heartbeat_state(
+                conn, "alice", "self",
+                last_alert_at=True,
+                last_alert_signature="security.sandbox_effective",
+            )
+
+            worse = CheckResult(
+                healthy=False,
+                message="two checks failing",
+                alert_signature="runtime.model_cli|security.sandbox_effective",
+            )
+            assert should_alert(conn, "alice", check, worse, settings, "UTC") is True
+
+    def test_a_check_with_no_signature_is_unaffected(self, db_path):
+        """The other five types must behave exactly as they did."""
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = HeartbeatCheck(name="site", type="url-health", config={})
+            result = CheckResult(healthy=False, message="down")
+            assert result.alert_signature is None
+
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+            db.update_heartbeat_state(conn, "alice", "site", last_alert_at=True)
+            # No signature to compare, cooldown expired: still pages.
+            assert should_alert(conn, "alice", check, result, settings, "UTC") is True
+
+    def test_recovery_then_the_same_failure_pages_again(self, db_path):
+        """A signature is cleared on recovery, so a recurrence is news again.
+
+        Without this, a deployment that broke, was fixed, and broke the same way
+        a month later would stay silent for ever.
+        """
+        with db.get_db(db_path) as conn:
+            settings = HeartbeatSettings(default_cooldown_minutes=0)
+            check = self._self_check()
+            db.update_heartbeat_state(
+                conn, "alice", "self",
+                last_alert_at=True,
+                last_alert_signature="security.sandbox_effective",
+            )
+            # Recovered: the handler clears the signature.
+            db.update_heartbeat_state(
+                conn, "alice", "self", last_healthy_at=True, clear_alert_signature=True,
+            )
+
+            again = CheckResult(
+                healthy=False,
+                message="unsandboxed again",
+                alert_signature="security.sandbox_effective",
+            )
+            assert should_alert(conn, "alice", check, again, settings, "UTC") is True
+
+    def _config(self, db_path):
+        return Config(db_path=db_path, security=SecurityConfig(sandbox_enabled=False))
+
+    def _doctor_result(self, name, status, detail="detail"):
+        from istota.doctor import CheckResult as DoctorResult
+
+        return DoctorResult(name, status, detail, remedy="")
+
+    def test_the_self_check_names_its_failures_as_the_signature(self, db_path):
+        """The signature is the sorted failing names, so it is order-stable.
+
+        Sorted rather than as-returned: `run_checks` walks the registry in
+        declaration order, so inserting a check between two failing ones would
+        otherwise change the signature and page everybody about a failure set
+        that had not changed.
+        """
+        results = [
+            self._doctor_result("security.sandbox_effective", "fail", "unsandboxed"),
+            self._doctor_result("runtime.model_cli", "fail", "missing"),
+        ]
+        with patch("istota.doctor.run_checks", return_value=results):
+            result = _check_self(self._self_check(), self._config(db_path), "alice")
+
+        assert result.healthy is False
+        assert result.alert_signature == "runtime.model_cli|security.sandbox_effective"
+
+    def test_a_healthy_self_check_carries_no_signature(self, db_path):
+        with patch("istota.doctor.run_checks", return_value=[]):
+            result = _check_self(self._self_check(), self._config(db_path), "alice")
+
+        assert result.healthy is True
+        assert result.alert_signature is None

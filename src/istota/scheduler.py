@@ -5428,6 +5428,25 @@ def _run_sleep_cycles(config: Config) -> None:
         logger.error("Error running channel sleep cycles: %s", e)
 
 
+def _run_heartbeat_checks(config: Config) -> None:
+    """One heartbeat sweep, on a background thread with its own connection.
+
+    Exceptions are contained by `_spawn_background_check` and logged as
+    `background_check_failed`; the try/except here is kept so the log names
+    heartbeats specifically, which is what an operator greps for — the same
+    shape `_run_email_poll` uses two definitions up.
+    """
+    from .heartbeat import check_heartbeats
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            checked_users = check_heartbeats(conn, config)
+            if checked_users:
+                logger.debug("Checked heartbeats for %d user(s)", len(checked_users))
+    except Exception as e:
+        logger.error("Error checking heartbeats: %s", e)
+
+
 def _spawn_background_check(
     name: str,
     fn: Callable[[], object],
@@ -8289,16 +8308,28 @@ def run_daemon(
             )
             last_pressure_sample = now
 
-        # Check heartbeats periodically
+        # Check heartbeats periodically.
+        #
+        # Backgrounded, like the sweeps above and for the reason
+        # `_spawn_background_check` documents. This used to run inline, inside
+        # `with db.get_db(...)`, which was fair while the six check types were
+        # cheap; `self-check` now renders the whole doctor registry — process
+        # spawns, a socket per configured service, and optionally a live model
+        # call — once per user with one configured. On the loop thread that
+        # blocked `pool.dispatch()` for the whole of it *and* held the batch's
+        # write transaction open across it, so every other writer in the daemon
+        # queued behind a health check.
+        #
+        # The thread opens its own connection rather than being handed one:
+        # a second connection opened under a caller's held write lock is the
+        # 30-second-busy-timeout deadlock `notification_store` documents, and
+        # here there is no reason to take it — nothing on the loop needs the
+        # result. `_spawn_background_check` skips a tick whose predecessor is
+        # still running, so a slow registry cannot stack one thread per tick.
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:
-            try:
-                from .heartbeat import check_heartbeats
-                with db.get_db(config.db_path) as conn:
-                    checked_users = check_heartbeats(conn, config)
-                    if checked_users:
-                        logger.debug("Checked heartbeats for %d user(s)", len(checked_users))
-            except Exception as e:
-                logger.error("Error checking heartbeats: %s", e)
+            _spawn_background_check(
+                "heartbeats", lambda: _run_heartbeat_checks(config), background_checks,
+            )
             last_heartbeat_check = now
 
         # Sleep out the rest of the base tick, re-dispatching in sub-tick slices

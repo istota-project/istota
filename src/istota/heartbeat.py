@@ -55,6 +55,21 @@ class CheckResult:
     healthy: bool
     message: str
     details: dict | None = None
+    #: What this failure *is*, for a check that can name its own failing parts.
+    #:
+    #: `should_alert`'s cooldown rate-limits a standing failure; it never ends
+    #: one. That is right for a check whose failure is a fact about the world
+    #: worth repeating — a `url-health` site that is still down an hour later —
+    #: and wrong for one whose failure set includes conditions documented as
+    #: the normal state of a deployment, which is what `self-check` became when
+    #: it started rendering the doctor registry. A check that sets this is
+    #: saying "an unchanged answer is not news": it pages when the signature
+    #: changes and stays quiet while it does not.
+    #:
+    #: `None` — the default, and what all five other check types leave it — is
+    #: exactly today's behaviour, which is why this is safe to add here rather
+    #: than in a `self-check`-only branch of `should_alert`.
+    alert_signature: str | None = None
 
 
 def _get_mount_path(config: "Config", path: str) -> Path:
@@ -773,6 +788,14 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
         # Not delivered to the user — nothing in `heartbeat` or `scheduler`
         # reads it — so the names are safe here whatever the gate above said.
         details={"failures": [r.name for r in failures], "summary": summary},
+        # Sorted, and the names alone: `run_checks` walks the registry in
+        # declaration order, so a check inserted between two failing ones would
+        # otherwise change the signature and page every user about a failure set
+        # that had not changed. The `detail` is deliberately excluded for the
+        # same reason — several carry a count or a path that moves on its own.
+        # Empty stays None rather than "": a healthy run has nothing to
+        # suppress, and `should_alert` returns False for it long before this.
+        alert_signature="|".join(sorted(r.name for r in failures)) or None,
     )
 
 
@@ -842,6 +865,20 @@ def should_alert(
     """
     if result.healthy:
         return False
+
+    # A failure that has not changed since the last page is not news. Only a
+    # check that named what it is failing on gets to make that claim; every
+    # other type leaves `alert_signature` None and keeps the cooldown-only
+    # behaviour below. Read before quiet hours and before the cooldown because
+    # it is the cheapest of the three and needs no clock.
+    if result.alert_signature is not None:
+        state = db.get_heartbeat_state(conn, user_id, check.name)
+        if state and state.last_alert_signature == result.alert_signature:
+            logger.debug(
+                "Skipping alert for %s/%s: unchanged failure set (%s)",
+                user_id, check.name, result.alert_signature,
+            )
+            return False
 
     # Check quiet hours
     if is_quiet_hours(user_tz, settings.quiet_hours):
@@ -951,6 +988,10 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                     conn, user_id, check.name,
                     last_healthy_at=True,
                     reset_errors=True,
+                    # Recovery forgets what the last alert was about, so the
+                    # same failure recurring next month is news again rather
+                    # than being suppressed for ever by a stale signature.
+                    clear_alert_signature=True,
                 )
             else:
                 # Check if we should alert
@@ -978,6 +1019,12 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                         db.update_heartbeat_state(
                             conn, user_id, check.name,
                             last_alert_at=True,
+                            # Only a *delivered* alert records its signature.
+                            # Recording one for a send that reached nobody would
+                            # suppress every later page for the same condition —
+                            # `notification_store.last_delivered_at` draws the
+                            # same line for the same reason.
+                            last_alert_signature=check_result.alert_signature,
                         )
                     else:
                         db.update_heartbeat_state(
