@@ -34,6 +34,13 @@ the pass deleted the head of each response while admission kept the head, and
 under a read-state tier it trimmed in-response read rows while admission kept
 those too. Both hand back next poll exactly what the last prune deleted.
 
+The agreement is with the **last observed** response order, which is as far as
+a ceiling can go: this pass ranks stored rows by the order the poll that stored
+them used, and a source that reorders its window between polls can have a row
+deleted here and handed back as unread. Stated rather than left inside the word
+"exactly", beside the other named cost — an old unread row dropped ahead of a
+newer read one.
+
 **Admission is the other half of the maximum.** A response carrying more items
 than the maximum would otherwise have its tail inserted and immediately
 trimmed, then re-inserted next poll. :func:`plan_admission` caps one response
@@ -41,7 +48,11 @@ at the same budget the count pass enforces, so there is no tail to churn. What
 it must not do is decide what was *observed*: an item past the budget was
 still returned, so the poller stamps its ``last_seen_at`` anyway
 (``mark_entries_seen``), or the age pass would delete it, free budget, and let
-the next response re-admit it as unread.
+the next response re-admit it as unread. It bounds one *response*, not a feed's
+stored total: polling runs every five minutes and the prune once a day, so a
+source emitting fresh guids every poll can sit well over its maximum until the
+next prune. That is the design's own reading — polling and admission may raise
+the row count, and the maximum is what a prune restores.
 
 This module owns setting resolution, admission, transaction control, dry-run
 behaviour and result construction. The SQL storage helpers stay in
@@ -78,6 +89,12 @@ _PARAM_CHUNK = 400
 @dataclass(frozen=True)
 class PruneResult:
     """What one prune did, or would have done.
+
+    ``protected_excess_entries`` is the plain count of rows above the maximum
+    once both passes have run, over every feed still above it. Two things put
+    a feed there and it distinguishes neither: stars, which are never deleted,
+    and the floor under the unstarred budget, which holds rows a star-consumed
+    budget would have taken.
 
     ``reusable_pages`` and ``page_size`` are diagnostics rather than deletion
     deltas: SQLite keeps freed pages on its freelist and reuses them for later

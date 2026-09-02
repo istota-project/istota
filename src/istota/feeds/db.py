@@ -128,7 +128,13 @@ CREATE INDEX IF NOT EXISTS idx_entries_feed_last_seen_unstarred
 -- `fetched_at` is the retention clock, and both passes rank on it. Partial
 -- like its neighbour, so the age pass — which ranks a feed's whole contents,
 -- stars included, because the floor counts every stored row — cannot use it
--- and sorts instead; the count pass, which looks at unstarred rows only, can.
+-- at all. The count pass, which looks at unstarred rows only, scans it as a
+-- covering index and takes the partition from it, but still sorts: the index
+-- is `(feed_id, fetched_at)` ascending and the window wants `fetched_at DESC,
+-- id ASC`, so `EXPLAIN QUERY PLAN` reports a temp b-tree for the last two
+-- terms. A `(feed_id, fetched_at DESC, id)` index would remove that sort and
+-- is deliberately not added here: schema v8's index set is what the migration
+-- shipped, and a third one is its own change.
 CREATE INDEX IF NOT EXISTS idx_entries_feed_fetched_unstarred
     ON feed_entries(feed_id, fetched_at)
     WHERE starred = 0;
@@ -950,7 +956,15 @@ def budget_floor(max_entries_per_feed: int) -> int:
     same rows or they take turns: the pass needs it as a bound SQL value and
     :func:`unstarred_budget` needs it in Python, and a second reading of the
     constant is how the two start disagreeing.
+
+    ``0`` is *no maximum*, and it disables this clamp with it — a floor of
+    fifty under a ceiling that does not exist would be a bound nobody asked
+    for. That is where this parts company with :func:`_effective_floor`, whose
+    caller is the age pass: there the constant stands with no ceiling, because
+    a quiet feed still has to keep something.
     """
+    if max_entries_per_feed <= 0:
+        return 0
     return _effective_floor(MIN_ENTRIES_PER_FEED, max_entries_per_feed)
 
 
@@ -1095,6 +1109,17 @@ def prune_entries_to_feed_cap(
     carry one: a maximum lowered below a feed's own window would be
     unenforceable if every row in the window were undeletable.
 
+    That agreement is with the **last observed** response order, and the
+    residual is worth naming rather than leaving inside the word "exactly".
+    This pass ranks stored rows by ``fetched_at`` and rowid, which record the
+    order of the poll that stored them; admission ranks the response in front
+    of it. A source that reorders its window between polls therefore moves rows
+    across the boundary, and one that moves back in can be deleted here and
+    handed back as unread — the shape the age pass closes with its in-response
+    clause, which a ceiling cannot carry for the reason above. What a
+    reordering source costs is deleting *more* than admission refuses; nothing
+    is stored and immediately trimmed, since both ends compute one budget.
+
     Unread rows lose nothing they should keep. The *age* pass exempts them
     absolutely, which is where "don't throw away what I haven't read" belongs;
     this is the hard ceiling and nothing else. The cost, stated plainly: on a
@@ -1115,9 +1140,12 @@ def prune_entries_to_feed_cap(
     unenforceable. The floor on the *budget* is a different quantity and does
     apply.
 
-    A feed can still finish above the maximum on its stars alone. That overage
-    is reported rather than guessing that a starred row is safe to delete.
-    ``0`` disables the pass entirely. Does not commit.
+    A feed can finish above the maximum two ways, and the reported overage is
+    the plain difference rather than either cause: its stars, which are never
+    deleted, and the floor under its budget, which holds unstarred rows a
+    star-consumed budget would have taken. Reported rather than guessing that
+    a starred row is safe to delete. ``0`` disables the pass entirely. Does not
+    commit.
     """
     if max_entries_per_feed <= 0:
         return 0, 0, 0

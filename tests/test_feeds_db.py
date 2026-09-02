@@ -2395,6 +2395,60 @@ class TestTheFloor:
         assert len(guids) == 6
 
 
+class TestTheBudget:
+    """``unstarred_budget`` is one expression at two ends, so it gets its own
+    tests: the count pass and ``plan_admission`` must agree, and the arithmetic
+    is the thing they agree *on*."""
+
+    def test_the_floor_clamps_to_the_maximum_and_zero_disables_it(self):
+        assert feeds_db.budget_floor(MIN_ENTRIES_PER_FEED + 5) == (
+            MIN_ENTRIES_PER_FEED
+        )
+        assert feeds_db.budget_floor(20) == 20
+        assert feeds_db.budget_floor(1) == 1
+        # No ceiling, so no clamp: a floor of fifty under a maximum that does
+        # not exist would be a bound nobody asked for.
+        assert feeds_db.budget_floor(0) == 0
+
+    def test_stars_come_off_the_total_but_never_below_the_floor(self):
+        assert feeds_db.unstarred_budget(5000, 0) == 5000
+        assert feeds_db.unstarred_budget(5000, 100) == 4900
+        # Floored: without this the budget is zero for good.
+        assert feeds_db.unstarred_budget(5000, 4990) == MIN_ENTRIES_PER_FEED
+        assert feeds_db.unstarred_budget(5000, 99999) == MIN_ENTRIES_PER_FEED
+        # At or below the floor the clamp is the maximum itself.
+        assert feeds_db.unstarred_budget(20, 25) == 20
+        assert feeds_db.unstarred_budget(1, 1) == 1
+        # No maximum: both callers short-circuit before here.
+        assert feeds_db.unstarred_budget(0, 3) == 0
+
+    @pytest.mark.parametrize("cap", [0, 3, 20, MIN_ENTRIES_PER_FEED + 5])
+    @pytest.mark.parametrize("stars", [0, 2, 60])
+    def test_the_count_pass_keeps_exactly_that_many_unstarred_rows(
+        self, tmp_path, cap, stars,
+    ):
+        """The SQL restates the Python expression, so this is what holds them
+        equal — and with them the pass and admission."""
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(stars):
+                _store(conn, feed_id, f"star{i:03d}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(1), status="read", starred=True)
+            for i in range(70):
+                _store(conn, feed_id, f"plain{i:03d}", fetched_at=_iso(100 + i),
+                       last_seen_at=_iso(1), status="read")
+            conn.commit()
+            feeds_db.prune_entries_to_feed_cap(conn, max_entries_per_feed=cap)
+            conn.commit()
+            kept = [g for g in _guids(conn) if g.startswith("plain")]
+        expected = 70 if cap <= 0 else min(
+            70, feeds_db.unstarred_budget(cap, stars),
+        )
+        assert len(kept) == expected
+        # The newest by the retention clock, which is `plain000` upward.
+        assert kept == [f"plain{i:03d}" for i in range(expected)]
+
+
 class TestCountPruning:
     def _prune(self, path, cap):
         with feeds_db.connect(path) as conn:
@@ -2487,6 +2541,34 @@ class TestCountPruning:
         assert (over, excess) == (1, 7)
 
     def test_stars_alone_can_leave_a_feed_over_the_maximum(self, tmp_path):
+        """Above the floor, where the overage is star-driven and nothing else.
+
+        Below it the budget floor contributes to the same number, so this is
+        the shape that isolates the cause the reported overage is usually read
+        as.
+        """
+        cap = MIN_ENTRIES_PER_FEED + 5
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            for i in range(cap + 5):
+                _store(conn, feed_id, f"star{i:02d}", fetched_at=_iso(10 + i),
+                       last_seen_at=_iso(1), status="read", starred=True)
+            conn.commit()
+        (deleted, over, excess), guids = self._prune(path, cap)
+        assert deleted == 0
+        # Reported rather than guessing that a starred row is safe to delete.
+        assert (over, excess) == (1, 5)
+        assert len(guids) == cap + 5
+
+    def test_a_small_maximum_stands_above_itself_on_stars_and_the_floor(
+        self, tmp_path,
+    ):
+        """At or below the floor the clamp is the maximum itself.
+
+        So stars take nothing off the budget, the unstarred row survives, and
+        the feed is over its maximum by both causes at once — which is why the
+        reported overage is the plain difference and names neither.
+        """
         path, feed_id = _seed_one_feed(tmp_path)
         with feeds_db.connect(path) as conn:
             for i in range(5):
@@ -2496,9 +2578,6 @@ class TestCountPruning:
                    last_seen_at=_iso(1), status="read")
             conn.commit()
         (deleted, over, excess), guids = self._prune(path, 3)
-        # The unstarred row stays: the budget is floored at the maximum, and
-        # stars put this feed over that maximum either way. The overage is
-        # reported rather than guessing that a starred row is safe to delete.
         assert deleted == 0
         assert (over, excess) == (1, 3)
         assert len(guids) == 6

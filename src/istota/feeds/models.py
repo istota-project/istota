@@ -101,9 +101,14 @@ DEFAULT_ENTRY_RETENTION_DAYS = 90
 # silently shortened the safety period an upgrade gets.
 UPGRADE_GRACE_DAYS = 90
 
-# Total stored rows for one feed, stars excepted. Also the size of the window
-# admitted from one response, which is what stops a response larger than the
-# maximum reinserting everything the count pass just deleted.
+# Total stored rows for one feed, stars excepted, and the size of the window
+# admitted from one response — one budget at both ends, which is what stops a
+# response larger than the maximum reinserting everything the count pass just
+# deleted. `feeds_db.unstarred_budget` is that budget and is where the two
+# qualifications live: stars come off this total, and the remainder is floored
+# at `min(MIN_ENTRIES_PER_FEED, this)`, so a feed can stand above the number
+# below by its stars and by the rows that floor holds. At or below the floor
+# the clamp is the maximum itself, so stars take nothing off it there.
 DEFAULT_MAX_ENTRIES_PER_FEED = 5000
 
 # The fewest entries a feed keeps whatever their age. Deliberately not a user
