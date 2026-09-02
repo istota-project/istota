@@ -43,6 +43,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Collection, Iterable
@@ -613,7 +614,7 @@ def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> s
     reasons: list[str] = []
     established = False
 
-    available, why = _session_log_sandbox_availability(config, probe)
+    available, why = _sandbox_mask_availability(config, probe)
     if why:
         reasons.append(why)
         established = available is False
@@ -629,7 +630,7 @@ def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> s
     return f"{prefix} — " + ", and ".join(reasons)
 
 
-def _session_log_sandbox_availability(
+def _sandbox_mask_availability(
     config: "Config", probe: bool,
 ) -> tuple[bool | None, str]:
     """Is a database mask emitted at all on this deployment, and if not, why.
@@ -639,6 +640,17 @@ def _session_log_sandbox_availability(
     the one that earns the tuple: a check whose subject is a boundary must not
     answer "fine" when it did not look, and must not assert an exposure it did
     not observe either.
+
+    **Two checks share it, and they read the answer in opposite directions.**
+    For ``runtime.session_log_dir`` a mask is defence in depth and its absence
+    is the finding; for ``runtime.task_control_dir`` a mask *over* the tree
+    takes away a file every task must open, so the mask existing is the
+    finding. One function either way, because a second copy of the ISSUE-381
+    reasoning — ``effective_sandboxing`` rather than ``sandbox_enabled``, and a
+    warm memo rather than a spawn under ``probe=False`` — is the
+    ``map_basemap`` two-consumers failure waiting to happen. The reasons it
+    returns are phrased about the deployment rather than about either
+    directory, so both callers can quote them verbatim.
 
     Never raises: an unobtainable answer is ``None`` with a reason, not an
     exception and not a quiet ``True``. Returning ``True`` there was the first
@@ -673,7 +685,7 @@ def _session_log_sandbox_availability(
             else effective_sandboxing_if_known(config)
         )
     except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("session-log mask: sandbox availability failed", exc_info=True)
+        logger.debug("sandbox mask availability could not be determined", exc_info=True)
         return unknown
 
     if effective is None:
@@ -909,6 +921,453 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
             remedy=" ".join(remedies),
         )
     return CheckResult(name, OK, observed)
+
+
+# The three prefixes the control tree's mask axis renders under. The split is
+# `_MASK_EXPOSED` / `_MASK_UNKNOWN` above with the direction inverted: there a
+# mask is defence in depth and its absence is the finding, here a mask over the
+# tree takes away a file the task must open, so the mask *existing* is.
+#
+# `_CONTROL_MASK_UNKNOWN` is deliberately worded so it does not contain the
+# established sentence as a substring. The session-log check's own lesson was a
+# fixed prefix asserting the exposure in its first clause and disclaiming it in
+# the second; a prefix that reads as the assertion plus a hedge is the same
+# defect, and it also makes the two states indistinguishable to anything
+# grepping the detail — including this module's own tests.
+_CONTROL_MASKED = "the task control directory is masked out of every sandbox"
+_CONTROL_WOULD_BE_MASKED = (
+    "the task control directory would be masked out of every sandbox"
+)
+_CONTROL_MASK_UNKNOWN = (
+    "whether the database mask reaches the task control directory could not be "
+    "established"
+)
+
+_CONTROL_OVERLAP_REMEDY = (
+    "Nothing model-writable may be at or above the control tree: the framework "
+    "writes every task's assembled prompt, briefing metadata and prepared image "
+    "attachments there. Move the overlapping path, or point temp_dir somewhere "
+    "no bind reaches."
+)
+
+_CONTROL_TREE_REMEDY = (
+    "The daemon creates each level 0700 and re-asserts the mode on every task, "
+    "so a level it does not own is one it cannot repair: chown the tree to the "
+    "daemon's user, or move it aside and let the next task recreate it."
+)
+
+_CONTROL_MASK_REMEDY = (
+    "Point temp_dir outside the database directory, or move db_path. The "
+    "database mask is the sandbox's last mount operation, so a control "
+    "directory under it cannot be opened inside the namespace and every "
+    "Claude Code task fails at start-up on a file its own request named."
+)
+
+
+def _severer(a: str, b: str) -> str:
+    """The worse of two statuses, FAIL over WARN over OK."""
+    order = {OK: 0, SKIP: 0, WARN: 1, FAIL: 2}
+    return a if order.get(a, 0) >= order.get(b, 0) else b
+
+
+def _overlaps(a: Path, b: Path) -> bool:
+    """Whether either path is at or inside the other.
+
+    Both directions, exactly as ``config._warn_ro_paths_over_control_tree``
+    compares: above the control tree reaches every user's, inside it reaches
+    one user's or one task's — which is smaller and no more acceptable.
+    """
+    return a == b or a.is_relative_to(b) or b.is_relative_to(a)
+
+
+def _control_tree_findings(root: Path) -> list[tuple[str, str, str]]:
+    """Is ``{temp_dir}/.control`` itself a directory the daemon owns, at 0700.
+
+    ``(status, finding, remedy)`` triples, empty when the tree is healthy. The
+    root is the level the guarantee rests on: 0700 there is what stops any
+    other local account on the host walking down into a user's control files,
+    and the shipped default ``temp_dir`` of ``/tmp/istota`` has a
+    world-writable sticky parent, so on a host where the daemon has not run yet
+    another account can pre-create it.
+
+    A missing root is not a finding. ``ensure_task_control_dir`` creates it on
+    the first task, so an install that has not run one is healthy;
+    ``runtime.writable_dirs.temp_dir`` is the check that says whether it will
+    be creatable.
+
+    ``lstat`` rather than ``stat``, because a symlink at this level is one of
+    the two states ``get_task_control_dir`` refuses and following it would
+    report the mode and owner of whatever it points at.
+    """
+    try:
+        st = os.lstat(root)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        return [(
+            WARN,
+            f"{root} could not be inspected ({exc.strerror or exc})",
+            _CONTROL_TREE_REMEDY,
+        )]
+
+    if stat.S_ISLNK(st.st_mode):
+        return [(
+            FAIL,
+            f"{root} is a symlink rather than a directory the daemon owns, so "
+            f"no task can name a control directory under it",
+            _CONTROL_TREE_REMEDY,
+        )]
+    if not stat.S_ISDIR(st.st_mode):
+        return [(
+            FAIL,
+            f"{root} exists and is not a directory, so every task fails at "
+            f"start-up",
+            _CONTROL_TREE_REMEDY,
+        )]
+
+    out: list[tuple[str, str, str]] = []
+    if st.st_uid != os.geteuid():
+        # Ahead of the mode, and a FAIL rather than a WARN: the daemon refuses
+        # a level it does not own, so this is every task of every user failing
+        # rather than a permission that is wider than it should be.
+        out.append((
+            FAIL,
+            f"{root} is owned by uid {st.st_uid} rather than by the daemon "
+            f"(uid {os.geteuid()}), which refuses a level it does not own",
+            _CONTROL_TREE_REMEDY,
+        ))
+    mode = stat.S_IMODE(st.st_mode)
+    if mode != 0o700:
+        out.append((
+            WARN,
+            f"{root} is mode {mode:04o} rather than 0700, so another local "
+            f"account can reach every user's control files",
+            _CONTROL_TREE_REMEDY,
+        ))
+    return out
+
+
+def _control_overlap_findings(
+    config: "Config", users: list[str], root: Path,
+) -> list[tuple[str, str, str]]:
+    """Anything model-writable at or above the control tree.
+
+    This is the axis the whole change rests on. The tree is a *sibling* of the
+    per-user workspaces rather than a child of one, which is what removes the
+    symlink-swap window ISSUE-320 measured instead of racing it — and that is a
+    property of the rendered config, not of the code, so it is a property the
+    suite cannot see and doctor can.
+
+    Three producers of a path the model can write, compared in both directions:
+
+    - ``{temp_dir}/{user_id}``, the sandbox's ``--chdir`` target and
+      ``ISTOTA_DEFERRED_DIR``. Checked whatever the sandbox setting says,
+      because the model writes there on every shape. A user id equal to
+      ``CONTROL_DIR_NAME`` lands here, since ``get_user_temp_dir`` is a plain
+      join — ``get_task_control_dir`` refuses that name, and this is what says
+      why out loud rather than leaving an operator with a user whose every task
+      fails and nothing in the config pointing at the cause.
+    - ``{mount}/Users/{user_id}``, bound read-write into that user's sandbox.
+    - the **per-resource mounts**, and they are the reason this axis reports
+      more than the first two. A ``user_resources`` row resolves to ``mount /
+      resource_path``, bounded by the Nextcloud mount root and nothing else, so
+      on a layout where ``temp_dir`` sits under the mount a row naming the tree
+      binds it — read-write or read-only — and neither ``native_fs_roots`` entry
+      nor the ``extra_ro_binds`` bind covers a sibling task's directory.
+      ``native_fs_roots``' docstring records that as a known gap on the grounds
+      that no shipped shape produces the layout and that refusing a resource
+      path is a decision about resources. Reporting it is neither of those: it
+      costs one comparison per row, it is silent on every shape that ships, and
+      a gap named only in a docstring is one nothing would ever notice.
+
+    The last two are gated on the *requested* ``sandbox_enabled`` — the same
+    gate ``config._warn_ro_paths_over_control_tree`` takes, and for the same
+    two reasons: with the sandbox off nothing is bound at all, so there is no
+    bind for a row to widen, and the effective predicate spawns.
+
+    Never raises: an unresolvable path is skipped rather than reported, since a
+    path this cannot resolve is one no bind can name either.
+    """
+    from .executor import get_user_temp_dir  # noqa: PLC0415 - executor pulls in most of the package
+
+    out: list[tuple[str, str, str]] = []
+
+    def _check(label: str, path: Path) -> None:
+        if _overlaps(path, root):
+            out.append((
+                WARN, f"{label} ({path}) overlaps the control tree",
+                _CONTROL_OVERLAP_REMEDY,
+            ))
+
+    for user_id in users:
+        try:
+            _check(
+                f"the workspace of user {user_id!r}",
+                get_user_temp_dir(config, user_id).resolve(),
+            )
+        except (OSError, ValueError, TypeError):
+            continue
+
+    if not getattr(getattr(config, "security", None), "sandbox_enabled", False):
+        return out
+
+    mount = getattr(config, "nextcloud_mount_path", None)
+    if not mount:
+        return out
+    mount = Path(mount)
+
+    for user_id in users:
+        try:
+            _check(
+                f"the mounted home of user {user_id!r}",
+                (mount / "Users" / user_id).resolve(),
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+        user_config = (getattr(config, "users", {}) or {}).get(user_id)
+        for resource in getattr(user_config, "resources", None) or ():
+            path = getattr(resource, "path", "")
+            if not path:
+                continue
+            try:
+                # `lstrip("/")` exactly as `build_bwrap_cmd` and
+                # `native_fs_roots` do: an absolute `resource_path` is
+                # re-rooted under the mount rather than escaping it.
+                resolved = (mount / path.lstrip("/")).resolve()
+            except (OSError, ValueError, TypeError):
+                continue
+            # Deliberately not gated on the path existing, unlike the two
+            # binds themselves. A row naming a directory that is not there yet
+            # binds it the moment it appears, and the control root is created
+            # by the first task that runs.
+            _check(
+                f"the {getattr(resource, 'type', '?')} resource {path!r} of "
+                f"user {user_id!r} ({getattr(resource, 'permissions', '?')})",
+                resolved,
+            )
+    return out
+
+
+def _control_mask_finding(
+    config: "Config", root: Path, probe: bool,
+) -> tuple[str, str] | None:
+    """``(finding, remedy)`` when the database mask reaches the control tree.
+
+    The mask is an empty read-only tmpfs emitted as the *last* mount operation
+    and cannot be worked around, so a control directory under one could never
+    be opened inside the namespace: the composed system prompt would be named
+    by ``BrainRequest.composed_system_prompt_path`` and unreadable at that
+    path, and both Claude Code backends would fail at start-up on a file their
+    own request pointed at. ``## Design`` claims the layout avoids this on all
+    three shipped shapes; this is what checks the claim against the config a
+    deployment actually rendered rather than against the one it was written
+    from.
+
+    **The shape question is asked first and the availability question only
+    where its answer can change the verdict.** Availability is
+    ``effective_sandboxing``, which spawns; on every layout where no mask would
+    reach the tree the answer cannot matter, so asking it would pay a
+    subprocess per doctor run for a fact nothing reads. That is the inverse of
+    ``runtime.session_log_dir``, where the absence of a mask is itself the
+    finding and availability therefore has to be asked every time.
+
+    **A mask the builder refuses is not a mask.** ``mask_shadowed_by`` is the
+    sandbox builder's own predicate rather than a copy of it, for the reason
+    its docstring gives: "is the tree under ``db_path.parent``" answers True on
+    the standalone install, where ``db_path.parent`` is the workspace and
+    ``_mask_dir`` refuses outright, so a copy would report a mask that is never
+    emitted.
+
+    Being unable to consult the builder returns ``None`` rather than a finding,
+    and that is the safe direction here where it would not be in the session-log
+    check: there the absence of a mask is the exposure, so silence would hide
+    one; here the presence of a mask is, so an unanswerable question cannot
+    have found one.
+    """
+    try:
+        from .executor import (  # noqa: PLC0415 - executor pulls in most of the package
+            mask_protected_paths,
+            mask_shadowed_by,
+        )
+    except Exception:  # pragma: no cover - defensive; executor is always importable
+        logger.debug("task control dir: the sandbox builder could not be consulted")
+        return None
+
+    try:
+        protected = mask_protected_paths(config)
+        candidates: list[Path] = [Path(config.db_path).parent]
+        try:
+            candidates.append(config.module_db_root())
+        except Exception:  # noqa: BLE001 - a misconfigured module_data_dir raises
+            pass
+
+        swallowing: list[Path] = []
+        seen: list[Path] = []
+        for candidate in candidates:
+            # Both names, exactly as `_mask_dir` emits them: under a symlinked
+            # deployment root a mask lands at one and not the other.
+            for name in (candidate, candidate.resolve()):
+                if name in seen:
+                    continue
+                seen.append(name)
+                if mask_shadowed_by(name, protected):
+                    continue  # the builder refuses this one, so it masks nothing
+                if root == name or root.is_relative_to(name):
+                    swallowing.append(name)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not raise
+        # Not `OSError` alone: `mask_protected_paths` resolves paths from a
+        # config file, where a null byte raises `ValueError`.
+        return (
+            f"{_CONTROL_MASK_UNKNOWN} — the mask could not be evaluated ({exc})",
+            _CONTROL_MASK_REMEDY,
+        )
+
+    if not swallowing:
+        return None
+
+    available, why = _sandbox_mask_availability(config, probe)
+    if available is True:
+        prefix = _CONTROL_MASKED
+    elif available is False:
+        prefix = _CONTROL_WOULD_BE_MASKED
+    else:
+        prefix = _CONTROL_MASK_UNKNOWN
+    finding = (
+        f"{prefix} — {root} is inside {swallowing[0]}, which the sandbox masks "
+        f"with an empty read-only tmpfs as its last mount operation"
+    )
+    if why:
+        finding = f"{finding}, and {why}"
+    return finding, _CONTROL_MASK_REMEDY
+
+
+def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
+    """The daemon-owned tree holding each task's framework-authored files.
+
+    ``{temp_dir}/.control/{user_id}/task_{id}`` holds both halves of the
+    assembled prompt, the briefing metadata and the prepared image attachments.
+    The model must be able to read its own — the prompt names the attachment
+    paths — and must not be able to write any of them or read another task's.
+    Two mechanisms enforce that (one ``--ro-bind`` of the task's own directory,
+    and the directory in both ``native_fs_roots`` lists), and both of them
+    depend on a layout property that lives in the rendered config rather than
+    in the code: the tree is a sibling of the per-user workspaces, so nothing
+    model-writable is above it.
+
+    **Two independent questions, both answered on every run**, following
+    ``runtime.session_log_dir``. Is the tree itself a directory the daemon owns
+    at 0700, and is anything model-writable at or above it — including the
+    database mask, which reaches it from the other direction by taking it away.
+    Neither pre-empts the other: an operator who reads one reason and fixes it
+    would otherwise be told nothing about the second and would still have the
+    tree exposed.
+
+    ``SKIP`` with no configured users, because nothing names a control
+    directory until a task runs for somebody and a check with no subject must
+    not report a property holding.
+
+    ``probe=False`` spawns nothing, and on every layout that ships neither does
+    ``probe=True`` — see `_control_mask_finding`.
+
+    Never raises. It runs on the daemon's start-up path, and it deliberately
+    reports rather than repairs: ``ensure_task_control_dir`` is what creates and
+    re-asserts the tree, and a diagnostic that quietly chmod'd a directory
+    would make the next run's answer a fact about this one.
+    """
+    name = "runtime.task_control_dir"
+
+    users = sorted(getattr(config, "users", {}) or {})
+    if not users:
+        return CheckResult(
+            name, SKIP,
+            "no users are configured, so nothing names a task control directory",
+        )
+
+    from .executor import CONTROL_DIR_NAME  # noqa: PLC0415 - executor pulls in most of the package
+
+    temp_dir = getattr(config, "temp_dir", None)
+    if not temp_dir:
+        return CheckResult(
+            name, FAIL, "no temp_dir is configured, so no control tree can exist",
+            remedy="Set temp_dir to an absolute path the daemon owns.",
+        )
+    if not Path(temp_dir).is_absolute():
+        # Out of scope rather than guessed at, the same way
+        # `config._warn_ro_paths_over_control_tree` skips it: `resolve()` would
+        # answer against the calling process's cwd, which differs between the
+        # daemon, the web app and a skill CLI, so the same config would report
+        # one thing here and another there.
+        return CheckResult(
+            name, SKIP,
+            f"temp_dir ({temp_dir}) is relative, so the control tree resolves "
+            f"differently in each process that loads this config",
+        )
+    try:
+        root = Path(temp_dir).resolve() / CONTROL_DIR_NAME
+    except (OSError, ValueError, TypeError) as exc:
+        return CheckResult(
+            name, FAIL, f"the control tree under {temp_dir} cannot be named: {exc}",
+            remedy="Set temp_dir to an absolute path the daemon can resolve.",
+        )
+
+    findings: list[str] = []
+    remedies: list[str] = []
+    status = OK
+
+    def _note(triple: tuple[str, str, str]) -> None:
+        nonlocal status
+        severity, finding, remedy = triple
+        status = _severer(status, severity)
+        findings.append(finding)
+        if remedy and remedy not in remedies:
+            remedies.append(remedy)
+
+    for triple in _control_tree_findings(root):
+        _note(triple)
+
+    # Resolution, per user rather than for a representative one: the refusals
+    # are per-user-id (an id that is not a plain component, or one equal to
+    # `CONTROL_DIR_NAME`), so one user can be unable to run a task while every
+    # other user is fine — and the id is the thing an operator would change.
+    from .executor import get_task_control_dir  # noqa: PLC0415
+
+    unresolvable = [
+        user_id for user_id in users
+        if get_task_control_dir(config, user_id, 0) is None
+    ]
+    if unresolvable:
+        _note((
+            FAIL,
+            "no control directory can be named for "
+            + ", ".join(repr(u) for u in unresolvable)
+            + ", so every task of those users fails at start-up",
+            "Rename the user, or clear whatever is standing at "
+            f"{root}; the id must be a plain path component and must not be "
+            f"{CONTROL_DIR_NAME!r}.",
+        ))
+
+    for triple in _control_overlap_findings(config, users, root):
+        _note(triple)
+
+    mask = _control_mask_finding(config, root, probe)
+    if mask:
+        _note((WARN, mask[0], mask[1]))
+
+    plural = "" if len(users) == 1 else "s"
+    try:
+        mode = f"mode {stat.S_IMODE(os.lstat(root).st_mode):04o}"
+    except OSError:
+        mode = "not created yet"
+    observed = f"{root}: {mode}, {len(users)} configured user{plural}"
+
+    if not findings:
+        return CheckResult(name, OK, observed)
+    return CheckResult(
+        name,
+        status,
+        f"{observed}; " + "; ".join(findings),
+        remedy=" ".join(remedies),
+    )
 
 
 # The two remedies this check can offer. Both are fixed literals: `detail` and
@@ -1214,7 +1673,7 @@ def _sandbox_in_force_clause(config: "Config", probe: bool) -> str:
     here. What the sandbox state changes is how much the exposure costs, which
     is a clause, not a condition.
 
-    Three states, following ``_session_log_sandbox_availability``: in force, not
+    Three states, following ``_sandbox_mask_availability``: in force, not
     in force, and not established on this run. The third is why the answer is
     not a bool — a check whose subject is a boundary must not report "fine"
     where it did not look, and must not assert an exposure it did not observe.
@@ -4145,6 +4604,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
     ("runtime.session_log_dir", check_session_log_dir),
+    ("runtime.task_control_dir", check_task_control_dir),
     ("runtime.subscription_usage", check_subscription_usage),
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_credentials", check_sandbox_credentials),
@@ -4187,6 +4647,10 @@ CHECK_SCOPES: dict[str, str] = {
     # reads the last sweep's row out of the framework database, neither of which
     # a bare `docker run` has.
     "runtime.session_log_dir": DEPLOYMENT,
+    # Deployment, not image: every question it asks is about a rendered
+    # config's paths and about a tree on the install's own disk. A bare
+    # `docker run` has neither a users table nor a temp dir anything wrote to.
+    "runtime.task_control_dir": DEPLOYMENT,
     # Deployment, not image: it needs a credential and network egress, neither of
     # which a bare `docker run` has. Not in DEEP_CHECKS — it spawns no namespace.
     "runtime.subscription_usage": DEPLOYMENT,

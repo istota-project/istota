@@ -4137,6 +4137,465 @@ class TestSessionLogDir:
         assert r.status in (WARN, FAIL)
 
 
+
+class TestTaskControlDir:
+    """`runtime.task_control_dir` — the daemon-owned tree the framework writes
+    each task's prompt halves, briefing metadata and prepared image attachments
+    into.
+
+    Two independent questions, both answered on every run, in the shape
+    `runtime.session_log_dir` set: is the tree itself a directory the daemon
+    owns at 0700, and is anything model-writable at or above it. The second is
+    what the whole change rests on — the tree is a *sibling* of the per-user
+    workspaces rather than a child of one — and it is a property of the
+    rendered config, which is exactly the class of fact the suite cannot see
+    and doctor exists to name.
+
+    The mask axis runs the other way from `runtime.session_log_dir`'s. There a
+    mask over the directory is defence in depth and its absence is the finding;
+    here a mask *over* the control tree takes away a file the task must open,
+    so the finding is the mask existing.
+    """
+
+    NAME = "runtime.task_control_dir"
+
+    def _config(self, make_config, tmp_path, *, users=("alice",), **overrides):
+        from istota.config import UserConfig
+
+        temp = tmp_path / "srv" / "tmp"
+        temp.mkdir(parents=True, exist_ok=True)
+        data = tmp_path / "srv" / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        (data / "istota.db").touch()
+        # A mapping is taken as written, so a test that needs resources on a
+        # user can pass one. Binding `users` as a named parameter and then
+        # rebuilding it from the keys is how the first draft of the two
+        # resource tests silently ran against a `UserConfig()` with no rows and
+        # passed on an OK that meant nothing.
+        if not isinstance(users, dict):
+            users = {u: UserConfig() for u in users}
+        kwargs = {
+            "db_path": data / "istota.db",
+            "temp_dir": temp,
+            "users": users,
+        }
+        kwargs.update(overrides)
+        return make_config(**kwargs)
+
+    def _run(self, config, **kwargs):
+        return run_checks(config, only=(self.NAME,), **kwargs)[0]
+
+    def _root(self, config):
+        from istota.executor import CONTROL_DIR_NAME
+
+        return Path(config.temp_dir).resolve() / CONTROL_DIR_NAME
+
+    # -- when it does not apply --------------------------------------------
+
+    def test_skips_when_no_users_are_configured(self, make_config, tmp_path):
+        # Nothing names a control directory until a task runs for somebody, and
+        # a check with no subject must not report a property holding.
+        r = self._run(self._config(make_config, tmp_path, users=()))
+        assert r.status == SKIP
+        assert "user" in r.detail
+
+    # -- the healthy shape -------------------------------------------------
+
+    def test_ok_before_the_tree_exists(self, make_config, tmp_path):
+        # `ensure_task_control_dir` creates it on the first task, so an install
+        # that has not run one is healthy rather than broken.
+        config = self._config(make_config, tmp_path)
+        r = self._run(config)
+        assert r.status == OK
+        assert str(self._root(config)) in r.detail
+
+    def test_ok_on_a_well_formed_tree(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        root.mkdir(parents=True)
+        os.chmod(root, 0o700)
+        (root / "alice").mkdir()
+        r = self._run(config)
+        assert r.status == OK
+        assert not r.remedy
+
+    def test_the_ok_line_names_the_root_and_the_users_it_resolved_for(
+        self, make_config, tmp_path,
+    ):
+        config = self._config(make_config, tmp_path, users=("alice", "bob"))
+        r = self._run(config)
+        assert r.status == OK
+        assert str(self._root(config)) in r.detail
+        assert "2" in r.detail
+
+    # -- question one: is the tree itself ours ------------------------------
+
+    def test_reports_a_widened_root(self, make_config, tmp_path):
+        # `ensure_task_control_dir` re-asserts 0700 on the next task, so this
+        # heals itself — but only while the daemon still owns the directory,
+        # and until then every other local account can walk into it.
+        #
+        # `chmod` after the `mkdir` rather than `mode=`, here and below: the
+        # umask subtracts from a `mkdir` mode, so the mode under test would be
+        # whatever the ambient umask left of it.
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        root.mkdir(parents=True)
+        os.chmod(root, 0o755)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "0755" in r.detail
+        assert r.remedy
+
+    def test_fails_when_a_regular_file_sits_at_the_root(self, make_config, tmp_path):
+        # `_ensure_control_level` refuses this with ENOTDIR, so every task of
+        # every user fails at start-up until it is moved aside.
+        config = self._config(make_config, tmp_path)
+        self._root(config).write_text("not a directory")
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "not a directory" in r.detail
+        assert r.remedy
+
+    def test_fails_when_the_root_is_a_symlink(self, make_config, tmp_path):
+        # A symlink is what `get_task_control_dir`'s containment equality is
+        # resolving through when it refuses; the daemon owns the parent, so
+        # this is a corrupt-state report rather than a boundary.
+        config = self._config(make_config, tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        self._root(config).symlink_to(elsewhere)
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "symlink" in r.detail
+        assert r.remedy
+
+    def test_reports_a_root_owned_by_another_account(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # `_ensure_control_level` fails closed on a uid mismatch, so this is
+        # every task failing rather than a widened permission. The daemon's own
+        # uid is what moves, since a test cannot chown to another account — and
+        # the real one is read *before* the patch, because `doctor.os` is the
+        # `os` module itself and a lambda calling through it recurses.
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        root.mkdir(parents=True)
+        os.chmod(root, 0o700)
+        mine = os.geteuid()
+        monkeypatch.setattr(doctor.os, "geteuid", lambda: mine + 1)
+        r = self._run(config)
+        assert r.status == FAIL
+        assert "uid" in r.detail
+        assert r.remedy
+
+    # -- question two: is anything model-writable above it ------------------
+
+    def test_reports_a_user_workspace_at_or_above_the_control_tree(
+        self, make_config, tmp_path,
+    ):
+        # `{temp_dir}/{user}` is bound read-write into that user's own sandbox
+        # and is the model's working directory. A link making it resolve to the
+        # shared temp root puts every user's control tree inside that bind,
+        # which is the one thing the sibling layout exists to prevent.
+        config = self._config(make_config, tmp_path, users=("alice", "bob"))
+        temp = Path(config.temp_dir)
+        (temp / "bob").symlink_to(temp)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "overlaps the control tree" in r.detail
+        assert "bob" in r.detail
+        assert r.remedy
+
+    def test_reports_the_user_id_that_collides_with_the_control_directory(
+        self, make_config, tmp_path,
+    ):
+        # `get_user_temp_dir` is a plain join, so a user of this name would put
+        # their model-writable scratch directory exactly where the control root
+        # goes. `get_task_control_dir` refuses the name; this is what says so
+        # out loud, because the refusal alone is a user whose every task fails
+        # with nothing in the config pointing at why.
+        config = self._config(make_config, tmp_path, users=("alice", ".control"))
+        r = self._run(config)
+        assert r.status in (WARN, FAIL)
+        assert ".control" in r.detail
+        assert r.remedy
+
+    def test_reports_a_resource_row_that_would_bind_the_control_tree(
+        self, make_config, tmp_path,
+    ):
+        # The gap Stage 3's review recorded and `native_fs_roots`' docstring
+        # names: a `user_resources` row resolves to `mount / resource_path`,
+        # bounded by the Nextcloud mount and nothing else, so on a layout where
+        # `temp_dir` sits under the mount a row is a second route into the
+        # whole tree that neither guard covers. No shipped shape produces the
+        # layout; this is what would say so if one did.
+        from istota.config import ResourceConfig, SecurityConfig, UserConfig
+
+        mount = tmp_path / "mount"
+        temp = mount / "tmp"
+        temp.mkdir(parents=True)
+        config = self._config(
+            make_config, tmp_path,
+            temp_dir=temp,
+            nextcloud_mount_path=mount,
+            security=SecurityConfig(sandbox_enabled=True),
+            users={
+                "alice": UserConfig(
+                    resources=[
+                        ResourceConfig(
+                            type="folder", path="tmp/.control",
+                            permissions="readwrite",
+                        ),
+                    ],
+                ),
+            },
+        )
+        r = self._run(config)
+        assert r.status == WARN
+        assert "overlaps the control tree" in r.detail
+        assert "readwrite" in r.detail
+        assert r.remedy
+
+    def test_a_read_only_resource_row_over_the_tree_is_reported_too(
+        self, make_config, tmp_path,
+    ):
+        # Read-only is the read exposure rather than the write vector, which is
+        # the same thing `sandbox_ro_paths` warns about at load: one task
+        # reading every other task of that user's assembled prompt.
+        from istota.config import ResourceConfig, SecurityConfig, UserConfig
+
+        mount = tmp_path / "mount"
+        temp = mount / "tmp"
+        temp.mkdir(parents=True)
+        config = self._config(
+            make_config, tmp_path,
+            temp_dir=temp,
+            nextcloud_mount_path=mount,
+            security=SecurityConfig(sandbox_enabled=True),
+            users={
+                "alice": UserConfig(
+                    resources=[
+                        ResourceConfig(type="folder", path="tmp", permissions="read"),
+                    ],
+                ),
+            },
+        )
+        r = self._run(config)
+        assert r.status == WARN
+        assert "overlaps the control tree" in r.detail
+
+    def test_a_resource_row_is_not_reported_with_the_sandbox_switched_off(
+        self, make_config, tmp_path,
+    ):
+        # Nothing is bound at all with the sandbox off, so there is no bind for
+        # a row to widen. Same gate `config._warn_ro_paths_over_control_tree`
+        # takes, and for the same reason: the *requested* flag, because the
+        # effective one spawns.
+        from istota.config import ResourceConfig, SecurityConfig, UserConfig
+
+        mount = tmp_path / "mount"
+        temp = mount / "tmp"
+        temp.mkdir(parents=True)
+        config = self._config(
+            make_config, tmp_path,
+            temp_dir=temp,
+            nextcloud_mount_path=mount,
+            security=SecurityConfig(sandbox_enabled=False),
+            users={
+                "alice": UserConfig(
+                    resources=[
+                        ResourceConfig(
+                            type="folder", path="tmp/.control",
+                            permissions="readwrite",
+                        ),
+                    ],
+                ),
+            },
+        )
+        assert self._run(config).status == OK
+
+    def test_a_resource_row_elsewhere_under_the_mount_is_not_a_finding(
+        self, make_config, tmp_path,
+    ):
+        from istota.config import ResourceConfig, SecurityConfig, UserConfig
+
+        mount = tmp_path / "mount"
+        temp = mount / "tmp"
+        temp.mkdir(parents=True)
+        (mount / "Docs").mkdir(parents=True, exist_ok=True)
+        config = self._config(
+            make_config, tmp_path,
+            temp_dir=temp,
+            nextcloud_mount_path=mount,
+            security=SecurityConfig(sandbox_enabled=True),
+            users={
+                "alice": UserConfig(
+                    resources=[
+                        ResourceConfig(
+                            type="folder", path="Docs", permissions="readwrite",
+                        ),
+                    ],
+                ),
+            },
+        )
+        assert self._run(config).status == OK
+
+    # -- question two, second half: the database mask -----------------------
+
+    def _bwrap(self, monkeypatch, *, available=True, cached=True):
+        """Stand in for the bwrap capability probe, recording each invocation.
+
+        `subprocess` cannot answer the spawn question here: `_bwrap_available`
+        returns False at its `sys.platform` check on a macOS host and memoizes
+        in `_bwrap_checked` after the first call anywhere in the process, so a
+        `subprocess` spy stays empty whether or not the gate exists.
+        """
+        from istota import executor
+
+        calls: list[str] = []
+
+        def _probe():
+            calls.append("bwrap")
+            return available
+
+        monkeypatch.setattr(executor, "_bwrap_available", _probe)
+        monkeypatch.setattr(executor, "_bwrap_checked", cached)
+        return calls
+
+    def _masked_shape(self, make_config, tmp_path):
+        """`db_path.parent` *is* the control root, so the mask lands on it.
+
+        The one layout where the tree is swallowed: a mask anywhere above
+        `temp_dir` shadows the workspace and `_mask_dir` refuses it, so the
+        only candidate that reaches the tree is one at or inside it.
+        """
+        config = self._config(make_config, tmp_path)
+        root = self._root(config)
+        root.mkdir(mode=0o700, parents=True)
+        config.db_path = root / "istota.db"
+        config.db_path.touch()
+        return config
+
+    def test_reports_a_mask_that_swallows_the_control_tree(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The database mask is the last mount operation and cannot be worked
+        # around, so a control directory under it could never be opened inside
+        # the namespace — the composed system prompt would be named by the
+        # request and unreadable, and every Claude Code task would fail at
+        # start-up. `## Design` claims this holds on all three shipped shapes;
+        # this is what checks the claim against a rendered config.
+        self._bwrap(monkeypatch, available=True)
+        r = self._run(self._masked_shape(make_config, tmp_path))
+        assert r.status == WARN
+        assert "masked out of every sandbox" in r.detail
+        assert r.remedy
+
+    def test_a_mask_that_is_refused_does_not_produce_a_finding(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # `mask_shadowed_by` is the sandbox builder's own predicate rather than
+        # a copy: "is the tree under db_path.parent" answers True on the
+        # standalone install, where db_path.parent is the workspace and the
+        # mask is refused, so a copy would report a mask that is never emitted.
+        self._bwrap(monkeypatch, available=True)
+        workspace = tmp_path / "istota-home"
+        (workspace / "tmp").mkdir(parents=True)
+        (workspace / "istota.db").touch()
+        from istota.config import UserConfig
+
+        config = make_config(
+            db_path=workspace / "istota.db",
+            temp_dir=workspace / "tmp",
+            nextcloud_mount_path=workspace,
+            users={"alice": UserConfig()},
+        )
+        r = self._run(config)
+        assert "masked" not in r.detail
+
+    def test_the_healthy_layout_asks_no_availability_question_at_all(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The availability answer cannot change the verdict where no mask would
+        # reach the tree, and asking it spawns. `probe` exists to stop exactly
+        # that, so the shape question is asked first and the probe is reached
+        # only where its answer matters.
+        calls = self._bwrap(monkeypatch, available=True, cached=None)
+        assert self._run(self._config(make_config, tmp_path)).status == OK
+        assert calls == []
+
+    def test_probe_false_does_not_spawn_for_the_mask_question(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        calls = self._bwrap(monkeypatch, cached=None)
+        r = self._run(self._masked_shape(make_config, tmp_path), probe=False)
+        assert calls == [], "probe=False invoked the bwrap probe"
+        assert r.status == WARN
+        assert "could not be established" in r.detail
+
+    def test_an_unestablished_answer_does_not_assert_the_tree_is_masked(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The session-log check's lesson: a fixed prefix rendered a sentence
+        # asserting the exposure in its first clause and disclaiming it in the
+        # second. A boundary check must neither pass on a question it could not
+        # settle nor assert a condition it did not observe.
+        self._bwrap(monkeypatch, cached=None)
+        r = self._run(self._masked_shape(make_config, tmp_path), probe=False)
+        assert "could not be established" in r.detail
+        assert "is masked out of every sandbox" not in r.detail
+
+    def test_a_warm_memo_answers_without_probing(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        # The daemon probes at start-up, so inside that process the answer is
+        # free. Saying "could not be established" while `_bwrap_checked` holds
+        # it is a statement about the world that is wrong.
+        calls = self._bwrap(monkeypatch, available=False, cached=False)
+        r = self._run(self._masked_shape(make_config, tmp_path), probe=False)
+        assert calls == []
+        assert "would be masked" in r.detail
+        assert "could not be established" not in r.detail
+
+    # -- both answers, not the first ---------------------------------------
+
+    def test_both_questions_are_reported_rather_than_the_first(
+        self, make_config, tmp_path,
+    ):
+        # The property the stage is named for. An operator who reads one reason
+        # and fixes it would otherwise be told nothing about the second and
+        # would still have the tree reachable.
+        config = self._config(make_config, tmp_path, users=("alice", "bob"))
+        root = self._root(config)
+        root.mkdir(parents=True)
+        os.chmod(root, 0o755)
+        temp = Path(config.temp_dir)
+        (temp / "bob").symlink_to(temp)
+        r = self._run(config)
+        assert r.status == WARN
+        assert "0755" in r.detail
+        assert "overlaps the control tree" in r.detail
+
+    # -- it never raises ----------------------------------------------------
+
+    def test_never_raises_on_a_relative_temp_dir(self, make_config, tmp_path):
+        # Called directly rather than through `run_checks`, which catches every
+        # exception and would report a raise as a plain FAIL.
+        config = self._config(make_config, tmp_path)
+        config.temp_dir = Path("relative/tmp")
+        r = doctor.check_task_control_dir(config, True)
+        assert r.status in (OK, WARN, FAIL, SKIP)
+
+    def test_never_raises_on_a_config_whose_paths_are_broken(
+        self, make_config, tmp_path,
+    ):
+        config = self._config(make_config, tmp_path)
+        config.db_path = Path("")
+        config.nextcloud_mount_path = None
+        r = doctor.check_task_control_dir(config, True)
+        assert r.status in (OK, WARN, FAIL, SKIP)
+
 class TestSandboxMasksUsesTheNativeProfile:
     """The `sandbox.masks` probe execs `/bin/sh`, not the `claude` CLI.
 
