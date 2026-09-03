@@ -700,6 +700,66 @@ class TestReviewRun:
         # without this the `--agents both` argument carries no weight.
         assert sorted(stub_brain.calls) == ["bughunt", "conformance"]
 
+    def test_the_error_quotes_what_the_reviewer_actually_said(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`skill.md` promises the reading model the head of the reviewer's own
+        output on a failed review, and the code dropped `result_text`, so only
+        the `stop_reason` slug arrived. Every cause — no credential, no route,
+        an unknown model — is `error`, and the sentence the CLI exits on is the
+        one thing that tells them apart."""
+        developer_config()
+        for agent in ("conformance", "bughunt"):
+            stub_brain.replies[agent] = [
+                StubResult(
+                    success=False,
+                    stop_reason="error",
+                    result_text="Not logged in \u00b7 Please run /login\n",
+                )
+            ]
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+        assert code == 0
+        assert envelope["reason"] == "review_failed"
+        assert "Not logged in" in envelope["error"]
+        # One line: the envelope is JSON a model reads, not a log.
+        assert "\n" not in envelope["error"]
+
+    def test_a_reviewer_that_said_nothing_still_gets_a_usable_error(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config()
+        for agent in ("conformance", "bughunt"):
+            stub_brain.replies[agent] = [
+                StubResult(success=False, stop_reason="timeout", result_text="")
+            ]
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+        assert code == 0
+        assert "timeout" in envelope["error"]
+        assert not envelope["error"].rstrip().endswith(":")
+
+    def test_a_reviewer_that_said_far_too_much_is_capped(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config()
+        for agent in ("conformance", "bughunt"):
+            stub_brain.replies[agent] = [
+                StubResult(
+                    success=False, stop_reason="error", result_text="x" * 5000,
+                )
+            ]
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+        assert code == 0
+        assert envelope["error"].count("x") == 2 * code_review._ERROR_TEXT_CHARS
+
     def test_a_request_fault_inside_a_reviewer_still_blocks_the_push(
         self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
     ):

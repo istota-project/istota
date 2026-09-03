@@ -27,7 +27,8 @@ from . import email_support
 from . import task_cgroup
 from . import task_env
 from .claude_runtime_env import (
-    CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401  — re-exported; the drift guard reads it beside `build_clean_env`
+    CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
+    # re-exported: the drift guard reads it beside `build_clean_env`.
     without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
     # the only remaining call, and `tests/test_security.py` imports both names
     # from here beside `build_clean_env`.
@@ -2556,6 +2557,75 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                             "ANTHROPIC_BASE_URL")
 
 
+#: Skills whose CLI is itself a model caller.
+#:
+#: `code_review` spawns the `claude` binary per reviewer — `make_brain` inside
+#: a skill CLI, a shape no other skill has (nothing else under `src/istota/
+#: skills/` imports a brain). It is the exception `proxy_base_env`'s strip has
+#: to make: ISSUE-390 reasoned that "no skill invokes the `claude` binary and
+#: none reads the variable" and took `CLAUDE_CODE_OAUTH_TOKEN` out of the
+#: snapshot every host-side skill CLI runs with, and from that change every
+#: review on a subscription-authenticated deployment came back `skipped /
+#: review_failed` about a second after it started — the shape of a `claude -p`
+#: that exits on "Not logged in" before opening a socket (ISSUE-409).
+#:
+#: A name list rather than a manifest flag, because both manifest routes are
+#: worse. Declaring the token `sensitive` in `skill.md` puts it in
+#: `derive_credential_set`, which is index-wide and drives the split that
+#: builds the *model's* env — so the task's own `ClaudeCodeBrain` would lose
+#: the credential in order to give it to the skill. A `daemon_env` manifest
+#: source would let any skill name any variable in the daemon's environment as
+#: its own credential, which is a much wider door than one reader needs.
+SKILL_MODEL_CALLERS = frozenset({"code_review"})
+
+#: What such a CLI needs in order to *authenticate*, as opposed to reach.
+#:
+#: `build_model_cli_env` runs inside the skill subprocess, so the `os.environ`
+#: it reads is `proxy_base_env` plus whatever the proxy injected — not the
+#: daemon's own. The two API-key names are in that env by no route at all
+#: (`build_clean_env` is an allowlist and does not carry them), so this was
+#: broken on an API-key deployment before ISSUE-390 broke it on a subscription
+#: one; same failure, one shape earlier (ISSUE-409). Naming all three keeps
+#: the fix from being true only of the deployment it was found on.
+#:
+#: Deliberately not the rest of `_MODEL_CLI_*`: a base URL, a CA bundle and an
+#: outbound proxy are *reachability*, and a deployment needing one of those
+#: fails at connect with an error that says so — which the reviewer's own
+#: output now carries into the envelope. A missing credential failed silently,
+#: which is why it is the half worth injecting. The other half is ISSUE-410,
+#: where the open question is not whether but where: they are not secrets, so
+#: `proxy_base_env` — every host-side skill CLI, several of which make outbound
+#: requests of their own — is the likelier home than a per-skill credential map.
+SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
+    {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+)
+
+
+def skill_model_credentials(*sources: Mapping[str, str]) -> dict[str, str]:
+    """:data:`SKILL_MODEL_CREDENTIAL_VARS`, read from the first source that has
+    each one.
+
+    A *copy* out of its sources, never a split, and that is the shape of the
+    whole fix. Everything else in the proxy's `credential_env` got there by
+    `_split_credential_env`, which moves a name out of the model's environment
+    and into the proxy's; the Claude token has to end up in both, because
+    `ClaudeCodeBrain` and `TmuxClaudeBrain` authenticate the task's own brain
+    with it. Taking it out of the model's env here would unauthenticate the
+    task in order to fix the skill.
+
+    An absent or empty value yields no entry, so a deployment configured with
+    one of these injects only that one, and a deployment with none injects
+    nothing rather than an empty string a CLI would read as a credential.
+    """
+    out: dict[str, str] = {}
+    for name in SKILL_MODEL_CREDENTIAL_VARS:
+        for source in sources:
+            if source.get(name):
+                out[name] = source[name]
+                break
+    return out
+
+
 def build_model_cli_env(config: Config) -> dict[str, str]:
     """Build the env for a daemon-side model call that is not a task.
 
@@ -2631,7 +2701,15 @@ def build_stripped_env() -> dict[str, str]:
 # ``derive_lookup_allowlist`` subtracts this set from its return value so
 # ``credential-fetch ISTOTA_SECRET_KEY`` is rejected by the proxy even if
 # the var sneaks into ``credential_env``.
-_PROXY_LOOKUP_BLOCKED = frozenset({"ISTOTA_SECRET_KEY"})
+#
+# ``SKILL_MODEL_CREDENTIAL_VARS`` joins it for the same reason from the other
+# direction: `task_env` puts those in ``credential_env`` on purpose, so the
+# proxy can inject them into the one skill CLI that calls a model. Injection
+# is scoped to that skill; the lookup endpoint is not scoped to anything — its
+# allowlist is a union, and the socket is bound into the sandbox, so a name in
+# it is a name the model can ask for by hand. That would put the credential
+# back on the route ISSUE-390 closed, through a different door.
+_PROXY_LOOKUP_BLOCKED = frozenset({"ISTOTA_SECRET_KEY"}) | SKILL_MODEL_CREDENTIAL_VARS
 
 
 # Reserved key a setup_env hook may return to prepend entries to the *model's*
@@ -2938,7 +3016,7 @@ def derive_lookup_allowlist(
 
     Replaces ``_allowed_credentials_for_skills``. Subtracts
     ``_PROXY_LOOKUP_BLOCKED`` as a defense-in-depth hard-reject list
-    (today: ``ISTOTA_SECRET_KEY``).
+    (today: ``ISTOTA_SECRET_KEY`` and the model credentials).
     """
     allowed: set[str] = set()
     for creds in derive_skill_credential_map(authorized_skills, skill_index).values():

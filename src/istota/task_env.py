@@ -95,6 +95,7 @@ def build_task_runtime(
         HOOK_PATH_PREPEND_KEY,
         SANDBOX_CACHE_NPM,
         SANDBOX_CACHE_UV,
+        SKILL_MODEL_CALLERS,
         _build_network_allowlist,
         _split_credential_env,
         build_clean_env,
@@ -106,6 +107,7 @@ def build_task_runtime(
         effective_sandboxing,
         native_fs_confinement_active,
         resolve_sandbox_cache_dir,
+        skill_model_credentials,
     )
 
     env = build_clean_env(config)
@@ -295,14 +297,33 @@ def build_task_runtime(
         # declared in no skill manifest, so neither `derive_credential_set`
         # nor `derive_proxy_only_set` takes it out of this snapshot, and the
         # model reaches every host-side skill CLI through the same Bash tool
-        # the strips in `NativeBrain` just cleaned. No skill
-        # invokes the `claude` binary and none reads the variable, so it has
-        # no reader here either — and unlike a tool subprocess these run
-        # *unsandboxed as the daemon user*, which is the reason to be strict
-        # rather than a reason to relax.
+        # the strips in `NativeBrain` just cleaned — and unlike a tool
+        # subprocess these run *unsandboxed as the daemon user*, which is the
+        # reason to be strict rather than a reason to relax.
         proxy_base_env = without_claude_runtime_env(
             {**env, **proxy_only_env}
         )
+        # One skill CLI is itself a model caller, and the strip above left it
+        # unauthenticated: `code_review` spawns the `claude` binary per
+        # reviewer, so from ISSUE-390 every review came back `review_failed`
+        # on a deployment where that token is the only credential there is.
+        # `skill_model_credentials` is where the reasoning lives, including
+        # why this is a copy rather than a third `_split_credential_env`.
+        #
+        # Two sources, in order: the token is in `env` because
+        # `build_clean_env` put it there, and the two API-key names are in no
+        # task env by any route, so they come from the daemon's own.
+        #
+        # Injection only, never lookup: the map scopes a value to one skill's
+        # subprocess, while `allowed_credentials` — which this deliberately
+        # does not touch — is a union any holder of the socket can fetch from,
+        # the model included. `_PROXY_LOOKUP_BLOCKED` says the same thing at
+        # the endpoint, so the two do not depend on each other's ordering.
+        model_creds = skill_model_credentials(env, os.environ)
+        if model_creds:
+            credential_env.update(model_creds)
+            for skill_name in SKILL_MODEL_CALLERS & set(authorized_skills):
+                skill_cred_map.setdefault(skill_name, set()).update(model_creds)
         _proxy_ctx = SkillProxy(
             _proxy_sock, credential_env, proxy_base_env,
             timeout=config.security.skill_proxy_timeout,

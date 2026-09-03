@@ -116,6 +116,138 @@ class TestTheClaudeRuntimeCredential:
         # needs it there; `NativeBrain` strips it on its own paths.
         assert runtime.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-test"
 
+    def test_the_one_skill_that_calls_a_model_gets_it_back(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # `code_review` spawns the `claude` CLI of its own, so the strip above
+        # left it unauthenticated (every review came back `review_failed`).
+        # It comes back scoped to that skill, by copy rather than by split:
+        # the model's env keeps it, because two brains authenticate with it.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": ["code_review", "kv"],
+            "skill_index": {
+                "code_review": _skill("code_review"),
+                "kv": _skill("kv"),
+            },
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        proxy = runtime.proxy_ctx
+        assert proxy is not None
+        assert proxy.credential_env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-test"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" in proxy.skill_credential_map["code_review"]
+        # Still out of the shared base env and still in the model's own.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in proxy.base_env
+        assert runtime.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-test"
+
+    def test_no_other_skill_gets_it(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": ["code_review", "kv"],
+            "skill_index": {
+                "code_review": _skill("code_review"),
+                "kv": _skill("kv"),
+            },
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in (
+            runtime.proxy_ctx.skill_credential_map.get("kv", set())
+        )
+
+    def test_it_is_never_fetchable_over_the_socket(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # `credential-fetch` is scoped by a union allowlist rather than per
+        # skill, so anything in it is readable by anything holding the socket
+        # — the model included. Injection is scoped; a lookup would not be.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": ["code_review"],
+            "skill_index": {"code_review": _skill("code_review")},
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.proxy_ctx.allowed_credentials
+
+    def test_a_skill_the_task_never_authorized_gets_nothing(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": [],
+            "skill_index": {"code_review": _skill("code_review")},
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert "code_review" not in runtime.proxy_ctx.skill_credential_map
+
+    def test_an_api_key_deployment_is_authenticated_the_same_way(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # `build_model_cli_env` runs *inside* the skill subprocess, so the
+        # `os.environ` it reads is the proxy's snapshot rather than the
+        # daemon's — and the API-key names are in a task env by no route at
+        # all. Broken on that shape before ISSUE-390 broke the other one.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": ["code_review"],
+            "skill_index": {"code_review": _skill("code_review")},
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        proxy = runtime.proxy_ctx
+        assert proxy.credential_env["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
+        assert "ANTHROPIC_API_KEY" in proxy.skill_credential_map["code_review"]
+        assert "ANTHROPIC_API_KEY" not in proxy.allowed_credentials
+        # Never in the shared snapshot: it reaches one skill, not all of them.
+        assert "ANTHROPIC_API_KEY" not in proxy.base_env
+
+    def test_nothing_is_injected_when_the_daemon_has_no_token(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": ["code_review"],
+            "skill_index": {"code_review": _skill("code_review")},
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        # An empty string is not a credential: injecting one gives the CLI
+        # something to authenticate with that cannot work.
+        assert not runtime.proxy_ctx.credential_env
+        assert "code_review" not in runtime.proxy_ctx.skill_credential_map
+
 
 class TestTheOrderOfTheTwoCredentialSplits:
     def test_a_var_declared_both_ways_goes_to_the_proxy_only_bucket(

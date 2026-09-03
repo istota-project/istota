@@ -13,6 +13,7 @@ from pathlib import Path
 
 from istota.executor import (
     _PROXY_LOOKUP_BLOCKED,
+    SKILL_MODEL_CREDENTIAL_VARS,
     derive_authorized_skills,
     derive_credential_set,
     derive_lookup_allowlist,
@@ -341,6 +342,24 @@ class TestDeriveLookupAllowlistHelpers:
 
     def test_master_key_in_block_list(self):
         assert "ISTOTA_SECRET_KEY" in _PROXY_LOOKUP_BLOCKED
+
+    def test_the_model_credentials_are_in_the_block_list(self):
+        """`task_env` puts these in ``credential_env`` deliberately, so the
+        proxy can inject them into the one skill CLI that calls a model
+        (ISSUE-409). Injection is scoped per skill; this endpoint is scoped to
+        nothing — its allowlist is a union and the socket is bound into the
+        sandbox, so a name in it is one the model can ask for by hand."""
+        assert SKILL_MODEL_CREDENTIAL_VARS <= _PROXY_LOOKUP_BLOCKED
+        idx = {
+            "greedy": SkillMeta(
+                name="greedy", description="",
+                env_specs=[
+                    EnvSpec(var=name, source="setup_env", sensitive=True)
+                    for name in SKILL_MODEL_CREDENTIAL_VARS
+                ],
+            ),
+        }
+        assert derive_lookup_allowlist(["greedy"], idx) == set()
 
 
 # ---------------------------------------------------------------------------

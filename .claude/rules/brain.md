@@ -848,8 +848,18 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   `/proc/<pid>/environ` — so stripping only the frame leaves the token
   reachable; and `execute_task`'s `proxy_base_env`, which is what every
   host-side skill CLI gets — the model
-  reaches those through the same Bash tool, they run unsandboxed as the daemon
-  user, and none of them reads the variable or invokes the `claude` binary.
+  reaches those through the same Bash tool, and they run unsandboxed as the
+  daemon user. That third site had one reader after all, and the claim that it
+  did not is what ISSUE-409 corrected: `code_review` spawns the `claude` binary
+  per reviewer, so from ISSUE-390 every review on a subscription deployment came
+  back `skipped / review_failed` about a second after it started. The strip
+  stands and the exception is scoped rather than lifted —
+  `executor.skill_model_credentials` copies the credential into the proxy's
+  per-skill map for the skills in `SKILL_MODEL_CALLERS` alone, a copy rather
+  than a third split because `ClaudeCodeBrain` needs the same value in the
+  model's own env, and `_PROXY_LOOKUP_BLOCKED` keeps it out of the
+  `credential-fetch` allowlist, which is a union anything holding the socket can
+  read from.
   Four things about the shape are deliberate. It is a **name list, not a
   `CLAUDE_*` prefix rule**, because a prefix would also swallow an operator's
   own `passthrough_env_vars` entry; the drift that buys is covered by a guard in

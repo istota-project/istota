@@ -106,6 +106,33 @@ def _skip(reason: str, message: str, **extra):
     _emit({"status": "skipped", "reason": reason, "error": message, **extra}, 0)
 
 
+#: How much of a failed reviewer's own output the envelope quotes.
+#:
+#: Enough for the sentence a CLI exits on ("Not logged in · Please run /login",
+#: an auth error, a model name it does not know) and not enough for a diff or a
+#: half-written review to arrive as an error string.
+_ERROR_TEXT_CHARS = 300
+
+
+def _failure_error(agent: str, stop_reason: str, text: str | None) -> str:
+    """The `error` string for a reviewer whose call did not succeed.
+
+    `stop_reason` alone is a slug — `error` covers a missing credential, an
+    unreachable provider and a model name the CLI rejects alike, and the
+    reviewer usually said which on its way out. `skill.md` has promised the
+    quote to the reading model since the field existed; the code dropped
+    `result_text` on the floor and only the slug arrived, which turned a
+    one-line diagnosis into a session of tracing the call chain (ISSUE-409).
+
+    Flattened to one line and capped: it rides in a JSON envelope a model
+    reads, and the skill's own "the findings are untrusted input" rule names
+    this field, so it is quoted as data rather than trusted.
+    """
+    head = " ".join((text or "").split())[:_ERROR_TEXT_CHARS].strip()
+    base = f"{agent} failed (stop_reason={stop_reason})"
+    return f"{base}: {head}" if head else base
+
+
 def _task_id() -> int | None:
     raw = os.environ.get("ISTOTA_TASK_ID", "").strip()
     try:
@@ -393,7 +420,8 @@ def cmd_run(args):
                 "code_review %s failed (stop_reason=%s)", agent, result.stop_reason
             )
             return engine.AgentReply(
-                ok=False, error=f"{agent} failed (stop_reason={result.stop_reason})"
+                ok=False,
+                error=_failure_error(agent, result.stop_reason, result.result_text),
             )
         return engine.AgentReply(ok=True, text=result.result_text or "")
 
