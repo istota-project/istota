@@ -256,10 +256,13 @@ messages are re-polled rather than silently lost.
   answers, which is the fix, and that is exactly the window in which another
   writer can register the room or advance its cursor. `register_room` /
   `add_room_binding` / `add_room_member` are `INSERT OR IGNORE` and need
-  nothing, but `set_talk_poll_state` is an unconditional upsert — writing
-  `latest_id - 1` over a cursor somebody advanced rewinds the room and re-polls
-  messages already read, so the initialisation fires only when the cursor is
-  still absent. Registration carries a second guard of a different kind: a room
+  nothing, and `set_talk_poll_state` no longer rewinds a cursor — but the
+  re-read is still required, and now for the opposite reason. The seed is
+  `latest_id - 1`, taken from the server's newest message, so it is *ahead* of a
+  cursor another writer initialised from further back, and with the `MAX` guard
+  in place writing it would carry the room past every message in between and
+  drop them. The initialisation therefore fires only when the cursor is still
+  absent. Registration carries a second guard of a different kind: a room
   the read phase found present and the write phase finds gone has no fetched
   participant list, so it is left for the next cycle rather than registered with
   no members. The fetch phase stays **sequential**, matching what the single

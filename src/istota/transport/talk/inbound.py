@@ -647,9 +647,14 @@ def _apply_room_pass(
     lock was free while Nextcloud answered, which is the fix, and that is
     exactly the window in which another writer can register the room or advance
     its cursor. `register_room` / `add_room_binding` / `add_room_member` are all
-    `INSERT OR IGNORE` and need no help, but `set_talk_poll_state` is an
-    unconditional upsert: writing `latest_id - 1` over a cursor somebody
-    advanced would rewind the room and re-poll messages already read.
+    `INSERT OR IGNORE` and need no help, and `set_talk_poll_state` no longer
+    rewinds a cursor — but the re-read below is still required, and now for the
+    opposite reason. The seed is `latest_id - 1`, computed from the server's
+    newest message, so it is *ahead* of a cursor another writer initialised
+    from anywhere further back: with the `MAX` guard in place, writing it would
+    carry the room past every message between the two and drop them silently.
+    So the seed lands only when the cursor is still absent, which is the one
+    state it describes.
     """
     poll_tasks = []
     gated = 0

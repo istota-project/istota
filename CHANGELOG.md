@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Istota can no longer act twice on the same chat message. The mark it keeps of how far it has read each room could be moved backwards by a write arriving out of order, and anything after that mark is then read a second time — a `!command` run again, a confirmation answered again, an acknowledgement posted again. The mark now only ever moves forward, which is the only direction a Talk message id ever goes.
+
 - Code review works again. Every review came back as skipped with a failure about a second after it started, because the credential the reviewers authenticate with was being removed from the environment they run in. It was removed on purpose, to keep it away from the model, on the reasoning that no skill needed it — code review does, and it is the only one that does, so it now gets it back and nothing else does. The credential still cannot be asked for by name over the skill socket. Deployments authenticating with an API key rather than a subscription had the same failure for longer and are fixed by the same change.
 
 - A failed code review now says what the reviewer said. The result quoted only a status word, which is the same word whether the reviewer had no credential, no route to the model, or a model name it did not recognise; the sentence it actually exited on was thrown away. It is now included, on one line and capped.

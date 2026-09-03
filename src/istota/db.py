@@ -7589,13 +7589,50 @@ def set_talk_poll_state(
     conversation_token: str,
     message_id: int,
 ) -> None:
-    """Set the last known message ID for a conversation."""
+    """Advance the last known message ID for a conversation. Never rewinds it.
+
+    **The cursor only ever moves forward**, and that is enforced here rather
+    than at the call sites. It used to be an unconditional upsert, so any
+    writer could move a room's cursor backwards — and the reassuring reading,
+    that redelivery is idempotent because the cursor guards it, is false: the
+    poll advances the cursor at the top of the results loop *before* every
+    filter, and below it sit `!command` dispatch, confirmation replies with
+    their ack post, and `cancel_for_conversation`. None of those is idempotent
+    and only `ingest_message` is deduped, so a rewind re-runs that window —
+    a command dispatched twice, an ack posted twice, a confirmation cancelled
+    twice.
+
+    There is no legitimate rewind to preserve. Talk comment ids are global and
+    monotonic; neither `clear-history` nor deleting a message resets them, so a
+    lower id reaching here is a stale writer rather than a correction. With a
+    second inbound driver on the way (the signaling event stream), "stale
+    writer" stops being hypothetical.
+
+    An INSERT is unguarded, because a room's first cursor has nothing to be
+    compared against: `_apply_room_pass` seeds it from `latest_id - 1`, which is
+    lower than everything the room will hold afterwards. `updated_at` moves on
+    every call, refused id or not — it records when a writer last reported on
+    the room, which is how an operator tells a quiet room from a stalled poller.
+
+    The guard does **not** make a forward jump safe, which is the other half of
+    the same problem: `_apply_room_pass` still writes its seed only when the
+    cursor is still absent, because `MAX` would otherwise carry a room's cursor
+    *past* messages nobody has read.
+
+    The comparison is SQLite's, so it reads an integer id — which every caller
+    has, since the value is Talk's own `id` field and the column is
+    `INTEGER NOT NULL`. A string would sort above every integer in SQLite's
+    ordering and freeze the cursor, so this is a type the callers owe rather
+    than one the SQL can defend.
+    """
     conn.execute(
         """
         INSERT INTO talk_poll_state (conversation_token, last_known_message_id, updated_at)
         VALUES (?, ?, datetime('now'))
         ON CONFLICT(conversation_token) DO UPDATE SET
-            last_known_message_id = excluded.last_known_message_id,
+            last_known_message_id = MAX(
+                excluded.last_known_message_id, last_known_message_id
+            ),
             updated_at = excluded.updated_at
         """,
         (conversation_token, message_id),
