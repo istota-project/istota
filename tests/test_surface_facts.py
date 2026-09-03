@@ -9,8 +9,8 @@ asked to. And the table covers every surface the registry can produce, so
 adding a transport without filling in a record fails here rather than answering
 "not a room surface" at seven call sites.
 
-Nothing in `src/` reads the leaf yet; the equivalence tests that pin each
-converted site against the literal it replaces are their own stage.
+The seven converted sites read it now; the equivalence tests pinning each one
+against the literal it replaces live in `tests/test_surface_model_equivalence.py`.
 """
 
 import dataclasses
@@ -33,8 +33,9 @@ from istota.transport.registry import _surface_for_source_type
 # not — every `playbook` literal in `src/` is a `memory_chunks.source_type`
 # (`executor._recall_playbooks`, `memory/sleep_cycle.py`) and no `create_task`
 # call passes it. It is kept because an extra unrecognised value costs one
-# parametrized case and must answer None either way; the spec's own list has
-# the same error and Stage 7 is where that gets corrected.
+# parametrized case and must answer None either way. It is why the flip list
+# below carries eight names against the seven `origin_surface_for_source_type`
+# documents.
 SHIPPED_SOURCE_TYPES = (
     "briefing", "cli", "doctor", "email", "heartbeat", "istota_file",
     "playbook", "repl", "scheduled", "subtask", "talk", "web",
@@ -216,8 +217,8 @@ class TestOriginSurfaceForSourceType:
 
     @pytest.mark.parametrize("source_type", SHIPPED_SOURCE_TYPES)
     def test_the_room_predicates_answer_todays_answer(self, source_type):
-        # `ROOM_SURFACES` is `{"talk", "web"}` and the two scheduler gates test
-        # `task.source_type` against it directly. Routing the same source type
+        # The two scheduler gates used to test `task.source_type` against a
+        # `("talk", "web")` literal directly. Routing the same source type
         # through the leaf must not change either answer for any shipped value.
         origin = surfaces.origin_surface_for_source_type(source_type)
         expected = source_type in ("talk", "web")
@@ -228,7 +229,8 @@ class TestOriginSurfaceForSourceType:
         # The defect this function exists to avoid, asserted rather than
         # described: `_surface_for_source_type` maps every non-surface source
         # type to "talk", so asking it the origin question flips eight of the
-        # twelve from "no surface" to "a room surface". At the confirmation gate
+        # twelve values enumerated above from "no surface" to "a room surface"
+        # — seven of them real task source types. At the confirmation gate
         # the predicate is negated, which is what suppressed the prompt on the
         # mirror leg for cron, briefing and heartbeat tasks. (The spec says six;
         # measured, it is eight — `istota_file` and `doctor` flip too.)
@@ -243,7 +245,8 @@ class TestOriginSurfaceForSourceType:
         ]
 
     def test_an_empty_source_type_originates_nowhere(self):
-        # The scheduler's gates read `task.source_type or ""`, and the delivery
+        # The confirmation gate reads `task.source_type or ""` (the
+        # `store_turn_message` one reads the column bare), and the delivery
         # mapping sends "" to "talk". This is the ninth flip and the one a
         # column default can produce.
         assert surfaces.origin_surface_for_source_type("") is None

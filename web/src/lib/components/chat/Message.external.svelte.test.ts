@@ -94,9 +94,10 @@ describe('the external marker', () => {
   });
 
   it('does not claim "email" for an origin it does not recognize', () => {
-    // The server's contract is "a surface outside ROOM_SURFACES", which is
-    // email today only because TRANSCRIPT_SURFACE_FILTER limits user rows to
-    // web/talk/email. That coupling spans two files with nothing enforcing it,
+    // The server's contract is "a surface that does not own rooms"
+    // (surfaces.is_room_member, read negated), which is email today only
+    // because TRANSCRIPT_SURFACE_FILTER limits user rows to web/talk/email.
+    // That coupling spans two files with nothing enforcing it,
     // so a widened filter must not have the client assert an email that never
     // arrived — while still marking the turn as from outside.
     const { container } = render(Message, {
