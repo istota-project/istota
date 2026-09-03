@@ -611,8 +611,8 @@ class TestProvisionRoomsCli:
 
         seen: list = []
 
-        def fake_provision(config, user_id, names, known_tokens=None, resolved=None):
-            seen.append(known_tokens)
+        def fake_provision(config, user_id, names, known_records=None, resolved=None):
+            seen.append(known_records)
             return [
                 pr.ProvisionedRoom(name=n, token=f"tok-{n}", created=False, invited=False)
                 for n in names
@@ -624,8 +624,8 @@ class TestProvisionRoomsCli:
         cli.cmd_nextcloud_provision_rooms(args)
 
         assert seen[0] == {}
-        assert seen[1]["general"] == "tok-general"
-        assert pr.read_provisioned_tokens(db_path, "alice")["logs"] == "tok-logs"
+        assert seen[1]["general"].token == "tok-general"
+        assert pr.read_provisioned_records(db_path, "alice")["logs"].token == "tok-logs"
 
     def test_a_failed_re_invite_is_stranded_and_not_reported_as_existing(
         self, cfg_file, db_path, monkeypatch, capsys
@@ -684,7 +684,7 @@ class TestProvisionRoomsCli:
 
         from istota import cli, provision_rooms as pr
 
-        def fake_provision(config, user_id, names, known_tokens=None, resolved=None):
+        def fake_provision(config, user_id, names, known_records=None, resolved=None):
             resolved.append(
                 pr.ProvisionedRoom(name=names[0], token="tok-first", created=True)
             )
@@ -696,9 +696,9 @@ class TestProvisionRoomsCli:
                 _Args(config=str(cfg_file), user="alice")
             )
 
-        assert pr.read_provisioned_tokens(db_path, "alice") == {
-            "general": "tok-first",
-        }
+        assert pr.read_provisioned_records(db_path, "alice")["general"].token == (
+            "tok-first"
+        )
 
     def test_adopt_records_a_token_without_contacting_talk(
         self, cfg_file, db_path, monkeypatch, capsys
@@ -718,7 +718,11 @@ class TestProvisionRoomsCli:
         out = capsys.readouterr().out
         assert "recorded general = tk4ab9cd" in out
         assert "STATE: updated" in out
-        assert pr.read_provisioned_tokens(db_path, "alice") == {"general": "tk4ab9cd"}
+        recorded = pr.read_provisioned_records(db_path, "alice")
+        assert recorded["general"].token == "tk4ab9cd"
+        # `--adopt` never contacts Talk, so it has observed no failed invite
+        # to retry — recording one would re-invite on the next deploy.
+        assert recorded["general"].invite_failed is False
 
     def test_adopt_rejects_a_malformed_pair(self, cfg_file, db_path, capsys):
         import pytest as _pytest
@@ -888,40 +892,41 @@ class TestProvisionedTokenRecord:
     def test_record_and_read_round_trip(self, tmp_path):
         from istota.provision_rooms import (
             ProvisionedRoom,
-            read_provisioned_tokens,
-            record_provisioned_tokens,
+            read_provisioned_records,
+            record_provisioned_rooms,
         )
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        assert read_provisioned_tokens(db_path, "alice") == {}
+        assert read_provisioned_records(db_path, "alice") == {}
 
-        assert record_provisioned_tokens(db_path, "alice", [
+        assert record_provisioned_rooms(db_path, "alice", [
             ProvisionedRoom(name="general", token="G1", created=True),
             ProvisionedRoom(name="logs", token="L1", created=True),
         ]) is True
-        assert read_provisioned_tokens(db_path, "alice") == {
-            "general": "G1", "logs": "L1",
-        }
+        assert {
+            name: r.token
+            for name, r in read_provisioned_records(db_path, "alice").items()
+        } == {"general": "G1", "logs": "L1"}
 
     def test_a_changed_token_overwrites_the_record(self, tmp_path):
         from istota.provision_rooms import (
             ProvisionedRoom,
-            read_provisioned_tokens,
-            record_provisioned_tokens,
+            read_provisioned_records,
+            record_provisioned_rooms,
         )
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        record_provisioned_tokens(
+        record_provisioned_rooms(
             db_path, "alice",
             [ProvisionedRoom(name="general", token="G1", created=True)],
         )
-        record_provisioned_tokens(
+        record_provisioned_rooms(
             db_path, "alice",
             [ProvisionedRoom(name="general", token="G2", created=True)],
         )
-        assert read_provisioned_tokens(db_path, "alice")["general"] == "G2"
+        assert read_provisioned_records(db_path, "alice")["general"].token == "G2"
 
     def test_the_value_is_json_like_every_other_kv_writer(self, tmp_path):
         # `cli.cmd_kv_get` does an unguarded `json.loads` on a stored value, so
@@ -931,75 +936,77 @@ class TestProvisionedTokenRecord:
         from istota.provision_rooms import (
             PROVISIONED_NAMESPACE,
             ProvisionedRoom,
-            record_provisioned_tokens,
+            record_provisioned_rooms,
         )
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        record_provisioned_tokens(
+        record_provisioned_rooms(
             db_path, "alice",
             [ProvisionedRoom(name="general", token="G1", created=True)],
         )
         with db.get_db(db_path) as conn:
             raw = db.kv_get(conn, "alice", PROVISIONED_NAMESPACE, "general")
-        assert json.loads(raw["value"]) == "G1"
+        # An object since ISSUE-408 — the token alone could not say whether
+        # this run's invite landed, which is what authorizes a later retry.
+        assert json.loads(raw["value"]) == {"token": "G1", "invite_failed": False}
 
     def test_a_bare_string_from_an_earlier_version_is_still_read(self, tmp_path):
         from istota.provision_rooms import (
             PROVISIONED_NAMESPACE,
-            read_provisioned_tokens,
+            read_provisioned_records,
         )
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
         with db.get_db(db_path) as conn:
             db.kv_set(conn, "alice", PROVISIONED_NAMESPACE, "general", "G1")
-        assert read_provisioned_tokens(db_path, "alice") == {"general": "G1"}
+        assert read_provisioned_records(db_path, "alice")["general"].token == "G1"
 
     def test_the_record_is_per_user(self, tmp_path):
         from istota.provision_rooms import (
             ProvisionedRoom,
-            read_provisioned_tokens,
-            record_provisioned_tokens,
+            read_provisioned_records,
+            record_provisioned_rooms,
         )
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        record_provisioned_tokens(
+        record_provisioned_rooms(
             db_path, "alice",
             [ProvisionedRoom(name="general", token="G1", created=True)],
         )
-        assert read_provisioned_tokens(db_path, "bob") == {}
+        assert read_provisioned_records(db_path, "bob") == {}
 
     def test_a_room_with_no_token_is_not_recorded(self, tmp_path):
         from istota.provision_rooms import (
             ProvisionedRoom,
-            read_provisioned_tokens,
-            record_provisioned_tokens,
+            read_provisioned_records,
+            record_provisioned_rooms,
         )
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        record_provisioned_tokens(
+        record_provisioned_rooms(
             db_path, "alice",
             [ProvisionedRoom(name="general", token="", created=False)],
         )
-        assert read_provisioned_tokens(db_path, "alice") == {}
+        assert read_provisioned_records(db_path, "alice") == {}
 
     def test_recording_against_a_missing_db_does_not_raise(self, tmp_path):
         # Bookkeeping runs after the rooms already exist on Talk, so a DB
         # failure here must not turn a successful provision into a failed play.
-        from istota.provision_rooms import ProvisionedRoom, record_provisioned_tokens
+        from istota.provision_rooms import ProvisionedRoom, record_provisioned_rooms
 
-        assert record_provisioned_tokens(
+        assert record_provisioned_rooms(
             tmp_path / "nope.db", "alice",
             [ProvisionedRoom(name="general", token="G1", created=True)],
         ) is False
 
     def test_reading_a_missing_db_returns_empty(self, tmp_path):
-        from istota.provision_rooms import read_provisioned_tokens
+        from istota.provision_rooms import read_provisioned_records
 
-        assert read_provisioned_tokens(tmp_path / "nope.db", "alice") == {}
+        assert read_provisioned_records(tmp_path / "nope.db", "alice") == {}
 
 
 class TestRenameDoesNotDuplicate:
@@ -1008,29 +1015,34 @@ class TestRenameDoesNotDuplicate:
         # The ISSUE-342 regression: `general` was renamed to `#general` in the
         # web UI, which propagated to Talk. The next deploy found no group room
         # called `general` and made one.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
             participants={"G1": [{"actorType": "users", "actorId": "alice"}]},
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("G1"),
         )
 
         assert (result.token, result.created) == ("G1", False)
         client.create_conversation.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_renamed_room_the_user_left_is_re_invited_not_recreated(self):
-        from istota.provision_rooms import ensure_room
+    async def test_a_renamed_room_with_a_failed_invite_is_retried_not_recreated(self):
+        # The room is bot-only because the invite that made it never landed —
+        # recorded, so this run knows. It is retried in place. A bot-only room
+        # with *no* recorded failure is a room the user left and is left alone;
+        # that half is ISSUE-408, in `tests/test_leaving_a_room_sticks.py`.
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
             participants={"G1": [{"actorType": "users", "actorId": "bot"}]},
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot",
+            known=ProvisionedRecord("G1", invite_failed=True),
         )
 
         assert (result.token, result.created) == ("G1", False)
@@ -1043,14 +1055,14 @@ class TestRenameDoesNotDuplicate:
         # An empty `log_channel` is a user-chosen state (ISSUE-115). Reusing a
         # recorded room must not count as making it usable, or a deploy would
         # switch the execution log back on.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "L1", "displayName": "#logs", "type": 2}],
             participants={"L1": [{"actorType": "users", "actorId": "alice"}]},
         )
         result = await ensure_room(
-            client, "logs", "alice", bot_user_id="bot", known_token="L1",
+            client, "logs", "alice", bot_user_id="bot", known=ProvisionedRecord("L1"),
         )
 
         assert result.seedable is False
@@ -1062,7 +1074,7 @@ class TestRenameDoesNotDuplicate:
         # same-named room under a *different* token, so reusing it is
         # distinguishable from simply creating one. Against an empty room list
         # this test would pass whether the fallback ran or not.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G2", "displayName": "general", "type": 2}],
@@ -1070,7 +1082,7 @@ class TestRenameDoesNotDuplicate:
             created_token="G3",
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="GONE",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("GONE"),
         )
 
         assert (result.token, result.created) == ("G2", False)
@@ -1078,11 +1090,11 @@ class TestRenameDoesNotDuplicate:
 
     @pytest.mark.asyncio
     async def test_a_recorded_token_gone_with_no_name_match_creates(self):
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(rooms=[], created_token="G2")
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="GONE",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("GONE"),
         )
 
         assert (result.token, result.created) == ("G2", True)
@@ -1093,7 +1105,7 @@ class TestRenameDoesNotDuplicate:
         # so requiring type 2 here would reject it, the name match would fail
         # too (it was renamed — the whole premise), and the duplicate is back.
         # Only the DM-ish types are refused on this path.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 3}],
@@ -1101,7 +1113,7 @@ class TestRenameDoesNotDuplicate:
             created_token="G2",
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("G1"),
         )
 
         assert (result.token, result.created) == ("G1", False)
@@ -1111,7 +1123,7 @@ class TestRenameDoesNotDuplicate:
         # Other humans are in it, so the user left a shared room. Re-adding them
         # on every deploy is the ISSUE-102 clobber shape, and unlike logs/alerts
         # there is no column they could clear to opt out.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1121,7 +1133,7 @@ class TestRenameDoesNotDuplicate:
             ]},
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("G1"),
         )
 
         assert (result.token, result.created) == ("G1", False)
@@ -1133,14 +1145,14 @@ class TestRenameDoesNotDuplicate:
         # `_is_orphan` already treats an empty list as more likely a failed read
         # than a real room; the two paths must not disagree about the same
         # evidence.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
             participants={"G1": []},
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("G1"),
         )
 
         assert result.token == "G1"
@@ -1152,7 +1164,7 @@ class TestRenameDoesNotDuplicate:
         # `invited=False` on this path meant both "already in it" and "tried and
         # failed", and the CLI's stranded predicate reads only created/adopted —
         # so a room the user cannot read printed `existing` and the play passed.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "#general", "type": 2}],
@@ -1160,7 +1172,8 @@ class TestRenameDoesNotDuplicate:
         )
         client.add_participant = AsyncMock(side_effect=RuntimeError("no permission"))
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot",
+            known=ProvisionedRecord("G1", invite_failed=True),
         )
 
         assert (result.invited, result.reinvited) == (False, True)
@@ -1170,7 +1183,7 @@ class TestRenameDoesNotDuplicate:
     async def test_a_recorded_token_pointing_at_a_one_to_one_is_ignored(self):
         # Talk puts the other party's user id in `name` for a DM. A recorded
         # token must not resurrect one as a channel.
-        from istota.provision_rooms import ensure_room
+        from istota.provision_rooms import ProvisionedRecord, ensure_room
 
         client = _fake_client(
             rooms=[{"token": "G1", "displayName": "alice", "type": 1}],
@@ -1178,7 +1191,7 @@ class TestRenameDoesNotDuplicate:
             created_token="G2",
         )
         result = await ensure_room(
-            client, "general", "alice", bot_user_id="bot", known_token="G1",
+            client, "general", "alice", bot_user_id="bot", known=ProvisionedRecord("G1"),
         )
 
         assert (result.token, result.created) == ("G2", True)
@@ -1192,13 +1205,13 @@ class TestRenameDoesNotDuplicate:
             rooms=[{"token": "G1", "displayName": "general", "type": 2}],
             participants={"G1": [{"actorType": "users", "actorId": "alice"}]},
         )
-        result = await ensure_room(client, "general", "alice", known_token=None)
+        result = await ensure_room(client, "general", "alice", known=None)
 
         assert (result.token, result.created) == ("G1", False)
 
     @pytest.mark.asyncio
     async def test_provision_rooms_threads_the_record_through(self):
-        from istota.provision_rooms import provision_rooms
+        from istota.provision_rooms import ProvisionedRecord, provision_rooms
 
         client = _fake_client(
             rooms=[
@@ -1212,7 +1225,7 @@ class TestRenameDoesNotDuplicate:
         )
         results = await provision_rooms(
             client, "alice", ("general", "logs"),
-            bot_user_id="bot", known_tokens={"general": "G1"},
+            bot_user_id="bot", known_records={"general": ProvisionedRecord("G1")},
         )
 
         assert [(r.name, r.token, r.created) for r in results] == [

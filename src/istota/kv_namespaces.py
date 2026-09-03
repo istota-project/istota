@@ -4,8 +4,10 @@ A reserved namespace holds framework state that happens to live in the KV
 store: today the USER.md curation audit trail and the fingerprints the
 bypass detector compares against (`memory/curation/audit.py`),
 `_provisioned_rooms` — the Talk token `provision_rooms.py` provisioned for each
-default room name, which is what lets a deploy recognise a room the user has
-since renamed instead of minting a second one (ISSUE-342) — and
+default room name, plus whether an invite to it is still outstanding, which is
+what lets a deploy recognise a room the user has since renamed instead of
+minting a second one (ISSUE-342) and tell a room they left from one whose
+invite never landed (ISSUE-408) — and
 `_avatar_import`, what the scheduler's Nextcloud profile-picture import tick
 wrote down for `doctor`'s socket-free `web.avatar_import` check to read, and
 `_session_log_sweep`, the same shape for the native-brain transcript sweep —
