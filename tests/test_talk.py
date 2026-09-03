@@ -365,6 +365,23 @@ class TestSplitMessage:
         for part in parts:
             assert len(part) <= 4000
 
+    @pytest.mark.parametrize("limit", [1, 2, 5, 9, 10, 11, 20])
+    def test_a_tiny_limit_terminates(self, limit):
+        """Found while giving `TalkTransport` a limit small enough to force a
+        split in a test (ISSUE-405). Ten characters are reserved for the
+        " (1/3)" indicator, so at `max_length <= 10` the budget went to zero,
+        every branch put the split at position 0, and the loop appended an
+        empty part and re-examined the same text for ever — a hang rather than
+        a bad split. Not reachable from the shipped 30000-character capability,
+        which is why nothing had hit it.
+        """
+        parts = split_message("part one. part two. part three.", max_length=limit)
+        assert parts
+        assert "" not in parts
+        assert "".join(p.split(" (")[0] for p in parts).replace(" ", "") == (
+            "partone.parttwo.partthree."
+        )
+
 
 class TestSendMessageReferenceId:
     @pytest.mark.asyncio

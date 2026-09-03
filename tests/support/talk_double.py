@@ -81,6 +81,16 @@ the test would have proved something about a room that does not exist rather
 than about a room that timed out. The call is recorded with `refused=False` and
 mints no `sent_id`.
 
+**The same registry answers "fails once, then works", which is what a retry
+needs** (ISSUE-405). A bare exception fails every call to that room, as it
+always has; a *list* is consumed one entry per call, in order, and a `None`
+entry lets that call through. Without the list a retry test cannot tell a fix
+from a no-op — every attempt fails, so "the reply was lost" is the answer
+whether or not anything retried. `history_failures` is the same grammar on
+`fetch_chat_history`, because the retry reads the room back before it re-posts
+and that read has its own failure to model; one consumer serves both, so there
+is one thing to learn rather than two.
+
 Also not covered: ISSUE-401, a binding whose Talk conversation has been deleted.
 It is indistinguishable from a live binding at the database level, so the double
 accepts it, exactly as this module's rule says it should.
@@ -341,7 +351,13 @@ class FakeTalkClient:
         # The same instance is re-raised on every call, so a split message
         # chains one frame per part. Harmless on a function-scoped fixture and
         # worth knowing before anyone makes the double session-scoped.
-        self.send_failures: dict[str, Exception] = {}
+        self.send_failures: dict[str, "Exception | list[Exception | None]"] = {}
+        # The same, for `fetch_chat_history`. Separate registry rather than a
+        # second axis on the one above, because the key on both is the room and
+        # what differs is the verb: a queued entry in a single map could not say
+        # whether it belonged to the post or to the read, and the Talk retry
+        # makes both against the same token in one call.
+        self.history_failures: dict[str, "Exception | list[Exception | None]"] = {}
         # The tokens `create_conversation` minted, in order. Nothing binds
         # them — `_chat_promote_to_talk` writes the binding itself, which is
         # exactly the step the double is there to check, since every later call
@@ -434,6 +450,25 @@ class FakeTalkClient:
             known_channels=sorted(self.known_channels, key=str),
         )
 
+    @staticmethod
+    def _next_failure(store: dict, token: object) -> "Exception | None":
+        """One entry of a failure registry, consumed. See `send_failures`.
+
+        A bare exception stays put and answers every call; a list is popped
+        from the front, so `[exc, None]` is "fail once, then work". An empty or
+        exhausted list lets everything through, which is what makes a queue
+        shorter than the attempt count read as "it recovered" rather than as a
+        double that quietly stopped failing.
+        """
+        entry = store.get(token)
+        if entry is None:
+            return None
+        if isinstance(entry, Exception):
+            return entry
+        if not entry:
+            return None
+        return entry.pop(0)
+
     def _is_bound(self, method: str, token: str, args: dict[str, Any]) -> bool:
         """The lookup, with a database failure kept out of the product's reach.
 
@@ -477,7 +512,7 @@ class FakeTalkClient:
         # request went out, so the call stands in `calls` with `refused=False`
         # and `refusals` keeps meaning "nothing was misrouted". No id is minted,
         # which is what a test reads to tell this from a send that landed.
-        failure = self.send_failures.get(conversation_token)
+        failure = self._next_failure(self.send_failures, conversation_token)
         if failure is not None:
             raise failure
         self._next_message_id += 1
@@ -539,8 +574,16 @@ class FakeTalkClient:
 
     async def fetch_chat_history(
         self, conversation_token: str, limit: int = 100,
+        timeout: float = 30,
     ) -> list[dict]:
-        self._check("fetch_chat_history", conversation_token, {"limit": limit})
+        self._check("fetch_chat_history", conversation_token, {
+            "limit": limit, "timeout": timeout,
+        })
+        # After `_check`, for the reason `send_message`'s is: the room was
+        # named correctly and the request went out.
+        failure = self._next_failure(self.history_failures, conversation_token)
+        if failure is not None:
+            raise failure
         return list(self.messages.get(conversation_token, []))[-limit:]
 
     async def get_latest_message_id(self, conversation_token: str) -> int | None:

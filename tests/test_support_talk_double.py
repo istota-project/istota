@@ -664,6 +664,85 @@ class TestABearerTokenTheServerRejects:
         assert fake_talk.auth_failures == []
 
 
+class TestAFailureInTransit:
+    """`send_failures` / `history_failures`: a room the check accepts, a
+    request that goes out, and no answer coming back.
+
+    The queue form is what ISSUE-405 needed and it has its own control, because
+    a registry that only ever fails makes a retry test green whatever the
+    product does — every attempt fails, so "the reply was lost" is the answer
+    with or without a retry.
+    """
+
+    async def test_a_bare_exception_fails_every_call(self, fake_talk, rooms):
+        ref = rooms["plain"].talk_ref
+        fake_talk.send_failures[ref] = httpx.ReadTimeout("")
+        for _ in range(3):
+            with pytest.raises(httpx.ReadTimeout):
+                await fake_talk.send_message(ref, "hi")
+        assert len(fake_talk.calls) == 3
+
+    async def test_a_list_is_consumed_one_entry_per_call(self, fake_talk, rooms):
+        ref = rooms["plain"].talk_ref
+        fake_talk.send_failures[ref] = [httpx.ReadTimeout(""), None]
+        with pytest.raises(httpx.ReadTimeout):
+            await fake_talk.send_message(ref, "one")
+        assert await fake_talk.send_message(ref, "two")
+
+    async def test_an_exhausted_list_lets_everything_through(
+        self, fake_talk, rooms,
+    ):
+        ref = rooms["plain"].talk_ref
+        fake_talk.send_failures[ref] = [httpx.ReadTimeout("")]
+        with pytest.raises(httpx.ReadTimeout):
+            await fake_talk.send_message(ref, "one")
+        assert await fake_talk.send_message(ref, "two")
+        assert await fake_talk.send_message(ref, "three")
+
+    async def test_it_is_keyed_by_room(self, fake_talk, rooms):
+        fake_talk.send_failures[rooms["plain"].talk_ref] = httpx.ReadTimeout("")
+        assert await fake_talk.send_message(rooms["promoted"].talk_ref, "hi")
+
+    async def test_a_failed_send_mints_no_id_and_is_not_a_refusal(
+        self, fake_talk, rooms,
+    ):
+        """The two things a test reads to tell this from the other two failure
+        modes: `sent_id is None` on a call whose `refused` is False."""
+        ref = rooms["plain"].talk_ref
+        fake_talk.send_failures[ref] = [httpx.ReadTimeout("")]
+        with pytest.raises(httpx.ReadTimeout):
+            await fake_talk.send_message(ref, "hi", reference_id="istota:task:1:result")
+        assert fake_talk.sent_ids == []
+        assert fake_talk.sent_id_for("istota:task:1:result") is None
+        assert fake_talk.refusals == []
+        assert fake_talk.auth_failures == []
+        assert [c.sent_id for c in fake_talk.calls] == [None]
+
+    async def test_the_room_is_answered_before_the_transport_is(
+        self, fake_talk, rooms,
+    ):
+        """A misroute is Nextcloud's answer and comes first, so a queued
+        failure is not spent by a call that never reached a room."""
+        fake_talk.send_failures[rooms["promoted"].canonical] = httpx.ReadTimeout("")
+        with pytest.raises(UnknownTalkRoom):
+            await fake_talk.send_message(rooms["promoted"].canonical, "hi")
+        assert len(fake_talk.refusals) == 1
+
+    async def test_history_failures_are_the_same_grammar(self, fake_talk, rooms):
+        ref = rooms["plain"].talk_ref
+        fake_talk.history_failures[ref] = [httpx.ReadTimeout(""), None]
+        with pytest.raises(httpx.ReadTimeout):
+            await fake_talk.fetch_chat_history(ref)
+        assert await fake_talk.fetch_chat_history(ref) == []
+
+    async def test_the_two_registries_are_independent(self, fake_talk, rooms):
+        ref = rooms["plain"].talk_ref
+        fake_talk.history_failures[ref] = httpx.ReadTimeout("")
+        assert await fake_talk.send_message(ref, "hi")
+        with pytest.raises(httpx.ReadTimeout):
+            await fake_talk.fetch_chat_history(ref)
+
+
 class TestTheWebSeamMethods:
     """The rule applies to the methods only `web_app` calls, too."""
 
