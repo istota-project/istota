@@ -88,7 +88,7 @@ istota-skill money monarch-category-map set --global --category "Internet Servic
 
 The scope flag is required. `--global` is the map every profile falls back to; `--profile NAME` is one profile's own map, which wins over the global one for that ledger. Give `--category` exactly as Monarch spells it, punctuation included — the lookup falls back to a case-insensitive match but nothing else.
 
-`--account` must be an account beancount accepts: two or more components separated by `:`, each starting with an uppercase letter or a digit and holding only letters, digits and dashes. An account it cannot parse is refused here rather than reaching the ledger, where it would break every later read of that file rather than just its own entry. `set` overwrites an existing mapping; removing one is an operator command (`istota money monarch category-map unset`) and is not available here.
+`--account` must be an account beancount accepts: two or more components separated by `:`, holding only letters, digits and dashes, with the first component starting with an uppercase letter and later ones with an uppercase letter or a digit. An account it cannot parse is refused here rather than reaching the ledger, where it would break every later read of that file rather than just its own entry. `set` overwrites an existing mapping; removing one is an operator command (`istota money monarch category-map unset`) and is not available here.
 
 Setting a mapping does not move transactions already in the ledger. Correct those with `edit-transaction`, which stamps `edited:` so the next sync leaves them alone.
 

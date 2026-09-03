@@ -1136,3 +1136,66 @@ class TestMonarchAccountsReachTheLedger:
         assert cs.get_category_map(db_path, None) == {
             "Internet Services": "Expenses:Internet-Services",
         }
+
+    def test_the_global_sync_accounts_may_not_be_empty(self, tmp_path):
+        """`""` means "inherit" on a profile row and means nothing on the global
+        one, where `map_monarch_account` hands it to the ledger verbatim."""
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        for field in ("default_account", "recategorize_account"):
+            cfg = self._config(sync=MonarchSyncSettings(**{field: ""}))
+            with pytest.raises(ValueError, match=field):
+                cs.save_monarch(db_path, cfg, replace_collections=True)
+        assert cs.load_monarch(db_path).sync.default_account == "Assets:Bank:Checking"
+
+    def test_an_empty_profile_account_still_inherits(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cs.upsert_monarch_profile(db_path, "acme", ledger="acme", default_account="")
+        profile = [
+            p for p in cs.load_monarch(db_path).profiles if p.name == "acme"
+        ][0]
+        assert profile.sync.default_account == "Assets:Bank:Checking"
+
+    def test_a_bad_stored_row_does_not_block_a_sync_settings_edit(self, tmp_path):
+        """config_store.py's stated rule: only the fields a caller passes are
+        checked, so an existing non-conforming row never becomes uneditable."""
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO monarch_category_map(profile_id, monarch_category, "
+                "beancount_account) VALUES (?, ?, ?)",
+                (cs.GLOBAL_PROFILE_ID, "Fees", "Expenses:Fees (Bank)"),
+            )
+        cs.set_monarch_sync(db_path, lookback_days=30)
+        assert cs.load_monarch(db_path).sync.lookback_days == 30
+
+    def test_the_sync_writer_checks_what_it_is_given(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with pytest.raises(ValueError, match="default_account"):
+            cs.set_monarch_sync(db_path, default_account="Assets:Bank (Checking)")
+        with pytest.raises(ValueError, match="default_account"):
+            cs.set_monarch_sync(db_path, default_account="")
+        cs.set_monarch_sync(db_path, default_account="Assets:Bank:Savings")
+        assert cs.load_monarch(db_path).sync.default_account == "Assets:Bank:Savings"
+
+    def test_a_global_map_row_counts_as_stored_monarch_config(self, tmp_path):
+        """`has_monarch_data` stays profile-only: it also answers sync-monarch's
+        "is there anything to sync". This is the migration's question."""
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        assert cs.has_monarch_config_rows(db_path) is False
+        cs.set_category_map_entry(
+            db_path, None, "Internet Services", "Expenses:Internet-Services",
+        )
+        assert cs.has_monarch_config_rows(db_path) is True
+        assert cs.has_monarch_data(db_path) is False
+
+    def test_an_invalid_account_raises_the_dedicated_type(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with pytest.raises(cs.InvalidAccountError):
+            cs.set_category_map_entry(db_path, None, "Fees", "Expenses:Fees (Bank)")
+        assert issubclass(cs.InvalidAccountError, ValueError)

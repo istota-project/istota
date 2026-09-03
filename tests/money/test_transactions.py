@@ -1090,7 +1090,10 @@ class TestAccountComponentUnicode:
 
         from istota.money.core.transactions import map_monarch_category
 
-        for category in ("Café", "Bücher & Zeitschriften", "日用品"):
+        for category in (
+            "Café", "Bücher & Zeitschriften", "日用品", "Ⅷ", "²x", "٣abc",
+            "Internet Services (Reimbursed)", "Sub-", "misc", "~~~",
+        ):
             ledger = tmp_path / "t.beancount"
             ledger.write_text(
                 'plugin "beancount.plugins.auto_accounts"\n'
@@ -1125,3 +1128,28 @@ class TestDefaultAccountReachesThePosting:
             accounts={}, categories={}, tags=MonarchTagFilters(),
         )
         assert map_monarch_account("Some Card", cfg) == "Assets:Bank:Checking"
+
+
+class TestAccountComponentShape:
+    def test_a_trailing_dash_is_kept(self):
+        """Beancount's component class allows one, so stripping it would rename
+        an account that already worked."""
+        from istota.money.core.transactions import account_component
+
+        assert account_component("Sub-") == "Sub-"
+        assert account_component("--Water") == "Water"
+        assert account_component("---") == "Unknown"
+
+    def test_a_lowercase_initial_is_raised(self):
+        """`Expenses:Uncategorized:misc` is not a valid account and never was —
+        beancount rejects a lowercase component initial."""
+        from istota.money.core.transactions import account_component
+
+        assert account_component("misc") == "Misc"
+
+    def test_punctuation_only_differences_collide(self):
+        """Documented rather than fixed: replacing a separator with a dash would
+        rename every multi-word category's account."""
+        from istota.money.core.transactions import account_component
+
+        assert account_component("Food & Drink") == account_component("Food Drink")

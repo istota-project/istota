@@ -2249,7 +2249,7 @@ def save_monarch(
     _check_profile_accounts({
         "default_account": cfg.sync.default_account,
         "recategorize_account": cfg.sync.recategorize_account,
-    })
+    }, allow_empty=False)
     init_db(db_path)
     with _connect(db_path) as conn:
         _kv_set(conn, "monarch_settings",
@@ -2287,6 +2287,29 @@ def save_monarch(
             _replace_account_map(conn, pid, p.accounts, clear=True)
             _replace_category_map(conn, pid, p.categories, clear=True)
             _replace_tag_filters(conn, pid, p.tags, clear=True)
+
+
+_SYNC_SCALARS = ("lookback_days", "default_account", "recategorize_account")
+
+
+def set_monarch_sync(db_path: Path | str, **fields: Any) -> dict:
+    """Write only the global sync settings the caller named.
+
+    `save_monarch` takes a whole `MonarchConfig` and so validates the whole
+    record, which is right for an import and wrong for an edit: this module's
+    rule is that only the fields a caller actually passes are checked, or an
+    existing non-conforming row makes everything around it uneditable.
+    """
+    unknown = set(fields) - set(_SYNC_SCALARS)
+    if unknown:
+        raise ValueError(f"unknown sync settings: {sorted(unknown)}")
+    _check_profile_accounts(fields, allow_empty=False)
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        for name in _SYNC_SCALARS:
+            if name in fields:
+                _kv_set(conn, "monarch_settings", f"sync.{name}", fields[name])
+    return dict(fields)
 
 
 def _upsert_profile_row(
@@ -2462,6 +2485,15 @@ def delete_monarch_profile(db_path: Path | str, name: str) -> bool:
         return cur.rowcount > 0
 
 
+class InvalidAccountError(ValueError):
+    """A configured value that is not a beancount account.
+
+    A subclass so every existing ``except ValueError`` keeps working, and a
+    distinct type so the legacy importer can tell content it should refuse from
+    a coercion failure it should not swallow.
+    """
+
+
 def _check_map_account(kind: str, key: str, value: str) -> None:
     """Reject a mapping target that beancount could not parse.
 
@@ -2470,7 +2502,7 @@ def _check_map_account(kind: str, key: str, value: str) -> None:
     later `check` fails on a transaction already appended.
     """
     if not isinstance(value, str) or not _is_account(value):
-        raise ValueError(
+        raise InvalidAccountError(
             f"invalid {kind} account for {key!r}: {value!r} — expected a "
             "beancount account like Expenses:Internet-Services",
         )
@@ -2479,19 +2511,25 @@ def _check_map_account(kind: str, key: str, value: str) -> None:
 _PROFILE_ACCOUNT_FIELDS = ("default_account", "recategorize_account")
 
 
-def _check_profile_accounts(fields: dict) -> None:
+def _check_profile_accounts(fields: dict, *, allow_empty: bool = True) -> None:
     """Reject a profile account beancount could not parse.
 
     `map_monarch_account` returns `default_account` verbatim for a Monarch
     account with no mapping, so it reaches the ledger the same way a map target
-    does. An empty value clears the column and the global setting applies.
+    does.
+
+    ``allow_empty`` is the difference between the two stores. On a profile row
+    an empty value clears the column and `load_monarch` falls back to the
+    global setting, so it is a way of saying "inherit". The global settings have
+    nothing beneath them and `_kv_set` writes the empty string through, so there
+    ``""`` is a posting with no account rather than a default.
     """
     for name in _PROFILE_ACCOUNT_FIELDS:
         value = fields.get(name)
-        if value in (None, ""):
+        if value is None or (allow_empty and value == ""):
             continue
         if not isinstance(value, str) or not _is_account(value):
-            raise ValueError(
+            raise InvalidAccountError(
                 f"invalid {name}: {value!r} — expected a beancount account "
                 "like Assets:Bank:Checking",
             )
@@ -2726,6 +2764,26 @@ def has_tax_data(db_path: Path | str) -> bool:
             if row:
                 return True
     return False
+
+
+def has_monarch_config_rows(db_path: Path | str) -> bool:
+    """True if any monarch profile *or* map row exists, global included.
+
+    What the legacy importer must ask before it replaces the global maps
+    wholesale. Distinct from :func:`has_monarch_data`, which answers
+    sync-monarch's "is there anything to sync" and so stays profile-only.
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        for sql, params in (
+            ("SELECT 1 FROM monarch_profiles WHERE id != ? LIMIT 1",
+             (GLOBAL_PROFILE_ID,)),
+            ("SELECT 1 FROM monarch_account_map LIMIT 1", ()),
+            ("SELECT 1 FROM monarch_category_map LIMIT 1", ()),
+        ):
+            if conn.execute(sql, params).fetchone() is not None:
+                return True
+        return False
 
 
 def has_monarch_data(db_path: Path | str) -> bool:

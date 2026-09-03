@@ -4,6 +4,13 @@ Invokes the in-tree ``istota.money`` Click CLI in-process. The user's
 :class:`UserContext` is resolved up front via :func:`istota.money.resolve_for_user`
 against the istota config and injected into Click via ``obj=``. No env-var
 marshaling, no subprocess, no HTTP.
+
+Two shapes, and which one a verb takes follows the split the two CLIs already
+keep. An accounting operation goes through the Click tree via :func:`_run`,
+which is every verb here bar two. A verb reading or writing the money *config*
+calls :mod:`istota.money.config_store` directly against ``ctx.db_path``, the
+way ``istota/cli_money.py`` does, because the Click tree exposes no config
+commands. Both resolve the user through :func:`_resolve_context`.
 """
 
 import argparse

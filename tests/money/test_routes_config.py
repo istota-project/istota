@@ -881,3 +881,26 @@ class TestMonarchSyncSettings:
         assert resp.status_code == 200
         body = client.get("/istota/api/money/config/monarch").json()
         assert body["sync"]["default_account"] == "Assets:Bank:Savings"
+
+    def test_an_unrelated_bad_row_does_not_block_the_edit(self, ctx, client):
+        import sqlite3
+
+        with sqlite3.connect(ctx.db_path) as conn:
+            conn.execute(
+                "INSERT INTO monarch_category_map(profile_id, monarch_category, "
+                "beancount_account) VALUES (?, ?, ?)",
+                (config_store.GLOBAL_PROFILE_ID, "Fees", "Expenses:Fees (Bank)"),
+            )
+        resp = client.put(
+            "/istota/api/money/config/monarch", json={"lookback_days": 30},
+        )
+        assert resp.status_code == 200
+        assert client.get("/istota/api/money/config/monarch").json()[
+            "sync"
+        ]["lookback_days"] == 30
+
+    def test_rejects_an_empty_default_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch", json={"default_account": ""},
+        )
+        assert resp.status_code == 400

@@ -107,12 +107,22 @@ def account_component(name: str) -> str:
     invalid one is not rejected at import, it lands in the ledger and breaks the
     parser for every later read.
 
-    Every distinct name gets a distinct component wherever one exists. Returning
-    a shared fallback for a name this cannot slug would merge categories that
-    have nothing to do with each other into one account, which is a wrong number
-    in a report rather than a parse error somebody notices.
+    Deleting a disallowed character rather than replacing it means two names
+    differing only in punctuation collapse together — "Food & Drink" and "Food
+    Drink" are both `FoodDrink`. That is inherited from the `replace(" ", "")`
+    this replaced, and kept deliberately: substituting a dash instead would give
+    every multi-word category a new account name and split its balance across
+    the old one and the new at the next sync.
+
+    What is not inherited is a shared fallback for a name with nothing to slug.
+    A name in an uncased script gets an initial rather than `Unknown`, since
+    merging unrelated categories into one account is a wrong number in a report
+    rather than a parse error somebody notices.
+
+    Only a *leading* dash is stripped. Beancount's component class allows a
+    trailing one, so removing it would rename an account that already worked.
     """
-    slug = _ACCOUNT_COMPONENT_DISALLOWED.sub("", name).strip("-")
+    slug = _ACCOUNT_COMPONENT_DISALLOWED.sub("", name).lstrip("-")
     if not slug:
         return "Unknown"
     if not (slug[0].isupper() or slug[0].isdigit()):
