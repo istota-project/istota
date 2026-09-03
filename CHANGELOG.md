@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
+
 ### Fixed
 
 - A Monarch category with punctuation in its name no longer breaks the whole ledger. The sync built an account name for an unmapped category by deleting spaces and leaving everything else, so `Internet Services (Reimbursed)` became `Expenses:Uncategorized:InternetServices(Reimbursed)`, which beancount cannot parse; because nothing checked the name before the transaction was written, every later read of that ledger failed rather than just the one entry. Names are now reduced to the characters beancount accepts, keeping accented and non-Latin letters instead of dropping them.

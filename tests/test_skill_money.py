@@ -514,3 +514,107 @@ class TestMoneyLoaderEnvFirst:
             "session_id": "env-sid",
             "csrftoken": "store-csrf",
         }}
+
+
+class TestMonarchCategoryMap:
+    """The host-side route for reading and setting a Monarch category mapping.
+
+    Config rather than ledger work, so it goes to config_store directly rather
+    than through the Click tree. The scope is always the task's own user:
+    MONEY_USER is set by the framework from the task's user_id, and there is no
+    flag that can name a different one.
+    """
+
+    @pytest.fixture
+    def ctx(self, tmp_path):
+        from istota.money import config_store
+        from istota.money.cli import UserContext
+
+        db_path = tmp_path / "money" / "data" / "money.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        config_store.init_db(db_path)
+        return UserContext(
+            data_dir=tmp_path / "money", ledgers=[], db_path=db_path,
+        )
+
+    @pytest.fixture
+    def run(self, ctx, capsys):
+        import json as _json
+
+        from istota.skills.money import main
+
+        def _run(argv):
+            with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+                 patch("istota.config.load_config", return_value=MagicMock()), \
+                 patch("istota.money.resolve_for_user", return_value=ctx):
+                try:
+                    main(argv)
+                except SystemExit as exc:
+                    # `_output` exits 1 after printing the error envelope.
+                    # Anything else is argparse refusing the argv, which the
+                    # scope and user-flag cases assert on directly.
+                    if exc.code != 1:
+                        raise
+                    return _json.loads(capsys.readouterr().out), 1
+            return _json.loads(capsys.readouterr().out), 0
+
+        return _run
+
+    def test_set_then_list(self, run):
+        body, code = run([
+            "monarch-category-map", "set", "--global",
+            "--category", "Internet Services (Reimbursed)",
+            "--account", "Expenses:Internet-Services",
+        ])
+        assert code == 0
+        assert body["status"] == "ok"
+        assert body["state"] == "created"
+
+        body, code = run(["monarch-category-map", "list", "--global"])
+        assert code == 0
+        assert body["mapping"] == {
+            "Internet Services (Reimbursed)": "Expenses:Internet-Services",
+        }
+
+    def test_set_refuses_an_account_beancount_cannot_parse(self, run):
+        body, code = run([
+            "monarch-category-map", "set", "--global",
+            "--category", "Internet Services (Reimbursed)",
+            "--account", "Expenses:Uncategorized:InternetServices(Reimbursed)",
+        ])
+        assert code == 1
+        assert body["status"] == "error"
+        assert "category-map" in body["error"]
+
+        body, _ = run(["monarch-category-map", "list", "--global"])
+        assert body["mapping"] == {}
+
+    def test_set_on_a_profile_that_does_not_exist_is_an_error(self, run):
+        body, code = run([
+            "monarch-category-map", "set", "--profile", "nope",
+            "--category", "Fees", "--account", "Expenses:Fees",
+        ])
+        assert code == 1
+        assert body["status"] == "error"
+
+    def test_a_scope_is_required(self, run):
+        with pytest.raises(SystemExit) as exc:
+            run(["monarch-category-map", "list"])
+        assert exc.value.code == 2
+
+    def test_there_is_no_flag_for_another_user(self, run):
+        with pytest.raises(SystemExit) as exc:
+            run([
+                "monarch-category-map", "list", "--global", "--user", "bob",
+            ])
+        assert exc.value.code == 2
+
+    def test_the_scope_comes_from_the_environment(self, ctx, capsys):
+        from istota.skills.money import main
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("istota.config.load_config", return_value=MagicMock()), \
+             patch("istota.money.resolve_for_user", return_value=ctx), \
+             pytest.raises(SystemExit):
+            main(["monarch-category-map", "list", "--global"])
+        assert "MONEY_USER not set" in capsys.readouterr().out
