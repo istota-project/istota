@@ -643,6 +643,90 @@ def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> s
     return f"{prefix} — " + ", and ".join(reasons)
 
 
+#: Set in a task's environment by ``task_env.build_task_runtime``, and only
+#: where the sandbox was really in force. So a process carrying it is *inside* a
+#: bubblewrap namespace — one carrying ``--unshare-user --disable-userns``
+#: wherever bwrap supports them, which is what stops a second namespace being
+#: created in there.
+_IN_SANDBOX_MARKER = "ISTOTA_SANDBOXED"
+
+
+def _sandbox_probe_is_nested() -> bool:
+    """Would a bwrap probe in this process be a nested one, and so unanswerable."""
+    return bool(os.environ.get(_IN_SANDBOX_MARKER))
+
+
+def _deployment_sandboxing(
+    config: "Config", probe: bool,
+) -> tuple[bool | None, str]:
+    """Is the sandbox in force *on this deployment*, in three states.
+
+    ``(True, "")`` it is; ``(False, "")`` it is not; ``(None, reason)`` this run
+    could not establish which. The three consumers below each phrase their own
+    sentence around ``reason`` and read the bool in their own direction, but the
+    question and the way it is asked are one thing and live here: three copies
+    of the probe-versus-memo rule is the ``map_basemap`` two-consumers failure
+    waiting to happen, and the copies had already drifted into three spellings
+    of the same "could not be determined".
+
+    **The nested arm is the one that earns the function**, and it is the shape
+    ``check_skill_model_credential``'s value arm already answers for a
+    credential: a check reading the current process while its subject is the
+    daemon. ``effective_sandboxing`` asks whether *this* process can build a
+    namespace, which is the right question for the executor and the wrong one
+    for a diagnostic: run from inside a task's own sandbox the probe
+    fails with ``ENOSPC`` on the nesting depth — the task's namespace carries
+    ``--disable-userns`` — so the check reported that every task runs
+    unsandboxed, from inside a demonstrably sandboxed one, and ``istota doctor``
+    exited 1 about a deployment whose boundary was working.
+
+    Nesting is read from the environment rather than from the probe's stderr:
+    the marker is a fact the daemon recorded when it built the task, while the
+    text of a bwrap failure is not a contract. Two consequences, both accepted.
+    A task can set the marker itself and turn a real ``FAIL`` into an
+    unestablished answer — on a deployment where that FAIL is true the task
+    already has the daemon's own filesystem access, so it is not the cheapest
+    thing it could do, and every authoritative surface (the boot log, the
+    scheduler's sweep, the admin Health pane, the heartbeat) runs in the daemon,
+    where no marker exists. And a task on an *unconfined* deployment carries
+    ``ISTOTA_TASK_ID`` without this marker, so the probe there is a valid one
+    and the ISSUE-381 finding still reaches an operator reading a doctor run
+    from inside a task.
+
+    On a deployment whose bwrap predates ``--disable-userns`` a nested probe
+    could in fact succeed, so the marker costs that shape an ``OK`` it might
+    have earned. That is the safe direction, and the only one available without
+    reading bwrap's stderr for a reason.
+
+    Never raises: an unobtainable answer is ``None`` with a reason.
+    """
+    if _sandbox_probe_is_nested():
+        return None, (
+            "this process is itself inside a bubblewrap namespace "
+            f"({_IN_SANDBOX_MARKER}), which is built with --disable-userns, so "
+            "a probe from here cannot create a nested one and says nothing "
+            "about the daemon"
+        )
+    try:
+        from .executor import effective_sandboxing, effective_sandboxing_if_known
+
+        # `effective_sandboxing` consults the bwrap capability probe, which
+        # spawns. `probe=False` forbids that, so ask the memo instead — which is
+        # usually warm in the process that matters, since the daemon probes at
+        # start-up. Only a genuinely cold memo is reported as unlooked-at.
+        effective = (
+            effective_sandboxing(config) if probe
+            else effective_sandboxing_if_known(config)
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic must not raise
+        logger.debug("sandbox availability lookup failed", exc_info=True)
+        return None, "whether bubblewrap works here could not be determined"
+
+    if effective is None:
+        return None, "whether bubblewrap works here was not probed on this run"
+    return effective, ""
+
+
 def _sandbox_mask_availability(
     config: "Config", probe: bool,
 ) -> tuple[bool | None, str]:
@@ -659,11 +743,15 @@ def _sandbox_mask_availability(
     is the finding; for ``runtime.task_control_dir`` a mask *over* the tree
     takes away a file every task must open, so the mask existing is the
     finding. One function either way, because a second copy of the ISSUE-381
-    reasoning — ``effective_sandboxing`` rather than ``sandbox_enabled``, and a
-    warm memo rather than a spawn under ``probe=False`` — is the
-    ``map_basemap`` two-consumers failure waiting to happen. The reasons it
+    reasoning — ``effective_sandboxing`` rather than ``sandbox_enabled`` — is
+    the ``map_basemap`` two-consumers failure waiting to happen. The reasons it
     returns are phrased about the deployment rather than about either
     directory, so both callers can quote them verbatim.
+
+    How the answer is obtained, and the three states it comes in, are
+    :func:`_deployment_sandboxing`'s: the warm-memo rule under ``probe=False``
+    and the nested-probe arm are shared with the other two consumers rather
+    than restated here.
 
     Never raises: an unobtainable answer is ``None`` with a reason, not an
     exception and not a quiet ``True``. Returning ``True`` there was the first
@@ -681,31 +769,9 @@ def _sandbox_mask_availability(
             "sandbox_enabled), so nothing masks anything"
         )
 
-    unknown = (
-        None,
-        "whether bubblewrap works here could not be determined, so no mask "
-        "can be confirmed",
-    )
-    try:
-        from .executor import effective_sandboxing, effective_sandboxing_if_known
-
-        # `effective_sandboxing` consults the bwrap capability probe, which
-        # spawns. `probe=False` forbids that, so ask the memo instead — which is
-        # usually warm in the process that matters, since the daemon probes at
-        # start-up. Only a genuinely cold memo is reported as unlooked-at.
-        effective = (
-            effective_sandboxing(config) if probe
-            else effective_sandboxing_if_known(config)
-        )
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("sandbox mask availability could not be determined", exc_info=True)
-        return unknown
-
+    effective, why = _deployment_sandboxing(config, probe)
     if effective is None:
-        return None, (
-            "whether bubblewrap works here was not probed on this run, so no "
-            "mask can be confirmed"
-        )
+        return None, f"{why}, so no mask can be confirmed"
     if not effective:
         return False, (
             "[security] sandbox_enabled is set but bubblewrap does not work "
@@ -2368,35 +2434,19 @@ def _sandbox_in_force_clause(config: "Config", probe: bool) -> str:
     here. What the sandbox state changes is how much the exposure costs, which
     is a clause, not a condition.
 
-    Three states, following ``_sandbox_mask_availability``: in force, not
-    in force, and not established on this run. The third is why the answer is
+    Three states, resolved by :func:`_deployment_sandboxing`: in force, not in
+    force, and not established on this run. The third is why the answer is
     not a bool — a check whose subject is a boundary must not report "fine"
     where it did not look, and must not assert an exposure it did not observe.
 
     Never raises: every branch returns a clause, so the caller appends
     unconditionally.
     """
-    try:
-        from .executor import effective_sandboxing, effective_sandboxing_if_known
-
-        # `effective_sandboxing` spawns the bwrap capability probe. Under
-        # `probe=False` ask the memo instead — warm in the daemon, which probes
-        # at start-up — and report a genuinely cold one as unlooked-at.
-        effective = (
-            effective_sandboxing(config) if probe
-            else effective_sandboxing_if_known(config)
-        )
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("sandbox credentials: availability failed", exc_info=True)
-        return (
-            "whether bubblewrap works here could not be determined, so whether "
-            "the sandbox is actually in force is unestablished"
-        )
-
+    effective, why = _deployment_sandboxing(config, probe)
     if effective is None:
         return (
-            "whether bubblewrap works here was not probed on this run, so "
-            "whether the sandbox is actually in force is unestablished"
+            f"{why}, so whether the sandbox is actually in force is "
+            "unestablished"
         )
     if effective:
         return (
@@ -2550,13 +2600,22 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
     tier never reaches this, and an operator running the whole registry gets
     both lines with the remedy on the one that has a repair.
 
-    **Three states, not two**, following ``_session_log_sandbox_availability``
-    and ``_sandbox_in_force_clause``. Under ``probe=False`` the answer would
-    cost a spawn, so it comes from ``effective_sandboxing_if_known`` — warm in
-    the daemon, which probes at start-up — and a genuinely cold memo is
-    reported as unestablished rather than as either answer. A boundary check
-    must not pass on a question it could not settle, and must not assert an
-    exposure it did not observe.
+    **Three states, not two**, resolved by :func:`_deployment_sandboxing` and
+    shared with ``_sandbox_mask_availability`` and ``_sandbox_in_force_clause``.
+    Under ``probe=False`` the answer would cost a spawn, so it comes from
+    ``effective_sandboxing_if_known`` — warm in the daemon, which probes at
+    start-up — and a genuinely cold memo is reported as unestablished rather
+    than as either answer. A boundary check must not pass on a question it could
+    not settle, and must not assert an exposure it did not observe.
+
+    **Run from inside a task's own sandbox it settles nothing, and says so.**
+    The probe fails in there on the nesting depth rather than on any capability
+    the deployment lacks, so this reported every task unsandboxed from inside a
+    confined one and exited 1 about a working boundary. That arm is a ``SKIP``,
+    not the ``WARN`` the other two unestablished causes get: probing again is
+    what settles those, and nothing settles this one from here. See
+    :func:`_deployment_sandboxing` for why the marker rather than the probe's
+    stderr answers it, and for the two consequences of that choice.
 
     Not in ``DEEP_CHECKS``: ``effective_sandboxing`` memoizes its probe and the
     daemon has already paid for it during prompt assembly, so inside the daemon
@@ -2588,35 +2647,35 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
             ),
         )
 
-    unestablished = CheckResult(
-        name,
-        WARN,
-        (
-            "[security] sandbox_enabled is set but whether bubblewrap can "
-            "create a namespace here was not established on this run, so "
-            "whether tasks are confined is unknown"
-        ),
-        remedy=(
-            "Run `istota doctor`, which probes, to settle it. "
-            + _SANDBOX_EFFECTIVE_REMEDY
-        ),
-    )
-
-    try:
-        from .executor import effective_sandboxing, effective_sandboxing_if_known
-
-        # `effective_sandboxing` consults the bwrap capability probe, which
-        # spawns. `probe=False` forbids that, so read the memo instead.
-        effective = (
-            effective_sandboxing(config) if probe
-            else effective_sandboxing_if_known(config)
-        )
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("sandbox effective: availability lookup failed", exc_info=True)
-        return unestablished
-
+    effective, why = _deployment_sandboxing(config, probe)
     if effective is None:
-        return unestablished
+        if _sandbox_probe_is_nested():
+            # SKIP rather than WARN: this process can never settle the question,
+            # so there is nothing for the reader to act on and a warning on every
+            # doctor run a task makes is noise. The two remaining unestablished
+            # causes are settled by probing, so they stay a WARN with the line
+            # that says so.
+            return CheckResult(
+                name,
+                SKIP,
+                f"{why}, so whether tasks are confined cannot be answered here",
+                remedy=(
+                    "Run `istota doctor` on the host as the daemon user; a "
+                    "probe from inside a task's own sandbox cannot answer it."
+                ),
+            )
+        return CheckResult(
+            name,
+            WARN,
+            (
+                f"[security] sandbox_enabled is set but {why}, so whether "
+                "tasks are confined is unknown"
+            ),
+            remedy=(
+                "Run `istota doctor`, which probes, to settle it. "
+                + _SANDBOX_EFFECTIVE_REMEDY
+            ),
+        )
     if not effective:
         return CheckResult(
             name,

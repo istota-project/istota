@@ -2376,7 +2376,8 @@ class TestSandboxEffective:
 
         assert r.status != FAIL
         assert r.status != OK
-        assert "not established" in r.detail
+        assert "not probed on this run" in r.detail
+        assert "unknown" in r.detail
         assert r.remedy.strip()
 
     def test_an_unprobed_run_with_a_warm_memo_answers(self, make_config, monkeypatch):
@@ -2427,7 +2428,73 @@ class TestSandboxEffective:
 
         assert r.status != OK
         assert "the check itself raised" not in r.detail
-        assert "not established" in r.detail
+        assert "could not be determined" in r.detail
+        assert "unknown" in r.detail
+
+    # -- run from inside a task's own sandbox ------------------------------
+
+    def test_a_probe_from_inside_a_sandbox_settles_nothing(
+        self, make_config, monkeypatch
+    ):
+        """The reported defect, and the reason `_deployment_sandboxing` exists.
+
+        A task's own namespace is built with `--disable-userns`, so bwrap in
+        there fails on the nesting depth whatever the deployment can do. This
+        check read that as the deployment's answer: `istota doctor` run by a
+        task on the production host reported every task unsandboxed, and exited
+        1, from inside a task whose database masks were demonstrably in place.
+
+        The availability patch is what makes it a reproduction rather than a
+        tautology — it is the answer a real nested probe gives, and against the
+        pre-change code this asserted a FAIL.
+        """
+        from istota import executor
+
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        r = self._run(self._config(make_config))
+
+        assert r.status == SKIP
+        assert "ISTOTA_SANDBOXED" in r.detail
+        assert "unsandboxed" not in r.detail
+
+    def test_it_asks_nothing_from_inside_a_sandbox(self, make_config, monkeypatch):
+        """The marker is read before either route to the availability answer.
+
+        Not a performance point: a nested probe spawns a `bwrap` that is going
+        to fail, and a check that ran it and then discarded the answer would
+        keep the failure one refactor away from being read again.
+        """
+        asked = self._record_availability(monkeypatch)
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+
+        r = self._run(self._config(make_config))
+
+        assert r.status == SKIP
+        assert asked == []
+
+    def test_a_task_on_an_unconfined_deployment_still_fails(
+        self, make_config, monkeypatch
+    ):
+        """The boundary control on the skip, and the reason it is not
+        `_non_daemon_env_markers`.
+
+        `ISTOTA_SANDBOXED` is set only where the sandbox was really in force, so
+        a task on the ISSUE-381 shape carries `ISTOTA_TASK_ID` without it and its
+        probe is a valid one. Skipping on the whole marker set would hide the one
+        deployment this check exists to report from the surface an operator
+        actually reaches — a task run of `istota doctor`.
+        """
+        from istota import executor
+
+        monkeypatch.setenv("ISTOTA_TASK_ID", "1234")
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setattr(executor, "_bwrap_checked", False)
+        r = self._run(self._config(make_config))
+
+        assert r.status == FAIL
+        assert "unsandboxed" in r.detail
 
     # -- the scope guarantee, which is the whole reason for a separate check -
 
@@ -4899,6 +4966,29 @@ class TestSessionLogDir:
         assert "unbound" in r.detail.lower()
         assert "bubblewrap" in r.detail.lower()
         assert r.remedy
+
+    def test_a_nested_probe_is_unknown_rather_than_an_exposure(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        """Run inside a task's own sandbox the availability probe answers
+        nothing, and this check must not read that as the logs being unbound.
+
+        Same defect as `security.sandbox_effective`, one prefix along: the
+        finding here is phrased as an observation about the deployment, and a
+        nested probe observed only its own namespace. Both halves are asserted,
+        because the reason text alone would satisfy either prefix.
+        """
+        from istota import executor
+
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        config = self._config(make_config, tmp_path)
+        (config.db_path.parent / "logs").mkdir(parents=True)
+        r = self._run(config)
+
+        assert "could not be established" in r.detail
+        assert "unbound rather than masked" not in r.detail
+        assert "ISTOTA_SANDBOXED" in r.detail
 
     def test_an_unavailable_sandbox_and_a_refused_mask_are_both_reported(
         self, make_config, tmp_path, monkeypatch,
