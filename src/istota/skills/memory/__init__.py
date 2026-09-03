@@ -57,6 +57,7 @@ import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
+from istota.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,
     write_last_seen,
@@ -108,9 +109,20 @@ def _err(msg: str, **extra) -> int:
 
 
 def _user_id() -> str:
+    """The calling task's user id, refused unless it can name a directory.
+
+    Emptiness was the only thing checked, and two joins below build a
+    *containment base* from the result — `{mount}/Users/{user_id}` — where a
+    `.` collapses that base to `{mount}/Users` and admits every user's overlay
+    directory (ISSUE-402). The CLI runs host-side under the skill proxy with
+    the daemon's filesystem access, so the base is the boundary.
+    """
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     if not user_id:
         _err("ISTOTA_USER_ID not set")
+        sys.exit(1)
+    if not is_scopable_user_id(user_id):
+        _err("ISTOTA_USER_ID does not name a per-user directory")
         sys.exit(1)
     return user_id
 

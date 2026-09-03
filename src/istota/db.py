@@ -12,6 +12,8 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .user_scope import is_scopable_user_id
+
 logger = logging.getLogger("istota.db")
 
 
@@ -1125,7 +1127,7 @@ def get_db(
 def create_task(
     conn: sqlite3.Connection,
     prompt: str = "",
-    user_id: str = "",
+    user_id: str = "",  # not a usable default — see the guard below
     source_type: str = "cli",
     conversation_token: str | None = None,
     parent_task_id: int | None = None,
@@ -1154,7 +1156,25 @@ def create_task(
     skill: str | None = None,
     skill_args: str | None = None,
 ) -> int:
-    """Create a new task and return its ID."""
+    """Create a new task and return its ID.
+
+    Raises ``ValueError`` for a ``user_id`` that cannot name a directory of its
+    own. The column is ``TEXT NOT NULL``, which SQLite satisfies with ``''``,
+    and this function used to default the parameter to ``''`` and validate
+    nothing — so an unowned task row was one omitted argument away, and every
+    path derived from it collapsed to the shared parent (ISSUE-402). Every
+    network-facing producer already gates on membership in ``config.users``;
+    what this covers is the local entry points that do not (``istota task -u``,
+    ``istota repl -u``, ``execute_task_interactive``) and the omitted argument
+    itself. The path joins fail closed on their own — this is the second layer,
+    at the source, so the row never exists rather than existing and binding
+    nothing.
+    """
+    if not is_scopable_user_id(user_id):
+        raise ValueError(
+            f"create_task: user_id {user_id!r} cannot name a per-user directory; "
+            "it must be a non-empty path component other than '.' or '..'."
+        )
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
     if talk_message_id is not None:
         existing = conn.execute(

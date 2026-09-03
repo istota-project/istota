@@ -38,6 +38,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from .user_scope import scoped_user_dir
+
 if TYPE_CHECKING:
     from . import db
     from .config import Config
@@ -359,6 +361,27 @@ def build_mount_plan(
     from . import config as istota_config
     from . import executor
 
+    # The workspace bind is `{temp_dir}/{user_id}`, and `get_user_temp_dir` is a
+    # plain join — deliberately, because `.claude/rules/executor.md` records the
+    # containment for that join as living *here*. It did not, which is ISSUE-402
+    # one join over and a worse one: `config.temp_dir` holds
+    # `.control/{every_user_id}/task_*/`, so a `user_id` that collapses put every
+    # other user's assembled system prompt in the namespace, read-write, with the
+    # `extra_ro_binds` re-bind covering only this task's own directory.
+    #
+    # A raise rather than a dropped bind, because `user_temp_dir` is also the
+    # `--chdir` target and the deferred-op directory: a namespace without it is
+    # not a narrower sandbox, it is a broken one, and bwrap would fail on the
+    # chdir with nothing naming the cause. `build_bwrap_cmd` propagates this and
+    # `execute_task` fails the task; `_validate_workspace_dir` below is the
+    # existing precedent for a `ValueError` out of this function.
+    if scoped_user_dir(config.temp_dir, task.user_id) is None:
+        raise ValueError(
+            f"sandbox: user id {task.user_id!r} does not name a directory under "
+            f"{config.temp_dir}; refusing to build a namespace around a "
+            "workspace path that collapses to the shared root."
+        )
+
     mounts: list[Mount] = []
 
     def _ro(
@@ -588,10 +611,23 @@ def build_mount_plan(
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
+    user_dir: Path | None = None
     if mount:
         mount = mount.resolve()
-        user_dir = mount / "Users" / task.user_id
-        if user_dir.exists():
+        # `scoped_user_dir`, not a plain join: `PurePath` drops an empty
+        # component and a `.`, so `mount / "Users" / ""` is `{mount}/Users` —
+        # the parent of every user's directory — and this bind is read-write.
+        # An absolute `user_id` replaces the root outright. None means the id
+        # did not name a child, and the bind is dropped rather than falling
+        # back to something wider (ISSUE-402).
+        user_dir = scoped_user_dir(mount / "Users", task.user_id)
+        if user_dir is None:
+            logger.warning(
+                "sandbox: user id %r does not name a directory under "
+                "%s/Users; binding no user directory for task %s.",
+                task.user_id, mount, task.id,
+            )
+        elif user_dir.exists():
             _rw(user_dir, "nextcloud_user_dir", user_data=True)
         # Talk attachments directory (flat, shared across conversations)
         talk_dir = mount / "Talk"
@@ -759,13 +795,21 @@ def build_mount_plan(
             rpath = (mount / r.resource_path.lstrip("/")).resolve()
             if not rpath.exists():
                 continue
-            # Skip if already covered by user dir bind
-            user_dir = mount / "Users" / task.user_id
-            try:
-                rpath.relative_to(user_dir.resolve())
-                continue  # Already inside user dir
-            except ValueError:
-                pass
+            # Skip if already covered by the user dir bind above. `user_dir` is
+            # that bind's own source, not a second derivation of it: with a
+            # plain join here an unscoped id made this `{mount}/Users`, so
+            # every resource anywhere under it read as covered — by a bind that
+            # is not emitted at all. None means no bind was emitted from a
+            # scoped id. (Not the same as "no bind was emitted": a scoped
+            # `user_dir` that does not exist emits none either and still skips
+            # here. Harmless — the loop has already refused a `rpath` that does
+            # not exist, and a resource under a missing directory cannot.)
+            if user_dir is not None:
+                try:
+                    rpath.relative_to(user_dir.resolve())
+                    continue  # Already inside user dir
+                except ValueError:
+                    pass
             if r.permissions == "readwrite":
                 _rw(rpath, "user_resource", user_data=True)
             else:

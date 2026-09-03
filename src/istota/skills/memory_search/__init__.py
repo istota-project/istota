@@ -17,6 +17,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from istota.user_scope import scoped_user_dir
+
 
 def _get_conn() -> sqlite3.Connection:
     """Get DB connection from env var."""
@@ -119,7 +121,14 @@ def _indexable_roots(user_id: str) -> list[Path]:
     roots: list[Path] = []
     mount = os.environ.get("NEXTCLOUD_MOUNT_PATH", "")
     if mount:
-        roots.append(Path(mount) / "Users" / user_id)
+        # Scoped, not joined: a `.` or an absolute `ISTOTA_USER_ID` collapses
+        # this root to `{mount}/Users`, which is exactly the "another user's
+        # workspace" the docstring above says must not be indexable
+        # (ISSUE-402). No root rather than a wider one — an empty allowlist
+        # refuses everything.
+        own = scoped_user_dir(Path(mount) / "Users", user_id)
+        if own is not None:
+            roots.append(own)
     token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "")
     if mount and token:
         roots.append(Path(mount) / "Channels" / token)

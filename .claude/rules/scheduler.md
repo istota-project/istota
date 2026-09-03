@@ -534,6 +534,18 @@ create_task(conn, prompt, user_id, source_type="cli", conversation_token=None,
     reply_to_talk_id=None, reply_to_content=None,
     heartbeat_silent=False, scheduled_job_id=None,
     talk_delivery_token=None) -> int
+    # Raises ValueError for a `user_id` that cannot name a directory of its own —
+    # empty, whitespace, `.`, `..`, or carrying a separator (`user_scope
+    # .is_scopable_user_id`). The column is TEXT NOT NULL, which SQLite satisfies
+    # with '', and the parameter's own default was '' with no validation, so an
+    # unowned row was one omitted argument away and every path derived from it
+    # collapsed to the shared parent (ISSUE-402). The default is still '' so the
+    # parameter order is unchanged; what changed is that it no longer produces a
+    # row. Every network-facing producer already gates on membership in
+    # `config.users` and the subtask path pins the id to the parent row, so what
+    # this covers is the local entry points that do not (`istota task -u`,
+    # `istota repl -u`, `execute_task_interactive`) and the omitted argument.
+    # The second layer, not the boundary: the path joins fail closed on their own.
 
 claim_task(conn, worker_id, max_retry_age_minutes=60, user_id=None) -> Task | None
 get_task(conn, task_id) -> Task | None

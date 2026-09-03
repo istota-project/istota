@@ -1542,15 +1542,19 @@ class TestPerUserReposDir:
         self, sandbox_config, make_sandbox_task, tmp_path,
     ):
         """`{repos_dir}/""` is `{repos_dir}`, so a fallback here would hand the
-        shared root to a task whose user id went missing. Fail closed."""
-        repos = self._setup(sandbox_config, tmp_path)
-        result = _run_bwrap(sandbox_config, make_sandbox_task(user_id=""), True)
+        shared root to a task whose user id went missing. Fail closed.
 
-        root = str(repos.resolve())
-        assert not any(
-            src == root or src.startswith(root + os.sep)
-            for src, _ in _get_bind_pairs(result, "--bind")
-        )
+        The refusal is now stronger than "this bind is absent": ISSUE-402 found
+        the same collapse on `{temp_dir}/{user_id}` and `{mount}/Users/
+        {user_id}`, so `build_mount_plan` declines to build a namespace at all
+        for an id that names no directory. That subsumes what this test
+        asserted — no plan means no bind of anything — and the assertion
+        becomes the refusal itself. `tests/test_user_dir_containment.py` is
+        where the wider rule lives.
+        """
+        self._setup(sandbox_config, tmp_path)
+        with pytest.raises(ValueError, match="does not name a directory under"):
+            _run_bwrap(sandbox_config, make_sandbox_task(user_id=""), True)
 
     def test_the_native_file_tools_write_only_the_tasks_own_subtree(
         self, sandbox_config, make_sandbox_task, tmp_path,

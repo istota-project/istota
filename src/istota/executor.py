@@ -81,6 +81,7 @@ from .image_attachments import (
     render_ocr_context,
 )
 from .shell_exec import pipefail_env
+from .user_scope import scoped_user_dir
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 
@@ -342,13 +343,29 @@ def image_bind_roots(
     behind a symlink an unresolved path names a file that does not exist inside
     the namespace, and every `Read` fails.
     """
-    roots = [user_temp_dir]
+    roots: list[Path] = []
+    # `user_temp_dir` is `{temp_dir}/{user_id}` and arrives already joined, so
+    # an id that collapses makes this root `config.temp_dir` — every user's
+    # scratch space and the whole `.control` tree, as a legal copy source
+    # (ISSUE-402). `build_mount_plan` refuses such a task outright and
+    # `ensure_task_control_dir` refuses it before that, so nothing reaches here
+    # on the real path; the entry is skipped rather than trusted because this
+    # list is an allowlist and a boundary should not rest on a caller two
+    # frames up having already refused.
+    if scoped_user_dir(config.temp_dir, task.user_id) is not None:
+        roots.append(user_temp_dir)
     if control_dir is not None:
         roots.append(control_dir)
     mount = config.nextcloud_mount_path
     if mount:
         mount = Path(mount)
-        roots.append(mount / "Users" / task.user_id)
+        # Scoped, not joined: an unscoped id collapses to `{mount}/Users` and
+        # every user's attachments become a legal copy source (ISSUE-402). No
+        # user root at all is the right fallback — the bind is dropped there
+        # too, so a file under one would be unreadable inside the namespace.
+        own = scoped_user_dir(mount / "Users", task.user_id)
+        if own is not None:
+            roots.append(own)
         roots.append(mount / "Talk")
         if task.conversation_token:
             roots.append(mount / "Channels" / task.conversation_token)
@@ -901,11 +918,15 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     would mean a user whose task directory exists and whose repos directory
     does not, silently.
 
-    What *is* checked is that the join did what it says — the same equality
-    rule ``sandbox_cache_sweeper`` uses, and for the same reason. Truthiness
-    alone lets three values through that resolve outside one user's subtree:
-    ``.`` collapses to the shared root, ``..`` to its parent, and an absolute
-    component replaces the root outright. And the entry is model-plantable:
+    What *is* checked is that the join did what it says —
+    :func:`~istota.user_scope.scoped_user_dir`, the same equality rule
+    ``sandbox_cache_sweeper`` uses and for the same reason. Truthiness alone
+    lets three values through that resolve outside one user's subtree: ``.``
+    collapses to the shared root, ``..`` to its parent, and an absolute
+    component replaces the root outright. The rule was written here and had no
+    counterpart at the Nextcloud mount join next door, which is ISSUE-402; it
+    lives in that leaf now and this function is one of its four callers. And
+    the entry is model-plantable:
     every deployment running the shared bind gave a task read-write access to
     this root, so ``{repos_dir}/{user_id}`` may already be a symlink someone
     left there, which ``_bind`` and ``_add`` both resolve and which ``chmod``
@@ -926,28 +947,17 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     root = config.developer.repos_dir
     if not root or not user_id:
         return None
-    root_path = Path(root)
-    candidate = root_path / user_id
-    try:
-        # Two checks, because neither catches the other's cases. The lexical
-        # one refuses a component that never became a child (`.` is dropped by
-        # `PurePath`, an absolute one replaces the root, a nested one goes
-        # deeper); the resolved one refuses `..` and every symlink, which are
-        # children by name and somewhere else on disk.
-        contained = (
-            candidate.parent == root_path
-            and candidate.resolve() == root_path.resolve() / user_id
+    # `scoped_user_dir` is where the two checks live now — this function is
+    # where they were written, and the Nextcloud mount join next door had no
+    # equivalent until ISSUE-402 gave the rule one home.
+    candidate = scoped_user_dir(root, user_id)
+    if candidate is None:
+        logger.warning(
+            "developer.repos_dir: %s does not resolve to the subtree named "
+            "by user id %r; not using it. A symlink or a path component in "
+            "the user id would reach outside that user's own tree.",
+            f"{root}/{user_id}", user_id,
         )
-        if not contained:
-            logger.warning(
-                "developer.repos_dir: %s does not resolve to the subtree named "
-                "by user id %r; not using it. A symlink or a path component in "
-                "the user id would reach outside that user's own tree.",
-                candidate, user_id,
-            )
-            return None
-    except OSError:
-        return None
     return candidate
 
 
