@@ -12,6 +12,17 @@ That much is a reading of the code. Whether it *happens*, and for how long, was
 inference when the issue was filed, and the issue says so: measure first, and
 decide the restructure on the numbers. This file covers the measurement.
 
+**The room half has since been fixed and its cases moved.** The measurement
+established what the issue could not: the room loop's awaits recur rather than
+being first-encounter work, so an empty group room paid two round trips of lock
+time on every cycle for ever. That block is now read → close → await → reopen
+to write, and `tests/test_talk_poll_room_txn_split.py` is where the room pass is
+covered — including the recurrence finding, which it keeps by counting the round
+trips rather than by measuring the lock they no longer hold. What is left here is
+the `results` block, which cannot be split the same way (`ingest_message` has to
+commit in the same transaction as the cursor advance) and so still holds every
+await this instrument was built to count.
+
 **These tests assert on a log line because the log line is the deliverable.**
 `talk_poll_txn` is a data format, not chatter: fixed key order, `key=value`, on
 its own logger, so a series can be pulled out of the journal whole and lined up
@@ -183,67 +194,6 @@ class TestTheHoldIsRecorded:
         # The hold is at least as long as the wait inside it, which is the whole
         # claim: the connection was open for the duration of the round trip.
         assert int(fields["held_ms"]) >= int(fields["await_ms"])
-
-    async def test_an_empty_group_room_holds_the_lock_on_every_cycle(
-        self, config, caplog,
-    ):
-        """The finding that corrects this issue's own framing.
-
-        The room loop's awaits read like first-encounter work and are not.
-        `get_latest_message_id` persists a cursor only when the room *has* a
-        message and the backfill caches only a non-empty history, so a group
-        room nobody has written in fails both guards on every cycle, for ever,
-        and does two round trips inside the write transaction each time. The
-        in-code comment at the cursor write records the same fact from the
-        `lastMessage` gate's point of view.
-
-        Three cycles, because one proves nothing about recurrence.
-        """
-        with caplog.at_level(logging.INFO, logger="istota.transport.talk.txn"):
-            for _ in range(3):
-                poller._participant_cache.clear()
-                await _poll(
-                    config,
-                    conversations=[{"token": "empty", "type": 2, "name": "team"}],
-                    messages=[],
-                    participants=[{"actorId": "alice"}],
-                    latest_id=None,
-                    latest_delay=0.03,
-                    history=[],
-                    history_delay=0.03,
-                )
-
-        rooms = [ln for ln in _txn_lines(caplog) if _fields(ln)["phase"] == "rooms"]
-        assert len(rooms) == 3, "an empty room stopped paying after the first poll"
-        for line in rooms:
-            assert int(_fields(line)["await_ms"]) >= 50
-
-    async def test_first_encounter_work_is_named_against_the_room_loop(
-        self, config, caplog,
-    ):
-        """The cold path, which is where the issue's three cited awaits live.
-
-        A room with no poll cursor and no cached history does both of them, and
-        `register_room` has already written by then, so the lock is held across
-        the pair.
-        """
-        with caplog.at_level(logging.INFO, logger="istota.transport.talk.txn"):
-            await _poll(
-                config,
-                conversations=[{"token": "fresh", "type": 2, "name": "team"}],
-                messages=[],
-                participants=[{"actorId": "alice"}],
-                latest_id=500,
-                latest_delay=0.03,
-                history=[_msg(msg_id=499)],
-                history_delay=0.03,
-            )
-
-        rooms = [ln for ln in _txn_lines(caplog) if _fields(ln)["phase"] == "rooms"]
-        assert rooms, "the room loop awaited Nextcloud and said nothing"
-        fields = _fields(rooms[-1])
-        assert int(fields["awaits"]) >= 2
-        assert int(fields["await_ms"]) >= 50
 
     async def test_a_long_hold_is_a_warning_and_a_short_one_is_not(
         self, config, caplog,

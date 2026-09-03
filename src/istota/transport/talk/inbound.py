@@ -470,6 +470,293 @@ def _reconcile_webmirror_stamp(
         )
 
 
+@dataclass
+class _RoomPlan:
+    """One room's work for a poll cycle, carried across the three phases of the
+    room pass (ISSUE-406).
+
+    The read phase fills everything down to `needs_backfill` from the registry,
+    the fetch phase fills the three network fields with no connection open, and
+    the write phase applies the result. Nothing here is authoritative by the
+    time the write phase reads it — see `_apply_room_pass`, which re-reads every
+    condition it acts on.
+    """
+
+    conv: dict
+    token: str
+    conv_type: int | None
+    display_name: str | None
+    canonical: str
+    # The cursor as the read phase found it. `None` means the gate has nothing
+    # to compare against and must not hold the room back.
+    known_cursor: int | None
+    last_message_id: int | None
+    needs_participants: bool
+    needs_cursor_init: bool
+    needs_backfill: bool
+    # Filled by the fetch phase.
+    participants: list[dict] | None = None
+    latest_id: int | None = None
+    backfill_msgs: list[dict] | None = None
+    cursor_init_failed: bool = False
+
+
+def _plan_room_pass(
+    conn,
+    config: Config,
+    conversations: list[dict],
+    conv_types: dict[str, int],
+    conv_names: dict[str, str],
+) -> list[_RoomPlan]:
+    """Read what the registry says about each conversation. Reads only.
+
+    Not one write, which is the property that matters rather than a style
+    preference: under WAL a transaction that never writes never becomes a
+    writer, so this block blocks nobody however long it takes. `db.get_db`'s
+    `PRAGMA synchronous` is per-connection and takes no lock either.
+    """
+    plans: list[_RoomPlan] = []
+    for conv in conversations:
+        conversation_token = conv.get("token")
+        if not conversation_token:
+            continue
+
+        # Conversation types: 1=one-to-one (DM), 2=group, 3=public, 4=changelog
+        conv_type = conv.get("type")
+        conv_types[conversation_token] = conv_type
+        display_name = conv.get("displayName") or conv.get("name")
+        if display_name:
+            conv_names[conversation_token] = display_name
+
+        # Resolve the canonical token FIRST: a *promoted* web room's canonical
+        # token is its web token (the Talk token lives only in a binding), so
+        # keying by the raw Talk token would create a phantom duplicate
+        # origin='talk' row.
+        canonical = (
+            db.resolve_room_token(conn, "talk", conversation_token)
+            or conversation_token
+        )
+        # Only a genuinely new room needs the participant fetch. Type 4 is the
+        # "Talk updates" changelog room, which shouldn't surface in web chat.
+        needs_participants = (
+            db.get_room(conn, canonical) is None and conv_type != 4
+        )
+
+        # Cache 1:1 DM tokens by user ID (for notification fallback)
+        if conv_type == 1:
+            other_user = conv.get("name", "")
+            if other_user and other_user in config.users:
+                _dm_token_cache[other_user] = conversation_token
+
+        last_message_id = db.get_talk_poll_state(conn, conversation_token)
+
+        # The gate needs a cursor we have actually seen. A room being polled for
+        # the first time has none, and the write phase invents one from the
+        # server's own latest id — comparing the room list against that would
+        # skip the very message the initialisation is there to catch.
+        known_cursor = last_message_id
+
+        needs_cursor_init = False
+        if last_message_id is None:
+            if conv_type == 1:
+                # DM: fetch recent messages — the DM is initiated by messaging
+                # the bot, so there's no historical spam risk. 0 triggers a
+                # history fetch.
+                last_message_id = 0
+                logger.debug(
+                    "First poll for DM %s - fetching message history",
+                    conversation_token,
+                )
+            else:
+                needs_cursor_init = True
+
+        plans.append(_RoomPlan(
+            conv=conv,
+            token=conversation_token,
+            conv_type=conv_type,
+            display_name=display_name,
+            canonical=canonical,
+            known_cursor=known_cursor,
+            last_message_id=last_message_id,
+            needs_participants=needs_participants,
+            needs_cursor_init=needs_cursor_init,
+            needs_backfill=not db.has_cached_talk_messages(
+                conn, conversation_token,
+            ),
+        ))
+    return plans
+
+
+async def _fetch_room_pass(
+    client: TalkClient, config: Config, plans: list[_RoomPlan],
+) -> None:
+    """Ask Nextcloud for what the write phase needs, with nothing open.
+
+    Deliberately **sequential**, one room after another, which is what the
+    single-transaction version did. Running these concurrently is a real
+    latency win and a separate change with its own risk: ISSUE-399 was about
+    the cost of the number of connections this poller opens at once, and
+    widening that is not something to do in passing while fixing a lock.
+    """
+    for plan in plans:
+        if plan.needs_participants:
+            # Never raises — `_get_participants` treats a failure as a DM.
+            plan.participants = await _get_participants(
+                client, plan.token, plan.conv_type,
+            )
+
+        if plan.needs_cursor_init:
+            try:
+                plan.latest_id = await client.get_latest_message_id(plan.token)
+            except Exception as e:
+                logger.error(
+                    "Error initializing poll state for %s: %s", plan.token, e,
+                )
+                # Pass over this room for the cycle, exactly as the
+                # single-transaction version's `continue` did — including
+                # skipping the backfill below it.
+                plan.cursor_init_failed = True
+                continue
+
+        if plan.needs_backfill:
+            try:
+                plan.backfill_msgs = await client.fetch_chat_history(
+                    plan.token, limit=config.conversation.talk_context_limit,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Backfill failed for %s: %s — context will build from polling",
+                    plan.token, e,
+                )
+
+
+def _apply_room_pass(
+    conn,
+    config: Config,
+    client: TalkClient,
+    plans: list[_RoomPlan],
+    *,
+    full_sweep: bool,
+) -> tuple[list, int]:
+    """Apply the room pass and return the polls to open plus the gated count.
+
+    Writes only, and no await — this is the block that takes the write lock, and
+    the whole point of the split is that nothing in it waits on a socket.
+
+    **Every condition is re-read here rather than trusted from the plan.** The
+    lock was free while Nextcloud answered, which is the fix, and that is
+    exactly the window in which another writer can register the room or advance
+    its cursor. `register_room` / `add_room_binding` / `add_room_member` are all
+    `INSERT OR IGNORE` and need no help, but `set_talk_poll_state` is an
+    unconditional upsert: writing `latest_id - 1` over a cursor somebody
+    advanced would rewind the room and re-poll messages already read.
+    """
+    poll_tasks = []
+    gated = 0
+
+    for plan in plans:
+        if plan.cursor_init_failed:
+            continue
+
+        existing_room = db.get_room(conn, plan.canonical)
+        if existing_room is not None:
+            # Backfill the registry title from Talk's displayName (migrated
+            # rooms were folded in with NULL names; without this they'd show the
+            # generic "Talk room" until their next message). Talk-origin only —
+            # a web-origin (incl. promoted) room's user-set name wins.
+            if (
+                existing_room.origin == "talk"
+                and plan.display_name
+                and existing_room.name != plan.display_name
+            ):
+                db.rename_room(conn, plan.canonical, plan.display_name)
+        elif plan.conv_type != 4 and plan.participants is not None:
+            # Register the Talk room in the unified registry on first sight so
+            # it surfaces in web chat even when no one has messaged the bot in
+            # it yet — the task-keyed unified-rooms migration and the live
+            # record_inbound path both miss a room the bot merely lurks in
+            # (polled + history-cached, but never addressed): the #sysadmin
+            # case. Seed membership from the human participants mapped to istota
+            # users (bot excluded). A user who later hides the room is kept out
+            # by their dismissal tombstone.
+            #
+            # `participants is not None` covers the room the read phase found
+            # present and this one finds gone: nothing fetched a participant
+            # list for it, and `_istota_members_for_conversation` iterates that
+            # list for anything but a DM, so the alternative is a `TypeError`
+            # out of the poll. It registers on the next cycle instead. Slightly
+            # conservative for a DM, which reads its member off `conv['name']`
+            # and would have registered — one cycle, against a second branch.
+            member_ids = _istota_members_for_conversation(
+                plan.conv, plan.participants, config,
+            )
+            if member_ids:
+                db.register_room(
+                    conn, plan.canonical, member_ids[0],
+                    origin="talk", name=plan.display_name,
+                )
+                db.add_room_binding(conn, plan.canonical, "talk", plan.token)
+                for uid in member_ids[1:]:
+                    db.add_room_member(conn, plan.canonical, uid)
+
+        last_message_id = plan.last_message_id
+        if plan.needs_cursor_init:
+            if plan.latest_id:
+                last_message_id = plan.latest_id - 1
+                # Persist it. The only other writer is the message loop, which
+                # fires solely for a message a poll actually returned — so a
+                # room whose polls keep coming back empty never acquired a
+                # cursor at all, and `known_cursor is None` bypassed the gate on
+                # every cycle for ever. `latest_id - 1` is behind the newest
+                # message by construction, so the next poll still returns it
+                # (ISSUE-399 review).
+                #
+                # Only when the cursor is *still* absent: see the re-read note
+                # in this function's docstring.
+                if db.get_talk_poll_state(conn, plan.token) is None:
+                    db.set_talk_poll_state(conn, plan.token, last_message_id)
+                logger.debug(
+                    "First poll for room %s - starting from message %d",
+                    plan.token, last_message_id,
+                )
+            else:
+                last_message_id = 0
+                logger.debug(
+                    "First poll for room %s - no messages yet", plan.token,
+                )
+
+        if plan.needs_backfill and plan.backfill_msgs:
+            db.upsert_talk_messages(conn, plan.token, plan.backfill_msgs)
+            logger.info(
+                "Backfilled %d messages for conversation %s",
+                len(plan.backfill_msgs), plan.token,
+            )
+
+        # The gate: on an ordinary cycle, skip a room the room list says holds
+        # nothing we have not already read. This is what stops the cycle opening
+        # one long-poll per room around the clock — 97% of which were being
+        # abandoned client-side having carried nothing (ISSUE-399). A full sweep
+        # ignores it.
+        if (
+            not full_sweep
+            and plan.known_cursor is not None
+            and not _has_news(plan.conv, plan.known_cursor)
+        ):
+            gated += 1
+            continue
+
+        poll_tasks.append(
+            _poll_single_conversation(
+                client,
+                plan.token,
+                last_message_id,
+                config.scheduler.talk_poll_timeout,
+            )
+        )
+
+    return poll_tasks, gated
+
+
 async def poll_talk_conversations(config: Config) -> list[int]:
     """
     Poll all Talk conversations concurrently for new messages and create tasks.
@@ -561,168 +848,36 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 logger.warning("Error listing Talk conversations: %s: %s", type(e).__name__, e)
                 return []
 
-    # Build list of conversations to poll and initialize new ones
-    poll_tasks = []
-    gated = 0  # rooms the lastMessage gate held back this cycle
+    # Build list of conversations to poll and initialize new ones.
+    #
+    # Three phases, and the split is the fix rather than a tidy-up (ISSUE-406).
+    # This used to be one `db.get_db` block that read the registry, wrote to it,
+    # awaited Nextcloud and wrote again. `db.get_db` commits at the end of the
+    # `with` and SQLite's deferred transaction becomes a *writer* at the first
+    # write, so every await after that first write was a WAL write lock held
+    # across a round trip — and every other writer in the daemon queued behind
+    # it, each for up to `db.get_db`'s 30s wait. Readers were unaffected, which
+    # is why it went unseen.
+    #
+    # It also recurred rather than being first-encounter work: a group room
+    # nobody has written in fails both the cursor guard and the history-cache
+    # guard on every cycle for ever, and paid two round trips each time.
+    #
+    # So: read what the registry says, close, ask Nextcloud, reopen to write.
+    # The results block below cannot be split this way — see the atomicity note
+    # in this function's docstring — and keeps its instrumented awaits.
     conv_types: dict[str, int] = {}  # token -> conversation type
     conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
-    with _timed_poll_txn("rooms") as hold, db.get_db(config.db_path) as conn:
-        for conv in conversations:
-            conversation_token = conv.get("token")
-            if not conversation_token:
-                continue
 
-            # Conversation types: 1=one-to-one (DM), 2=group, 3=public, 4=changelog
-            conv_type = conv.get("type")
-            conv_types[conversation_token] = conv_type
-            display_name = conv.get("displayName") or conv.get("name")
-            if display_name:
-                conv_names[conversation_token] = display_name
+    with db.get_db(config.db_path) as conn:
+        plans = _plan_room_pass(conn, config, conversations, conv_types, conv_names)
 
-            # Register the Talk room in the unified registry on first sight so
-            # it surfaces in web chat even when no one has messaged the bot in
-            # it yet — the task-keyed unified-rooms migration and the live
-            # record_inbound path both miss a room the bot merely lurks in
-            # (polled + history-cached, but never addressed): the #sysadmin
-            # case. Resolve the canonical token FIRST: a *promoted* web room's
-            # canonical token is its web token (the Talk token lives only in a
-            # binding), so registering by the raw Talk token would create a
-            # phantom duplicate origin='talk' row. Seed membership from the human
-            # participants mapped to istota users (bot excluded). Only a
-            # genuinely new room needs the participant fetch, so it's rare, not
-            # per-poll — membership for active users is maintained below (the
-            # message loop) and by record_inbound. A user who later hides the
-            # room is kept out by their dismissal tombstone.
-            canonical = (
-                db.resolve_room_token(conn, "talk", conversation_token)
-                or conversation_token
-            )
-            existing_room = db.get_room(conn, canonical)
-            if existing_room is not None:
-                # Backfill the registry title from Talk's displayName (migrated
-                # rooms were folded in with NULL names; without this they'd show
-                # the generic "Talk room" until their next message). Talk-origin
-                # only — a web-origin (incl. promoted) room's user-set name wins.
-                if (
-                    existing_room.origin == "talk"
-                    and display_name
-                    and existing_room.name != display_name
-                ):
-                    db.rename_room(conn, canonical, display_name)
-            elif conv_type != 4:
-                # New room (skip type 4 = the "Talk updates" changelog room — a
-                # system room that shouldn't surface in web chat).
-                participants = await _await_in_txn(
-                    hold, _get_participants(client, conversation_token, conv_type),
-                )
-                member_ids = _istota_members_for_conversation(
-                    conv, participants, config,
-                )
-                if member_ids:
-                    db.register_room(
-                        conn, canonical, member_ids[0],
-                        origin="talk", name=display_name,
-                    )
-                    db.add_room_binding(conn, canonical, "talk", conversation_token)
-                    for uid in member_ids[1:]:
-                        db.add_room_member(conn, canonical, uid)
+    await _fetch_room_pass(client, config, plans)
 
-            # Cache 1:1 DM tokens by user ID (for notification fallback)
-            if conv_type == 1:
-                other_user = conv.get("name", "")
-                if other_user and other_user in config.users:
-                    _dm_token_cache[other_user] = conversation_token
-
-            # Get last known message ID for this conversation
-            last_message_id = db.get_talk_poll_state(conn, conversation_token)
-
-            # The gate needs a cursor we have actually seen. A room being polled
-            # for the first time has none, and the branch below invents one from
-            # the server's own latest id — comparing the room list against that
-            # would skip the very message the initialisation is there to catch.
-            known_cursor = last_message_id
-
-            # First-time poll behavior depends on conversation type
-            if last_message_id is None:
-                if conv_type == 1:
-                    # DM: fetch recent messages - the DM is initiated by messaging the bot,
-                    # so there's no historical spam risk. Use 0 to trigger history fetch.
-                    last_message_id = 0
-                    logger.debug("First poll for DM %s - fetching message history", conversation_token)
-                else:
-                    # Group/public room: initialize to latest_id - 1 so the immediate
-                    # poll picks up the most recent message (avoids missing the first
-                    # message that triggered bot being added to the room)
-                    try:
-                        latest_id = await _await_in_txn(
-                            hold,
-                            client.get_latest_message_id(conversation_token),
-                        )
-                        if latest_id:
-                            last_message_id = latest_id - 1
-                            # Persist it. The only other writer is the message
-                            # loop below, which fires solely for a message a
-                            # poll actually returned — so a room whose polls
-                            # keep coming back empty never acquired a cursor at
-                            # all, and `known_cursor is None` bypassed the gate
-                            # on every cycle for ever. `latest_id - 1` is behind
-                            # the newest message by construction, so the next
-                            # poll still returns it (ISSUE-399 review).
-                            db.set_talk_poll_state(
-                                conn, conversation_token, last_message_id,
-                            )
-                            logger.debug("First poll for room %s - starting from message %d", conversation_token, last_message_id)
-                        else:
-                            last_message_id = 0
-                            logger.debug("First poll for room %s - no messages yet", conversation_token)
-                    except Exception as e:
-                        logger.error("Error initializing poll state for %s: %s", conversation_token, e)
-                        continue
-
-            # Backfill cache on first encounter
-            if not db.has_cached_talk_messages(conn, conversation_token):
-                try:
-                    backfill_msgs = await _await_in_txn(
-                        hold,
-                        client.fetch_chat_history(
-                            conversation_token,
-                            limit=config.conversation.talk_context_limit,
-                        ),
-                    )
-                    if backfill_msgs:
-                        db.upsert_talk_messages(conn, conversation_token, backfill_msgs)
-                        logger.info(
-                            "Backfilled %d messages for conversation %s",
-                            len(backfill_msgs), conversation_token,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Backfill failed for %s: %s — context will build from polling",
-                        conversation_token, e,
-                    )
-
-            # The gate: on an ordinary cycle, skip a room the room list says
-            # holds nothing we have not already read. This is what stops the
-            # cycle opening one long-poll per room around the clock — 97% of
-            # which were being abandoned client-side having carried nothing
-            # (ISSUE-399). A full sweep ignores it.
-            if (
-                not full_sweep
-                and known_cursor is not None
-                and not _has_news(conv, known_cursor)
-            ):
-                gated += 1
-                continue
-
-            # Add to concurrent poll list
-            poll_tasks.append(
-                _poll_single_conversation(
-                    client,
-                    conversation_token,
-                    last_message_id,
-                    config.scheduler.talk_poll_timeout,
-                )
-            )
+    with _timed_poll_txn("rooms"), db.get_db(config.db_path) as conn:
+        poll_tasks, gated = _apply_room_pass(
+            conn, config, client, plans, full_sweep=full_sweep,
+        )
 
         # Reconcile the unified registry against Nextcloud: a Talk room the bot
         # is no longer in (deleted in NC, or bot removed) drops out of the
