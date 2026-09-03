@@ -177,6 +177,11 @@ class FakeTalkClient:
         # `tests/test_support_talk_double.py`. A refused send raises before
         # minting, so this list is shorter than the send calls; `sent_id_for`
         # is what walks the two together.
+        #
+        # Inherits the same blind spot the wrappers had, for the same reason: a
+        # test that assigns `client.send_message = ...` shadows the class
+        # method, so nothing appends here and `sent_id_for` answers None with
+        # no error. Read the double, do not replace its methods.
         self.sent_ids: list[int] = []
         # Seedable, so a test can drive the poller or name a channel whose
         # display name is not its room's registered name.
@@ -385,24 +390,41 @@ class FakeTalkClient:
         ]
 
     def sent_id_for(self, reference_id: str) -> int | None:
-        """The id handed back for the accepted send carrying `reference_id`.
+        """The id handed back for the **last** accepted send carrying `reference_id`.
 
         The scheduler labels every post it makes (`istota:task:<id>:ack`,
         `:prompt`, `:result`, `istota:log:<id>`), so a test naming one of those
         says which post it means instead of indexing into `calls` and hoping
-        the order holds. `None` when no accepted send carried it — including
-        when the send was *refused*, which is the case a test must not read as
-        "the post did not happen for the reason I expected": pair this with
-        `refusals` when the distinction matters.
+        the order holds.
+
+        **Last, not first, and that is the product's rule rather than a
+        preference.** `TalkTransport.deliver` splits a long message and passes
+        the *same* `reference_id` to every part, then returns the id of the
+        final one — which is what the caller stores in
+        `messages.external_ids`. Matching the first part would agree with the
+        product on every short message and disagree on exactly the long ones,
+        which is the worst possible place for a test helper to differ.
+
+        `None` when no accepted send carried it — including when the send was
+        *refused*, which is the case a test must not read as "the post did not
+        happen for the reason I expected": pair this with `refusals` when the
+        distinction matters.
         """
+        # An unlabelled send records `reference_id: None`, so a `None` argument
+        # would match every one of them and hand back a real id. No caller
+        # passes one today; this is what stops the first that does from getting
+        # a confident wrong answer.
+        if not reference_id:
+            return None
+        found = None
         accepted = 0
         for call in self.calls:
             if call.method != "send_message" or call.refused:
                 continue
             if call.args.get("reference_id") == reference_id:
-                return self.sent_ids[accepted]
+                found = self.sent_ids[accepted]
             accepted += 1
-        return None
+        return found
 
     @property
     def refusals(self) -> list[TalkCall]:

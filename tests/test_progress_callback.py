@@ -96,6 +96,11 @@ class TestTalkEventSubscriber:
         assert [(c.method, c.token) for c in fake_talk.calls] == [
             ("edit_message", room.talk_ref),
         ]
+        # A refused edit records the same method, token and args, so without
+        # this the case is equally true of an edit Nextcloud rejected. The
+        # sibling cases get it from `_edits`, which drops refused rows and then
+        # indexes `[-1]`; this one reads `calls` directly.
+        assert fake_talk.refusals == []
         assert fake_talk.calls[0].args["message_id"] == 100
         body = fake_talk.calls[0].args["message"]
         assert "📄 Reading x.txt" in body
@@ -208,14 +213,16 @@ class TestTalkEventSubscriber:
         assert "Cancelled" in _edits(fake_talk)[-1]
 
     @patch("istota.consumers.talk.run_coro", side_effect=Exception("network"))
-    def test_edit_exception_swallowed(self, mock_run, tmp_path, fake_talk, room):
+    def test_edit_exception_swallowed(self, mock_run, tmp_path, room):
         sub = TalkEventSubscriber(
             _make_config(tmp_path), _make_task(conversation_token=room.canonical),
             ack_msg_id=100,
         )
-        # Must not raise.
+        # Must not raise. No assertion on `fake_talk` here: `run_coro` is the
+        # thing raising, so the coroutine is built and never awaited and
+        # nothing can reach the double whatever the subscriber does — an empty
+        # `calls` would be a fact about this patch, not about the product.
         sub.on_event(_ev("tool_start", {"description": "📄 Reading x.txt"}))
-        assert fake_talk.calls == []
 
     @patch("istota.consumers.talk.run_coro", side_effect=asyncio.run)
     def test_on_finish_is_noop(self, mock_run, tmp_path, fake_talk, room):

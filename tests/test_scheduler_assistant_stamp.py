@@ -112,9 +112,10 @@ class TestTalkOriginAssistantStamp:
         assert _assistant_external_ids(db_path, task_id) == {"talk": str(posted)}
         # The id is only the right one if the post resolved the room's binding.
         assert fake_talk.refusals == []
-        assert [c.token for c in fake_talk.calls] == [talk_room.talk_ref] * len(
-            fake_talk.calls
-        )
+        # A set, not a list padded to its own length: that form is trivially
+        # true of an empty `calls` and leans on the `posted is not None` above
+        # to have any content at all.
+        assert {c.token for c in fake_talk.calls} == {talk_room.talk_ref}
 
     @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_native_talk_reply_lifts_read_sync_cap(

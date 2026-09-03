@@ -75,9 +75,12 @@ def _origin_room(conn):
 
     Built through `tests/support/rooms.py`, so the `talk` binding points at a
     different string from the canonical token — a real promotion's shape. The
-    hand-rolled version bound `talk -> rm_web123`, which no producer writes and
-    under which a room-token/Talk-ref mix-up on any leg here would be
-    invisible. Every assertion keys on the canonical token, still `ROOM`.
+    hand-rolled version bound `talk -> rm_web123`, which no producer writes.
+    Every assertion keys on the canonical token, still `ROOM`.
+
+    Latent rather than load-bearing, for the reason
+    `test_email_self_reply_mirror.py`'s copy of this docstring sets out: no
+    test here reaches the Talk seam, so nothing yet observes the divergence.
     """
     return promoted_room(conn, USER, canonical=ROOM, talk_ref="talktok_rmweb123")
 

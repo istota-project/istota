@@ -3018,6 +3018,10 @@ class TestProcessOneTask:
         assert task.status == "failed"
         assert task.attempt_count == 0
         mock_alert.assert_called_once()
+        # The seed is only doing its job if nothing was refused: a mistyped
+        # token would be refused and swallowed, leaving the test green and the
+        # room fixture silently inert.
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task", return_value=(
         False,
@@ -3097,6 +3101,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.status == "pending_confirmation"
         assert task.confirmation_prompt is not None
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.run_coro", return_value=None)
@@ -3221,6 +3226,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.status == "completed"
         assert task.confirmation_prompt is None
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.run_coro", return_value=None)
@@ -3772,6 +3778,10 @@ class TestAutoIndexGate:
             )
         process_one_task(config)
         mock_index.assert_not_called()
+        # The seed is only doing its job if nothing was refused: a mistyped
+        # token would be refused and swallowed, leaving the room fixture
+        # silently inert and the test green.
+        assert fake_talk.refusals == []
 
     @patch("istota.memory.search.index_conversation")
     @patch("istota.scheduler.execute_task", return_value=(True, "Briefing for today", None, None))
@@ -3806,6 +3816,7 @@ class TestAutoIndexGate:
             )
         process_one_task(config)
         assert mock_index.call_count >= 1
+        assert fake_talk.refusals == []
 
     @patch("istota.memory.search.index_conversation")
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
@@ -3826,6 +3837,7 @@ class TestAutoIndexGate:
             )
         process_one_task(config)
         mock_index.assert_not_called()
+        assert fake_talk.refusals == []
 
 
 # ---------------------------------------------------------------------------
@@ -7903,6 +7915,9 @@ class TestPostResultToTalk:
                 "message": "Part 2", "reply_to": None, "reference_id": None,
             }),
         ]
+        # A refused call records the same token and the same args, so the
+        # comparison above is equally true of two posts Nextcloud rejected.
+        assert fake_talk.refusals == []
 
     @pytest.mark.asyncio
     async def test_group_chat_no_talk_message_id(self, fake_talk, room):
@@ -7919,6 +7934,7 @@ class TestPostResultToTalk:
                 "message": "@dave Response", "reply_to": None, "reference_id": None,
             }),
         ]
+        assert fake_talk.refusals == []
 
     @pytest.mark.asyncio
     async def test_group_chat_no_threading_for_progress_updates(self, fake_talk, room):
@@ -7937,6 +7953,7 @@ class TestPostResultToTalk:
                 "reference_id": None,
             }),
         ]
+        assert fake_talk.refusals == []
 
     @pytest.mark.asyncio
     async def test_reference_id_passed_through(self, fake_talk, room):
@@ -7954,6 +7971,7 @@ class TestPostResultToTalk:
                 "reference_id": "istota:task:1:result",
             }),
         ]
+        assert fake_talk.refusals == []
 
 
 class TestWorkerPoolConcurrencyCaps:
@@ -8764,6 +8782,9 @@ class TestMalformedResultGuard:
         assert result is not None
         task_id, success = result
         assert success is False
+        # Self-checking seed: a token the room fixture never bound would be
+        # refused and swallowed, leaving this green and the fixture inert.
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=None)
@@ -8816,6 +8837,8 @@ class TestMalformedResultGuard:
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.status == "failed"
+        # Self-checking seed, as above.
+        assert fake_talk.refusals == []
 
 
 # ---------------------------------------------------------------------------

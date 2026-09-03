@@ -280,6 +280,34 @@ class TestReturnShapes:
         )
         assert fake_talk.sent_id_for("istota:task:7:prompt") is None
 
+    async def test_sent_id_for_takes_the_last_part_of_a_split_message(
+        self, fake_talk, rooms,
+    ):
+        """`TalkTransport.deliver` gives every part of a split message the same
+        `reference_id` and returns the *last* part's id, which is the one the
+        caller stores. Matching the first would agree on every short message
+        and disagree on exactly the long ones."""
+        token = rooms["plain"].talk_ref
+        first = await fake_talk.send_message(
+            token, "Part 1", reference_id="istota:task:7:result",
+        )
+        last = await fake_talk.send_message(
+            token, "Part 2", reference_id="istota:task:7:result",
+        )
+        assert first["ocs"]["data"]["id"] != last["ocs"]["data"]["id"]
+        assert fake_talk.sent_id_for("istota:task:7:result") == (
+            last["ocs"]["data"]["id"]
+        )
+
+    async def test_sent_id_for_refuses_a_falsy_reference_id(
+        self, fake_talk, rooms,
+    ):
+        """An unlabelled send records `reference_id: None`, so a `None`
+        argument would otherwise match it and return a real id."""
+        await fake_talk.send_message(rooms["plain"].talk_ref, "unlabelled")
+        assert fake_talk.sent_id_for(None) is None
+        assert fake_talk.sent_id_for("") is None
+
     async def test_sent_id_for_skips_a_refused_send(self, fake_talk, rooms):
         """A refused send is not "the post did not happen for my reason"."""
         with pytest.raises(UnknownTalkRoom):
