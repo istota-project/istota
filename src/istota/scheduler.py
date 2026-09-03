@@ -2799,6 +2799,12 @@ def process_one_task(
     # (ISSUE-172).
     stored_assistant_msg_id: int | None = None
 
+    # The `confirmation` row written when a task parks, kept in scope past the
+    # transaction because its push may still be owed at the tail (ISSUE-404):
+    # the branch that writes it withholds delivery when the Talk post is
+    # carrying the question instead, and that post can fail.
+    held_notification: RaiseResult | None = None
+
     # A once-job whose table row was deleted inside the transaction below, and
     # whose CRON.md entry therefore still has to go: `(user_id, job_name)`.
     # Buffered rather than written in place, the same shape as
@@ -2877,8 +2883,12 @@ def process_one_task(
                     body=confirmation_source.body_for(result),
                     room_token=transcript_token,
                 )
+                # Withheld here, and owed at the tail if that push fails —
+                # see the `talk_undelivered` arm at the end of this function
+                # (ISSUE-404). `held_notification` stays in scope for it.
                 if post_talk_message is None:
                     notification_results.append(held_notification)
+                    held_notification = None
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
@@ -3465,6 +3475,10 @@ def process_one_task(
     # result is always a separate Talk message (the ack carries progress); the
     # Talk subscriber never posts the result, so no dedup is needed.
     response_msg_id = None
+    # A Talk post was attempted and came back with no message id (ISSUE-404).
+    # Read after the email leg has had its say, since both write the one
+    # buffered `failure_alert`.
+    talk_undelivered = False
     if post_talk_message:
         # For a web-origin mirror leg, repost the user's question (attributed)
         # before the reply so the Talk transcript isn't an orphaned answer. Pure
@@ -3520,6 +3534,20 @@ def process_one_task(
                 config, talk_token, post_talk_mirror_body,
                 talk_message_id=response_msg_id,
             )
+        # `TalkTransport.deliver` catches every exception, logs one line and
+        # returns None — the right contract, since a Nextcloud outage must not
+        # turn a successful task into a failed one, but nothing read the value
+        # it returns to say so. Every site below is `if response_msg_id:` with
+        # no else, so a `ReadTimeout` on the final post was indistinguishable
+        # here from a task that had no Talk leg at all and the answer was lost
+        # in silence (ISSUE-404).
+        #
+        # `post_talk_message` is the predicate, not the `plan_talk and
+        # talk_token` pair the email arm keys on: the silent-scheduled-job
+        # branch sets `post_talk_message` under `if talk_token:` alone, since it
+        # bypasses the delivery plan entirely, and that answer is just as lost.
+        # Being inside this block is the same test, stated once.
+        talk_undelivered = response_msg_id is None
     # Store bot's response message ID for reply tracking
     if response_msg_id and not is_failure_notify:
         try:
@@ -3603,21 +3631,29 @@ def process_one_task(
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
             if (task.withheld_from_room or email_from_the_user) \
-                    and not (plan_talk and talk_token):
+                    and not (plan_talk and talk_token and response_msg_id):
                 # The answer exists and nothing carries it (ISSUE-255, second arm
                 # added by ISSUE-275 — see the permanent-failure branch above for
                 # why `withheld_from_room` alone stopped covering it). With a
-                # room leg the Talk post has already landed and the assistant row
-                # is stored, so a failed send costs the mail copy alone; with an
-                # email-only plan `tasks.result` is the only copy left, and
-                # nothing puts it in front of the user. Carry the body itself
-                # rather than a pointer — the point is that the answer survives
-                # the failure, not that its loss is announced.
+                # room leg that *landed*, the assistant row is stored and the
+                # answer is in front of the user, so a failed send costs the mail
+                # copy alone; with an email-only plan `tasks.result` is the only
+                # copy left, and nothing puts it in front of the user. Carry the
+                # body itself rather than a pointer — the point is that the
+                # answer survives the failure, not that its loss is announced.
                 #
-                # The guard is `plan_talk and talk_token`, the same pair the
-                # permanent-failure branch keys on, not `plan_talk` alone: a plan
-                # can carry a Talk leg whose channel resolves to None, in which
-                # case nothing was posted and the answer is just as lost.
+                # The guard is three terms and each removes a different way of
+                # believing an answer landed when it did not. `plan_talk` alone
+                # is not enough — a plan can carry a Talk leg whose channel
+                # resolves to None, so `talk_token` is the pair the
+                # permanent-failure branch also keys on. And the pair alone is
+                # not enough either (ISSUE-404): `TalkTransport.deliver` returns
+                # None on a `ReadTimeout` exactly as it does on a room that
+                # resolved to nothing, so `response_msg_id` is what makes this a
+                # question about the post rather than about the plan. With both
+                # legs down the pair suppressed the last notice there was, and
+                # an emailed request whose answer reached neither surface was
+                # silent on both.
                 # Unwrapped for the same reason the room transcript unwraps it
                 # (ISSUE-247): an email task's `result` may *be* the
                 # `{"subject","body","format"}` envelope the send path parses, and
@@ -3668,6 +3704,82 @@ def process_one_task(
                 web_result = result
             for dest in web_foreign_dests:
                 run_coro(web_transport.deliver(dest.channel, web_result, task=task))
+
+    # A confirmation prompt whose Talk push failed already has the right notice
+    # written, so this is the deferred half of a decision made above rather than
+    # a new one (ISSUE-404). The branch that parks the task writes the
+    # `confirmation` row unconditionally and withholds its push only because
+    # `post_talk_message` was going to carry the question — so a post that never
+    # landed leaves an actionable, object-backed row that nothing delivered, and
+    # the task dies at `expire_stale_confirmations` two hours later with the
+    # question having reached nobody. `deliver_pending` re-reads the row and
+    # sends only while it is still open, which is what makes a second call safe.
+    #
+    # This has to run ahead of the generic arm and take the case away from it: a
+    # `task_alert` here would be strictly worse than nothing, since it is
+    # non-actionable and auto-resolves on being seen, so the copy the user opens
+    # would close itself in front of the `confirmation` row that carries the
+    # `!confirm` verbs.
+    #
+    # Deliberately not gated on `_talk_is_mirror`. An email-origin confirmation
+    # is posted on its mirror leg on purpose — that leg is the only push surface
+    # that can reach the user, because the email leg must never carry the
+    # question — so the carve-out below would leave exactly the shape the
+    # confirmation gate's own comment records fixing.
+    if talk_undelivered and held_notification is not None:
+        deliver_pending(config, [held_notification])
+
+    # A Talk leg that carried the message and posted nothing (ISSUE-404). Last,
+    # after every other leg, because there is one buffered `failure_alert` and
+    # the email arms above have the stronger claim on it — they also mark the
+    # task failed, and they carry the same body.
+    #
+    # Not a mirror leg. A mirror is the room fan-out of a web- or email-origin
+    # task, so Talk is the copy and the answer is somewhere else: `_store_room_
+    # turn` has written the canonical `messages` row that the web room renders,
+    # and for a web-origin task the stream carried it live. Alerting there would
+    # tell a user their answer was lost while it sits in the room they are
+    # looking at, on every web-origin task for the length of a Nextcloud outage,
+    # on the one channel that has to stay worth reading. The canonical row is
+    # the backstop, and not the email arm above — that one is additionally gated
+    # on the answer being the *user's* own, so it says nothing about an external
+    # correspondent's reply, which is the shape where the mirror is the user's
+    # only view.
+    #
+    # It fires for every source type, including a briefing or a cron job, and
+    # that is a decision rather than an omission: what this arm exists to stop is
+    # content that was generated and delivered nowhere, and an automated task's
+    # answer is lost exactly as thoroughly as an interactive one's. The sibling
+    # suppression at the permanent-failure branch is about *errors*, which is a
+    # different thing to put in front of a user. Where `alert` routes back to
+    # Talk the send fails too and the row stays open, which is the outcome the
+    # inbox exists for.
+    #
+    # Two accepted trades, both stated rather than fixed. The alert can be
+    # routed to the very room that just refused the post, in which case only the
+    # row survives. And a long message is posted part by part, so a failure on
+    # part 3 of 5 returns None with parts 1 and 2 already in the room and this
+    # delivers the whole body again — a duplicate beats a silently truncated
+    # answer, and `deliver` reports no more than it knows.
+    #
+    # It never touches the task's status, deliberately unlike the email arm.
+    # This runs on three shapes with three different statuses — a completed
+    # answer, a `failed` task's apology, and (above) a parked confirmation — so
+    # there is no one status to write, and on the common one the log channel has
+    # already posted a completed line and the assistant row is already stored.
+    # Flipping it would leave those records disagreeing about whether the task
+    # ran, and would offer a re-run — another model call — for a failure that
+    # was never in the model. The inbox row is what makes the loss durable.
+    if talk_undelivered and held_notification is None \
+            and not _talk_is_mirror and failure_alert is None:
+        # "message", not "reply": on the permanent-failure path this body is the
+        # apology for a task that failed, not an answer to anything.
+        failure_alert = (
+            f"⚠️ **Could not post to Talk** (task #{task.id})\n\n"
+            "The message is below so it is not lost:\n\n"
+            f"{post_talk_message}"
+        )
+        failure_alert_title = f"Could not post to Talk — task #{task.id}"
 
     if failure_alert:
         # Last, and after every DB transaction above has closed. Best-effort by
@@ -6279,7 +6391,8 @@ def _write_undelivered_row(
                 body=message,
                 severity="warning",
                 # There is no in-app action: the answer is in the row and in
-                # `tasks.result`, and resending the mail is the user's move.
+                # `tasks.result`, and retrying the delivery — resending the mail,
+                # or asking again once Talk is back — is the user's move.
                 actionable=False,
                 params={"task_id": task.id, "source_type": task.source_type},
                 room_token=task.conversation_token,
