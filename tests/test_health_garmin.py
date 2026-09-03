@@ -18,6 +18,7 @@ import pytest
 
 from istota import db as framework_db
 from istota.health import garmin as gm
+from tests.support.monotonic_spy import monotonic_spy
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +293,7 @@ class TestPending:
         # Fast-forward past the TTL by patching monotonic.
         import time as _time
         base = _time.monotonic() + gm.PENDING_AUTH_TTL_SEC + 60
-        monkeypatch.setattr(gm.time, "monotonic", lambda: base)
+        monotonic_spy(monkeypatch, gm, lambda: base)
 
         with pytest.raises(gm.GarminAuthError, match="no pending"):
             gm.complete_mfa(fdb, user_id="alice", code="123456")

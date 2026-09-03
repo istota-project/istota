@@ -62,6 +62,12 @@ TIMEOUT = 30
 #: gives up. Not the request timeout: this covers nginx not being up yet.
 CONNECT_RETRY_SECONDS = 60
 
+#: How long to wait between connection attempts inside that window. A constant
+#: rather than a literal so a test can zero it: the loop is bounded by wall
+#: clock, so skipping the wait without shortening the window spins a core for
+#: the whole of it (ISSUE-411).
+CONNECT_RETRY_POLL_SECONDS = 1.0
+
 #: The user ids the full shape provisions, and the defaults `attach` uses.
 #: They mirror `stack.FULL_IDENTITY`, which is what compose is actually given;
 #: the two cannot import each other (stack imports services), so a unit test
@@ -430,7 +436,7 @@ class NextcloudService:
                         f"{method} {path} never connected {waited} (the "
                         f"stack's nginx, on {self.base_url}): {exc}"
                     ) from None
-                time.sleep(1.0)
+                time.sleep(CONNECT_RETRY_POLL_SECONDS)
             except ValueError as exc:
                 raise NextcloudError(
                     f"{method} {path} did not answer JSON: {exc}"

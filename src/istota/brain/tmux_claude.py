@@ -87,7 +87,10 @@ _PANE_HEIGHT = 50
 # How long to wait for the REPL to become ready before injecting the prompt.
 _READY_TIMEOUT_S = 30.0
 _READY_POLL_S = 0.4
-# Sentinel poll cadence while waiting for the Stop hook to fire.
+# Sentinel poll cadence while waiting for the Stop hook to fire. Also the
+# tailer's, and the tailer reads it every iteration off a *thread* — where it
+# is an `Event.wait` rather than a `time.sleep`, so zeroing it in a test that
+# starts one buys a spinning core rather than a skipped wait.
 _SENTINEL_POLL_S = 0.4
 # After the Stop hook fires, the assistant's final turn may still be flushing to
 # the transcript JSONL. Poll briefly for the final turn to land before parsing so

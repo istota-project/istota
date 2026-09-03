@@ -13,13 +13,14 @@ from istota.brain._fallback import (
     reset_availability_breaker,
 )
 from istota.config import BrainConfig
+from tests.support.monotonic_spy import monotonic_spy
 
 
 class TestBreaker:
     def test_open_returns_true_once(self, monkeypatch):
         import istota.brain._fallback as mod
         clock = [100.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         b = PrimaryAvailabilityBreaker()
         assert b.open("claude_code", 300) is True   # closed → open
         assert b.open("claude_code", 300) is False  # already open
@@ -27,7 +28,7 @@ class TestBreaker:
     def test_should_skip_within_and_after_cooldown(self, monkeypatch):
         import istota.brain._fallback as mod
         clock = [0.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         b = PrimaryAvailabilityBreaker()
         b.open("claude_code", 300)
         assert b.should_skip("claude_code", 300) is True
@@ -56,7 +57,7 @@ class TestBreaker:
     def test_reopen_after_cooldown_arms_new_alert(self, monkeypatch):
         import istota.brain._fallback as mod
         clock = [0.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         b = PrimaryAvailabilityBreaker()
         assert b.open("x", 100) is True
         clock[0] = 101.0
@@ -70,7 +71,7 @@ class TestBreaker:
         # forever. Window is [0, 100); a re-open at t=90 must not push it out.
         import istota.brain._fallback as mod
         clock = [0.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         b = PrimaryAvailabilityBreaker()
         assert b.open("x", 100) is True
         clock[0] = 90.0
@@ -83,7 +84,7 @@ class TestBreaker:
     def test_success_does_not_close_a_breaker_opened_after_its_probe(self, monkeypatch):
         import istota.brain._fallback as mod
         clock = [0.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         b = PrimaryAvailabilityBreaker()
         b.open("x", 100)
         clock[0] = 101.0
@@ -102,7 +103,7 @@ class TestDeadline:
     def _clocked(self, monkeypatch, start=0.0):
         import istota.brain._fallback as mod
         clock = [start]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         return clock, PrimaryAvailabilityBreaker()
 
     def test_until_shortens_the_window(self, monkeypatch):

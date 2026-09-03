@@ -97,6 +97,8 @@ pytest.importorskip("bs4", reason="browser render module needs bs4")
 
 import browse_api  # noqa: E402  (import after the stubs + path insert)
 
+from tests.support.sleep_spy import sleep_spy  # noqa: E402  (same reason)
+
 
 def _write_cdp_health(**fields):
     """Set the record directly, the way the other browser tests poke globals.
@@ -195,7 +197,7 @@ def _poisoned_playwright(monkeypatch, message="Playwright Sync API inside the as
     sp = mock.MagicMock(name="sync_playwright")
     sp.start.side_effect = _raise
     monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
-    monkeypatch.setattr(chrome.time, "sleep", lambda _s: None)
+    sleep_spy(monkeypatch, chrome, record=False)
 
 
 def _run_on_another_thread(fn):
