@@ -420,28 +420,81 @@ class TestTheMessageDelete:
 
         assert [c.bearer_token for c in fake_talk_web.calls] == ["live-at"]
 
-    async def test_the_user_client_here_is_never_closed(
+    async def test_the_user_client_is_closed_on_the_way_out(
         self, fake_talk_web, web_app_module, db_path, room,
     ):
-        """A pinned product gap, not a passing assertion about correct code.
+        """The user-scoped client is built per call, so this path owns its
+        lifetime and nothing else can end it.
 
-        `_delete_from_talk` is the one site of seven that builds its client
-        inline as an argument to `_attempt` and never calls `aclose()`, so the
-        `httpx.AsyncClient` that `delete_message` opens is leaked on every web
-        message delete in a Talk-bound room. Found by this stage's review, left
-        for its own change: a deletion path is a boundary surface and deserves
-        one rather than a drive-by edit here. Filed as ISSUE-403.
+        `delete_message` opens an `httpx.AsyncClient` behind the client, and
+        once `_delete_from_talk` returns no reference to it survives — so a
+        construction not matched by an `aclose()` is a connection pool leaked on
+        every web message delete in a Talk-bound room, silently, because the
+        whole function is best-effort and reports nothing (ISSUE-403).
 
-        Written as an equality against today's answer so that fixing the
-        product turns this red and whoever fixes it updates the number, instead
-        of the gap quietly outliving the note.
+        Both halves are the assertion. `closes == 1` alone is equally true of a
+        second client built and closed while the first was dropped, and
+        `constructions == 1` alone says nothing about the leak.
+
+        The construction count is 1 rather than 2 because `fake_talk` patches
+        `async_runtime.get_talk_client` as well, so the bot leg is handed the
+        instance and constructs nothing. Without that patch the real factory
+        runs, builds through the patched class, and the number is 2 here for a
+        reason that has nothing to do with this property.
         """
         _store(db_path, "live-at")
 
         await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
 
         assert fake_talk_web.calls, "nothing ran, so this proves nothing"
-        assert fake_talk_web.closes == 0
+        assert len(fake_talk_web.constructions) == 1
+        assert fake_talk_web.closes == 1
+
+    async def test_the_pooled_bot_client_is_left_open(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The complement, and why the count above is 1 rather than "one per
+        client this path used".
+
+        The bot leg comes from `async_runtime.get_talk_client`, a process-wide
+        singleton whose lifetime belongs to the runtime's cleanup hook; closing
+        it here would take every later Talk call in the process with it. So the
+        `finally` covers the user client alone, and the fix for ISSUE-403 is
+        wrong in the other direction if this number moves.
+
+        The 403 is what drives both legs at once, which also makes this the
+        case where the user client is closed on a path where its own call
+        *failed* — the leak was on every outcome, not only the happy one.
+        """
+        _store(db_path, "live-at")
+        fake_talk_web.bearer_rejections["live-at"] = 403
+
+        await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+
+        assert [c.bearer_token for c in fake_talk_web.calls] == ["live-at", None]
+        assert len(fake_talk_web.constructions) == 1
+        assert fake_talk_web.closes == 1
+
+    async def test_the_client_is_closed_when_the_call_raises_outright(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The third of `_attempt`'s three exits, and the one the other two
+        cases cannot reach.
+
+        A 403 leaves through `except httpx.HTTPStatusError`; a success leaves
+        through the `return` inside the `try`. An unbound ref raises
+        `UnknownTalkRoom` from the double's own check, which lands in the bare
+        `except Exception` — the arm that catches a connection failure, which is
+        exactly the state a leaked pool is most likely to be in. Both legs take
+        it, so the bot leg is asked and the user client is still closed once.
+        """
+        _store(db_path, "live-at")
+
+        await web_app_module._delete_from_talk("alice", "no-such-room", "5150")
+
+        assert [c.bearer_token for c in fake_talk_web.refusals] == ["live-at", None]
+        assert len(fake_talk_web.constructions) == 1
+        assert fake_talk_web.closes == 1
 
     async def test_a_non_numeric_id_reaches_no_client(
         self, fake_talk_web, web_app_module, db_path, room,

@@ -437,7 +437,7 @@ async def test_a_401_forces_a_refresh_and_retries_once(fake_talk_web, room, ...)
 
 Also still uncovered: nothing puts the double behind a `!search` through `commands` — the `async_runtime` patch *reaches* it, but `search_messages` is on no seam and not on the double, so such a call gets an `AttributeError` — and the double still accepts a dead binding (ISSUE-401), by the same rule that makes it accept a live one.
 
-One product defect the instrument found and did not fix: `_delete_from_talk` never closes its user-scoped client, alone among the seven, so every web message delete in a Talk-bound room leaks an `httpx` pool. `tests/test_web_talk_seams.py::TestTheMessageDelete::test_the_user_client_here_is_never_closed` pins today's answer, so a fix turns it red rather than passing unnoticed.
+One product defect the instrument found, filed as ISSUE-403 and since fixed: `_delete_from_talk` built its user-scoped client inline as an argument and never closed it, alone among the seven, so every web message delete in a Talk-bound room leaked the `httpx` pool behind it. The two tests that replaced the pin assert the property from both sides — the constructed client is closed on every outcome, and the pooled bot client the fallback leg uses is not, since that one belongs to the runtime's cleanup hook.
 
 ## Shared fixtures (`conftest.py`)
 

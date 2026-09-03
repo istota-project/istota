@@ -6557,10 +6557,15 @@ async def _delete_from_talk(
         access = await asyncio.to_thread(
             web_tokens.get_access_token, _config.db_path, _config, username,
         )
-        if access and await _attempt(
-            TalkClient(_config, bearer_token=access, timeout=5), "user",
-        ):
-            return
+        if access:
+            # Per-call and held by nothing else, so it is closed here; the bot
+            # client below is the runtime's singleton and is not (ISSUE-403).
+            user_client = TalkClient(_config, bearer_token=access, timeout=5)
+            try:
+                if await _attempt(user_client, "user"):
+                    return
+            finally:
+                await user_client.aclose()
 
     if not _config or not _config.nextcloud.url:
         return

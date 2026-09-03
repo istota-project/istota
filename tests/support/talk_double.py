@@ -223,20 +223,22 @@ class TalkConstruction:
 
     Six of `web_app`'s seven sites construct a client per attempt, so the count
     is the attempt count — which is how a test tells "retried once" from
-    "retried in a loop" without reaching into the product.
+    "retried in a loop" without reaching into the product. The seventh is the
+    promote path, which holds one client across `create_conversation`,
+    `add_participant` and `send_message`.
 
-    Two exclusions, both found in review and both easy to trip over:
+    One exclusion, found in review and easy to trip over: **a client fetched
+    through `get_talk_client` is not counted here.** `talk_bot_client` hands
+    back the same instance without recording a construction, so
+    `_delete_from_talk`'s two attempts — one bearer, one bot — produce two
+    `calls` and one construction. Read `calls` on any path with a bot leg.
 
-    - **A client fetched through `get_talk_client` is not counted here.**
-      `talk_bot_client` hands back the same instance without recording a
-      construction, so `_delete_from_talk`'s two attempts — one bearer, one bot
-      — produce two `calls` and one construction. Read `calls` on any path with
-      a bot leg.
-    - **`_delete_from_talk` never closes its user client**, alone among the
-      seven, so `closes` is not the construction count either. That is a
-      product defect rather than a modelling choice; `tests/test_web_talk_seams.py`
-      pins the current behaviour so a fix turns it red instead of passing
-      unnoticed.
+    Which is also why `closes` is not simply the construction count on such a
+    path, and why that is correct rather than a gap: `web_app` closes what it
+    constructs and leaves the singleton to the runtime's own cleanup hook, so
+    those two attempts produce one close. ISSUE-403 was the case where the
+    numbers disagreed for the other reason — a constructed client nobody closed
+    — and `tests/test_web_talk_seams.py` now pins both directions.
     """
 
     bearer_token: str | None
