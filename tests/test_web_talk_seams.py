@@ -430,7 +430,7 @@ class TestTheMessageDelete:
         `httpx.AsyncClient` that `delete_message` opens is leaked on every web
         message delete in a Talk-bound room. Found by this stage's review, left
         for its own change: a deletion path is a boundary surface and deserves
-        one rather than a drive-by edit here.
+        one rather than a drive-by edit here. Filed as ISSUE-403.
 
         Written as an equality against today's answer so that fixing the
         product turns this red and whoever fixes it updates the number, instead
