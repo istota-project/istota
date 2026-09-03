@@ -650,6 +650,80 @@ class TalkClient:
             messages = list(reversed(messages))
         return messages
 
+    async def get_signaling_settings(self) -> dict:
+        """Talk's signaling settings for the authenticated account.
+
+        Returns ``server`` (the HPB URL), ``signalingMode`` and
+        ``helloAuthParams`` carrying both a ``1.0`` (userid + ticket) and a
+        ``2.0`` (JWT) form (``SignalingController.php:263-289``);
+        ``transport/talk/signaling.parse_settings`` reads the shape.
+
+        No ``token`` parameter — the neutral point, which is what a
+        non-room-specific call wants. The credential it mints is per *user*,
+        so one fetch serves every room's connection, and the settings call is
+        the thing a burst of reconnects shares rather than repeats.
+
+        **Called before every non-resume hello, uncached beyond a few
+        seconds.** Talk mints the JWT ``exp = iat + 60`` (``lib/Config.php:815``)
+        and the signaling server allows a minute of leeway either way
+        (``hub.go:147``), so a token held across a backoff of more than a
+        minute or two comes back ``token_expired``.
+        """
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v3/signaling/settings"
+        )
+
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        return _ocs_data(response, "signaling settings", default={})
+
+    async def join_room_session(self, conversation_token: str) -> str:
+        """Create a Talk session for this account in a room, and return its id.
+
+        ``POST …/participants/active``. This is what puts istota in the room's
+        participant list and what the signaling server's ping loop then keeps
+        warm; the returned id is the ``sessionid`` of the signaling room-join
+        frame. ``force: true`` is what the reference client sends and what
+        supersedes a previous session (``participantsService.js:32-34``,
+        ``RoomController.php:2165-2172``).
+
+        An answer with no ``sessionId`` raises rather than returning an empty
+        string. A room join built without one does not degrade to a
+        user-scoped join: the signaling server substitutes its own public
+        session id for the empty one (``hub.go:1937-1943``) and Nextcloud
+        answers the generic ``no_such_room``, which also means "no such room"
+        and "not a participant". Naming the real cause here is the only place
+        it can be named.
+        """
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
+            f"/{conversation_token}/participants/active"
+        )
+
+        client = await self._ensure_open()
+        response = await client.post(
+            url,
+            auth=self.auth,
+            headers=self._headers(json_body=True),
+            json={"force": True},
+        )
+        response.raise_for_status()
+        data = _ocs_data(
+            response, f"join room session {conversation_token}", default={},
+        )
+        session_id = data.get("sessionId") if isinstance(data, dict) else None
+        if not session_id or not isinstance(session_id, str):
+            raise TalkResponseError(
+                f"join room session {conversation_token}: no sessionId in the "
+                f"OCS data (keys: {sorted(data) if isinstance(data, dict) else type(data).__name__})"
+            )
+        return session_id
+
     async def get_participants(self, conversation_token: str) -> list[dict]:
         """Get participants of a conversation."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}/participants"
