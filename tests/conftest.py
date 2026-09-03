@@ -265,7 +265,7 @@ def db_conn(db_path):
 
 @pytest.fixture
 def fake_talk(db_path):
-    """A `FakeTalkClient` behind both of the `get_talk_client` bindings.
+    """A `FakeTalkClient` behind every `get_talk_client` binding.
 
     `get_talk_client` is imported at module level in two places —
     `transport/talk/__init__.py` and `transport/talk/inbound.py` — so this
@@ -273,6 +273,19 @@ def fake_talk(db_path):
     poller and `_post_ack` talking to the real factory, which is a hole shaped
     exactly like the bug the double exists to catch;
     `tests/test_support_talk_double.py` has a control for it.
+
+    It also patches `async_runtime.get_talk_client` itself, which is what
+    *reaches* the two function-local importers — `web_app._delete_from_talk`'s
+    bot fallback and `commands`' `!search` — since a function-local import
+    resolves the name at call time. Reached is not covered: `!search` calls
+    `search_messages`, which is on no seam and not on the double, so it gets an
+    `AttributeError` rather than an answer. All three go through `talk_bot_client`, which clears
+    any bearer token left on the shared instance by a `fake_talk_web`
+    construction: `get_talk_client` returns the basic-auth bot client, and
+    `_delete_from_talk` asks for it directly after a user-scoped attempt failed.
+
+    It does **not** reach `web_app`'s seven direct `TalkClient(...)`
+    constructions. Those need `fake_talk_web`, below.
 
     **Not autouse.** An autouse patch would change every existing test's
     behaviour in one commit and make the conversion unreviewable.
@@ -299,16 +312,47 @@ def fake_talk(db_path):
     from istota import scheduler as scheduler_module
     from istota.transport.talk import inbound as talk_inbound
 
-    from .support.talk_double import FakeTalkClient
+    from .support.talk_double import FakeTalkClient, talk_bot_client
 
     client = FakeTalkClient(db_path)
+    bot = talk_bot_client(client)
     scheduler_module._channel_name_cache.clear()
     talk_inbound._participant_cache.clear()
-    with patch("istota.transport.talk.get_talk_client", return_value=client), \
-         patch("istota.transport.talk.inbound.get_talk_client", return_value=client):
+    with patch("istota.transport.talk.get_talk_client", bot), \
+         patch("istota.transport.talk.inbound.get_talk_client", bot), \
+         patch("istota.async_runtime.get_talk_client", bot):
         yield client
     scheduler_module._channel_name_cache.clear()
     talk_inbound._participant_cache.clear()
+
+
+@pytest.fixture
+def fake_talk_web(fake_talk):
+    """The same double, additionally behind `web_app`'s own constructions.
+
+    `web_app.py` builds `TalkClient(...)` directly in seven places, each with a
+    per-user OAuth bearer token — the promote path that *creates* a promoted
+    room, the post-as-user mirror, the read push and pull, the rename
+    propagation, the message delete and the liveness probe. There is no factory
+    to patch, so the class itself is the seam: this replaces
+    `istota.talk.TalkClient`, which every one of those sites imports
+    function-locally and therefore resolves at call time.
+
+    Depends on `fake_talk` rather than repeating it, so a web test gets one
+    double behind both — which is what `_delete_from_talk` needs, since it tries
+    the user's client and then the bot's.
+
+    Two things a web test still has to do itself: point the module global
+    (`web_app._config`) at a config on the same `db_path`, and store a token for
+    the user, since `web_tokens.feature_enabled` gates every one of these paths
+    before a client is built.
+    """
+    from unittest.mock import patch
+
+    from .support.talk_double import talk_client_factory
+
+    with patch("istota.talk.TalkClient", talk_client_factory(fake_talk)):
+        yield fake_talk
 
 
 @pytest.fixture

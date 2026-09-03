@@ -405,7 +405,7 @@ Both return a `RoomShape` carrying `canonical`, `talk_ref`, `origin`, `name` and
 
 A third shape neither builder makes: a Talk-origin room a user later also opens in web chat, so it carries a web binding while `canonical == talk_ref`. Add it when something needs it rather than faking it locally.
 
-The `fake_talk` fixture puts `tests/support/talk_double.py`'s `FakeTalkClient` behind **both** module-level `get_talk_client` bindings (`transport/talk/__init__.py` and `transport/talk/inbound.py` — patching only the first leaves the whole poller on the real factory). It is not autouse, it reads the `db_path` fixture's database, and it clears the two process-lifetime caches sitting in front of the seams. One rule on every method taking a token: accept it if it is a live `talk` `surface_ref` in `room_bindings` or if it is in `known_channels`, otherwise raise `UnknownTalkRoom` and record the attempt with `refused=True`.
+The `fake_talk` fixture puts `tests/support/talk_double.py`'s `FakeTalkClient` behind every `get_talk_client` binding: both module-level ones (`transport/talk/__init__.py` and `transport/talk/inbound.py` — patching only the first leaves the whole poller on the real factory) and the definition site in `async_runtime`, which is what reaches the two function-local importers (`web_app._delete_from_talk`, `commands`' `!search`), since a function-local import resolves the name at call time. It is not autouse, it reads the `db_path` fixture's database, and it clears the two process-lifetime caches sitting in front of the seams. One rule on every method taking a token: accept it if it is a live `talk` `surface_ref` in `room_bindings` or if it is in `known_channels`, otherwise raise `UnknownTalkRoom` and record the attempt with `refused=True`.
 
 **Assert on `calls`, never on the absence of a raise.** The product swallows: `TalkTransport.deliver` catches and returns None, `scheduler.edit_talk_message` catches and returns False, `inbound._post_ack` catches and logs. A refusal is swallowed exactly as a real 404 would be, so a test that only reaches the end of the function proves nothing. Pair every count with `refusals == []` as well, because a post refused for naming the canonical token reads exactly like a post correctly suppressed.
 
@@ -414,7 +414,30 @@ Two escape hatches, and they are not interchangeable:
 - **`known_channels` is data and needs no justification.** Plenty of tokens are legitimately unbound and are ordinary product behaviour: `alerts_channel`, `log_channel`, the first briefing token, `default_destination`, an auto-detected 1:1 DM, and a room `provision_rooms.py` created that the Talk poller has not yet seen. Name the channel and move on.
 - **`strict=False` needs a stated reason on the line.** It accepts everything, so it removes the guard for that test rather than widening it, and under it `refused` is False on every row and the `refusals` list says nothing at all. It is for the genuinely unmodellable case — `talk_channel_for_task` rung 3 can hand back an email thread hash that names nothing anywhere. As of the delivery conversion nothing outside the double's own test file uses it, which is the state to keep: a routine opt-out is not a guard.
 
-**What the double does not reach.** `web_app.py` constructs `TalkClient(...)` directly in seven places, including `_chat_promote_to_talk`, which creates the promoted shape, and `_post_as_user`, which posts a web turn to the room's Talk ref. They take a per-user OAuth bearer token, so they need a construction-site patch rather than a factory patch. Two function-local `get_talk_client` imports are also outside the fixture, which patches module-level bindings only: one in `web_app`, one in `commands` (`!search`) — so the hole is not only the web process. A green suite says nothing about any of them.
+**The web process needs the second fixture, `fake_talk_web`.** `web_app.py` constructs `TalkClient(...)` directly in seven places — the promote path that creates the promoted shape, the post-as-user mirror, the read push and pull, the rename propagation, the message delete and the liveness probe — and each takes a per-user OAuth bearer token, so there is no factory to patch and the class itself is the seam. `fake_talk_web` depends on `fake_talk` and additionally replaces `istota.talk.TalkClient`, so one double stands behind both; a web test using `fake_talk` alone still reaches the real client. Two things the test still does itself: point `web_app._config` at a config on the same `db_path`, and store a token for the user, since `web_tokens.feature_enabled` gates every one of those paths before a client is built.
+
+Every construction returns **the same instance**, which is what lets `calls` span an attempt and its retry. `constructions` is the history (`bearer_token`, `timeout`), `TalkCall.bearer_token` is what pins one call to one construction, and `created_tokens` holds what `create_conversation` minted — bound to nothing, deliberately, so `_chat_promote_to_talk`'s `add_participant` and seed post are refused unless the product wrote the binding first.
+
+**A bearer client can fail two ways, and the double keeps them apart.** `_post_as_user` and `_mark_read_as_user` each force-refresh the token once on a **401** and retry, so a double whose only unhappy answer was `UnknownTalkRoom` would turn a stale credential into a misroute and delete that coverage without failing anything. `bearer_rejections` maps a bearer token to the status the server answers with; the answer raises `httpx.HTTPStatusError` and is recorded as `TalkCall.status`, never as `refused`, so `refusals == []` goes on meaning "nothing that reached the room check was misrouted". Read that qualifier literally: the credential is checked first, as Nextcloud does it, so a call that was both stale-credentialled and misrouted never reaches the room check and leaves `refusals` empty. A test setting `bearer_rejections` pairs `refusals == []` with `auth_failures`; the ~30 existing assertions elsewhere are unaffected, since the bot carries no bearer.
+
+**One coroutine at a time.** Every construction returns the same instance, so `bearer_token` is a field two in-flight calls would share: `constructions` would interleave and a call would record whichever construction ran last. Nothing hits that today, because these tests drive the coroutines directly rather than through an endpoint — but `chat_read_all_rooms` fires one `_push_read_to_talk` per moved room, so an endpoint-driven test would, and it wants a per-construction facade over a shared ledger before it can read `constructions` positionally.
+
+```python
+async def test_a_401_forces_a_refresh_and_retries_once(fake_talk_web, room, ...):
+    fake_talk_web.bearer_rejections["stale-at"] = 401
+    ...
+    assert [c.bearer_token for c in fake_talk_web.constructions] == ["stale-at", "fresh-at"]
+    assert fake_talk_web.refusals == []          # a stale token is not a misroute
+```
+
+`tests/test_web_talk_seams.py` is the file that drives these. **The fixture reaches all seven sites; five are driven end to end and two are not**, which is the honest form of the claim:
+
+- **The rename propagation** lives inside the `PATCH /chat/rooms/{id}` handler, so reaching it needs an ASGI-driven test rather than a direct call. It resolves its token through `_room_talk_binding`, which is exactly the canonical-vs-`surface_ref` question, so it is worth adding.
+- **`_talk_conversation_seen_by_user`** is reachable only through `_talk_conversation_verdict`'s **bot** 404, and the double's second failure mode is keyed on the bearer token, which the bot has none of. An unknown token there raises `UnknownTalkRoom`, lands in the generic handler and reads as `unknown`, so the `gone` / `bot_removed` verdicts and the whole rebind branch cannot be driven. Expressing it wants a token-keyed rejection map beside the bearer-keyed one, and the one-coroutine constraint above has to be lifted first, because the promote path holds a bot client across the call that would build a user one.
+
+Also still uncovered: nothing puts the double behind a `!search` through `commands` — the `async_runtime` patch *reaches* it, but `search_messages` is on no seam and not on the double, so such a call gets an `AttributeError` — and the double still accepts a dead binding (ISSUE-401), by the same rule that makes it accept a live one.
+
+One product defect the instrument found and did not fix: `_delete_from_talk` never closes its user-scoped client, alone among the seven, so every web message delete in a Talk-bound room leaks an `httpx` pool. `tests/test_web_talk_seams.py::TestTheMessageDelete::test_the_user_client_here_is_never_closed` pins today's answer, so a fix turns it red rather than passing unnoticed.
 
 ## Shared fixtures (`conftest.py`)
 
@@ -426,6 +449,7 @@ Two escape hatches, and they are not interchangeable:
 | `make_config` | Factory for creating Config objects |
 | `make_user_config` | Factory for creating UserConfig objects |
 | `fake_talk` | A Talk client that refuses a token Nextcloud would refuse — see "Room shapes, and the Talk double" above |
+| `fake_talk_web` | The same double, additionally behind `web_app`'s own `TalkClient(...)` constructions |
 
 Three autouse fixtures apply to every test whether you ask for them or not: `_no_network_symbol_lookups` (fails a test that tries to resolve a ticker symbol over the network), `_reset_async_runtime_singletons` (drops the persistent asyncio loop and pooled HTTP client between tests), and `_reset_expunge_warning_latch` (clears the once-per-process IMAP expunge warning).
 

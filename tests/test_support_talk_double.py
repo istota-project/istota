@@ -20,6 +20,7 @@ import inspect
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 
 from istota import async_runtime, db, talk
@@ -33,8 +34,11 @@ from .support.talk_double import (
     BrokenTalkDouble,
     FakeTalkClient,
     TalkCall,
+    TalkConstruction,
     UnknownTalkAttachment,
     UnknownTalkRoom,
+    talk_bot_client,
+    talk_client_factory,
     talk_refs_in,
 )
 
@@ -512,6 +516,231 @@ class TestPollMessages:
         assert await fake_talk.poll_messages(token, last_known_message_id=2) == []
 
 
+class TestTheConstructionSitePatch:
+    """`talk_client_factory`, which is what reaches `web_app`.
+
+    Asserted directly here rather than only through the web paths, because a
+    factory returning a fresh instance per construction would leave every
+    web-side assertion looking at an empty `calls` — green, and proving nothing.
+    """
+
+    def test_every_construction_returns_the_one_instance(self, fake_talk):
+        factory = talk_client_factory(fake_talk)
+        first = factory(None, bearer_token="a", timeout=5)
+        second = factory(None, bearer_token="b", timeout=5)
+        assert first is fake_talk and second is fake_talk
+
+    def test_it_records_what_the_product_asked_for(self, fake_talk):
+        factory = talk_client_factory(fake_talk)
+        factory(None)
+        factory(None, bearer_token="live-at", timeout=5)
+        assert fake_talk.constructions == [
+            TalkConstruction(bearer_token=None, timeout=None),
+            TalkConstruction(bearer_token="live-at", timeout=5),
+        ]
+
+    async def test_a_call_carries_the_current_construction_s_bearer(
+        self, fake_talk, rooms,
+    ):
+        factory = talk_client_factory(fake_talk)
+        factory(None, bearer_token="stale-at", timeout=5)
+        await fake_talk.send_message(rooms["plain"].talk_ref, "one")
+        factory(None, bearer_token="fresh-at", timeout=5)
+        await fake_talk.send_message(rooms["plain"].talk_ref, "two")
+        assert [c.bearer_token for c in fake_talk.calls] == [
+            "stale-at", "fresh-at",
+        ]
+
+    async def test_the_bot_client_carries_no_bearer(self, fake_talk, rooms):
+        """`_delete_from_talk` tries the user, then the bot, on one instance.
+
+        Without the reset in `talk_bot_client` the bot inherits the credential
+        the user attempt just failed with, and the fallback the product has
+        cannot be told from a second failure of the same kind.
+        """
+        talk_client_factory(fake_talk)(None, bearer_token="user-at", timeout=5)
+        bot = talk_bot_client(fake_talk)(None)
+        await bot.send_message(rooms["plain"].talk_ref, "as the bot")
+        assert fake_talk.calls[-1].bearer_token is None
+
+    async def test_aclose_is_counted_not_honoured(self, fake_talk, rooms):
+        await fake_talk.aclose()
+        await fake_talk.send_message(rooms["plain"].talk_ref, "still open")
+        assert fake_talk.closes == 1
+        assert fake_talk.refusals == []
+
+
+class TestABearerTokenTheServerRejects:
+    """The 401 both retrying callers exist for, expressible as data.
+
+    The trap this closes: a double whose only unhappy answer is
+    `UnknownTalkRoom` makes a stale credential and a misroute the same event, so
+    `_post_as_user`'s retry can neither be driven nor distinguished — and a test
+    written against such a double would report the retry as covered.
+    """
+
+    async def test_it_raises_the_status_the_product_branches_on(
+        self, fake_talk, rooms,
+    ):
+        fake_talk.bearer_rejections["stale-at"] = 401
+        talk_client_factory(fake_talk)(None, bearer_token="stale-at", timeout=5)
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
+        assert excinfo.value.response.status_code == 401
+
+    async def test_it_is_recorded_as_a_status_and_not_as_a_refusal(
+        self, fake_talk, rooms,
+    ):
+        """`refusals == []` means "nothing was misrouted" in thirty-odd files."""
+        fake_talk.bearer_rejections["stale-at"] = 401
+        talk_client_factory(fake_talk)(None, bearer_token="stale-at", timeout=5)
+        with pytest.raises(httpx.HTTPStatusError):
+            await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
+        assert fake_talk.refusals == []
+        assert [(c.method, c.status) for c in fake_talk.auth_failures] == [
+            ("send_message", 401),
+        ]
+
+    async def test_the_credential_answers_before_the_room_does(
+        self, fake_talk, rooms,
+    ):
+        """Nextcloud authenticates before it routes, so a rejected token
+        answers 401 even for a token naming nothing — and the misroute only
+        surfaces on the retry, once the credential is good."""
+        fake_talk.bearer_rejections["stale-at"] = 401
+        factory = talk_client_factory(fake_talk)
+        factory(None, bearer_token="stale-at", timeout=5)
+        with pytest.raises(httpx.HTTPStatusError):
+            await fake_talk.send_message(rooms["promoted"].canonical, "hi")
+        factory(None, bearer_token="fresh-at", timeout=5)
+        with pytest.raises(UnknownTalkRoom):
+            await fake_talk.send_message(rooms["promoted"].canonical, "hi")
+        assert [(c.status, c.refused) for c in fake_talk.calls] == [
+            (401, False), (None, True),
+        ]
+
+    async def test_a_fresh_token_is_not_rejected(self, fake_talk, rooms):
+        fake_talk.bearer_rejections["stale-at"] = 401
+        talk_client_factory(fake_talk)(None, bearer_token="fresh-at", timeout=5)
+        resp = await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
+        assert resp["ocs"]["data"]["id"] == fake_talk.sent_ids[-1]
+
+    async def test_sent_id_for_survives_a_rejected_send(self, fake_talk, rooms):
+        """The 401 retry's own regression test, and it was a live defect.
+
+        `sent_id_for` used to keep its own index of accepted sends and read
+        `sent_ids` positionally. A credential rejection is recorded with
+        `refused=False` and mints no id, so from the first 401 the two lists
+        were one apart: this exact scenario raised `IndexError` out of a test
+        helper, and with one more send it silently returned the *previous*
+        post's id. The id now travels on the call.
+        """
+        fake_talk.bearer_rejections["stale-at"] = 401
+        factory = talk_client_factory(fake_talk)
+        factory(None, bearer_token="stale-at", timeout=5)
+        with pytest.raises(httpx.HTTPStatusError):
+            await fake_talk.send_message(
+                rooms["plain"].talk_ref, "hi", reference_id="istota:task:1:ack",
+            )
+        factory(None, bearer_token="fresh-at", timeout=5)
+        await fake_talk.send_message(
+            rooms["plain"].talk_ref, "hi", reference_id="istota:task:1:ack",
+        )
+        await fake_talk.send_message(
+            rooms["plain"].talk_ref, "and again", reference_id="istota:task:1:result",
+        )
+
+        assert fake_talk.sent_id_for("istota:task:1:ack") == fake_talk.sent_ids[0]
+        assert fake_talk.sent_id_for("istota:task:1:result") == fake_talk.sent_ids[1]
+        assert len(fake_talk.sent_ids) == 2, "a rejected send must mint nothing"
+
+    async def test_the_bot_is_never_rejected_by_a_bearer_rule(
+        self, fake_talk, rooms,
+    ):
+        """`bearer_token` is None in basic-auth mode, and `None` must not match
+        a `bearer_rejections` entry by accident."""
+        fake_talk.bearer_rejections[""] = 401
+        await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
+        assert fake_talk.auth_failures == []
+
+
+class TestTheWebSeamMethods:
+    """The rule applies to the methods only `web_app` calls, too."""
+
+    @pytest.mark.parametrize("method,args", [
+        ("add_participant", ("alice",)),
+        ("rename_conversation", ("new name",)),
+        ("delete_conversation", ()),
+        ("delete_message", (12,)),
+    ])
+    async def test_a_canonical_token_is_refused(
+        self, fake_talk, rooms, method, args,
+    ):
+        with pytest.raises(UnknownTalkRoom):
+            await getattr(fake_talk, method)(rooms["promoted"].canonical, *args)
+        assert [c.refused for c in fake_talk.calls] == [True]
+
+    @pytest.mark.parametrize("method,args", [
+        ("add_participant", ("alice",)),
+        ("rename_conversation", ("new name",)),
+        ("delete_conversation", ()),
+        ("delete_message", (12,)),
+    ])
+    async def test_the_talk_ref_is_accepted(self, fake_talk, rooms, method, args):
+        await getattr(fake_talk, method)(rooms["promoted"].talk_ref, *args)
+        assert fake_talk.refusals == []
+
+    async def test_create_conversation_mints_a_token_bound_to_nothing(
+        self, fake_talk, db_path,
+    ):
+        room = await fake_talk.create_conversation("a new room")
+        assert room["token"] == fake_talk.created_tokens[-1]
+        assert room["token"] not in talk_refs_in(db_path)
+        # Which is exactly why the next call against it is refused until the
+        # product writes the binding — the promote path's real assertion.
+        with pytest.raises(UnknownTalkRoom):
+            await fake_talk.add_participant(room["token"], "alice")
+
+    async def test_two_creates_do_not_collide(self, fake_talk):
+        first = await fake_talk.create_conversation("one")
+        second = await fake_talk.create_conversation("two")
+        assert first["token"] != second["token"]
+
+    async def test_mark_read_swallows_by_default(self, fake_talk, rooms):
+        """The real client's own contract, and the swallowing control for it."""
+        assert await fake_talk.mark_conversation_read(
+            rooms["promoted"].canonical,
+        ) is False
+        assert [c.refused for c in fake_talk.calls] == [True]
+
+    async def test_mark_read_raises_when_asked_to(self, fake_talk, rooms):
+        with pytest.raises(UnknownTalkRoom):
+            await fake_talk.mark_conversation_read(
+                rooms["promoted"].canonical, raise_on_error=True,
+            )
+
+    async def test_mark_read_returns_true_for_a_bound_ref(self, fake_talk, rooms):
+        assert await fake_talk.mark_conversation_read(
+            rooms["promoted"].talk_ref,
+        ) is True
+
+    async def test_a_401_reaches_a_caller_that_asked_for_it(
+        self, fake_talk, rooms,
+    ):
+        """`_mark_read_as_user` passes `raise_on_error=True` precisely so it can
+        see the 401 and force a refresh. Swallowing it here would take that
+        away without failing anything."""
+        fake_talk.bearer_rejections["stale-at"] = 401
+        talk_client_factory(fake_talk)(None, bearer_token="stale-at", timeout=5)
+        with pytest.raises(httpx.HTTPStatusError):
+            await fake_talk.mark_conversation_read(
+                rooms["plain"].talk_ref, raise_on_error=True,
+            )
+        assert await fake_talk.mark_conversation_read(
+            rooms["plain"].talk_ref,
+        ) is False
+
+
 class TestTheSeamControl:
     """`get_talk_client` is imported at module level in two places.
 
@@ -544,18 +773,66 @@ class TestTheSeamControl:
         would satisfy a `is not None`.
         """
         patched = {"istota.transport.talk", "istota.transport.talk.inbound"}
-        importers = set()
-        for path in Path(async_runtime.__file__).parent.rglob("*.py"):
-            source = path.read_text()
-            # Module level, i.e. not indented. A function-local import (web_app,
-            # commands) is out of the fixture's reach by construction and is
-            # documented as uncovered rather than pinned here.
-            if re.search(r"^from [.\w]*async_runtime import .*get_talk_client",
-                         source, re.MULTILINE):
-                importers.add(_module_name_for(path))
-        assert importers == patched
+        assert self._importers(r"^from") == patched
         assert talk_pkg.get_talk_client is async_runtime.get_talk_client
         assert talk_inbound.get_talk_client is async_runtime.get_talk_client
+
+    def test_the_function_local_importers_are_the_two_written_down(self):
+        """These are covered by the third patch, on `async_runtime` itself.
+
+        A function-local import resolves the name at call time, so patching the
+        definition site reaches every one of them — which is why this pins the
+        set rather than the patching. A third `from` import is reached
+        automatically; it is listed here so somebody confirms that rather than
+        assuming it.
+        """
+        # `[ \t]`, not `\s`: with `re.MULTILINE` a `\s+` after `^` matches the
+        # preceding newline, so every module-level import reads as indented and
+        # the two sets collapse into one.
+        assert self._importers(r"^[ \t]+from") == {
+            "istota.web_app", "istota.commands",
+        }
+
+    def test_the_definition_site_is_patched(self, fake_talk, talk_config):
+        """Which is what actually reaches those two.
+
+        Pinned directly rather than by driving either caller, because neither
+        would prove it. `commands`' one calls `search_messages`, which is on no
+        seam and would have to be added to the double for one test; and
+        `web_app._delete_from_talk`'s bot fallback is reached by the
+        *construction* patch anyway — `get_talk_client` builds its singleton
+        with a lazy `from .talk import TalkClient` — so under `fake_talk_web` it
+        stays green with this patch removed. Measured, not assumed.
+        """
+        assert async_runtime.get_talk_client(talk_config) is fake_talk
+
+    def test_nothing_reaches_it_as_an_attribute(self):
+        """The spelling both `_importers` pins are blind to.
+
+        `from . import async_runtime` followed by `async_runtime.get_talk_client(...)`
+        matches neither anchor, and a module that captured the function into a
+        local name would not be reached by the patch either. No such call site
+        exists; this is what keeps the two pins above honest about their own
+        scope, since their regex only ever sees the `from … import` form.
+        """
+        root = Path(async_runtime.__file__).parent
+        offenders = {
+            _module_name_for(path)
+            for path in root.rglob("*.py")
+            if re.search(r"\basync_runtime\.get_talk_client\b", path.read_text())
+            and _module_name_for(path) != "istota.async_runtime"
+        }
+        assert offenders == set()
+
+    @staticmethod
+    def _importers(anchor: str) -> set[str]:
+        found = set()
+        for path in Path(async_runtime.__file__).parent.rglob("*.py"):
+            source = path.read_text()
+            if re.search(anchor + r" [.\w]*async_runtime import .*get_talk_client",
+                         source, re.MULTILINE):
+                found.add(_module_name_for(path))
+        return found
 
 
 # The methods the two patched seams call on their client, written down so a
@@ -576,9 +853,32 @@ SEAM_METHODS = {
     "send_message",
 }
 
+# The same, for `web_app`'s own `TalkClient(...)` constructions. A separate set
+# because the two seams are patched separately and a method can belong to one
+# and not the other — `aclose` is called by every web site and by neither
+# `get_talk_client` seam, since those hand back a singleton nobody closes.
+WEB_SEAM_METHODS = {
+    "aclose",
+    "add_participant",
+    "create_conversation",
+    "delete_conversation",
+    "delete_message",
+    "get_conversation_info",
+    "list_conversations",
+    "mark_conversation_read",
+    "rename_conversation",
+    "send_message",
+}
+
+# `web_app` has one other receiver literally named `client`: the
+# `httpx.AsyncClient` in `_fetch_userinfo`. Subtracted by name rather than by
+# narrowing the regex, so a *second* method appearing on it fails the walk and
+# somebody looks, instead of being silently absorbed.
+NOT_A_TALK_CLIENT = {"get"}
+
 # Public on the double and on no real client — helpers for the tests, not part
 # of the shadowed surface.
-DOUBLE_ONLY = {"calls_to", "refusals", "sent_id_for"}
+DOUBLE_ONLY = {"auth_failures", "calls_to", "refusals", "sent_id_for"}
 
 
 class TestPinnedAgainstTheSeams:
@@ -600,8 +900,28 @@ class TestPinnedAgainstTheSeams:
         )
         assert called == SEAM_METHODS
 
-    def test_every_method_the_two_seams_call_exists_on_the_double(self):
-        missing = {m for m in SEAM_METHODS if not hasattr(FakeTalkClient, m)}
+    def test_the_walked_web_set_is_the_written_down_set(self):
+        """`web_app`'s receivers are `client` and `user_client`.
+
+        `_talk_conversation_verdict` takes its client as a parameter also named
+        `client`, so the same walk covers it; `_delete_from_talk`'s inner
+        `_attempt` does too, which is what puts `delete_message` in the set for
+        both the user and the bot credential.
+        """
+        # Read rather than imported: `istota.web_app` needs fastapi and authlib,
+        # which are an optional extra, and this pin has to hold in the default
+        # suite whether or not they are installed.
+        source = (Path(async_runtime.__file__).parent / "web_app.py").read_text()
+        called = set(re.findall(
+            r"\b(?:user_)?client\.([a-z_][a-z_0-9]*)\(", source,
+        )) - NOT_A_TALK_CLIENT
+        assert called == WEB_SEAM_METHODS
+
+    def test_every_method_a_seam_calls_exists_on_the_double(self):
+        missing = {
+            m for m in SEAM_METHODS | WEB_SEAM_METHODS
+            if not hasattr(FakeTalkClient, m)
+        }
         assert missing == set()
 
     def test_every_shadowing_method_still_exists_on_the_real_client(self):
@@ -616,11 +936,11 @@ class TestPinnedAgainstTheSeams:
             m for m, value in vars(FakeTalkClient).items()
             if not m.startswith("_") and callable(value)
         } - DOUBLE_ONLY
-        assert shadowing == SEAM_METHODS
+        assert shadowing == SEAM_METHODS | WEB_SEAM_METHODS
         orphaned = {m for m in shadowing if not hasattr(talk.TalkClient, m)}
         assert orphaned == set()
 
-    @pytest.mark.parametrize("name", sorted(SEAM_METHODS))
+    @pytest.mark.parametrize("name", sorted(SEAM_METHODS | WEB_SEAM_METHODS))
     def test_each_shadowed_signature_matches_the_real_client(self, name):
         """A parameter renamed or reordered on `TalkClient` would leave the
         double accepting calls the real client rejects. Names and kinds only —
