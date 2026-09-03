@@ -321,7 +321,20 @@ def poll_all_tasks_files(config: Config) -> list[int]:
     discovered_files = discover_tasks_files(config)
 
     for tasks_file in discovered_files:
-        task_ids = poll_user_tasks_file(config, tasks_file.owner_id, tasks_file.file_path)
+        # One user's file must not cost every user after it in the listing.
+        # `poll_user_tasks_file` handles its own read errors but nothing stood
+        # between a raise inside it and the rest of the sweep — which
+        # `db.create_task` made reachable when it started refusing a user id
+        # that cannot name a directory (ISSUE-402).
+        try:
+            task_ids = poll_user_tasks_file(
+                config, tasks_file.owner_id, tasks_file.file_path,
+            )
+        except Exception as e:  # noqa: BLE001 — one owner, not the sweep
+            logger.error(
+                "Error polling TASKS.md for %s: %s", tasks_file.owner_id, e,
+            )
+            continue
         all_task_ids.extend(task_ids)
 
     return all_task_ids

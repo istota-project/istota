@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import db
 from . import user_profiles
+from .user_scope import is_scopable_user_id
 from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
@@ -154,13 +155,19 @@ def cmd_task(args):
         return
 
     with db.get_db(config.db_path) as conn:
-        task_id = db.create_task(
-            conn,
-            prompt=prompt,
-            user_id=args.user,
-            source_type=source_type,
-            conversation_token=args.conversation_token,
-        )
+        try:
+            task_id = db.create_task(
+                conn,
+                prompt=prompt,
+                user_id=args.user,
+                source_type=source_type,
+                conversation_token=args.conversation_token,
+            )
+        except ValueError as e:
+            # This entry point is one of the three the guard exists for
+            # (ISSUE-402), so the refusal is intended — a traceback is not.
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         print(f"Task created: {task_id}")
 
     if args.execute:
@@ -210,6 +217,17 @@ def cmd_repl(args):
     if not user_id:
         print(
             "Error: could not infer a user; pass -u/--user.", file=sys.stderr,
+        )
+        sys.exit(1)
+    # Checked once here rather than caught per turn: `db.create_task` refuses a
+    # user id that cannot name a directory of its own (ISSUE-402), and a session
+    # that accepted `-u` and then failed on every line is worse than one that
+    # declines to start.
+    if not is_scopable_user_id(user_id):
+        print(
+            f"Error: user {user_id!r} cannot name a per-user directory; it must "
+            "be a non-empty path component other than '.' or '..'.",
+            file=sys.stderr,
         )
         sys.exit(1)
 
