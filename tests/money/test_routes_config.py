@@ -861,3 +861,23 @@ class TestInvoicingScalarHardening:
             "/istota/api/money/config/invoicing", json={"next_invoice_number": 0},
         )
         assert resp.status_code == 400
+
+
+class TestMonarchSyncSettings:
+    def test_rejects_unparseable_default_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch",
+            json={"default_account": "Assets:Bank (Checking)"},
+        )
+        assert resp.status_code == 400
+        body = client.get("/istota/api/money/config/monarch").json()
+        assert body["sync"]["default_account"] == "Assets:Bank:Checking"
+
+    def test_accepts_a_valid_default_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch",
+            json={"default_account": "Assets:Bank:Savings"},
+        )
+        assert resp.status_code == 200
+        body = client.get("/istota/api/money/config/monarch").json()
+        assert body["sync"]["default_account"] == "Assets:Bank:Savings"

@@ -2297,7 +2297,10 @@ async def api_config_monarch_put(
     cfg = config_store.load_monarch(user_ctx.db_path)
     for k, v in body.items():
         setattr(cfg.sync, k, v)
-    config_store.save_monarch(user_ctx.db_path, cfg, replace_collections=False)
+    try:
+        config_store.save_monarch(user_ctx.db_path, cfg, replace_collections=False)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
     return {"status": "ok"}
 
 

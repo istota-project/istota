@@ -240,6 +240,16 @@ def _migrate_section(ctx: UserContext, section: str) -> dict | None:
 
         try:
             summary = _IMPORTERS[section](db_path, parsed)
+        except ValueError as exc:
+            # Content the importer refuses, same class as an unparseable file.
+            # `ensure_initialised` runs on every money call, so raising here
+            # would take the module down for that user until the file was fixed.
+            logger.warning(
+                "money_legacy_rejected section=%s path=%s error=%s",
+                section, legacy_path, exc,
+            )
+            _release_lock(db_path, section)
+            return None
         except Exception:
             # Importer failed; release the lock so the next run can retry.
             _release_lock(db_path, section)

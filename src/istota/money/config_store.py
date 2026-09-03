@@ -2246,6 +2246,10 @@ def save_monarch(
     Credentials are NOT persisted here — they belong to the encrypted
     ``secrets`` table managed by :mod:`istota.secrets_store`.
     """
+    _check_profile_accounts({
+        "default_account": cfg.sync.default_account,
+        "recategorize_account": cfg.sync.recategorize_account,
+    })
     init_db(db_path)
     with _connect(db_path) as conn:
         _kv_set(conn, "monarch_settings",
@@ -2290,6 +2294,10 @@ def _upsert_profile_row(
     p: MonarchProfile,
     global_sync: MonarchSyncSettings,
 ) -> int:
+    _check_profile_accounts({
+        "default_account": p.sync.default_account,
+        "recategorize_account": p.sync.recategorize_account,
+    })
     lookback = (
         p.sync.lookback_days
         if p.sync.lookback_days != global_sync.lookback_days
@@ -2327,6 +2335,8 @@ def _upsert_profile_row(
 def _replace_account_map(
     conn: sqlite3.Connection, profile_id: int, mapping: dict[str, str], *, clear: bool,
 ) -> None:
+    for key, value in (mapping or {}).items():
+        _check_map_account("account-map", key, value)
     if clear:
         conn.execute(
             "DELETE FROM monarch_account_map WHERE profile_id = ?", (profile_id,),
@@ -2342,6 +2352,8 @@ def _replace_account_map(
 def _replace_category_map(
     conn: sqlite3.Connection, profile_id: int, mapping: dict[str, str], *, clear: bool,
 ) -> None:
+    for key, value in (mapping or {}).items():
+        _check_map_account("category-map", key, value)
     if clear:
         conn.execute(
             "DELETE FROM monarch_category_map WHERE profile_id = ?", (profile_id,),
@@ -2404,6 +2416,7 @@ def upsert_monarch_profile(
     db_path: Path | str, name: str, **fields: Any,
 ) -> tuple[dict, str]:
     """Upsert a monarch profile. ``ledger`` required for create."""
+    _check_profile_accounts(fields)
     init_db(db_path)
     with _connect(db_path) as conn:
         existing = conn.execute(
@@ -2463,6 +2476,27 @@ def _check_map_account(kind: str, key: str, value: str) -> None:
         )
 
 
+_PROFILE_ACCOUNT_FIELDS = ("default_account", "recategorize_account")
+
+
+def _check_profile_accounts(fields: dict) -> None:
+    """Reject a profile account beancount could not parse.
+
+    `map_monarch_account` returns `default_account` verbatim for a Monarch
+    account with no mapping, so it reaches the ledger the same way a map target
+    does. An empty value clears the column and the global setting applies.
+    """
+    for name in _PROFILE_ACCOUNT_FIELDS:
+        value = fields.get(name)
+        if value in (None, ""):
+            continue
+        if not isinstance(value, str) or not _is_account(value):
+            raise ValueError(
+                f"invalid {name}: {value!r} — expected a beancount account "
+                "like Assets:Bank:Checking",
+            )
+
+
 def set_account_map_entry(
     db_path: Path | str, profile: str | None,
     monarch_name: str, beancount_account: str,
@@ -2518,8 +2552,6 @@ def get_account_map(
 def replace_account_map(
     db_path: Path | str, profile: str | None, mapping: dict[str, str],
 ) -> None:
-    for key, value in mapping.items():
-        _check_map_account("account-map", key, value)
     init_db(db_path)
     with _connect(db_path) as conn:
         pid = _resolve_profile_id(conn, profile)
@@ -2582,8 +2614,6 @@ def get_category_map(
 def replace_category_map(
     db_path: Path | str, profile: str | None, mapping: dict[str, str],
 ) -> None:
-    for key, value in mapping.items():
-        _check_map_account("category-map", key, value)
     init_db(db_path)
     with _connect(db_path) as conn:
         pid = _resolve_profile_id(conn, profile)

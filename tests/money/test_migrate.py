@@ -518,3 +518,45 @@ class TestBackfillWorkEntryIds:
         year = self._write_legacy_entry(ctx)
         _migrate.ensure_initialised(ctx)
         assert "uid = " in year.read_text()
+
+
+MONARCH_TOML_BAD_ACCOUNT = """\
+[monarch.sync]
+lookback_days = 45
+default_account = "Assets:Bank (Checking)"
+"""
+
+
+class TestMigrateRejectedContent:
+    """A legacy file the importer refuses must not take the module down.
+
+    `ensure_initialised` runs on every money call, so a raise here would make
+    the module unusable for that user until somebody edited a file nothing had
+    told them about.
+    """
+
+    def test_a_rejected_file_is_skipped_not_fatal(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        path = _write_workspace_config(
+            tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT,
+        )
+        _migrate.ensure_initialised(ctx)
+
+        assert config_store.get_meta(
+            ctx.db_path, "monarch_legacy_imported_at",
+        ) is None
+        assert path.exists(), "the legacy file stays put so it can be corrected"
+        assert config_store.load_monarch(ctx.db_path).sync.default_account == (
+            "Assets:Bank:Checking"
+        )
+
+    def test_the_corrected_file_imports_on_the_next_run(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        path = _write_workspace_config(
+            tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT,
+        )
+        _migrate.ensure_initialised(ctx)
+        path.write_text(MONARCH_TOML)
+        _migrate.ensure_initialised(ctx)
+
+        assert config_store.load_monarch(ctx.db_path).sync.lookback_days == 45

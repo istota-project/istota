@@ -14,6 +14,7 @@ from istota.money.core.models import (
     InvoicingConfig,
     MonarchConfig,
     MonarchCredentials,
+    MonarchProfile,
     MonarchSyncSettings,
     MonarchTagFilters,
     ServiceConfig,
@@ -1016,3 +1017,122 @@ class TestInvoicingScalarShapes:
 
     def test_blank_values_are_a_noop(self):
         cs.check_invoicing_scalars({"default_ar_account": "", "currency": ""})
+
+
+class TestMonarchAccountsReachTheLedger:
+    """Every config value naming an account the sync posts to is shape-checked.
+
+    The map writers were guarded first, but they are not the only route: a
+    profile's `default_account` is what `map_monarch_account` returns verbatim
+    for an unmapped Monarch account, and `save_monarch` writes both the maps
+    and the profile rows without going through the guarded wrappers.
+    """
+
+    def test_profile_create_rejects_unparseable_default_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with pytest.raises(ValueError, match="default_account"):
+            cs.upsert_monarch_profile(
+                db_path, "acme", ledger="acme",
+                default_account="Assets:Bank (Checking)",
+            )
+        assert cs.list_monarch_profiles(db_path) == []
+
+    def test_profile_create_rejects_unparseable_recategorize_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with pytest.raises(ValueError, match="recategorize_account"):
+            cs.upsert_monarch_profile(
+                db_path, "acme", ledger="acme",
+                recategorize_account="Expenses:Personal Expense",
+            )
+
+    def test_profile_update_rejects_unparseable_default_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cs.upsert_monarch_profile(
+            db_path, "acme", ledger="acme",
+            default_account="Assets:Bank:Checking",
+        )
+        with pytest.raises(ValueError, match="default_account"):
+            cs.upsert_monarch_profile(
+                db_path, "acme", default_account="Assets:Bank (Checking)",
+            )
+        row = cs.list_monarch_profiles(db_path)[0]
+        assert row["default_account"] == "Assets:Bank:Checking"
+
+    def test_profile_accepts_a_valid_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        _, state = cs.upsert_monarch_profile(
+            db_path, "acme", ledger="acme",
+            default_account="Assets:Bank:Checking",
+            recategorize_account="Expenses:Personal-Expense",
+        )
+        assert state == "created"
+
+    def _config(self, **kw) -> MonarchConfig:
+        return MonarchConfig(
+            credentials=MonarchCredentials(),
+            sync=kw.pop("sync", MonarchSyncSettings()),
+            accounts=kw.pop("accounts", {}),
+            categories=kw.pop("categories", {}),
+            tags=MonarchTagFilters(),
+            profiles=kw.pop("profiles", []),
+        )
+
+    def test_save_rejects_unparseable_category_map_target(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cfg = self._config(categories={
+            "Internet Services (Reimbursed)":
+                "Expenses:Uncategorized:InternetServices(Reimbursed)",
+        })
+        with pytest.raises(ValueError, match="category-map"):
+            cs.save_monarch(db_path, cfg, replace_collections=True)
+        assert cs.get_category_map(db_path, None) == {}
+
+    def test_save_rejects_unparseable_account_map_target(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cfg = self._config(accounts={"Visa": "Liabilities Visa"})
+        with pytest.raises(ValueError, match="account-map"):
+            cs.save_monarch(db_path, cfg, replace_collections=True)
+
+    def test_save_rejects_unparseable_profile_default_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cfg = self._config(profiles=[MonarchProfile(
+            name="acme", ledger="acme",
+            sync=MonarchSyncSettings(default_account="Assets:Bank (Checking)"),
+            accounts={}, categories={}, tags=MonarchTagFilters(),
+        )])
+        with pytest.raises(ValueError, match="default_account"):
+            cs.save_monarch(db_path, cfg, replace_collections=True)
+
+    def test_save_accepts_a_valid_config(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cfg = self._config(
+            categories={"Internet Services (Reimbursed)": "Expenses:Internet-Services"},
+            accounts={"Visa": "Liabilities:Visa-Fidelity"},
+        )
+        cs.save_monarch(db_path, cfg, replace_collections=True)
+        assert cs.get_category_map(db_path, None) == {
+            "Internet Services (Reimbursed)": "Expenses:Internet-Services",
+        }
+
+    def test_a_rejected_save_leaves_the_stored_config_alone(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        cs.save_monarch(
+            db_path,
+            self._config(categories={"Internet Services": "Expenses:Internet-Services"}),
+            replace_collections=True,
+        )
+        bad = self._config(categories={"Fees": "Expenses:Fees (Bank)"})
+        with pytest.raises(ValueError, match="category-map"):
+            cs.save_monarch(db_path, bad, replace_collections=True)
+        assert cs.get_category_map(db_path, None) == {
+            "Internet Services": "Expenses:Internet-Services",
+        }
