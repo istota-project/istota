@@ -1,7 +1,7 @@
 """`web_app`'s own Talk calls, through the strict double.
 
 Until now the double reached the daemon and not the web process. `web_app.py`
-constructs `TalkClient(...)` directly in seven places — each with a per-user
+constructs `TalkClient(...)` directly in eight places — most with a per-user
 OAuth bearer token, so there is no `get_talk_client` to patch — and two of them
 are the paths most exposed to ISSUE-400: `_chat_promote_to_talk`, which *creates*
 the divergence between a room's canonical token and its Talk ref, and
@@ -23,6 +23,8 @@ token once and tries again, and a double whose only unhappy answer was
 coverage. `bearer_rejections` is what keeps the two apart; see
 `tests/support/talk_double.py`.
 """
+
+from unittest.mock import patch
 
 import pytest
 
@@ -354,6 +356,47 @@ class TestThePromotePath:
         ]
         assert fake_talk_web.created_tokens == []
 
+    async def test_a_bot_removed_from_a_live_conversation_replaces_nothing(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The verdict the whole rebind path is built around (ISSUE-401).
+
+        Talk's room read is participant-scoped, so the bot's 404 means "deleted"
+        or "the bot was removed" and only the first may mint a replacement — a
+        replacement for the second forks a conversation that keeps its history
+        and its other participants and is then reachable by nothing. The user
+        can still see it, so nothing is touched.
+
+        This and its sibling were unreachable under this fixture until ISSUE-407
+        widened `bearer_rejections` to key the bot's basic auth as well: the
+        bot's 404 had no way to be expressed, so both verdicts fell through to
+        `unknown` on the generic arm and the branch went uncovered.
+        """
+        _store(db_path, "live-at")
+        fake_talk_web.bearer_rejections[None] = 404
+
+        status, _payload = await web_app_module._chat_promote_to_talk(
+            "alice", self._handle_id(db_path, room),
+        )
+
+        assert status == "bot_removed"
+        assert fake_talk_web.created_tokens == []
+        assert [c.bearer_token for c in fake_talk_web.calls] == [None, "live-at"]
+
+    # The `gone` verdict — the only one that may rebind — is still not drivable
+    # here, and the reason is the nesting hazard `FakeTalkClient` records rather
+    # than anything about the 404. One instance serves every construction, so
+    # the user client built *inside* `_talk_conversation_seen_by_user` leaves its
+    # bearer on the shared object; the outer bot client then carries it, and
+    # `bearer_rejections["live-at"] = 404` refuses the `create_conversation`
+    # that the verdict was supposed to authorize. Driving it wants a
+    # per-construction credential, which is a change to the instrument.
+
+    @staticmethod
+    def _handle_id(db_path, room) -> int:
+        with db.get_db(db_path) as conn:
+            return db.get_web_chat_room_by_token(conn, room.canonical).id
+
 
 class TestTheReadPush:
     async def test_it_marks_the_talk_ref_read(
@@ -436,11 +479,8 @@ class TestTheMessageDelete:
         second client built and closed while the first was dropped, and
         `constructions == 1` alone says nothing about the leak.
 
-        The construction count is 1 rather than 2 because `fake_talk` patches
-        `async_runtime.get_talk_client` as well, so the bot leg is handed the
-        instance and constructs nothing. Without that patch the real factory
-        runs, builds through the patched class, and the number is 2 here for a
-        reason that has nothing to do with this property.
+        The user leg is the only one that runs here, so the count is 1. The
+        403 case below is where both legs run and the number is 2.
         """
         _store(db_path, "live-at")
 
@@ -450,21 +490,21 @@ class TestTheMessageDelete:
         assert len(fake_talk_web.constructions) == 1
         assert fake_talk_web.closes == 1
 
-    async def test_the_pooled_bot_client_is_left_open(
+    async def test_the_bot_client_is_built_here_and_closed_here_too(
         self, fake_talk_web, web_app_module, db_path, room,
     ):
-        """The complement, and why the count above is 1 rather than "one per
-        client this path used".
+        """The bot leg owns its client's lifetime, same as the user leg
+        (ISSUE-407).
 
-        The bot leg comes from `async_runtime.get_talk_client`, a process-wide
-        singleton whose lifetime belongs to the runtime's cleanup hook; closing
-        it here would take every later Talk call in the process with it. So the
-        `finally` covers the user client alone, and the fix for ISSUE-403 is
-        wrong in the other direction if this number moves.
+        It used to be `async_runtime.get_talk_client`'s process-wide singleton,
+        which is documented as bound to the runtime loop — and this function is
+        scheduled on uvicorn's loop by `_fire_and_forget`. httpx binds a pool to
+        whichever loop issues its first request, so in the web process this leg
+        raised on every call, *after* the DELETE had been written to the socket.
 
-        The 403 is what drives both legs at once, which also makes this the
-        case where the user client is closed on a path where its own call
-        *failed* — the leak was on every outcome, not only the happy one.
+        The 403 is what drives both legs at once, which also makes this the case
+        where the user client is closed on a path where its own call *failed* —
+        the ISSUE-403 leak was on every outcome, not only the happy one.
         """
         _store(db_path, "live-at")
         fake_talk_web.bearer_rejections["live-at"] = 403
@@ -472,8 +512,43 @@ class TestTheMessageDelete:
         await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
 
         assert [c.bearer_token for c in fake_talk_web.calls] == ["live-at", None]
-        assert len(fake_talk_web.constructions) == 1
-        assert fake_talk_web.closes == 1
+        assert len(fake_talk_web.constructions) == 2
+        assert fake_talk_web.closes == 2
+
+    async def test_neither_leg_reaches_the_process_wide_singleton(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The discriminating half, and the one the counts above cannot make.
+
+        `constructions == 2` is equally true of a bot leg that built a second
+        client for some other reason, so this asks the question directly: with
+        the factory replaced by something that refuses, both legs still reach
+        Talk. Against the pre-fix product the bot leg calls it and the delete is
+        lost — which is exactly what the accessor's own guard now does in
+        production, since uvicorn's loop is not the runtime's.
+
+        Patched in the body rather than through `monkeypatch`, because the name
+        being replaced is one `fake_talk` is *already* patching: a fixture-scoped
+        undo is finalized in reverse setup order, and the ordering that puts it
+        after `fake_talk`'s own unpatch reinstalls the double on
+        `async_runtime.get_talk_client` for the rest of the worker. Which is not
+        hypothetical — it turned `test_support_talk_double.py`'s seam control red
+        two files later, and only under a fixed test order.
+        """
+        from istota import async_runtime
+
+        def _refuse(_config):
+            raise AssertionError(
+                "the web process must not resolve the runtime-loop singleton"
+            )
+
+        _store(db_path, "live-at")
+        fake_talk_web.bearer_rejections["live-at"] = 403
+
+        with patch.object(async_runtime, "get_talk_client", _refuse):
+            await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+
+        assert [c.bearer_token for c in fake_talk_web.calls] == ["live-at", None]
 
     async def test_the_client_is_closed_when_the_call_raises_outright(
         self, fake_talk_web, web_app_module, db_path, room,
@@ -486,15 +561,91 @@ class TestTheMessageDelete:
         `UnknownTalkRoom` from the double's own check, which lands in the bare
         `except Exception` — the arm that catches a connection failure, which is
         exactly the state a leaked pool is most likely to be in. Both legs take
-        it, so the bot leg is asked and the user client is still closed once.
+        it, so both clients are built and both are closed.
         """
         _store(db_path, "live-at")
 
         await web_app_module._delete_from_talk("alice", "no-such-room", "5150")
 
         assert [c.bearer_token for c in fake_talk_web.refusals] == ["live-at", None]
-        assert len(fake_talk_web.constructions) == 1
-        assert fake_talk_web.closes == 1
+        assert len(fake_talk_web.constructions) == 2
+        assert fake_talk_web.closes == 2
+
+    async def test_an_unexpected_error_is_not_reported_as_a_refusal(
+        self, fake_talk_web, web_app_module, db_path, room, caplog,
+    ):
+        """A `RuntimeError` from the client is not Talk saying no.
+
+        Both are `False` out of `_attempt`, and the one line the function used
+        to log covered either — which is how ISSUE-407 stayed invisible for the
+        life of the defect: a delete Nextcloud may well have performed, reported
+        as one nobody was allowed to make.
+
+        The control is the sibling below, where both legs are genuinely refused
+        and the quieter line is the honest one.
+        """
+        _store(db_path, "live-at")
+
+        with caplog.at_level("INFO", logger="istota.web_app"):
+            await web_app_module._delete_from_talk("alice", "no-such-room", "5150")
+
+        assert "may not have propagated" in caplog.text
+        assert "UnknownTalkRoom" in caplog.text
+
+    async def test_a_refusal_by_both_legs_still_reads_as_a_refusal(
+        self, fake_talk_web, web_app_module, db_path, room, caplog,
+    ):
+        """Nextcloud answered, twice, so the delete definitely did not happen —
+        which is a different sentence from "we do not know"."""
+        _store(db_path, "live-at")
+        fake_talk_web.bearer_rejections["live-at"] = 403
+        fake_talk_web.bearer_rejections[None] = 403
+
+        with caplog.at_level("INFO", logger="istota.web_app"):
+            await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+
+        assert "talk refused" in caplog.text
+        assert "user: HTTP 403; bot: HTTP 403" in caplog.text
+        assert "may not have propagated" not in caplog.text
+
+    async def test_a_server_error_is_an_unknown_fate_not_a_refusal(
+        self, fake_talk_web, web_app_module, db_path, room, caplog,
+    ):
+        """The half the exception-type split got wrong.
+
+        `delete_message` raises `HTTPStatusError` for a 500 exactly as it does
+        for a 403, so classifying on the exception alone put "Nextcloud fell
+        over mid-delete" in the same sentence as "Talk said no" — the very
+        conflation this issue is about, one layer along.
+        """
+        _store(db_path, "live-at")
+        fake_talk_web.bearer_rejections["live-at"] = 403
+        fake_talk_web.bearer_rejections[None] = 502
+
+        with caplog.at_level("INFO", logger="istota.web_app"):
+            await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+
+        assert "may not have propagated" in caplog.text
+        assert "bot: HTTP 502" in caplog.text
+        # The user leg's genuine refusal still rides along, so the operator sees
+        # both legs rather than only the one that could not be settled.
+        assert "user: HTTP 403" in caplog.text
+
+    async def test_the_bot_leg_keeps_the_default_timeout(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The user leg's 5s bound is for the web *request* path, and this
+        function is scheduled fire-and-forget after the response is decided. The
+        bot leg carried `DEFAULT_TIMEOUT` as the pooled singleton and keeps it;
+        tightening it would fail a delete a slow Nextcloud was about to accept,
+        in exactly the "written to the socket, answer never read" shape this
+        issue is about."""
+        _store(db_path, "live-at")
+        fake_talk_web.bearer_rejections["live-at"] = 403
+
+        await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+
+        assert [c.timeout for c in fake_talk_web.constructions] == [5, None]
 
     async def test_a_non_numeric_id_reaches_no_client(
         self, fake_talk_web, web_app_module, db_path, room,

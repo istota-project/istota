@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -261,6 +262,21 @@ class TestDeletionTailOnEvents:
         assert resp.json()["deletion_cursor"] == 0
 
 
+@contextlib.contextmanager
+def _fake_talk_class(client):
+    """Stand `client` in at `istota.talk.TalkClient`, the seam this path uses.
+
+    `_delete_from_talk` builds both of its clients itself as of ISSUE-407 —
+    patching `async_runtime.get_talk_client`, which is what these tests used to
+    do, now stands in front of nothing. Three of the four were `assert_not_
+    awaited` and so stayed green against a product reaching the real Nextcloud;
+    the fourth is what caught it.
+    """
+    client.aclose = AsyncMock()
+    with patch("istota.talk.TalkClient", return_value=client):
+        yield client
+
+
 class TestTalkPropagation:
     async def _bound_room(self, chat_client, cookies, talk_ref="TALKROOM"):
         room = await _default_room(chat_client, cookies)
@@ -275,7 +291,7 @@ class TestTalkPropagation:
 
         client = MagicMock()
         client.delete_message = AsyncMock(return_value={})
-        with patch("istota.async_runtime.get_talk_client", return_value=client):
+        with _fake_talk_class(client):
             resp = await chat_client.delete(
                 f"/istota/api/chat/messages/{mid}", cookies=cookies, headers=ORIGIN,
             )
@@ -290,7 +306,7 @@ class TestTalkPropagation:
 
         client = MagicMock()
         client.delete_message = AsyncMock(return_value={})
-        with patch("istota.async_runtime.get_talk_client", return_value=client):
+        with _fake_talk_class(client):
             await chat_client.delete(
                 f"/istota/api/chat/messages/{mid}", cookies=cookies, headers=ORIGIN,
             )
@@ -309,7 +325,7 @@ class TestTalkPropagation:
 
         client = MagicMock()
         client.delete_message = AsyncMock(return_value={})
-        with patch("istota.async_runtime.get_talk_client", return_value=client):
+        with _fake_talk_class(client):
             await chat_client.delete(
                 f"/istota/api/chat/messages/{mid}", cookies=cookies, headers=ORIGIN,
             )
@@ -325,7 +341,7 @@ class TestTalkPropagation:
 
         client = MagicMock()
         client.delete_message = AsyncMock(side_effect=RuntimeError("talk down"))
-        with patch("istota.async_runtime.get_talk_client", return_value=client):
+        with _fake_talk_class(client):
             resp = await chat_client.delete(
                 f"/istota/api/chat/messages/{mid}", cookies=cookies, headers=ORIGIN,
             )
