@@ -1919,8 +1919,15 @@ class TestSkillModelCredential:
         assert "security.skill_model_credential.value" not in results
 
     def test_no_credential_fails(self, make_config, monkeypatch):
+        """The positive control for the whole `.value` half.
+
+        The markers are deleted explicitly rather than left to the suite's
+        environment scrub: this is the one case that must reach FAIL, and every
+        skip below is a way for it to stop doing so quietly.
+        """
         for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_AUTH_TOKEN"):
+                     "ANTHROPIC_AUTH_TOKEN", "ISTOTA_TASK_ID",
+                     "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
             monkeypatch.delenv(name, raising=False)
         results = self._run(make_config())
         assert results["security.skill_model_credential.wiring"].status == OK
@@ -1948,6 +1955,86 @@ class TestSkillModelCredential:
         config = make_config(security=SecurityConfig(skill_proxy_enabled=False))
         results = self._run(config)
         assert results["security.skill_model_credential.value"].status == SKIP
+
+    @pytest.mark.parametrize(
+        "marker",
+        ["ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"],
+    )
+    def test_the_value_half_cannot_answer_from_a_task_env(
+        self, make_config, monkeypatch, marker
+    ):
+        """The `.value` half reads `os.environ`, and doctor runs in six places.
+
+        Four are the daemon and one is the web unit, but `istota doctor` is
+        also a command a task can run, and a task's environment is the one
+        ISSUE-390 deliberately strips the Claude credential out of, so absence
+        there is by design and says nothing about the daemon. Reading it as the
+        daemon's answer reported FAIL, and exited 1, about a deployment whose
+        reviews worked.
+        """
+        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+                     "ANTHROPIC_AUTH_TOKEN", "ISTOTA_TASK_ID",
+                     "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(marker, "1")
+        results = self._run(make_config())
+        value = results["security.skill_model_credential.value"]
+        assert value.status == SKIP
+        # The detail says what was observed, which is the marker rather than a
+        # verdict about the daemon.
+        assert marker in value.detail
+
+    def test_the_wiring_half_still_answers_from_a_task_env(
+        self, make_config, monkeypatch
+    ):
+        """The drift guard reads the skill index and the config, never the
+        environment, so it is sound wherever it runs, and it is the half that
+        catches a renamed skill directory."""
+        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+                     "ANTHROPIC_AUTH_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ISTOTA_TASK_ID", "4213")
+        results = self._run(make_config())
+        assert results["security.skill_model_credential.wiring"].status == OK
+
+        monkeypatch.setattr(
+            doctor_executor, "SKILL_MODEL_CALLERS", frozenset({"code_reviewe"}),
+        )
+        results = self._run(make_config())
+        assert results["security.skill_model_credential.wiring"].status == FAIL
+
+    def test_a_credential_present_in_a_task_env_still_counts(
+        self, make_config, monkeypatch
+    ):
+        """Presence is positive evidence wherever it is read.
+
+        `build_clean_env` copies the token out of the daemon's own environment
+        into every task's, so seeing it inside a task says the daemon has it.
+        Only *absence* is the unanswerable direction, so the skip must not
+        outrank a credential that is right there.
+        """
+        monkeypatch.setenv("ISTOTA_TASK_ID", "4213")
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        results = self._run(make_config())
+        value = results["security.skill_model_credential.value"]
+        assert value.status == OK
+        assert "sk-ant-oat-test" not in value.detail
+
+    def test_an_unrelated_istota_variable_is_not_a_marker(
+        self, make_config, monkeypatch
+    ):
+        """The negative control for the marker set: the daemon's own
+        environment carries `ISTOTA_*` variables too, so a namespace test
+        rather than named markers would swallow the FAIL everywhere."""
+        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+                     "ANTHROPIC_AUTH_TOKEN", "ISTOTA_TASK_ID",
+                     "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/etc/istota/config.toml")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", "/etc/istota/admins")
+        results = self._run(make_config())
+        assert results["security.skill_model_credential.value"].status == FAIL
 
     def test_a_disabled_skill_skips(self, make_config, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
