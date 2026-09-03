@@ -1,12 +1,13 @@
 """A Talk client double that refuses a token Nextcloud would refuse.
 
-Every delivery test in the tree patches `get_talk_client` with a bare
-`MagicMock` whose methods are `AsyncMock`s. Those accept any string, which is
-exactly why ISSUE-400 was invisible: the double is *more permissive than
-Nextcloud*, so a call handing a room's canonical `web-…` token to the Talk API
-— the thing that 404s in production — looks identical to a call that resolved
-the room's `talk` binding first. On an ordinary Talk room the two strings are
-equal, so the mistake only shows on a promoted room, and no test built one.
+Every delivery test in the tree used to patch `get_talk_client` with a bare
+`MagicMock` whose methods are `AsyncMock`s, and several non-delivery tests
+still do. Those accept any string, which is exactly why ISSUE-400 was
+invisible: such a double is *more permissive than Nextcloud*, so a call handing
+a room's canonical `web-…` token to the Talk API — the thing that 404s in
+production — looks identical to a call that resolved the room's `talk` binding
+first. On an ordinary Talk room the two strings are equal, so the mistake only
+shows on a promoted room, and no test built one.
 
 One rule, applied on every method taking a conversation token: accept it if it
 is a `talk` `surface_ref` in `room_bindings`, or if it is in `known_channels`.
