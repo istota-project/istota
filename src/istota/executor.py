@@ -2822,10 +2822,16 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     reach. The ``repos_dir`` entry below survives the demolition and is worth a
     word, because with the derivation in place nothing can currently produce a
     configured cache root while ``repos_dir`` is set —
-    ``resolve_sandbox_cache_dir`` reads ``security.sandbox_cache_dir`` only on
-    the branch where ``repos_dir`` is *unset*, and this entry is only appended
-    when it is set. So it cannot fire today. It stays because this list is the
-    answer to one question — what must a cache never be mounted above — and
+    the derived branch is gated on the ``sandbox_cache_is_derived`` triple —
+    ``is_admin and developer.enabled and developer.repos_dir`` — while this
+    entry is appended on ``repos_dir`` alone. So it fires on exactly one shape:
+    a deployment with the path still set and the skill switched off, or a
+    non-admin, either of which takes the fallback branch and reads
+    ``security.sandbox_cache_dir`` *and* carries this entry. That is the
+    sandbox-without-developer deployment the fallback exists for, and a
+    ``sandbox_cache_dir`` at or above ``repos_dir`` there would cover every
+    user's subtree at once. It stays because this list is the answer to one
+    question — what must a cache never be mounted above — and
     ``repos_dir`` is on that list on the merits: a cache mounted over the root
     would cover every user's subtree beneath it. A future second reader of
     ``sandbox_cache_dir`` would want the entry already here rather than
@@ -2964,6 +2970,19 @@ def mask_protected_paths(
     would reopen the two-consumers gap the extraction exists to close.
     """
     if plan_mounts is not None:
+        if not plan_mounts:
+            # Raised rather than falling back, for the reason
+            # `render_bwrap_argv` raises on a sourceless mount: an empty plan
+            # would quietly yield a protected list of the mount alone, and
+            # `plan_masks` would then emit a database mask over the venv and the
+            # source tree, so every task on that host would die at `execvp
+            # .../python3: No such file or directory`. Unreachable from the one
+            # caller — `/usr` is on the list before this runs — and fail-closed
+            # rather than fail-open if that ever stops being true.
+            raise ValueError(
+                "mask_protected_paths: plan_mounts is empty; a plan with no "
+                "mounts cannot have produced the paths a mask must not shadow"
+            )
         protected = [m.source for m in plan_mounts if m.protected and m.source]
     else:
         src, venv = _source_and_venv_paths()

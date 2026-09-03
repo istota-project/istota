@@ -423,6 +423,13 @@ def test_no_mask_reaches_any_root(built: Built):
     rather than about a convenience.
     """
     read_roots, write, denied = built.roots
+    # Every world gives `db_path` a directory of its own, so every plan carries
+    # at least one mask. Asserted rather than assumed: the loop below is
+    # satisfied by an empty tuple, and a change that stopped emitting masks
+    # would turn this from a boundary into a no-op without failing anything.
+    assert built.plan.masks, (
+        "this plan carries no database mask, so the loop below asserts nothing"
+    )
     for mask in built.plan.masks:
         for path in [*read_roots, *write, *denied]:
             assert path != mask and not path.is_relative_to(mask), (
@@ -472,9 +479,6 @@ def test_the_two_protected_derivations_agree(built: Built):
         "disagree. Either a bind that must not be masked away lost its "
         "`protected=True`, or the standing body names a path that is no "
         "longer bound."
-    )
-    assert len(from_plan) == len(set(from_plan)), (
-        f"the projected list has a duplicate: {from_plan}"
     )
 
 
@@ -584,15 +588,23 @@ def test_native_fs_roots_is_this_projection(built: Built):
             built.world["user_temp"],
             built.world["workspace"] if built.case.workspace else None,
         )
-    plan = build_mount_plan(
-        built.config,
-        built.task,
-        built.case.is_admin,
-        built.resources,
-        built.world["user_temp"],
-        profile=SandboxProfile.NATIVE,
-        workspace_dir=built.world["workspace"] if built.case.workspace else None,
-    )
+        # Inside the patch, not after it. Neither the venv nor the source tree
+        # is user data, so the projection is the same either way today — but
+        # `protected` now feeds the mask refusal from those same two entries,
+        # so building the comparison plan under the host's real layout would
+        # make this test's mask logging depend on the checkout. The insulation
+        # was accidental; this makes it deliberate.
+        plan = build_mount_plan(
+            built.config,
+            built.task,
+            built.case.is_admin,
+            built.resources,
+            built.world["user_temp"],
+            profile=SandboxProfile.NATIVE,
+            workspace_dir=(
+                built.world["workspace"] if built.case.workspace else None
+            ),
+        )
     assert native == project_fs_roots(plan, None)
 
 
@@ -617,12 +629,14 @@ def test_a_control_directory_adds_itself_and_nothing_else(tmp_path, monkeypatch)
 
 #: Every ``_sandbox_bind_targets`` entry that is deliberately *broader* than
 #: any single bind, with the reason. Keyed by a label rather than by a path,
-#: because four of the seven are config-derived and one is per-user.
+#: because two of the six are config-derived.
 #:
 #: A literal again, and for the same reason as ``DIVERGENCES``: a target that
 #: covers no bind at all is the ISSUE-319 shape — a list entry that reads like
 #: a boundary and refuses nothing — and the only thing that catches it is a
-#: test that refuses to accept a new name silently.
+#: test that refuses to accept a new name silently. Being on this list is not
+#: an exemption from having to cover something: an entry here is still required
+#: to be a strict ancestor of a destination somewhere in the matrix.
 DELIBERATELY_BROADER: dict[str, str] = {
     "/": (
         "the filesystem root. The rule is equal-or-ancestor, so this refuses a "
@@ -631,10 +645,6 @@ DELIBERATELY_BROADER: dict[str, str] = {
     "/etc": (
         "the /etc allowlist is bound file by file (ssl, resolv.conf, passwd, "
         "alternatives, …) and the directory itself is bound at no path"
-    ),
-    "/tmp": (
-        "the namespace's own tmpfs, emitted inside the --unshare-pid flag "
-        "group rather than as a bind"
     ),
     "temp_dir": (
         "every user's task workspace. The plan binds one user's "
@@ -658,8 +668,34 @@ DELIBERATELY_BROADER: dict[str, str] = {
 }
 
 #: The one target that can name a path with nothing on disk behind it, so no
-#: bind could name it either. Bounded here so the escape hatch cannot widen.
+#: bind could name it either — `build_mount_plan` gates the `~/.claude` tmpfs on
+#: `claude_dir.exists()`. Bounded here so the escape hatch cannot widen.
 MAY_BE_ABSENT = {"home/.claude"}
+
+#: Every label `_sandbox_bind_targets` produces unconditionally. Asserted as an
+#: equality rather than walked, because a walk only constrains the targets that
+#: are *there*: a **deleted** entry passes it silently, and deleting
+#: `home/.cache/huggingface` is what lets a configured `sandbox_cache_dir` be
+#: mounted over the read-only model cache — the first failure the function's own
+#: docstring names.
+ALWAYS_LABELLED = {
+    "/", "/usr", "/etc", "/tmp", "temp_dir",
+    "home/.local", "home/.claude", "home/.cache/huggingface",
+}
+
+
+def _expected_labels(config) -> set[str]:
+    """Which labels this config must produce, the conditional ones included."""
+    expected = set(ALWAYS_LABELLED)
+    if config.developer.repos_dir:
+        expected.add("developer.repos_dir")
+    if config.nextcloud_mount_path:
+        expected.add("nextcloud_mount_path")
+    if config.security.sandbox_ro_paths:
+        expected.add("sandbox_ro_paths")
+    if custom_system_prompt_path(config) is not None:
+        expected.add("custom_system_prompt")
+    return expected
 
 
 def _labelled_targets(config, home: Path) -> dict[Path, str]:
@@ -686,15 +722,26 @@ def _labelled_targets(config, home: Path) -> dict[Path, str]:
 
 
 def _destinations(plan: MountPlan) -> set[Path]:
-    """Every path the render names as a destination inside the namespace.
+    """Every path the plan mounts *at*, inside the namespace.
 
-    The same expressions ``render_bwrap_argv`` uses, and the existence gate
-    left off: a bind whose source is momentarily absent still describes a path
-    the plan is willing to mount, which is the question this list answers.
+    The same expressions ``render_bwrap_argv`` uses, and the existence gate left
+    off: a bind whose source is momentarily absent still describes a path the
+    plan is willing to mount, which is the question this answers.
+
+    ``flag`` entries are read rather than skipped, because one of them is a
+    mount: the namespace group is ``--unshare-pid --proc /proc --dev /dev
+    --tmpfs /tmp``, and ``/tmp`` is a cache-ancestor target. Skipping it left
+    that target's only anchor a host accident — under Linux ``tmp_path`` is
+    below ``/tmp`` and it read as an ancestor, under macOS it is below
+    ``/private/var/folders`` and it read as covering nothing at all.
     """
     out: set[Path] = set()
     for mount in plan.mounts:
         if mount.mode == "flag":
+            argv = list(mount.argv)
+            for index, token in enumerate(argv[:-1]):
+                if token in ("--tmpfs", "--proc", "--dev"):
+                    out.add(Path(argv[index + 1]))
             continue
         if mount.mode == "symlink":
             out.add(Path(str(mount.dest)))
@@ -714,41 +761,73 @@ def _destinations(plan: MountPlan) -> set[Path]:
     return out
 
 
+def _both_profiles(built: Built) -> set[Path]:
+    """Destinations under both profiles, from one world.
+
+    ``_sandbox_bind_targets`` takes no profile, so the custom system prompt — a
+    CLAUDE-only bind — would read as an uncovered target under NATIVE alone.
+    """
+    return _destinations(built.plan) | _destinations(
+        other_profile_plan(built, SandboxProfile.NATIVE)
+    )
+
+
 class TestTheCacheAncestorList:
     """`_sandbox_bind_targets` stays hand-written; this is its coverage test.
 
     It cannot become a projection — it is called from inside
     `resolve_sandbox_cache_dir`, which `build_mount_plan` itself calls, so
     projecting it is an import cycle (the spec's Decisions section settles
-    this). What is available is the half that matters: every path it names is a
-    path the plan actually mounts, or is deliberately broader than one and says
-    so here. ISSUE-319 was an entry on this list that was *also* the documented
-    home for the cache; an entry naming a path nothing mounts is the same
-    failure with nothing to detect it.
+    this). What is available is that every path it names is a path the plan
+    actually mounts, or is a strict ancestor of one and says here why the
+    broader test is the one wanted.
+
+    **Both directions, because the two failures are opposite and only one is
+    obvious.** An entry naming a path nothing mounts is ISSUE-319's shape — a
+    list entry that reads like a boundary and refuses nothing — and a walk over
+    the targets catches it. A *deleted* entry is the more expensive failure and
+    that walk cannot see it at all: dropping `~/.cache/huggingface` lets a
+    configured `sandbox_cache_dir` be mounted over the read-only model cache,
+    which is the first thing the function's docstring says this list is for, and
+    it would leave a one-directional file green. So the label set is an equality.
     """
+
+    @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
+    def test_the_target_list_is_exactly_the_labels_this_config_earns(
+        self, case, tmp_path, monkeypatch,
+    ):
+        """The deletion direction. An entry that disappears fails here."""
+        built = build_plan(case, tmp_path / "world", monkeypatch,
+                           profile=SandboxProfile.CLAUDE)
+        labels = _labelled_targets(built.config, Path(str(built.world["home"])))
+        targets = _sandbox_bind_targets(built.config)
+
+        unrecognised = [t for t in targets if t not in labels]
+        assert unrecognised == [], (
+            f"{unrecognised} are cache-ancestor targets this test does not "
+            f"recognise. Give each a label in `_labelled_targets` and a place "
+            f"in `ALWAYS_LABELLED` or `_expected_labels`, and — if it is "
+            f"broader than any single bind — a reason in `DELIBERATELY_BROADER`."
+        )
+        assert {labels[t] for t in targets} == _expected_labels(built.config), (
+            "the cache-ancestor list is not the set of entries this config "
+            "earns. An entry that vanished from it is invisible to a walk over "
+            "the entries that are left, and every one it loses is a path a "
+            "configured sandbox_cache_dir may now be mounted over."
+        )
 
     @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
     def test_every_target_covers_something_the_plan_mounts(
         self, case, tmp_path, monkeypatch,
     ):
+        """The dead-entry direction, per case."""
         built = build_plan(case, tmp_path / "world", monkeypatch,
                            profile=SandboxProfile.CLAUDE)
-        native = other_profile_plan(built, SandboxProfile.NATIVE)
-        # Both profiles, because this function has no profile argument: the
-        # custom system prompt is a CLAUDE-only bind and would read as an
-        # uncovered target under NATIVE alone.
-        destinations = _destinations(built.plan) | _destinations(native)
-        home = Path(str(built.world["home"]))
-        labels = _labelled_targets(built.config, home)
+        destinations = _both_profiles(built)
+        labels = _labelled_targets(built.config, Path(str(built.world["home"])))
 
         for target in _sandbox_bind_targets(built.config):
-            label = labels.get(target)
-            assert label is not None, (
-                f"{target} is a cache-ancestor target this test does not "
-                f"recognise. Give it a label in `_labelled_targets`, and if it "
-                f"is broader than any single bind, a reason in "
-                f"`DELIBERATELY_BROADER`."
-            )
+            label = labels[target]
             if label in DELIBERATELY_BROADER:
                 continue
             if label in MAY_BE_ABSENT and not target.exists():
@@ -761,26 +840,38 @@ class TestTheCacheAncestorList:
                 f"belongs in DELIBERATELY_BROADER with its reason."
             )
 
-    def test_every_documented_broader_entry_is_actually_reached(
+    def test_every_documented_broader_entry_is_broader_than_something(
         self, tmp_path, monkeypatch,
     ):
         """The exemption list must not rot into names that mean nothing.
 
-        Each entry has to be produced by some case in the matrix and has to be
-        genuinely broader there — a strict ancestor of a destination, never an
-        exact one, since an exact match would mean the exemption is now hiding
-        a covered target rather than explaining an uncovered one.
+        Two things, and the second is one an earlier draft of this test only
+        claimed in its docstring. An entry must never be an *exact* destination,
+        since that would mean the exemption is hiding a covered target rather
+        than explaining an uncovered one — asserted per case. And it must be a
+        *strict ancestor* of some destination somewhere in the matrix, which is
+        what makes it a boundary rather than a name: without that, an entry
+        covering nothing at all passes as readily as one covering everything,
+        which is the hole the exemption was meant to be too narrow to have.
+
+        Ancestry is asserted across the matrix rather than per case on purpose.
+        `developer.repos_dir` is appended whenever the path is set, while the
+        repos bind needs `is_admin and developer.enabled` besides, so on
+        `developer_disabled_with_repos_dir` and
+        `non_admin_with_developer_configured` the entry legitimately covers
+        nothing. That is the shape the function's docstring calls reachable on
+        exactly one deployment, and it is a reason to require a covering case
+        rather than to accept none.
         """
         reached: set[str] = set()
+        ancestor_of_something: set[str] = set()
         for index, case in enumerate(CASES):
             built = build_plan(case, tmp_path / f"c{index}", monkeypatch,
                                profile=SandboxProfile.CLAUDE)
-            destinations = _destinations(built.plan) | _destinations(
-                other_profile_plan(built, SandboxProfile.NATIVE)
-            )
+            destinations = _both_profiles(built)
             labels = _labelled_targets(built.config, Path(str(built.world["home"])))
             for target in _sandbox_bind_targets(built.config):
-                label = labels.get(target)
+                label = labels[target]
                 if label not in DELIBERATELY_BROADER:
                     continue
                 assert target not in destinations, (
@@ -789,10 +880,20 @@ class TestTheCacheAncestorList:
                     f"exemption is hiding a covered target now; drop it."
                 )
                 reached.add(label)
+                if any(
+                    d != target and d.is_relative_to(target) for d in destinations
+                ):
+                    ancestor_of_something.add(label)
 
         assert reached == set(DELIBERATELY_BROADER), (
             "a documented broader entry is produced by no case in the matrix: "
             f"{sorted(set(DELIBERATELY_BROADER) - reached)}"
+        )
+        assert ancestor_of_something == set(DELIBERATELY_BROADER), (
+            "a documented broader entry is an ancestor of nothing the plan "
+            "mounts, in any case in the matrix, so it refuses a cache "
+            "destination that would have covered no boundary: "
+            f"{sorted(set(DELIBERATELY_BROADER) - ancestor_of_something)}"
         )
 
 
