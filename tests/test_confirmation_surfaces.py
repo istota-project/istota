@@ -15,6 +15,7 @@ to whichever confirmation was newest at reply time, not the one the user was
 answering.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ from istota import db
 from istota.config import (
     Config,
     EmailConfig as AppEmailConfig,
+    NextcloudConfig,
     SiteConfig,
     TalkConfig,
     UserConfig,
@@ -30,6 +32,8 @@ from istota.config import (
 )
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
+
+from .support.rooms import plain_talk_room, promoted_room
 
 try:
     import authlib  # noqa: F401
@@ -362,43 +366,66 @@ class TestConfirmCommand:
 
 
 class TestTalkBurstBinding:
+    """The ack goes back to the Talk room the reply arrived in.
+
+    `handle_confirmation_reply`'s `_post_ack` has no `nextcloud.url` guard, so
+    before `fake_talk` the second case here built a real `TalkClient` and
+    attempted a POST at nc.example.com — swallowed by `_post_ack`'s own
+    `except Exception`, so it passed either way and the seam contact was
+    invisible. The room is `plain_talk_room` because the reply's room is
+    whatever Talk named, never a canonical token.
+    """
+
     @pytest.mark.asyncio
-    async def test_bare_yes_with_several_pending_refuses_to_guess(self, make_config):
+    async def test_bare_yes_with_several_pending_refuses_to_guess(
+        self, make_config, db_path, fake_talk,
+    ):
         from istota.transport.talk.inbound import handle_confirmation_reply
 
         config = _configured(make_config, carol=UserConfig())
-        client = MagicMock()
-        client.send_message = AsyncMock(return_value=1)
-
         with db.get_db(config.db_path) as conn:
+            room = plain_talk_room(conn, "carol", token="some-talk-room")
             first = _park_confirmation(conn, "carol", "body one", "Email from A")
             second = _park_confirmation(conn, "carol", "body two", "Email from B")
             conn.commit()
 
-            with patch("istota.transport.talk.inbound.get_talk_client", return_value=client):
-                handled = await handle_confirmation_reply(
-                    conn, config, "carol", "yes", "some-talk-room",
-                )
+            handled = await handle_confirmation_reply(
+                conn, config, "carol", "yes", room.talk_ref,
+            )
             assert handled is True
             assert db.get_task(conn, first).status == "pending_confirmation"
             assert db.get_task(conn, second).status == "pending_confirmation"
 
-        posted = client.send_message.await_args[0][1]
+        acks = fake_talk.calls_to(room.talk_ref, method="send_message")
+        assert len(acks) == 1
+        posted = acks[0].args["message"]
         assert f"#{first}" in posted and f"#{second}" in posted
+        assert fake_talk.refusals == []
 
     @pytest.mark.asyncio
-    async def test_bare_yes_with_one_pending_still_works(self, make_config):
+    async def test_bare_yes_with_one_pending_still_works(
+        self, make_config, db_path, fake_talk,
+    ):
         from istota.transport.talk.inbound import handle_confirmation_reply
 
         config = _configured(make_config, carol=UserConfig())
         with db.get_db(config.db_path) as conn:
+            room = plain_talk_room(conn, "carol", token="some-talk-room")
             task_id = _park_confirmation(conn, "carol", "body", "Email from A")
             conn.commit()
             handled = await handle_confirmation_reply(
-                conn, config, "carol", "yes", "some-talk-room",
+                conn, config, "carol", "yes", room.talk_ref,
             )
             assert handled is True
             assert db.get_task(conn, task_id).status == "pending"
+        # The ack goes back to the room the reply arrived in. This is the
+        # assertion the old shape could not make at all: with no double the ack
+        # went to a real client, failed, and `_post_ack` swallowed it, so the
+        # test passed without the ack ever being posted anywhere.
+        assert [(c.method, c.token, c.args["message"]) for c in fake_talk.calls] == [
+            ("send_message", room.talk_ref, "Confirmed."),
+        ]
+        assert fake_talk.refusals == []
 
 
 # ---------------------------------------------------------------------------
@@ -867,7 +894,17 @@ class TestWebRoomUnfreeze:
 
 
 def _confirming_config(make_config):
+    """A Talk-enabled deployment, Nextcloud URL included.
+
+    The URL is not decoration: `TalkTransport.deliver` returns None before it
+    touches a client when `nextcloud.url` is empty, so without it the claim
+    "the prompt reached the mirror Talk leg" could only ever be checked at a
+    `post_result_to_talk` mock — above the layer that decides which room.
+    """
     config = make_config(
+        nextcloud=NextcloudConfig(
+            url="https://nc.example.com", username="istota", app_password="s",
+        ),
         talk=TalkConfig(enabled=True, bot_username="istota"),
         email=_email_config(),
         users={"testuser": UserConfig(display_name="Alice")},
@@ -878,31 +915,47 @@ def _confirming_config(make_config):
 
 def _seed_room_task(config, *, source_type):
     """A task in a room bound to both its own surface and Talk, delivering by
-    the room fan-out — the shape that produces a mirror Talk leg."""
+    the room fan-out — the shape that produces a mirror Talk leg.
+
+    A promoted room from `tests/support/rooms.py`, so the canonical token and
+    the Talk ref differ: the prompt reaching the mirror leg is only correct if
+    the poster resolved the `talk` binding, and on a room whose two tokens were
+    equal that would be true either way.
+    """
     with db.get_db(config.db_path) as conn:
-        db.register_room(conn, "room1", "testuser", origin="web")
-        db.add_room_binding(conn, "room1", "web", "room1")
-        db.add_room_binding(conn, "room1", "talk", "talktok42")
-        return db.create_task(
+        room = promoted_room(
+            conn, "testuser", canonical="room1", talk_ref="talktok42",
+        )
+        task_id = db.create_task(
             conn, prompt="reply to them", user_id="testuser",
-            source_type=source_type, conversation_token="room1",
+            source_type=source_type, conversation_token=room.canonical,
             output_target="room",
         )
+    return room, task_id
 
 
 _ASKS = "Should I proceed with booking Tuesday at 2pm? Reply yes or no."
 
 
 class TestSchedulerConfirmationOnMirrorLeg:
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    """Asserted at the Talk seam, on a room whose two tokens differ.
+
+    The claim is that the prompt reaches the *mirror Talk leg*, which is a
+    claim about a destination, so it is made below `get_talk_client` rather
+    than at a `post_result_to_talk` mock's keyword. `refusals == []` sits
+    beside every count because `TalkTransport.deliver` swallows a 404 and
+    returns None — a prompt sent to the canonical `room1` would otherwise read
+    exactly like a prompt correctly withheld.
+    """
+
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_email_origin_confirmation_posts_to_the_mirror_talk_leg(
-        self, mock_run_coro, mock_post_talk, make_config,
+        self, mock_run_coro, make_config, db_path, fake_talk,
     ):
         from istota.scheduler import process_one_task
 
         config = _confirming_config(make_config)
-        task_id = _seed_room_task(config, source_type="email")
+        room, task_id = _seed_room_task(config, source_type="email")
 
         with patch(
             "istota.scheduler.execute_task",
@@ -915,25 +968,24 @@ class TestSchedulerConfirmationOnMirrorLeg:
         assert task.status == "pending_confirmation"
         assert task.confirmation_prompt == _ASKS
 
-        talk_calls = [
-            c for c in mock_post_talk.call_args_list
-            if c.kwargs.get("target_token") == "talktok42"
+        bodies = [
+            c.args["message"]
+            for c in fake_talk.calls_to(room.talk_ref, method="send_message")
         ]
-        assert len(talk_calls) == 1
-        assert talk_calls[0].args[2] == _ASKS
+        assert bodies == [_ASKS]
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.post_result_to_email")
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_email_origin_confirmation_is_never_mailed_to_the_correspondent(
-        self, mock_run_coro, mock_post_talk, mock_post_email, make_config,
+        self, mock_run_coro, mock_post_email, make_config, db_path, fake_talk,
     ):
         """The prompt is a question for the principal. Mailing it out would ask
         the external correspondent to approve the bot's reply to themselves."""
         from istota.scheduler import process_one_task
 
         config = _confirming_config(make_config)
-        task_id = _seed_room_task(config, source_type="email")
+        _room, task_id = _seed_room_task(config, source_type="email")
 
         with patch(
             "istota.scheduler.execute_task",
@@ -948,10 +1000,9 @@ class TestSchedulerConfirmationOnMirrorLeg:
             assert db.get_task(conn, task_id).status == "pending_confirmation"
         mock_post_email.assert_not_called()
 
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_web_origin_confirmation_still_stays_off_talk(
-        self, mock_run_coro, mock_post_talk, make_config,
+        self, mock_run_coro, make_config, db_path, fake_talk,
     ):
         """Regression guard. A web-origin task's confirmation rides its own SSE
         stream and is answered by POST /chat/tasks/{id}/confirm, so it must not
@@ -959,7 +1010,7 @@ class TestSchedulerConfirmationOnMirrorLeg:
         from istota.scheduler import process_one_task
 
         config = _confirming_config(make_config)
-        task_id = _seed_room_task(config, source_type="web")
+        room, task_id = _seed_room_task(config, source_type="web")
 
         with patch(
             "istota.scheduler.execute_task",
@@ -970,7 +1021,6 @@ class TestSchedulerConfirmationOnMirrorLeg:
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, task_id).status == "pending_confirmation"
 
-        assert [
-            c for c in mock_post_talk.call_args_list
-            if c.kwargs.get("target_token") == "talktok42"
-        ] == []
+        # Nothing at all reached Talk — not the room's ref and not a refused
+        # attempt at its canonical token, which would look the same from above.
+        assert fake_talk.calls == []

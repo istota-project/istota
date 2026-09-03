@@ -42,6 +42,8 @@ from istota.scheduler import process_one_task
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
 
+from .support.rooms import promoted_room
+
 ROOM = "rm_web123"
 USER = "carol"
 USER_ADDR = "carol@test.com"
@@ -77,10 +79,17 @@ def config(db_path, tmp_path):
 
 def _origin_room(conn):
     """The web room the original send went out from, bound on both surfaces so
-    the `room:` descriptor has something to expand to."""
-    db.register_room(conn, ROOM, USER, origin="web")
-    db.add_room_binding(conn, ROOM, "web", ROOM)
-    db.add_room_binding(conn, ROOM, "talk", ROOM)
+    the `room:` descriptor has something to expand to.
+
+    Built through `tests/support/rooms.py` rather than by hand, which changes
+    one thing: the `talk` binding now points at a *different* string from the
+    canonical token, as a real promotion does. The hand-rolled version bound
+    `talk -> rm_web123`, a shape no producer writes — and one under which a
+    room-token/Talk-ref mix-up on any of the legs these tests assert about
+    would be invisible. Every assertion here keys on the canonical token, so
+    `ROOM` is still what they name.
+    """
+    return promoted_room(conn, USER, canonical=ROOM, talk_ref="talktok_rmweb123")
 
 
 def _sent_from_the_room(conn, *, to_addr=EXTERNAL_ADDR, origin_target=f"room:{ROOM}"):

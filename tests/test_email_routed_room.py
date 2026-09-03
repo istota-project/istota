@@ -41,6 +41,8 @@ from istota.transport import (
 )
 from istota.transport.routing import transcript_room_for_task
 
+from .support.rooms import plain_talk_room, promoted_room
+
 # A first-contact thread hash: the 16-lowercase-hex shape `compute_thread_id`
 # produces, naming no room anywhere. Deliberately repetitive rather than a
 # realistic-looking digest — the secret scanner reads a high-entropy hex run of
@@ -90,9 +92,13 @@ def config(db_path, tmp_path):
 
 
 def _routed_room(conn):
-    """The user's `#assistant`-shaped Talk room, registered as rooms are."""
-    db.register_room(conn, ROUTED_ROOM, "testuser", origin="talk")
-    db.add_room_binding(conn, ROUTED_ROOM, "talk", ROUTED_ROOM)
+    """The user's `#assistant`-shaped Talk room, registered as rooms are.
+
+    An ordinary Talk room, so the canonical token *is* the Talk ref — which is
+    what makes it the wrong shape to catch a room-token/Talk-ref mix-up, and
+    the reason the promoted case below is built separately.
+    """
+    return plain_talk_room(conn, "testuser", token=ROUTED_ROOM)
 
 
 # What the poller stamps once it has resolved the room (see
@@ -739,9 +745,10 @@ class TestTalkMirrorNarrowed:
         from istota.scheduler import _talk_result_mirror_body
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "web-alice-1", "testuser", origin="web")
-            db.add_room_binding(conn, "web-alice-1", "talk", "talktok9")
+            room = promoted_room(
+                conn, "testuser", canonical="web-alice-1", talk_ref="talktok9",
+            )
             assert _talk_result_mirror_body(
-                conn, self._task(THREAD_TOKEN), "talktok9", None, "hi",
-                [SimpleNamespace(surface="web", channel="web-alice-1")],
+                conn, self._task(THREAD_TOKEN), room.talk_ref, None, "hi",
+                [SimpleNamespace(surface="web", channel=room.canonical)],
             ) is None
