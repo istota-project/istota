@@ -619,12 +619,19 @@ class TalkClient:
 
     async def fetch_chat_history(
         self, conversation_token: str, limit: int = 100,
+        timeout: float = 30,
     ) -> list[dict]:
         """Fetch recent chat messages for context building.
 
         Returns up to ``limit`` messages in oldest-first order.
         Uses lookIntoFuture=0 (history fetch) without lastKnownMessageId
         to get the most recent messages.
+
+        ``timeout`` defaults to the 30s this read has always used. The Talk
+        transport's idempotency readback passes a much tighter one: it runs
+        inside a retry ladder on a thread that is blocking a task's start or
+        its completion, so a slow-but-reachable Nextcloud would otherwise
+        multiply the wait rather than shorten it (ISSUE-405).
         """
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
 
@@ -634,7 +641,7 @@ class TalkClient:
             auth=self.auth,
             headers=self._headers(),
             params={"lookIntoFuture": 0, "limit": limit},
-            timeout=30,
+            timeout=timeout,
         )
         response.raise_for_status()
         messages = response.json().get("ocs", {}).get("data", [])
@@ -814,7 +821,10 @@ def split_message(message: str, max_length: int = 4000) -> list[str]:
 
         # Reserve space for page indicator suffix like " (1/3)"
         # Use conservative estimate — 10 chars covers up to " (99/99)"
-        effective_max = max_length - 10
+        # Floored at 1: at `max_length <= 10` the reservation took the whole
+        # budget, so every branch below landed on 0 and the loop appended an
+        # empty part and re-examined the same text for ever.
+        effective_max = max(1, max_length - 10)
 
         # Try splitting at paragraph boundary (double newline)
         chunk = remaining[:effective_max]
@@ -835,6 +845,12 @@ def split_message(message: str, max_length: int = 4000) -> list[str]:
         # Hard split as last resort
         if split_pos < effective_max // 2:
             split_pos = effective_max
+
+        # Never zero, whatever the branches above decided. Only reachable once
+        # `effective_max` is 1 or less, i.e. in the same degenerate regime the
+        # floor above covers; the two together are what stop a small
+        # `max_length` hanging the caller rather than splitting badly.
+        split_pos = max(split_pos, 1)
 
         parts.append(remaining[:split_pos].rstrip())
         remaining = remaining[split_pos:].lstrip("\n")

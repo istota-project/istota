@@ -1036,6 +1036,55 @@ behaviour (attributed repost, web-only read state) on any failure.
   their signatures); their sync call sites invoke them via `run_coro` so the
   awaited methods run on the persistent loop. `notifications._send_talk` also
   delegates to `TalkTransport.deliver`.
+- **A failed Talk post is retried, and only ever behind an idempotency
+  readback** (ISSUE-405). `deliver` posts each part up to `_POST_ATTEMPTS`
+  times with a short backoff and a wall-clock `_POST_DEADLINE_SECONDS`, and a
+  `None` return therefore means the attempts were spent and nothing was posted
+  — the value ISSUE-404's undelivered-result branch keys on, so a message the
+  readback finds already in the room comes back as its id rather than as
+  `None`. What made a retry unwritable before is that a `ReadTimeout` on a POST
+  is not evidence the message was *not* stored: Nextcloud may have accepted and
+  written it and merely been slow to answer, and a blind re-post then leaves a
+  duplicate in the user's room, which is worse than the silence it replaces. So
+  a re-post needs one of two permissions. Either the failure proves the request
+  never went out — `ConnectError` / `ConnectTimeout` / `PoolTimeout` and nothing
+  else, since a `ReadTimeout` and even a `WriteTimeout` had bytes on the wire —
+  or `_posted_message_id` fails to find the post in the room's recent history.
+  **The readback can only ever answer for a message that is one post.** A
+  `referenceId` names the whole answer rather than one part: `deliver` splits at
+  `max_message_length` and stamps every part with the same one, so a match
+  proves *some* part is in the room and never that all of them are. Reporting
+  success on that would turn a loud, recoverable failure into a silently
+  truncated answer — the user gets the first fraction of their reply and the
+  scheduler is told it was delivered — so a split send is refused a readback
+  outright and keeps the honest `None`. Requiring all N parts instead is not
+  available: with one key across N parts, "part three never landed" and "the
+  window returned three of five" are the same evidence.
+  **The readback matches on the actor as well as the `referenceId`**, and that
+  is the security half rather than belt and braces: `referenceId` is free text
+  on Talk's chat API and any participant can set it (the same property
+  `inbound._reconcile_webmirror_echo` guards against), so matching the
+  reference alone would let a room member suppress the bot's own answer by
+  claiming its key. For the same reason an actor *mismatch* is a decided answer
+  and never renders the question unanswerable — a member who could do that could
+  block delivery outright. The actor is compared against **both**
+  `talk.bot_username` and `nextcloud.username`, which are the same string on
+  every shipped deployment and are configured separately; matching one alone
+  would make the readback miss our own post where they differ and re-post it.
+  **An unanswerable question holds the message back** — a split send, no
+  reference id, no bot account name, a readback that itself failed, or a
+  history entry that is ours by reference and actor and whose id is not a
+  number — because giving up costs exactly the pre-fix behaviour while guessing
+  costs a duplicate. Retryable is the transport-level failures plus 5xx; a 404
+  or a 403 is an answer rather than a blip, and 429 is deliberately excluded
+  because retrying it correctly means honouring `Retry-After`. **`_is_transient`
+  and `_may_have_been_stored` are different questions and the second is what
+  gates the readback**: two failures are worth retrying and cannot have stored
+  anything (the connect class), and one is not worth retrying and can have
+  (`send_message` parses the body after `raise_for_status`, so a 2xx whose body
+  does not parse raises with the message already written). A caller that passes
+  no `reference_id` gets the connect-class retry alone, which is every
+  non-scheduler poster — the scheduler labels all four of its posts.
 - **`EmailTransport.deliver`** owns the send body via
   `transport.email.outbound.deliver_email_result` — structured-output parsing
   (deferred file preferred over inline JSON), thread-reply vs fresh-send routing,
