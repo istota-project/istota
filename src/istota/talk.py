@@ -716,8 +716,9 @@ class TalkClient:
         data = _ocs_data(
             response, f"join room session {conversation_token}", default={},
         )
-        session_id = data.get("sessionId") if isinstance(data, dict) else None
-        if not session_id or not isinstance(session_id, str):
+        raw = data.get("sessionId") if isinstance(data, dict) else None
+        session_id = raw.strip() if isinstance(raw, str) else None
+        if not session_id:
             raise TalkResponseError(
                 f"join room session {conversation_token}: no sessionId in the "
                 f"OCS data (keys: {sorted(data) if isinstance(data, dict) else type(data).__name__})"

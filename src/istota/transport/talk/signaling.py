@@ -53,11 +53,22 @@ session resume, room membership included, for its 30-second window
 (``hub.go:119``). A server *error* message is carried on ``SignalingError``
 and is safe to log: upstream's are fixed strings ("The token is expired"), not
 echoes of what was sent.
+
+**Every reader here is total and every builder refuses rather than guesses.**
+That split is deliberate. What arrives off the socket is decoded by something
+that cannot raise into the watcher's event loop, because a server istota does
+not control decides what arrives. What istota *sends* is built from values it
+chose, so a value that cannot produce a correct frame is a bug in the caller
+and is raised at the builder, where the cause can still be named — the
+alternative is a frame the server refuses with an error that means four
+different things.
 """
 
 import logging
+import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("istota.transport.talk.signaling")
 
@@ -76,7 +87,7 @@ BACKEND_PATH = "/ocs/v2.php/apps/spreed/api/v3/signaling/backend"
 # Recovery classes. The branches are not guessable from the code alone, which
 # is why the taxonomy is data rather than a chain of `if code ==`.
 RECOVERY_FRESH_TOKEN = "fresh_token"      # discard the token, re-fetch settings
-RECOVERY_FRESH_SESSION = "fresh_session"  # re-POST participants/active, once
+RECOVERY_FRESH_SESSION = "fresh_session"  # re-POST participants/active
 RECOVERY_FRESH_HELLO = "fresh_hello"      # resume failed, send a full hello
 RECOVERY_FATAL = "fatal"                  # will not fix itself; stop the watcher
 
@@ -85,8 +96,36 @@ RETRY_FRESH_SESSION = {"no_such_room"}
 RETRY_FRESH_HELLO = {"no_such_session"}
 FATAL = {"invalid_backend", "invalid_client_type", "invalid_hello_version"}
 
-_SCHEMES = (("https://", "wss://"), ("http://", "ws://"),
-            ("wss://", "wss://"), ("ws://", "ws://"))
+# How many times one recovery may be taken before the code is treated as
+# permanent. **A budget rather than a comment, because "once" is a rule a
+# caller cannot express against a stateless classifier** — and the failure it
+# prevents is the one this module's fatal-by-default rule exists for: a
+# watcher that reconnects forever while delivering nothing, with the socket up
+# and `doctor` reporting it healthy.
+#
+# `no_such_room` is 1 because Nextcloud returns it for a stale Talk session, a
+# room that is gone and a bot that was removed, and only the first is fixed by
+# a fresh `participants/active`; a second means the room is gone or istota was
+# removed, and the reconciliation pass — not a retry — is what decides that.
+# `token_not_valid_yet` is why the token budget is not unbounded: it means the
+# two hosts' clocks disagree by more than the minute of leeway, and a re-fetch
+# mints a token with a *later* `iat`, so the refusal is reproduced exactly.
+RECOVERY_BUDGET = {
+    RECOVERY_FRESH_TOKEN: 2,
+    RECOVERY_FRESH_SESSION: 1,
+    RECOVERY_FRESH_HELLO: 1,
+}
+
+# Codes that mean the deployment is misconfigured rather than that this
+# connection was unlucky. A re-fetch cannot fix a clock, so the watcher warns
+# naming both hosts and backs off; it does not churn credentials.
+CLOCK_SKEW_CODES = {"token_not_valid_yet"}
+
+_WS_SCHEMES = {"https": "wss", "http": "ws", "wss": "wss", "ws": "ws"}
+
+# The first reconnect window. The spec's backoff runs "from 1s", and the delay
+# is drawn from the window's upper half, so the first attempt waits 1-2s.
+_BASE_WINDOW_SECONDS = 2.0
 
 # Bounds the exponent so a watcher that has been down for a week cannot ask for
 # 2**900 seconds before the ceiling is applied.
@@ -105,21 +144,34 @@ class SignalingSettings:
     server: str                  # HPB base URL, as Nextcloud gave it
     signaling_mode: str          # "internal" | "external" | "conversation_cluster"
     hello_auth_params: dict      # {"1.0": {...}, "2.0": {...}} verbatim, never rebuilt
+    # Diagnostics only. **Never build an auth params object out of this**: the
+    # v1 form's `userid` comes from `hello_auth_params["1.0"]` verbatim, and
+    # rebuilding it here is the mistake the module docstring warns about.
     user_id: str | None
     backend_url: str
 
 
 @dataclass
 class ChatEvent:
-    """A room chat event, reduced to what the ingest path can act on."""
+    """A room chat event, reduced to what the ingest path can act on.
+
+    No defaults: an event that is neither a payload nor a trigger is a state
+    no branch of `parse_event` produces, and a consumer reading `refresh_only`
+    to decide whether to fetch would silently do nothing with one.
+    """
 
     room_token: str
-    comments: list = field(default_factory=list)  # empty when refresh-only
-    refresh_only: bool = False
+    comments: list      # empty when the server sent refresh-only
+    refresh_only: bool
 
 
 class SignalingError(Exception):
     """A refusal from the signaling server, carrying its recovery class.
+
+    ``recovery`` is the class the *code* belongs to, which is the answer for a
+    first occurrence. A caller holding a per-connection count asks
+    ``classify_error(err.code, attempt=n)`` instead, which is where the budget
+    above is applied.
 
     ``message`` is the server's own text. Upstream's are fixed strings and
     never echo the credential that was sent, so it is safe to log — unlike a
@@ -130,11 +182,19 @@ class SignalingError(Exception):
         self.code = code if isinstance(code, str) else ""
         self.message = " ".join(str(message or "").split())[:200]
         self.recovery = classify_error(self.code)
-        super().__init__(f"{self.code or 'unknown'}: {self.message}".rstrip(": "))
+        label = self.code or "unknown"
+        super().__init__(f"{label}: {self.message}" if self.message else label)
 
 
-def classify_error(code) -> str:
+def classify_error(code, *, attempt: int = 0) -> str:
     """Map a server error code to exactly one recovery class.
+
+    ``attempt`` is how many recoveries of this kind have already been taken
+    **since the last successful hello** — the watcher resets it on success, so
+    a long-lived connection that meets an expired token once a day is not
+    counting up to a ceiling. Past the budget the code is fatal, which is what
+    makes the spec's "re-run the join once, guarded against a loop" a
+    mechanism rather than a comment.
 
     An unrecognised code is fatal rather than retried. Retrying a refusal
     nobody understands is the failure that looks healthy: the socket
@@ -143,21 +203,48 @@ def classify_error(code) -> str:
     """
     if not isinstance(code, str):
         return RECOVERY_FATAL
+
+    if code in FATAL:
+        return RECOVERY_FATAL
+
+    recovery = None
     if code in RETRY_FRESH_TOKEN:
-        return RECOVERY_FRESH_TOKEN
-    if code in RETRY_FRESH_SESSION:
-        return RECOVERY_FRESH_SESSION
-    if code in RETRY_FRESH_HELLO:
-        return RECOVERY_FRESH_HELLO
-    return RECOVERY_FATAL
+        recovery = RECOVERY_FRESH_TOKEN
+    elif code in RETRY_FRESH_SESSION:
+        recovery = RECOVERY_FRESH_SESSION
+    elif code in RETRY_FRESH_HELLO:
+        recovery = RECOVERY_FRESH_HELLO
+
+    if recovery is None:
+        return RECOVERY_FATAL
+
+    try:
+        taken = max(0, int(attempt))
+    except (TypeError, ValueError, OverflowError):
+        taken = 0
+    if taken >= RECOVERY_BUDGET.get(recovery, 1):
+        return RECOVERY_FATAL
+
+    return recovery
+
+
+def is_clock_skew(code) -> bool:
+    """Does this refusal mean the two hosts disagree about the time?
+
+    Separate from the recovery class on purpose: the remedy is the same
+    (discard the token) but the *diagnosis* is not, and only this one is an
+    operator problem that a retry cannot fix.
+    """
+    return isinstance(code, str) and code in CLOCK_SKEW_CODES
 
 
 def parse_settings(data, *, nextcloud_url: str) -> SignalingSettings:
     """Read the OCS settings payload. Tolerates anything; validates nothing.
 
-    A payload it cannot read yields empty fields rather than an exception, so
-    the failure surfaces where it can be named — ``websocket_url`` on an empty
-    server, ``build_hello`` on absent auth params.
+    A payload it cannot read yields empty fields rather than an exception.
+    ``hpb_unavailable_reason`` is what turns that into a sentence, so a caller
+    never has to tell "Talk is in internal mode" from "the settings call
+    returned nothing readable" by comparing against the empty string.
     """
     payload = data if isinstance(data, dict) else {}
 
@@ -181,29 +268,99 @@ def parse_settings(data, *, nextcloud_url: str) -> SignalingSettings:
     )
 
 
+def hpb_unavailable_reason(settings: SignalingSettings) -> str | None:
+    """``None`` when this deployment has an HPB to connect to, else why not.
+
+    Three states, not two, and collapsing them is how a startup refusal ends
+    up naming the wrong cause. ``signaling_mode == "internal"`` means Talk has
+    no signaling server registered — the deployment cannot do what it was
+    configured to do. An *empty* mode means the settings call answered with
+    nothing this client could read, which is a different fault with a
+    different fix, and it is what a plain ``== "internal"`` test would let
+    through. The refusal itself is the caller's; this only names the reason.
+    """
+    if not isinstance(settings, SignalingSettings):
+        return "Talk signaling settings could not be read"
+
+    mode = settings.signaling_mode
+    if not mode:
+        return (
+            "Talk reported no signaling mode — the settings call returned "
+            "nothing this client could read"
+        )
+    if mode == "internal":
+        return (
+            "Talk is in internal signaling mode: no high-performance backend "
+            "is registered with it (occ talk:signaling:list)"
+        )
+    if not settings.server:
+        return f"Talk reported {mode} signaling but named no server URL"
+    return None
+
+
+def parse_welcome(frame) -> tuple[str, ...]:
+    """The server's advertised feature list. ``()`` for anything unreadable.
+
+    Beside ``parse_error`` rather than left to the caller, and the reason is
+    the one asymmetry worth naming: getting this extraction wrong is silent.
+    Handing ``build_hello`` a dict instead of the list inside it would select
+    the v1 ticket — which never expires and is never rotated — on a connection
+    that then works perfectly, so no counter, no reconnect and no `doctor`
+    check would ever show it. ``build_hello`` therefore refuses a shape it
+    cannot read rather than treating it as "no features".
+    """
+    if not isinstance(frame, dict):
+        return ()
+
+    welcome = frame.get("welcome")
+    if not isinstance(welcome, dict):
+        return ()
+
+    features = welcome.get("features")
+    if not isinstance(features, (list, tuple)):
+        return ()
+
+    return tuple(f for f in features if isinstance(f, str))
+
+
 def websocket_url(server) -> str:
     """`https`->`wss`, `http`->`ws`, strip trailing slash, append `/spreed`.
 
     The rule Talk's own client uses (``signaling.js:1008-1010``). A value it
     cannot turn into a WebSocket URL is refused rather than mangled: this is
-    the connect target, and ``"" -> "/spreed"`` would be a connection to
-    nothing with no message saying why.
+    the connect target and an operator may have typed it, so
+    ``"" -> "/spreed"`` or a stray query string appended before ``/spreed``
+    would be a connection to nothing with no message saying why.
     """
     value = server.strip() if isinstance(server, str) else ""
     if not value:
         raise ValueError("signaling: no server URL to connect to")
 
-    lowered = value.lower()
-    for prefix, ws_prefix in _SCHEMES:
-        if lowered.startswith(prefix):
-            rest = value[len(prefix):]
-            if not rest.strip("/"):
-                raise ValueError(f"signaling: server URL has no host: {value!r}")
-            return f"{ws_prefix}{rest}".rstrip("/") + "/spreed"
+    # Checked on the raw value: `urlsplit` follows the WHATWG rule and strips
+    # ASCII tab and newline *before* parsing, so a tab inside the host would
+    # otherwise be silently removed rather than refused — which is the one
+    # thing this function says it does not do.
+    if any(c.isspace() for c in value):
+        raise ValueError(
+            f"signaling: server URL contains whitespace: {value!r}"
+        )
 
-    raise ValueError(
-        f"signaling: server URL is not http(s) or ws(s): {value!r}"
-    )
+    parts = urlsplit(value)
+    ws_scheme = _WS_SCHEMES.get(parts.scheme.lower())
+    if not ws_scheme:
+        raise ValueError(
+            f"signaling: server URL is not http(s) or ws(s): {value!r}"
+        )
+    if not parts.netloc:
+        raise ValueError(f"signaling: server URL has no usable host: {value!r}")
+    if parts.query or parts.fragment:
+        raise ValueError(
+            "signaling: server URL carries a query or fragment, which cannot "
+            f"be extended with /spreed: {value!r}"
+        )
+
+    path = parts.path.rstrip("/")
+    return f"{ws_scheme}://{parts.netloc}{path}/spreed"
 
 
 def build_hello(settings: SignalingSettings, welcome_features, request_id) -> dict:
@@ -220,27 +377,36 @@ def build_hello(settings: SignalingSettings, welcome_features, request_id) -> di
     per-user secret behind it is generated once and kept forever. A leaked v1
     ticket is a permanent credential for the bot's signaling identity; a leaked
     JWT is worthless in two minutes.
+
+    ``welcome_features`` is what ``parse_welcome`` returned. A shape this
+    cannot read is refused rather than read as an empty list, because the
+    fallback that would follow is the credential above.
     """
     if not settings.backend_url:
         raise ValueError(
             "signaling: no Nextcloud backend URL for the hello frame"
         )
+    if not isinstance(welcome_features, (list, tuple, set, frozenset)):
+        raise ValueError(
+            "signaling: welcome features must be a sequence from "
+            f"parse_welcome, got {type(welcome_features).__name__}"
+        )
 
-    features = welcome_features if isinstance(welcome_features, (list, tuple, set)) else ()
     params_by_version = settings.hello_auth_params or {}
 
     version = None
     params = params_by_version.get("2.0")
-    if "hello-v2" in features and isinstance(params, dict) and params:
+    if "hello-v2" in welcome_features and isinstance(params, dict) and params:
         version = "2.0"
     else:
         params = params_by_version.get("1.0")
         if isinstance(params, dict) and params:
             version = "1.0"
-            # Logged every time rather than once per process: this module holds
-            # no per-process state, and a deployment on the non-expiring
-            # credential should be saying so in its journal. The line names the
-            # version, never the ticket.
+            # Logged on every hello rather than once: this module holds no
+            # per-process state by design, so deduping a deployment that is
+            # permanently on v1 (N rooms x every reconnect) belongs to the
+            # supervisor, which has somewhere to keep the flag. The line names
+            # the version, never the ticket.
             logger.warning(
                 "signaling: no hello-v2 token available, authenticating with "
                 "the v1 ticket — it does not expire and is never rotated; "
@@ -330,7 +496,13 @@ def parse_event(frame) -> ChatEvent | None:
     """
     try:
         return _parse_chat_event(frame)
-    except Exception as e:  # pragma: no cover - the contract's backstop
+    except Exception as e:
+        # Every access below is isinstance-guarded, so no JSON-decodable frame
+        # reaches this. It is here for what a JSON decoder is not the only
+        # source of — a mapping whose own `get` raises — and it is driven by a
+        # test, because an unreachable backstop nothing exercises is a claim
+        # rather than a contract.
+        #
         # Never the frame itself: it carries message text, and on the relay
         # path that is somebody's chat.
         logger.debug("signaling: unreadable event frame (%s)", type(e).__name__)
@@ -396,26 +568,49 @@ def parse_error(frame) -> SignalingError | None:
     return SignalingError(error.get("code"), error.get("message") or "")
 
 
-def backoff_delay(attempt: int, *, maximum: float, base: float = 1.0,
-                  rand=None) -> float:
+def backoff_delay(attempt: int, *, maximum: float,
+                  base: float = _BASE_WINDOW_SECONDS, rand=None) -> float:
     """Exponential backoff with jitter, in seconds, bounded by ``maximum``.
 
-    Half the window is fixed and half is jittered, rather than the full range:
-    a watcher failing at connect (bad URL, refused TLS) must not be able to
-    draw a near-zero delay and restart as fast as the loop can schedule it,
-    and N watchers reconnecting after the hourly ingress drop must not all
-    arrive at once. ``rand`` is injectable so the bounds are testable without
-    seeding the global RNG.
+    The window doubles from ``base`` and the delay is drawn from its upper
+    half, so a first reconnect waits 1-2s and no attempt can draw a near-zero
+    delay: a watcher failing at connect (bad URL, refused TLS) must not
+    restart as fast as the loop can schedule it. Half-jitter rather than full
+    keeps that floor while still spreading a burst — though what bounds the
+    spread at the first attempt is the window itself, one second wide, not the
+    jitter fraction. N watchers coming back from the hourly ingress drop are
+    therefore spread across a second, which is what the per-room
+    ``participants/active`` POST can absorb; it is not a substitute for a
+    startup stagger if that ever proves too tight.
+
+    ``rand`` is injectable so the bounds are testable without seeding the
+    global RNG. Nothing here raises: ``maximum`` comes from operator config,
+    and a watcher's reconnect must not die on a bad value — a nonsense one
+    falls back to the base window rather than removing the ceiling, which is
+    what ``min(window, nan)`` would silently do.
     """
     draw = rand if callable(rand) else random.random
 
     try:
         exponent = min(max(0, int(attempt)), _MAX_BACKOFF_EXPONENT)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         exponent = 0
 
-    floor = max(float(base), 0.001)
-    ceiling = max(float(maximum), floor)
+    try:
+        floor = float(base)
+    except (TypeError, ValueError):
+        floor = _BASE_WINDOW_SECONDS
+    if not math.isfinite(floor) or floor <= 0:
+        floor = _BASE_WINDOW_SECONDS
+
+    try:
+        ceiling = float(maximum)
+    except (TypeError, ValueError):
+        ceiling = floor
+    if not math.isfinite(ceiling):
+        ceiling = floor
+    ceiling = max(ceiling, floor)
+
     window = min(floor * (2 ** exponent), ceiling)
     half = window / 2.0
     return half + draw() * half

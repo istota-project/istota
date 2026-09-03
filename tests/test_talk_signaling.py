@@ -249,9 +249,10 @@ class TestBuildHelloShape:
             for settings in (_settings(), _settings(v2=False)):
                 frame = signaling.build_hello(settings, features, "1")
 
-                assert "type" not in frame["hello"]["auth"]
-                assert "internalsecret" not in str(frame)
-                assert "hmac" not in str(frame).lower()
+                # The key set, not a substring sweep: "internalsecret" not
+                # being in the frame is true of every frame this builder can
+                # construct, including one that added `"type": "internal"`.
+                assert set(frame["hello"]["auth"]) == {"url", "params"}
 
     def test_carries_the_backend_url_and_request_id(self):
         frame = signaling.build_hello(_settings(), ["hello-v2"], "7")
@@ -400,27 +401,53 @@ class TestParseEvent:
         assert signaling.parse_event(frame) is None
 
     @pytest.mark.parametrize(
-        "frame",
+        "frame,expected",
         [
-            None, [], "", 0, 3.5, {"type": "event"},
-            {"type": "event", "event": None},
-            {"type": "event", "event": {"target": "room", "type": "message",
-                                        "message": None}},
-            {"type": "event", "event": {"target": "room", "type": "message",
-                                        "message": {"data": {"type": "chat",
-                                                             "chat": None}}}},
-            {"type": "event", "event": {"target": "room", "type": "message",
-                                        "message": {"roomid": ["a"],
-                                                    "data": {"type": "chat",
-                                                             "chat": {"refresh": True}}}}},
-            _chat_frame({"comments": "not-a-list"}),
-            _chat_frame({"comments": [None, 7]}),
+            (None, None), ([], None), ("", None), (0, None), (3.5, None),
+            ({"type": "event"}, None),
+            ({"type": "event", "event": None}, None),
+            ({"type": "event", "event": {"target": "room", "type": "message",
+                                         "message": None}}, None),
+            ({"type": "event", "event": {"target": "room", "type": "message",
+                                         "message": {"data": {"type": "chat",
+                                                              "chat": None}}}}, None),
+            # A non-string roomid: there is no room to act on.
+            ({"type": "event", "event": {"target": "room", "type": "message",
+                                         "message": {"roomid": ["a"],
+                                                     "data": {"type": "chat",
+                                                              "chat": {"refresh": True}}}}},
+             None),
+            # These two named a comment and carried nothing usable, so they
+            # trigger a fetch rather than dropping a message.
+            (_chat_frame({"comments": "not-a-list"}), "refresh"),
+            (_chat_frame({"comments": [None, 7]}), "refresh"),
         ],
     )
-    def test_never_raises(self, frame):
-        # The contract is total: a frame it cannot read is dropped, never an
-        # exception into the watcher's event loop.
-        signaling.parse_event(frame)
+    def test_a_frame_it_cannot_read_is_dropped_or_downgraded(self, frame, expected):
+        # Asserting the *value*, not merely that nothing was raised: a bare
+        # call passes equally against an implementation returning the wrong
+        # ChatEvent, which is the repo's recurring no-op-probe failure.
+        out = signaling.parse_event(frame)
+
+        if expected is None:
+            assert out is None
+        else:
+            assert out.refresh_only is True
+            assert out.comments == []
+            assert out.room_token == "abc123"
+
+    def test_the_totality_backstop_catches_a_reader_that_raises(self):
+        # The isinstance guards mean no JSON-decodable frame reaches the
+        # `except`. Drive it with the one thing a decoder is not the only
+        # source of, so the contract is exercised rather than asserted: an
+        # unreachable backstop no test drives is a claim, not a guarantee.
+        class Hostile(dict):
+            def get(self, *a, **kw):
+                raise RuntimeError("the reader itself blew up")
+
+        frame = Hostile(type="event")
+
+        assert signaling.parse_event(frame) is None
 
     def test_a_junk_comment_in_a_batch_does_not_take_the_good_ones_with_it(self):
         good = {"id": 42}
@@ -516,7 +543,9 @@ class TestBackoff:
         # can schedule it.
         for attempt in range(0, 10):
             delay = signaling.backoff_delay(attempt, maximum=60.0, rand=lambda: 0.0)
-            assert delay >= 0.5
+            # The spec's backoff runs "from 1s"; the draw is the window's
+            # upper half, so no attempt can collapse toward zero.
+            assert delay >= 1.0
 
     def test_grows(self):
         flat = [
@@ -524,7 +553,7 @@ class TestBackoff:
             for a in range(0, 8)
         ]
         assert flat == sorted(flat)
-        assert flat[0] < flat[-1]
+        assert flat[0] == 2.0
         assert flat[-1] == 60.0
 
     def test_is_jittered(self):
@@ -680,3 +709,292 @@ class TestTalkClientSignalingMethods:
 
         with pytest.raises(TalkResponseError):
             asyncio.run(client.join_room_session("abc123"))
+
+
+# --- what the review turned up ---------------------------------------------
+
+
+class TestTheRecoveryBudget:
+    """"Re-run the join once, guarded against a loop" has to be a mechanism.
+
+    A stateless classifier cannot express it: the first `no_such_room` and the
+    fiftieth are the same string, so a watcher written against the class alone
+    re-POSTs `participants/active` and reconnects forever — the exact failure
+    the fatal-by-default rule exists to prevent, with the socket up and
+    `doctor` reporting a live watcher.
+    """
+
+    def test_a_first_no_such_room_is_recoverable(self):
+        assert signaling.classify_error("no_such_room", attempt=0) == \
+            signaling.RECOVERY_FRESH_SESSION
+
+    def test_a_second_no_such_room_is_fatal(self):
+        # Nextcloud returns one error for "gone", "not a participant" and
+        # "stale session" on purpose. Only the third is fixed by a fresh
+        # participants/active; a second failure means the reconciliation pass,
+        # not a retry, decides what happens to the room.
+        assert signaling.classify_error("no_such_room", attempt=1) == \
+            signaling.RECOVERY_FATAL
+
+    def test_the_token_budget_is_bounded_because_a_clock_cannot_be_refetched(self):
+        # token_not_valid_yet means the hosts disagree about the time by more
+        # than the minute of leeway. Re-fetching mints a token with a *later*
+        # iat, so an unbounded budget reproduces the refusal exactly, forever.
+        assert signaling.classify_error("token_not_valid_yet", attempt=0) == \
+            signaling.RECOVERY_FRESH_TOKEN
+        assert signaling.classify_error("token_not_valid_yet", attempt=2) == \
+            signaling.RECOVERY_FATAL
+
+    def test_a_resume_failure_is_retried_once(self):
+        assert signaling.classify_error("no_such_session", attempt=0) == \
+            signaling.RECOVERY_FRESH_HELLO
+        assert signaling.classify_error("no_such_session", attempt=1) == \
+            signaling.RECOVERY_FATAL
+
+    def test_every_recoverable_class_has_a_budget(self):
+        # A class with no entry defaults to 1, so this is about the table being
+        # complete rather than about the default being wrong.
+        assert set(signaling.RECOVERY_BUDGET) == {
+            signaling.RECOVERY_FRESH_TOKEN,
+            signaling.RECOVERY_FRESH_SESSION,
+            signaling.RECOVERY_FRESH_HELLO,
+        }
+        assert all(v >= 1 for v in signaling.RECOVERY_BUDGET.values())
+
+    @pytest.mark.parametrize("attempt", [None, "two", -1, 1.5])
+    def test_a_nonsense_attempt_does_not_raise(self, attempt):
+        # The count comes from a watcher's own state, but this is on the
+        # failure path and must not add a second failure to the first.
+        assert signaling.classify_error("no_such_room", attempt=attempt) in {
+            signaling.RECOVERY_FRESH_SESSION, signaling.RECOVERY_FATAL,
+        }
+
+    def test_the_fatal_set_is_read_rather_than_reached_by_fall_through(self):
+        # Behaviour alone cannot distinguish "in FATAL" from "unknown", since
+        # both answer fatal — so the set's contents are pinned directly.
+        # Without this, deleting a member turns nothing red and the constant
+        # is decoration.
+        assert signaling.FATAL == {
+            "invalid_backend", "invalid_client_type", "invalid_hello_version",
+        }
+        for code in signaling.FATAL:
+            # A budget must never rescue a fatal code.
+            assert signaling.classify_error(code, attempt=0) == \
+                signaling.RECOVERY_FATAL
+            assert signaling.classify_error(code, attempt=99) == \
+                signaling.RECOVERY_FATAL
+
+
+class TestClockSkewIsDiagnosedApartFromItsRemedy:
+    def test_token_not_valid_yet_is_clock_skew(self):
+        assert signaling.is_clock_skew("token_not_valid_yet") is True
+
+    @pytest.mark.parametrize(
+        "code", ["token_expired", "no_such_room", "", None, 7],
+    )
+    def test_nothing_else_is(self, code):
+        # Same remedy as token_expired, different diagnosis: one is an
+        # unlucky connection, the other is an operator problem no retry fixes.
+        assert signaling.is_clock_skew(code) is False
+
+
+class TestParseWelcome:
+    def test_reads_the_feature_list(self):
+        frame = {"type": "welcome",
+                 "welcome": {"version": "2.1.1",
+                             "features": ["hello-v2", "chat-relay"]}}
+
+        assert signaling.parse_welcome(frame) == ("hello-v2", "chat-relay")
+
+    def test_drops_non_string_features_rather_than_the_whole_list(self):
+        frame = {"welcome": {"features": ["chat-relay", 7, None]}}
+
+        assert signaling.parse_welcome(frame) == ("chat-relay",)
+
+    @pytest.mark.parametrize(
+        "frame",
+        [None, {}, [], "welcome", {"welcome": None}, {"welcome": {}},
+         {"welcome": {"features": "chat-relay"}},
+         {"welcome": {"features": None}}],
+    )
+    def test_returns_an_empty_tuple_for_anything_unreadable(self, frame):
+        assert signaling.parse_welcome(frame) == ()
+
+
+class TestBuildHelloRefusesAFeatureListItCannotRead:
+    """The one extraction whose failure is silent, and it costs the credential.
+
+    A caller handing over ``frame["welcome"]`` (a dict) instead of the list
+    inside it would select the v1 ticket — which never expires — on a
+    connection that then works perfectly. No counter, no reconnect and no
+    `doctor` check would ever show it, so this is refused rather than read as
+    "the server advertised nothing".
+    """
+
+    @pytest.mark.parametrize(
+        "features",
+        [None, "hello-v2", {"features": ["hello-v2"]}, 7,
+         {"welcome": {"features": []}}],
+    )
+    def test_a_shape_that_is_not_a_sequence_is_refused(self, features):
+        with pytest.raises(ValueError):
+            signaling.build_hello(_settings(), features, "1")
+
+    def test_a_string_is_refused_rather_than_substring_matched(self):
+        # `"hello-v2" in "advertises hello-v2"` is True, so a bare string
+        # would select v2 by accident here and v1 by accident elsewhere.
+        with pytest.raises(ValueError):
+            signaling.build_hello(_settings(), "advertises hello-v2", "1")
+
+    @pytest.mark.parametrize("features", [[], (), set(), frozenset()])
+    def test_an_empty_sequence_is_a_legitimate_answer(self, features):
+        frame = signaling.build_hello(_settings(), features, "1")
+
+        assert frame["hello"]["version"] == "1.0"
+
+    def test_the_output_of_parse_welcome_is_accepted(self):
+        features = signaling.parse_welcome(
+            {"welcome": {"features": ["hello-v2", "chat-relay"]}},
+        )
+
+        frame = signaling.build_hello(_settings(), features, "1")
+
+        assert frame["hello"]["version"] == "2.0"
+
+
+class TestHpbUnavailableReason:
+    """Three states, not two. Collapsing them is how a startup refusal names
+    the wrong cause: `signalingMode == "internal"` means Talk has no HPB
+    registered, while an empty mode means the settings call answered with
+    nothing readable — and a plain `== "internal"` test lets the second
+    through, which is the "looks healthy, is not pushing" outcome the refusal
+    exists to prevent."""
+
+    def test_an_external_deployment_with_a_server_is_available(self):
+        assert signaling.hpb_unavailable_reason(_settings()) is None
+
+    def test_internal_mode_names_the_missing_backend(self):
+        settings = signaling.parse_settings(
+            {"signalingMode": "internal"}, nextcloud_url=NC_URL,
+        )
+
+        reason = signaling.hpb_unavailable_reason(settings)
+
+        assert reason is not None
+        assert "internal" in reason
+
+    def test_an_unreadable_payload_is_not_reported_as_internal_mode(self):
+        settings = signaling.parse_settings(None, nextcloud_url=NC_URL)
+
+        reason = signaling.hpb_unavailable_reason(settings)
+
+        assert reason is not None
+        assert "internal signaling mode" not in reason
+
+    def test_external_mode_with_no_server_url_names_that(self):
+        settings = signaling.parse_settings(
+            {"signalingMode": "external"}, nextcloud_url=NC_URL,
+        )
+
+        reason = signaling.hpb_unavailable_reason(settings)
+
+        assert reason is not None
+        assert "server URL" in reason
+
+    @pytest.mark.parametrize("value", [None, "external", 7])
+    def test_it_never_raises_on_something_that_is_not_settings(self, value):
+        assert signaling.hpb_unavailable_reason(value) is not None
+
+
+class TestWebsocketUrlRefusesWhatItCannotTransform:
+    @pytest.mark.parametrize(
+        "server",
+        [
+            # Appending /spreed after a query or fragment builds a target
+            # nothing is listening on, and the failure names none of this.
+            "https://h/x?a=b",
+            "https://h/x#frag",
+            "https://h /x",
+            "https://h\t/x",
+        ],
+    )
+    def test_refused(self, server):
+        with pytest.raises(ValueError):
+            signaling.websocket_url(server)
+
+    def test_a_port_and_a_deep_path_still_work(self):
+        assert signaling.websocket_url("https://h:8443/standalone-signaling/") == \
+            "wss://h:8443/standalone-signaling/spreed"
+
+    def test_the_host_keeps_its_case(self):
+        assert signaling.websocket_url("HTTPS://Host.Example/x") == \
+            "wss://Host.Example/x/spreed"
+
+
+class TestSignalingErrorMessage:
+    def test_a_message_ending_in_a_colon_keeps_it(self):
+        # `.rstrip(": ")` strips a character *set*, so it ate the colon and
+        # any trailing spaces of a legitimate server message.
+        err = signaling.SignalingError("token_expired", "The token is expired: ")
+
+        assert str(err) == "token_expired: The token is expired:"
+
+    def test_an_empty_message_leaves_no_dangling_separator(self):
+        assert str(signaling.SignalingError("no_such_room", "")) == "no_such_room"
+
+    def test_an_unknown_code_still_renders(self):
+        assert "unknown" in str(signaling.SignalingError(None, ""))
+
+
+class TestBackoffNeverRaisesOnOperatorInput:
+    """`maximum` comes from `reconnect_backoff_max` in the config file, and
+    this runs on the reconnect path — a bad value must not be a second
+    failure on top of the first."""
+
+    @pytest.mark.parametrize(
+        "maximum", [None, "sixty", float("nan"), float("inf"), -1, 0],
+    )
+    def test_a_nonsense_maximum_falls_back_to_the_base_window(self, maximum):
+        delay = signaling.backoff_delay(5, maximum=maximum, rand=lambda: 1.0)
+
+        # NaN is the one that matters: `min(window, nan)` returns the window,
+        # so a naive clamp silently removes the ceiling entirely and attempt
+        # 30 asks for 2**30 seconds.
+        assert 0 < delay <= 2.0
+
+    @pytest.mark.parametrize("attempt", [float("inf"), float("nan"), "five", None])
+    def test_a_nonsense_attempt_does_not_raise(self, attempt):
+        delay = signaling.backoff_delay(attempt, maximum=60.0, rand=lambda: 1.0)
+
+        assert 0 < delay <= 60.0
+
+
+class TestChatEventHasNoDefaults:
+    def test_every_field_is_required(self):
+        # An event that is neither a payload nor a trigger is a state no
+        # parse_event branch produces, and a consumer reading `refresh_only`
+        # to decide whether to fetch would silently do nothing with one.
+        with pytest.raises(TypeError):
+            signaling.ChatEvent(room_token="abc123")
+
+
+class TestJoinRoomSessionRefusesAWhitespaceSessionId:
+    def test_a_blank_session_id_is_named_at_the_ocs_call(self):
+        # It would otherwise be caught a layer later by build_room_join, whose
+        # message names the room rather than the answer Nextcloud actually
+        # gave — and this method is the only place the real cause can be named.
+        from istota.talk import TalkResponseError
+
+        client, _ = _wired_talk_client(
+            json_body={"ocs": {"data": {"sessionId": "   "}}},
+        )
+
+        with pytest.raises(TalkResponseError):
+            asyncio.run(client.join_room_session("abc123"))
+
+    def test_a_session_id_is_returned_stripped(self):
+        client, _ = _wired_talk_client(
+            json_body={"ocs": {"data": {"sessionId": " talk-session-1 "}}},
+        )
+
+        assert asyncio.run(client.join_room_session("abc123")) == "talk-session-1"
