@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota doctor` now reports whether a skill that calls a model on its own — code review is the one today — can actually authenticate. Nothing in the deployment said so before, so the only way to find out was to run a review and read the result. It checks two things separately: that the skill the credential is meant for still exists under the name the code looks it up by, which is what a rename would silently break, and that the daemon holds a credential to hand it. Credential names are reported, never values.
+
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
 
 ### Fixed

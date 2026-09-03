@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from istota import doctor, subscription_usage
+from istota import executor as doctor_executor
 from istota.doctor import (
     CHECKS,
     DEEP_CHECKS,
@@ -1871,6 +1872,90 @@ class TestSkillProxy:
         config = _dev_config(make_config, tmp_path)
         results = _by_name(run_checks(config, only=("security.skill_proxy",)))
         assert results["security.skill_proxy.forge_posture"].status == SKIP
+
+
+class TestSkillModelCredential:
+    """`security.skill_model_credential` — ISSUE-409.
+
+    The failure this covers was invisible to the deployment: `code_review`'s
+    reviewers had no credential while the daemon's own brain worked, so the
+    only way to find out was to run a review and read the envelope. Both halves
+    are driven here with the daemon environment controlled, since a check that
+    passed because the developer had a token exported is asserting nothing.
+    """
+
+    def _run(self, config):
+        return _by_name(
+            run_checks(config, only=("security.skill_model_credential",))
+        )
+
+    def test_wiring_ok_and_value_ok(self, make_config, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        results = self._run(make_config())
+        wiring = results["security.skill_model_credential.wiring"]
+        assert wiring.status == OK
+        assert "code_review" in wiring.detail
+        value = results["security.skill_model_credential.value"]
+        assert value.status == OK
+        # The name, never the value: a CheckResult is rendered into the boot
+        # log and the admin dashboard.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" in value.detail
+        assert "sk-ant-oat-test" not in value.detail
+
+    def test_a_renamed_skill_fails_the_wiring(self, make_config, monkeypatch):
+        """The drift guard, and the only one of these that catches a *re*-
+        regression. `SKILL_MODEL_CALLERS` matches skill names against the index
+        at task-build time, so a rename silently stops the injection — no
+        import breaks and nothing on a deployment goes red."""
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        monkeypatch.setattr(
+            doctor_executor, "SKILL_MODEL_CALLERS", frozenset({"code_reviewe"}),
+        )
+        results = self._run(make_config())
+        wiring = results["security.skill_model_credential.wiring"]
+        assert wiring.status == FAIL
+        assert "code_reviewe" in wiring.detail
+        # Nothing to say about a credential for a skill that does not resolve.
+        assert "security.skill_model_credential.value" not in results
+
+    def test_no_credential_fails(self, make_config, monkeypatch):
+        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+                     "ANTHROPIC_AUTH_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+        results = self._run(make_config())
+        assert results["security.skill_model_credential.wiring"].status == OK
+        assert results["security.skill_model_credential.value"].status == FAIL
+
+    def test_an_api_key_counts(self, make_config, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+        results = self._run(make_config())
+        value = results["security.skill_model_credential.value"]
+        assert value.status == OK
+        assert "ANTHROPIC_API_KEY" in value.detail
+
+    def test_the_value_half_skips_with_the_proxy_off(self, make_config, monkeypatch):
+        """No injection and no strip: the CLI is re-exec'd with the daemon's
+        own environment, so whatever authenticates the daemon authenticates it.
+        Reporting a FAIL there would call a shape broken for a boundary it does
+        not have."""
+        from istota.config import SecurityConfig
+
+        for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+                     "ANTHROPIC_AUTH_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+        config = make_config(security=SecurityConfig(skill_proxy_enabled=False))
+        results = self._run(config)
+        assert results["security.skill_model_credential.value"].status == SKIP
+
+    def test_a_disabled_skill_skips(self, make_config, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        config = make_config()
+        config.disabled_skills = ["code_review"]
+        results = self._run(config)
+        assert results["security.skill_model_credential.wiring"].status == SKIP
+        assert "security.skill_model_credential.value" not in results
 
 
 class TestSandboxCredentials:

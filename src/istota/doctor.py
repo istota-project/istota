@@ -2070,6 +2070,152 @@ def _probe_output_line(text: str | None, limit: int = 160) -> str:
 # ---------------------------------------------------------------------------
 
 
+def check_skill_model_credential(
+    config: "Config", probe: bool
+) -> list[CheckResult]:
+    """Whether a skill CLI that calls a model can authenticate (ISSUE-409).
+
+    The fact this states was unstated anywhere, which is why the failure it
+    covers could only be found by running a review. `code_review` spawns
+    `claude -p` per reviewer from inside a skill CLI, and the skill proxy
+    strips the Claude credential out of the environment every host-side CLI
+    runs with, so for a while every review on a subscription deployment came
+    back `skipped / review_failed` while the daemon's own brain worked
+    perfectly. Nothing in the deployment said so.
+
+    Two results, because they fail independently and an operator fixes them
+    differently.
+
+    ``security.skill_model_credential.wiring`` is the drift guard, and it is
+    the one that catches a *re*-regression. `SKILL_MODEL_CALLERS` is a list of
+    skill *names*, matched against the loaded index at task-build time, so a
+    renamed or removed skill directory silently stops the injection — there is
+    no import to break and no test on a deployment to go red. A name that no
+    longer resolves is reported here rather than discovered by a review.
+
+    ``security.skill_model_credential.value`` asks whether the daemon holds
+    anything to inject. Only the presence of a name is ever read or reported;
+    a credential's value never reaches a `CheckResult`, which is rendered into
+    the admin dashboard and the boot log.
+
+    Spawns nothing, so it is safe under ``probe=False``, and never raises.
+    """
+    prefix = "security.skill_model_credential"
+    results: list[CheckResult] = []
+
+    try:
+        from .executor import (  # noqa: PLC0415
+            SKILL_MODEL_CALLERS,
+            SKILL_MODEL_CREDENTIAL_VARS,
+        )
+        from .skills._loader import (  # noqa: PLC0415
+            effective_disabled_skills,
+            load_skill_index,
+        )
+        index = load_skill_index(
+            config.skills_dir, bundled_dir=config.bundled_skills_dir
+        )
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return [
+            CheckResult(
+                f"{prefix}.wiring",
+                SKIP,
+                f"the skill index could not be loaded: {exc}",
+            )
+        ]
+
+    # The operator's own disabled set, not a user's: this is a deployment-scope
+    # statement, and `effective_disabled_skills` takes a user id because a user
+    # may disable a skill for themselves. "" is the deployment's own view —
+    # `config.disabled_skills` plus the capability gate — so a skill one user
+    # turned off is still reported as wired, which is what it is.
+    try:
+        disabled = effective_disabled_skills(config, "", index)
+    except Exception:  # noqa: BLE001 - a check never raises
+        disabled = set()
+
+    missing = sorted(n for n in SKILL_MODEL_CALLERS if n not in index)
+    turned_off = sorted(n for n in SKILL_MODEL_CALLERS if n in disabled)
+    live = sorted(
+        n for n in SKILL_MODEL_CALLERS if n in index and n not in disabled
+    )
+
+    if missing:
+        results.append(
+            CheckResult(
+                f"{prefix}.wiring",
+                FAIL,
+                f"SKILL_MODEL_CALLERS names {', '.join(missing)}, which the "
+                f"skill index does not have — the proxy injects no model "
+                f"credential for a name that does not resolve, so that skill's "
+                f"model calls fail unauthenticated",
+                remedy=(
+                    "A skill was renamed or removed without updating "
+                    "SKILL_MODEL_CALLERS in executor.py."
+                ),
+            )
+        )
+    elif not live:
+        results.append(
+            CheckResult(
+                f"{prefix}.wiring",
+                SKIP,
+                f"every model-calling skill is disabled on this deployment "
+                f"({', '.join(turned_off) or 'none configured'})",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                f"{prefix}.wiring",
+                OK,
+                f"the proxy injects a model credential for {', '.join(live)}",
+            )
+        )
+
+    if not live:
+        return results
+
+    present = sorted(n for n in SKILL_MODEL_CREDENTIAL_VARS if os.environ.get(n))
+    if present:
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                OK,
+                f"the daemon holds {', '.join(present)} to inject",
+            )
+        )
+    elif not getattr(config.security, "skill_proxy_enabled", True):
+        # With the proxy off there is no injection and no strip: the CLI is
+        # re-exec'd with the daemon's own inherited environment, so whatever
+        # authenticates the daemon authenticates it. Nothing to assert here,
+        # and asserting anyway would report a deployment shape as broken for a
+        # boundary it does not have.
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                SKIP,
+                "[security] skill_proxy_enabled = false, so a skill CLI "
+                "inherits the daemon's environment directly",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                FAIL,
+                "the daemon holds none of "
+                f"{', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}, so "
+                f"{', '.join(live)} will fail unauthenticated",
+                remedy=(
+                    "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the "
+                    "daemon's environment."
+                ),
+            )
+        )
+    return results
+
+
 def check_skill_proxy(config: "Config", probe: bool) -> list[CheckResult]:
     """The skill proxy's two independent facts.
 
@@ -5224,6 +5370,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
+    ("security.skill_model_credential", check_skill_model_credential),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -5302,6 +5449,7 @@ CHECK_SCOPES: dict[str, str] = {
     # chose in a rendered config. The image tier asserts over `--scope image`
     # and must not go red for a deployment's own decision.
     "security.sandbox_credentials": DEPLOYMENT,
+    "security.skill_model_credential": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,
