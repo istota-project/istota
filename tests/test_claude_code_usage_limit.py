@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
+from istota.brain import claude_code
 from istota.brain._types import BrainRequest, BrainResult
+from tests.support.sleep_spy import sleep_spy
 from istota.brain.claude_code import (
     ClaudeCodeBrain,
     is_transient_api_error,
@@ -246,12 +248,12 @@ class TestStreamingSuccessBranchClassification:
 
 
 class TestSimpleRetryShortCircuit:
-    def test_usage_limit_not_retried(self):
+    def test_usage_limit_not_retried(self, monkeypatch):
         brain = ClaudeCodeBrain()
         ul = BrainResult(success=False, result_text="usage limit reached", stop_reason="usage_limit")
+        slept = sleep_spy(monkeypatch, claude_code)
         with patch.object(brain, "_execute_simple_once", return_value=ul) as once:
-            with patch("istota.brain.claude_code.time.sleep") as sleep:
-                out = brain._execute_simple(["claude"], _req())
+            out = brain._execute_simple(["claude"], _req())
         assert out.stop_reason == "usage_limit"
         assert once.call_count == 1  # not retried
-        sleep.assert_not_called()
+        assert slept == []

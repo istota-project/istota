@@ -68,7 +68,7 @@ class TestWaitForCompletionUsageLimit:
         monkeypatch.setattr(brain, "_capture", lambda name: pane_text)
         monkeypatch.setattr(brain, "_pane_alive", lambda name: True)
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_SENTINEL_POLL_S", 0.0)
         s = tmp_path / "stop.json"  # never created
         import time as _t
         return brain._wait_for_completion("s", s, _t.monotonic() + 9999, None)
@@ -107,7 +107,7 @@ class _ExecHarness:
         self.calls = 0
         import istota.brain.tmux_claude as mod
         monkeypatch.setattr(mod.shutil, "which", lambda _: "/usr/bin/tmux")
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "API_RETRY_DELAY_SECONDS", 0)
         monkeypatch.setattr(self.brain, "_cleanup_legacy_hook", lambda req: None)
 
         def run(req, attempt):

@@ -31,7 +31,11 @@ from istota.executor import (
     TRANSIENT_STATUS_CODES,
 )
 from istota import db as _db
+from istota import executor
 from istota.brain import BrainRequest, ClaudeCodeBrain
+from istota.brain import claude_code
+from tests.support.monotonic_spy import monotonic_spy
+from tests.support.sleep_spy import sleep_spy
 from istota.brain._types import BrainResult
 import json
 from pathlib import Path
@@ -243,9 +247,9 @@ class TestExecuteStreamingRetry:
         )
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    @patch("istota.brain.claude_code.time.sleep")
-    def test_retries_on_transient_error(self, mock_sleep, mock_exec_once, tmp_path):
+    def test_retries_on_transient_error(self, mock_exec_once, tmp_path, monkeypatch):
         """Should retry on transient 500 errors before giving up."""
+        slept = sleep_spy(monkeypatch, claude_code)
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_123"}'
         mock_exec_once.side_effect = [
             BrainResult(False, error_500, stop_reason="error"),
@@ -261,14 +265,12 @@ class TestExecuteStreamingRetry:
         # The backoff is slept in slices so a `!stop` lands during it rather
         # than after (ISSUE-212 — the wait can now be a provider-supplied
         # Retry-After, not just the fixed 5s). The total is the contract.
-        assert sum(c.args[0] for c in mock_sleep.call_args_list) == pytest.approx(
-            API_RETRY_DELAY_SECONDS
-        )
+        assert sum(slept) == pytest.approx(API_RETRY_DELAY_SECONDS)
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    @patch("istota.brain.claude_code.time.sleep")
-    def test_no_retry_on_permanent_error(self, mock_sleep, mock_exec_once, tmp_path):
+    def test_no_retry_on_permanent_error(self, mock_exec_once, tmp_path, monkeypatch):
         """Should not retry on permanent 401 errors."""
+        slept = sleep_spy(monkeypatch, claude_code)
         error_401 = 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}'
         mock_exec_once.return_value = BrainResult(False, error_401, stop_reason="error")
 
@@ -278,12 +280,12 @@ class TestExecuteStreamingRetry:
         assert result.success is False
         assert "401" in result.result_text
         assert mock_exec_once.call_count == 1
-        mock_sleep.assert_not_called()
+        assert slept == []
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    @patch("istota.brain.claude_code.time.sleep")
-    def test_no_retry_on_non_api_error(self, mock_sleep, mock_exec_once, tmp_path):
+    def test_no_retry_on_non_api_error(self, mock_exec_once, tmp_path, monkeypatch):
         """Should not retry on non-API errors like OOM."""
+        slept = sleep_spy(monkeypatch, claude_code)
         mock_exec_once.return_value = BrainResult(
             False, "Claude Code was killed (likely out of memory)", stop_reason="oom",
         )
@@ -294,12 +296,12 @@ class TestExecuteStreamingRetry:
         assert result.success is False
         assert "out of memory" in result.result_text
         assert mock_exec_once.call_count == 1
-        mock_sleep.assert_not_called()
+        assert slept == []
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    @patch("istota.brain.claude_code.time.sleep")
-    def test_gives_up_after_max_retries(self, mock_sleep, mock_exec_once, tmp_path):
+    def test_gives_up_after_max_retries(self, mock_exec_once, tmp_path, monkeypatch):
         """Should give up after max retry attempts."""
+        slept = sleep_spy(monkeypatch, claude_code)
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
         mock_exec_once.return_value = BrainResult(False, error_500, stop_reason="error")
 
@@ -309,7 +311,7 @@ class TestExecuteStreamingRetry:
         assert result.success is False
         assert "500" in result.result_text
         assert mock_exec_once.call_count == API_RETRY_MAX_ATTEMPTS
-        assert sum(c.args[0] for c in mock_sleep.call_args_list) == pytest.approx(
+        assert sum(slept) == pytest.approx(
             API_RETRY_DELAY_SECONDS * (API_RETRY_MAX_ATTEMPTS - 1)
         )
 
@@ -341,9 +343,11 @@ class TestExecuteStreamingRetry:
         assert result.actions_taken == actions
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
-    @patch("istota.brain.claude_code.time.sleep")
-    def test_actions_taken_from_successful_retry(self, mock_sleep, mock_exec_once, tmp_path):
+    def test_actions_taken_from_successful_retry(
+        self, mock_exec_once, tmp_path, monkeypatch,
+    ):
         """On retry, should use actions_taken from the successful attempt."""
+        sleep_spy(monkeypatch, claude_code, record=False)
         error_500 = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"err"},"request_id":"req_1"}'
         actions = '["📄 Reading config"]'
         mock_exec_once.side_effect = [
@@ -2357,7 +2361,9 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
         assert budgets[0] <= _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS
         assert sum(budgets) < 3 * _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS
 
-    def test_files_after_the_budget_runs_out_are_skipped_and_earlier_text_kept(self):
+    def test_files_after_the_budget_runs_out_are_skipped_and_earlier_text_kept(
+        self, monkeypatch,
+    ):
         def eat_the_budget(path, timeout=None):
             # First file consumes the whole budget, as a wedged child would.
             if path.endswith("a.mp3"):
@@ -2366,9 +2372,8 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
             raise AssertionError(f"should not have been called for {path}")
 
         _clock = [1000.0]
-        with patch("istota.executor.time.monotonic", side_effect=lambda: _clock[0]), patch(
-            _TRANSCRIBE_PATCH, side_effect=eat_the_budget
-        ):
+        monotonic_spy(monkeypatch, executor, lambda: _clock[0])
+        with patch(_TRANSCRIBE_PATCH, side_effect=eat_the_budget):
             result = _pre_transcribe_attachments(["/tmp/a.mp3", "/tmp/b.wav"], "")
 
         assert "first one landed" in result

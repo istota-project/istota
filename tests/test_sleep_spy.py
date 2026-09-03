@@ -14,6 +14,8 @@ import threading
 import time
 import types
 
+import pytest
+
 from tests.support.sleep_spy import sleep_spy
 
 
@@ -76,6 +78,70 @@ def test_record_false_skips_without_recording(monkeypatch):
 
     assert slept == []
     assert time.monotonic() - started < 1.0
+
+
+def test_a_one_shot_hook_is_not_spent_by_another_thread(monkeypatch):
+    """`on_sleep` exists for a test that changes state between two polls.
+
+    `tests/test_cli_session.py` appends to the file the follow loop is reading,
+    the first time that loop sleeps. Such a hook is one-shot, so an unpatched
+    reach is the sharper hazard: a foreign thread's sleep spends the one shot,
+    the loop never sees the change, and the test goes red about the loop.
+    """
+    mod = _module_that_imported_time()
+    fired: list[str] = []
+
+    def hook(_seconds):
+        if not fired:
+            fired.append("owner")
+
+    sleep_spy(monkeypatch, mod, record=False, on_sleep=hook)
+
+    t = threading.Thread(target=lambda: mod.time.sleep(0.01))
+    t.start()
+    t.join(timeout=5)
+
+    assert not t.is_alive()
+    assert fired == [], "a foreign thread's sleep must not run the hook"
+    mod.time.sleep(0.0)
+    assert fired == ["owner"]
+
+
+def test_the_stdlib_module_may_be_passed_directly(monkeypatch):
+    """`time.time` is the wall clock, so a bare `getattr` picks the wrong object.
+
+    `istota.cli` imports `time` inside the function under test, so the stdlib
+    module is the only handle a test has. Passing it must patch `sleep` on it,
+    not walk into its `time` attribute.
+    """
+    slept = sleep_spy(monkeypatch, time)
+    time.sleep(3.0)
+    assert slept == [3.0]
+
+
+def test_a_foreign_module_bound_to_the_name_time_is_refused(monkeypatch):
+    """Silence is the one outcome a spy must not produce.
+
+    Patching some other module's `sleep` sets an attribute nothing calls, so the
+    recorder stays empty and every assertion about it passes for no reason —
+    the failure this helper exists to remove, wearing its own name.
+    """
+    mod = types.ModuleType("module_with_a_confusing_attribute")
+    mod.time = threading  # any module that is not the stdlib clock
+
+    with pytest.raises(TypeError, match="not the stdlib time module"):
+        sleep_spy(monkeypatch, mod)
+
+
+def test_a_from_import_is_patched_where_the_name_actually_lives(monkeypatch):
+    """`from time import sleep` binds the function on the module itself."""
+    mod = types.ModuleType("module_that_did_a_from_import")
+    mod.sleep = time.sleep
+
+    slept = sleep_spy(monkeypatch, mod)
+    mod.sleep(7.0)
+
+    assert slept == [7.0]
 
 
 def test_the_patch_is_undone(monkeypatch):

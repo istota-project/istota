@@ -1,8 +1,11 @@
 """Tests for skills/finviz.py — FinViz market data scraping."""
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests.support.sleep_spy import sleep_spy
 
 from istota.skills.markets.finviz import (
     FinVizData,
@@ -493,7 +496,7 @@ class TestFetchFinvizData:
 
         assert data is None
 
-    def test_fetch_retries_on_failure_then_succeeds(self):
+    def test_fetch_retries_on_failure_then_succeeds(self, monkeypatch):
         error_response = MagicMock()
         error_response.json.return_value = {"status": "error", "error": "busy"}
         error_response.raise_for_status = MagicMock()
@@ -502,24 +505,20 @@ class TestFetchFinvizData:
         ok_response.json.return_value = {"status": "ok", "text": SAMPLE_PAGE_TEXT}
         ok_response.raise_for_status = MagicMock()
 
-        with (
-            patch("httpx.post", side_effect=[error_response, ok_response]),
-            patch("time.sleep"),
-        ):
+        sleep_spy(monkeypatch, time, record=False)
+        with patch("httpx.post", side_effect=[error_response, ok_response]):
             data = fetch_finviz_data(retries=1)
 
         assert data is not None
         assert isinstance(data, FinVizData)
 
-    def test_fetch_retries_exhausted(self):
+    def test_fetch_retries_exhausted(self, monkeypatch):
         error_response = MagicMock()
         error_response.json.return_value = {"status": "error", "error": "busy"}
         error_response.raise_for_status = MagicMock()
 
-        with (
-            patch("httpx.post", return_value=error_response),
-            patch("time.sleep"),
-        ):
+        sleep_spy(monkeypatch, time, record=False)
+        with patch("httpx.post", return_value=error_response):
             data = fetch_finviz_data(retries=2)
 
         assert data is None

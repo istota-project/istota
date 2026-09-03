@@ -18,9 +18,13 @@ from unittest.mock import patch
 
 import pytest
 
+from istota import context
+from istota.brain import claude_code
 from istota.config import Config, ConversationConfig
 from istota.context import select_relevant_context, select_relevant_talk_context
 from istota.db import ConversationMessage, TalkMessage
+from tests.support.monotonic_spy import monotonic_spy
+from tests.support.sleep_spy import sleep_spy
 
 
 def _config(**conv_overrides) -> Config:
@@ -268,9 +272,8 @@ class TestTriageBudget:
     is free. The deadline `cancel_check` is what bounds it.
     """
 
-    @patch("istota.brain.claude_code.time.sleep")
     @patch("istota.brain.claude_code.subprocess.run")
-    def test_the_backoff_stops_once_the_budget_is_spent(self, mock_run, mock_sleep):
+    def test_the_backoff_stops_once_the_budget_is_spent(self, mock_run, monkeypatch):
         """Without the deadline this is three spawns and a two-minute sleep no
         cancel can land on: `_interruptible_sleep` polls `cancel_check`, and
         triage used to supply none."""
@@ -281,19 +284,21 @@ class TestTriageBudget:
             stderr="API Error: 503 {}\nRetry-After: 60",
         )
         history = _history(5)
+        slept = sleep_spy(monkeypatch, claude_code)
         # A budget already spent: the first backoff must not sleep at all.
-        with patch("istota.context.time.monotonic", side_effect=[0.0] + [10_000.0] * 40):
-            result = select_relevant_context(
-                "test", history,
-                _config(skip_selection_threshold=2, always_include_recent=2),
-            )
+        ticks = iter([0.0] + [10_000.0] * 40)
+        monotonic_spy(monkeypatch, context, lambda: next(ticks))
+        result = select_relevant_context(
+            "test", history,
+            _config(skip_selection_threshold=2, always_include_recent=2),
+        )
 
         assert mock_run.call_count == 1
-        mock_sleep.assert_not_called()
+        assert slept == []
         assert result == history  # fail open
 
     @patch("istota.brain.claude_code.subprocess.run")
-    def test_a_retry_inside_the_budget_still_happens(self, mock_run):
+    def test_a_retry_inside_the_budget_still_happens(self, mock_run, monkeypatch):
         """The budget bounds the ladder; it does not delete it. A transient
         failure that resolves on the second attempt is the case where retrying
         beats failing open."""
@@ -307,11 +312,11 @@ class TestTriageBudget:
         ]
         history = _history(5)
 
-        with patch("istota.brain.claude_code.time.sleep"):
-            result = select_relevant_context(
-                "test", history,
-                _config(skip_selection_threshold=2, always_include_recent=2),
-            )
+        sleep_spy(monkeypatch, claude_code, record=False)
+        result = select_relevant_context(
+            "test", history,
+            _config(skip_selection_threshold=2, always_include_recent=2),
+        )
 
         assert mock_run.call_count == 2
         assert result == [history[0], history[3], history[4]]

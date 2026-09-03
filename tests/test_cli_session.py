@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from istota import cli
+from tests.support.sleep_spy import sleep_spy
 from tests.test_session_log_read import (
     STAMP,
     _assistant,
@@ -619,7 +620,7 @@ class TestTail:
                 with open(path, "a", encoding="utf-8") as handle:
                     handle.write(json.dumps(_result()) + "\n")
 
-        monkeypatch.setattr(time, "sleep", _sleep)
+        sleep_spy(monkeypatch, time, record=False, on_sleep=_sleep)
         cli.cmd_session_tail(
             _FakeArgs(
                 config=str(cfg), target=str(path), lines=0,
@@ -670,7 +671,7 @@ class TestTail:
                 with open(path, "a", encoding="utf-8") as handle:
                     handle.write(',"stop_reason":"completed"}\n')
 
-        monkeypatch.setattr(time, "sleep", _sleep)
+        sleep_spy(monkeypatch, time, record=False, on_sleep=_sleep)
         cli.cmd_session_tail(
             _FakeArgs(
                 config=str(cfg), target=str(path), lines=0,
@@ -702,7 +703,7 @@ class TestTail:
                 replaced["done"] = True
                 write_log(path, [_session(task_id=6610)])
 
-        monkeypatch.setattr(time, "sleep", _sleep)
+        sleep_spy(monkeypatch, time, record=False, on_sleep=_sleep)
         cli.cmd_session_tail(
             _FakeArgs(
                 config=str(cfg), target=str(path), lines=0,
@@ -729,7 +730,7 @@ class TestTail:
                 gone["done"] = True
                 path.unlink()
 
-        monkeypatch.setattr(time, "sleep", _sleep)
+        sleep_spy(monkeypatch, time, record=False, on_sleep=_sleep)
         assert cli.cmd_session_tail(
             _FakeArgs(
                 config=str(cfg), target=str(path), lines=0,

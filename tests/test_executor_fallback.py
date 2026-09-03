@@ -22,6 +22,7 @@ from istota.executor import (
     fallback_notice_text,
 )
 from istota.executor_stream import TaskStreamAdapter
+from tests.support.monotonic_spy import monotonic_spy
 
 # Reuse the streaming test harness (config/task/patches).
 from tests.test_executor_streaming import (
@@ -510,7 +511,7 @@ class TestPrimaryHealthyClosesBreaker:
         # breaker is closed via record_success.
         import istota.brain._fallback as fb_mod
         clock = [0.0]
-        monkeypatch.setattr(fb_mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, fb_mod, lambda: clock[0])
         get_availability_breaker().open("claude_code", 900)
         clock[0] = 901.0  # cooldown elapsed → should_skip False → primary probed
         results, primary, fb, _a = _run(

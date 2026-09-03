@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,8 @@ import pytest
 from istota import db
 from istota.health._migrate import ensure_initialised
 from istota.health.workspace import synthesize_health_context
+from tests.support.monotonic_spy import monotonic_spy
+from tests.support.sleep_spy import sleep_spy
 
 
 def _run(args, env, expect_success=True) -> dict:
@@ -442,24 +445,23 @@ class TestGarminSyncDelegated:
             else:
                 monkeypatch.setenv(k, v)
 
-    def _patch_poll(self, transition_after_calls: int = 1):
-        """Patch ``time.sleep`` to no-op and ``time.monotonic`` to advance
-        in fixed steps so the polling loop terminates quickly. Returns a
-        counter ref so the test can react to poll iterations."""
-        counter = {"n": 0}
+    def _patch_poll(self, monkeypatch):
+        """Skip ``time.sleep`` and advance ``time.monotonic`` in fixed steps so
+        the polling loop terminates quickly.
 
-        def fake_sleep(_):
-            counter["n"] += 1
-
+        Both go through the thread-bounded helpers (ISSUE-411): the skill
+        imports ``time`` inside the function, so the stdlib module is the only
+        handle, and an unbounded patch would hand a scheduler thread a stepped
+        clock and a no-op wait for the length of the test.
+        """
         monotonic_state = {"t": 0.0}
 
         def fake_monotonic():
             monotonic_state["t"] += 0.1
             return monotonic_state["t"]
 
-        return counter, patch("time.sleep", side_effect=fake_sleep), patch(
-            "time.monotonic", side_effect=fake_monotonic,
-        )
+        sleep_spy(monkeypatch, time, record=False)
+        monotonic_spy(monkeypatch, time, fake_monotonic)
 
     def test_success_path_emits_payload(self, db_path, monkeypatch, capsys):
         from istota.skills.health import _cmd_garmin_sync_delegated
@@ -472,10 +474,8 @@ class TestGarminSyncDelegated:
                 result='{"status":"ok","inserted":5,"days_processed":3,"auth_error":false}',
             )
 
-        counter, sleep_patch, monotonic_patch = self._patch_poll()
-        with sleep_patch, monotonic_patch, patch(
-            "istota.db.get_task", side_effect=fake_get_task,
-        ):
+        self._patch_poll(monkeypatch)
+        with patch("istota.db.get_task", side_effect=fake_get_task):
             _cmd_garmin_sync_delegated(_garmin_args())
 
         out = capsys.readouterr().out
@@ -507,10 +507,8 @@ class TestGarminSyncDelegated:
                 error="garmin sync: token_expired",
             )
 
-        counter, sleep_patch, monotonic_patch = self._patch_poll()
-        with sleep_patch, monotonic_patch, patch(
-            "istota.db.get_task", side_effect=fake_get_task,
-        ):
+        self._patch_poll(monkeypatch)
+        with patch("istota.db.get_task", side_effect=fake_get_task):
             with pytest.raises(SystemExit) as exc_info:
                 _cmd_garmin_sync_delegated(_garmin_args())
         assert exc_info.value.code == 1
@@ -529,10 +527,8 @@ class TestGarminSyncDelegated:
                 source_type="cli", user_id="alice", prompt="",
             )
 
-        counter, sleep_patch, monotonic_patch = self._patch_poll()
-        with sleep_patch, monotonic_patch, patch(
-            "istota.db.get_task", side_effect=fake_get_task,
-        ):
+        self._patch_poll(monkeypatch)
+        with patch("istota.db.get_task", side_effect=fake_get_task):
             with pytest.raises(SystemExit):
                 _cmd_garmin_sync_delegated(_garmin_args())
         out = capsys.readouterr().out
@@ -560,9 +556,9 @@ class TestGarminSyncDelegated:
             monotonic_state["calls"] += 1
             return 1000.0 if monotonic_state["calls"] >= 2 else 0.0
 
-        with patch("time.sleep"), patch(
-            "time.monotonic", side_effect=fake_monotonic,
-        ), patch("istota.db.get_task", side_effect=fake_get_task):
+        sleep_spy(monkeypatch, time, record=False)
+        monotonic_spy(monkeypatch, time, fake_monotonic)
+        with patch("istota.db.get_task", side_effect=fake_get_task):
             with pytest.raises(SystemExit):
                 _cmd_garmin_sync_delegated(_garmin_args())
         out = capsys.readouterr().out
