@@ -11,7 +11,7 @@ across the primary brain call, the reroute and the fallback call, which is
 what the ``ExitStack`` in ``execute_task`` expresses. A ``with`` here would
 close them before the brain ran.
 
-Three orderings inside ``build_task_runtime`` are load-bearing and are
+Four orderings inside ``build_task_runtime`` are load-bearing and are
 preserved as written:
 
 1. ``proxy_base_env`` is snapshotted *before* ``ISTOTA_SANDBOXED`` is set,
@@ -20,6 +20,9 @@ preserved as written:
    call operates on the residue of the first.
 3. ``HOOK_PATH_PREPEND_KEY`` is consumed after the ``hook_env`` merge, which
    skips it by name; it reaches neither ``env`` nor the proxy snapshot.
+4. Both ISSUE-410 reachability top-ups run *after* both credential splits, so
+   a name a manifest declared ``sensitive`` stays where the split put it
+   rather than being read back out of the daemon's environment.
 
 And two predicates that look like one and are not: the network-proxy gate
 reads ``config.security.sandbox_enabled`` (what the operator asked for) while
@@ -107,7 +110,9 @@ def build_task_runtime(
         effective_sandboxing,
         native_fs_confinement_active,
         resolve_sandbox_cache_dir,
+        skill_cli_tls_env,
         skill_model_credentials,
+        skill_model_reachability,
     )
 
     env = build_clean_env(config)
@@ -303,6 +308,21 @@ def build_task_runtime(
         proxy_base_env = without_claude_runtime_env(
             {**env, **proxy_only_env}
         )
+        # Plus where this host's TLS trust store is (ISSUE-410).
+        # `build_clean_env` is an allowlist carrying none of those names, so a
+        # host-side skill CLI on a deployment with a private CA had no way to
+        # know it existed and failed at the handshake. Shared with every such
+        # CLI because a trust store path can only *add* a CA — it redirects
+        # nothing and carries no credential, so a skill with no use for it is
+        # unaffected. The proxy triple is the opposite on both counts and is
+        # scoped below instead; `SKILL_CLI_TLS_VARS` carries that reasoning.
+        #
+        # `credential_env` is passed too, so a name a manifest declared
+        # `sensitive` — which the split just *moved* out of `env` — is not
+        # read back out of the daemon's environment and handed to every CLI.
+        proxy_base_env.update(
+            skill_cli_tls_env(proxy_base_env, credential_env)
+        )
         # One skill CLI is itself a model caller, and the strip above left it
         # unauthenticated: `code_review` spawns the `claude` binary per
         # reviewer, so from ISSUE-390 every review came back `review_failed`
@@ -320,10 +340,25 @@ def build_task_runtime(
         # the model included. `_PROXY_LOOKUP_BLOCKED` says the same thing at
         # the endpoint, so the two do not depend on each other's ordering.
         model_creds = skill_model_credentials(env, os.environ)
-        if model_creds:
-            credential_env.update(model_creds)
+        # And how to *reach* the provider, scoped the same way (ISSUE-410).
+        # Not in `proxy_base_env` with the TLS names above, because a proxy
+        # URL redirects traffic rather than merely sitting unread: `browse`
+        # calls `BROWSER_API_URL` — loopback by default — over an httpx client
+        # with `trust_env=True`, which honours `HTTP_PROXY` and does not
+        # exempt loopback, so sharing the daemon's egress proxy would send an
+        # internal call at it. It can also carry basic-auth userinfo, and a
+        # skill CLI's stderr goes back to the model verbatim.
+        model_reach = skill_model_reachability(proxy_base_env, credential_env)
+        # One dict from here down because the injection is identical; they are
+        # built apart because the empty-value rule differs, and named apart
+        # because `scoped_for_model` is not all credentials any more.
+        scoped_for_model = {**model_creds, **model_reach}
+        if scoped_for_model:
+            credential_env.update(scoped_for_model)
             for skill_name in SKILL_MODEL_CALLERS & set(authorized_skills):
-                skill_cred_map.setdefault(skill_name, set()).update(model_creds)
+                skill_cred_map.setdefault(skill_name, set()).update(
+                    scoped_for_model
+                )
         _proxy_ctx = SkillProxy(
             _proxy_sock, credential_env, proxy_base_env,
             timeout=config.security.skill_proxy_timeout,
