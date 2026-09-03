@@ -1,9 +1,26 @@
 """Tests for scheduler repost suppression (Stage 3 of the user-scoped
 Nextcloud OAuth spec): when the web process already posted a web-origin turn
 into Talk as the user (external-id stamp on the user row), the completion-time
-attributed repost is skipped — the answer post is unaffected."""
+attributed repost is skipped — the answer post is unaffected.
 
-import pytest
+Asserted at the Talk seam rather than at a `post_result_to_talk` mock. The
+mirror leg only exists on a room bound to *two* surfaces, so every room here is
+the promoted shape from `tests/support/rooms.py` and the destination is a
+`talk` `surface_ref` that is not the room's canonical token. Against the old
+permissive double a repost sent to the canonical `web-…` token was
+indistinguishable from one sent to the Talk ref; `fake_talk` refuses the first,
+exactly as Nextcloud does. `refusals == []` is asserted alongside every count,
+because `TalkTransport.deliver` swallows the refusal and returns None — a
+suppression test that only counted *successful* posts would read a 404 as a
+suppression.
+
+Not parametrized over `plain_talk_room`: a Talk-origin room has no `web`
+binding, so there is no web-origin task in it to mirror. The non-diverging
+mirror shape — a Talk room a user later also opens in web chat — is a third
+shape neither builder makes, noted here rather than faked.
+"""
+
+import asyncio
 from unittest.mock import patch
 
 from istota import db
@@ -17,12 +34,7 @@ from istota.config import (
 )
 from istota.scheduler import process_one_task
 
-
-@pytest.fixture
-def db_path(tmp_path):
-    path = tmp_path / "test.db"
-    db.init_db(path)
-    return path
+from .support.rooms import promoted_room
 
 
 def _make_config(db_path, tmp_path):
@@ -42,37 +54,41 @@ def _make_config(db_path, tmp_path):
     )
 
 
-def _seed_web_mirror_task(db_path, *, stamp_talk_id=None):
+def _seed_web_mirror_task(db_path, *, stamp_talk_id=None, external_ids=None):
     """A web-origin task in a Talk-bound room, with its canonical user turn
     stored (as record_inbound would). When `stamp_talk_id` is set, the user
     turn carries the post-as-user external-id stamp."""
     with db.get_db(db_path) as conn:
-        db.register_room(conn, "webroom", "testuser", origin="web")
-        db.add_room_binding(conn, "webroom", "web", "webroom")
-        db.add_room_binding(conn, "webroom", "talk", "talktok42")
+        shape = promoted_room(conn, "testuser")
         task_id = db.create_task(
             conn, prompt="what's the weather?", user_id="testuser",
-            source_type="web", conversation_token="webroom",
+            source_type="web", conversation_token=shape.canonical,
             output_target="room",
         )
+        if external_ids is None and stamp_talk_id:
+            external_ids = {"talk": str(stamp_talk_id)}
         db.add_message(
-            conn, "webroom", role="user", body="what's the weather?",
-            origin_surface="web", task_id=task_id,
-            external_ids=(
-                {"talk": str(stamp_talk_id)} if stamp_talk_id else None
-            ),
+            conn, shape.canonical, role="user", body="what's the weather?",
+            origin_surface="web", task_id=task_id, external_ids=external_ids,
         )
-    return task_id
+    return shape, task_id
+
+
+def _bodies(fake_talk, shape):
+    """Every message posted to the room's Talk ref, in order."""
+    return [
+        c.args["message"]
+        for c in fake_talk.calls_to(shape.talk_ref, method="send_message")
+    ]
 
 
 class TestMirrorRepostSuppression:
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_stamped_turn_suppresses_repost(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run, db_path, tmp_path, fake_talk,
     ):
         config = _make_config(db_path, tmp_path)
-        _seed_web_mirror_task(db_path, stamp_talk_id=555)
+        shape, _ = _seed_web_mirror_task(db_path, stamp_talk_id=555)
 
         with patch(
             "istota.scheduler.execute_task",
@@ -81,24 +97,21 @@ class TestMirrorRepostSuppression:
             result = process_one_task(config)
         assert result is not None and result[1] is True
 
-        talk_calls = [
-            c for c in mock_post_talk.call_args_list
-            if c.kwargs.get("target_token") == "talktok42"
-        ]
         # Only the answer was posted — no attributed repost.
-        assert len(talk_calls) == 1
-        assert talk_calls[0].args[2] == "It's sunny."
-        assert "(via web)" not in talk_calls[0].args[2]
+        assert _bodies(fake_talk, shape) == ["It's sunny."]
+        # Without this, a repost refused for naming the canonical token would
+        # read exactly like a repost that was suppressed.
+        assert fake_talk.refusals == []
+        assert shape.canonical not in [c.token for c in fake_talk.calls]
 
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_unstamped_turn_keeps_legacy_repost(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run, db_path, tmp_path, fake_talk,
     ):
         # Regression: no stamp (feature off / post failed) → the attributed
         # repost fires exactly as before, then the answer.
         config = _make_config(db_path, tmp_path)
-        _seed_web_mirror_task(db_path, stamp_talk_id=None)
+        shape, _ = _seed_web_mirror_task(db_path, stamp_talk_id=None)
 
         with patch(
             "istota.scheduler.execute_task",
@@ -107,37 +120,22 @@ class TestMirrorRepostSuppression:
             result = process_one_task(config)
         assert result is not None and result[1] is True
 
-        talk_calls = [
-            c for c in mock_post_talk.call_args_list
-            if c.kwargs.get("target_token") == "talktok42"
-        ]
-        assert len(talk_calls) == 2
-        assert "Alice" in talk_calls[0].args[2]
-        assert "(via web)" in talk_calls[0].args[2]
-        assert "what's the weather?" in talk_calls[0].args[2]
-        assert talk_calls[1].args[2] == "It's sunny."
+        bodies = _bodies(fake_talk, shape)
+        assert len(bodies) == 2
+        assert "Alice" in bodies[0]
+        assert "(via web)" in bodies[0]
+        assert "what's the weather?" in bodies[0]
+        assert bodies[1] == "It's sunny."
+        assert fake_talk.refusals == []
 
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_stamp_on_other_surface_does_not_suppress(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run, db_path, tmp_path, fake_talk,
     ):
         # An external id on a different surface must not suppress the Talk
         # repost — only a `talk` stamp signals the user post landed in Talk.
         config = _make_config(db_path, tmp_path)
-        with db.get_db(db_path) as conn:
-            db.register_room(conn, "webroom", "testuser", origin="web")
-            db.add_room_binding(conn, "webroom", "web", "webroom")
-            db.add_room_binding(conn, "webroom", "talk", "talktok42")
-            task_id = db.create_task(
-                conn, prompt="q", user_id="testuser", source_type="web",
-                conversation_token="webroom", output_target="room",
-            )
-            db.add_message(
-                conn, "webroom", role="user", body="q",
-                origin_surface="web", task_id=task_id,
-                external_ids={"matrix": "abc"},
-            )
+        shape, _ = _seed_web_mirror_task(db_path, external_ids={"matrix": "abc"})
 
         with patch(
             "istota.scheduler.execute_task",
@@ -145,14 +143,16 @@ class TestMirrorRepostSuppression:
         ):
             process_one_task(config)
 
-        talk_calls = [
-            c for c in mock_post_talk.call_args_list
-            if c.kwargs.get("target_token") == "talktok42"
-        ]
-        assert len(talk_calls) == 2  # repost + answer
+        bodies = _bodies(fake_talk, shape)
+        assert len(bodies) == 2  # repost + answer
+        assert "(via web)" in bodies[0]
+        assert bodies[1] == "a"
+        assert fake_talk.refusals == []
 
 
 class TestUserTurnHasExternalId:
+    """The database helper alone — no delivery, so no Talk seam to reach."""
+
     def test_helper(self, db_path):
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r", "u", origin="web")

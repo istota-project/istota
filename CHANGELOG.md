@@ -292,6 +292,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The rules deciding what each messaging surface may do with a room now live in one table instead of ten hardcoded lists of surface names spread over five files. Nothing changes for anyone using the bot; what changes is that those lists agreed with each other by luck rather than by design, and three genuinely different questions were being asked of the same names — the ground the promoted-room fault above grew in. Each question now has one name and one answer per surface, and a test refuses a new surface that leaves one of them unanswered. The stand-in for Nextcloud Talk used in testing also refuses a room address the real Nextcloud would refuse, so a misroute of that kind now fails a test rather than going quiet in production.
+
 - The health check no longer tests a program the install does not use. Both `!check` and the nightly self-check ran the `claude` command line to prove a model answers, whatever backend was actually configured. On the built-in agent loop, which is what the Docker deployment ships, that exercised a program nothing else touches and said nothing about whether tasks would work. It now names the backend in use and reports that there is no command line to exercise. An install running the Claude Code or tmux backend is unaffected.
 
 - A run of failed tasks in the last hour is now reported as a warning rather than raising an alert. It reads the same way in the health report and in the nightly self-check, and the self-check no longer treats it as a reason to notify you: a task that failed an hour ago is worth seeing and is not worth a page. Everything else the self-check reports is unchanged in that respect.

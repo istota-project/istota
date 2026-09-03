@@ -42,6 +42,8 @@ from istota.scheduler import process_one_task
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email.inbound import poll_emails
 
+from .support.rooms import promoted_room
+
 ROOM = "rm_web123"
 USER = "carol"
 USER_ADDR = "carol@test.com"
@@ -77,10 +79,26 @@ def config(db_path, tmp_path):
 
 def _origin_room(conn):
     """The web room the original send went out from, bound on both surfaces so
-    the `room:` descriptor has something to expand to."""
-    db.register_room(conn, ROOM, USER, origin="web")
-    db.add_room_binding(conn, ROOM, "web", ROOM)
-    db.add_room_binding(conn, ROOM, "talk", ROOM)
+    the `room:` descriptor has something to expand to.
+
+    Built through `tests/support/rooms.py` rather than by hand, which changes
+    one thing: the `talk` binding now points at a *different* string from the
+    canonical token, as a real promotion does. The hand-rolled version bound
+    `talk -> rm_web123`, a shape no producer writes. Every assertion here keys
+    on the canonical token, so `ROOM` is still what they name.
+
+    **The divergence is latent, not load-bearing.** Nothing in this file
+    reaches the Talk seam — every test mocks `scheduler.run_coro` and the
+    config carries no `nextcloud.url`, so `TalkTransport.deliver` returns
+    before it touches a client — and the destinations asserted here are
+    `output_target` and `messages.room_token`, both canonical. Measured: with
+    `deliver` mutated to address `task.conversation_token`, twelve tests across
+    the converted files went red and none of them were in this file. What the
+    builder buys is that the fixture is now the shape a producer writes, so a
+    future case taking `fake_talk` can tell the two tokens apart without first
+    rebuilding the room.
+    """
+    return promoted_room(conn, USER, canonical=ROOM, talk_ref="talktok_rmweb123")
 
 
 def _sent_from_the_room(conn, *, to_addr=EXTERNAL_ADDR, origin_target=f"room:{ROOM}"):

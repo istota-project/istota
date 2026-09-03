@@ -19,6 +19,7 @@ so both halves of the exchange are ordinary rows in it. Driven from the seam
 every one of these bugs lived in the wiring between them.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -40,6 +41,8 @@ from istota.transport import (
     transcript_room,
 )
 from istota.transport.routing import transcript_room_for_task
+
+from .support.rooms import plain_talk_room, promoted_room
 
 # A first-contact thread hash: the 16-lowercase-hex shape `compute_thread_id`
 # produces, naming no room anywhere. Deliberately repetitive rather than a
@@ -89,10 +92,29 @@ def config(db_path, tmp_path):
     )
 
 
+def _talk_bodies(fake_talk):
+    """Every body posted to the routed Talk room, in order.
+
+    Read off the seam rather than off a `post_result_to_talk` mock, so a body
+    that reached the room and a body handed to a shim that would have 404'd are
+    different observations. Refused calls are excluded here and asserted absent
+    at each call site.
+    """
+    return [
+        c.args["message"]
+        for c in fake_talk.calls_to(ROUTED_ROOM, method="send_message")
+        if not c.refused
+    ]
+
+
 def _routed_room(conn):
-    """The user's `#assistant`-shaped Talk room, registered as rooms are."""
-    db.register_room(conn, ROUTED_ROOM, "testuser", origin="talk")
-    db.add_room_binding(conn, ROUTED_ROOM, "talk", ROUTED_ROOM)
+    """The user's `#assistant`-shaped Talk room, registered as rooms are.
+
+    An ordinary Talk room, so the canonical token *is* the Talk ref — which is
+    what makes it the wrong shape to catch a room-token/Talk-ref mix-up, and
+    the reason the promoted case below is built separately.
+    """
+    return plain_talk_room(conn, "testuser", token=ROUTED_ROOM)
 
 
 # What the poller stamps once it has resolved the room (see
@@ -286,10 +308,9 @@ class TestInboundTurn:
 
 class TestAnswerTurn:
     @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_the_answer_is_a_turn_and_matches_what_talk_was_posted(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
+        self, mock_run_coro, mock_post_email, db_path, config, fake_talk,
     ):
         """Symptom 1 and symptom 2 together, on the reported shape: an email
         exchange routed into a room, answered with prose."""
@@ -319,7 +340,8 @@ class TestAnswerTurn:
         assert msgs[1].task_id == task_id
         assert notes == []
         # And Talk was posted the same body the room stored.
-        posted = [c.args[2] for c in mock_post_talk.call_args_list]
+        posted = _talk_bodies(fake_talk)
+        assert fake_talk.refusals == []
         assert answer in posted
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
@@ -366,10 +388,9 @@ class TestAnswerTurn:
         assert [m.body for m in assistant] == [answer]
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_a_raw_envelope_result_is_unwrapped_for_both_surfaces(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
+        self, mock_run_coro, mock_post_email, db_path, config, fake_talk,
     ):
         """The one case the unwrap was written for survives: when the *result*
         is the envelope, storing it verbatim would put JSON in the room.
@@ -394,7 +415,8 @@ class TestAnswerTurn:
                 if m.role == "assistant"
             ]
         assert [m.body for m in assistant] == ["Noted."]
-        posted = [c.args[2] for c in mock_post_talk.call_args_list]
+        posted = _talk_bodies(fake_talk)
+        assert fake_talk.refusals == []
         assert "Noted." in posted
         assert not any(p.lstrip().startswith("{") for p in posted), posted
 
@@ -439,10 +461,9 @@ class TestTalkSideOfTheExchange:
         )
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_talk_is_told_who_the_answer_is_answering(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
+        self, mock_run_coro, mock_post_email, db_path, config, fake_talk,
     ):
         with db.get_db(db_path) as conn:
             _routed_room(conn)
@@ -455,7 +476,8 @@ class TestTalkSideOfTheExchange:
         ):
             process_one_task(config)
 
-        posted = [c.args[2] for c in mock_post_talk.call_args_list]
+        posted = _talk_bodies(fake_talk)
+        assert fake_talk.refusals == []
         assert any(
             "contact@example.com" in p and "Hey" in p for p in posted
         ), posted
@@ -492,10 +514,9 @@ class TestEmailTaskMayParkOnAConfirmation:
     the correspondent."""
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
-    @patch("istota.scheduler.post_result_to_talk")
-    @patch("istota.scheduler.run_coro", return_value=414)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_the_question_goes_to_the_room_and_not_to_the_contact(
-        self, mock_run_coro, mock_post_talk, mock_post_email, db_path, config,
+        self, mock_run_coro, mock_post_email, db_path, config, fake_talk,
     ):
         with db.get_db(db_path) as conn:
             _routed_room(conn)
@@ -510,7 +531,8 @@ class TestEmailTaskMayParkOnAConfirmation:
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.status == "pending_confirmation"
-        posted = [c.args[2] for c in mock_post_talk.call_args_list]
+        posted = _talk_bodies(fake_talk)
+        assert fake_talk.refusals == []
         assert any("Should I proceed?" in p for p in posted), posted
         mock_post_email.assert_not_called()
 
@@ -739,9 +761,10 @@ class TestTalkMirrorNarrowed:
         from istota.scheduler import _talk_result_mirror_body
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "web-alice-1", "testuser", origin="web")
-            db.add_room_binding(conn, "web-alice-1", "talk", "talktok9")
+            room = promoted_room(
+                conn, "testuser", canonical="web-alice-1", talk_ref="talktok9",
+            )
             assert _talk_result_mirror_body(
-                conn, self._task(THREAD_TOKEN), "talktok9", None, "hi",
-                [SimpleNamespace(surface="web", channel="web-alice-1")],
+                conn, self._task(THREAD_TOKEN), room.talk_ref, None, "hi",
+                [SimpleNamespace(surface="web", channel=room.canonical)],
             ) is None

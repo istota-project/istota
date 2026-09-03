@@ -5,6 +5,14 @@ Persistent-asyncio-loop spec. Covers the Stage 2 lifecycle (``_ensure_open`` /
 singleton, and the Stage 6 behaviour where the 11 TalkClient methods issue
 requests on the persistent ``self._client`` (connection reuse, post-aclose
 failure, per-request timeout override).
+
+**Deliberately not converted onto `fake_talk`.** The real ``TalkClient`` and
+the real ``get_talk_client`` factory are what this file is testing, so patching
+the factory out would delete the subject rather than guard it — it is the one
+file in the tree that must construct a live client. It mocks at the ``httpx``
+layer, *below* the client, so no room registry is involved and ``"room123"`` is
+a string handed to a mocked transport rather than a destination anything
+resolved. There is nothing here for a room-shape parametrization to tell apart.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch

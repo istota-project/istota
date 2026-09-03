@@ -1,5 +1,6 @@
 """Configuration loading for istota.scheduler module."""
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -59,6 +60,8 @@ from istota.transport.email.outbound import (
     _parse_email_output,
     _load_deferred_email_output,
 )
+
+from .support.rooms import plain_talk_room, promoted_room
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +595,7 @@ class TestTalkTargetForDelivery:
         that into a silent reroute.
         """
         config = self._live_config(tmp_path)
-        self._room(config, "other_room", "binding_room")
+        self._room(config, "other_room", "binding_room", origin="web")
         task = self._task(
             source_type="email",
             conversation_token="other_room",
@@ -606,10 +609,26 @@ class TestTalkTargetForDelivery:
     # room's `talk` binding now. Same expected token, different source of truth,
     # and one thing the column could never do: see the promote test.
 
-    def _room(self, config, canonical, talk_ref, *, origin="web"):
+    def _room(self, config, canonical, talk_ref, *, origin):
+        """A room shape `tests/support/rooms.py` deliberately will not build.
+
+        `promoted_room` reproduces the *web-origin* promotion, so it always
+        writes a `web` binding and a web-chat handle. The two cases left on
+        this helper are rooms whose `talk` binding points at some other
+        conversation than their own token, and they exist to pin the
+        resolver's rungs rather than to model anything a producer writes — so
+        they keep the primitive writes and name their origin explicitly. The
+        web-origin promotions use the shared builder.
+        """
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, canonical, "alice", origin=origin)
             db.add_room_binding(conn, canonical, "talk", talk_ref)
+
+    def _promoted(self, config, canonical, talk_ref):
+        with db.get_db(config.db_path) as conn:
+            return promoted_room(
+                conn, "alice", canonical=canonical, talk_ref=talk_ref,
+            )
 
     def _live_config(self, tmp_path, alerts_channel="alerts1"):
         config = self._config(tmp_path, alerts_channel=alerts_channel)
@@ -628,19 +647,17 @@ class TestTalkTargetForDelivery:
         would pin a reachability the system denies.
         """
         config = self._live_config(tmp_path)
-        self._room(config, "web-alice-abc123def456", "RealTalkRoom")
-        task = self._task(
-            source_type="email", conversation_token="web-alice-abc123def456",
-        )
-        assert _talk_target_for_delivery(config, task) == "RealTalkRoom"
+        room = self._promoted(config, "web-alice-abc123def456", "RealTalkRoom")
+        task = self._task(source_type="email", conversation_token=room.canonical)
+        assert _talk_target_for_delivery(config, task) == room.talk_ref
 
     def test_room_binding_beats_a_real_looking_token(self, tmp_path):
         # A thread-matched email task inherited `other_room` from a prior
         # outbound; the room's own Talk binding is the authority for delivery.
         config = self._live_config(tmp_path)
-        self._room(config, "other_room", "delivery_room")
-        task = self._task(source_type="email", conversation_token="other_room")
-        assert _talk_target_for_delivery(config, task) == "delivery_room"
+        room = self._promoted(config, "other_room", "delivery_room")
+        task = self._task(source_type="email", conversation_token=room.canonical)
+        assert _talk_target_for_delivery(config, task) == room.talk_ref
 
     def test_a_subtask_resolves_through_its_inherited_room(self, tmp_path):
         # A subtask inherits the parent's conversation_token verbatim
@@ -2542,10 +2559,9 @@ class TestProcessOneTask:
         assert any(m.body == "Here is the answer" for m in notes)
         assert all(m.body != "Here is the answer" for m in own_turns)
 
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_web_origin_room_mirrors_to_bound_talk(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run_coro, db_path, tmp_path, fake_talk,
     ):
         # A web-origin room bound to a Talk conversation mirrors its final result
         # into that Talk room (web's own result streams over SSE). The mirror
@@ -2555,7 +2571,7 @@ class TestProcessOneTask:
         room_token = default_web_room_token(config, "testuser")
         with db.get_db(db_path) as conn:
             db.add_room_binding(conn, room_token, "talk", "talktok42")
-            db.create_task(
+            task_id = db.create_task(
                 conn, prompt="hi", user_id="testuser", source_type="web",
                 conversation_token=room_token, output_target="room",
             )
@@ -2567,20 +2583,25 @@ class TestProcessOneTask:
             result = process_one_task(config)
         assert result is not None and result[1] is True
 
-        # The Talk mirror was posted to the bound Talk room.
-        assert mock_post_talk.called
-        _, kwargs = mock_post_talk.call_args
-        assert kwargs.get("target_token") == "talktok42"
-        # external_ids ledger recorded the mirror's Talk post id.
+        # The Talk mirror was posted to the bound Talk room, and to nothing
+        # else — the canonical `web-…` token is where ISSUE-400 sent it, and
+        # the double refuses that rather than accepting it silently.
+        assert {c.token for c in fake_talk.calls} == {"talktok42"}
+        assert fake_talk.refusals == []
+        # external_ids ledger recorded the mirror's Talk post id — the id of
+        # the *reply*, which is not the first thing posted (the unstamped user
+        # turn gets an attributed repost ahead of it), so it is named by its
+        # reference_id rather than taken by position.
+        posted = fake_talk.sent_id_for(f"istota:task:{task_id}:result")
+        assert posted is not None
         with db.get_db(db_path) as conn:
             msgs = db.get_messages(conn, room_token)
         assistant = [m for m in msgs if m.role == "assistant"][0]
-        assert assistant.external_ids == {"talk": "4242"}
+        assert assistant.external_ids == {"talk": str(posted)}
 
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_web_origin_mirror_reposts_user_question(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run_coro, db_path, tmp_path, fake_talk,
     ):
         # A web-origin turn mirrored into a bound Talk room reposts the user's
         # question (attributed) first, then the reply — otherwise the Talk
@@ -2605,21 +2626,21 @@ class TestProcessOneTask:
         assert result is not None and result[1] is True
 
         # Two Talk posts to the bound room: the attributed question, then reply.
-        talk_calls = [
-            c for c in mock_post_talk.call_args_list
-            if c.kwargs.get("target_token") == "talktok42"
+        bodies = [
+            c.args["message"]
+            for c in fake_talk.calls_to("talktok42", method="send_message")
         ]
-        assert len(talk_calls) == 2
-        repost_body = talk_calls[0].args[2]
-        reply_body = talk_calls[1].args[2]
-        assert "Frank" in repost_body
-        assert "what's the weather?" in repost_body
-        assert reply_body == "It's sunny."
+        assert len(bodies) == 2
+        assert "Frank" in bodies[0]
+        assert "what's the weather?" in bodies[0]
+        assert bodies[1] == "It's sunny."
+        # A post refused for naming the canonical token would leave a shorter
+        # list, not a failed assertion about a body.
+        assert fake_talk.refusals == []
 
-    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
-    @patch("istota.scheduler.run_coro", return_value=4242)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_mirror_repost_not_written_to_canonical_store(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run_coro, db_path, tmp_path, fake_talk,
     ):
         # The repost is a pure Talk-surface artifact: it must never land in the
         # canonical `messages` store (where web reads its history), so it can't
@@ -2647,17 +2668,28 @@ class TestProcessOneTask:
         # direct-create test, and the repost added none).
         assert [m.role for m in msgs] == ["assistant"]
         assert all("ping" not in m.body for m in msgs if m.role == "user")
+        # And the repost did reach Talk, so "not in the store" is a statement
+        # about the store rather than about a post that never happened.
+        assert len(fake_talk.calls_to("talktok42", method="send_message")) == 2
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.post_result_to_talk", return_value=4242)
     @patch("istota.scheduler.run_coro", return_value=4242)
     def test_talk_origin_does_not_repost(
-        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+        self, mock_run_coro, mock_post_talk, db_path, tmp_path, fake_talk,
     ):
         # A Talk-origin task delivers a single reply — no repost (the user's
         # message is already natively in the Talk room).
+        #
+        # `fake_talk` is here because the progress subscriber's edit does *not*
+        # go through the `istota.scheduler.run_coro` patched above — it goes
+        # through `istota.consumers.talk.run_coro`, a different binding — so
+        # without the double this test reached the real Talk client and posted
+        # at nc.example.com. The room is bound so that edit is one Nextcloud
+        # would have accepted.
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "talkroom", "testuser", origin="talk")
+            plain_talk_room(conn, "testuser", token="talkroom")
             db.create_task(
                 conn, prompt="hi", user_id="testuser", source_type="talk",
                 conversation_token="talkroom",
@@ -2674,6 +2706,7 @@ class TestProcessOneTask:
             if c.kwargs.get("reference_id", "").endswith((":result", ":prompt"))
         ]
         assert all(not c.kwargs["reference_id"].endswith(":prompt") for c in talk_calls)
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_own_origin_web_task_does_not_push(self, mock_arun, db_path, tmp_path):
@@ -2966,10 +2999,11 @@ class TestProcessOneTask:
     @patch("istota.scheduler._post_policy_refusal_alert")
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_policy_refusal_skips_retry_for_talk(
-        self, mock_arun, mock_alert, mock_exec, db_path, tmp_path,
+        self, mock_arun, mock_alert, mock_exec, db_path, tmp_path, fake_talk,
     ):
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "testuser", token="room1")
             db.create_task(
                 conn, prompt="Talk task", user_id="testuser",
                 source_type="talk", conversation_token="room1",
@@ -2984,6 +3018,10 @@ class TestProcessOneTask:
         assert task.status == "failed"
         assert task.attempt_count == 0
         mock_alert.assert_called_once()
+        # The seed is only doing its job if nothing was refused: a mistyped
+        # token would be refused and swallowed, leaving the test green and the
+        # room fixture silently inert.
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task", return_value=(
         False,
@@ -3042,10 +3080,13 @@ class TestProcessOneTask:
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=42)
-    def test_confirmation_detected(self, mock_arun, mock_exec, db_path, tmp_path):
+    def test_confirmation_detected(
+        self, mock_arun, mock_exec, db_path, tmp_path, fake_talk,
+    ):
         mock_exec.return_value = (True, "I need your confirmation before deleting the file. Reply yes or no.", None, None)
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "testuser", token="room1")
             db.create_task(
                 conn, prompt="Delete file", user_id="testuser",
                 source_type="talk", conversation_token="room1",
@@ -3060,6 +3101,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.status == "pending_confirmation"
         assert task.confirmation_prompt is not None
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.run_coro", return_value=None)
@@ -3158,7 +3200,7 @@ class TestProcessOneTask:
     @patch("istota.scheduler.run_coro", return_value=42)
     @patch("istota.scheduler.asyncio.run", return_value=42)
     def test_confirmation_excluded_for_all_broadcast(
-        self, mock_arun, mock_runcoro, mock_exec, db_path, tmp_path,
+        self, mock_arun, mock_runcoro, mock_exec, db_path, tmp_path, fake_talk,
     ):
         """A confirmation prompt on an output_target='all' broadcast must NOT
         stall in pending_confirmation — 'all' is a fan-out, not an interactive
@@ -3169,6 +3211,7 @@ class TestProcessOneTask:
         )
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "testuser", token="room1")
             db.create_task(
                 conn, prompt="Delete file", user_id="testuser",
                 source_type="talk", conversation_token="room1",
@@ -3183,6 +3226,7 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.status == "completed"
         assert task.confirmation_prompt is None
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.run_coro", return_value=None)
@@ -3719,10 +3763,11 @@ class TestAutoIndexGate:
     @patch("istota.memory.search.index_conversation")
     @patch("istota.scheduler.execute_task", return_value=(True, "ACTION: report", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
-    def test_silent_scheduled_with_action_still_skips_indexing(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+    def test_silent_scheduled_with_action_still_skips_indexing(self, mock_arun, mock_exec, mock_index, db_path, tmp_path, fake_talk):
         """Even when a silent job did report ACTION, its conversation isn't recall-relevant."""
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "alice", token="room1")
             db.create_task(
                 conn,
                 prompt="Daily check",
@@ -3733,6 +3778,10 @@ class TestAutoIndexGate:
             )
         process_one_task(config)
         mock_index.assert_not_called()
+        # The seed is only doing its job if nothing was refused: a mistyped
+        # token would be refused and swallowed, leaving the room fixture
+        # silently inert and the test green.
+        assert fake_talk.refusals == []
 
     @patch("istota.memory.search.index_conversation")
     @patch("istota.scheduler.execute_task", return_value=(True, "Briefing for today", None, None))
@@ -3754,9 +3803,10 @@ class TestAutoIndexGate:
     @patch("istota.memory.search.index_conversation")
     @patch("istota.scheduler.execute_task", return_value=(True, "Hi there", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
-    def test_talk_task_indexes(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+    def test_talk_task_indexes(self, mock_arun, mock_exec, mock_index, db_path, tmp_path, fake_talk):
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "alice", token="room1")
             db.create_task(
                 conn,
                 prompt="Hello",
@@ -3766,16 +3816,18 @@ class TestAutoIndexGate:
             )
         process_one_task(config)
         assert mock_index.call_count >= 1
+        assert fake_talk.refusals == []
 
     @patch("istota.memory.search.index_conversation")
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
-    def test_indexing_disabled_by_config_skips_all(self, mock_arun, mock_exec, mock_index, db_path, tmp_path):
+    def test_indexing_disabled_by_config_skips_all(self, mock_arun, mock_exec, mock_index, db_path, tmp_path, fake_talk):
         config = self._make_config(
             db_path, tmp_path,
             memory_search=MemorySearchConfig(enabled=False, auto_index_conversations=True),
         )
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "alice", token="room1")
             db.create_task(
                 conn,
                 prompt="Hello",
@@ -3785,6 +3837,7 @@ class TestAutoIndexGate:
             )
         process_one_task(config)
         mock_index.assert_not_called()
+        assert fake_talk.refusals == []
 
 
 # ---------------------------------------------------------------------------
@@ -7761,7 +7814,16 @@ class TestCleanupOldClaudeLogs:
 
 
 class TestPostResultToTalk:
-    """Tests for post_result_to_talk() — reply threading and @mentions in group chats."""
+    """Tests for post_result_to_talk() — reply threading and @mentions in group chats.
+
+    About the shape of each call (mention, reply_to, splitting, reference_id),
+    so every room here is `plain_talk_room` and the destination is fixed. The
+    `AsyncMock` this used to patch in accepted any token; `fake_talk` accepts
+    only a live `talk` `surface_ref`, so the calls asserted below are calls
+    Nextcloud would also have accepted. The returned id is the double's own
+    rather than a literal, since `TalkTransport.deliver` returns None on a
+    refusal and a hardcoded number would let that read as a delivery.
+    """
 
     def _make_config(self):
         return Config(
@@ -7772,139 +7834,144 @@ class TestPostResultToTalk:
             ),
         )
 
-    def _make_task(self, *, is_group_chat=False, talk_message_id=None, user_id="alice"):
+    def _make_task(self, token, *, is_group_chat=False, talk_message_id=None,
+                   user_id="alice"):
         return db.Task(
             id=1,
             prompt="hello",
             user_id=user_id,
             source_type="talk",
             status="completed",
-            conversation_token="room123",
+            conversation_token=token,
             is_group_chat=is_group_chat,
             talk_message_id=talk_message_id,
         )
 
+    @pytest.fixture
+    def room(self, db_path):
+        with db.get_db(db_path) as conn:
+            return plain_talk_room(conn, "alice")
+
     @pytest.mark.asyncio
-    async def test_dm_no_reply_to_no_mention(self):
+    async def test_dm_no_reply_to_no_mention(self, fake_talk, room):
         """DM messages should not use reply_to or @mention."""
         config = self._make_config()
-        task = self._make_task(is_group_chat=False, talk_message_id=42)
+        task = self._make_task(room.canonical, is_group_chat=False, talk_message_id=42)
 
-        with patch("istota.transport.talk.get_talk_client") as MockClient:
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 100}}}
-            )
-            result = await post_result_to_talk(
-                config, task, "Hello there", use_reply_threading=True,
-            )
-
-        mock_instance.send_message.assert_called_once_with(
-            "room123", "Hello there", reply_to=None, reference_id=None,
+        result = await post_result_to_talk(
+            config, task, "Hello there", use_reply_threading=True,
         )
-        assert result == 100
+
+        assert [(c.method, c.token, c.args) for c in fake_talk.calls] == [
+            ("send_message", room.talk_ref, {
+                "message": "Hello there", "reply_to": None, "reference_id": None,
+            }),
+        ]
+        assert result == fake_talk.sent_ids[0]
 
     @pytest.mark.asyncio
-    async def test_group_chat_reply_to_and_mention(self):
+    async def test_group_chat_reply_to_and_mention(self, fake_talk, room):
         """Group chat messages should reply to original and @mention the user."""
         config = self._make_config()
-        task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="bob")
-
-        with patch("istota.transport.talk.get_talk_client") as MockClient:
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 200}}}
-            )
-            result = await post_result_to_talk(
-                config, task, "Sure thing", use_reply_threading=True,
-            )
-
-        mock_instance.send_message.assert_called_once_with(
-            "room123", "@bob Sure thing", reply_to=42, reference_id=None,
+        task = self._make_task(
+            room.canonical, is_group_chat=True, talk_message_id=42, user_id="bob",
         )
-        assert result == 200
+
+        result = await post_result_to_talk(
+            config, task, "Sure thing", use_reply_threading=True,
+        )
+
+        assert [(c.method, c.token, c.args) for c in fake_talk.calls] == [
+            ("send_message", room.talk_ref, {
+                "message": "@bob Sure thing", "reply_to": 42, "reference_id": None,
+            }),
+        ]
+        assert result == fake_talk.sent_ids[0]
 
     @pytest.mark.asyncio
-    async def test_group_chat_split_message_only_first_part_gets_reply(self):
+    async def test_group_chat_split_message_only_first_part_gets_reply(
+        self, fake_talk, room,
+    ):
         """When a message is split, only the first part should get reply_to and @mention."""
         config = self._make_config()
-        task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="carol")
+        task = self._make_task(
+            room.canonical, is_group_chat=True, talk_message_id=42, user_id="carol",
+        )
 
-        with patch("istota.transport.talk.get_talk_client") as MockClient, \
-             patch("istota.transport.talk.split_message", return_value=["Part 1", "Part 2"]):
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 300}}}
-            )
+        with patch(
+            "istota.transport.talk.split_message",
+            return_value=["Part 1", "Part 2"],
+        ):
             await post_result_to_talk(
                 config, task, "Long message", use_reply_threading=True,
             )
 
-        calls = mock_instance.send_message.call_args_list
-        assert len(calls) == 2
-        # First part: reply_to + @mention
-        assert calls[0].args == ("room123", "@carol Part 1")
-        assert calls[0].kwargs == {"reply_to": 42, "reference_id": None}
-        # Second part: no reply_to, no @mention
-        assert calls[1].args == ("room123", "Part 2")
-        assert calls[1].kwargs == {"reply_to": None, "reference_id": None}
+        # Both parts land in the same room, in order; only the first threads.
+        assert [(c.token, c.args) for c in fake_talk.calls] == [
+            (room.talk_ref, {
+                "message": "@carol Part 1", "reply_to": 42, "reference_id": None,
+            }),
+            (room.talk_ref, {
+                "message": "Part 2", "reply_to": None, "reference_id": None,
+            }),
+        ]
+        # A refused call records the same token and the same args, so the
+        # comparison above is equally true of two posts Nextcloud rejected.
+        assert fake_talk.refusals == []
 
     @pytest.mark.asyncio
-    async def test_group_chat_no_talk_message_id(self):
+    async def test_group_chat_no_talk_message_id(self, fake_talk, room):
         """Group chat without talk_message_id should still @mention but reply_to is None."""
         config = self._make_config()
-        task = self._make_task(is_group_chat=True, talk_message_id=None, user_id="dave")
-
-        with patch("istota.transport.talk.get_talk_client") as MockClient:
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 400}}}
-            )
-            await post_result_to_talk(
-                config, task, "Response", use_reply_threading=True,
-            )
-
-        mock_instance.send_message.assert_called_once_with(
-            "room123", "@dave Response", reply_to=None, reference_id=None,
+        task = self._make_task(
+            room.canonical, is_group_chat=True, talk_message_id=None, user_id="dave",
         )
 
+        await post_result_to_talk(config, task, "Response", use_reply_threading=True)
+
+        assert [(c.token, c.args) for c in fake_talk.calls] == [
+            (room.talk_ref, {
+                "message": "@dave Response", "reply_to": None, "reference_id": None,
+            }),
+        ]
+        assert fake_talk.refusals == []
+
     @pytest.mark.asyncio
-    async def test_group_chat_no_threading_for_progress_updates(self):
+    async def test_group_chat_no_threading_for_progress_updates(self, fake_talk, room):
         """Progress updates (use_reply_threading=False) should not get reply_to or @mention."""
         config = self._make_config()
-        task = self._make_task(is_group_chat=True, talk_message_id=42, user_id="eve")
-
-        with patch("istota.transport.talk.get_talk_client") as MockClient:
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 500}}}
-            )
-            # Default use_reply_threading=False (progress/ack messages)
-            await post_result_to_talk(config, task, "Working on it...")
-
-        mock_instance.send_message.assert_called_once_with(
-            "room123", "Working on it...", reply_to=None, reference_id=None,
+        task = self._make_task(
+            room.canonical, is_group_chat=True, talk_message_id=42, user_id="eve",
         )
+
+        # Default use_reply_threading=False (progress/ack messages)
+        await post_result_to_talk(config, task, "Working on it...")
+
+        assert [(c.token, c.args) for c in fake_talk.calls] == [
+            (room.talk_ref, {
+                "message": "Working on it...", "reply_to": None,
+                "reference_id": None,
+            }),
+        ]
+        assert fake_talk.refusals == []
 
     @pytest.mark.asyncio
-    async def test_reference_id_passed_through(self):
+    async def test_reference_id_passed_through(self, fake_talk, room):
         """reference_id should be passed to send_message for each part."""
         config = self._make_config()
-        task = self._make_task(is_group_chat=False, talk_message_id=42)
+        task = self._make_task(room.canonical, is_group_chat=False, talk_message_id=42)
 
-        with patch("istota.transport.talk.get_talk_client") as MockClient:
-            mock_instance = MockClient.return_value
-            mock_instance.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 100}}}
-            )
-            await post_result_to_talk(
-                config, task, "Result", reference_id="istota:task:1:result",
-            )
-
-        mock_instance.send_message.assert_called_once_with(
-            "room123", "Result", reply_to=None,
-            reference_id="istota:task:1:result",
+        await post_result_to_talk(
+            config, task, "Result", reference_id="istota:task:1:result",
         )
+
+        assert [(c.token, c.args) for c in fake_talk.calls] == [
+            (room.talk_ref, {
+                "message": "Result", "reply_to": None,
+                "reference_id": "istota:task:1:result",
+            }),
+        ]
+        assert fake_talk.refusals == []
 
 
 class TestWorkerPoolConcurrencyCaps:
@@ -8700,13 +8767,14 @@ class TestMalformedResultGuard:
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=None)
-    def test_talk_strict_xml_in_prose_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path):
+    def test_talk_strict_xml_in_prose_flips_to_failure(self, mock_arun, mock_exec, db_path, tmp_path, fake_talk):
         """XML patterns in prose should be caught for Talk output (strict mode)."""
         text = "The error was </parameter> and it broke things."
         mock_exec.return_value = (True, text, None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "testuser", token="room1")
             db.create_task(conn, prompt="Research", user_id="testuser",
                            source_type="talk", conversation_token="room1")
 
@@ -8714,15 +8782,19 @@ class TestMalformedResultGuard:
         assert result is not None
         task_id, success = result
         assert success is False
+        # Self-checking seed: a token the room fixture never bound would be
+        # refused and swallowed, leaving this green and the fixture inert.
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.asyncio.run", return_value=None)
-    def test_malformed_result_retries_then_fails(self, mock_arun, mock_exec, db_path, tmp_path):
+    def test_malformed_result_retries_then_fails(self, mock_arun, mock_exec, db_path, tmp_path, fake_talk):
         """Malformed results exhaust retries and eventually fail permanently."""
         mock_exec.return_value = (True, "</invoke>", None, None)
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
+            plain_talk_room(conn, "testuser", token="room1")
             db.create_task(conn, prompt="Test", user_id="testuser", source_type="talk",
                            conversation_token="room1")
 
@@ -8765,6 +8837,8 @@ class TestMalformedResultGuard:
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.status == "failed"
+        # Self-checking seed, as above.
+        assert fake_talk.refusals == []
 
 
 # ---------------------------------------------------------------------------
@@ -8790,11 +8864,21 @@ class TestTaskIdInProgress:
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Here is the answer to your question.", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=42)
-    def test_ack_message_contains_task_id(self, mock_arun, mock_exec, db_path, tmp_path):
-        """Ack message posted to Talk should contain the task ID."""
+    def test_ack_message_contains_task_id(
+        self, mock_arun, mock_exec, db_path, tmp_path, fake_talk,
+    ):
+        """Ack message posted to Talk should contain the task ID.
+
+        Asserted at the Talk seam. The previous version tried and failed to
+        read the ack out of `asyncio.run`'s call list — the ack never went
+        through that binding, both of its loop bodies were empty, and the only
+        live assertion left was `task_id is not None`. Meanwhile the delivery
+        it could not see was reaching the real Talk client.
+        """
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
+            room = plain_talk_room(conn, "testuser", token="room1")
             task_id = db.create_task(
                 conn, prompt="Hello", user_id="testuser",
                 source_type="talk", conversation_token="room1",
@@ -8802,22 +8886,13 @@ class TestTaskIdInProgress:
 
         process_one_task(config)
 
-        # Find the ack call (first asyncio.run call with post_result_to_talk)
-        [
-            c for c in mock_arun.call_args_list
-            if c.args and hasattr(c.args[0], '__name__') is False  # coroutine
+        acks = [
+            c for c in fake_talk.calls_to(room.talk_ref, method="send_message")
+            if c.args.get("reference_id") == f"istota:task:{task_id}:ack"
         ]
-        # The ack text is passed as the second argument to post_result_to_talk
-        # Check all asyncio.run calls for one containing the task ID in ack format
-        for call in mock_arun.call_args_list:
-            args = call.args
-            if args and hasattr(args[0], 'cr_frame'):
-                # This is a coroutine — can't inspect easily, check via mock_arun
-                pass
-        # Alternative: verify via the mock that the ack was called with task id
-        # The ack is the first asyncio.run call
-        # Since post_result_to_talk is called via asyncio.run, check mock_exec received task with correct id
-        assert task_id is not None  # Sanity check
+        assert len(acks) == 1, "no ack reached the Talk room"
+        assert f"#{task_id}" in acks[0].args["message"]
+        assert fake_talk.refusals == []
 
     @patch("istota.scheduler.execute_task", return_value=(True, "Done with the research.", '["Read file", "Write file"]', None))
     @patch("istota.scheduler.asyncio.run", return_value=42)

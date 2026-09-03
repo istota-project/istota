@@ -2,7 +2,8 @@
 *both* turns into the canonical `messages` store, not just the bot's reply.
 
 `record_inbound` gated every room side effect — including the `role='user'`
-store — on `surface in ROOM_SURFACES` (talk/web). Email was excluded wholesale,
+store — on `surface in ROOM_SURFACES` (talk/web; that constant is retired and
+the gate now reads `surfaces.is_room_member`). Email was excluded wholesale,
 so an email reply threaded back into a web room stored the assistant row (via
 `scheduler._store_room_turn`, whose gate is room *existence*) but never the user
 row: web rendered a bot answer with no question above it.

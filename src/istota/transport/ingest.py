@@ -19,6 +19,7 @@ import os
 from typing import TYPE_CHECKING
 
 from .. import db
+from ..surfaces import is_room_member
 from ._types import IncomingMessage
 from .routing import transcript_room
 
@@ -26,21 +27,6 @@ if TYPE_CHECKING:
     from ..config import Config
 
 logger = logging.getLogger(__name__)
-
-# Surfaces that *own* rooms: they lazily register an unknown token, bind it,
-# add membership, and rename it from the surface. Email/REPL are not room
-# surfaces — a token they carry is never turned into a room.
-#
-# This is deliberately narrower than "surfaces whose turns are stored". A
-# mirror-only surface (email) still records its turn when the token it resolved
-# to *already is* a room — see `mirror_only` in `record_inbound`.
-#
-# Not to be confused with `TransportCapabilities.room_view`, which is the set of
-# surfaces that are a *view of* a room (talk + web again today, but for a
-# different reason and with a different consequence — it drives the outbound
-# fan-out, this drives inbound room creation). The two sets are distinct
-# concepts that happen to have the same members; keep them apart.
-ROOM_SURFACES = frozenset({"talk", "web"})
 
 
 def resolve_author(
@@ -210,7 +196,14 @@ def record_inbound(
     # 1. Resolve canonical room token. With no binding, the surface_ref *is* the
     #    canonical token (origin-surface case).
     room_token = db.resolve_room_token(conn, surface, surface_ref) or surface_ref
-    room_surface = surface in ROOM_SURFACES and bool(room_token)
+    # Does this surface *own* rooms — register an unknown token, bind it, add
+    # membership, rename from the surface? `surfaces.SURFACES` answers it;
+    # `room_role == "member"` is talk and web, and email's `guest` is what keeps
+    # the mirror-only path below off every one of those side effects. Not the
+    # room-*view* question, which drives the outbound fan-out and which
+    # `is_room_view` answers separately for the one site where the two can
+    # diverge (the scheduler's confirmation mirror gate).
+    room_surface = is_room_member(surface) and bool(room_token)
 
     # A non-room surface whose exchange belongs in a room (ISSUE-136): an email
     # threaded back into the web/Talk room it came from, or — since ISSUE-247 —

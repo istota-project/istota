@@ -113,6 +113,12 @@ class WebTransport:
         # row *is* the delivery — a room fan-out that also pushed here would
         # render the same message twice.
         room_view="canonical",
+        # A web send registers the room and joins its sender, exactly as Talk
+        # does — `_chat_create_web_task` goes through the same `record_inbound`.
+        inbound_room_role="member",
+        # Nothing mirrors *into* a canonical view: writing the row is the
+        # delivery, so a mirror mode here would render the turn twice.
+        user_turn_mirror=None,
     )
 
     def __init__(self, config: "Config"):

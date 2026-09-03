@@ -380,9 +380,41 @@ the full set is listed in `AGENTS.md`.
 
 **Real SQLite via `tmp_path`**: No database mocking. Tests create real SQLite databases initialized from `schema.sql`. This catches actual SQL issues that mocks would hide.
 
-**`unittest.mock` for external dependencies**: HTTP calls, subprocess invocations, and file system operations outside the test directory are mocked.
+**`unittest.mock` for external dependencies**: HTTP calls, subprocess invocations, and file system operations outside the test directory are mocked. One seam is the exception and has its own double, because a mock there accepts arguments the real service refuses — see "Room shapes, and the Talk double" below.
 
 **Class-based tests**: Tests are organized in classes grouping related scenarios.
+
+### Room shapes, and the Talk double
+
+A room is one conversation bound to several surfaces, and it borrows its canonical identity from the surface it was created on. On an ordinary Talk room `rooms.token` and the `talk` binding's `surface_ref` are the same string. On a room created in web chat and later promoted to Talk they are different, and that difference is the only thing separating a delivery that resolved the binding from one that handed the canonical token to the Talk API and got a 404. That was ISSUE-400, and no test in the tree could see it, because every test built the first shape and the `MagicMock` standing in for the Talk client accepted any string.
+
+Two builders in `tests/support/rooms.py` write what the real producers write — `record_inbound`'s room branch and `web_app._chat_promote_to_talk` — pinned by `tests/test_support_rooms.py` diffing every table a builder writes. That includes the `room_members` row, which arrives from `db.register_room` rather than from a call in the builder: a room with no member row is invisible to `db.list_member_rooms`, so a test asserting through the web room listing would fail for a reason having nothing to do with what it was testing.
+
+```python
+from .support.rooms import plain_talk_room, promoted_room
+
+room = plain_talk_room(conn, "testuser")     # canonical == talk_ref
+room = promoted_room(conn, "testuser")       # canonical is 'web-…', talk_ref is not
+```
+
+Both return a `RoomShape` carrying `canonical`, `talk_ref`, `origin`, `name` and a `diverges` property. **Which one to use is decided by what the test claims**, not by preference:
+
+- **Parametrize over both** where the test asserts *where* something landed. That is the set that gains coverage: the promoted case fails on a misroute, and the plain case is what says an ISSUE-400-shaped failure is shape-specific rather than a test that breaks under any change. A mutation that misroutes on every shape reddens both, which is the answer you want, not a broken control.
+- **A plain room** where the test is about content or ordering and makes no destination choice. It costs nothing and picks up the double's guard for free.
+- **A promoted room alone** where the shape is what makes the scenario exist — a mirror leg only exists on a room bound to two surfaces, so there is no plain case to parametrize over.
+
+A third shape neither builder makes: a Talk-origin room a user later also opens in web chat, so it carries a web binding while `canonical == talk_ref`. Add it when something needs it rather than faking it locally.
+
+The `fake_talk` fixture puts `tests/support/talk_double.py`'s `FakeTalkClient` behind **both** module-level `get_talk_client` bindings (`transport/talk/__init__.py` and `transport/talk/inbound.py` — patching only the first leaves the whole poller on the real factory). It is not autouse, it reads the `db_path` fixture's database, and it clears the two process-lifetime caches sitting in front of the seams. One rule on every method taking a token: accept it if it is a live `talk` `surface_ref` in `room_bindings` or if it is in `known_channels`, otherwise raise `UnknownTalkRoom` and record the attempt with `refused=True`.
+
+**Assert on `calls`, never on the absence of a raise.** The product swallows: `TalkTransport.deliver` catches and returns None, `scheduler.edit_talk_message` catches and returns False, `inbound._post_ack` catches and logs. A refusal is swallowed exactly as a real 404 would be, so a test that only reaches the end of the function proves nothing. Pair every count with `refusals == []` as well, because a post refused for naming the canonical token reads exactly like a post correctly suppressed.
+
+Two escape hatches, and they are not interchangeable:
+
+- **`known_channels` is data and needs no justification.** Plenty of tokens are legitimately unbound and are ordinary product behaviour: `alerts_channel`, `log_channel`, the first briefing token, `default_destination`, an auto-detected 1:1 DM, and a room `provision_rooms.py` created that the Talk poller has not yet seen. Name the channel and move on.
+- **`strict=False` needs a stated reason on the line.** It accepts everything, so it removes the guard for that test rather than widening it, and under it `refused` is False on every row and the `refusals` list says nothing at all. It is for the genuinely unmodellable case — `talk_channel_for_task` rung 3 can hand back an email thread hash that names nothing anywhere. As of the delivery conversion nothing outside the double's own test file uses it, which is the state to keep: a routine opt-out is not a guard.
+
+**What the double does not reach.** `web_app.py` constructs `TalkClient(...)` directly in seven places, including `_chat_promote_to_talk`, which creates the promoted shape, and `_post_as_user`, which posts a web turn to the room's Talk ref. They take a per-user OAuth bearer token, so they need a construction-site patch rather than a factory patch. Two function-local `get_talk_client` imports are also outside the fixture, which patches module-level bindings only: one in `web_app`, one in `commands` (`!search`) — so the hole is not only the web process. A green suite says nothing about any of them.
 
 ## Shared fixtures (`conftest.py`)
 
@@ -393,6 +425,7 @@ the full set is listed in `AGENTS.md`.
 | `make_task` | Factory for creating test tasks |
 | `make_config` | Factory for creating Config objects |
 | `make_user_config` | Factory for creating UserConfig objects |
+| `fake_talk` | A Talk client that refuses a token Nextcloud would refuse — see "Room shapes, and the Talk double" above |
 
 Three autouse fixtures apply to every test whether you ask for them or not: `_no_network_symbol_lookups` (fails a test that tries to resolve a ticker symbol over the network), `_reset_async_runtime_singletons` (drops the persistent asyncio loop and pooled HTTP client between tests), and `_reset_expunge_warning_latch` (clears the once-per-process IMAP expunge warning).
 

@@ -2215,6 +2215,14 @@ class TalkMessage:
 # below return False for the room forever, pinning it to the legacy `tasks` path
 # until retention GCs the task. Mirroring is not the criterion; guaranteed
 # completeness is.
+#
+# **Left a literal on purpose.** The question is "whose history is the store
+# guaranteed to hold", which is neither of the room-model questions
+# `surfaces.SURFACES` answers — and the reason email is out of it is a fact
+# about when a migration ran, not about what email is. Reading
+# `surfaces.is_room_member` here would give the same answer today and would be
+# the room-surface muddle committed one question further along: the day email's
+# backfill exists, this set widens and the room-role set does not.
 _CONVERSATIONAL_SOURCE_TYPES = ("talk", "web")
 
 
@@ -4752,9 +4760,24 @@ def initialize_room_read_state(
 # `_migrate_nonconversational_transcript_cleanup` — that migration is what
 # decides which of those rows survive, and the two disagreeing is how live turns
 # get silently swept.
+# Declared once here and imported by `commands.py` (`_TRANSCRIPT_SURFACES`),
+# which used to carry a hand copy of the same tuple. It answers the third of
+# the three questions the room-surface literals used to share — "may this
+# surface deposit a `role='user'` row in a room at all" — and is deliberately
+# **not** derived from `surfaces.SURFACES`: the column it filters holds
+# `source_type` values rather than surface names, and the DELETE below must
+# stay in sync with a fourth value (`scheduled`) no surface table will ever
+# have. Its members happen to equal `room_role == "member"` plus the one
+# `guest`, which is a coincidence rather than a derivation — the room-ownership
+# question is `surfaces.is_room_member`, and reading that one here would stop
+# an email `!confirm` recording its exchange.
+TRANSCRIPT_SURFACES = ("web", "talk", "email")
+
 TRANSCRIPT_SURFACE_FILTER = (
     "(m.role = 'assistant' "
-    "OR (m.origin_surface IN ('web', 'talk', 'email') AND m.role = 'user'))"
+    "OR (m.origin_surface IN ("
+    + ", ".join(f"'{s}'" for s in TRANSCRIPT_SURFACES)
+    + ") AND m.role = 'user'))"
 )
 
 
@@ -5532,8 +5555,10 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
 
     This one-shot generalizes `_migrate_scheduled_transcript_cleanup` from
     scheduled-only to every non-conversational source type. Over rows whose
-    `origin_surface NOT IN ('web','talk','scheduled')` (scheduled is owned by
-    its own marker, conversational surfaces are real turns), and never touching
+    `origin_surface NOT IN ('web','talk','scheduled','email')` (scheduled is
+    owned by its own marker, conversational surfaces are real turns, and `email`
+    joined them at ISSUE-136 — see the comment on the statement itself), and
+    never touching
     `role='system'` (the notification/log lane), it:
 
       * drops the `role='user'` rows — synthetic prompts, never user-authored;
@@ -5575,6 +5600,14 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
         # partial run re-arms the migration, and a DB restored from a
         # pre-migration snapshot re-runs it from scratch. Either would silently
         # strip live email turns back to the orphaned-reply state ISSUE-136 fixed.
+        #
+        # **Spelled out rather than built from `TRANSCRIPT_SURFACES`**, which is
+        # the question it is asking one step removed: this list is that set plus
+        # `scheduled`, whose synthetic user rows the `unified_rooms_v1` backfill
+        # inserted and which no surface table will ever hold. The relation is a
+        # superset, not an equality, so a pinned string cannot express it and
+        # interpolating the tuple would quietly drop the fourth value on the
+        # next reader who assumed the two were the same list.
         conn.execute(
             "DELETE FROM messages "
             "WHERE role = 'user' "

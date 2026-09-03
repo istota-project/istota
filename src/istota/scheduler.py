@@ -154,7 +154,11 @@ from .transport import (
     resolve_delivery_plan,
     transcript_room_for_task,
 )
-from .transport.ingest import ROOM_SURFACES
+from .surfaces import (
+    is_room_member,
+    is_room_view,
+    origin_surface_for_source_type,
+)
 from .transport.registry import _surface_for_source_type
 from .storage import ensure_user_directories_v2
 
@@ -613,7 +617,7 @@ def _room_turn_belongs_here(
     reaching ``record_inbound``), and talk/web already stored their assistant
     row on the conversational path above — so widening it only re-attempts a
     deduped insert. That equivalence leans on the conversational store staying
-    where it is: narrow its `source_type in ("talk", "web")` gate and this rung
+    where it is: narrow its `is_room_member(...)` gate and this rung
     starts writing `room_body` for those turns, which is a different body from
     the `result` that path stores.
 
@@ -2830,13 +2834,28 @@ def process_one_task(
                 # the question delivered nowhere, then died at
                 # `expire_stale_confirmations` two hours later.
                 #
-                # `ROOM_SURFACES` is the set being asked for here — "does this
+                # **The one site asking the room-*view* question** — "does this
                 # task's own origin surface show it the question itself?" — and
-                # not the inbound room-creation question the constant is named
-                # for. They coincide because a surface owns rooms exactly when
-                # it has a transcript of its own to render the prompt into.
+                # the only place the view axis and the membership axis could
+                # ever diverge. They coincide for every surface that exists
+                # today, because a surface owns rooms exactly when it has a
+                # transcript of its own to render the prompt into; keep them
+                # apart anyway, since a read-only external view would answer
+                # these two differently and this gate is read negated.
+                #
+                # `origin_surface_for_source_type` and **never**
+                # `registry._surface_for_source_type`: that one answers "where
+                # do I deliver this result" and maps every non-surface source
+                # type to `talk`, so through it a cron, briefing or heartbeat
+                # task would read as a room surface and have its prompt
+                # suppressed on the mirror leg — delivered nowhere, then killed
+                # by `expire_stale_confirmations` two hours later, which is the
+                # exact failure the paragraph above records fixing.
                 if plan_talk and talk_token and not (
-                    _talk_is_mirror and (task.source_type or "") in ROOM_SURFACES
+                    _talk_is_mirror
+                    and is_room_view(origin_surface_for_source_type(
+                        task.source_type or ""
+                    ))
                 ):
                     post_talk_message = result
 
@@ -2868,8 +2887,15 @@ def process_one_task(
                 # for room-surface tasks (Talk/web), so the unified history
                 # reader stays caught up and the web transcript renders this
                 # turn from messages. Idempotent; the trace stays in `tasks`.
+                #
+                # The ownership question, asked of the task's *origin* surface —
+                # `origin_surface_for_source_type` and never
+                # `registry._surface_for_source_type`, for the reason spelled
+                # out at the confirmation gate above. A scheduled, briefing or
+                # subtask row originates on no surface at all and answers None,
+                # which is what the tuple answered for it before.
                 if (
-                    task.source_type in ("talk", "web")
+                    is_room_member(origin_surface_for_source_type(task.source_type))
                     and task.conversation_token
                     and db.get_room(conn, task.conversation_token) is not None
                 ):

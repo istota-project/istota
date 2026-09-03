@@ -173,8 +173,9 @@
   // than on a comparison, because the server only sends the field for a turn
   // that is genuinely from outside.
   const isExternal = $derived(isUser && !!message.origin);
-  // The server's contract is "a surface outside `ROOM_SURFACES`", which resolves
-  // to email today only because `TRANSCRIPT_SURFACE_FILTER` limits user rows to
+  // The server's contract is "a surface that does not own rooms"
+  // (`not surfaces.is_room_member(origin_surface)`), which resolves to email
+  // today only because `TRANSCRIPT_SURFACE_FILTER` limits user rows to
   // web/talk/email. That coupling lives in two files with nothing enforcing it,
   // so the label is derived rather than hardcoded: if the filter ever widens, an
   // unfamiliar origin reads as "External message" instead of asserting an email

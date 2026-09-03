@@ -264,6 +264,54 @@ def db_conn(db_path):
 
 
 @pytest.fixture
+def fake_talk(db_path):
+    """A `FakeTalkClient` behind both of the `get_talk_client` bindings.
+
+    `get_talk_client` is imported at module level in two places —
+    `transport/talk/__init__.py` and `transport/talk/inbound.py` — so this
+    patches **both names**. Patching only the package one leaves the entire
+    poller and `_post_ack` talking to the real factory, which is a hole shaped
+    exactly like the bug the double exists to catch;
+    `tests/test_support_talk_double.py` has a control for it.
+
+    **Not autouse.** An autouse patch would change every existing test's
+    behaviour in one commit and make the conversion unreviewable.
+
+    Bound to the `db_path` fixture, which `make_config` also builds on
+    (`tmp_path / "test.db"`), so a test using both gets a double reading the
+    same database. A test whose database is elsewhere assigns
+    `fake_talk.db_path`; the binding lookup happens per call, so that takes
+    effect immediately. Point it at a database `db.init_db` has run against —
+    the double raises `BrokenTalkDouble`, which is a `BaseException` and so
+    escapes the product's `except Exception`, rather than letting a missing
+    `room_bindings` table read as a 404.
+
+    It also clears the two process-lifetime caches that sit *in front of* the
+    seams, because a cache hit is a call the double never sees. Both are module
+    globals nothing else resets, and an xdist worker runs many tests in one
+    process: `scheduler._channel_name_cache` (token -> displayName, no
+    expiry) and `transport.talk.inbound._participant_cache` (TTL). Cleared
+    on the way in and on the way out, so this fixture neither inherits nor
+    leaves a hit.
+    """
+    from unittest.mock import patch
+
+    from istota import scheduler as scheduler_module
+    from istota.transport.talk import inbound as talk_inbound
+
+    from .support.talk_double import FakeTalkClient
+
+    client = FakeTalkClient(db_path)
+    scheduler_module._channel_name_cache.clear()
+    talk_inbound._participant_cache.clear()
+    with patch("istota.transport.talk.get_talk_client", return_value=client), \
+         patch("istota.transport.talk.inbound.get_talk_client", return_value=client):
+        yield client
+    scheduler_module._channel_name_cache.clear()
+    talk_inbound._participant_cache.clear()
+
+
+@pytest.fixture
 def make_task():
     """Factory fixture that creates Task dataclass instances with defaults."""
     def _make_task(**overrides):

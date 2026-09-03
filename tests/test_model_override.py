@@ -592,8 +592,6 @@ class TestLogChannelShowsResolvedModelEffort:
             return "stub"
 
         monkeypatch.setattr(scheduler, "_format_log_channel_body", fake_format)
-        monkeypatch.setattr(scheduler, "edit_talk_message",
-                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("skip")))
 
         config = Config(
             db_path=tmp_path / "x.db", model="claude-opus-4-7", effort="high",
@@ -609,15 +607,18 @@ class TestLogChannelShowsResolvedModelEffort:
             all_descriptions = []
             log_msg_id = [None]
 
-        try:
-            scheduler._finalize_log_channel(
-                config, task, "log-room", "**[#42]**",
-                FakeCb(), success=True,
-                model="claude-sonnet-4-6", effort="low",
-            )
-        except Exception:
-            # Talk send may fail in unit test; we only care about the format call
-            pass
+        # No destinations: the body is composed before the delivery loop, so
+        # this is the whole of what the test claims and there is nothing left
+        # to swallow. The previous version passed the string "log-room" where a
+        # `list[Destination]` belongs, so the loop raised `AttributeError` on
+        # the first character and a bare `except Exception` caught it — which
+        # is also why no room-shape conversion applies here: the Talk seam was
+        # never reached, and could not be.
+        scheduler._finalize_log_channel(
+            config, task, [], "**[#42]**",
+            FakeCb(), success=True,
+            model="claude-sonnet-4-6", effort="low",
+        )
 
         # Resolved values reached the formatter
         assert captured.get("model") == "claude-sonnet-4-6"
