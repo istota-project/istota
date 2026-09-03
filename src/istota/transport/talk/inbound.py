@@ -6,8 +6,10 @@ tasks (see its atomicity note); ``TalkTransport.poll`` delegates here.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ... import confirmations, db
@@ -18,6 +20,22 @@ from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
 from ..ingest import ingest_message
 
 logger = logging.getLogger("istota.transport.talk.inbound")
+
+# Dedicated logger so a multi-day series can be pulled out of the journal whole
+# (`journalctl … | grep talk_poll_txn`), the same reasoning as the scheduler's
+# health line and the host-pressure breadcrumb.
+_POLL_TXN_LOGGER = logging.getLogger("istota.transport.talk.txn")
+
+# A transaction open this long is an operator's problem rather than a data
+# point. Well under `db.get_db`'s 30s lock wait, which is what another writer
+# would spend behind it, and far under the 180s main-loop stall threshold —
+# this is meant to fire before either of those does.
+_TXN_HOLD_WARN_SECONDS = 1.0
+
+# Below this, an "await" was a cache hit rather than a round trip.
+# `_get_participants` is awaited whether or not it reaches the network, so
+# counting entries would put a line on every cycle of every busy room.
+_TXN_AWAIT_FLOOR_SECONDS = 0.005
 
 
 # Participant cache: token -> (participants list, timestamp)
@@ -191,6 +209,123 @@ async def _get_participants(
             conversation_token, conv_type, type(e).__name__, e,
         )
         return []
+
+
+@dataclass
+class _TxnHold:
+    """One poll transaction: how long it was held, and how much of that it spent
+    waiting on Nextcloud (ISSUE-406).
+
+    `held` runs from just before `db.get_db` opens the connection to just after
+    it commits, so it includes `sqlite3.connect`, the `PRAGMA synchronous` write
+    and any wait for the lock itself. That is deliberate — the wait for the lock
+    is the cost another writer pays, and it is the number an investigator wants.
+
+    `awaits` counts only the awaits that took at least `_TXN_AWAIT_FLOOR_SECONDS`
+    and `await_seconds` sums only those. The floor is applied per await rather
+    than to the total because `_get_participants` is awaited once per message
+    whether or not it reaches the network: a few hundred cache hits sum past any
+    floor worth setting, and would then be reported as a round trip.
+    """
+
+    label: str
+    opened: float
+    awaits: int = 0
+    await_seconds: float = 0.0
+
+
+@contextlib.contextmanager
+def _timed_poll_txn(label: str):
+    """Measure one ``db.get_db`` block in ``poll_talk_conversations``.
+
+    The poller awaits the network with a synchronous `sqlite3` connection open.
+    `db.get_db` commits at the end of the `with`, and SQLite's deferred
+    transaction begins at the first write — so a write anywhere in the block
+    takes a WAL write lock that is then held across every later await, and every
+    other writer in the daemon queues behind it for the length of a round trip.
+
+    Whether that costs anything in production was inference when ISSUE-406 was
+    filed. This is the measurement that decides it, and it is deliberately the
+    whole of what that issue got: restructuring the daemon's busiest poll path
+    on a hypothesis is the trade the issue itself declined.
+
+    **Both blocks await on a recurring basis, not only on first sight**, which
+    is worth stating because the opposite reading is the natural one and it is
+    wrong. `get_latest_message_id` persists a cursor only when the room has a
+    message, and `fetch_chat_history` caches only when it returns something —
+    so an *empty* group room fails both guards on every cycle for ever, and does
+    two round trips inside the write transaction each time. The comment at the
+    cursor write records the same fact from the gate's point of view. The room
+    loop's participant fetch recurs too, for any room where
+    `_istota_members_for_conversation` comes back empty, since nothing is then
+    registered and the next cycle takes the same branch.
+
+    The line is emitted at **close**, so the window it describes is the
+    `held_ms` before its own timestamp — which is what makes it possible to line
+    a hold up against the `ReadTimeout` records the issue is trying to explain.
+    """
+    hold = _TxnHold(label=label, opened=time.monotonic())
+    try:
+        yield hold
+    finally:
+        _report_poll_txn(hold, time.monotonic() - hold.opened)
+
+
+async def _await_in_txn(hold: "_TxnHold", coro):
+    """Await ``coro`` and charge its wall time to an open transaction.
+
+    Charged only if it took at least ``_TXN_AWAIT_FLOOR_SECONDS`` — see
+    ``_TxnHold`` for why the floor is per await and not on the total.
+    """
+    start = time.monotonic()
+    try:
+        return await coro
+    finally:
+        elapsed = time.monotonic() - start
+        if elapsed >= _TXN_AWAIT_FLOOR_SECONDS:
+            hold.awaits += 1
+            hold.await_seconds += elapsed
+
+
+def _report_poll_txn(hold: "_TxnHold", held_seconds: float) -> None:
+    """Emit the `talk_poll_txn` line, or nothing.
+
+    **A data format, not chatter.** Fixed field order, `key=value`,
+    space-separated, matching `scheduler_stats` and the host-pressure
+    breadcrumb; a rename is a breaking change for whoever is grepping a journal.
+
+    Nothing is said about a transaction that neither waited on the network nor
+    ran long, which is most of them on a settled deployment.
+
+    **INFO, not DEBUG**, matching `scheduler_stats` and the host-pressure
+    breadcrumb. The distribution this exists to collect is the sub-second
+    population, and `setup_logging` puts the `istota` logger and both its
+    handlers at the configured level, which defaults to INFO — so at DEBUG the
+    only lines that survive are the ones already past the warn threshold, and
+    the instrument ships unable to measure the thing it was built for. The
+    alternative is asking an operator to run the whole tree at DEBUG for days.
+    The floor and the caches are what keep the volume down instead of the level.
+
+    Never raises. The caller is a `finally`, where an exception here would
+    replace whatever the block was already propagating, and it runs on the
+    daemon's busiest loop.
+    """
+    try:
+        slow = held_seconds >= _TXN_HOLD_WARN_SECONDS
+        if not hold.awaits and not slow:
+            return
+        line = (
+            f"talk_poll_txn phase={hold.label} "
+            f"held_ms={held_seconds * 1000:.0f} "
+            f"awaits={hold.awaits} "
+            f"await_ms={hold.await_seconds * 1000:.0f}"
+        )
+        if slow:
+            _POLL_TXN_LOGGER.warning(line)
+        else:
+            _POLL_TXN_LOGGER.info(line)
+    except Exception:  # noqa: BLE001 — instrumentation must not fail the poll
+        pass
 
 
 def _is_multi_user(participants: list[dict]) -> bool:
@@ -431,7 +566,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     gated = 0  # rooms the lastMessage gate held back this cycle
     conv_types: dict[str, int] = {}  # token -> conversation type
     conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
-    with db.get_db(config.db_path) as conn:
+    with _timed_poll_txn("rooms") as hold, db.get_db(config.db_path) as conn:
         for conv in conversations:
             conversation_token = conv.get("token")
             if not conversation_token:
@@ -477,8 +612,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             elif conv_type != 4:
                 # New room (skip type 4 = the "Talk updates" changelog room — a
                 # system room that shouldn't surface in web chat).
-                participants = await _get_participants(
-                    client, conversation_token, conv_type,
+                participants = await _await_in_txn(
+                    hold, _get_participants(client, conversation_token, conv_type),
                 )
                 member_ids = _istota_members_for_conversation(
                     conv, participants, config,
@@ -519,7 +654,10 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     # poll picks up the most recent message (avoids missing the first
                     # message that triggered bot being added to the room)
                     try:
-                        latest_id = await client.get_latest_message_id(conversation_token)
+                        latest_id = await _await_in_txn(
+                            hold,
+                            client.get_latest_message_id(conversation_token),
+                        )
                         if latest_id:
                             last_message_id = latest_id - 1
                             # Persist it. The only other writer is the message
@@ -544,8 +682,12 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             # Backfill cache on first encounter
             if not db.has_cached_talk_messages(conn, conversation_token):
                 try:
-                    backfill_msgs = await client.fetch_chat_history(
-                        conversation_token, limit=config.conversation.talk_context_limit,
+                    backfill_msgs = await _await_in_txn(
+                        hold,
+                        client.fetch_chat_history(
+                            conversation_token,
+                            limit=config.conversation.talk_context_limit,
+                        ),
                     )
                     if backfill_msgs:
                         db.upsert_talk_messages(conn, conversation_token, backfill_msgs)
@@ -663,7 +805,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     results = [t.result() for t in done]
 
     # Process results
-    with db.get_db(config.db_path) as conn:
+    with _timed_poll_txn("results") as hold, db.get_db(config.db_path) as conn:
         for conversation_token, messages in results:
             if not messages:
                 continue
@@ -744,7 +886,9 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # In multi-user rooms, only respond when @mentioned
                 conv_type = conv_types.get(conversation_token, 1)
-                participants = await _get_participants(client, conversation_token, conv_type)
+                participants = await _await_in_txn(
+                    hold, _get_participants(client, conversation_token, conv_type),
+                )
                 is_multi_user = _is_multi_user(participants)
                 if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
                     logger.debug(
@@ -782,7 +926,10 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     content, brain, has_attachments=bool(attachments),
                 )
                 if prefix.usage is not None:
-                    await client.send_message(conversation_token, prefix.usage)
+                    await _await_in_txn(
+                        hold,
+                        client.send_message(conversation_token, prefix.usage),
+                    )
                     continue
                 if prefix.matched:
                     model_override = prefix.model
@@ -791,9 +938,12 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # !command dispatch — intercept before task creation
                 if content.strip().startswith("!"):
-                    result = await dispatch_command(
-                        config, actor_id, conversation_token, content,
-                        surface="talk", conn=conn,
+                    result = await _await_in_txn(
+                        hold,
+                        dispatch_command(
+                            config, actor_id, conversation_token, content,
+                            surface="talk", conn=conn,
+                        ),
                     )
                     if result.handled:
                         continue
@@ -811,9 +961,12 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         reply_to_content = parent_content[:1000]
 
                 # Check if this is a confirmation reply before creating a new task
-                handled = await handle_confirmation_reply(
-                    conn, config, actor_id, content, conversation_token,
-                    reply_to_talk_id=reply_to_talk_id,
+                handled = await _await_in_txn(
+                    hold,
+                    handle_confirmation_reply(
+                        conn, config, actor_id, content, conversation_token,
+                        reply_to_talk_id=reply_to_talk_id,
+                    ),
                 )
                 if handled:
                     continue
@@ -826,9 +979,12 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         conversation_token, actor_id,
                     )
                     try:
-                        await client.send_message(
-                            conversation_token,
-                            "Still working on a previous request — I'll be with you shortly.",
+                        await _await_in_txn(
+                            hold,
+                            client.send_message(
+                                conversation_token,
+                                "Still working on a previous request — I'll be with you shortly.",
+                            ),
                         )
                     except Exception as e:
                         logger.debug("Failed to send channel gate message: %s", e)

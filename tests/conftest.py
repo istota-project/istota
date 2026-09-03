@@ -275,16 +275,19 @@ def fake_talk(db_path):
     `tests/test_support_talk_double.py` has a control for it.
 
     It also patches `async_runtime.get_talk_client` itself, which is what
-    *reaches* the two function-local importers — `web_app._delete_from_talk`'s
-    bot fallback and `commands`' `!search` — since a function-local import
-    resolves the name at call time. Reached is not covered: `!search` calls
-    `search_messages`, which is on no seam and not on the double, so it gets an
-    `AttributeError` rather than an answer. All three go through `talk_bot_client`, which clears
-    any bearer token left on the shared instance by a `fake_talk_web`
-    construction: `get_talk_client` returns the basic-auth bot client, and
-    `_delete_from_talk` asks for it directly after a user-scoped attempt failed.
+    *reaches* the one remaining function-local importer — `commands`' `!search`
+    — since a function-local import resolves the name at call time. Reached is
+    not covered: `!search` calls `search_messages`, which is on no seam and not
+    on the double, so it gets an `AttributeError` rather than an answer. All
+    three go through `talk_bot_client`, which clears any bearer token left on
+    the shared instance by a `fake_talk_web` construction, so the singleton
+    reads as the basic-auth bot client whichever test ran before.
 
-    It does **not** reach `web_app`'s seven direct `TalkClient(...)`
+    `web_app._delete_from_talk`'s bot leg used to be the second importer and is
+    now one of `web_app`'s own constructions (ISSUE-407) — the singleton belongs
+    to the runtime loop and that function runs on uvicorn's.
+
+    It does **not** reach `web_app`'s eight direct `TalkClient(...)`
     constructions. Those need `fake_talk_web`, below.
 
     **Not autouse.** An autouse patch would change every existing test's
@@ -330,11 +333,11 @@ def fake_talk(db_path):
 def fake_talk_web(fake_talk):
     """The same double, additionally behind `web_app`'s own constructions.
 
-    `web_app.py` builds `TalkClient(...)` directly in seven places, each with a
+    `web_app.py` builds `TalkClient(...)` directly in eight places, most with a
     per-user OAuth bearer token — the promote path that *creates* a promoted
     room, the post-as-user mirror, the read push and pull, the rename
-    propagation, the message delete and the liveness probe. There is no factory
-    to patch, so the class itself is the seam: this replaces
+    propagation, the message delete's two legs and the liveness probe. There is
+    no factory to patch, so the class itself is the seam: this replaces
     `istota.talk.TalkClient`, which every one of those sites imports
     function-locally and therefore resolves at call time.
 

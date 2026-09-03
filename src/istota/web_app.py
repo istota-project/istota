@@ -5707,6 +5707,29 @@ def _fire_and_forget(coro) -> None:
     task = asyncio.get_running_loop().create_task(coro)
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
+    task.add_done_callback(_log_bg_task_failure)
+
+
+def _log_bg_task_failure(task) -> None:
+    """Retrieve and log an exception the coroutine did not catch itself.
+
+    The claim above — that every coroutine passed in catches its own — is the
+    invariant, not a guarantee: the client construction and the `aclose()` in
+    `_delete_from_talk`'s two `finally` blocks sit outside its `_attempt`, so
+    the function has raise sites its own `except` arms do not cover. Without
+    this the escape is asyncio's "Task exception was never retrieved", printed
+    by the event loop at an arbitrary later point with no room, no user and no
+    indication of which of the three callers produced it.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "background task %s failed: %s: %s",
+            task.get_coro().__qualname__ if task.get_coro() else "?",
+            type(exc).__name__, exc,
+        )
 
 
 def _room_talk_ref(room_token: str) -> str | None:
@@ -6525,6 +6548,16 @@ async def _delete_from_talk(
     committed, and a Talk that is down or a message past Talk's own deletion
     window must not turn a successful delete into a failed one. The divergence
     it can leave (gone in web, still in Talk) is bounded and visible.
+
+    **Both legs build their own client and close it** (ISSUE-407). The bot leg
+    used to take the runtime's Talk-client singleton, which is bound to
+    the persistent runtime loop — and this coroutine is scheduled on uvicorn's
+    by `_fire_and_forget`. httpx binds a pool to whichever loop issues its first
+    request, so in the web process the DELETE went out and the answer could
+    never be read: every such call raised after the side effect, and the raise
+    landed in `_attempt`'s bare `except`. These are one-off OCS calls from the
+    web process rather than the scheduler's delivery path, so a short-lived
+    client here is the same answer the promote and rename paths already give.
     """
     from .talk import TalkClient
 
@@ -6532,6 +6565,16 @@ async def _delete_from_talk(
         msg_id = int(talk_message_id)
     except (TypeError, ValueError):
         return
+
+    # Where each leg ended up, kept apart because they mean opposite things to
+    # whoever reads the log. A status Nextcloud answered with in the 4xx range
+    # is an answer — not yours, too old, already gone — and says the delete did
+    # not happen. A 5xx, no response at all, or an exception leaves its fate
+    # open. Reporting both as "no credential could" is what kept ISSUE-407
+    # invisible: the `RuntimeError` from a cross-loop call arrived *after* the
+    # DELETE had been written to the socket.
+    refused: list[str] = []
+    errors: list[str] = []
 
     async def _attempt(client: "TalkClient", who: str) -> bool:
         try:
@@ -6546,9 +6589,16 @@ async def _delete_from_talk(
                 "talk delete refused as=%s room=%s msg=%s status=%s",
                 who, talk_ref, msg_id, status,
             )
+            bucket = refused if 400 <= status < 500 else errors
+            bucket.append(f"{who}: HTTP {status}")
             return False
         except Exception as e:  # noqa: BLE001
-            logger.debug("talk delete failed as=%s: %s", who, e)
+            # Capped: this is remote-influenced text and it now reaches a level
+            # operators read, where it only ever reached debug before.
+            errors.append(f"{who}: {type(e).__name__}: {str(e)[:200]}")
+            logger.debug(
+                "talk delete failed as=%s: %s: %s", who, type(e).__name__, e,
+            )
             return False
 
     from . import web_tokens
@@ -6558,8 +6608,6 @@ async def _delete_from_talk(
             web_tokens.get_access_token, _config.db_path, _config, username,
         )
         if access:
-            # Per-call and held by nothing else, so it is closed here; the bot
-            # client below is the runtime's singleton and is not (ISSUE-403).
             user_client = TalkClient(_config, bearer_token=access, timeout=5)
             try:
                 if await _attempt(user_client, "user"):
@@ -6567,13 +6615,29 @@ async def _delete_from_talk(
             finally:
                 await user_client.aclose()
 
-    if not _config or not _config.nextcloud.url:
-        return
-    from .async_runtime import get_talk_client
-    if not await _attempt(get_talk_client(_config), "bot"):
+    # No `nextcloud.url` means the bot leg cannot run; fall through rather than
+    # returning, so a user-leg failure is still reported.
+    if _config and _config.nextcloud.url:
+        # No `timeout=` — the bot leg carries `DEFAULT_TIMEOUT`, as it did when
+        # it was the pooled singleton, and as the promote and rename paths do.
+        # The user leg's tighter bound is for the web *request* path, and this
+        # whole function is scheduled fire-and-forget after the response.
+        bot_client = TalkClient(_config)
+        try:
+            if await _attempt(bot_client, "bot"):
+                return
+        finally:
+            await bot_client.aclose()
+
+    if errors:
+        logger.warning(
+            "talk delete may not have propagated room=%s msg=%s: %s",
+            talk_ref, msg_id, "; ".join(errors + refused),
+        )
+    elif refused:
         logger.info(
-            "talk delete not propagated room=%s msg=%s (no credential could)",
-            talk_ref, msg_id,
+            "talk delete not propagated room=%s msg=%s (talk refused — %s)",
+            talk_ref, msg_id, "; ".join(refused),
         )
 
 

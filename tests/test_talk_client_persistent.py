@@ -15,6 +15,12 @@ a string handed to a mocked transport rather than a destination anything
 resolved. There is nothing here for a room-shape parametrization to tell apart.
 """
 
+import asyncio
+import contextlib
+import http.server
+import json
+import threading
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -258,3 +264,137 @@ class TestShimDeliveryEndToEnd:
         assert MockHttp.call_count == 1  # one pooled client, not a per-call one
         # The singleton the shim used is the process-global one.
         assert get_talk_client(cfg)._client is inst
+
+
+class TestTheSingletonIsBoundToOneLoop:
+    """Why `get_talk_client`'s "bound to the runtime loop" is a constraint and
+    not a note (ISSUE-407).
+
+    `_ensure_open` builds the `httpx.AsyncClient` lazily, so its pool — and the
+    `anyio` primitives inside it — bind to whichever loop issues the first
+    request. A second loop then fails on every call for the life of the process.
+
+    The first test runs against a real socket rather than a mocked `httpx`,
+    because the failure lives in httpx's own connection machinery and a mock
+    reproduces nothing. It is also the dependency fact the guard rests on: if a
+    future httpx makes a pool loop-agnostic, it goes red and the guard can be
+    reconsidered rather than silently outliving its reason.
+    """
+
+    def test_the_second_loop_fails_after_the_request_has_gone_out(self):
+        """The shape that makes this worse than an ordinary error.
+
+        The server records the request, so the side effect happened; the caller
+        gets a `RuntimeError` and, at the call site this issue is about, reads
+        it as "the operation did not happen".
+        """
+        with _ocs_stub() as stub:
+            client = TalkClient(_config_at(stub.base_url))
+            try:
+                first = run_coro(client.get_conversation_info("on-the-runtime-loop"))
+                assert first == {"displayName": "ok"}
+
+                with pytest.raises(RuntimeError) as excinfo:
+                    asyncio.run(client.get_conversation_info("on-another-loop"))
+            finally:
+                run_coro(client.aclose())
+
+        assert "different event loop" in str(excinfo.value)
+        # Both requests reached the server. The second one's answer was written
+        # to the socket and never read — which is the whole claim, and it is
+        # also why this has to *wait*: the client raised before reading the
+        # response, so it is no evidence that the handler thread has run at all.
+        # Asserting the list directly is a race that happens to win.
+        assert stub.wait_for(2) == ["on-the-runtime-loop", "on-another-loop"]
+
+    def test_the_accessor_refuses_a_caller_on_another_loop(self):
+        """The guard, and the reason it raises rather than logging.
+
+        Without it the misuse is invisible until the request has already been
+        written — which is how `web_app._delete_from_talk`'s bot leg spent its
+        life reporting a delete Nextcloud may well have performed as one no
+        credential could make. Raising here happens *before* the side effect.
+        """
+        cfg = _config()
+        # From the runtime loop itself: allowed, and the reentrant case the
+        # accessor's docstring is about.
+        assert run_coro(_get_on_this_loop(cfg)) is get_talk_client(cfg)
+
+        with pytest.raises(RuntimeError, match="runtime loop"):
+            asyncio.run(_get_on_this_loop(cfg))
+
+    def test_a_caller_with_no_running_loop_is_left_alone(self):
+        """Most callers resolve the client synchronously and hand it to
+        `run_coro`; they have no loop to compare against and must not be
+        refused."""
+        assert get_talk_client(_config()) is not None
+
+
+async def _get_on_this_loop(cfg):
+    return get_talk_client(cfg)
+
+
+def _config_at(base_url: str) -> Config:
+    return Config(
+        nextcloud=NextcloudConfig(
+            url=base_url, username="bot", app_password="secret",
+        )
+    )
+
+
+@contextlib.contextmanager
+def _ocs_stub():
+    """A loopback HTTP server answering any OCS room read, recording the token.
+
+    Bound to 127.0.0.1 on an ephemeral port, so nothing outside this process can
+    reach it and there is no credential for it to expect.
+
+    `wait_for(n)` rather than a bare `paths` read: the handler runs on its own
+    thread (`ThreadingHTTPServer` with `daemon_threads`, so `server_close` joins
+    none of them), and the caller that matters here raised *before* reading its
+    response — so nothing in the client's own control flow establishes that the
+    handler has run.
+    """
+    paths: list[str] = []
+    recorded = threading.Condition()
+
+    def _wait_for(n: int, timeout: float = 5.0) -> list[str]:
+        with recorded:
+            recorded.wait_for(lambda: len(paths) >= n, timeout=timeout)
+            return list(paths)
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        # Keep-alive, so the first request leaves a connection in the pool for
+        # the second to reuse. On HTTP/1.0 the server closes after each answer,
+        # the second loop dials a fresh connection of its own and the
+        # cross-loop failure does not happen at all — which is a fact about the
+        # stub, not about the product: Nextcloud speaks HTTP/1.1.
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's spelling
+            with recorded:
+                paths.append(self.path.rsplit("/", 1)[-1])
+                recorded.notify_all()
+            body = json.dumps({"ocs": {"data": {"displayName": "ok"}}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):  # keep the suite's own output clean
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield types.SimpleNamespace(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}",
+            paths=paths,
+            wait_for=_wait_for,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

@@ -242,6 +242,46 @@ messages are re-polled rather than silently lost.
   empty `IncomingMessage` list. (An earlier design split this into a
   `collect → ingest` step across a transaction boundary; that introduced exactly
   this message-loss window and was reverted.)
+
+  **Both of its `db.get_db` blocks await Nextcloud with the connection open, and
+  `talk_poll_txn` is what says how much that costs** (ISSUE-406). `db.get_db`
+  commits at the end of the `with` and SQLite's deferred transaction begins at
+  the first write, so a write anywhere in either block takes a WAL write lock
+  held across every later await in it, and every other writer in the daemon
+  queues behind it for a round trip. `_timed_poll_txn` wraps each block and
+  `_await_in_txn` charges every await inside it — all eight, not only the three
+  the issue names. A line is emitted when at least one await passed
+  `_TXN_AWAIT_FLOOR_SECONDS` (the floor is **per await**, since
+  `_get_participants` is awaited once per message whether or not it reaches the
+  network, and a few hundred cache hits sum past any useful total) or the hold
+  passed `_TXN_HOLD_WARN_SECONDS`, which makes it a warning instead. INFO
+  otherwise, matching `scheduler_stats` and the host-pressure breadcrumb — at
+  DEBUG the whole sub-second population the measurement exists to collect is
+  dropped by `setup_logging`'s default level, so the instrument would ship
+  unable to measure. `phase=rooms` and `phase=results` are the two blocks. The
+  line is emitted at close, so the window it describes is the `held_ms` before
+  its own timestamp — which is what lets a hold be lined up against a
+  `ReadTimeout` record.
+
+  The restructure ISSUE-406 proposes is **deliberately not done**, since its own
+  case was inference and the issue asks for the numbers first. What reading the
+  code did settle is that the exposure is *wider* than the issue describes, in
+  two ways that both make the eventual restructure more likely rather than less.
+  The room loop recurs rather than being first-encounter work: `latest_id` is
+  persisted only for a room that has a message and the backfill caches only a
+  non-empty history, so an **empty group room** fails both guards on every cycle
+  for ever and does two round trips inside the write transaction each time; its
+  participant fetch recurs the same way for a room where
+  `_istota_members_for_conversation` comes back empty, since nothing is
+  registered and the next cycle takes the same branch. And the results loop
+  holds four further awaits the issue does not mention — the `!model` usage
+  reply, `dispatch_command`, `handle_confirmation_reply` (which posts an ack)
+  and the channel-gate notice — each a Talk POST after
+  `upsert_talk_messages` and `set_talk_poll_state` have made the transaction a
+  writer, and the channel-gate one fires per message whenever a foreground task
+  is already running in that room. Note also that the atomicity above forbids
+  the obvious fix for that block: the cursor advance and `ingest_message` must
+  commit together, so it cannot be closed and reopened around the await.
 - **Email**: `transport.email.inbound.poll_emails(config) -> list[int]` owns
   every email-specific step (IMAP listing, the plus-address → sender → thread
   routing precedence, attachment download + Nextcloud upload, prompt assembly,

@@ -266,7 +266,16 @@ def get_talk_client(config):
     persistent loop because every Talk call site goes through ``run_coro`` —
     not eagerly here. ``get_async_runtime()`` ensures the runtime is started so
     the registered ``aclose`` cleanup hook will fire on ``stop()``.
+
+    "Bound to the runtime loop" is a **constraint**, and ``_reject_foreign_loop``
+    below enforces it (ISSUE-407). The web process genuinely runs two loops —
+    uvicorn's and this one — and a caller on the wrong one is not merely
+    unsupported: httpx's pool binds to whichever loop issues the first request,
+    so every later call from the other loop raises after the request has already
+    been written to the socket. The caller then reads a completed side effect as
+    one that never happened. Refusing here happens before it.
     """
+    _reject_foreign_loop()
     global _TALK_CLIENT
     with _TALK_CLIENT_LOCK:
         if _TALK_CLIENT is not None and not _TALK_CLIENT.is_closed:
@@ -277,6 +286,65 @@ def get_talk_client(config):
         get_async_runtime().add_cleanup_hook(client.aclose)
         _TALK_CLIENT = client
         return _TALK_CLIENT
+
+
+def _reject_foreign_loop() -> None:
+    """Refuse a caller running on an event loop that is not the runtime's.
+
+    No running loop is the ordinary case and is left alone: most callers resolve
+    the client synchronously on a plain thread and hand it to ``run_coro``. The
+    runtime's own loop is the reentrant case ``get_talk_client``'s own docstring
+    is about. Anything else is the misuse, and it raises rather than logging
+    because the alternative is a request that goes out and an answer nobody can
+    read.
+
+    **It starts nothing and reads no attribute that raises.** The runtime is read
+    straight out of ``_RUNTIME`` rather than through ``get_async_runtime()``,
+    because putting that call on ``get_talk_client``'s cache-hit path would make
+    a cheap accessor able to spawn a loop thread, block ten seconds and raise —
+    and would have a caller this guard is about to refuse start a runtime first.
+
+    **No runtime yet is refused rather than allowed**, which is the one branch
+    that reads backwards. The runtime's loop is created inside ``AsyncRuntime.
+    _run`` on its own thread, and ``get_async_runtime`` publishes ``_RUNTIME``
+    and ``_loop`` before anything can be submitted — so a caller with a running
+    loop and no runtime in existence is on a loop that cannot possibly be the
+    runtime's. Letting it through would bind the pool to that loop and break
+    every ``run_coro`` caller afterwards, which is this defect with the two
+    loops swapped.
+
+    **And it takes no lock**, which matters for the same reason the rest of this
+    module does. ``get_async_runtime`` holds ``_RUNTIME_LOCK`` across
+    ``start()``'s ``self._ready.wait(timeout=10.0)``, and the documented
+    reentrant caller is *on the runtime loop* — so acquiring it here would block
+    an event loop on a ``threading.Lock`` for up to ten seconds during a
+    restart, in the one module whose subject is loop hygiene. A bare read of the
+    global is atomic under the GIL, and the publication ordering above is what
+    makes reading it unsynchronized correct rather than merely cheap.
+
+    It also logs before raising: two of the seven call sites swallow into a
+    falsy return and one is unwrapped, so on the day this fires the exception
+    alone would be invisible at some of them and would cost a whole Talk poll
+    cycle at another.
+    """
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    rt = _RUNTIME
+    if rt is not None and running is rt._loop:
+        return
+    message = (
+        "get_talk_client() was called from an event loop that is not the "
+        "persistent runtime loop. The singleton's connection pool belongs to "
+        "that loop; a request issued from this one fails after it has been "
+        "sent. Build a short-lived TalkClient here and close it, or hop off "
+        "the loop first with `await asyncio.to_thread(run_coro, coro)` — "
+        "calling run_coro() directly from here blocks this loop until the "
+        "coroutine finishes."
+    )
+    logger.error(message)
+    raise RuntimeError(message)
 
 
 def reset_talk_client() -> None:

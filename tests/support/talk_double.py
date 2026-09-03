@@ -37,30 +37,35 @@ room half way through a scenario and the next call must see the new binding.
 same reason: a test repoints or extends them mid-scenario.
 
 **The web process is reached by a second patch, not by this module's first one.**
-`web_app.py` constructs `TalkClient(...)` directly in seven places — including
+`web_app.py` constructs `TalkClient(...)` directly in eight places — including
 `_chat_promote_to_talk`, which *creates* the promoted shape, and `_post_as_user`,
 which posts a web turn to the room's Talk ref — and each takes a per-user OAuth
 bearer token, so there is no factory to patch. `talk_client_factory` stands in at
 `istota.talk.TalkClient` for exactly those, and the `fake_talk_web` fixture
 installs it. `fake_talk` alone does not: a web test using only that fixture still
-reaches the real client. The two *function-local* `get_talk_client` imports
-(`web_app._delete_from_talk`'s bot fallback, `commands`' `!search`) are *reached*
-by `fake_talk` patching `async_runtime.get_talk_client` itself, since a
-function-local import resolves the name at call time — reached, not covered:
+reaches the real client. The one remaining *function-local* `get_talk_client`
+import (`commands`' `!search`) is *reached* by `fake_talk` patching
+`async_runtime.get_talk_client` itself, since a function-local import resolves
+the name at call time — reached, not covered:
 `!search` calls `search_messages`, which is on no seam and not on this double,
 so such a call gets an `AttributeError` rather than an answer.
 
-**One of the seven web sites is reached and still cannot be driven**, which is
-worth naming rather than leaving to be discovered. `_talk_conversation_verdict`
-tells a deleted conversation from one the bot was merely removed from by
-branching on the *bot's* own 404, and only then constructs the user client in
-`_talk_conversation_seen_by_user`. This double's second failure mode is keyed on
-the bearer token and the bot carries none, so an unknown token there comes back
-as `UnknownTalkRoom`, lands in the generic `except Exception` and reads as
-`unknown` — which leaves the `gone` and `bot_removed` verdicts, and the rebind
-branch behind them, unreachable under this fixture. Expressing it wants a
-token-keyed rejection map beside the bearer-keyed one, and the nesting hazard
-noted on `FakeTalkClient` has to be closed first.
+**One of the eight web sites is reached and only half drivable**, which is worth
+naming rather than leaving to be discovered. `_talk_conversation_verdict` tells a
+deleted conversation from one the bot was merely removed from by branching on the
+*bot's* own 404, and only then constructs the user client in
+`_talk_conversation_seen_by_user`. Both verdicts used to be unreachable, because
+this double's second failure mode was keyed on a bearer token the bot does not
+carry, so its 404 came back as `UnknownTalkRoom` and read as `unknown` on the
+generic arm. ISSUE-407 keyed `None` to the bot's basic auth, which makes
+`bot_removed` drivable — it returns before the outer client is used again.
+
+`gone` still is not, and the remaining blocker is the **nesting hazard** below
+rather than anything about the 404: one instance serves every construction, so
+the user client built inside the verdict leaves its bearer on the shared object,
+the outer bot client picks it up, and refusing that token then refuses the
+`create_conversation` the verdict was supposed to authorize. Driving it wants a
+per-construction credential.
 
 A bearer client brings a second way to fail, and flattening it into the first
 would destroy behaviour the product has: `_post_as_user` and `_mark_read_as_user`
@@ -336,11 +341,13 @@ class FakeTalkClient:
         # instance outlives every construction), so this is the only evidence
         # that the product closed what it opened.
         self.closes = 0
-        # bearer token -> the status the server answers with, for every call
-        # that client makes. 401 is the case with product behaviour behind it;
-        # 403 and 404 are here because `_mark_read_as_user` and
-        # `_delete_from_talk` branch on *not* being 401.
-        self.bearer_rejections: dict[str, int] = {}
+        # credential -> the status the server answers with, for every call that
+        # client makes. A bearer token as a string; `None` is the bot's basic
+        # auth. 401 is the case with product behaviour behind it; 403 and 404
+        # are here because `_mark_read_as_user` and `_delete_from_talk` branch
+        # on *not* being 401. See `_check_credential` for why the bot is a key
+        # here rather than exempt.
+        self.bearer_rejections: dict[str | None, int] = {}
         # conversation token -> the exception a `send_message` to that room
         # raises *after* the room check has accepted it. The third way to fail,
         # and the one production hit (ISSUE-404): a valid token, a request that
@@ -402,17 +409,29 @@ class FakeTalkClient:
         credential *and* a misroute, the first attempt reports the credential
         and only the retry — with a fresh token — reaches the room check. Both
         attempts are in `calls`, which is where that reads correctly.
+
+        **The `None` key is the bot's basic auth, not "no credential".** The bot
+        carries one too, and Nextcloud refuses a delete it is not allowed to make
+        exactly as it refuses the user's — which is the *second* leg of
+        `_delete_from_talk`, and the only way to reach the branch where both legs
+        are refused and nothing went wrong. Membership is what is tested rather
+        than truthiness, so an unregistered `None` still means "the bot is fine"
+        and no existing test changes behaviour.
         """
-        if not isinstance(self.bearer_token, str):
+        if self.bearer_token not in self.bearer_rejections:
             return
-        status = self.bearer_rejections.get(self.bearer_token)
+        status = self.bearer_rejections[self.bearer_token]
         if not status:
             return
         self._record(method, token, args, status=status)
         request = httpx.Request("POST", "https://nextcloud.invalid/ocs")
+        who = (
+            f"bearer token {self.bearer_token!r}"
+            if isinstance(self.bearer_token, str)
+            else "the bot's basic auth"
+        )
         raise httpx.HTTPStatusError(
-            f"talk.{method}: bearer token {self.bearer_token!r} rejected with "
-            f"HTTP {status}",
+            f"talk.{method}: {who} rejected with HTTP {status}",
             request=request,
             response=httpx.Response(status, request=request),
         )

@@ -654,14 +654,26 @@ class TestABearerTokenTheServerRejects:
         assert fake_talk.sent_id_for("istota:task:1:result") == fake_talk.sent_ids[1]
         assert len(fake_talk.sent_ids) == 2, "a rejected send must mint nothing"
 
-    async def test_the_bot_is_never_rejected_by_a_bearer_rule(
+    async def test_the_bot_is_rejected_only_by_a_rule_naming_it(
         self, fake_talk, rooms,
     ):
-        """`bearer_token` is None in basic-auth mode, and `None` must not match
-        a `bearer_rejections` entry by accident."""
+        """`None` is the bot's basic auth and is a deliberate key (ISSUE-407),
+        so this is about the *other* falsy spellings not matching it.
+
+        It used to assert the bot could never be rejected at all, which the
+        rule change makes false. The registry is membership-tested, so an entry
+        under `""` still says nothing about a client carrying `None` — which is
+        what keeps the ~30 `auth_failures == []` assertions elsewhere meaning
+        what they did.
+        """
         fake_talk.bearer_rejections[""] = 401
         await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
         assert fake_talk.auth_failures == []
+
+        fake_talk.bearer_rejections[None] = 401
+        with pytest.raises(httpx.HTTPStatusError):
+            await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
+        assert [c.status for c in fake_talk.auth_failures] == [401]
 
 
 class TestAFailureInTransit:
@@ -856,32 +868,38 @@ class TestTheSeamControl:
         assert talk_pkg.get_talk_client is async_runtime.get_talk_client
         assert talk_inbound.get_talk_client is async_runtime.get_talk_client
 
-    def test_the_function_local_importers_are_the_two_written_down(self):
+    def test_the_function_local_importers_are_the_ones_written_down(self):
         """These are covered by the third patch, on `async_runtime` itself.
 
         A function-local import resolves the name at call time, so patching the
         definition site reaches every one of them — which is why this pins the
-        set rather than the patching. A third `from` import is reached
+        set rather than the patching. A further `from` import is reached
         automatically; it is listed here so somebody confirms that rather than
         assuming it.
+
+        `web_app` was the second entry until ISSUE-407 and is deliberately not
+        one now: it runs on uvicorn's loop, the singleton belongs to the
+        runtime's, and the accessor refuses the pairing outright. A `web_app`
+        appearing here again is that defect coming back.
         """
         # `[ \t]`, not `\s`: with `re.MULTILINE` a `\s+` after `^` matches the
         # preceding newline, so every module-level import reads as indented and
         # the two sets collapse into one.
-        assert self._importers(r"^[ \t]+from") == {
-            "istota.web_app", "istota.commands",
-        }
+        assert self._importers(r"^[ \t]+from") == {"istota.commands"}
 
     def test_the_definition_site_is_patched(self, fake_talk, talk_config):
         """Which is what actually reaches those two.
 
-        Pinned directly rather than by driving either caller, because neither
-        would prove it. `commands`' one calls `search_messages`, which is on no
-        seam and would have to be added to the double for one test; and
-        `web_app._delete_from_talk`'s bot fallback is reached by the
-        *construction* patch anyway — `get_talk_client` builds its singleton
-        with a lazy `from .talk import TalkClient` — so under `fake_talk_web` it
-        stays green with this patch removed. Measured, not assumed.
+        Pinned directly rather than by driving the caller, because that would
+        not prove it: `commands`' one calls `search_messages`, which is on no
+        seam and would have to be added to the double for one test.
+
+        It was pinned this way before ISSUE-407 for a second reason worth
+        keeping, since it is the shape of trap this file exists to catch —
+        `web_app._delete_from_talk`'s bot fallback was reached by the
+        *construction* patch anyway, `get_talk_client` building its singleton
+        with a lazy `from .talk import TalkClient`, so driving it stayed green
+        with this patch removed. Measured then, not assumed.
         """
         assert async_runtime.get_talk_client(talk_config) is fake_talk
 
