@@ -168,6 +168,16 @@ class FakeTalkClient:
         self.strict = strict
         self.known_channels: set[str] = set(known_channels)
         self.calls: list[TalkCall] = []
+        # The ids `send_message` handed back, in order, one per *accepted*
+        # send. `TalkCall` records what went into a call and not what came out
+        # of it, and several converted tests assert that an edit addresses the
+        # message a send created rather than the ack — so without this each of
+        # them wraps `send_message` itself, which is four spellings of one
+        # thing and invisible to the signature pin in
+        # `tests/test_support_talk_double.py`. A refused send raises before
+        # minting, so this list is shorter than the send calls; `sent_id_for`
+        # is what walks the two together.
+        self.sent_ids: list[int] = []
         # Seedable, so a test can drive the poller or name a channel whose
         # display name is not its room's registered name.
         self.display_names: dict[str, str] = {}
@@ -265,6 +275,7 @@ class FakeTalkClient:
             "reference_id": reference_id,
         })
         self._next_message_id += 1
+        self.sent_ids.append(self._next_message_id)
         # The shape `TalkTransport.deliver` unwraps.
         return {"ocs": {"data": {"id": self._next_message_id}}}
 
@@ -372,6 +383,26 @@ class FakeTalkClient:
             c for c in self.calls
             if c.token == token and (method is None or c.method == method)
         ]
+
+    def sent_id_for(self, reference_id: str) -> int | None:
+        """The id handed back for the accepted send carrying `reference_id`.
+
+        The scheduler labels every post it makes (`istota:task:<id>:ack`,
+        `:prompt`, `:result`, `istota:log:<id>`), so a test naming one of those
+        says which post it means instead of indexing into `calls` and hoping
+        the order holds. `None` when no accepted send carried it — including
+        when the send was *refused*, which is the case a test must not read as
+        "the post did not happen for the reason I expected": pair this with
+        `refusals` when the distinction matters.
+        """
+        accepted = 0
+        for call in self.calls:
+            if call.method != "send_message" or call.refused:
+                continue
+            if call.args.get("reference_id") == reference_id:
+                return self.sent_ids[accepted]
+            accepted += 1
+        return None
 
     @property
     def refusals(self) -> list[TalkCall]:

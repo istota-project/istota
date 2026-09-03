@@ -130,33 +130,6 @@ def _addressed(fake_talk):
     return [(c.method, c.token) for c in fake_talk.calls]
 
 
-def _record_sent_ids(fake_talk):
-    """The message ids the double hands back, in order.
-
-    `TalkCall` records what went into a call, not what came out of it, and one
-    assertion below is that the edit addresses the message the *send* created
-    rather than the ack. Wrapping is how that id is read without reaching for
-    the double's private counter.
-    """
-    sent = []
-    inner = fake_talk.send_message
-
-    # The real signature rather than `*args, **kwargs`:
-    # `tests/test_support_talk_double.py` pins signatures against the class, so
-    # an instance-level replacement is invisible to that guard and a call-shape
-    # change would pass through here unnoticed.
-    async def _send(conversation_token, message, reply_to=None, reference_id=None):
-        response = await inner(
-            conversation_token, message,
-            reply_to=reply_to, reference_id=reference_id,
-        )
-        sent.append(response["ocs"]["data"]["id"])
-        return response
-
-    fake_talk.send_message = _send
-    return sent
-
-
 # ---------------------------------------------------------------------------
 # Site 1 — the ack (scheduler.process_one_task)
 # ---------------------------------------------------------------------------
@@ -409,7 +382,6 @@ class TestSubscriberRouting:
     def test_streamed_text_posts_and_edits_on_the_bound_talk_room(
         self, mock_run, config, fake_talk, promoted,
     ):
-        sent = _record_sent_ids(fake_talk)
         sub = TalkEventSubscriber(
             config, _talk_task(promoted.canonical), ack_msg_id=100,
             target_token=promoted.talk_ref,
@@ -422,8 +394,10 @@ class TestSubscriberRouting:
             ("edit_message", promoted.talk_ref),
         ]
         # The edit addresses the message the send created, not the ack (100).
-        assert len(sent) == 1
-        assert fake_talk.calls[1].args["message_id"] == sent[0]
+        # `sent_ids` is the double's own record of what it handed back —
+        # `TalkCall` carries only what went in.
+        assert len(fake_talk.sent_ids) == 1
+        assert fake_talk.calls[1].args["message_id"] == fake_talk.sent_ids[0]
         # `_addressed` includes refused calls, so this is not implied above.
         assert fake_talk.refusals == []
 

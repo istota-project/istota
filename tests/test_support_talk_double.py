@@ -243,6 +243,58 @@ class TestReturnShapes:
         after = await fake_talk.send_message(rooms["plain"].talk_ref, "three")
         assert after["ocs"]["data"]["id"] == before["ocs"]["data"]["id"] + 1
 
+    async def test_sent_ids_records_what_came_back(self, fake_talk, rooms):
+        token = rooms["plain"].talk_ref
+        first = await fake_talk.send_message(token, "one")
+        second = await fake_talk.send_message(token, "two")
+        assert fake_talk.sent_ids == [
+            first["ocs"]["data"]["id"], second["ocs"]["data"]["id"],
+        ]
+
+    async def test_a_refused_send_records_no_id_either(self, fake_talk, rooms):
+        """The reason `sent_id_for` walks `calls` instead of indexing.
+
+        `sent_ids` is one entry per *accepted* send, so it is shorter than the
+        send calls whenever one was refused — an index taken from `calls` would
+        silently name the wrong message.
+        """
+        await fake_talk.send_message(rooms["plain"].talk_ref, "one")
+        with pytest.raises(UnknownTalkRoom):
+            await fake_talk.send_message(rooms["promoted"].canonical, "two")
+        assert len(fake_talk.sent_ids) == 1
+        assert len([c for c in fake_talk.calls if c.method == "send_message"]) == 2
+
+    async def test_sent_id_for_names_the_post_by_its_reference_id(
+        self, fake_talk, rooms,
+    ):
+        token = rooms["plain"].talk_ref
+        await fake_talk.send_message(token, "ack", reference_id="istota:task:7:ack")
+        result = await fake_talk.send_message(
+            token, "answer", reference_id="istota:task:7:result",
+        )
+        assert fake_talk.sent_id_for("istota:task:7:result") == (
+            result["ocs"]["data"]["id"]
+        )
+        assert fake_talk.sent_id_for("istota:task:7:ack") != (
+            result["ocs"]["data"]["id"]
+        )
+        assert fake_talk.sent_id_for("istota:task:7:prompt") is None
+
+    async def test_sent_id_for_skips_a_refused_send(self, fake_talk, rooms):
+        """A refused send is not "the post did not happen for my reason"."""
+        with pytest.raises(UnknownTalkRoom):
+            await fake_talk.send_message(
+                rooms["promoted"].canonical, "answer",
+                reference_id="istota:task:7:result",
+            )
+        after = await fake_talk.send_message(
+            rooms["plain"].talk_ref, "later", reference_id="istota:task:8:result",
+        )
+        assert fake_talk.sent_id_for("istota:task:7:result") is None
+        assert fake_talk.sent_id_for("istota:task:8:result") == (
+            after["ocs"]["data"]["id"]
+        )
+
     async def test_get_conversation_info_returns_the_rooms_display_name(
         self, fake_talk, rooms,
     ):
@@ -497,7 +549,7 @@ SEAM_METHODS = {
 
 # Public on the double and on no real client — helpers for the tests, not part
 # of the shadowed surface.
-DOUBLE_ONLY = {"calls_to", "refusals"}
+DOUBLE_ONLY = {"calls_to", "refusals", "sent_id_for"}
 
 
 class TestPinnedAgainstTheSeams:
