@@ -243,14 +243,60 @@ messages are re-polled rather than silently lost.
   `collect → ingest` step across a transaction boundary; that introduced exactly
   this message-loss window and was reverted.)
 
-  **Both of its `db.get_db` blocks await Nextcloud with the connection open, and
-  `talk_poll_txn` is what says how much that costs** (ISSUE-406). `db.get_db`
+  **The room pass no longer awaits with a connection open; the results block
+  still does** (ISSUE-406). The room pass is three phases — `_plan_room_pass`
+  reads the registry (and writes nothing, so under WAL it never becomes a
+  writer and blocks nobody), `_fetch_room_pass` asks Nextcloud with no
+  connection open, `_apply_room_pass` reopens and writes. That is the shape the
+  issue proposed, and it is available *here* and not to the results block, whose
+  atomicity note above forbids it.
+
+  **The write phase re-reads every condition it acts on**, which is the price of
+  the split rather than belt and braces: the lock is free while Nextcloud
+  answers, which is the fix, and that is exactly the window in which another
+  writer can register the room or advance its cursor. `register_room` /
+  `add_room_binding` / `add_room_member` are `INSERT OR IGNORE` and need
+  nothing, but `set_talk_poll_state` is an unconditional upsert — writing
+  `latest_id - 1` over a cursor somebody advanced rewinds the room and re-polls
+  messages already read, so the initialisation fires only when the cursor is
+  still absent. Registration carries a second guard of a different kind: a room
+  the read phase found present and the write phase finds gone has no fetched
+  participant list, so it is left for the next cycle rather than registered with
+  no members. The fetch phase stays **sequential**, matching what the single
+  transaction did — running the round trips concurrently is a real latency win
+  and a separate change, since ISSUE-399 was about how many connections this
+  poller holds at once.
+
+  **What the measurement established before the fix**, and why the room half was
+  worth doing on it: the room loop's awaits recur rather than being
+  first-encounter work. `get_latest_message_id` persists a cursor only for a
+  room that has a message and the backfill caches only a non-empty history, so
+  an **empty group room** failed both guards on every cycle for ever and paid
+  two round trips of write-lock time each time; the participant fetch recurred
+  the same way for a room where `_istota_members_for_conversation` came back
+  empty. The comment at the cursor write records the same fact from the
+  `lastMessage` gate's side.
+
+  **The results block is unchanged and still holds four awaits the issue does
+  not name** — the `!model` usage reply, `dispatch_command`,
+  `handle_confirmation_reply` (which posts an ack) and the channel-gate notice,
+  each a Talk POST after `upsert_talk_messages` and `set_talk_poll_state` have
+  made the transaction a writer, and the last of those fires per message
+  whenever that room already has a foreground task running. Closing that one
+  means hoisting the awaits or moving the blocking work off the loop thread, not
+  splitting the transaction, and it still has no production numbers behind it.
+  `talk_poll_txn phase=results` is what would supply them.
+
+  **`talk_poll_txn` is what says how much either costs.** `db.get_db`
   commits at the end of the `with` and SQLite's deferred transaction begins at
   the first write, so a write anywhere in either block takes a WAL write lock
   held across every later await in it, and every other writer in the daemon
   queues behind it for a round trip. `_timed_poll_txn` wraps each block and
-  `_await_in_txn` charges every await inside it — all eight, not only the three
-  the issue names. A line is emitted when at least one await passed
+  `_await_in_txn` charges every await inside it — the five the results block
+  still holds, where the issue named one. The room pass keeps its
+  `_timed_poll_txn` with no `_await_in_txn` under it at all, which is the
+  readback for the split: `phase=rooms awaits=0` is what says the round trips
+  happened outside the lock. A line is emitted when at least one await passed
   `_TXN_AWAIT_FLOOR_SECONDS` (the floor is **per await**, since
   `_get_participants` is awaited once per message whether or not it reaches the
   network, and a few hundred cache hits sum past any useful total) or the hold
@@ -263,25 +309,33 @@ messages are re-polled rather than silently lost.
   its own timestamp — which is what lets a hold be lined up against a
   `ReadTimeout` record.
 
-  The restructure ISSUE-406 proposes is **deliberately not done**, since its own
-  case was inference and the issue asks for the numbers first. What reading the
-  code did settle is that the exposure is *wider* than the issue describes, in
-  two ways that both make the eventual restructure more likely rather than less.
-  The room loop recurs rather than being first-encounter work: `latest_id` is
-  persisted only for a room that has a message and the backfill caches only a
-  non-empty history, so an **empty group room** fails both guards on every cycle
-  for ever and does two round trips inside the write transaction each time; its
-  participant fetch recurs the same way for a room where
-  `_istota_members_for_conversation` comes back empty, since nothing is
-  registered and the next cycle takes the same branch. And the results loop
-  holds four further awaits the issue does not mention — the `!model` usage
-  reply, `dispatch_command`, `handle_confirmation_reply` (which posts an ack)
-  and the channel-gate notice — each a Talk POST after
-  `upsert_talk_messages` and `set_talk_poll_state` have made the transaction a
-  writer, and the channel-gate one fires per message whenever a foreground task
-  is already running in that room. Note also that the atomicity above forbids
-  the obvious fix for that block: the cursor advance and `ingest_message` must
-  commit together, so it cannot be closed and reopened around the await.
+  **The room half was fixed on the mechanism, and the production series does not
+  support it** — stated here because the opposite is the natural assumption
+  about a change with an issue number on it. Read on the deployment 8.5 hours
+  after the instrument shipped, `talk_poll_txn` had emitted **nothing**: no
+  transaction of either phase held an await past the 5ms floor or ran past the
+  1s warn threshold.
+
+  **The two phases are silent for different reasons, and only one of them is
+  the instrument having nothing to observe.** The rooms phase runs every cycle
+  and does no round trip at all, because every live room there is already
+  registered, cursored and cached — of the four `talk_poll_state` rows with no
+  cached history, three carry no Talk binding and the fourth is archived, so
+  the room loop visits none of them, and the empty-group-room case this change
+  was argued from has no instance on that deployment. The results phase *did*
+  run — seven rooms advanced their cursor after the restart — so it took its
+  write lock repeatedly and still reported nothing: `_get_participants` was a
+  warm cache hit under the 5ms floor every time, and the four expensive awaits
+  fire only on interactive traffic, of which there was none. For that phase,
+  under that traffic, the silence is the issue's "holds are milliseconds"
+  answer rather than a gap in the data.
+
+  So the case for the split is the mechanism plus the contention its own tests
+  reproduce, not a measured cost. The condition is latent rather than absent — a
+  room the bot is newly added to re-enters it — but anyone reasoning about
+  whether this was worth its risk should know the series was empty. The results
+  block keeps its awaits and its instrument, which is where a number would come
+  from if interactive traffic ever put one of the four on the wire.
 - **Email**: `transport.email.inbound.poll_emails(config) -> list[int]` owns
   every email-specific step (IMAP listing, the plus-address → sender → thread
   routing precedence, attachment download + Nextcloud upload, prompt assembly,
