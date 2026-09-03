@@ -4949,6 +4949,14 @@ _AUX_COLUMNS = (
 # holding back — until the user has approved it.
 #
 # Both `?` bind the *room* token, in that order.
+#
+# **Left a SQL literal on purpose.** It is not the room-ownership question the
+# room-model conversion answers with `surfaces.is_room_member`: the column is
+# `tasks.source_type`, the two arms of the OR are two different *ways of
+# belonging to a room* rather than two surface roles, and email — which
+# `is_room_member` correctly excludes — is the whole point of the second arm.
+# Interpolating a surface set would collapse the two arms into one and put a
+# gated email's `tasks.prompt` back within reach of this query.
 _AUX_ROOM_SCOPE = (
     "((source_type IN ('web', 'talk') AND conversation_token = ?) "
     "OR (source_type = 'email' AND EXISTS ("
@@ -5119,7 +5127,7 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
 
     **Where it came from.** `origin` needs two things to be true, and the second
     is the one that is easy to miss. The surface must be one the room does not
-    itself live on — `ROOM_SURFACES` is `talk`/`web`, and
+    itself live on — `surfaces.is_room_member` is talk and web, and
     `TRANSCRIPT_SURFACE_FILTER` renders a user row only for those two plus
     `email`, so this resolves to `email` today. And the row must carry an
     `author_label`, which `transport.ingest.resolve_author` sets **iff the
@@ -5136,7 +5144,7 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     changes.
     """
     from .email_support import parse_email_prompt  # noqa: PLC0415
-    from .transport.ingest import ROOM_SURFACES  # noqa: PLC0415
+    from .surfaces import is_room_member  # noqa: PLC0415
 
     body = row["body"]
     out: dict = {"text": body}
@@ -5185,7 +5193,18 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     # `_row_get` rather than indexing, like the author columns above: a producer
     # that predates the column must degrade to today's rendering, not raise.
     origin_surface = _row_get(row, "origin_surface") or ""
-    if author_label and origin_surface and origin_surface not in ROOM_SURFACES:
+    # The one site reading the ownership predicate **negated**, and the one
+    # where "unknown" is not the safe answer: a damaged `origin_surface` renders
+    # a genuine Talk turn as an external message. The column is written verbatim
+    # from `task.source_type` and no writer transforms it, so the lookup stays
+    # exact rather than normalizing. Read **raw**, with no source-type mapping:
+    # the column stores a source type for assistant rows, so its domain is wider
+    # than surface names and mapping it would be a category error. It is also
+    # why the *static* table is read here and not `routing._room_view`, which
+    # collapses "not a room view" with "no live transport" — on a deployment
+    # with `talk.enabled = false` that would mark every historic Talk turn
+    # external, in the web process, on every page load.
+    if author_label and origin_surface and not is_room_member(origin_surface):
         out["origin"] = origin_surface
     return out
 

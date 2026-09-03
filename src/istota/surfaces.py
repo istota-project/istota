@@ -219,10 +219,11 @@ def is_room_member(surface: object) -> bool:
     ``commands._TRANSCRIPT_SURFACES`` is ``("web", "talk", "email")`` and gates
     ``_record_confirm_exchange``, so reading this predicate there would stop an
     email ``!confirm`` recording its exchange — and that row is a durable
-    authorization record. The neighbouring ``!steer`` write really is
-    ``("talk", "web")`` and really does ask this. Two writes in one file, two
-    questions; the spec's conversion table calls both of them ownership and is
-    wrong about the first.
+    authorization record. The neighbouring ``!steer`` and ``!retry`` writes
+    really are ``("talk", "web")`` and really do ask this, and both read this
+    predicate. Three ``role='user'`` writes in one file, two questions — which
+    is why the ``!confirm`` gate keeps its literal and carries a comment saying
+    so.
     """
     return _facts(surface).room_role == "member"
 
@@ -263,8 +264,11 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
 
     A scheduled task originates on no surface at all, so the answer is None
     and both room predicates answer False for it. Across all twelve shipped
-    source types that pair answers exactly what the `source_type in
-    ROOM_SURFACES` literal at the two scheduler gates answers today. The five
+    source types that pair answered exactly what the `source_type in
+    ROOM_SURFACES` literal at the two scheduler gates answered before the
+    conversion replaced it — the equivalence is pinned by
+    `tests/test_surface_model_equivalence.py`, which was written and run against
+    that literal. The five
     that are also surface names (``talk``, ``web``, ``email``, ``repl``,
     ``istota_file``) pass through; the other seven (``briefing``, ``cli``,
     ``doctor``, ``heartbeat``, ``playbook``, ``scheduled``, ``subtask``) do not.

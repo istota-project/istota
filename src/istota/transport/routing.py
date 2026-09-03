@@ -21,6 +21,11 @@ import logging
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+# The static room-model table. A stdlib-only leaf that imports nothing, so a
+# module-level import here costs nothing and introduces no cycle — unlike
+# `db`, which this module deliberately imports per function.
+from ..surfaces import is_room_member
+
 if TYPE_CHECKING:
     from .. import db
     from ..config import Config
@@ -355,6 +360,16 @@ def _room_view(
     """``TransportCapabilities.room_view`` for a surface name, or None when the
     surface is not a room view *or* is not resolvable.
 
+    **The second of two readers of `room_view`, and the config-gated one.**
+    `surfaces.room_view()` answers what role a surface plays in the room model
+    — a fact about the code, the same on every deployment — and is what the
+    converted room-model sites read. This one answers whether a live transport
+    for the surface exists on *this* deployment right now, which is what a
+    delivery planner wants and what nothing outside this module should read for
+    the model question: `web_app._user_row_display` would start rendering every
+    historic Talk turn as an external message on a deployment with
+    ``talk.enabled = false``.
+
     Those two answers deliberately collapse, and the caller skips only on
     ``"canonical"`` rather than keeping only ``"external"``. A binding whose
     surface has no live transport (Talk bound but ``talk.enabled = false``) has
@@ -678,7 +693,15 @@ def _room_for_destination(
         return None
     if not candidate:
         return None
-    if surface in ("talk", "web"):
+    # A room-owning surface is one that appears in `room_bindings`, so its
+    # candidate is a `surface_ref` to be resolved to the canonical token first.
+    # Email is a `guest` and binds nothing, which is why it never reaches here
+    # — the dispatch above returns None for it — and why the predicate is the
+    # ownership one rather than the room-view one. It sits *after* that
+    # dispatch deliberately: `surface == "room"` is a name in the destination
+    # grammar rather than a surface, and a member check placed ahead of it
+    # would drop every `room:<token>` descriptor (ISSUE-247).
+    if is_room_member(surface):
         candidate = db.resolve_room_token(conn, surface, candidate) or candidate
     return candidate if db.get_room(conn, candidate) is not None else None
 

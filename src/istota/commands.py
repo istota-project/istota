@@ -18,6 +18,9 @@ from .brain import Brain, EFFORT_LEVELS, make_brain
 from .memory import search as memory_search_mod
 from .process_group import kill_process_group
 from .config import Config
+# The static room-model table: a stdlib-only leaf importing nothing, so it
+# costs this module — which is imported on the Talk polling path — nothing.
+from .surfaces import is_room_member
 # The cost-render rule, imported rather than copied. It already has two
 # implementations — this one and `web/src/lib/usageFormat.ts` — pinned against
 # each other by a parity test; a third, inside a surface, is exactly what those
@@ -539,7 +542,15 @@ async def cmd_confirm(ctx: CommandContext):
 # (`TRANSCRIPT_SURFACE_FILTER`). Recording an answer from anywhere else stores
 # an invisible question above a visible ack, which is worse than storing
 # nothing — a CLI or REPL `!confirm` therefore leaves no transcript row.
-_TRANSCRIPT_SURFACES = ("web", "talk", "email")
+#
+# Imported rather than copied: this was a hand copy of `db`'s tuple, and the
+# two had to be read side by side to be seen as one thing. It is **not**
+# `surfaces.is_room_member`, and the difference is exactly email: the question
+# is "may this surface deposit a `role='user'` row at all" (member plus guest),
+# not "does this surface own rooms". The set happening to equal the room-role
+# set plus the one guest is a coincidence, and its domain is `source_type`
+# values rather than surface names — see the declaration in `db.py`.
+_TRANSCRIPT_SURFACES = db.TRANSCRIPT_SURFACES
 
 
 def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult":
@@ -561,6 +572,13 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
     """
     from . import confirmations
 
+    # **Deliberately not `surfaces.is_room_member`**, unlike the `!steer` and
+    # `!retry` writes in this same file. The question here is "may this surface
+    # deposit a `role='user'` row in a room at all", which admits email — a
+    # `guest` that joins a room's transcript without owning one. Reading the
+    # ownership predicate would return False for email and stop an email
+    # `!confirm` recording the exchange this function's docstring calls a
+    # durable authorization record.
     if ctx.surface not in _TRANSCRIPT_SURFACES:
         ctx.conn.commit()
         return CommandResult(handled=True, text=reply)
@@ -670,7 +688,11 @@ async def cmd_steer(ctx: CommandContext):
     # slot for the original prompt, and LLM-context reconstruction joins on
     # task_id — so a NULL-task_id row is display-only, never re-paired as a
     # phantom turn. Room surfaces only; best-effort.
-    if ctx.surface in ("talk", "web"):
+    #
+    # The ownership question, unlike `_record_confirm_exchange`'s gate a few
+    # hundred lines up: this write needs a room the surface owns to write into,
+    # so email — a `guest` — is out, and was before the predicate had a name.
+    if is_room_member(ctx.surface):
         try:
             if db.get_room(conn, room_token) is not None:
                 msg_id = db.add_message(
@@ -2092,7 +2114,17 @@ def _record_retry_user_turn(
     sees what was actually asked. ``task_id`` is the new task's id so the row
     pairs with the eventual assistant turn (``_store_room_turn``). Room surfaces
     only; mirrors `!steer`'s transcript write."""
-    if surface not in ("talk", "web"):
+    # The ownership question, and the conversion is behaviour-preserving for
+    # every surface including email.
+    #
+    # **The asymmetry it cements is deliberate-for-now and unexamined**, and is
+    # recorded here so whoever asks finds it from the code: an email `!confirm`
+    # records its exchange (`_record_confirm_exchange` gates on
+    # `_TRANSCRIPT_SURFACES`, member plus guest) while an email `!retry` records
+    # no user turn at all. Both are `role='user'` rows in the same room, and the
+    # two gates disagree about email. Which of them is right is a product
+    # question nobody has put; naming this one for ownership does not settle it.
+    if not is_room_member(surface):
         return
     token = original.conversation_token
     if not token:
