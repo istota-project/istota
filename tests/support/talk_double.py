@@ -72,6 +72,15 @@ status the server answers with, and the answer is recorded as `TalkCall.status`
 rather than as `refused`, so `refusals == []` keeps meaning "nothing was
 misrouted" in the thirty-odd tests that already assert it.
 
+A third way to fail is `send_failures`, and it is not a variation on either of
+the others: a token the room check accepts, a request that goes out, and a
+transport error on the way back — the `ReadTimeout` ISSUE-404 was filed from.
+Expressing that as an unknown token would have driven the *misroute* path
+instead, where the binding lookup and `_talk_lands_here` answer differently, so
+the test would have proved something about a room that does not exist rather
+than about a room that timed out. The call is recorded with `refused=False` and
+mints no `sent_id`.
+
 Also not covered: ISSUE-401, a binding whose Talk conversation has been deleted.
 It is indistinguishable from a live binding at the database level, so the double
 accepts it, exactly as this module's rule says it should.
@@ -172,7 +181,9 @@ class TalkCall:
     assertion that needs it, "the retry used the *fresh* token", is otherwise a
     guess about which construction went with which call.
 
-    `sent_id` is the id an accepted `send_message` minted, and it is on the call
+    `sent_id` is the id an accepted `send_message` minted — None on a call that
+    reached the room and then failed in transit (`send_failures`), which is how
+    a test tells that apart from a send that landed. It is on the call
     for a reason worth stating: `sent_id_for` used to walk `calls` and
     `sent_ids` as parallel arrays, keeping its own index of "accepted sends so
     far". A credential rejection is recorded with `refused=False` and mints no
@@ -318,6 +329,19 @@ class FakeTalkClient:
         # 403 and 404 are here because `_mark_read_as_user` and
         # `_delete_from_talk` branch on *not* being 401.
         self.bearer_rejections: dict[str, int] = {}
+        # conversation token -> the exception a `send_message` to that room
+        # raises *after* the room check has accepted it. The third way to fail,
+        # and the one production hit (ISSUE-404): a valid token, a request that
+        # went out, and a read that timed out. Modelling it as a refusal instead
+        # would have made the test exercise a misroute — a different code path,
+        # with the binding lookup and `_talk_lands_here` answering differently —
+        # and the same reasoning `bearer_rejections` records applies: a double
+        # that can fail only the one way its author had in mind collapses two
+        # unlike failures into one.
+        # The same instance is re-raised on every call, so a split message
+        # chains one frame per part. Harmless on a function-scoped fixture and
+        # worth knowing before anyone makes the double session-scoped.
+        self.send_failures: dict[str, Exception] = {}
         # The tokens `create_conversation` minted, in order. Nothing binds
         # them — `_chat_promote_to_talk` writes the binding itself, which is
         # exactly the step the double is there to check, since every later call
@@ -449,6 +473,13 @@ class FakeTalkClient:
             "reply_to": reply_to,
             "reference_id": reference_id,
         })
+        # After `_check`, never before: the room was named correctly and the
+        # request went out, so the call stands in `calls` with `refused=False`
+        # and `refusals` keeps meaning "nothing was misrouted". No id is minted,
+        # which is what a test reads to tell this from a send that landed.
+        failure = self.send_failures.get(conversation_token)
+        if failure is not None:
+            raise failure
         self._next_message_id += 1
         self.sent_ids.append(self._next_message_id)
         # Onto the call `_check` just recorded, so `sent_id_for` never has to
