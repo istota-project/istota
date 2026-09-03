@@ -5535,8 +5535,10 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
 
     This one-shot generalizes `_migrate_scheduled_transcript_cleanup` from
     scheduled-only to every non-conversational source type. Over rows whose
-    `origin_surface NOT IN ('web','talk','scheduled')` (scheduled is owned by
-    its own marker, conversational surfaces are real turns), and never touching
+    `origin_surface NOT IN ('web','talk','scheduled','email')` (scheduled is
+    owned by its own marker, conversational surfaces are real turns, and `email`
+    joined them at ISSUE-136 — see the comment on the statement itself), and
+    never touching
     `role='system'` (the notification/log lane), it:
 
       * drops the `role='user'` rows — synthetic prompts, never user-authored;

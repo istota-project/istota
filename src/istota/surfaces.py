@@ -264,11 +264,14 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
 
     A scheduled task originates on no surface at all, so the answer is None
     and both room predicates answer False for it. Across all twelve shipped
-    source types that pair answered exactly what the `source_type in
-    ROOM_SURFACES` literal at the two scheduler gates answered before the
-    conversion replaced it — the equivalence is pinned by
-    `tests/test_surface_model_equivalence.py`, which was written and run against
-    that literal. The five
+    source types that pair answered exactly what the **two** literals at the two
+    scheduler gates answered before the conversion replaced them — they were not
+    one literal spelled twice: the `store_turn_message` gate read a bare
+    `task.source_type in ("talk", "web")` and the confirmation gate read
+    `(task.source_type or "") in ROOM_SURFACES`, and only the second is replaced
+    by `is_room_view` rather than `is_room_member`. Both equivalences are pinned
+    separately by `tests/test_surface_model_equivalence.py`, which was written
+    and run against those literals. The five
     that are also surface names (``talk``, ``web``, ``email``, ``repl``,
     ``istota_file``) pass through; the other seven (``briefing``, ``cli``,
     ``doctor``, ``heartbeat``, ``playbook``, ``scheduled``, ``subtask``) do not.
