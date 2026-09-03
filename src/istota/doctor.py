@@ -52,6 +52,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Collection, Iterable
 from datetime import datetime, timezone
@@ -5201,6 +5202,521 @@ def _overlay_list(items: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# talk.signaling.*
+# ---------------------------------------------------------------------------
+#
+# Four checks over the Talk signaling transport, and **none of them
+# authenticates to the signaling server or joins a room**. That is a
+# constraint rather than an economy: doctor runs on a scheduler interval, on
+# the daemon's start-up path and behind the admin Health pane, and a check that
+# opened a signaling session would have to POST `participants/active` for some
+# room to do it — putting a phantom istota participant into a live room's
+# member list every time somebody loaded a dashboard, and emitting a
+# participant-list refresh to everyone in it.
+#
+# So `talk.signaling_reachable` reads the `welcome` frame, which the server
+# sends *before* any hello, and closes. `talk.signaling_auth` reads
+# `/cloud/capabilities`, which mints nothing. `talk.signaling_watchers` reads
+# in-process counters and makes no request at all.
+
+# How long the whole reachability probe gets: the settings call, the connect
+# and the first frame. Its own name rather than `PROBE_TIMEOUT`, which is the
+# budget for spawning a binary — these are network round trips to two different
+# hosts, and coupling them would mean a subprocess timeout tuning decided how
+# long a WebSocket handshake may take.
+SIGNALING_PROBE_TIMEOUT = 10
+
+# How long a reachability answer is reused. One doctor run asks two checks the
+# same question, and probing twice would double the OCS settings call and the
+# connect on the hourly sweep and on every admin page load. Short enough that a
+# rerun a minute later is a fresh answer, which is what an operator watching a
+# server come back up expects of a diagnostic.
+_SIGNALING_PROBE_TTL = 15.0
+
+_signaling_probe_memo: "tuple[float, tuple, _SignalingProbe] | None" = None
+
+
+@dataclass(frozen=True)
+class _SignalingProbe:
+    """What one unauthenticated look at the HPB established.
+
+    ``error`` is the whole verdict: a probe that could not resolve a URL, could
+    not import the library or could not read a frame reports why, and
+    ``features`` is empty. The two are not independent — a caller must read
+    ``error`` first, because "no features" is equally what an unreachable
+    server and a server advertising nothing look like, and those want different
+    findings.
+    """
+
+    url: str
+    version: str
+    features: tuple[str, ...]
+    error: str
+
+
+def reset_signaling_probe_memo() -> None:
+    """Forget the cached reachability answer. Test-teardown helper."""
+    global _signaling_probe_memo
+    _signaling_probe_memo = None
+
+
+def _signaling_gate(config: "Config") -> str:
+    """"" when the signaling checks should run, else the reason to SKIP.
+
+    Off is the default and is a supported shape rather than a misconfiguration
+    — a deployment with no high-performance backend keeps the Talk poller,
+    which is the capability floor — so this must never report a finding.
+    """
+    talk = getattr(config, "talk", None)
+    if talk is None or not getattr(talk, "enabled", False):
+        return "Talk is disabled"
+    sig = getattr(talk, "signaling", None)
+    if sig is None or not getattr(sig, "enabled", False):
+        return "Talk signaling is disabled ([talk.signaling] enabled)"
+    return ""
+
+
+def _run_off_loop(make_coro, timeout: float):
+    """Run one coroutine to completion on a private loop, from any context.
+
+    doctor is reached three ways that disagree about what thread it is on: a
+    plain thread (the CLI, the daemon's start-up), a worker thread
+    (``asyncio.to_thread`` in the admin pane and ``!check``), and directly from
+    a coroutine at one call site. ``asyncio.run`` raises in the last, and the
+    persistent runtime's pooled client belongs to a loop this thread is not on
+    — ``get_talk_client`` refuses a foreign loop outright, for the reason its
+    own docstring gives. A loop of its own on a thread of its own is the only
+    answer correct in all three.
+
+    Returns ``(value, error)``. Never raises: the caller is a check.
+    """
+    import asyncio
+
+    box: dict = {}
+
+    def target() -> None:
+        try:
+            box["value"] = asyncio.run(make_coro())
+        except BaseException as exc:  # noqa: BLE001 — reported, not propagated
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, name="doctor-signaling", daemon=True)
+    thread.start()
+    # A grace second past the caller's own budget: every coroutine below bounds
+    # itself, so a thread still alive here is one whose bound did not hold, and
+    # the answer is to stop waiting rather than to join for ever.
+    thread.join(timeout + 1.0)
+    if thread.is_alive():
+        return None, f"timed out after {timeout:.0f}s"
+    exc = box.get("error")
+    if exc is not None:
+        return None, f"{type(exc).__name__}: {exc}"
+    return box.get("value"), ""
+
+
+def _signaling_settings(config: "Config", timeout: float):
+    """Talk's signaling settings for the bot account, or the reason there are none.
+
+    A short-lived ``TalkClient`` rather than the persistent singleton, which is
+    bound to the scheduler's loop and would refuse this thread. One cheap OCS
+    GET; it mints a 60-second token that is read for its ``server`` field, never
+    used, and never logged.
+    """
+    from .transport.talk import signaling as sig
+
+    async def _fetch():
+        from .talk import TalkClient
+
+        client = TalkClient(config, timeout=timeout)
+        try:
+            return await client.get_signaling_settings()
+        finally:
+            await client.aclose()
+
+    payload, error = _run_off_loop(_fetch, timeout)
+    if error:
+        return None, error
+    return sig.parse_settings(payload, nextcloud_url=config.nextcloud.url), ""
+
+
+def _signaling_welcome_frame(ws_url: str, timeout: float):
+    """Connect, read the first frame, close. No hello, so no session.
+
+    ``open_timeout`` bounds the handshake and ``wait_for`` bounds the frame; the
+    server has its own 2-second deadline for a hello after connecting
+    (``hub.go:113``), so closing without one is the ordinary way a client that
+    only wanted the feature list leaves.
+    """
+    import asyncio
+    import json
+
+    from .transport.talk import signaling as sig
+
+    async def _read():
+        websockets = sig.require_websockets()
+        async with websockets.connect(
+            ws_url, open_timeout=timeout, close_timeout=2,
+        ) as socket:
+            raw = await asyncio.wait_for(socket.recv(), timeout=timeout)
+        return json.loads(raw)
+
+    frame, error = _run_off_loop(_read, timeout)
+    if error:
+        return {}, error
+    return frame if isinstance(frame, dict) else {}, ""
+
+
+def _signaling_capabilities(config: "Config", timeout: float):
+    """``/cloud/capabilities``, or the reason it could not be read.
+
+    Synchronous and off the signaling path entirely: it is the request the
+    daemon already makes to find out what this Nextcloud supports, and it mints
+    no credential of any kind.
+    """
+    from .nextcloud.capabilities import fetch_capabilities
+
+    try:
+        return fetch_capabilities(config, timeout=timeout), ""
+    except Exception as exc:  # noqa: BLE001 — a check never raises
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _signaling_probe(config: "Config") -> _SignalingProbe:
+    """Resolve the HPB URL and read its ``welcome``, memoized for a few seconds."""
+    global _signaling_probe_memo
+
+    sig_config = config.talk.signaling
+    key = (sig_config.url, getattr(config.nextcloud, "url", ""))
+
+    memo = _signaling_probe_memo
+    if memo is not None and memo[1] == key and (time.monotonic() - memo[0]) < _SIGNALING_PROBE_TTL:
+        return memo[2]
+
+    probe = _probe_signaling(config, sig_config, SIGNALING_PROBE_TIMEOUT)
+    _signaling_probe_memo = (time.monotonic(), key, probe)
+    return probe
+
+
+def _probe_signaling(config, sig_config, timeout: float) -> _SignalingProbe:
+    from .transport.talk import signaling as sig
+
+    # Before anything reaches the network: a deployment with `enabled = true`
+    # and no library refuses to boot, so reporting "connection refused" here
+    # would name the wrong fault and send an operator to look at a server that
+    # is fine.
+    try:
+        sig.require_websockets()
+    except sig.SignalingUnavailable as exc:
+        return _SignalingProbe("", "", (), str(exc))
+
+    if sig_config.url:
+        source = sig_config.url
+    else:
+        settings, error = _signaling_settings(config, timeout)
+        if error:
+            return _SignalingProbe(
+                "", "", (), f"Talk's signaling settings could not be read: {error}",
+            )
+        reason = sig.hpb_unavailable_reason(settings)
+        if reason is not None:
+            return _SignalingProbe("", "", (), reason)
+        source = settings.server
+
+    try:
+        ws_url = sig.websocket_url(source)
+    except ValueError as exc:
+        return _SignalingProbe("", "", (), str(exc))
+
+    frame, error = _signaling_welcome_frame(ws_url, timeout)
+    if error:
+        return _SignalingProbe(ws_url, "", (), f"{ws_url}: {error}")
+
+    features = sig.parse_welcome(frame)
+    welcome = frame.get("welcome") if isinstance(frame, dict) else None
+    version = ""
+    if isinstance(welcome, dict) and isinstance(welcome.get("version"), str):
+        version = welcome["version"]
+    if not features:
+        return _SignalingProbe(
+            ws_url, version, (),
+            f"{ws_url} answered, but the frame carried no feature list",
+        )
+    return _SignalingProbe(ws_url, version, features, "")
+
+
+def check_signaling_reachable(config: "Config", probe: bool) -> CheckResult:
+    """Does the high-performance backend answer, and can we tell where it is.
+
+    Unauthenticated: the ``welcome`` frame precedes the hello, so this opens a
+    socket, reads one frame and closes without creating a signaling session or
+    a Talk participant row. See the section header for why that matters.
+    """
+    name = "talk.signaling_reachable"
+    reason = _signaling_gate(config)
+    if reason:
+        return CheckResult(name, SKIP, reason, scope=DEPLOYMENT)
+    if not probe:
+        return CheckResult(
+            name, SKIP,
+            "reachability cannot be observed without a network request "
+            "(probe disabled)",
+            scope=DEPLOYMENT,
+        )
+
+    result = _signaling_probe(config)
+    if result.error:
+        return CheckResult(
+            name, FAIL, result.error,
+            remedy=(
+                "[talk.signaling] enabled = true, so the daemon refuses to "
+                "start without a reachable backend. Check that a "
+                "nextcloud-spreed-signaling server is running and registered "
+                "with Talk (occ talk:signaling:list), that this host can reach "
+                "it, and that [talk.signaling] url — when set — names the "
+                "route the daemon should take. Setting enabled = false returns "
+                "the deployment to the Talk poller."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    version = result.version or "an unreported version"
+    return CheckResult(
+        name, OK,
+        f"{result.url} answered a welcome frame ({version}, "
+        f"{len(result.features)} features)",
+        scope=DEPLOYMENT,
+    )
+
+
+def check_signaling_chat_relay(config: "Config", probe: bool) -> CheckResult:
+    """Does the server relay chat payloads, or only bare refreshes.
+
+    Read from the ``welcome`` frame rather than from a version string, because
+    that is what the runtime does: the feature is what the server advertises,
+    not what its release notes say. Talk treats it as optional
+    (``Manager.php:210-215``), so an older server connects perfectly and simply
+    never sends a comment — which is a working deployment, one fetch per
+    message more expensive than it needs to be, and is therefore a warning
+    rather than a failure.
+    """
+    name = "talk.signaling_chat_relay"
+    reason = _signaling_gate(config)
+    if reason:
+        return CheckResult(name, SKIP, reason, scope=DEPLOYMENT)
+    if not probe:
+        return CheckResult(
+            name, SKIP,
+            "the advertised feature list cannot be read without a network "
+            "request (probe disabled)",
+            scope=DEPLOYMENT,
+        )
+
+    result = _signaling_probe(config)
+    if result.error:
+        # A server we could not reach advertises nothing we can read. Calling
+        # that "no chat-relay" would name the wrong fault and send an operator
+        # to upgrade a server that is merely down.
+        return CheckResult(
+            name, SKIP,
+            "the server's feature list could not be read; see "
+            "talk.signaling_reachable for why",
+            scope=DEPLOYMENT,
+        )
+
+    from .transport.talk import signaling as sig
+
+    if sig.CLIENT_FEATURES[0] in result.features:
+        return CheckResult(
+            name, OK,
+            f"{result.url} advertises chat-relay", scope=DEPLOYMENT,
+        )
+
+    return CheckResult(
+        name, WARN,
+        f"{result.url} does not advertise chat-relay, so every chat event "
+        "arrives as a bare refresh and each one costs a fetch of the room",
+        remedy=(
+            "Upgrade the signaling server to 2.1.0 or later. Inbound Talk "
+            "still works meanwhile — the latency win is unaffected, only the "
+            "saved request is lost."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
+def _spreed_signaling_capabilities(payload) -> dict:
+    node = payload
+    for key in ("capabilities", "spreed", "config", "signaling"):
+        if not isinstance(node, dict):
+            return {}
+        node = node.get(key)
+    return node if isinstance(node, dict) else {}
+
+
+def check_signaling_auth(config: "Config", probe: bool) -> CheckResult:
+    """Talk's own half: an external signaling mode, and a hello-v2 token key.
+
+    Reads ``/cloud/capabilities`` and mints nothing — the settings endpoint
+    would answer the mode question too and would mint a token to do it, once
+    per doctor run for ever. The mode verdict comes from
+    ``signaling.signaling_mode_reason``, the same predicate the startup refusal
+    reads through the settings payload, so the warning an operator gets here
+    and the refusal they get on the next restart cannot disagree.
+    """
+    name = "talk.signaling_auth"
+    reason = _signaling_gate(config)
+    if reason:
+        return CheckResult(name, SKIP, reason, scope=DEPLOYMENT)
+    if not probe:
+        return CheckResult(
+            name, SKIP,
+            "Talk's capabilities cannot be read without a network request "
+            "(probe disabled)",
+            scope=DEPLOYMENT,
+        )
+
+    from .transport.talk import signaling as sig
+
+    payload, error = _signaling_capabilities(config, SIGNALING_PROBE_TIMEOUT)
+    if error:
+        return CheckResult(
+            name, WARN,
+            f"Talk's capabilities could not be read: {error}",
+            remedy=(
+                "Check the Nextcloud URL and the bot account's credentials. "
+                "Until this answers, whether the deployment has a "
+                "high-performance backend at all is unknown, and "
+                "[talk.signaling] enabled = true refuses to start without one."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    caps = _spreed_signaling_capabilities(payload)
+    mode = caps.get("mode")
+    mode_reason = sig.signaling_mode_reason(mode)
+    if mode_reason is not None:
+        return CheckResult(
+            name, FAIL, mode_reason,
+            remedy=(
+                "Register a signaling server with Talk "
+                "(occ talk:signaling:add, then occ talk:signaling:list to "
+                "confirm), or set [talk.signaling] enabled = false to keep the "
+                "Talk poller."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    # Never echoed, only tested for presence. It is a *public* key, so this is
+    # hygiene rather than a boundary — but a check's detail is one line saying
+    # what was observed, and a base64 blob in the daemon log and on the admin
+    # Health pane is not that.
+    if not caps.get("hello-v2-token-key"):
+        return CheckResult(
+            name, WARN,
+            f"Talk reports {mode} signaling but publishes no "
+            "hello-v2-token-key, so the client falls back to the v1 ticket — "
+            "which does not expire and is never rotated, so a leaked one is a "
+            "permanent credential for the bot's signaling identity",
+            remedy=(
+                "Upgrade Talk, or check that spreed.config.signaling."
+                "hello-v2-token-key appears in /cloud/capabilities. Inbound "
+                "signaling works on the v1 ticket meanwhile."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    return CheckResult(
+        name, OK,
+        f"Talk reports {mode} signaling and publishes a hello-v2 token key",
+        scope=DEPLOYMENT,
+    )
+
+
+def _as_count(value) -> int:
+    """A counter off a supervisor's ``stats()``, coerced and never raising."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    try:
+        return max(0, int(value))
+    except (ValueError, OverflowError):
+        return 0
+
+
+def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
+    """Every live room has a connected watcher, and no room is behind.
+
+    **The rooms-behind count is the half that cannot be inferred from the
+    others**, and it is why this check is not simply a watcher census. The
+    reconciliation pass compares each room's ``lastMessage.id`` against its
+    stored cursor and fetches only the rooms that are behind, so a signaling
+    path that has silently stopped delivering still looks perfect from every
+    other angle: the sockets are up, no reconnect is logged, and the messages
+    arrive — late, by another route. A non-zero count is what says the event
+    stream is not carrying the traffic.
+
+    ``probe`` is accepted to satisfy the ``Check`` protocol and is unused: this
+    reads in-process counters and makes no request.
+    """
+    name = "talk.signaling_watchers"
+    reason = _signaling_gate(config)
+    if reason:
+        return CheckResult(name, SKIP, reason, scope=DEPLOYMENT)
+
+    from .transport.talk import signaling as sig
+
+    stats = sig.read_stats()
+    if stats is None:
+        # doctor also runs in the web process, in the CLI and behind `!check`,
+        # where the supervisor lives in another process entirely. Reporting
+        # every watcher down there would page an operator about a process that
+        # was never meant to have any.
+        return CheckResult(
+            name, SKIP,
+            "no signaling supervisor is running in this process",
+            scope=DEPLOYMENT,
+        )
+
+    watchers = _as_count(stats.get("watchers"))
+    connected = _as_count(stats.get("connected"))
+    behind = _as_count(stats.get("rooms_behind"))
+    disconnected = [
+        str(token) for token in stats.get("disconnected") or []
+        if isinstance(token, str) and token
+    ]
+
+    findings = []
+    if disconnected:
+        findings.append(
+            f"{len(disconnected)} of {watchers} watchers disconnected: "
+            + _overlay_list(disconnected)
+        )
+    if behind:
+        findings.append(
+            f"{behind} room(s) were behind their cursor at the last "
+            "reconciliation, so messages are arriving over the fallback fetch "
+            "rather than over the event stream"
+        )
+
+    if findings:
+        return CheckResult(
+            name, WARN, "; ".join(findings),
+            remedy=(
+                "Check talk.signaling_reachable and the daemon log for "
+                "reconnect and error lines. A rooms-behind count that stays "
+                "non-zero while every watcher reports connected means the "
+                "server accepted the join and is relaying nothing."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    return CheckResult(
+        name, OK,
+        f"{connected} of {watchers} watchers connected, no room behind its cursor",
+        scope=DEPLOYMENT,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
 
@@ -5233,6 +5749,10 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.forge_transport", check_forge_transport),
     ("developer.repos_layout", check_repos_layout),
     ("developer.container", check_developer_container),
+    ("talk.signaling_reachable", check_signaling_reachable),
+    ("talk.signaling_chat_relay", check_signaling_chat_relay),
+    ("talk.signaling_auth", check_signaling_auth),
+    ("talk.signaling_watchers", check_signaling_watchers),
     ("web.static", check_web_static),
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
@@ -5314,6 +5834,14 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it is a fact about what is filed on this host.
     "developer.repos_layout": DEPLOYMENT,
     "developer.container": DEPLOYMENT,
+    # Deployment, not image: three of the four reach a network — a running
+    # signaling server and a running Nextcloud — and the fourth reads counters
+    # only the scheduler process has. A bare `docker run` can answer none of
+    # them.
+    "talk.signaling_reachable": DEPLOYMENT,
+    "talk.signaling_chat_relay": DEPLOYMENT,
+    "talk.signaling_auth": DEPLOYMENT,
+    "talk.signaling_watchers": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it reads the rendered config and reaches the
     # network. A bare `docker run` can answer neither.

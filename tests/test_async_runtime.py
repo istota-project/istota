@@ -7,6 +7,7 @@ bridges sync call sites to it via ``submit`` / ``run_coro``. See
 
 import asyncio
 import concurrent.futures
+import logging
 import threading
 import time
 
@@ -17,6 +18,7 @@ from istota.async_runtime import (
     get_async_runtime,
     reset_async_runtime,
     run_coro,
+    spawn_task,
 )
 
 
@@ -232,3 +234,235 @@ class TestModuleSingleton:
         assert a.is_running is False
         b = get_async_runtime()
         assert b is not a
+
+
+class TestSpawn:
+    """Fire-and-forget scheduling for long-lived coroutines.
+
+    ``submit``/``run_coro`` block the submitting thread for a result, which is
+    the right shape for a request and the wrong one for a watcher that runs
+    for the life of the daemon. ``spawn`` schedules and returns, handing back a
+    handle the caller holds for cancellation.
+
+    The shutdown ordering is what these assertions are really about.
+    ``_shutdown`` cancels in-flight coroutines *before* running the cleanup
+    hooks, so the shared ``TalkClient`` is not closed under a live request. A
+    spawned task that outlived cancellation would put that back.
+    """
+
+    def test_spawn_does_not_block_the_caller(self, runtime):
+        started = threading.Event()
+        release = threading.Event()
+
+        async def forever():
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+
+        t0 = time.monotonic()
+        handle = runtime.spawn(forever(), name="forever")
+        elapsed = time.monotonic() - t0
+
+        try:
+            assert elapsed < 1.0, "spawn blocked the caller"
+            assert started.wait(timeout=2.0), "the coroutine never started"
+            assert handle.done() is False
+        finally:
+            release.set()
+            handle.cancel()
+
+    def test_the_handle_cancels_the_task(self, runtime):
+        started = threading.Event()
+        cancelled = threading.Event()
+
+        async def forever():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        handle = runtime.spawn(forever(), name="forever")
+        assert started.wait(timeout=2.0)
+
+        handle.cancel()
+
+        assert cancelled.wait(timeout=2.0), "cancelling the handle did not reach the task"
+
+    def test_a_spawned_task_is_cancelled_by_stop(self):
+        rt = AsyncRuntime()
+        rt.start()
+        started = threading.Event()
+        cancelled = threading.Event()
+
+        async def forever():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        rt.spawn(forever(), name="forever")
+        assert started.wait(timeout=2.0)
+
+        rt.stop()
+
+        assert cancelled.is_set(), (
+            "stop() left a spawned task running; the cleanup hooks would then "
+            "close the shared TalkClient under it"
+        )
+
+    def test_a_spawned_task_is_cancelled_before_the_cleanup_hooks_run(self):
+        """The ordering ``_shutdown``'s docstring exists to protect."""
+        rt = AsyncRuntime()
+        rt.start()
+        order = []
+        started = threading.Event()
+
+        async def forever():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                order.append("task-cancelled")
+                raise
+
+        async def hook():
+            order.append("hook")
+
+        rt.spawn(forever(), name="forever")
+        rt.add_cleanup_hook(hook)
+        assert started.wait(timeout=2.0)
+
+        rt.stop()
+
+        assert order == ["task-cancelled", "hook"], order
+
+    def test_a_spawned_task_that_raises_is_reported(self, runtime, caplog):
+        done = threading.Event()
+
+        async def boom():
+            raise ValueError("watcher blew up")
+
+        with caplog.at_level(logging.ERROR, logger="istota.async_runtime"):
+            handle = runtime.spawn(boom(), name="boom")
+            handle.add_done_callback(lambda _f: done.set())
+            assert done.wait(timeout=2.0)
+            # The internal callback runs on the same future; give it a beat.
+            time.sleep(0.05)
+
+        assert any("boom" in r.getMessage() for r in caplog.records), (
+            "a spawned task died with no log line naming it"
+        )
+
+    def test_an_ordinary_completion_is_not_reported_as_a_failure(self, runtime, caplog):
+        done = threading.Event()
+
+        async def quiet():
+            return 7
+
+        with caplog.at_level(logging.WARNING, logger="istota.async_runtime"):
+            handle = runtime.spawn(quiet(), name="quiet")
+            handle.add_done_callback(lambda _f: done.set())
+            assert done.wait(timeout=2.0)
+            time.sleep(0.05)
+
+        assert handle.result(timeout=1.0) == 7
+        assert not caplog.records, [r.getMessage() for r in caplog.records]
+
+    def test_cancellation_is_not_reported_as_a_failure(self, runtime, caplog):
+        started = threading.Event()
+
+        async def forever():
+            started.set()
+            await asyncio.sleep(30)
+
+        with caplog.at_level(logging.WARNING, logger="istota.async_runtime"):
+            handle = runtime.spawn(forever(), name="forever")
+            assert started.wait(timeout=2.0)
+            handle.cancel()
+            time.sleep(0.1)
+
+        assert not caplog.records, [r.getMessage() for r in caplog.records]
+
+    def test_spawn_from_the_loop_thread_does_not_raise(self, runtime):
+        """Unlike ``submit``, which deadlocks there and therefore refuses.
+
+        ``spawn`` never blocks for a result, so scheduling from the loop's own
+        thread is safe — and it is what the supervisor does when it starts a
+        watcher from a coroutine already running on the loop.
+        """
+        inner_started = threading.Event()
+
+        async def inner():
+            inner_started.set()
+
+        async def outer():
+            runtime.spawn(inner(), name="inner")
+
+        runtime.submit(outer())
+
+        assert inner_started.wait(timeout=2.0)
+
+    def test_spawn_before_start_raises_and_closes_the_coroutine(self):
+        rt = AsyncRuntime()
+
+        async def never():
+            pass
+
+        coro = never()
+        with pytest.raises(RuntimeError):
+            rt.spawn(coro, name="never")
+        # Closed by spawn, so pytest reports no "never awaited" warning.
+        assert coro.cr_frame is None
+
+    def test_start_clears_handles_from_a_previous_run(self):
+        rt = AsyncRuntime()
+        rt.start()
+
+        async def forever():
+            await asyncio.sleep(30)
+
+        rt.spawn(forever(), name="forever")
+        assert rt.spawned_names() == ["forever"]
+        rt.stop()
+
+        rt.start()
+        try:
+            assert rt.spawned_names() == []
+        finally:
+            rt.stop()
+
+    def test_a_finished_task_is_dropped_from_the_registry(self, runtime):
+        done = threading.Event()
+
+        async def quiet():
+            return None
+
+        handle = runtime.spawn(quiet(), name="quiet")
+        handle.add_done_callback(lambda _f: done.set())
+        assert done.wait(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while runtime.spawned_names() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert runtime.spawned_names() == []
+
+
+class TestModuleLevelSpawnTask:
+    def teardown_method(self):
+        reset_async_runtime()
+
+    def test_it_schedules_on_the_process_global_runtime(self):
+        started = threading.Event()
+
+        async def work():
+            started.set()
+
+        handle = spawn_task(work(), name="work")
+        try:
+            assert started.wait(timeout=2.0)
+        finally:
+            handle.cancel()

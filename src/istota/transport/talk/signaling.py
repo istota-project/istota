@@ -268,34 +268,120 @@ def parse_settings(data, *, nextcloud_url: str) -> SignalingSettings:
     )
 
 
-def hpb_unavailable_reason(settings: SignalingSettings) -> str | None:
-    """``None`` when this deployment has an HPB to connect to, else why not.
+def signaling_mode_reason(mode) -> str | None:
+    """Why a deployment reporting this signaling mode has no HPB, or ``None``.
+
+    The mode half of :func:`hpb_unavailable_reason`, reachable on its own
+    because **two readers get at the same fact through different payloads**.
+    The runtime reads ``GET /v3/signaling/settings``, which also names a
+    server URL and so has a third question to ask. ``doctor``'s
+    ``talk.signaling_auth`` reads ``/cloud/capabilities``, which names no URL
+    and — the reason it reads that one — mints no token: doctor runs on a
+    scheduler interval and from the admin Health pane, so a check that asked
+    Talk for a credential on every dashboard load would be minting one per
+    page view for nothing.
 
     Three states, not two, and collapsing them is how a startup refusal ends
-    up naming the wrong cause. ``signaling_mode == "internal"`` means Talk has
-    no signaling server registered — the deployment cannot do what it was
-    configured to do. An *empty* mode means the settings call answered with
-    nothing this client could read, which is a different fault with a
-    different fix, and it is what a plain ``== "internal"`` test would let
-    through. The refusal itself is the caller's; this only names the reason.
+    up naming the wrong cause. ``"internal"`` means Talk has no signaling
+    server registered — the deployment cannot do what it was configured to do.
+    Anything *unreadable* means the call answered with nothing this client
+    could make sense of, which is a different fault with a different fix, and
+    it is what a plain ``== "internal"`` test would let through.
     """
-    if not isinstance(settings, SignalingSettings):
-        return "Talk signaling settings could not be read"
-
-    mode = settings.signaling_mode
-    if not mode:
+    if not isinstance(mode, str) or not mode:
         return (
-            "Talk reported no signaling mode — the settings call returned "
-            "nothing this client could read"
+            "Talk reported no signaling mode — the call returned nothing this "
+            "client could read"
         )
     if mode == "internal":
         return (
             "Talk is in internal signaling mode: no high-performance backend "
             "is registered with it (occ talk:signaling:list)"
         )
-    if not settings.server:
-        return f"Talk reported {mode} signaling but named no server URL"
     return None
+
+
+def hpb_unavailable_reason(settings: SignalingSettings) -> str | None:
+    """``None`` when this deployment has an HPB to connect to, else why not.
+
+    :func:`signaling_mode_reason` answers the mode question — the same
+    predicate the ``talk.signaling_auth`` check reads through capabilities, so
+    the startup refusal and the check cannot come to different conclusions
+    about whether a deployment is configured. What is added here is the
+    question only the settings payload can answer: an ``external`` deployment
+    that named no server URL is configured and still unusable.
+    """
+    if not isinstance(settings, SignalingSettings):
+        return "Talk signaling settings could not be read"
+
+    reason = signaling_mode_reason(settings.signaling_mode)
+    if reason is not None:
+        return reason
+    if not settings.server:
+        return (
+            f"Talk reported {settings.signaling_mode} signaling but named no "
+            "server URL"
+        )
+    return None
+
+
+class SignalingUnavailable(RuntimeError):
+    """``[talk.signaling] enabled = true`` on a deployment that cannot do it.
+
+    A refusal, not a degradation, and the two ways to reach it are the two
+    ways an operator can ask for push on a deployment that has none: Talk with
+    no high-performance backend registered, and the ``websockets`` library
+    absent. Neither falls back to the poller.
+
+    Falling back would be the worse failure and it is worth naming why, since
+    "degrade gracefully" is the reflex. The poller is a *capability floor* for
+    a deployment with no HPB, not a redundant branch — so a daemon that silently
+    took it would report every signaling counter healthy for want of any
+    watchers to be unhealthy, while the operator who set ``enabled = true``
+    believes messages arrive within a second and they arrive within a poll
+    cycle. There is no third failure mode, deliberately: a missing *secret*
+    used to be one, and is not, because this design has no secret.
+    """
+
+
+def require_websockets():
+    """The WebSocket client library, or a refusal naming the extra.
+
+    Imported here rather than at module scope for the reason every heavy
+    import in ``src/`` is inside a function — nothing that merely reads a frame
+    should pay for it — and because that is what lets a deployment with
+    signaling off run without the dependency at all.
+    """
+    try:
+        import websockets
+    except ImportError as exc:
+        raise SignalingUnavailable(
+            "[talk.signaling] enabled = true but the websockets library is "
+            "not installed, so no connection can be opened. Install the "
+            "signaling extra (`uv sync --extra signaling`, or "
+            "`pip install 'istota[signaling]'`), or set "
+            "[talk.signaling] enabled = false to keep the Talk poller."
+        ) from exc
+    return websockets
+
+
+def require_hpb(settings: "SignalingSettings") -> None:
+    """Refuse when this deployment has no high-performance backend.
+
+    Phrased entirely in terms of :func:`hpb_unavailable_reason`, so the
+    refusal and ``doctor``'s ``talk.signaling_auth`` cannot come to different
+    conclusions about the same deployment — the check is the operator's
+    warning that this is about to happen, and a second copy of the predicate
+    is how the two start disagreeing.
+    """
+    reason = hpb_unavailable_reason(settings)
+    if reason is None:
+        return None
+    raise SignalingUnavailable(
+        f"[talk.signaling] enabled = true but {reason}. Register a signaling "
+        "server with Talk (occ talk:signaling:add), or set "
+        "[talk.signaling] enabled = false to keep the Talk poller."
+    )
 
 
 def parse_welcome(frame) -> tuple[str, ...]:
@@ -614,3 +700,50 @@ def backoff_delay(attempt: int, *, maximum: float,
     window = min(floor * (2 ** exponent), ceiling)
     half = window / 2.0
     return half + draw() * half
+
+
+# --- Where doctor reads the supervisor's counters from ---------------------
+#
+# A process-local registration rather than an import, and that is the whole
+# point of it. The supervisor runs in the scheduler daemon; `doctor` also runs
+# in the web process, in the CLI and behind `!check`, where there is no
+# supervisor and never will be. An importable singleton would make those
+# processes report every watcher down — a page for a process that was never
+# supposed to have any — where "nothing is registered here" is the honest
+# answer and the one `talk.signaling_watchers` skips on.
+#
+# A callable rather than the supervisor object, so this module states no
+# opinion about the supervisor's shape; Stage 3 registers a bound `stats`.
+_STATS_SOURCE = None
+
+
+def set_stats_source(source) -> None:
+    """Register what ``read_stats`` should call. The supervisor's own hook."""
+    global _STATS_SOURCE
+    _STATS_SOURCE = source if callable(source) else None
+
+
+def clear_stats_source() -> None:
+    """Unregister. Called on supervisor shutdown, and by test teardown."""
+    global _STATS_SOURCE
+    _STATS_SOURCE = None
+
+
+def read_stats() -> dict | None:
+    """The supervisor's counters, or ``None`` when this process has none.
+
+    Never raises and never propagates a shape it cannot use. The caller is a
+    ``doctor`` check, and a diagnostic that fails on its own instrument
+    reports the wrong subsystem: a supervisor mid-restart raising out of
+    ``stats()`` is not a signaling outage, and neither is one that returns
+    something that is not a mapping.
+    """
+    source = _STATS_SOURCE
+    if source is None:
+        return None
+    try:
+        stats = source()
+    except Exception as e:  # noqa: BLE001 — a diagnostic must not raise
+        logger.debug("signaling: stats source raised (%s)", type(e).__name__)
+        return None
+    return stats if isinstance(stats, dict) else None

@@ -18,7 +18,11 @@ The load-bearing assertions, in the order the spec argues them:
 """
 
 import asyncio
+import builtins
 import logging
+import sys
+import tomllib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -998,3 +1002,174 @@ class TestJoinRoomSessionRefusesAWhitespaceSessionId:
         )
 
         assert asyncio.run(client.join_room_session("abc123")) == "talk-session-1"
+
+
+class TestSignalingModeReasonIsOnePredicateWithTwoReaders:
+    """The mode half of ``hpb_unavailable_reason``, reachable on its own.
+
+    Two payloads answer "does this deployment have an HPB", and neither is a
+    superset of the other. The runtime reads
+    ``GET /v3/signaling/settings``, which also names a server URL, and doctor's
+    ``talk.signaling_auth`` reads ``/cloud/capabilities``, which does not and
+    which mints no token. A second copy of the mode test in doctor is how the
+    startup refusal and the check start disagreeing about whether a deployment
+    is configured.
+    """
+
+    def test_external_is_available(self):
+        assert signaling.signaling_mode_reason("external") is None
+
+    def test_internal_names_the_missing_backend(self):
+        reason = signaling.signaling_mode_reason("internal")
+        assert reason is not None
+        assert "internal" in reason
+
+    @pytest.mark.parametrize("value", ["", None, 7, {}])
+    def test_an_unreadable_mode_is_not_reported_as_internal(self, value):
+        reason = signaling.signaling_mode_reason(value)
+        assert reason is not None
+        assert "internal signaling mode" not in reason
+
+    def test_hpb_unavailable_reason_answers_the_same_way_on_the_mode(self):
+        """The two must not drift; that is the whole point of the split."""
+        for mode in ("external", "internal", ""):
+            settings = signaling.parse_settings(
+                {"signalingMode": mode, "server": "https://hpb.example.com"},
+                nextcloud_url=NC_URL,
+            )
+            mode_reason = signaling.signaling_mode_reason(mode)
+            full_reason = signaling.hpb_unavailable_reason(settings)
+            if mode_reason is None:
+                assert full_reason is None
+            else:
+                assert full_reason == mode_reason
+
+
+class TestTheTwoStartupRefusals:
+    """``enabled = true`` on a deployment that cannot do it refuses to boot.
+
+    Neither degrades to polling. A silent fall-through would leave an operator
+    believing push is live on a daemon that reports every watcher healthy
+    because it has none — which is worse than not booting, and is the failure
+    the whole "trigger versus payload" ordering exists to keep diagnosable.
+
+    What is deliberately *not* a refusal is a missing secret, because there is
+    no secret: istota authenticates as its own Nextcloud user and everything
+    the connection needs is minted on demand by Talk.
+    """
+
+    def test_an_internal_mode_deployment_is_refused_by_name(self):
+        settings = signaling.parse_settings(
+            {"signalingMode": "internal"}, nextcloud_url=NC_URL,
+        )
+
+        with pytest.raises(signaling.SignalingUnavailable) as excinfo:
+            signaling.require_hpb(settings)
+
+        assert "internal" in str(excinfo.value)
+
+    def test_an_unreadable_settings_payload_is_refused_as_itself(self):
+        settings = signaling.parse_settings(None, nextcloud_url=NC_URL)
+
+        with pytest.raises(signaling.SignalingUnavailable) as excinfo:
+            signaling.require_hpb(settings)
+
+        assert "internal signaling mode" not in str(excinfo.value)
+
+    def test_a_working_deployment_is_not_refused(self):
+        assert signaling.require_hpb(_settings()) is None
+
+    def test_a_missing_library_is_refused_by_name(self, monkeypatch):
+        real_import = builtins.__import__
+
+        def _no_websockets(name, *args, **kwargs):
+            if name == "websockets" or name.startswith("websockets."):
+                raise ImportError("No module named 'websockets'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _no_websockets)
+        monkeypatch.delitem(sys.modules, "websockets", raising=False)
+
+        with pytest.raises(signaling.SignalingUnavailable) as excinfo:
+            signaling.require_websockets()
+
+        message = str(excinfo.value)
+        assert "websockets" in message
+        assert "signaling" in message, (
+            "the refusal does not name the extra that installs it"
+        )
+
+    def test_the_library_is_returned_when_it_is_there(self):
+        assert signaling.require_websockets() is not None
+
+    def test_the_refusal_is_not_a_generic_runtime_error_a_caller_would_miss(self):
+        assert issubclass(signaling.SignalingUnavailable, RuntimeError)
+
+
+class TestTheSignalingExtraIsDeclared:
+    """Asserted on the manifest, never by importing the library.
+
+    ``websockets`` already resolves as somebody else's transitive in this
+    worktree, so a test that merely imports it passes whether or not the extra
+    exists — and the deployment that installs ``istota[test]`` would then be
+    the one to find out.
+    """
+
+    def _extras(self):
+        root = Path(__file__).resolve().parents[1]
+        with open(root / "pyproject.toml", "rb") as fh:
+            return tomllib.load(fh)["project"]["optional-dependencies"]
+
+    def test_the_extra_exists_and_names_websockets(self):
+        extras = self._extras()
+        assert "signaling" in extras, "no `signaling` extra in pyproject.toml"
+        assert any(
+            req.split(">")[0].split("=")[0].strip() == "websockets"
+            for req in extras["signaling"]
+        ), extras["signaling"]
+
+    def test_it_is_folded_into_all_and_test(self):
+        extras = self._extras()
+        for name in ("all", "test"):
+            assert "istota[signaling]" in extras[name], (
+                f"the `{name}` extra does not carry signaling"
+            )
+
+    def test_it_carries_no_aiohttp(self):
+        """D10: asyncio-native and one job, rather than a client stack."""
+        assert not any(
+            "aiohttp" in req for req in self._extras()["signaling"]
+        )
+
+
+class TestTheSupervisorStatsSeam:
+    """Where ``doctor``'s ``talk.signaling_watchers`` reads from.
+
+    A process-local registration rather than an import, because the supervisor
+    runs in the scheduler daemon and ``doctor`` also runs in the web process,
+    in the CLI and from ``!check`` — where there is no supervisor and the
+    honest answer is that this process has none, not that every watcher is
+    down.
+    """
+
+    def teardown_method(self):
+        signaling.clear_stats_source()
+
+    def test_nothing_registered_reads_as_none(self):
+        signaling.clear_stats_source()
+        assert signaling.read_stats() is None
+
+    def test_a_registered_source_is_read(self):
+        signaling.set_stats_source(lambda: {"watchers": 3})
+        assert signaling.read_stats() == {"watchers": 3}
+
+    def test_a_source_that_raises_reads_as_none(self):
+        def boom():
+            raise RuntimeError("supervisor is mid-restart")
+
+        signaling.set_stats_source(boom)
+        assert signaling.read_stats() is None
+
+    def test_a_source_returning_something_that_is_not_a_mapping_reads_as_none(self):
+        signaling.set_stats_source(lambda: ["watchers"])
+        assert signaling.read_stats() is None

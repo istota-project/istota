@@ -44,6 +44,23 @@ whisper = [
     "faster-whisper>=1.1.0",
     "psutil>=5.9.0",
 ]
+# The WebSocket client for the Talk signaling transport ([talk.signaling]).
+# `websockets` rather than `aiohttp`: asyncio-native, small, and one job — and
+# `aiohttp` would be a much larger surface pulled in for a client role. The
+# import is inside a function, like every other heavy import in `src/`, and
+# `enabled = true` without the library is a startup refusal rather than a
+# silent fall-through to polling.
+#
+# One library behaviour is load-bearing and is easy to switch off by mistake:
+# the client must answer the server's WebSocket *control* pings. There is no
+# application-level ping in this protocol — the signaling server pings every
+# 54s with a 60s read deadline — so a client that stops ponging is dropped
+# every minute with nothing in the protocol saying why. `websockets` pongs by
+# default; `ping_interval=None` disables only the client's own pings and is
+# harmless.
+signaling = [
+    "websockets>=13.0",
+]
 location = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
@@ -114,6 +131,7 @@ all = [
     "istota[money]",
     "istota[feeds]",
     "istota[garmin]",
+    "istota[signaling]",
 ]
 # What the test suite needs: `all` minus the two heavy ML extras. Not a
 # deployment shape — nobody should install `istota[test]` to run the bot; it
@@ -141,6 +159,7 @@ test = [
     "istota[money]",
     "istota[feeds]",
     "istota[garmin]",
+    "istota[signaling]",
 ]
 
 [project.scripts]
