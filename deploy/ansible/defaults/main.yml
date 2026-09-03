@@ -191,6 +191,7 @@ istota_scheduler_dispatch_interval: 0.5       # Sub-tick pending-task dispatch c
 istota_scheduler_talk_poll_interval: 10       # Talk conversation polling interval
 istota_scheduler_talk_poll_timeout: 30        # Talk long-poll timeout
 istota_scheduler_talk_poll_wait: 2.0         # Max seconds to wait before processing fast rooms
+istota_scheduler_talk_poll_full_sweep_interval: 300  # Poll every room regardless of the lastMessage gate; 0 = no gate
 istota_scheduler_email_poll_interval: 60
 istota_scheduler_email_poll_batch_size: 50
 istota_scheduler_email_rate_limit_messages: 60          # Inbound email tasks per user per window (0 = unlimited)

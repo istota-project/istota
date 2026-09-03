@@ -1193,3 +1193,97 @@ def _compose_config(tmp_path, *, extra_env: dict[str, str] | None = None) -> dic
             pytrace=False,
         )
     return json.loads(result.stdout)
+
+
+class TestTheInContainerProbes:
+    """`tests/full/test_talk_poll_pressure.py` ships Python as a string.
+
+    Its two probes are sent to `python -c` inside the istota container, so
+    nothing on the host ever parses them: a defect in either is invisible to
+    ruff and to the whole default suite, and surfaces only as a non-zero exit
+    three minutes into a cold six-container boot, reported as "the probe itself
+    failed" with a traceback from `<string>`.
+
+    Both were written with `{{` / `}}` escaped for a `str.format` the templates
+    do not use — they interpolate with `.replace` — so every brace survived
+    doubled and `{{"a": 1}}` reached the interpreter as a set containing a dict.
+
+    **A `compile()` check does not catch that, and the first version of this
+    guard was written and its negative control run before that was noticed.**
+    `{{"a": 1}}` is perfectly valid Python: a set literal holding a dict. It
+    raises `TypeError: unhashable type: 'dict'` when the line *executes*, so
+    compiling the source proves only that the braces balance. Reintroducing the
+    exact production defect left the compile-only guard green — which is the
+    failure mode `.claude/rules/testbed.md` describes as a probe whose success
+    is indistinguishable from a no-op, arrived at here by the same route it
+    describes: reading the test instead of running the control.
+
+    So the check is on the doubled brace itself, which is unambiguous (no probe
+    here has any reason to carry one) and catches it before execution, plus an
+    AST sweep for set literals, since a doubled brace can only ever produce a
+    set literal or a set comprehension and every `{...}` in these templates is
+    meant to be a dict. `compile()` stays for the ordinary syntax error.
+    """
+
+    PROBES = ["PROBE_CURSORS", "PROBE_POLL", "PROBE_LAST_MESSAGE"]
+
+    @staticmethod
+    def _source(name: str) -> str:
+        from tests.full import test_talk_poll_pressure as pressure
+
+        return getattr(pressure, name)
+
+    @pytest.mark.parametrize("name", PROBES)
+    def test_the_probe_source_is_valid_python(self, name):
+        try:
+            compile(self._source(name), f"<{name}>", "exec")
+        except SyntaxError as exc:
+            pytest.fail(
+                f"{name} is not valid Python: {exc}\n"
+                f"line {exc.lineno}: {(exc.text or '').rstrip()}",
+                pytrace=False,
+            )
+
+    @pytest.mark.parametrize("name", PROBES)
+    def test_the_probe_carries_no_doubled_brace(self, name):
+        source = self._source(name)
+        for lineno, line in enumerate(source.splitlines(), 1):
+            assert "{{" not in line and "}}" not in line, (
+                f"{name} line {lineno} carries a doubled brace, which is the "
+                f"str.format escaping these templates do not use — it reaches "
+                f"the interpreter as a set literal:\n  {line.strip()}"
+            )
+
+    @pytest.mark.parametrize("name", PROBES)
+    def test_the_probe_builds_no_set_literals(self, name):
+        import ast
+
+        tree = ast.parse(self._source(name))
+        offenders = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Set, ast.SetComp))
+        ]
+        assert offenders == [], (
+            f"{name} builds a set at line(s) {offenders}; every brace in these "
+            f"probes is meant to be a dict, so a set is a doubled brace that "
+            f"will raise at run time inside the container"
+        )
+
+    @pytest.mark.parametrize("name", PROBES)
+    def test_the_probe_resolved_its_config_path(self, name):
+        """A `.replace` placeholder that is never substituted fails the same way.
+
+        The templates carry `{config}` and swap it for `CONTAINER_CONFIG`; a
+        rename on one side leaves the literal in the source, which compiles fine
+        and then opens a file called `{config}`.
+        """
+        from tests.full import test_talk_poll_pressure as pressure
+
+        source = self._source(name)
+        assert "{config}" not in source, (
+            f"{name} still carries an unsubstituted {{config}} placeholder"
+        )
+        assert pressure.CONTAINER_CONFIG in source, (
+            f"{name} does not name {pressure.CONTAINER_CONFIG}"
+        )

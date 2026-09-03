@@ -331,6 +331,7 @@ dispatch_interval = ${ISTOTA_SCHEDULER_DISPATCH_INTERVAL:-0.5}
 talk_poll_interval = ${ISTOTA_SCHEDULER_TALK_POLL_INTERVAL:-10}
 talk_poll_timeout = ${ISTOTA_SCHEDULER_TALK_POLL_TIMEOUT:-30}
 talk_poll_wait = ${ISTOTA_SCHEDULER_TALK_POLL_WAIT:-2.0}
+talk_poll_full_sweep_interval = ${ISTOTA_SCHEDULER_TALK_POLL_FULL_SWEEP_INTERVAL:-300}
 email_poll_interval = ${ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL:-60}
 briefing_check_interval = ${ISTOTA_SCHEDULER_BRIEFING_CHECK_INTERVAL:-60}
 tasks_file_poll_interval = ${ISTOTA_SCHEDULER_TASKS_FILE_POLL_INTERVAL:-30}
