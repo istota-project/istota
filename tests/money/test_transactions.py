@@ -47,6 +47,38 @@ class TestCategoryMapping:
         result = map_monarch_category("Unknown Category")
         assert result == "Expenses:Uncategorized:UnknownCategory"
 
+    def test_unknown_category_with_punctuation(self):
+        assert (
+            map_monarch_category("Internet Services (Reimbursed)")
+            == "Expenses:Uncategorized:InternetServicesReimbursed"
+        )
+        assert map_monarch_category("Fees & Charges") == "Expenses:Uncategorized:FeesCharges"
+        assert map_monarch_category("Utilities - Water") == "Expenses:Uncategorized:Utilities-Water"
+        assert map_monarch_category("401k match") == "Expenses:Uncategorized:401kmatch"
+        assert map_monarch_category("~~~") == "Expenses:Uncategorized:Unknown"
+
+    def test_unknown_category_accounts_parse(self, tmp_path):
+        from beancount import loader
+
+        for category in ("Internet Services (Reimbursed)", "Fees & Charges", "e-bike / repair"):
+            ledger = tmp_path / "t.beancount"
+            ledger.write_text(
+                'plugin "beancount.plugins.auto_accounts"\n'
+                "2026-08-30 * \"Joker.com\" \"note\"\n"
+                f"  {map_monarch_category(category)}  574.00 USD\n"
+                "  Liabilities:Visa-Fidelity\n"
+            )
+            _, errors, _ = loader.load_file(str(ledger))
+            assert errors == [], f"{category}: {errors}"
+
+    def test_csv_importer_map_slugs_unknown_category(self):
+        from istota.money.core.importers import _map_category
+
+        assert (
+            _map_category("Internet Services (Reimbursed)", {})
+            == "Expenses:Uncategorized:InternetServicesReimbursed"
+        )
+
     def test_all_mapped_categories_valid(self):
         for category, account in MONARCH_CATEGORY_MAP.items():
             assert ":" in account

@@ -90,6 +90,26 @@ MONARCH_CATEGORY_MAP = {
 }
 
 
+_ACCOUNT_COMPONENT_DISALLOWED = re.compile(r"[^A-Za-z0-9-]+")
+
+
+def account_component(name: str) -> str:
+    """Slug an arbitrary string into a valid beancount account component.
+
+    A component may hold only letters, digits and dashes and must start with an
+    uppercase letter or a digit, so a category like "Internet Services
+    (Reimbursed)" has to be stripped before it can go in an account name — an
+    invalid one is not rejected at import, it lands in the ledger and breaks the
+    parser for every later read.
+    """
+    slug = _ACCOUNT_COMPONENT_DISALLOWED.sub("", name).strip("-")
+    if not slug:
+        return "Unknown"
+    if not (slug[0].isupper() or slug[0].isdigit()):
+        slug = slug[0].upper() + slug[1:]
+    return slug
+
+
 def map_monarch_category(category: str) -> str:
     """Map a Monarch category to a beancount account."""
     if category in MONARCH_CATEGORY_MAP:
@@ -99,7 +119,7 @@ def map_monarch_category(category: str) -> str:
         if key.lower() == category.lower():
             return value
 
-    return f"Expenses:Uncategorized:{category.replace(' ', '')}"
+    return f"Expenses:Uncategorized:{account_component(category)}"
 
 
 def map_monarch_category_with_config(category: str, config: MonarchConfig) -> str:
