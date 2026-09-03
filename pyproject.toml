@@ -58,8 +58,13 @@ whisper = [
 # every minute with nothing in the protocol saying why. `websockets` pongs by
 # default; `ping_interval=None` disables only the client's own pings and is
 # harmless.
+# The floor is 14, not the 13 the design named: on 13 the top-level
+# `websockets.connect` is still the legacy implementation, with different
+# exception types and a different connection object, and it is gone by 15.
+# Nothing in the suite exercises the real client, so a 13.x resolution would
+# only be discovered in production.
 signaling = [
-    "websockets>=13.0",
+    "websockets>=14.0",
 ]
 location = [
     "fastapi>=0.100.0",

@@ -466,3 +466,123 @@ class TestModuleLevelSpawnTask:
             assert started.wait(timeout=2.0)
         finally:
             handle.cancel()
+
+
+class TestWhatTheHandleDoesAndDoesNotSay:
+    """A cancelled handle is a delivered cancel, not a stopped task.
+
+    ``run_coroutine_threadsafe``'s future is never put into ``RUNNING``, so
+    ``cancel()`` resolves it out of ``PENDING`` and fires every done-callback
+    inline while the task's own ``finally`` has not run. A supervisor that read
+    its own done-callback as "the watcher has stopped" would restart one on top
+    of a watcher still holding its socket and its Talk room session.
+    """
+
+    def test_the_handle_resolves_before_the_task_has_finished(self, runtime):
+        started = threading.Event()
+        finished = threading.Event()
+
+        async def slow_cleanup():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.3)
+                finished.set()
+                raise
+
+        handle = runtime.spawn(slow_cleanup(), name="slow")
+        assert started.wait(timeout=2.0)
+
+        handle.cancel()
+
+        assert handle.done() is True
+        assert handle.cancelled() is True
+        assert finished.is_set() is False, (
+            "the task had already finished, so this test proves nothing about "
+            "the gap the docstring warns about"
+        )
+        assert finished.wait(timeout=3.0)
+
+    def test_the_registry_still_holds_a_task_that_is_winding_down(self, runtime):
+        """What makes ``stop()``'s timeout report attributable.
+
+        A registry keyed on handle resolution would empty at the ``cancel``
+        above, so the one task worth naming is the one it forgets first.
+        """
+        started = threading.Event()
+        release = threading.Event()
+
+        async def slow_cleanup():
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                while not release.is_set():
+                    await asyncio.sleep(0.01)
+                raise
+
+        handle = runtime.spawn(slow_cleanup(), name="winding-down")
+        assert started.wait(timeout=2.0)
+        handle.cancel()
+
+        try:
+            assert runtime.spawned_names() == ["winding-down"]
+        finally:
+            release.set()
+
+        deadline = time.monotonic() + 2.0
+        while runtime.spawned_names() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert runtime.spawned_names() == []
+
+
+class TestSpawnDuringShutdown:
+    """A spawn racing ``stop()`` must not outlive the cleanup hooks.
+
+    ``stop()`` publishes ``_stopped`` and then leaves the loop running for the
+    whole of ``_shutdown``. A spawn accepted in that window creates its task
+    after the ``all_tasks()`` sweep has already run, so it starts fresh once
+    ``TalkClient.aclose`` has closed the client it is about to use — the exact
+    ordering the shutdown path exists to prevent, reached from the other side.
+    """
+
+    def test_a_spawn_after_stop_is_refused(self):
+        rt = AsyncRuntime()
+        rt.start()
+        rt.stop()
+
+        async def work():
+            pass
+
+        coro = work()
+        with pytest.raises(RuntimeError):
+            rt.spawn(coro, name="late")
+        assert coro.cr_frame is None
+
+    def test_a_spawn_from_inside_a_cleanup_hook_is_refused(self):
+        """The window that ``loop.is_running()`` alone does not close."""
+        rt = AsyncRuntime()
+        rt.start()
+        seen = {}
+
+        async def never_runs():
+            seen["ran"] = True
+
+        async def hook():
+            coro = never_runs()
+            try:
+                rt.spawn(coro, name="during-shutdown")
+                seen["accepted"] = True
+            except RuntimeError as exc:
+                seen["refused"] = str(exc)
+                coro.close()
+
+        rt.add_cleanup_hook(hook)
+        rt.stop()
+
+        assert "accepted" not in seen, (
+            "a spawn was accepted while the cleanup hooks were running"
+        )
+        assert "stopping" in seen.get("refused", "")
+        assert "ran" not in seen

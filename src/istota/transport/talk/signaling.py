@@ -77,7 +77,9 @@ logger = logging.getLogger("istota.transport.talk.signaling")
 # client's declared features and nothing else on that path — `ClientType()` is
 # never read — which is what makes a user-authenticated session receive
 # byte-for-byte what an internal client would.
-CLIENT_FEATURES = ("chat-relay",)
+CHAT_RELAY_FEATURE = "chat-relay"
+
+CLIENT_FEATURES = (CHAT_RELAY_FEATURE,)
 
 # Where Talk's signaling backend lives, relative to the Nextcloud base URL.
 # This is the `auth.url` of the hello frame: the HPB matches it against its own
@@ -276,10 +278,14 @@ def signaling_mode_reason(mode) -> str | None:
     The runtime reads ``GET /v3/signaling/settings``, which also names a
     server URL and so has a third question to ask. ``doctor``'s
     ``talk.signaling_auth`` reads ``/cloud/capabilities``, which names no URL
-    and — the reason it reads that one — mints no token: doctor runs on a
-    scheduler interval and from the admin Health pane, so a check that asked
-    Talk for a credential on every dashboard load would be minting one per
-    page view for nothing.
+    and mints no token: doctor runs on a scheduler interval and from the admin
+    Health pane, so a check asking Talk for a credential on every dashboard
+    load would mint one per page view for nothing. That saving is per check
+    rather than per run — its sibling ``talk.signaling_reachable`` still has to
+    fetch the settings to discover the HPB URL unless an operator configured
+    one — so what the split buys is that the *configuration* question is
+    answerable with no credential at all, on a deployment where the settings
+    call is the thing that is failing.
 
     Three states, not two, and collapsing them is how a startup refusal ends
     up naming the wrong cause. ``"internal"`` means Talk has no signaling
@@ -333,6 +339,12 @@ class SignalingUnavailable(RuntimeError):
     no high-performance backend registered, and the ``websockets`` library
     absent. Neither falls back to the poller.
 
+    Both predicates below are raised from the supervisor's start-up gate, which
+    is where the daemon decides whether to run watchers or the poll loop.
+    ``doctor``'s ``talk.signaling_reachable`` and ``talk.signaling_auth`` are
+    the operator's warning that this is about to happen; they report, and
+    refuse nothing.
+
     Falling back would be the worse failure and it is worth naming why, since
     "degrade gracefully" is the reflex. The poller is a *capability floor* for
     a deployment with no HPB, not a redundant branch — so a daemon that silently
@@ -377,9 +389,32 @@ def require_hpb(settings: "SignalingSettings") -> None:
     reason = hpb_unavailable_reason(settings)
     if reason is None:
         return None
+
+    # One remedy per reason. `hpb_unavailable_reason` answers three different
+    # questions, and only one of them is fixed by registering a server: the
+    # other two are a Nextcloud that answered with nothing readable, and a
+    # server that is registered and named no URL. A single "run
+    # occ talk:signaling:add" sentence would be wrong twice out of three.
+    mode = getattr(settings, "signaling_mode", "") or ""
+    if mode == "internal":
+        remedy = (
+            "Register a signaling server with Talk (occ talk:signaling:add, "
+            "then occ talk:signaling:list to confirm)"
+        )
+    elif not mode:
+        remedy = (
+            "Check that Nextcloud is reachable and that the bot account can "
+            "read GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings"
+        )
+    else:
+        remedy = (
+            "Talk has a signaling server registered but named no URL for it; "
+            "check occ talk:signaling:list, or set [talk.signaling] url to the "
+            "route this host should take"
+        )
+
     raise SignalingUnavailable(
-        f"[talk.signaling] enabled = true but {reason}. Register a signaling "
-        "server with Talk (occ talk:signaling:add), or set "
+        f"[talk.signaling] enabled = true but {reason}. {remedy}, or set "
         "[talk.signaling] enabled = false to keep the Talk poller."
     )
 
@@ -718,9 +753,24 @@ _STATS_SOURCE = None
 
 
 def set_stats_source(source) -> None:
-    """Register what ``read_stats`` should call. The supervisor's own hook."""
+    """Register what ``read_stats`` should call. The supervisor's own hook.
+
+    A non-callable is refused loudly rather than quietly: registering the
+    stats *dict* instead of the bound method is the obvious mistake, and
+    swallowing it leaves ``talk.signaling_watchers`` reporting "no supervisor
+    in this process" for the life of the daemon with nothing anywhere saying
+    why.
+    """
     global _STATS_SOURCE
-    _STATS_SOURCE = source if callable(source) else None
+    if source is not None and not callable(source):
+        logger.warning(
+            "signaling: stats source must be callable, got %s; "
+            "talk.signaling_watchers will report no supervisor",
+            type(source).__name__,
+        )
+        _STATS_SOURCE = None
+        return
+    _STATS_SOURCE = source
 
 
 def clear_stats_source() -> None:
@@ -731,6 +781,24 @@ def clear_stats_source() -> None:
 
 def read_stats() -> dict | None:
     """The supervisor's counters, or ``None`` when this process has none.
+
+    **The shape the supervisor owes this**, since ``doctor``'s
+    ``talk.signaling_watchers`` is the only reader and every key it wants is
+    one the supervisor alone can produce:
+
+    ``watchers``       int — rooms the supervisor means to be watching
+    ``connected``      int — watchers with a live, joined session right now
+    ``disconnected``   list[str] — the Talk tokens behind the gap, a fresh
+                       list per call; may be empty even while
+                       ``connected < watchers``, and the reader treats the
+                       counts as authoritative for that reason
+    ``rooms_behind``   int — rooms whose ``lastMessage.id`` was ahead of their
+                       cursor at the last reconciliation, which is the one
+                       number that distinguishes a stream that is delivering
+                       from one the safety-net fetch is carrying
+
+    A missing key reads as ``0`` or empty rather than as an error: this is a
+    diagnostic, and half an answer beats none.
 
     Never raises and never propagates a shape it cannot use. The caller is a
     ``doctor`` check, and a diagnostic that fails on its own instrument
@@ -746,4 +814,11 @@ def read_stats() -> dict | None:
     except Exception as e:  # noqa: BLE001 — a diagnostic must not raise
         logger.debug("signaling: stats source raised (%s)", type(e).__name__)
         return None
-    return stats if isinstance(stats, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    # A copy, because the supervisor is on the loop thread and the reader is
+    # not: handing back its live mapping means a check can be iterating a list
+    # the supervisor is rewriting. Shallow is enough for the scalars; the
+    # sequence values are copied where they are read, since only the reader
+    # knows which ones it walks.
+    return dict(stats)

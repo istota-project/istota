@@ -52,13 +52,18 @@ class AsyncRuntime:
         self._lock = threading.Lock()
         self._cleanup_hooks: list[Callable[[], Awaitable[None]]] = []
         self._stopped = False
-        # Handles for the fire-and-forget coroutines ``spawn`` scheduled, so
-        # ``_shutdown`` can name them and ``stop`` leaves none behind. Its own
-        # lock rather than ``self._lock``: that one is held across ``start``'s
-        # thread launch, and a done-callback firing on the loop thread must
-        # never queue behind a start.
+        # The fire-and-forget coroutines ``spawn`` scheduled, keyed by a
+        # sequence number so an entry can be removed by the *task* rather than
+        # by its handle. That distinction is the whole reason this is a dict:
+        # cancelling a ``run_coroutine_threadsafe`` future resolves the future
+        # immediately, while the task it points at is still winding down, so a
+        # registry keyed on handle-resolution empties exactly when a stuck task
+        # most needs naming. Its own lock rather than ``self._lock``: that one
+        # is held across ``start``'s thread launch, and a callback firing on
+        # the loop thread must never queue behind a start.
         self._spawn_lock = threading.Lock()
-        self._spawned: list[tuple[str, concurrent.futures.Future]] = []
+        self._spawn_seq = 0
+        self._spawned: dict[int, tuple[str, concurrent.futures.Future | None]] = {}
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
@@ -93,7 +98,7 @@ class AsyncRuntime:
             # futures that resolved a lifetime ago and report their names as
             # still running.
             with self._spawn_lock:
-                self._spawned = []
+                self._spawned = {}
             self._thread = threading.Thread(
                 target=self._run, name="async-runtime", daemon=True
             )
@@ -158,17 +163,22 @@ class AsyncRuntime:
         ``submit`` is the wrong entry point for a watcher: it blocks the
         submitting thread until the coroutine finishes, which is right for a
         request and is a hang for something that runs for the life of the
-        daemon. This schedules and returns, handing back the handle the caller
-        holds for cancellation.
+        daemon. This schedules and returns, handing back a handle the caller
+        holds for cancellation and for a done-callback.
 
-        **The returned handle is the cancellation seam**, not a decoration.
-        ``concurrent.futures.Future.cancel`` on a handle from
-        ``run_coroutine_threadsafe`` reaches through to the underlying
-        ``asyncio.Task``; the future stays pending until the task resolves, so
-        the cancel is not lost to a "already running" refusal the way it would
-        be on an executor future. Callers may also hang their own
-        ``add_done_callback`` on it — that is how a supervisor restarts a dead
-        watcher on a backoff.
+        **The handle says the cancel was delivered, never that the task has
+        stopped**, and a supervisor that reads it the second way restarts a
+        watcher on top of one that still holds its socket and its Talk room
+        session. ``run_coroutine_threadsafe``'s future is never put into
+        ``RUNNING`` — ``_chain_future`` only ever sets a result — so
+        ``cancel()`` succeeds straight out of ``PENDING``, resolves the future
+        and fires every done-callback inline, while the underlying task's
+        cancellation is merely scheduled on the loop and its ``finally`` blocks
+        have not run. So the cancel does reach the task, which is what makes
+        the handle a usable cancellation seam; what it does not do is wait.
+        A caller needing "it has finished" must take it from the coroutine
+        itself — an ``Event`` set in its own ``finally`` — and ``stop()`` takes
+        it from the ``gather`` in :meth:`_shutdown` for the same reason.
 
         **Unlike ``submit``, calling this from the loop's own thread is
         allowed**, and the supervisor does: starting a watcher happens inside a
@@ -185,38 +195,73 @@ class AsyncRuntime:
         prevent.
         """
         loop = self._loop
-        if loop is None or not loop.is_running():
+        # ``_stopped`` and not only ``loop.is_running()``. ``stop()`` publishes
+        # the flag and then leaves the loop running for the whole of
+        # ``_shutdown`` — so without this a spawn arriving in that window is
+        # accepted, creates its task *after* ``_shutdown``'s snapshot and after
+        # the ``all_tasks()`` sweep, and starts running once the cleanup hooks
+        # have already closed the shared client. That is the ordering the
+        # shutdown path exists to prevent, reached from the other side.
+        if loop is None or not loop.is_running() or self._stopped:
             if asyncio.iscoroutine(coro):
                 coro.close()
-            raise RuntimeError("AsyncRuntime not started")
+            raise RuntimeError(
+                "AsyncRuntime is stopping" if self._stopped
+                else "AsyncRuntime not started"
+            )
 
         label = str(name)
-        handle = asyncio.run_coroutine_threadsafe(coro, loop)
         with self._spawn_lock:
-            self._spawned.append((label, handle))
-        handle.add_done_callback(lambda fut: self._spawn_finished(label, fut))
+            self._spawn_seq += 1
+            key = self._spawn_seq
+            self._spawned[key] = (label, None)
+
+        handle = asyncio.run_coroutine_threadsafe(self._tracked(key, coro), loop)
+        with self._spawn_lock:
+            # Guarded: the wrapper's ``finally`` may already have forgotten the
+            # key on a coroutine that finished before this line ran, and
+            # re-adding it would leave a permanent phantom in the registry.
+            if key in self._spawned:
+                self._spawned[key] = (label, handle)
+        handle.add_done_callback(lambda fut: self._spawn_finished(key, label, fut))
         return handle
 
+    async def _tracked(self, key: int, coro: Awaitable[T]) -> T:
+        """Run ``coro``, forgetting its registry entry when the *task* ends.
+
+        The wrapper is what makes ``spawned_names`` mean "still running" rather
+        than "handle not yet resolved". The two diverge exactly at a
+        cancellation, which is the moment the answer matters.
+        """
+        try:
+            return await coro
+        finally:
+            with self._spawn_lock:
+                self._spawned.pop(key, None)
+
     def _spawn_finished(
-        self, name: str, handle: concurrent.futures.Future
+        self, key: int, name: str, handle: concurrent.futures.Future
     ) -> None:
-        """Drop a finished spawn from the registry and report an unhandled fault.
+        """Report an unhandled fault from a spawned task.
 
         Nothing here re-raises: it runs as a future callback, on the loop
         thread or on whichever thread cancelled, and an exception from a
         callback is swallowed by the future machinery anyway — so raising
         would only lose the log line as well.
 
-        A cancellation is not a fault. It is what ``stop()`` does to every
-        spawned task on the way down, and reporting it would put a warning in
-        every clean shutdown.
+        A cancellation is not a fault, and it also does not forget the entry.
+        It is what ``stop()`` does to every spawned task on the way down, so
+        reporting it would put a warning in every clean shutdown — and the task
+        behind it is still winding down, so dropping it here is what would make
+        ``stop()``'s timeout unattributable. ``_tracked`` owns the removal; the
+        one below is the backstop for a handle that resolved without the
+        wrapper ever running, which is what a loop closing under a queued
+        ``run_coroutine_threadsafe`` callback looks like.
         """
-        with self._spawn_lock:
-            self._spawned = [
-                entry for entry in self._spawned if entry[1] is not handle
-            ]
         if handle.cancelled():
             return
+        with self._spawn_lock:
+            self._spawned.pop(key, None)
         try:
             exc = handle.exception()
         except concurrent.futures.CancelledError:
@@ -231,9 +276,9 @@ class AsyncRuntime:
             )
 
     def spawned_names(self) -> list[str]:
-        """The names of the spawns still outstanding. Diagnostics and tests."""
+        """The names of the spawned tasks still running. Diagnostics and tests."""
         with self._spawn_lock:
-            return [name for name, _ in self._spawned]
+            return [name for name, _ in self._spawned.values()]
 
     async def _shutdown(
         self, hooks: list[Callable[[], Awaitable[None]]]
@@ -250,12 +295,18 @@ class AsyncRuntime:
         The spawned handles are cancelled first and by name. The
         ``all_tasks()`` sweep below would reach them anyway — they are ordinary
         tasks on this loop — so this is not what makes them stop; it is what
-        makes a spawn that *refuses* to stop attributable. Without it a watcher
-        swallowing ``CancelledError`` shows up as a shutdown that timed out,
-        with nothing saying which of a dozen tasks held it.
+        puts each one's name in the log before the sweep makes them
+        indistinguishable. What names a task that *refuses* to stop is
+        ``stop()``: the ``gather`` below never returns for one that swallows
+        cancellation, so the report has to come from the timeout branch, and
+        ``spawned_names`` still holds the culprit there because ``_tracked``
+        forgets a task only when the task itself ends.
         """
         with self._spawn_lock:
-            outstanding = list(self._spawned)
+            outstanding = [
+                (name, handle) for name, handle in self._spawned.values()
+                if handle is not None
+            ]
         for name, handle in outstanding:
             if handle.done():
                 continue
@@ -301,8 +352,16 @@ class AsyncRuntime:
             fut.result(timeout=shutdown_budget)
         except concurrent.futures.TimeoutError:
             fut.cancel()
+            # Naming the spawns still running is the whole point of tracking
+            # them: this branch is what a coroutine swallowing CancelledError
+            # produces, and without the list it reports only that shutdown was
+            # slow, with nothing saying which of a dozen tasks held it.
+            still_running = self.spawned_names()
             logger.warning(
-                "AsyncRuntime shutdown did not finish within %.1fs", shutdown_budget
+                "AsyncRuntime shutdown did not finish within %.1fs%s",
+                shutdown_budget,
+                f"; spawned tasks still running: {', '.join(still_running)}"
+                if still_running else "",
             )
         except Exception as exc:  # noqa: BLE001 — never let shutdown block stop
             logger.warning("AsyncRuntime shutdown failed: %s", exc)

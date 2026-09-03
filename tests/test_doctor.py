@@ -5998,17 +5998,39 @@ class TestSignalingReachable:
         assert result.status == OK, result.detail
         assert signaling_seams["urls"] == ["wss://other.example.com/sig/spreed"]
 
-    def test_internal_mode_fails_naming_the_missing_backend(
+    def test_internal_mode_skips_and_points_at_the_check_that_owns_it(
         self, make_config, signaling_seams
     ):
+        """One cause, one FAIL.
+
+        A deployment with no backend registered has nothing for a reachability
+        check to reach, and `talk.signaling_auth` already FAILs it with the
+        remedy that fixes it. A second FAIL here would report a configuration
+        fault under a check named for reachability and page an operator twice
+        for one cause.
+        """
         signaling_seams["settings"] = _settings_payload(mode="internal")
         config = _signaling_config(make_config)
 
         result = doctor.check_signaling_reachable(config, True)
 
-        assert result.status == FAIL
+        assert result.status == SKIP
         assert "internal" in result.detail
-        assert result.remedy
+        assert "talk.signaling_auth" in result.detail
+
+    def test_only_one_of_the_four_fails_on_an_internal_mode_deployment(
+        self, make_config, signaling_seams
+    ):
+        signaling_seams["settings"] = _settings_payload(mode="internal")
+        signaling_seams["capabilities"] = _caps(mode="internal")
+        config = _signaling_config(make_config)
+
+        results = run_checks(config, only=("talk.signaling_",))
+
+        failed = [r.name for r in results if r.status == FAIL]
+        assert failed == ["talk.signaling_auth"], [
+            (r.name, r.status) for r in results
+        ]
 
     def test_an_unreachable_server_fails(self, make_config, signaling_seams):
         signaling_seams["welcome_error"] = "connection refused"
@@ -6020,14 +6042,35 @@ class TestSignalingReachable:
         assert "connection refused" in result.detail
         assert result.remedy
 
-    def test_a_settings_call_that_failed_fails(self, make_config, signaling_seams):
+    def test_a_settings_call_that_failed_is_reported_with_its_cause(
+        self, make_config, signaling_seams
+    ):
         signaling_seams["settings_error"] = "401 Unauthorized"
         config = _signaling_config(make_config)
 
         result = doctor.check_signaling_reachable(config, True)
 
-        assert result.status == FAIL
+        assert result.status == SKIP
         assert "401" in result.detail
+
+    def test_the_remedy_does_not_claim_the_daemon_will_refuse_to_boot(
+        self, make_config, signaling_seams
+    ):
+        """An unreachable-but-registered server is not one of the two refusals.
+
+        The spec's Behaviour table says watchers retry on a backoff and the
+        reconciliation pass carries inbound meanwhile. A remedy sending an
+        operator to look for a boot failure that will not happen is a remedy
+        they cannot act on.
+        """
+        signaling_seams["welcome_error"] = "connection refused"
+        config = _signaling_config(make_config)
+
+        result = doctor.check_signaling_reachable(config, True)
+
+        assert result.status == FAIL
+        assert "refuses to start" not in result.remedy
+        assert "room_sync_interval" in result.remedy
 
     def test_a_missing_library_fails_naming_the_extra(
         self, make_config, signaling_seams, monkeypatch
@@ -6044,8 +6087,12 @@ class TestSignalingReachable:
 
         result = doctor.check_signaling_reachable(config, True)
 
+        # A fault, not an unanswerable question: `enabled = true` with no
+        # library is one of the two startup refusals, unlike a backend that is
+        # merely not registered.
         assert result.status == FAIL
         assert "signaling" in result.detail
+        assert "refuses to start" in result.remedy
         assert signaling_seams["urls"] == []
 
     def test_the_probe_is_shared_with_the_chat_relay_check(
@@ -6265,3 +6312,260 @@ class TestSignalingWatchers:
         self._stats()
         config = _signaling_config(make_config, enabled=False)
         assert doctor.check_signaling_watchers(config, True).status == SKIP
+
+
+class TestTheProbeNeverAuthenticates:
+    """The spec's load-bearing constraint, asserted against the one function
+    that could break it.
+
+    Every other test in this file monkeypatches `_signaling_welcome_frame`
+    wholesale, so all of them are assertions about the fixture — the shape
+    `.claude/rules/testbed.md` has now recorded eight times. Opening a
+    signaling session means POSTing `participants/active` for a room, so a
+    check that sent a hello would put a phantom istota participant into a live
+    room's member list every time an admin opened the Health pane. Adding a
+    `send` to that function must turn something red, and nothing above would.
+    """
+
+    class _FakeSocket:
+        def __init__(self, frame, log):
+            self._frame = frame
+            self.log = log
+
+        async def recv(self):
+            self.log.append("recv")
+            return self._frame
+
+        async def send(self, _payload):
+            self.log.append("send")
+
+        async def close(self):
+            self.log.append("close")
+
+    class _FakeConnect:
+        def __init__(self, socket, log):
+            self._socket = socket
+            self._log = log
+
+        def __call__(self, url, **kwargs):
+            self._log.append(("connect", url, sorted(kwargs)))
+            return self
+
+        async def __aenter__(self):
+            return self._socket
+
+        async def __aexit__(self, *exc):
+            self._log.append("exit")
+            return False
+
+    @pytest.fixture
+    def fake_websockets(self, monkeypatch):
+        import json
+        import types
+
+        from istota.transport.talk import signaling as sig
+
+        log = []
+        socket = self._FakeSocket(
+            json.dumps({
+                "type": "welcome",
+                "welcome": {"version": "2.1.1", "features": ["chat-relay"]},
+            }),
+            log,
+        )
+        module = types.SimpleNamespace(
+            connect=self._FakeConnect(socket, log)
+        )
+        monkeypatch.setattr(sig, "require_websockets", lambda: module)
+        return log
+
+    def test_it_reads_one_frame_and_sends_none(self, fake_websockets):
+        frame, error = doctor._signaling_welcome_frame(
+            "wss://hpb.example.com/spreed", 5.0,
+        )
+
+        assert error == ""
+        assert frame["type"] == "welcome"
+        assert "send" not in fake_websockets, (
+            "the reachability probe sent a frame; a hello here creates a "
+            "signaling session and, with it, a Talk participant row"
+        )
+        assert fake_websockets.count("recv") == 1
+
+    def test_the_control_can_fail(self, fake_websockets):
+        """Without this the assertion above is a claim rather than a guard.
+
+        Drive the same fake socket through a variant that does send a hello;
+        if the log stays empty the instrument is not observing sends and the
+        test above proves nothing.
+        """
+        import asyncio
+        import json
+
+        from istota.transport.talk import signaling as sig
+
+        async def _sending_read():
+            websockets = sig.require_websockets()
+            async with websockets.connect("wss://h/spreed") as socket:
+                await socket.send(json.dumps({"type": "hello"}))
+                return json.loads(await asyncio.wait_for(socket.recv(), 1))
+
+        doctor._run_off_loop(_sending_read, 5.0)
+
+        assert "send" in fake_websockets, (
+            "the instrument does not observe sends, so the assertion above "
+            "proves nothing"
+        )
+
+    def test_it_bounds_itself_well_inside_the_callers_budget(self, monkeypatch):
+        """The handshake and the first frame share the budget, not each take it.
+
+        Giving each leg the caller's whole number let the pair run to twice it
+        before `_run_off_loop`'s outer bound noticed — which returned a timeout
+        naming the wrong number and left the thread and its socket live.
+        """
+        seen = {}
+
+        import types
+
+        from istota.transport.talk import signaling as sig
+
+        class _Connect:
+            def __call__(self, url, **kwargs):
+                seen.update(kwargs)
+                raise OSError("refused")
+
+        monkeypatch.setattr(
+            sig, "require_websockets",
+            lambda: types.SimpleNamespace(connect=_Connect()),
+        )
+
+        doctor._signaling_welcome_frame("wss://h/spreed", 10.0)
+
+        assert seen["open_timeout"] <= 10.0 / 2.0
+
+
+class TestTheWatcherCensusDoesNotContradictItself:
+    """A supervisor may report counters and no token list.
+
+    Reading only the token list returns OK with a detail saying "1 of 5
+    watchers connected", which is a check contradicting itself in the one
+    place it is meant to be authoritative — and a watcher mid-reconnect is
+    plausibly counted as not connected while belonging on no list.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        from istota.transport.talk import signaling as sig
+
+        sig.clear_stats_source()
+        yield
+        sig.clear_stats_source()
+
+    def _stats(self, **fields):
+        from istota.transport.talk import signaling as sig
+
+        base = {"watchers": 5, "connected": 5, "disconnected": [], "rooms_behind": 0}
+        base.update(fields)
+        sig.set_stats_source(lambda: dict(base))
+
+    def test_a_counts_only_shortfall_warns(self, make_config):
+        self._stats(connected=1, disconnected=[])
+        config = _signaling_config(make_config)
+
+        result = doctor.check_signaling_watchers(config, True)
+
+        assert result.status == WARN, result.detail
+        assert "1 of 5" in result.detail
+
+    def test_a_string_disconnected_field_does_not_become_six_rooms(
+        self, make_config
+    ):
+        """`or []` on a bare string iterates it character by character.
+
+        Each character passes an `isinstance(token, str) and token` filter, so
+        the WARN would name six rooms that do not exist.
+        """
+        self._stats(connected=4, disconnected="abc123")
+        config = _signaling_config(make_config)
+
+        result = doctor.check_signaling_watchers(config, True)
+
+        assert "a, b, c" not in result.detail
+        assert "4 of 5" in result.detail
+
+    def test_a_missing_key_reads_as_zero_rather_than_raising(self, make_config):
+        from istota.transport.talk import signaling as sig
+
+        sig.set_stats_source(lambda: {})
+        config = _signaling_config(make_config)
+
+        result = doctor.check_signaling_watchers(config, True)
+
+        assert result.status == OK
+        assert "0 of 0" in result.detail
+
+    def test_the_reader_is_handed_a_copy_not_the_supervisors_own_mapping(self):
+        """The supervisor is on the loop thread and the reader is not."""
+        from istota.transport.talk import signaling as sig
+
+        live = {"watchers": 1, "connected": 1}
+        sig.set_stats_source(lambda: live)
+
+        read = sig.read_stats()
+        read["watchers"] = 99
+
+        assert live["watchers"] == 1
+
+    def test_registering_a_mapping_instead_of_a_callable_is_reported(self, caplog):
+        """The obvious mistake, and it is silent without this.
+
+        A non-callable used to clear the source, after which
+        `talk.signaling_watchers` reports "no supervisor in this process" for
+        the life of the daemon with nothing anywhere saying why.
+        """
+        import logging
+
+        from istota.transport.talk import signaling as sig
+
+        with caplog.at_level(logging.WARNING, logger=sig.logger.name):
+            sig.set_stats_source({"watchers": 1})
+
+        assert sig.read_stats() is None
+        assert any("callable" in r.getMessage() for r in caplog.records)
+
+
+class TestSignalingAuthOnATalkThatPublishesNoMode:
+    """An absent capability key must not fail a working deployment.
+
+    `capabilities.spreed.config.signaling.mode` was read off the deployment
+    this design was verified against, which is why the check asks it here
+    rather than paying for the settings call and its token. A different Talk
+    version may not publish it, and letting that fall through
+    `signaling_mode_reason`'s unreadable-mode arm would FAIL a deployment whose
+    high-performance backend is fine.
+    """
+
+    def test_an_absent_mode_key_warns_rather_than_failing(
+        self, make_config, signaling_seams
+    ):
+        signaling_seams["capabilities"] = {
+            "capabilities": {"spreed": {"config": {"signaling": {
+                "hello-v2-token-key": "LS0tLS1CRUdJTg==",
+            }}}}
+        }
+        config = _signaling_config(make_config)
+
+        result = doctor.check_signaling_auth(config, True)
+
+        assert result.status == WARN, result.detail
+        assert "mode" in result.detail
+        assert "talk.signaling_reachable" in result.remedy
+
+    def test_a_capabilities_payload_with_no_spreed_block_also_warns(
+        self, make_config, signaling_seams
+    ):
+        signaling_seams["capabilities"] = {"capabilities": {}}
+        config = _signaling_config(make_config)
+
+        assert doctor.check_signaling_auth(config, True).status == WARN

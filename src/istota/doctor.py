@@ -5218,13 +5218,35 @@ def _overlay_list(items: list[str]) -> str:
 # sends *before* any hello, and closes. `talk.signaling_auth` reads
 # `/cloud/capabilities`, which mints nothing. `talk.signaling_watchers` reads
 # in-process counters and makes no request at all.
+#
+# One qualification, because the reachability check's own docstring would
+# otherwise read as a stronger claim than it is: with `[talk.signaling] url`
+# empty — the documented normal case — resolving the HPB URL means an
+# authenticated `GET /v3/signaling/settings` as the bot, which mints a
+# 60-second JWT that is read for its `server` field and never used. What none
+# of these does is authenticate to the *signaling server* or create a Talk
+# session; the memo below bounds the token to one per TTL.
 
 # How long the whole reachability probe gets: the settings call, the connect
-# and the first frame. Its own name rather than `PROBE_TIMEOUT`, which is the
-# budget for spawning a binary — these are network round trips to two different
-# hosts, and coupling them would mean a subprocess timeout tuning decided how
-# long a WebSocket handshake may take.
+# and the first frame, against one deadline rather than one budget each. Its
+# own name rather than `PROBE_TIMEOUT`, which is the budget for spawning a
+# binary — these are network round trips to two different hosts, and coupling
+# them would mean a subprocess timeout tuning decided how long a WebSocket
+# handshake may take.
+#
+# **A deadline, because the legs are sequential and this runs on the daemon's
+# start-up path** (`scheduler.run_startup_checks`) and behind the admin Health
+# pane. Handing the same number to each leg made a slow Nextcloud followed by a
+# slow HPB cost twice what the constant says, and inside the socket leg
+# `open_timeout` plus a first-frame wait doubled it again. `talk.signaling_auth`
+# spends its own budget on top, since it reads a different endpoint and is not
+# covered by the memo, so the worst case an operator can meet is two of these.
 SIGNALING_PROBE_TIMEOUT = 10
+
+# The floor a leg is given once the deadline is nearly spent. A leg handed
+# ~0s fails instantly with a timeout that says nothing about the host, so the
+# probe would report "unreachable" for a server it never dialled.
+_SIGNALING_MIN_LEG = 1.0
 
 # How long a reachability answer is reused. One doctor run asks two checks the
 # same question, and probing twice would double the OCS settings call and the
@@ -5236,22 +5258,32 @@ _SIGNALING_PROBE_TTL = 15.0
 _signaling_probe_memo: "tuple[float, tuple, _SignalingProbe] | None" = None
 
 
+# Why a probe did not answer, where the three reasons want three different
+# findings. Inferring them from an empty URL instead collapses the first two,
+# which are a deployment that refuses to boot and a deployment that boots and
+# polls — opposite answers to "is anything wrong here".
+BLOCKED_LIBRARY = "library"          # `enabled = true`, no websockets: a refusal
+BLOCKED_UNAVAILABLE = "unavailable"  # no HPB registered, or Talk did not say
+BLOCKED_UNREACHABLE = "unreachable"  # a URL that resolved and did not answer
+
+
 @dataclass(frozen=True)
 class _SignalingProbe:
     """What one unauthenticated look at the HPB established.
 
-    ``error`` is the whole verdict: a probe that could not resolve a URL, could
-    not import the library or could not read a frame reports why, and
-    ``features`` is empty. The two are not independent — a caller must read
-    ``error`` first, because "no features" is equally what an unreachable
-    server and a server advertising nothing look like, and those want different
-    findings.
+    ``error`` is the whole verdict and ``blocker`` is its class: a probe that
+    could not import the library, could not resolve a URL or could not read a
+    frame reports why, and ``features`` is empty. The fields are not
+    independent — a caller must read ``error`` first, because "no features" is
+    equally what an unreachable server and a server advertising nothing look
+    like, and those want different findings.
     """
 
     url: str
     version: str
     features: tuple[str, ...]
     error: str
+    blocker: str = ""
 
 
 def reset_signaling_probe_memo() -> None:
@@ -5279,14 +5311,23 @@ def _signaling_gate(config: "Config") -> str:
 def _run_off_loop(make_coro, timeout: float):
     """Run one coroutine to completion on a private loop, from any context.
 
-    doctor is reached three ways that disagree about what thread it is on: a
-    plain thread (the CLI, the daemon's start-up), a worker thread
-    (``asyncio.to_thread`` in the admin pane and ``!check``), and directly from
-    a coroutine at one call site. ``asyncio.run`` raises in the last, and the
-    persistent runtime's pooled client belongs to a loop this thread is not on
-    — ``get_talk_client`` refuses a foreign loop outright, for the reason its
-    own docstring gives. A loop of its own on a thread of its own is the only
-    answer correct in all three.
+    doctor is reached from a plain thread (the CLI, the daemon's start-up) and
+    from a worker thread (``asyncio.to_thread`` in the admin pane, in
+    ``!check`` and in the heartbeat). A private loop on a private thread is
+    correct from all of them and stays correct if a fourth caller ever runs on
+    a loop, where ``asyncio.run`` would raise. It also keeps this off the
+    persistent runtime, whose pooled ``TalkClient`` belongs to the scheduler's
+    loop and refuses a foreign one outright.
+
+    **The coroutine is bounded here, not only joined here.** Leaving the bound
+    to the coroutine and joining for a bit longer is what leaks a thread: the
+    socket leg's own limits are an ``open_timeout`` *plus* a first-frame wait
+    *plus* a close, so a server that completes the handshake slowly and then
+    sends nothing outlives any join sized for one of them — the caller gets a
+    timeout naming the wrong number while the thread and its socket stay live.
+    One ``wait_for`` around the whole body makes the bound the thing the caller
+    asked for; the join is a second past it, as a backstop for a coroutine that
+    cannot be cancelled.
 
     Returns ``(value, error)``. Never raises: the caller is a check.
     """
@@ -5296,20 +5337,21 @@ def _run_off_loop(make_coro, timeout: float):
 
     def target() -> None:
         try:
-            box["value"] = asyncio.run(make_coro())
+            box["value"] = asyncio.run(
+                asyncio.wait_for(make_coro(), timeout=timeout)
+            )
         except BaseException as exc:  # noqa: BLE001 — reported, not propagated
             box["error"] = exc
 
     thread = threading.Thread(target=target, name="doctor-signaling", daemon=True)
     thread.start()
-    # A grace second past the caller's own budget: every coroutine below bounds
-    # itself, so a thread still alive here is one whose bound did not hold, and
-    # the answer is to stop waiting rather than to join for ever.
     thread.join(timeout + 1.0)
     if thread.is_alive():
-        return None, f"timed out after {timeout:.0f}s"
+        return None, f"did not return within {timeout:.0f}s"
     exc = box.get("error")
     if exc is not None:
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            return None, f"timed out after {timeout:.0f}s"
         return None, f"{type(exc).__name__}: {exc}"
     return box.get("value"), ""
 
@@ -5342,22 +5384,35 @@ def _signaling_settings(config: "Config", timeout: float):
 def _signaling_welcome_frame(ws_url: str, timeout: float):
     """Connect, read the first frame, close. No hello, so no session.
 
-    ``open_timeout`` bounds the handshake and ``wait_for`` bounds the frame; the
-    server has its own 2-second deadline for a hello after connecting
+    The server has its own 2-second deadline for a hello after connecting
     (``hub.go:113``), so closing without one is the ordinary way a client that
     only wanted the feature list leaves.
+
+    The per-stage limits are deliberately a fraction of the caller's budget
+    rather than all of it: ``_run_off_loop`` bounds the whole coroutine, and a
+    handshake and a first frame each given the full number would let the pair
+    run to twice it before that outer bound noticed.
+
+    No ``proxy`` argument, which is a decision rather than an omission. On
+    ``websockets`` 15 and later the default follows the process's
+    ``HTTPS_PROXY``/``ALL_PROXY`` — and the watcher this is a diagnostic for
+    will use the same library with the same default, so overriding it here
+    would have the check answer about a route the runtime does not take. It is
+    also not a parameter on 14, which the floor still admits.
     """
     import asyncio
     import json
 
     from .transport.talk import signaling as sig
 
+    handshake = max(timeout / 2.0, 1.0)
+
     async def _read():
         websockets = sig.require_websockets()
         async with websockets.connect(
-            ws_url, open_timeout=timeout, close_timeout=2,
+            ws_url, open_timeout=handshake, close_timeout=2,
         ) as socket:
-            raw = await asyncio.wait_for(socket.recv(), timeout=timeout)
+            raw = await asyncio.wait_for(socket.recv(), timeout=handshake)
         return json.loads(raw)
 
     frame, error = _run_off_loop(_read, timeout)
@@ -5386,19 +5441,31 @@ def _signaling_probe(config: "Config") -> _SignalingProbe:
     global _signaling_probe_memo
 
     sig_config = config.talk.signaling
-    key = (sig_config.url, getattr(config.nextcloud, "url", ""))
+    # The account is in the key because with no configured URL the answer is
+    # derived from a call authenticated as that account, so two configs sharing
+    # a Nextcloud URL and differing in credentials do not share an answer.
+    key = (
+        sig_config.url,
+        getattr(config.nextcloud, "url", ""),
+        getattr(config.nextcloud, "username", ""),
+    )
 
     memo = _signaling_probe_memo
     if memo is not None and memo[1] == key and (time.monotonic() - memo[0]) < _SIGNALING_PROBE_TTL:
         return memo[2]
 
-    probe = _probe_signaling(config, sig_config, SIGNALING_PROBE_TIMEOUT)
+    probe = _probe_signaling(
+        config, sig_config, time.monotonic() + SIGNALING_PROBE_TIMEOUT,
+    )
     _signaling_probe_memo = (time.monotonic(), key, probe)
     return probe
 
 
-def _probe_signaling(config, sig_config, timeout: float) -> _SignalingProbe:
+def _probe_signaling(config, sig_config, deadline: float) -> _SignalingProbe:
     from .transport.talk import signaling as sig
+
+    def remaining() -> float:
+        return max(deadline - time.monotonic(), _SIGNALING_MIN_LEG)
 
     # Before anything reaches the network: a deployment with `enabled = true`
     # and no library refuses to boot, so reporting "connection refused" here
@@ -5407,29 +5474,33 @@ def _probe_signaling(config, sig_config, timeout: float) -> _SignalingProbe:
     try:
         sig.require_websockets()
     except sig.SignalingUnavailable as exc:
-        return _SignalingProbe("", "", (), str(exc))
+        return _SignalingProbe("", "", (), str(exc), BLOCKED_LIBRARY)
 
     if sig_config.url:
         source = sig_config.url
     else:
-        settings, error = _signaling_settings(config, timeout)
+        settings, error = _signaling_settings(config, remaining())
         if error:
             return _SignalingProbe(
-                "", "", (), f"Talk's signaling settings could not be read: {error}",
+                "", "", (),
+                f"Talk's signaling settings could not be read: {error}",
+                BLOCKED_UNAVAILABLE,
             )
         reason = sig.hpb_unavailable_reason(settings)
         if reason is not None:
-            return _SignalingProbe("", "", (), reason)
+            return _SignalingProbe("", "", (), reason, BLOCKED_UNAVAILABLE)
         source = settings.server
 
     try:
         ws_url = sig.websocket_url(source)
     except ValueError as exc:
-        return _SignalingProbe("", "", (), str(exc))
+        return _SignalingProbe("", "", (), str(exc), BLOCKED_UNAVAILABLE)
 
-    frame, error = _signaling_welcome_frame(ws_url, timeout)
+    frame, error = _signaling_welcome_frame(ws_url, remaining())
     if error:
-        return _SignalingProbe(ws_url, "", (), f"{ws_url}: {error}")
+        return _SignalingProbe(
+            ws_url, "", (), f"{ws_url}: {error}", BLOCKED_UNREACHABLE,
+        )
 
     features = sig.parse_welcome(frame)
     welcome = frame.get("welcome") if isinstance(frame, dict) else None
@@ -5440,6 +5511,7 @@ def _probe_signaling(config, sig_config, timeout: float) -> _SignalingProbe:
         return _SignalingProbe(
             ws_url, version, (),
             f"{ws_url} answered, but the frame carried no feature list",
+            BLOCKED_UNREACHABLE,
         )
     return _SignalingProbe(ws_url, version, features, "")
 
@@ -5465,16 +5537,46 @@ def check_signaling_reachable(config: "Config", probe: bool) -> CheckResult:
 
     result = _signaling_probe(config)
     if result.error:
+        # A deployment with no backend registered has nothing for this check
+        # to reach, and `talk.signaling_auth` already FAILs it with the remedy
+        # that fixes it. A second FAIL here would name a configuration fault
+        # under a check called "reachable" and page an operator twice for one
+        # cause — the same reason the chat-relay check SKIPs rather than
+        # asserting a fault it did not observe.
+        if result.blocker == BLOCKED_UNAVAILABLE:
+            return CheckResult(
+                name, SKIP,
+                f"{result.error}; there is no backend URL to reach. See "
+                "talk.signaling_auth",
+                scope=DEPLOYMENT,
+            )
+
+        # The missing library is the other startup refusal, so it is a fault
+        # rather than a question this check could not answer.
+        if result.blocker == BLOCKED_LIBRARY:
+            return CheckResult(
+                name, FAIL, result.error,
+                remedy=(
+                    "Install the signaling extra (`uv sync --extra "
+                    "signaling`), or set [talk.signaling] enabled = false to "
+                    "keep the Talk poller. The daemon refuses to start "
+                    "as configured."
+                ),
+                scope=DEPLOYMENT,
+            )
+
         return CheckResult(
             name, FAIL, result.error,
             remedy=(
-                "[talk.signaling] enabled = true, so the daemon refuses to "
-                "start without a reachable backend. Check that a "
-                "nextcloud-spreed-signaling server is running and registered "
-                "with Talk (occ talk:signaling:list), that this host can reach "
-                "it, and that [talk.signaling] url — when set — names the "
-                "route the daemon should take. Setting enabled = false returns "
-                "the deployment to the Talk poller."
+                "Check that the nextcloud-spreed-signaling server is running "
+                "and that this host can reach it, and that [talk.signaling] "
+                "url — when set — names the route the daemon should take. "
+                "Inbound Talk is not dead meanwhile: watchers retry on a "
+                "backoff and the reconciliation pass keeps fetching the rooms "
+                "that are behind, so messages arrive within "
+                "[talk.signaling] room_sync_interval rather than within a "
+                "second. Setting enabled = false returns the deployment to the "
+                "Talk poller."
             ),
             scope=DEPLOYMENT,
         )
@@ -5525,7 +5627,7 @@ def check_signaling_chat_relay(config: "Config", probe: bool) -> CheckResult:
 
     from .transport.talk import signaling as sig
 
-    if sig.CLIENT_FEATURES[0] in result.features:
+    if sig.CHAT_RELAY_FEATURE in result.features:
         return CheckResult(
             name, OK,
             f"{result.url} advertises chat-relay", scope=DEPLOYMENT,
@@ -5593,6 +5695,31 @@ def check_signaling_auth(config: "Config", probe: bool) -> CheckResult:
 
     caps = _spreed_signaling_capabilities(payload)
     mode = caps.get("mode")
+
+    # `capabilities.spreed.config.signaling.mode` was read off the deployment
+    # this design was verified against, which is why the check asks it here
+    # rather than paying for the settings call and its token. It is still a key
+    # a *different* Talk version may not publish, and the difference between
+    # "not published" and "internal" is the difference between a working
+    # deployment and a broken one — so an absent key reports what it did not
+    # find instead of falling through `signaling_mode_reason`'s unreadable-mode
+    # arm and FAILing a deployment whose HPB is fine. The other reader of that
+    # arm is the startup refusal, which reads the settings endpoint, where an
+    # unreadable mode really is a fault.
+    if mode is None:
+        return CheckResult(
+            name, WARN,
+            "Talk's capabilities carry no spreed.config.signaling.mode, so "
+            "whether a high-performance backend is registered cannot be "
+            "answered without minting a token",
+            remedy=(
+                "Check talk.signaling_reachable, which reads the signaling "
+                "settings and does resolve the mode, and confirm with "
+                "occ talk:signaling:list."
+            ),
+            scope=DEPLOYMENT,
+        )
+
     mode_reason = sig.signaling_mode_reason(mode)
     if mode_reason is not None:
         return CheckResult(
@@ -5679,16 +5806,29 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
     watchers = _as_count(stats.get("watchers"))
     connected = _as_count(stats.get("connected"))
     behind = _as_count(stats.get("rooms_behind"))
+    # Type-guarded like the three counters beside it, and for a sharper reason:
+    # `or []` on the *string* "abc123" iterates it into six single-character
+    # tokens, each of which passes the filter, so the WARN would name six rooms
+    # that do not exist.
+    raw_disconnected = stats.get("disconnected")
     disconnected = [
-        str(token) for token in stats.get("disconnected") or []
+        token for token in
+        (raw_disconnected if isinstance(raw_disconnected, (list, tuple)) else [])
         if isinstance(token, str) and token
     ]
 
     findings = []
+    # The count comparison stands on its own rather than behind the token
+    # list, because a supervisor is free to report counters and no tokens — and
+    # a watcher mid-reconnect is plausibly counted as not connected while
+    # belonging on no "disconnected" list. Reading only the list there returns
+    # OK with a detail saying "1 of 5 watchers connected", which is a check
+    # contradicting itself in the one place it is meant to be authoritative.
+    if connected < watchers:
+        findings.append(f"{connected} of {watchers} watchers connected")
     if disconnected:
         findings.append(
-            f"{len(disconnected)} of {watchers} watchers disconnected: "
-            + _overlay_list(disconnected)
+            "disconnected: " + _overlay_list(disconnected)
         )
     if behind:
         findings.append(

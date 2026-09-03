@@ -1135,6 +1135,20 @@ class TestTheSignalingExtraIsDeclared:
                 f"the `{name}` extra does not carry signaling"
             )
 
+    def test_the_floor_excludes_the_legacy_client(self):
+        """`websockets.connect` is two different implementations either side of 14.
+
+        On 13 the top-level name is the legacy client, with different exception
+        types and a different connection object; it is gone by 15. Nothing in
+        the suite exercises the real client, so a 13.x resolution would only be
+        found in production.
+        """
+        requirement = next(
+            req for req in self._extras()["signaling"] if "websockets" in req
+        )
+        floor = requirement.split(">=")[1].strip().strip('"')
+        assert tuple(int(part) for part in floor.split(".")) >= (14,), requirement
+
     def test_it_carries_no_aiohttp(self):
         """D10: asyncio-native and one job, rather than a client stack."""
         assert not any(
