@@ -89,9 +89,9 @@ See [security](../deployment/security.md#authorization-model) for the full model
 
 ## Streaming events
 
-The brain emits `StreamEvent`s (defined in `src/istota/brain/_events.py`) which the executor's `_on_brain_event` adapter maps to typed `TaskEvent`s and writes to the `task_events` log via `EventWriter.emit()` (`src/istota/events.py`). There is no scheduler-side progress callback and no `italicize` flag — the log is the bus. In-process consumers (`TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber`) and the web SSE endpoint read from it.
+The brain emits `StreamEvent`s (defined in `src/istota/brain/_events.py`) which `executor_stream.TaskStreamAdapter.on_event` maps to typed `TaskEvent`s and writes to the `task_events` log via `EventWriter.emit()` (`src/istota/events.py`). There is no scheduler-side progress callback and no `italicize` flag — the log is the bus. In-process consumers (`TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber`) and the web SSE endpoint read from it.
 
-The `_on_brain_event` mapping:
+The `TaskStreamAdapter.on_event` mapping:
 
 - **ToolUseEvent** -> `tool_start` (gated by `progress_show_tool_use`); NativeBrain also emits `ToolEndEvent` -> `tool_end` and `ToolProgressEvent` -> `tool_progress`
 - **TextEvent** -> `progress_text` (gated by `progress_show_text`); per-token `TextDeltaEvent` -> coalesced `text_delta` on stream surfaces only
