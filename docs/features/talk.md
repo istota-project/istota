@@ -44,6 +44,7 @@ Per-user verbose logging of every tool action, with a `[task_id #channel]` prefi
 | `talk_poll_interval` | 10s | `[scheduler]` |
 | `talk_poll_timeout` | 30s | `[scheduler]` |
 | `talk_poll_wait` | 2.0s | `[scheduler]` |
+| `talk_poll_full_sweep_interval` | 300s | `[scheduler]` |
 | `progress_updates` | `true` | `[scheduler]` |
 | `progress_show_tool_use` | `true` | `[scheduler]` |
 | `progress_show_text` | `false` | `[scheduler]` |
