@@ -3801,9 +3801,13 @@ def shares_room_with(conn: sqlite3.Connection, user_a: str, user_b: str) -> bool
     the next time it registers the room — which is what the schema comment on
     `room_dismissals` says outright, and why the web delete and archive paths
     pair `remove_room_member` with `dismiss_room`. So a caller must not read a
-    `remove_room_member` on a Talk-origin room as a durable revocation. What is
-    durable is a room that is gone: `delete_web_chat_room` clears its members
-    and no poll re-seeds a web-origin room.
+    `remove_room_member` on a Talk-**backed** room as a durable revocation —
+    `web_app._is_talk_backed` is that predicate, and it is wider than `origin`:
+    a web-origin room promoted to Talk is one too, and takes the same hide path
+    since ISSUE-408. What is durable is a room that is gone:
+    `delete_web_chat_room` clears its members, and it is now reached only for a
+    room with no Talk conversation behind it — which is exactly the room no poll
+    re-seeds.
 
     The consequence for the avatar endpoint is stated where the cache policy
     is: the five-minute window bounds how long a client may hold whatever this

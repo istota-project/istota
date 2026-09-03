@@ -4121,6 +4121,40 @@ def _chat_mark_room_read(username: str, room_id: int) -> dict | None:
     return {"cursor": max_id, "advanced": max_id > old, "room_token": room.token}
 
 
+def _is_talk_backed(conn, reg, token: str) -> bool:
+    """True for a room whose transcript is also a live Nextcloud conversation.
+
+    The predicate behind "hide per user, never destroy". It asks about the
+    *binding*, not about `origin`, and that is the ISSUE-408 fix: a room created
+    in web chat and later promoted to Talk keeps `origin = 'web'`, so an
+    origin-only test sent it down the hard-delete path — which erased its
+    dismissal tombstone along with everything else keyed on the token, sent
+    nothing to Talk, and left the poll to find a live conversation with no
+    registry row and register it from scratch. The room came back with a fresh
+    handle and no memory of having been hidden.
+
+    `origin == "talk"` is kept as the first arm rather than folded into the
+    binding test: a Talk-origin room is Talk-backed whether or not its binding
+    row survived, and this is a "do not destroy" guard, so the reading that
+    preserves more is the safe one.
+
+    It asks the binding *row*, never Nextcloud, and the residual is accepted
+    rather than overlooked: a binding outlives the conversation it names
+    (ISSUE-401), so a room whose Talk conversation was deleted reads as
+    Talk-backed and can no longer be hard-deleted from web — it is hidden
+    instead, and its transcript and dangling binding are kept. Probing here
+    would put a network call, and `_talk_conversation_verdict`'s three-way
+    answer, inside a delete handler; an unreachable Nextcloud would then decide
+    whether a room is destroyed. "Reconnect to Talk" is the repair path for that
+    room, and it already owns that verdict.
+    """
+    from . import db
+
+    if reg is not None and reg.origin == "talk":
+        return True
+    return db.get_room_binding(conn, token, "talk") is not None
+
+
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
     model=_UNSET, effort=_UNSET,
@@ -4148,7 +4182,7 @@ def _chat_update_room(
                 db.rename_room(conn, updated.token, updated.name)
             if archived is not None:
                 reg = db.get_room(conn, updated.token)
-                if reg is not None and reg.origin == "talk":
+                if _is_talk_backed(conn, reg, updated.token):
                     # Shared Talk room: hide per-user via membership, never via
                     # the global archived flag (ISSUE-134) — that would hide it
                     # from the other participants too. Mirror _chat_delete_room:
@@ -4161,6 +4195,20 @@ def _chat_update_room(
                     else:
                         db.add_room_member(conn, updated.token, username)
                         db.undismiss_room(conn, updated.token, username)
+                        # A promoted room archived *before* ISSUE-408 took the
+                        # other arm and set the global flag, which nothing here
+                        # would ever clear — `list_member_rooms` subtracts it as
+                        # well as the tombstone, so the room would stay hidden
+                        # with no control left that could bring it back. A no-op
+                        # on a room whose flag was never set.
+                        #
+                        # Only for a room that is not Talk-origin. On one that
+                        # is, the flag is `archive_orphaned_talk_rooms` saying
+                        # the bot left the Nextcloud conversation — a fact about
+                        # the deployment, not this user's hide, and not theirs
+                        # to clear by unarchiving their own handle.
+                        if reg is not None and reg.origin != "talk":
+                            db.set_room_archived(conn, updated.token, False)
                 else:
                     db.set_room_archived(conn, updated.token, bool(archived))
         if updated is None:
@@ -4194,14 +4242,17 @@ def _chat_delete_room(username: str, room_id: int) -> str:
             return "not_found"
         if db.count_active_web_tasks(conn, room.token, username) > 0:
             return "busy"
-        # A Talk-origin room is hidden per-user, not destroyed: deleting from web
+        # A Talk-backed room is hidden per-user, not destroyed: deleting from web
         # must not wipe a Nextcloud Talk conversation's mirrored history, and —
         # because the room is shared (ISSUE-134) — must not hide it from the
         # other participants. Drop only this user's membership + archive their own
         # handle; the global `rooms.archived` flag stays reserved for "the bot
-        # left the Nextcloud room" (archive_orphaned_talk_rooms).
+        # left the Nextcloud room" (archive_orphaned_talk_rooms). A promoted room
+        # is Talk-backed too, and took the other branch until ISSUE-408 — the
+        # delete was never a delete, since nothing is sent to Talk and the poll
+        # re-registered the surviving conversation on its next cycle.
         reg = db.get_room(conn, room.token)
-        if reg is not None and reg.origin == "talk":
+        if _is_talk_backed(conn, reg, room.token):
             db.remove_room_member(conn, room.token, username)
             # Durable hide tombstone: the poll-time Talk-room registration
             # backfill re-adds membership for every participant, so dropping the

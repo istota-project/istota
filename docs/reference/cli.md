@@ -226,7 +226,17 @@ The `--check` form is the deployment fit-check — usable in a shell or a heartb
 
 `provision-rooms` is what the Ansible role calls to give a bare-metal install the same default Talk rooms a Docker install gets. It is idempotent and prints `STATE: created|updated|noop`. A channel room whose profile column is already set is left alone entirely, and a token is written only for a room the run actually made usable — so it can neither overwrite a pinned value nor re-enable an execution log you turned off. `--reseed` is the deliberate re-point, and overrides both rules.
 
-Each room's token is remembered per user, so renaming a room does not make the next run create a second one under the old name (ISSUE-342). A run prefers the remembered token and only matches on the room's name when there is nothing remembered for it — the first provision, or a room whose conversation has since been deleted in Nextcloud. A remembered room the user has left is re-invited only when the bot is its sole remaining participant: a room with other people in it is one they left on purpose, and re-adding them on every deploy is not a decision a deploy gets to make.
+Each room's token is remembered per user, so renaming a room does not make the next run create a second one under the old name (ISSUE-342). A run prefers the remembered token and only matches on the room's name when there is nothing remembered for it — the first provision, or a room whose conversation has since been deleted in Nextcloud.
+
+A remembered room the user is no longer in is left alone, and the invite is retried only where this tool's own last invite for that room is recorded as having failed (ISSUE-408). A bot-only room does not settle that on its own: it is equally what a failed invite leaves behind and what a user leaves by walking out of their own `general`, so the record decides rather than the participant list. Either way the room is reported `user not a member`, so a room nobody can read is still visible in the output rather than passing as `existing`.
+
+Records written before that outcome was stored carry no failure and are never retried. If such a room really was stranded by an invite that failed before the upgrade, drop its remembered token and the next run falls back to matching by name, which adopts the room and retries the invite:
+
+```bash
+istota kv delete _provisioned_rooms general --user alice
+```
+
+A retry that does fail still prints `invite FAILED`, which is what the Ansible role fails the play on.
 
 `--adopt NAME=TOKEN` writes that record by hand and exits without contacting Talk. It exists for an install that already carries a duplicate from before the record existed: the room you kept no longer answers to its old name, so nothing else can point the record at it. Repeatable. A wrong token costs nothing beyond a fall back to name matching on the next run.
 

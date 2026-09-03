@@ -46,6 +46,18 @@ every deploy:
   entrypoint never had the bug because it persists ``GENERAL_TOKEN`` in its
   provisioning flag file and skips the lookup entirely; it reuses a token where
   this reused a name.
+- **A retry needs a failure to retry.** Orphan adoption reads a bot-only room as
+  a failed invite, and a user who walks out of their own ``general`` leaves
+  exactly that state — so every deploy put them back in, for ever, and there was
+  no state that expressed having left (ISSUE-408). The distinction is not in the
+  participant list, but it is in the previous run: the invite outcome is
+  recorded beside the token, and the remembered-token arm retries only where the
+  last recorded invite *failed*. A room whose invite landed and that the user is
+  now absent from is a room they left, and the correct action is the one the
+  non-orphan arm already takes — log it and leave membership alone. The
+  name-matching arm below is untouched: a room with no record at all has no
+  outcome to contradict, and adopting it is still what stops one duplicate per
+  deploy on a first provision.
 """
 
 from __future__ import annotations
@@ -102,6 +114,21 @@ class ProvisionedRoom:
     # `invited=False` would otherwise mean both "already in it, nothing to do"
     # and "tried and failed" — and the CLI reports one and not the other.
     reinvited: bool = False
+    # Set when the remembered room exists and the user is simply not in it, and
+    # this run deliberately did nothing about that. Usually a room they left, so
+    # it is not a failure and must not fail the deploy — but it is also where a
+    # room stranded by an invite that failed before the outcome was recorded
+    # ends up, and that room is unreadable. Reporting it as `existing` would
+    # hide the second case behind the first, so the CLI names it (ISSUE-408).
+    absent: bool = False
+    # What the *record* should carry when this run neither attempted an invite
+    # nor saw the user in the room — i.e. it observed nothing that settles the
+    # question. `None` means this run did settle it and `invite_failed` is the
+    # answer. Carrying the previous value forward is what stops one transient
+    # failure to read the participant list from erasing a recorded failure: the
+    # run would otherwise write "no failure" having observed nothing at all, and
+    # the retry that record exists to authorize would never fire again.
+    carried_invite_failed: bool | None = None
 
     @property
     def seedable(self) -> bool:
@@ -113,6 +140,57 @@ class ProvisionedRoom:
         cannot read it.
         """
         return self.invited and (self.created or self.adopted)
+
+    @property
+    def invite_failed(self) -> bool:
+        """Whether this run tried to put the user in the room and could not.
+
+        The one fact that authorizes a later run to retry (ISSUE-408), and the
+        predicate the CLI's stranded warning already used — it is here so the
+        record and the warning cannot come to disagree about what a failure is.
+        False for a room the user was already in, where ``invited=False`` means
+        "nothing to do" rather than "tried and failed".
+        """
+        return not self.invited and (self.created or self.adopted or self.reinvited)
+
+    @property
+    def record_invite_failed(self) -> bool:
+        """What `record_provisioned_rooms` persists about the invite.
+
+        Deliberately not `invite_failed`, which answers a different question —
+        "did *this run* try and fail", which is what the CLI's stranded warning
+        and the Ansible `failed_when` are about. The record answers "is there an
+        invite still outstanding", and a run that observed nothing must not
+        overwrite that with its own silence. See `carried_invite_failed`.
+        """
+        if self.carried_invite_failed is None:
+            return self.invite_failed
+        return self.carried_invite_failed
+
+
+@dataclass
+class ProvisionedRecord:
+    """What a previous run left about one room name.
+
+    ``invite_failed`` defaults False, and that default is the whole
+    compatibility story: every record written before ISSUE-408 carries no
+    outcome, and reading the absence as "might have failed" would re-invite the
+    reporter on their very next deploy — which is the bug. So an unknown outcome
+    means "do not retry". ``--adopt`` records the same way: it never contacts
+    Talk, so it has observed no failure to retry.
+
+    What that costs is stated rather than implied, because it is a real
+    regression for one shape: a room stranded by an invite that failed *before*
+    the upgrade is no longer retried on its own, and it does not print
+    ``invite FAILED``, so the Ansible ``failed_when`` no longer fires for it
+    either. It is not silent — the room is reported ``user not a member``
+    (``ProvisionedRoom.absent``), which is what separates it from ``existing``.
+    Clearing the remembered token puts it back on the name-matching arm, which
+    adopts it and retries; ``docs/reference/cli.md`` carries the command.
+    """
+
+    token: str
+    invite_failed: bool = False
 
 
 def _is_users_actor(participant: dict) -> bool:
@@ -247,54 +325,79 @@ async def ensure_room(
     *,
     bot_user_id: str | None = None,
     rooms: "list[dict] | None" = None,
-    known_token: str | None = None,
+    known: ProvisionedRecord | None = None,
 ) -> ProvisionedRoom:
     """Reuse, adopt or create the group room ``name`` and put ``user_id`` in it.
 
     ``rooms`` lets a caller pass a room list it already fetched — provisioning
     three rooms otherwise costs three identical full-list GETs per user.
 
-    ``known_token`` is the token a previous run provisioned for this name, from
-    ``read_provisioned_tokens``. It is tried first and matched on the token
-    alone, so a room the user has since renamed is still recognised as theirs
-    (ISSUE-342). A stale token — the conversation deleted, or the bot removed
-    from it — is absent from the room list, and the name path takes over
-    unchanged.
+    ``known`` is what a previous run recorded for this name, from
+    ``read_provisioned_records``: the token and whether that run's invite
+    failed. The token is tried first and matched on the token alone, so a room
+    the user has since renamed is still recognised as theirs (ISSUE-342). A
+    stale token — the conversation deleted, or the bot removed from it — is
+    absent from the room list, and the name path takes over unchanged.
     """
     if rooms is None:
         rooms = await client.list_conversations()
 
-    remembered = _find_remembered_room(rooms, known_token or "")
+    known_token = known.token if known else ""
+    remembered = _find_remembered_room(rooms, known_token)
     if remembered is not None:
         participants = await client.get_participants(known_token)
         if any(_is_user(p, user_id) for p in participants):
             logger.info(
                 "Talk room already provisioned: %s -> %s", name, known_token,
             )
+            # Seeing the user in the room settles it: whatever an earlier run
+            # recorded, there is no invite outstanding now. This is the one arm
+            # that clears a recorded failure without attempting anything.
             return ProvisionedRoom(
                 name=name, token=known_token, created=False, invited=False,
+                carried_invite_failed=False,
             )
-        # The room is ours and still exists; the user is not in it. Two reasons
-        # not to invite them back unconditionally.
+        # The room is ours and still exists; the user is not in it. Three
+        # reasons not to invite them back unconditionally.
         #
         # An empty participant list is more likely a failed read than a real
         # room, which is the judgement `_is_orphan` already makes — so the two
         # paths must not disagree about the same evidence.
         #
-        # And a room with other humans in it is one the user *left*. Dragging
-        # them back on every deploy is the shape of the ISSUE-102 clobber this
-        # module's own docstring warns about, and unlike `logs` / `alerts`
-        # there is no profile column they could clear to opt out. A bot-only
-        # room is the case worth acting on: it is either a failed invite this
-        # tool left behind, or the user's own room they stepped out of.
-        if not participants or not _is_orphan(participants, bot_user_id):
+        # A room with other humans in it is one the user *left*. Dragging them
+        # back on every deploy is the shape of the ISSUE-102 clobber this
+        # module's own docstring warns about.
+        #
+        # And a bot-only room is ambiguous from the participant list alone — it
+        # is either a failed invite this tool left behind or the user's own room
+        # they stepped out of — so the list is not what decides it. The previous
+        # run is: only a token whose recorded invite *failed* has anything to
+        # retry, and a run that recorded success can never be looking at a
+        # failure now (ISSUE-408). Without that gate a user who left their
+        # `general` was put back on every deploy, with no state that could
+        # express having left — unlike `logs` / `alerts` there is no profile
+        # column to clear.
+        if (
+            not participants
+            or not _is_orphan(participants, bot_user_id)
+            or not (known and known.invite_failed)
+        ):
             logger.info(
                 "Provisioned Talk room %s (%s) exists but %s is not in it and "
-                "it is not bot-only; leaving membership alone",
+                "no failed invite is recorded for it; leaving membership alone",
                 name, known_token, user_id,
             )
+            # Nothing was attempted and nothing about the invite was observed —
+            # an empty list is a failed read, and a user missing from a room
+            # says nothing about whether our last invite to it landed. So the
+            # previous outcome is carried rather than overwritten: writing
+            # "no failure" here would erase a recorded one and permanently
+            # disable the retry it authorizes, which one transient Talk error
+            # on the participant read is enough to trigger.
             return ProvisionedRoom(
                 name=name, token=known_token, created=False, invited=False,
+                absent=True,
+                carried_invite_failed=bool(known and known.invite_failed),
             )
         # `adopted` stays False on purpose, so `seedable` is False and a
         # channel column the user cleared is not refilled behind them.
@@ -349,7 +452,7 @@ async def provision_rooms(
     names: "tuple[str, ...] | list[str]" = DEFAULT_ROOMS,
     *,
     bot_user_id: str | None = None,
-    known_tokens: "dict[str, str] | None" = None,
+    known_records: "dict[str, ProvisionedRecord] | None" = None,
     resolved: "list[ProvisionedRoom] | None" = None,
 ) -> list[ProvisionedRoom]:
     """Ensure each room in ``names`` exists for ``user_id``, in order.
@@ -358,8 +461,8 @@ async def provision_rooms(
     creates is absent from that snapshot, which is harmless: each name is looked
     up once.
 
-    ``known_tokens`` maps a room name to the token a previous run provisioned
-    for it — see ``read_provisioned_tokens``.
+    ``known_records`` maps a room name to what a previous run recorded for it —
+    see ``read_provisioned_records``.
 
     ``resolved`` is an out-parameter: each room is appended as it resolves, so a
     caller can record what it got when a later name raises. Without it a Talk
@@ -368,13 +471,13 @@ async def provision_rooms(
     which is the ISSUE-342 bug, arrived at through the error path.
     """
     rooms = await client.list_conversations()
-    known = known_tokens or {}
+    known = known_records or {}
     results = resolved if resolved is not None else []
     for name in names:
         results.append(
             await ensure_room(
                 client, name, user_id, bot_user_id=bot_user_id, rooms=rooms,
-                known_token=known.get(name),
+                known=known.get(name),
             )
         )
     return list(results)
@@ -382,7 +485,7 @@ async def provision_rooms(
 
 def provision_user_rooms(
     config, user_id: str, names: "tuple[str, ...] | list[str]" = DEFAULT_ROOMS,
-    *, known_tokens: "dict[str, str] | None" = None,
+    *, known_records: "dict[str, ProvisionedRecord] | None" = None,
     resolved: "list[ProvisionedRoom] | None" = None,
 ) -> list[ProvisionedRoom]:
     """Synchronous entry point: open a bot-auth TalkClient and provision.
@@ -400,7 +503,7 @@ def provision_user_rooms(
         try:
             return await provision_rooms(
                 client, user_id, names, bot_user_id=bot_user_id,
-                known_tokens=known_tokens, resolved=resolved,
+                known_records=known_records, resolved=resolved,
             )
         finally:
             await client.aclose()
@@ -408,26 +511,40 @@ def provision_user_rooms(
     return asyncio.run(_run())
 
 
-def _decode_token(raw: object) -> str:
-    """One stored value -> the Talk token, tolerating both encodings.
+def _decode_record(raw: object) -> ProvisionedRecord | None:
+    """One stored value -> what it says about the room, or None if nothing.
 
-    Values in `istota_kv` are JSON by convention — `cli.cmd_kv_get` does an
-    unguarded `json.loads` on one, so a bare string there is a traceback rather
-    than a value. The first version of this record wrote bare strings, so a
-    deployment can already have some on disk; both are read, and every write
-    from here on is JSON.
+    Three encodings, all of which a deployment can have on disk. Values in
+    `istota_kv` are JSON by convention — `cli.cmd_kv_get` does an unguarded
+    `json.loads` on one, so a bare string there is a traceback rather than a
+    value — but the first version of this record wrote bare strings anyway.
+    ISSUE-342 wrote a JSON string, and ISSUE-408 needed a second field, so from
+    here on it is a JSON object. Both older shapes carry no invite outcome and
+    read as "no failure recorded", which is the safe direction: see
+    `ProvisionedRecord`.
     """
     if not isinstance(raw, str) or not raw:
-        return ""
+        return None
     try:
         decoded = json.loads(raw)
     except ValueError:
-        return raw
-    return decoded if isinstance(decoded, str) else ""
+        return ProvisionedRecord(token=raw)
+    if isinstance(decoded, str):
+        return ProvisionedRecord(token=decoded) if decoded else None
+    if isinstance(decoded, dict):
+        token = decoded.get("token")
+        if not isinstance(token, str) or not token:
+            return None
+        return ProvisionedRecord(
+            token=token, invite_failed=decoded.get("invite_failed") is True,
+        )
+    return None
 
 
-def read_provisioned_tokens(db_path: Path, user_id: str) -> "dict[str, str]":
-    """Room name -> the Talk token a previous run provisioned for it.
+def read_provisioned_records(
+    db_path: Path, user_id: str,
+) -> "dict[str, ProvisionedRecord]":
+    """Room name -> what a previous run recorded for it.
 
     Empty on anything that goes wrong, including a database that does not exist
     yet: an unreadable record means "provision by name", which is the behaviour
@@ -445,22 +562,23 @@ def read_provisioned_tokens(db_path: Path, user_id: str) -> "dict[str, str]":
     except Exception as e:
         logger.warning("could not read provisioned room tokens for %s: %s", user_id, e)
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, ProvisionedRecord] = {}
     for row in rows:
-        token = _decode_token(row.get("value"))
-        if token:
-            out[row["key"]] = token
+        record = _decode_record(row.get("value"))
+        if record is not None:
+            out[row["key"]] = record
     return out
 
 
-def record_provisioned_tokens(
+def record_provisioned_rooms(
     db_path: Path, user_id: str, rooms: "list[ProvisionedRoom]",
 ) -> bool:
-    """Remember the token of each room, so a later rename cannot orphan it.
+    """Remember each room's token and whether an invite is still outstanding.
 
     Written for every room the run resolved, not only the ones it created: a
     room adopted or matched by name on this run is the one a future run must
-    recognise after it is renamed. Returns whether the write landed.
+    recognise after it is renamed. The outcome is what makes a later retry
+    correct — see `ProvisionedRecord`. Returns whether the write landed.
 
     Never raises. The rooms exist on Talk by the time this runs, so failing the
     deploy over bookkeeping would be worse than what a lost record costs: the
@@ -470,16 +588,19 @@ def record_provisioned_tokens(
     """
     from . import db
 
-    entries = [(r.name, r.token) for r in rooms if r.name and r.token]
+    entries = [
+        (r.name, {"token": r.token, "invite_failed": r.record_invite_failed})
+        for r in rooms if r.name and r.token
+    ]
     if not entries:
         return True
     try:
         if not Path(db_path).exists():
             raise FileNotFoundError(db_path)
         with db.get_db(db_path) as conn:
-            for name, token in entries:
+            for name, value in entries:
                 db.kv_set(
-                    conn, user_id, PROVISIONED_NAMESPACE, name, json.dumps(token),
+                    conn, user_id, PROVISIONED_NAMESPACE, name, json.dumps(value),
                 )
         return True
     except Exception as e:

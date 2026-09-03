@@ -1761,7 +1761,7 @@ def cmd_nextcloud_provision_rooms(args):
                     name=name, token=token, created=False, invited=False,
                 )
             )
-        if not provision_rooms_mod.record_provisioned_tokens(
+        if not provision_rooms_mod.record_provisioned_rooms(
             db_path, args.user, adopted,
         ):
             print(
@@ -1788,7 +1788,7 @@ def cmd_nextcloud_provision_rooms(args):
     # What a previous run provisioned, so a room the user has since renamed is
     # reused rather than duplicated (ISSUE-342). Empty on a first run or an
     # unreadable DB, which puts us back on the name-matching path.
-    known_tokens = provision_rooms_mod.read_provisioned_tokens(db_path, args.user)
+    known_records = provision_rooms_mod.read_provisioned_records(db_path, args.user)
 
     # `partial` is filled as each room resolves, so a failure on the third name
     # still records the two that succeeded — those rooms exist on Talk, and
@@ -1796,10 +1796,10 @@ def cmd_nextcloud_provision_rooms(args):
     partial: list = []
     try:
         rooms = provision_rooms_mod.provision_user_rooms(
-            config, args.user, names, known_tokens=known_tokens, resolved=partial,
+            config, args.user, names, known_records=known_records, resolved=partial,
         )
     except Exception as e:
-        provision_rooms_mod.record_provisioned_tokens(db_path, args.user, partial)
+        provision_rooms_mod.record_provisioned_rooms(db_path, args.user, partial)
         print(f"Error: could not provision Talk rooms for {args.user!r}: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -1807,7 +1807,7 @@ def cmd_nextcloud_provision_rooms(args):
     # by name, which is what every install did before the record existed — so
     # this warns rather than exiting. It still has to be visible: silently
     # reverting to name matching is the bug.
-    if not provision_rooms_mod.record_provisioned_tokens(db_path, args.user, rooms):
+    if not provision_rooms_mod.record_provisioned_rooms(db_path, args.user, rooms):
         print(
             f"Warning: could not record the room tokens for {args.user!r}. The "
             "rooms exist, but a later rename may produce a duplicate until this "
@@ -1838,7 +1838,8 @@ def cmd_nextcloud_provision_rooms(args):
                 {
                     "name": r.name, "token": r.token, "created": r.created,
                     "invited": r.invited, "adopted": r.adopted,
-                    "reinvited": r.reinvited,
+                    "reinvited": r.reinvited, "absent": r.absent,
+                    "invite_failed": r.invite_failed,
                 }
                 for r in rooms
             ],
@@ -1856,21 +1857,26 @@ def cmd_nextcloud_provision_rooms(args):
                 note = "re-invited"
             else:
                 note = "existing"
-            if not room.invited and (room.created or room.adopted or room.reinvited):
+            # Not a failure — leaving a room is allowed, and the deploy must not
+            # fail on it — but it is also where a room stranded by an invite
+            # that failed before ISSUE-408 recorded outcomes ends up. Saying
+            # `existing` for both would hide the unreadable one.
+            if room.absent:
+                note += ", user not a member"
+            if room.invite_failed:
                 note += ", invite FAILED"
             print(f"  {room.name}: {room.token} ({note})")
         for field, token in sorted(seeded.items()):
             print(f"  seeded {field} = {token}")
 
     # A room the user was never added to is one they cannot read, so say so
-    # loudly. The next run adopts that room and retries rather than making
-    # another one, but a persistent failure needs an operator. `reinvited` is in
-    # the predicate because a failed re-invite leaves exactly that state and
-    # would otherwise print `existing` and exit 0.
-    stranded = [
-        r.name for r in rooms
-        if not r.invited and (r.created or r.adopted or r.reinvited)
-    ]
+    # loudly. The next run retries that room rather than making another one —
+    # because this run recorded the failure (ISSUE-408) — but a persistent
+    # failure needs an operator. The predicate is `ProvisionedRoom.invite_failed`
+    # rather than a copy of it, since the same fact is what the record stores
+    # and what authorizes that retry; two spellings could disagree about which
+    # rooms are stranded and which get another attempt.
+    stranded = [r.name for r in rooms if r.invite_failed]
     if stranded:
         print(
             f"Warning: could not add {args.user!r} to: {', '.join(stranded)}. "
