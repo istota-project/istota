@@ -90,7 +90,12 @@ MONARCH_CATEGORY_MAP = {
 }
 
 
-_ACCOUNT_COMPONENT_DISALLOWED = re.compile(r"[^A-Za-z0-9-]+")
+# Beancount's own ACCOUNT_RE is Unicode-aware, so the slug keeps Unicode
+# letters and digits; `\w` covers those but also underscore, which it rejects.
+_ACCOUNT_COMPONENT_DISALLOWED = re.compile(r"[^\w-]|_")
+
+# A script with no case of its own still needs an uppercase-or-digit initial.
+_UNCASED_INITIAL = "X"
 
 
 def account_component(name: str) -> str:
@@ -101,12 +106,19 @@ def account_component(name: str) -> str:
     (Reimbursed)" has to be stripped before it can go in an account name — an
     invalid one is not rejected at import, it lands in the ledger and breaks the
     parser for every later read.
+
+    Every distinct name gets a distinct component wherever one exists. Returning
+    a shared fallback for a name this cannot slug would merge categories that
+    have nothing to do with each other into one account, which is a wrong number
+    in a report rather than a parse error somebody notices.
     """
     slug = _ACCOUNT_COMPONENT_DISALLOWED.sub("", name).strip("-")
     if not slug:
         return "Unknown"
     if not (slug[0].isupper() or slug[0].isdigit()):
         slug = slug[0].upper() + slug[1:]
+    if not (slug[0].isupper() or slug[0].isdigit()):
+        slug = _UNCASED_INITIAL + slug
     return slug
 
 

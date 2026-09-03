@@ -1043,3 +1043,85 @@ class TestSyncMonarchImportedPayments:
             self._ledger(tmp_path), self._config(), transactions=txns, dry_run=True,
         )
         assert [r["amount"] for r in result["imported"]] == [500.00]
+
+
+class TestAccountComponentUnicode:
+    """The slug keeps the characters beancount keeps.
+
+    `config_store._is_account` is deliberately Unicode-aware — beancount's own
+    ACCOUNT_RE is — so an ASCII-only slug here would turn `Café` into `Caf` and
+    collapse every category with no Latin letters onto one account, silently
+    merging categories that have nothing to do with each other.
+    """
+
+    def test_accented_letters_survive(self):
+        from istota.money.core.transactions import account_component
+
+        assert account_component("Café") == "Café"
+        assert account_component("Bücher & Zeitschriften") == "BücherZeitschriften"
+        assert account_component("Forderungen Müller") == "ForderungenMüller"
+
+    def test_underscore_is_not_a_beancount_character(self):
+        from istota.money.core.transactions import account_component
+
+        assert account_component("internet_services") == "Internetservices"
+
+    def test_uncased_scripts_do_not_collapse_onto_one_account(self):
+        from istota.money.core.transactions import account_component
+
+        first = account_component("日用品")
+        second = account_component("交通費")
+        assert first != second
+        assert first != "Unknown" and second != "Unknown"
+
+    def test_every_slug_is_an_account_beancount_accepts(self):
+        from istota.money.config_store import _is_account
+        from istota.money.core.transactions import map_monarch_category
+
+        for category in (
+            "Internet Services (Reimbursed)", "Café", "Bücher & Zeitschriften",
+            "日用品", "e-bike / repair", "401k match", "~~~", "Forderungen Müller",
+        ):
+            account = map_monarch_category(category)
+            assert _is_account(account), f"{category!r} -> {account!r}"
+
+    def test_unicode_slugs_load_in_beancount(self, tmp_path):
+        from beancount import loader
+
+        from istota.money.core.transactions import map_monarch_category
+
+        for category in ("Café", "Bücher & Zeitschriften", "日用品"):
+            ledger = tmp_path / "t.beancount"
+            ledger.write_text(
+                'plugin "beancount.plugins.auto_accounts"\n'
+                '2026-08-30 * "Payee" "note"\n'
+                f"  {map_monarch_category(category)}  1.00 USD\n"
+                "  Liabilities:Visa-Fidelity\n"
+            )
+            _, errors, _ = loader.load_file(str(ledger))
+            assert errors == [], f"{category}: {errors}"
+
+
+class TestDefaultAccountReachesThePosting:
+    """Why an unparseable `default_account` is the same defect as a bad map.
+
+    `map_monarch_account` returns the configured default verbatim for every
+    Monarch account with no mapping, so whatever is stored there is written
+    into the ledger unexamined.
+    """
+
+    def test_unmapped_account_falls_back_to_the_configured_default(self):
+        from istota.money.core.models import (
+            MonarchConfig,
+            MonarchCredentials,
+            MonarchSyncSettings,
+            MonarchTagFilters,
+        )
+        from istota.money.core.transactions import map_monarch_account
+
+        cfg = MonarchConfig(
+            credentials=MonarchCredentials(),
+            sync=MonarchSyncSettings(default_account="Assets:Bank:Checking"),
+            accounts={}, categories={}, tags=MonarchTagFilters(),
+        )
+        assert map_monarch_account("Some Card", cfg) == "Assets:Bank:Checking"
