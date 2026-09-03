@@ -13,7 +13,6 @@ import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep"
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 from zoneinfo import ZoneInfo
@@ -21,15 +20,26 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     import sqlite3
 
+    from .brain import BrainResult
+
 from . import db
 from . import email_support
 from . import task_cgroup
-from . import config as istota_config
+from . import task_env
 from .claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401  — re-exported; the drift guard reads it beside `build_clean_env`
-    without_claude_runtime_env,
+    without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
+    # the only remaining call, and `tests/test_security.py` imports both names
+    # from here beside `build_clean_env`.
 )
 from .config import Config
+from .sandbox_plan import (
+    Mount,
+    SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
+    build_mount_plan,
+    project_fs_roots,
+    render_bwrap_argv,
+)
 from .context import (
     build_talk_context,
     format_context_for_prompt,
@@ -48,15 +58,6 @@ from .storage import (
     read_user_memory_v2,
 )
 from .brain import (
-    ContextManagementEvent,
-    StreamEvent,
-    TextDeltaEvent,
-    TextEvent,
-    ThinkingDeltaEvent,
-    ThinkingEvent,
-    ToolEndEvent,
-    ToolProgressEvent,
-    ToolUseEvent,
     CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
@@ -71,6 +72,7 @@ from .brain._fallback import (
 )
 from .agent.events import READ_DESCRIPTION_PREFIX
 from .events import EventWriter, random_progress_message
+from .executor_stream import TaskStreamAdapter
 from .image_attachments import (
     KIND_OMITTED,
     ImagePreparation,
@@ -79,6 +81,7 @@ from .image_attachments import (
     render_ocr_context,
 )
 from .shell_exec import pipefail_env
+from .user_scope import scoped_user_dir
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 
@@ -340,13 +343,29 @@ def image_bind_roots(
     behind a symlink an unresolved path names a file that does not exist inside
     the namespace, and every `Read` fails.
     """
-    roots = [user_temp_dir]
+    roots: list[Path] = []
+    # `user_temp_dir` is `{temp_dir}/{user_id}` and arrives already joined, so
+    # an id that collapses makes this root `config.temp_dir` — every user's
+    # scratch space and the whole `.control` tree, as a legal copy source
+    # (ISSUE-402). `build_mount_plan` refuses such a task outright and
+    # `ensure_task_control_dir` refuses it before that, so nothing reaches here
+    # on the real path; the entry is skipped rather than trusted because this
+    # list is an allowlist and a boundary should not rest on a caller two
+    # frames up having already refused.
+    if scoped_user_dir(config.temp_dir, task.user_id) is not None:
+        roots.append(user_temp_dir)
     if control_dir is not None:
         roots.append(control_dir)
     mount = config.nextcloud_mount_path
     if mount:
         mount = Path(mount)
-        roots.append(mount / "Users" / task.user_id)
+        # Scoped, not joined: an unscoped id collapses to `{mount}/Users` and
+        # every user's attachments become a legal copy source (ISSUE-402). No
+        # user root at all is the right fallback — the bind is dropped there
+        # too, so a file under one would be unreadable inside the namespace.
+        own = scoped_user_dir(mount / "Users", task.user_id)
+        if own is not None:
+            roots.append(own)
         roots.append(mount / "Talk")
         if task.conversation_token:
             roots.append(mount / "Channels" / task.conversation_token)
@@ -899,11 +918,15 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     would mean a user whose task directory exists and whose repos directory
     does not, silently.
 
-    What *is* checked is that the join did what it says — the same equality
-    rule ``sandbox_cache_sweeper`` uses, and for the same reason. Truthiness
-    alone lets three values through that resolve outside one user's subtree:
-    ``.`` collapses to the shared root, ``..`` to its parent, and an absolute
-    component replaces the root outright. And the entry is model-plantable:
+    What *is* checked is that the join did what it says —
+    :func:`~istota.user_scope.scoped_user_dir`, the same equality rule
+    ``sandbox_cache_sweeper`` uses and for the same reason. Truthiness alone
+    lets three values through that resolve outside one user's subtree: ``.``
+    collapses to the shared root, ``..`` to its parent, and an absolute
+    component replaces the root outright. The rule was written here and had no
+    counterpart at the Nextcloud mount join next door, which is ISSUE-402; it
+    lives in that leaf now and this function is one of its four callers. And
+    the entry is model-plantable:
     every deployment running the shared bind gave a task read-write access to
     this root, so ``{repos_dir}/{user_id}`` may already be a symlink someone
     left there, which ``_bind`` and ``_add`` both resolve and which ``chmod``
@@ -924,28 +947,17 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     root = config.developer.repos_dir
     if not root or not user_id:
         return None
-    root_path = Path(root)
-    candidate = root_path / user_id
-    try:
-        # Two checks, because neither catches the other's cases. The lexical
-        # one refuses a component that never became a child (`.` is dropped by
-        # `PurePath`, an absolute one replaces the root, a nested one goes
-        # deeper); the resolved one refuses `..` and every symlink, which are
-        # children by name and somewhere else on disk.
-        contained = (
-            candidate.parent == root_path
-            and candidate.resolve() == root_path.resolve() / user_id
+    # `scoped_user_dir` is where the two checks live now — this function is
+    # where they were written, and the Nextcloud mount join next door had no
+    # equivalent until ISSUE-402 gave the rule one home.
+    candidate = scoped_user_dir(root, user_id)
+    if candidate is None:
+        logger.warning(
+            "developer.repos_dir: %s does not resolve to the subtree named "
+            "by user id %r; not using it. A symlink or a path component in "
+            "the user id would reach outside that user's own tree.",
+            f"{root}/{user_id}", user_id,
         )
-        if not contained:
-            logger.warning(
-                "developer.repos_dir: %s does not resolve to the subtree named "
-                "by user id %r; not using it. A symlink or a path component in "
-                "the user id would reach outside that user's own tree.",
-                candidate, user_id,
-            )
-            return None
-    except OSError:
-        return None
     return candidate
 
 
@@ -1371,6 +1383,289 @@ def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason, wind
         )
     except Exception:
         logger.debug("brain fallback alert failed", exc_info=True)
+
+
+@dataclass
+class FailoverOutcome:
+    """What one availability-failover run produced, for the persist step.
+
+    Every field is read by ``execute_task`` after the call. ``ran_fallback`` is
+    not derivable from ``primary_usage_result``: on the breaker-cooldown path
+    the fallback runs with no primary call at all, so there is nothing to hold
+    and the flag would read false for every task in the window.
+    """
+
+    result: "BrainResult"
+    # The primary's result, held only when a fallback replaced it, so both
+    # attempts' usage can be written from the one call site that has a `conn`.
+    primary_usage_result: "BrainResult | None"
+    ran_fallback: bool
+    # The effort the attempt actually ran at. The fallback re-resolves it in
+    # its own namespace, so `req.effort` describes the primary only.
+    usage_effort: str
+    dropped_pin: "str | None"
+    primary_kind: str
+    fallback_kind: "str | None"
+
+
+def _failover_notice(stream, event_writer, reason, *, primary_kind, fallback_kind):
+    """A `brain_fallback` emitter bound to `reason`, for `on_start`.
+
+    Both reroute paths hand the same notice to the stream; only the
+    reason differs (a fresh primary failure vs. the breaker already
+    being open). Returns None when there is no **event writer**, so
+    `_run_fallback` skips the hook entirely — the gate is the writer
+    rather than the stream, which matters now that the two arrive as
+    separate arguments instead of one adapter wrapping one writer. A
+    stream with no writer has buffered nothing either (`on_event`
+    returns at its own `event_writer is None`), so the skipped settle
+    costs nothing.
+    """
+    if event_writer is None:
+        return None
+
+    def _emit(model, dropped_pin):
+        # A reroute is a stream boundary exactly like a tool call: what
+        # streamed before it came from the brain that just failed, and
+        # the fallback streams into these same buffers. Settle them
+        # first, or an unflushed primary tail is emitted as the opening
+        # of the fallback's answer — one paragraph, under a notice
+        # saying the primary failed — and the fallback's own narration
+        # gate starts pre-credited with the primary's characters.
+        # The settle runs whether or not the notice does, because it is
+        # about the daemon's own buffers rather than the sentence: a
+        # retry that called the primary and watched it fail again has a
+        # tail held here that must not open the fallback's answer.
+        if stream is not None and stream.is_stream_surface:
+            stream.flush_thinking()
+            stream.settle_at_tool_boundary()
+        # ISSUE-361: once per turn, not once per failover attempt. The
+        # retry ladder re-runs this same task id, and every attempt
+        # after the breaker opens takes the cooldown path, so the
+        # per-attempt emit stacked the banner three deep under one user
+        # message. The first is what survives; `emit_once` is where the
+        # cases that costs something are written down.
+        event_writer.emit_once("brain_fallback", {
+            "primary": primary_kind,
+            "reason": reason,
+            "fallback": fallback_kind,
+            "model": model,
+            "dropped_pin": dropped_pin or "",
+            "text": fallback_notice_text(
+                primary_kind, reason, fallback_kind, model, dropped_pin,
+            ),
+        })
+
+    return _emit
+
+
+def run_with_failover(
+    brain,
+    req,
+    *,
+    config,
+    brain_config,
+    task,
+    stream,
+    event_writer,
+) -> FailoverOutcome:
+    """Run one attempt through the primary brain, rerouting when it is down.
+
+    Generalizes the old tmux->claude_code in-attempt fallback: when the primary
+    brain is unavailable (usage limit / missing binary / tmux launch failure)
+    and a fallback is configured, re-run this same attempt through the fallback
+    brain — no new DB row, no attempt increment. Stickiness: once the primary
+    reports a persistent unavailability, subsequent tasks skip it for a
+    cooldown. All of it collapses to the plain primary call when no fallback is
+    configured.
+
+    The caller owns the ``ExitStack`` around this call: the skill and network
+    proxies must be live for the primary call, the reroute and the fallback
+    call alike.
+
+    ``brain_config`` is the *identity* source (which brain ran, which one
+    catches it) and ``config.brain`` is the *policy* source: the cooldown and
+    ``fallback_on_transient`` are read off the latter, as they were when this
+    was inline. The two agree today because ``execute_task`` derives
+    ``brain_config`` from ``config.brain`` with ``dataclasses.replace``, which
+    carries both fields across. A future per-source-type override that varied
+    either one would have to change this function, not just its caller.
+    """
+    _primary_kind = brain_config.kind
+    _fallback_kind = effective_fallback_kind(brain_config)
+    _cooldown = config.brain.fallback_cooldown_seconds
+    _breaker = get_availability_breaker()
+    _dropped_pin = None
+    _primary_usage_result = None
+    _ran_fallback = False
+    _usage_effort = req.effort
+    _primary_started_at = None
+    _primary_started_monotonic = None
+
+    def _notice(reason):
+        return _failover_notice(
+            stream, event_writer, reason,
+            primary_kind=_primary_kind, fallback_kind=_fallback_kind,
+        )
+
+    _skip_primary = (
+        _fallback_kind is not None
+        and _cooldown > 0
+        and _breaker.should_skip(_primary_kind, _cooldown)
+    )
+    if _skip_primary:
+        # Cooling down — go straight to the fallback, no primary call.
+        logger.info(
+            "brain fallback: skipping primary %s (cooling down) "
+            "-> %s task=%d",
+            _primary_kind, _fallback_kind, task.id,
+        )
+        _fb, _dropped_pin, _fb_effort = _run_fallback(
+            config, brain_config, _fallback_kind, task, req,
+            on_start=_notice("cooldown"),
+        )
+        if _fb is not None:
+            # This branch is the steady state once the breaker
+            # opens — every task for the cooldown window takes it —
+            # so flagging the row here is what keeps the *majority*
+            # of genuinely-fallback rows from being labelled
+            # otherwise. There is no primary row: the primary was
+            # never called. When construction failed instead, the
+            # primary really did run below and the flag stays off.
+            _ran_fallback = True
+            _usage_effort = _fb_effort
+        brain_result = _fb if _fb is not None else brain.execute(req)
+    else:
+        _primary_started_at = time.time()
+        _primary_started_monotonic = time.monotonic()
+        brain_result = brain.execute(req)
+        _triggers = set(TRIGGER_STOP_REASONS)
+        if config.brain.fallback_on_transient:
+            _triggers.add("transient_api_error")
+        if brain_result.stop_reason in _triggers:
+            # Open the availability breaker only for persistent
+            # conditions (usage_limit / not_found). "fallback" is
+            # excluded so tmux keeps being probed per-task (its own
+            # launch _CircuitBreaker governs when to stop).
+            #
+            # Deliberately not gated on a fallback being configured
+            # (ISSUE-362). The breaker is a shared signal: the
+            # direct callers (sleep cycle, shared blocks) read it
+            # through `primary_brain_unavailable`, and
+            # `report_brain_result` already opens it for them with
+            # no regard to a fallback. Gating it here left a
+            # deployment with no fallback without the availability
+            # record and without either operator alert, so the only
+            # notice that a primary had gone down was the failed
+            # task itself. Safe for the task path: `_skip_primary`
+            # is separately gated on a fallback existing, so an open
+            # breaker never skips a primary there is nothing to
+            # replace.
+            #
+            # The window ends at the quota's reset where one is
+            # known, not a flat `_cooldown` from the failure
+            # (ISSUE-374). `open_primary_breaker` owns that and
+            # publishes the same deadline it armed, so the
+            # scheduler's breaker and the record the web process
+            # reads describe one window.
+            _armed_window = (
+                open_primary_breaker(
+                    _primary_kind,
+                    _cooldown,
+                    brain_result.stop_reason,
+                    config=config,
+                )
+                if brain_result.stop_reason in COOLDOWN_STOP_REASONS
+                else None
+            )
+            if _armed_window is not None:
+                _fire_fallback_alert(
+                    config, task, _primary_kind, _fallback_kind,
+                    brain_result.stop_reason, _armed_window,
+                )
+            if _fallback_kind is not None:
+                logger.error(
+                    "brain fallback: task=%d primary=%s reason=%s "
+                    "-> %s",
+                    task.id, _primary_kind,
+                    brain_result.stop_reason, _fallback_kind,
+                )
+            else:
+                logger.error(
+                    "brain unavailable: task=%d primary=%s "
+                    "reason=%s, no [brain] fallback configured",
+                    task.id, _primary_kind,
+                    brain_result.stop_reason,
+                )
+            # Preserve tmux's own launch alert: its _CircuitBreaker
+            # governs fallback/not_found (which are NOT in the
+            # availability breaker's cooldown set), so its
+            # 5-consecutive-launch-failure alert still routes here.
+            if _primary_kind == "tmux_claude":
+                try:
+                    from .brain.tmux_claude import (
+                        consume_circuit_open_alert,
+                    )
+                    if consume_circuit_open_alert():
+                        from . import notifications
+                        _tail = (
+                            "falling back."
+                            if _fallback_kind is not None
+                            else "no fallback configured, so tasks "
+                                 "keep failing."
+                        )
+                        notifications.send_notification(
+                            config, task.user_id,
+                            "⚠️ tmux_claude brain circuit opened — "
+                            f"{_tail} Check the claude CLI "
+                            "version / readiness markers.",
+                            purpose="alert",
+                        )
+                except Exception:
+                    logger.debug(
+                        "tmux circuit-open alert failed", exc_info=True
+                    )
+            _fb = None
+            if _fallback_kind is not None:
+                _fb, _dropped_pin, _fb_effort = _run_fallback(
+                    config, brain_config, _fallback_kind, task,
+                    req, on_start=_notice(brain_result.stop_reason),
+                )
+            if _fb is not None:
+                # The fallback *replaces* brain_result, so without
+                # this the single persist call below would record the
+                # fallback's numbers under the primary's identity and
+                # the primary's own spend would be unrecoverable. It
+                # is captured rather than written here because
+                # `_run_fallback` takes no `conn`: opening a second
+                # one would block on the write lock for the full 30s
+                # busy timeout whenever `execute_task` was entered
+                # with an open write transaction, as the interactive
+                # path does.
+                _primary_usage_result = brain_result
+                _ran_fallback = True
+                _usage_effort = _fb_effort
+                brain_result = _fb
+        elif brain_result.success and _cooldown > 0:
+            # Primary healthy again → close the breaker.
+            _breaker.record_success(
+                _primary_kind, started_at=_primary_started_monotonic,
+            )
+            from .brain_availability import clear_unavailable
+
+            clear_unavailable(
+                config, _primary_kind, started_at=_primary_started_at,
+            )
+
+    return FailoverOutcome(
+        result=brain_result,
+        primary_usage_result=_primary_usage_result,
+        ran_fallback=_ran_fallback,
+        usage_effort=_usage_effort,
+        dropped_pin=_dropped_pin,
+        primary_kind=_primary_kind,
+        fallback_kind=_fallback_kind,
+    )
 
 
 def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
@@ -2817,14 +3112,31 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     reach. The ``repos_dir`` entry below survives the demolition and is worth a
     word, because with the derivation in place nothing can currently produce a
     configured cache root while ``repos_dir`` is set —
-    ``resolve_sandbox_cache_dir`` reads ``security.sandbox_cache_dir`` only on
-    the branch where ``repos_dir`` is *unset*, and this entry is only appended
-    when it is set. So it cannot fire today. It stays because this list is the
-    answer to one question — what must a cache never be mounted above — and
+    the derived branch is gated on the ``sandbox_cache_is_derived`` triple —
+    ``is_admin and developer.enabled and developer.repos_dir`` — while this
+    entry is appended on ``repos_dir`` alone. So it fires on exactly one shape:
+    a deployment with the path still set and the skill switched off, or a
+    non-admin, either of which takes the fallback branch and reads
+    ``security.sandbox_cache_dir`` *and* carries this entry. That is the
+    sandbox-without-developer deployment the fallback exists for, and a
+    ``sandbox_cache_dir`` at or above ``repos_dir`` there would cover every
+    user's subtree at once. It stays because this list is the answer to one
+    question — what must a cache never be mounted above — and
     ``repos_dir`` is on that list on the merits: a cache mounted over the root
     would cover every user's subtree beneath it. A future second reader of
     ``sandbox_cache_dir`` would want the entry already here rather than
     discover its absence the way ISSUE-319 was discovered.
+
+    **It stays hand-written, and a test is what the extraction bought
+    instead.** Making it a projection over the mount plan is an import cycle:
+    it is called from inside :func:`resolve_sandbox_cache_dir`, which
+    :func:`~istota.sandbox_plan.build_mount_plan` itself calls. So
+    ``tests/test_sandbox_plan_parity.py::TestTheCacheAncestorList`` asserts the
+    half that is available — every path named here is either a destination the
+    plan actually mounts, or is deliberately broader than any one bind and says
+    so there with its reason. An entry naming a path nothing mounts is
+    ISSUE-319's shape from the other side: a list entry that reads like a
+    boundary and refuses nothing.
     """
     home = Path(os.environ.get("HOME", "/tmp"))
     targets: list[Path] = [
@@ -2898,17 +3210,35 @@ def mask_protected_paths(
     *,
     user_temp_dir: Path | None = None,
     workspace_dir: Path | None = None,
+    plan_mounts: "tuple[Mount, ...] | None" = None,
 ) -> list[Path]:
     """Paths a late tmpfs mask must not shadow, for this config.
 
     A mask at or above any of these would take away something the task needs —
     its own workspace, the source tree it runs from, the venv, the mount — and
-    turn a security measure into an outage. ``build_bwrap_cmd`` builds this list
-    per task; ``doctor`` builds it without one, to answer whether the database
-    mask covers a directory on this deployment at all.
+    turn a security measure into an outage. ``build_mount_plan`` builds this
+    list per task; ``doctor`` builds it without one, to answer whether the
+    database mask covers a directory on this deployment at all.
 
-    A caller with no task omits both keyword arguments, and each omission is a
-    documented divergence rather than an equivalence.
+    **``plan_mounts`` is the per-task branch, and it is a projection rather
+    than a second derivation.** Four of the five paths below — the task
+    workspace, the source tree, the venv and the REPL workspace — are binds the
+    plan already carries, and naming them again here is exactly the two-copies
+    shape ISSUE-319 and ISSUE-320 each cost a filed bug. So
+    :func:`~istota.sandbox_plan.build_mount_plan` passes its own accumulated
+    mounts and this returns their ``Mount.protected`` entries. The Nextcloud
+    mount **root** is the fifth and is added from the config either way,
+    because it is the one protected path that is not a bind: the plan mounts
+    ``{mount}/Users/{user_id}``, ``{mount}/Talk`` and
+    ``{mount}/Channels/{token}`` and never the root itself, so projecting alone
+    would stop refusing a mask over the mount whenever none of those exists.
+
+    The mounts, not a whole ``MountPlan``, because the plan does not exist yet
+    at the point the builder needs this: the masks are part of it. Passing the
+    finished object would be a cycle wearing a nicer type.
+
+    A caller with no task omits all three keyword arguments, and each omission
+    is a documented divergence rather than an equivalence.
 
     ``user_temp_dir`` is the per-task workspace and is what the sandbox actually
     protects. Omitting it substitutes ``config.temp_dir``, the *parent* of every
@@ -2929,11 +3259,29 @@ def mask_protected_paths(
     of this one, which is why it is written down here: narrowing that blocklist
     would reopen the two-consumers gap the extraction exists to close.
     """
-    src, venv = _source_and_venv_paths()
-    temp = Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)
-    protected: list[Path] = [temp.resolve(), src, venv]
-    if workspace_dir is not None:
-        protected.append(Path(workspace_dir))
+    if plan_mounts is not None:
+        if not plan_mounts:
+            # Raised rather than falling back, for the reason
+            # `render_bwrap_argv` raises on a sourceless mount: an empty plan
+            # would quietly yield a protected list of the mount alone, and
+            # `plan_masks` would then emit a database mask over the venv and the
+            # source tree, so every task on that host would die at `execvp
+            # .../python3: No such file or directory`. Unreachable from the one
+            # caller — `/usr` is on the list before this runs — and fail-closed
+            # rather than fail-open if that ever stops being true.
+            raise ValueError(
+                "mask_protected_paths: plan_mounts is empty; a plan with no "
+                "mounts cannot have produced the paths a mask must not shadow"
+            )
+        protected = [m.source for m in plan_mounts if m.protected and m.source]
+    else:
+        src, venv = _source_and_venv_paths()
+        temp = (
+            Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)
+        )
+        protected = [temp.resolve(), src, venv]
+        if workspace_dir is not None:
+            protected.append(Path(workspace_dir))
     mount = config.nextcloud_mount_path
     if mount:
         protected.append(Path(mount).resolve())
@@ -3347,38 +3695,6 @@ def _is_relative_to(path: Path, other: Path) -> bool:
         return False
 
 
-class SandboxProfile(str, Enum):
-    """Which *outer process* a sandbox is being built for.
-
-    The mount plan is otherwise generic: every bind, mask and namespace flag
-    `build_bwrap_cmd` emits is decided by the config, the task and the user,
-    and is identical under both profiles. Two things are not, and both exist
-    only because the process bwrap execs is the `claude` CLI:
-
-    - the Claude runtime block — ``~/.local/bin``, ``~/.local/share/claude``,
-      ``~/.local/state/claude``, and the ``~/.claude`` tmpfs base with
-      ``.credentials.json``, ``settings.json`` and the ``projects``/``debug``/
-      ``todos`` directories through it;
-    - the ``custom_system_prompt_path`` bind, which is there because the CLI
-      opens that file itself, inside the namespace.
-
-    ``NATIVE`` is the profile for a sandbox around istota's own code —
-    NativeBrain's Bash tool today, its tool server next. That process makes no
-    model call from inside the namespace, so it needs neither: it reads the
-    system prompt in the daemon, and handing it the credential file means a
-    `cat` of `~/.claude/.credentials.json` comes back as a tool result to
-    whatever provider native is pointed at (ISSUE-389). Read-only stops the
-    token being *rewritten*, never read.
-
-    There is deliberately no default. A forgotten profile is a ``TypeError``
-    at the call site rather than a silent grant of the Claude mounts, which is
-    the failure this split exists to make impossible.
-    """
-
-    CLAUDE = "claude"
-    NATIVE = "native"
-
-
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -3399,610 +3715,36 @@ def build_bwrap_cmd(
     Returns the original cmd unchanged if sandbox is not available
     (non-Linux, bwrap not installed, or namespace creation denied).
 
-    ``profile`` is required and keyword-only — see ``SandboxProfile`` for what
-    it decides and why it has no default. Everything else about the plan is
-    generic, including the ordering, which is load-bearing in four places
-    (cache bind before repos bind, ``.developer`` re-bind after
-    ``user_temp_dir``, ``extra_ro_binds`` after *every* bind — its two entries
-    are a document a daemon-side OCR call names, which lives inside a
-    read-write bind that would otherwise bury it, and the task's own control
-    directory — and masks last with ``--remount-ro`` after each).
-    Omitting the Claude block under ``NATIVE`` moves none of them.
-
-    ``authorized_skills`` is the union of selected skills and skills
-    auto-authorized by credential presence — the same set
-    ``_build_network_allowlist`` keys on. It used to be ``selected_skills``, was
-    read by nothing, and is now the predicate behind the exec-socket bind.
-    *Authorized*, not *selected*, deliberately: `developer` is a menu skill with
-    no `always_include` and no `source_types`, so it reaches `selected_skills`
-    only via sticky skills, which is to say on the second turn of a conversation
-    and not the first.
-
-    ``workspace_dir`` (REPL ``--workspace cwd``) is bound RW and becomes the
-    sandbox ``--chdir`` target instead of ``user_temp_dir``. It is bounds-checked
-    against the protected-path blocklist (see ``_validate_workspace_dir``) — an
-    arbitrary RW bind would otherwise let a workspace shadow the RO ``.developer``
-    protections or reach another user's mount.
+    Three steps, and the middle one is where the policy lives.
+    :func:`~istota.sandbox_plan.build_mount_plan` decides every bind, mask and
+    namespace flag — it holds the whole of what this function used to be down
+    to the argv formatting, and its docstring documents ``profile``,
+    ``authorized_skills`` and ``workspace_dir``.
+    :func:`~istota.sandbox_plan.render_bwrap_argv` turns that answer into argv
+    and decides nothing. The split exists so the native brain's file-tool
+    roots, the cache bind's ancestor check and the mask's protected paths can
+    project one answer instead of each restating a slice of it; the argv is
+    unchanged by it, and ``tests/test_sandbox_argv_golden.py`` is what says so.
     """
     if not _bwrap_available():
         return cmd
 
-    args: list[str] = ["bwrap"]
-
-    def _ro_bind(src: Path, dest: Path | None = None) -> None:
-        original = str(src)
-        src = src.resolve()
-        if not src.exists():
-            return
-        d = str(dest.resolve()) if dest else original
-        args.extend(["--ro-bind", str(src), d])
-
-    def _bind(src: Path, dest: Path | None = None) -> None:
-        original = str(src)
-        src = src.resolve()
-        if not src.exists():
-            return
-        d = str(dest.resolve()) if dest else original
-        args.extend(["--bind", str(src), d])
-
-    def _tmpfs(path: Path) -> None:
-        args.extend(["--tmpfs", str(path.resolve())])
-
-    # --- System (RO) ---
-    _ro_bind(Path("/usr"))
-    # Merged-usr compatibility: /bin, /lib, /sbin, /lib64 are symlinks to /usr/*
-    # on Debian 13+. Create symlinks inside sandbox so both paths work.
-    for compat in ["/bin", "/lib", "/lib64", "/sbin"]:
-        p = Path(compat)
-        if p.is_symlink():
-            args.extend(["--symlink", str(p.readlink()), compat])
-        elif p.exists():
-            _ro_bind(p)
-
-    # Selective /etc binds — only what's needed for DNS, TLS, user lookup,
-    # timezone, and for the binaries in the /usr bind above to resolve.
-    #
-    # /etc/alternatives is the last of those and the least obvious: Debian ships
-    # awk, cc, vi, editor, pager, which and nc as /usr/bin symlinks into it, so
-    # binding /usr alone carries the links in and leaves every one of them
-    # dangling. The command then fails with "No such file or directory" for a
-    # binary ls shows sitting right there, inside the sandbox only. It holds
-    # nothing but symlinks back into /usr, which is already bound.
-    etc_files = [
-        "/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf",
-        "/etc/hosts", "/etc/nsswitch.conf", "/etc/ld.so.cache",
-        "/etc/localtime", "/etc/passwd", "/etc/group",
-        "/etc/alternatives",
-    ]
-    for ef in etc_files:
-        _ro_bind(Path(ef))
-
-    # --- Namespaces ---
-    args.extend(["--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
-
-    # --- Application installs (RO) ---
-    # Bind extra RO paths from config (e.g. /srv/app for co-located services)
-    for ro_path in config.security.sandbox_ro_paths:
-        _ro_bind(Path(ro_path))
-
-    # --- Python venv + source tree (RO) ---
-    # Resolve istota_home from the source tree (src/istota/ -> parent -> parent).
-    # Shared with `mask_protected_paths`, which has to name the same two paths.
-    istota_src, venv_path = _source_and_venv_paths()
-    _ro_bind(venv_path)
-    _ro_bind(istota_src)
-
-    # --- Custom system prompt (RO, this one file) --- CLAUDE only.
-    # The config directory is not in the sandbox and should not be: it holds
-    # config.toml. Everything else in it — emissaries, persona, guidelines,
-    # skill bodies — reaches the model as content the daemon read and put in
-    # the prompt. `system-prompt.md` is the exception, because the CLI opens
-    # the path itself, inside the namespace. Binding the file rather than its
-    # directory keeps config.toml out; bwrap creates the parent as a mount
-    # point and nothing else in it is visible.
-    #
-    # This dependency was met until now only by `sandbox_ro_paths =
-    # ["/srv/app"]`, the same default that exposed the databases; narrowing it
-    # to [] made every task on a custom_system_prompt install exit with
-    # "System prompt file not found".
-    #
-    # `NATIVE` skips it because nothing inside that namespace opens the path:
-    # NativeBrain reads the system prompt in the daemon and puts it on the
-    # wire itself, so the file is already prompt text by the time the sandbox
-    # is built. Which is also why `NATIVE` needs no config-directory bind at
-    # all — this was the only one.
-    if profile is SandboxProfile.CLAUDE:
-        sp_path = custom_system_prompt_path(config)
-        if sp_path is not None:
-            _ro_bind(sp_path)
-
-    # Mask other users' config files
-    users_config_dir = istota_src / "config" / "users"
-    if users_config_dir.exists():
-        _tmpfs(users_config_dir)
-
-    # --- Claude CLI runtime (selective .local binds) --- CLAUDE only.
-    #
-    # These exist because the process bwrap execs *is* the `claude` CLI: it
-    # resolves its own binary, reads its installed versions, takes a lock in
-    # state/, authenticates with the credential and writes its session JSONL
-    # back out. Under `NATIVE` the outer process is istota's own code, which
-    # does none of that — and binding the block anyway is ISSUE-389's filed
-    # bug, because `cat "$HOME/.claude/.credentials.json"` inside a native
-    # Bash call returns the subscription token as a tool result. Read-only
-    # stops it being rewritten, not read.
-    #
-    # `~/.local/bin` goes with them. On the reference deployment it holds
-    # `claude` and `gws`, and neither is reachable from a native namespace by
-    # design: `gws` is spawned host-side by the skill proxy, never in-sandbox.
-    #
-    # The `~/.claude` tmpfs goes too, and that is the one line worth pausing
-    # on, because it is a mask as well as a mount base. With the shipped
-    # `sandbox_ro_paths = []` nothing puts `$HOME` in the namespace, so under
-    # `NATIVE` the directory is absent rather than shadowed and the mask has
-    # nothing to do. Under a broadened `sandbox_ro_paths` covering `$HOME` it
-    # would have — that is the same default-deny-plus-hardening question the
-    # spec parks for `/etc/{namespace}` and the config directory, and it is
-    # deferred here for the same reason rather than overlooked.
-    home = Path(os.environ.get("HOME", "/tmp"))
-    if profile is SandboxProfile.CLAUDE:
-        # bin/ and share/claude/ are RO (binary + versions)
-        _ro_bind(home / ".local" / "bin")
-        _ro_bind(home / ".local" / "share" / "claude")
-        # state/claude/ is RW (lock files created at runtime)
-        _bind(home / ".local" / "state" / "claude")
-
-        # --- Claude auth (tmpfs base + RW credentials for OAuth refresh) ---
-        claude_dir = home / ".claude"
-        if claude_dir.exists():
-            _tmpfs(claude_dir)
-            creds = claude_dir / ".credentials.json"
-            if creds.exists():
-                _ro_bind(creds)  # RO: prevents token persistence attacks
-            settings = claude_dir / "settings.json"
-            if settings.exists():
-                _ro_bind(settings)
-            # Persist session JSONL logs and debug output across sandbox exits
-            for subdir in ["projects", "debug", "todos"]:
-                d = claude_dir / subdir
-                if d.exists():
-                    _bind(d)
-
-    # --- User workspace (RW) ---
-    _bind(user_temp_dir.resolve())
-
-    # --- REPL workspace (RW) — validated, bound, and used as the chdir target.
-    workspace_resolved: Path | None = None
-    if workspace_dir is not None:
-        workspace_resolved = _validate_workspace_dir(config, workspace_dir)
-        _bind(workspace_resolved)
-
-    # .developer/ scripts (credential-fetch, git helpers) must be read-only
-    # to prevent a compromised subprocess from replacing them to intercept
-    # credentials.  A later --ro-bind on a subdir overrides the parent --bind.
-    dev_dir = user_temp_dir.resolve() / ".developer"
-    if dev_dir.is_dir():
-        _ro_bind(dev_dir)
-
-    # --- Skill proxy socket (RO inside sandbox) ---
-    if proxy_sock and proxy_sock.exists():
-        _ro_bind(proxy_sock)
-
-    # --- Network isolation ---
-    if net_proxy_sock:
-        args.append("--unshare-net")
-        if net_proxy_sock.exists():
-            _ro_bind(net_proxy_sock)
-
-    # --- No Docker API reaches a task, and no `docker` binary either ---
-    # This used to bind the Docker CLI read-only and, at the conventional
-    # in-sandbox path /var/run/docker.sock, a per-user allowlist proxy in front
-    # of the root-equivalent socket. Both are gone, and the proxy with them.
-    #
-    # The bind was safe on its own terms — the proxy refused create, run, build,
-    # privileged and host-mount, so a task reaching it with `curl --unix-socket`
-    # could not escalate — but it was also *unconditional*, which is what makes
-    # its removal worth stating: `cp`, `restart`, `inspect` and the raw HTTP
-    # surface were reachable from every task of every user on a devbox
-    # deployment, including tasks built from email, feeds and fetched pages.
-    #
-    # Nothing in a build needs it now. Project code reaches the container over
-    # the exec transport, whose socket is bound above and gated on
-    # `"developer" in authorized_skills` — an arbitrary-command channel into a
-    # permissive-egress container is not an allowlist, so unlike the proxy's it
-    # cannot be ungated. The devbox skill's one remaining Docker verb, `reset`,
-    # runs host-side in the skill CLI process and never wanted a bind.
-    #
-    # **The socket is what makes this true, not the missing CLI bind.** `/usr`
-    # is `--ro-bind`ed unconditionally a little above, so `/usr/bin/docker` —
-    # which is exactly `devbox.docker_cli`'s default — is still in the namespace
-    # on any host that installs the client. The explicit bind was redundant
-    # there and is gone with the rest; what a task cannot do is reach a daemon,
-    # because no socket is bound at any path and no `DOCKER_HOST` is exported.
-
-    # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
-    mount = config.nextcloud_mount_path
-    if mount:
-        mount = mount.resolve()
-        user_dir = mount / "Users" / task.user_id
-        if user_dir.exists():
-            _bind(user_dir)
-        # Talk attachments directory (flat, shared across conversations)
-        talk_dir = mount / "Talk"
-        if talk_dir.exists():
-            _ro_bind(talk_dir)
-        if task.conversation_token:
-            channel_dir = mount / "Channels" / task.conversation_token
-            if channel_dir.exists():
-                _bind(channel_dir)
-
-    # --- Huggingface model cache (RO) ---
-    hf_cache = home / ".cache" / "huggingface"
-    if hf_cache.exists():
-        _ro_bind(hf_cache)
-
-    # --- Package-manager cache (RW) ---
-    # Not gated on admin or on the developer skill: any task that runs a
-    # package manager writes a cache, and without this the write lands on
-    # bwrap's root tmpfs. `execute_task` points UV_CACHE_DIR and XDG_CACHE_HOME
-    # at whatever this returns, so the bind and the environment cannot disagree.
-    #
-    # One user's own directory, never a shared root — see
-    # `resolve_sandbox_cache_dir` for why a shared cache is a cross-user code
-    # path. This is emitted late, after the `.developer` read-only re-bind and
-    # the huggingface bind, so a destination *above* either would cover it;
-    # `_sandbox_bind_targets` is what refuses that. Still before the masks,
-    # which stay last.
-    #
-    # The bind stays *before* the developer repos bind, deliberately. With
-    # `developer.repos_dir` set the cache is `{repos_dir}/{user_id}/`
-    # `.package-caches`, so that later bind is an ancestor and covers this one,
-    # which is what puts the cache and a worktree's venv on a single mount and
-    # is the only shape where uv can hardlink rather than copy — moving this
-    # bind after it makes the cache its own mount again and costs the full byte
-    # copy. What that covering exposes is the rest of *this* user's subtree,
-    # which is already bound RW for exactly these tasks; there is no other
-    # user's cache in the namespace to mask, which is what retired the ISSUE-319
-    # machinery rather than merely satisfying it.
-    #
-    # **The `--disable-userns` precondition this bind used to carry is gone,
-    # and ISSUE-320 asked whether a symlink swap came back with it.** Measured
-    # on a real kernel
-    # (`tests/linux/test_sandbox_cache_dir.py::TestTheCacheBindSymlinkRace`).
-    # The window is real, it was reachable, and what closed it is the gate on
-    # `sandbox_cache_is_derived` rather than anything about the flag.
-    #
-    # **The window is real.** `_bind` emits `src.resolve()` as the source and
-    # the path *as written* as the destination. On a real directory `resolve()`
-    # returns the same string, so the argv source is the written name — and
-    # bwrap's `mount` walks that name again, in the kernel, after Python is
-    # done with it. A symlink planted in between is followed: measured binding
-    # another user's subtree read-write, on the shape with no covering bind.
-    # (There is a second, earlier window between `resolve_sandbox_cache_dir`
-    # returning and `_bind`'s own `resolve()`; that one is closed by Python
-    # resolving, not by the kernel, and it is much narrower.)
-    #
-    # **What makes it unreachable is that the derived cache and the covering
-    # bind now have one gate.** `sandbox_cache_is_derived` is `is_admin and
-    # developer.enabled and developer.repos_dir` — exactly the condition the
-    # repos bind below is emitted on. So wherever this bind's source sits in a
-    # model-writable parent, the repos bind is emitted after it, is an ancestor
-    # of it, and lands on top: the swapped mount is buried and what the sandbox
-    # sees at the cache path is the host symlink, dangling. Before that gate
-    # matched, a *non-admin* on a devbox deployment derived a cache inside
-    # `{repos_dir}/{user_id}` — which their own container mounts read-write —
-    # and took this bind with nothing above it. That was ISSUE-320 holding.
-    #
-    # **The entry's account of what the flag was doing is wrong**, and it is
-    # worth not re-deriving: passing `--disable-userns` does not pin this
-    # directory as a mountpoint. bwrap mounts inside its own mount namespace,
-    # so the host directory never becomes one, and `rename` on it succeeds
-    # while the bind is live — measured on a bwrap without the flag, which is
-    # what the linux tier runs; the flag-on arm of that measurement skips there
-    # and runs where bwrap has it. The flag never closed this window, so its
-    # removal did not open it.
-    #
-    # The ordering below is therefore load-bearing for a second reason beyond
-    # `link(2)`: moving this bind after the repos bind costs both. The linux
-    # tier is what detects that; `tests/test_sandbox.py`'s bind-order assertion
-    # names this as its second reason.
-    cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
-    if cache_dir is not None:
-        _bind(cache_dir)
-
-    # --- Developer repos (RW) ---
-    #
-    # The task's own subtree, never the shared root — see `get_user_repos_dir`.
-    # Created by the developer skill's `setup_env`, which runs before this.
-    #
-    # The `exists()` below is the guard that stops a user who has never run a
-    # developer task from having the root stand in, and on this branch it is
-    # again not catching anything: `resolve_sandbox_cache_dir` runs a dozen
-    # lines above and creates `{repos_dir}/{user_id}` with `parents=True`
-    # whenever `sandbox_cache_is_derived` holds — which is this same condition,
-    # since ISSUE-320 made the two gates one. So wherever this bind is emitted
-    # the directory has just been created, and `setup_env` had already created
-    # it for exactly these tasks besides. Kept because the two call sites are
-    # far apart and the coupling is not local; the next person to move that
-    # `mkdir` should find this note rather than a comment claiming a check that
-    # does something.
-    if is_admin and config.developer.enabled:
-        repos = get_user_repos_dir(config, task.user_id)
-        if repos is not None and repos.exists():
-            _bind(repos)
-
-    # --- The devbox exec socket (RW) ---
-    #
-    # Gated on `"developer" in authorized_skills`, byte for byte the predicate
-    # at `_build_network_allowlist` that already decides whether this task gets
-    # the package registries and the forge. The exec socket is bound exactly
-    # where the package registries are allowed.
-    #
-    # **The gate is about the mechanism, not caution.** The retired docker
-    # socket proxy this replaced was bound into every sandbox ungated, and that
-    # was defensible because it was an allowlist: it refused create, run, build,
-    # privileged and host-mount, so even an untrusted-content task reaching it
-    # with `curl --unix-socket` could not escalate. This is the opposite shape —
-    # an unauthenticated arbitrary-command channel into a container with
-    # permissive egress — so binding it into every task's sandbox would hand an
-    # email, feed or browse task a route straight around
-    # `_build_network_allowlist`, which is per task and skill-scoped. Nothing
-    # binds a Docker socket at any path now; the contrast is why this one is
-    # gated, not a description of a bind that still exists.
-    #
-    # The *directory*, not the socket file: a server restart unlinks and
-    # recreates the inode, and a bind of the file itself strands this side
-    # against a dead target. Only the per-user subdirectory — the parent holds
-    # every user's socket, and that is arbitrary command execution against
-    # another user's repositories.
-    if (
-        istota_config.devbox_container_backend(config)
-        and "developer" in (authorized_skills or ())
-    ):
-        exec_dir = istota_config.exec_socket_dir(config, task.user_id)
-        if exec_dir is not None and exec_dir.is_dir():
-            _bind(exec_dir)
-
-    # --- Per-resource mounts ---
-    if mount:
-        for r in user_resources:
-            if not r.resource_path:
-                continue
-            rpath = (mount / r.resource_path.lstrip("/")).resolve()
-            if not rpath.exists():
-                continue
-            # Skip if already covered by user dir bind
-            user_dir = mount / "Users" / task.user_id
-            try:
-                rpath.relative_to(user_dir.resolve())
-                continue  # Already inside user dir
-            except ValueError:
-                pass
-            if r.permissions == "readwrite":
-                _bind(rpath)
-            else:
-                _ro_bind(rpath)
-
-    # --- Extra RO binds (e.g. service sockets for same-host APIs, and the
-    # document a task-less OCR call reads) ---
-    #
-    # **Last of the binds, and that is the point.** bwrap applies operations in
-    # argv order and the later mount wins, so a caller asking for read-only
-    # gets read-only whatever else covers the same path. Emitted higher up —
-    # where this block used to sit, between the `user_temp_dir` bind and the
-    # Nextcloud mount — it was buried by any later bind of an ancestor, and a
-    # bloodwork panel's upload lives under `{mount}/Users/{user_id}`, which is
-    # bound read-write. So the one caller that names a document
-    # (`build_daemon_sandbox`, ISSUE-397) got read-write on its main path while
-    # every comment said otherwise, and a test asserting only that the
-    # `--ro-bind` was emitted passed throughout. The assertion has to be about
-    # argv order: `tests/test_brain_request_confinement.py::
-    # test_the_document_stays_read_only_under_a_later_bind`.
-    #
-    # It has one task-path entry now, and being last is what that entry wants
-    # too. `execute_task` appends the task's own control directory,
-    # `{temp_dir}/.control/{user_id}/task_{id}` — both prompt halves, the
-    # briefing metadata and the prepared image renditions, everything the
-    # daemon authors for this task. It is a sibling of `user_temp_dir` rather
-    # than a child, so nothing binds over it today; being after every bind is
-    # what keeps that true of any bind added later. (The entry used to be one
-    # file *inside* the read-write `user_temp_dir` bind, where a later
-    # read-only bind was the only thing that made it read-only at all. That
-    # ordering requirement is gone with the file, and the loop stays where it
-    # is because the property is worth having unconditionally. This comment
-    # used to say the loop was free to move because the list was always empty
-    # on the task path. It was true when written and stopped being true in the
-    # same release.)
-    #
-    # A missing entry is skipped rather than raising, because bwrap fails the
-    # whole namespace on a bind whose source is absent — one cleanup race would
-    # otherwise fail every task instead of one. It is logged, because the entry
-    # is a boundary and the two callers lose different things by it. The OCR
-    # document sits inside a read-write bind, so a skipped entry leaves the
-    # writable copy in the namespace and nothing else says so. The control
-    # directory is bound by nothing else, so a skipped entry leaves the path
-    # *absent*: the CLI then exits at `--append-system-prompt-file` and a
-    # `Read` of a prepared attachment gets ENOENT. Fail-closed either way,
-    # which is why the message names both rather than picking one.
-    for path in (extra_ro_binds or []):
-        if path.exists():
-            _ro_bind(path)
-        else:
-            logger.warning(
-                "sandbox: extra read-only bind %s does not exist; the path is "
-                "left as its parent bind has it, or absent from the namespace "
-                "entirely where nothing else binds it", path,
-            )
-
-    # --- Database masks (must be the LAST mount operations) ---
-    # No SQLite file the daemon owns is readable from inside the sandbox, for
-    # admins or anyone else. Reads and writes go through skill CLIs, which the
-    # proxy runs host-side scoped by ISTOTA_USER_ID.
-    #
-    # These are masks rather than "just don't bind it" because not binding was
-    # never sufficient and the gap was invisible: `module_data_dir` defaults
-    # under `{db_path.parent}`, the reference deployment puts that under
-    # `istota_home`, and `sandbox_ro_paths` defaulted to the `/srv/app` that
-    # contains it — so one RO bind that mentions no database exposed the
-    # framework DB, its live -wal/-shm, every user's health/money/location/
-    # feeds DB, the local DB backups and the browser profile. An empty tmpfs
-    # over the directories shadows whatever earlier binds put there, because
-    # bwrap applies operations in argv order and these are last. Keep them last.
-    # `--remount-ro` on each mask is part of the same operation — see `_mask_dir`
-    # for why an empty *writable* tmpfs makes the dead end look like a corrupt
-    # database — and is the one thing that may follow a mask, since it can only
-    # take permissions away.
-    #
-    # It is a mask, not a revocation: with `kernel.unprivileged_userns_clone`
-    # on (bwrap needs it) a process can `unshare -Urm` and umount a tmpfs to
-    # reveal what was underneath, which is why `--disable-userns` is passed
-    # where bwrap supports it and why `sandbox_ro_paths` should stay narrow.
-    # With nothing bound underneath — the shipped default — there is nothing to
-    # reveal either way.
-    #
-    # Paths the sandbox must keep. A mask at or above any of these would
-    # shadow something the task needs (its own workspace, the source tree it
-    # runs from), turning a security measure into an outage; the standalone
-    # layout puts db_path beside the workspace, so this is reachable by
-    # configuration rather than only by mistake.
-    _mask_protected: list[Path] = mask_protected_paths(
-        config, user_temp_dir=user_temp_dir, workspace_dir=workspace_resolved,
+    plan = build_mount_plan(
+        config,
+        task,
+        is_admin,
+        user_resources,
+        user_temp_dir,
+        profile=profile,
+        proxy_sock=proxy_sock,
+        net_proxy_sock=net_proxy_sock,
+        extra_ro_binds=extra_ro_binds,
+        authorized_skills=authorized_skills,
+        workspace_dir=workspace_dir,
     )
-    _masked: list[Path] = []
-
-    def _mask_dir(target: Path) -> bool:
-        """Cover ``target`` with an empty, read-only tmpfs, at every name it
-        answers to. False if any name went uncovered.
-
-        Both the resolved path and the path as written: `_ro_bind` uses the
-        *unresolved* string as its sandbox destination, so under a symlinked
-        deployment root (`/srv` -> `/realstore`) a bind lands at `/srv/app`
-        while a resolved-only mask lands at `/realstore/app/...` — a path not
-        in the namespace at all, leaving the databases readable at the name the
-        model would actually use.
-
-        Read-only because a writable mask makes the dead end lie. `sqlite3
-        {db_dir}/istota.db "select …"` on a writable tmpfs *creates* the file
-        and then reports `no such table` — which reads as a missing schema or a
-        corrupt database, sends the model hunting, and leaves a zero-byte
-        `istota.db` sitting in the directory for the rest of the task. On a
-        read-only mask the same command fails at open, which is the truth: the
-        file is not in this namespace. It also means nothing a task writes
-        under a database directory can survive to be mistaken for a database.
-
-        Read-only makes a mask *under* an existing mask fatal rather than
-        merely redundant: bwrap has to `mkdir` the second mountpoint on the
-        first mask's tmpfs, gets EROFS, and exits before running anything — so
-        a second mask nested in the first would fail every task rather than
-        weakening one directory. Already-covered candidates are therefore
-        skipped here, where every mask can see the others, rather than by each
-        caller checking one path against one other.
-        """
-        covered = True
-        candidates: list[Path] = []
-        for candidate in (target, target.resolve()):
-            if candidate not in candidates:
-                candidates.append(candidate)
-        for candidate in candidates:
-            shadowed = mask_shadowed_by(candidate, _mask_protected)
-            if shadowed:
-                logger.error(
-                    "Not masking %s: it contains paths the sandbox needs (%s). "
-                    "Move db_path/module_data_dir out from above the workspace "
-                    "and the source tree — the databases are exposed until you do.",
-                    candidate, ", ".join(str(p) for p in shadowed),
-                )
-                covered = False
-                continue
-            if any(candidate.is_relative_to(m) for m in _masked):
-                # Covered by an earlier mask, which is the same guarantee by a
-                # different mount — not a skip the caller needs to hear about.
-                continue
-            args.extend(["--tmpfs", str(candidate)])
-            if _bwrap_supports_remount_ro():
-                # After the tmpfs, never before: --remount-ro acts on whatever
-                # is mounted at that path at the time bwrap reaches it, and
-                # before the tmpfs that is the host directory.
-                args.extend(["--remount-ro", str(candidate)])
-            _masked.append(candidate)
-        return covered
-
-    if config.db_path:
-        db_dir = Path(config.db_path).parent
-        _mask_dir(db_dir)
-        try:
-            module_root = config.module_db_root()
-        except ValueError:
-            # module_data_dir is under the Nextcloud mount — a misconfiguration
-            # module resolution fails loudly on. Refusing to build the sandbox
-            # would turn it into "every task fails", so mask what we can and
-            # let the module path own the error. The mount root is bound only
-            # per-user, so the misplaced root isn't broadly reachable anyway.
-            logger.warning(
-                "module_data_dir is under the Nextcloud mount; skipping its "
-                "sandbox mask (module resolution will raise on use)",
-            )
-        else:
-            # No "is it already under db_dir?" test here: `_mask_dir` skips a
-            # candidate any earlier mask already covers, and it does it against
-            # every name each mask answers to. The check that used to live here
-            # compared one resolved path against one other, and it also skipped
-            # the module root when the db_dir mask had been *refused* — leaving
-            # it unmasked for want of a cover that was never mounted.
-            _mask_dir(module_root)
-
-    if _bwrap_supports_disable_userns():
-        # Both, or neither: bwrap exits 1 on `--disable-userns` without
-        # `--unshare-user` ("--disable-userns requires --unshare-user"), which
-        # is why this flag never once reached a real sandbox — the probe had
-        # the same gap and answered "unsupported" on every host. Unprivileged
-        # bwrap unshares the user namespace regardless, so on the supported
-        # deployment the companion flag only makes the request explicit.
-        args.extend(["--unshare-user", "--disable-userns"])
-    elif _bwrap_requires_unshare_user():
-        # Not hardening, unlike the branch above: on this host it is what makes
-        # bwrap run at all. `_bwrap_available`'s plain probe failed and its
-        # `--unshare-user` probe succeeded, which happens as uid 0 with a
-        # non-setuid bwrap — bwrap only forces the user namespace on itself
-        # when it is neither. The real argv has to carry the flag the probe was
-        # answered with, or the daemon would report a working sandbox and then
-        # build one that cannot start.
-        args.append("--unshare-user")
-
-    # --- Lifecycle ---
-    chdir_target = workspace_resolved or user_temp_dir.resolve()
-    args.extend(["--die-with-parent", "--chdir", str(chdir_target)])
-    args.append("--")
-
-    if net_proxy_sock:
-        # Wrap the command in a shell that starts the TCP-to-Unix bridge as a
-        # background process, then execs the original command with HTTPS_PROXY
-        # pointed at the bridge. "$@" preserves the original argv from cmd.
-        #
-        # The bridge's stdin is redirected from /dev/null so it cannot share
-        # (and accidentally consume) the prompt that the brain pipes to the
-        # exec'd command's stdin — the read end is otherwise inherited by both.
-        #
-        # No `sleep` before exec: the bridge only needs to be listening before
-        # the command opens a *network* connection, which happens well after
-        # the command starts and reads its stdin prompt; the bridge's bind()
-        # /listen() completes within a few ms of Python startup. On the rare
-        # cold-start race the command's own connection retry recovers.
-        from .network_proxy import BRIDGE_PORT
-        bridge_path = str(user_temp_dir.resolve() / ".developer" / "net-bridge")
-        sock_path = str(net_proxy_sock)
-        shell_cmd = (
-            f"python3 {bridge_path} {sock_path} {BRIDGE_PORT} </dev/null & "
-            f"exec env "
-            f"HTTPS_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
-            f"HTTP_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
-            f'NO_PROXY= "$@"'
-        )
-        args.extend(["/bin/sh", "-c", shell_cmd, "sh"] + cmd)
-    else:
-        args.extend(cmd)
-
-    return args
+    return render_bwrap_argv(
+        plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
+    )
 
 
 def native_fs_confinement_active(config: Config) -> bool:
@@ -4047,25 +3789,43 @@ def native_fs_roots(
     than ENOENT, and it is the answer on the unsandboxed shapes too — macOS,
     the standalone install, a Docker stack without the two container settings —
     where ``build_bwrap_cmd`` hands the command back unwrapped and this list is
-    once again the only confinement there is. So it still mirrors
+    once again the only confinement there is. So it still names
     ``build_bwrap_cmd``'s user-data binds exactly (not the system/venv binds,
     which are irrelevant to the file tools): writable roots are the RW binds,
     read roots additionally the RO binds (Talk attachments, read-only
-    resources). No database root of any kind — ``build_bwrap_cmd`` masks those,
-    and these tools have no masks.
+    resources) — with one qualification the projection added: a read-only bind
+    nested inside an earlier read-write one is a *write-deny* root instead,
+    since that is what bwrap's ordering already makes it, so it is reachable
+    for reading through the root containing it rather than named on its own
+    (rule 2 in ``project_fs_roots``). No database root of any kind — the
+    sandbox masks those, and these tools have no masks.
 
-    Drifting from the binds is therefore no longer a boundary failure and is
-    still a bug: on a sandboxed host the two would disagree about which error a
-    path gets, and on an unsandboxed one the drift is the whole policy.
+    **It no longer restates them.** This function builds the same
+    :class:`~istota.sandbox_plan.MountPlan` ``build_bwrap_cmd`` renders and
+    hands it to :func:`~istota.sandbox_plan.project_fs_roots`, which is where
+    the four derivation rules live. A bind added to the plan reaches both
+    consumers or neither, which is what ISSUE-319 and ISSUE-320 each cost a
+    filed bug to discover. The plan is built with ``profile=NATIVE`` — the
+    profile decides only the Claude runtime block and the custom system prompt
+    bind, none of which is user data, so the roots would be the same either
+    way; naming the right one keeps the plan honest for anything that reads it
+    later.
 
     The third element carries the RO carve-outs bwrap gets by re-binding a
     path read-only *after* the RW bind that would otherwise cover it.
     Containment alone cannot express those, so they are returned separately and
-    threaded onto ``ToolEnv.write_denied_roots``. Two entries today.
+    threaded onto ``ToolEnv.write_denied_roots``. Two *named* entries, plus
+    every read-only user-data mount nested inside an earlier read-write one,
+    which ``project_fs_roots`` derives rather than naming (rule 2 there).
+    The two named ones:
     ``.developer`` — the credential-fetch helper and the git credential helpers
     — which the claude_code path has protected since the RO re-bind was added
     and which this function silently left writable until it grew this return
-    value. And ``control_dir``, the task's own
+    value. It is carried at the path *as written*, matching the bind, which is
+    the same value this function has always returned; note that it is not the
+    value enforcement compares against, since ``ToolEnv`` realpaths every deny
+    root, so a symlink planted at that name relocates the denial. That gap
+    predates the projection and is not closed here. And ``control_dir``, the task's own
     ``{temp_dir}/.control/{user_id}/task_{id}``: every file the daemon authors
     for this task, which is to say both prompt halves, the briefing metadata
     and the prepared image renditions.
@@ -4136,132 +3896,41 @@ def native_fs_roots(
     and on ``_validate_workspace_dir`` refusing a workspace that would bind one
     back in. Those two guards, not this function, are what to check if a
     deployment ever puts a database under ``temp_dir`` or ``repos_dir``.
+
+    **A rejected REPL workspace costs the workspace and nothing else, which is
+    the deliberate asymmetry with ``build_bwrap_cmd``.** There a workspace the
+    blocklist refuses fails the task, because the alternative is a namespace
+    that silently lacks the directory the user asked to work in. Here the roots
+    are an error-message layer over the same plan, so the answer is to log and
+    carry on without it. The validation therefore runs *before* the build
+    rather than as a ``try`` around it: catching there would either lose every
+    other root or mean building the plan a second time, and the plan build is
+    not free — ``resolve_sandbox_cache_dir`` creates a directory and
+    ``plan_masks`` logs a refused mask, both of which would then happen twice
+    per task. It is also the narrower catch, which matters more: a ``ValueError``
+    from anywhere else in the build (``Path.resolve`` raises one on an embedded
+    NUL, and a ``user_resources`` row is row data) still propagates instead of
+    being reported as a blocklist rejection that never happened.
     """
-    write: list[Path] = []
-    read_only: list[Path] = []
-    write_denied: list[Path] = []
-
-    def _add(target: list[Path], p: Path | None) -> None:
-        if p is None:
-            return
-        rp = p.resolve()
-        if rp.exists() and rp not in target:
-            target.append(rp)
-
-    # User workspace (RW) — always present (mkdir'd by the caller).
-    _add(write, user_temp_dir)
-
-    # .developer/ (RO carve-out inside the workspace above). Mirrors the
-    # _ro_bind in build_bwrap_cmd: the scripts in here hold the credential
-    # helpers, so a writable copy is a credential-interception path.
-    #
-    # Appended directly rather than through _add, which skips a path that does
-    # not exist yet. build_bwrap_cmd re-checks `dev_dir.is_dir()` on every Bash
-    # invocation, while this list is built once per task — so an existence gate
-    # here would leave a window where a .developer created mid-run is read-only
-    # for Bash and writable for the file tools. A deny root that never comes
-    # into existence costs one failed comparison.
-    write_denied.append(user_temp_dir.resolve() / ".developer")
-
-    # The task control directory. Mirrors the `extra_ro_binds` entry
-    # `execute_task` passes to `build_bwrap_cmd`, and takes two entries here
-    # rather than one — see the docstring for why `read_only` and
-    # `write_denied` are enforced under different conditions.
-    #
-    # Both appended directly rather than through `_add`, for the reason
-    # `.developer` is: `_add` skips a path that does not exist, and a deny root
-    # that only appears once the directory does would leave a window in which
-    # it is writable. `ensure_task_control_dir` runs before this is called, so
-    # the window is theoretical — which is exactly when it is cheapest to
-    # close. A read root that never comes into existence costs one failed
-    # comparison.
-    if control_dir is not None:
-        _control_real = control_dir.resolve()
-        write_denied.append(_control_real)
-        if _control_real not in read_only:
-            read_only.append(_control_real)
-
-    # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
         try:
-            _add(write, _validate_workspace_dir(config, workspace_dir))
+            _validate_workspace_dir(config, workspace_dir)
         except ValueError:
-            logger.warning("native_fs_roots: workspace %s rejected by blocklist", workspace_dir)
+            logger.warning(
+                "native_fs_roots: workspace %s rejected by blocklist", workspace_dir,
+            )
+            workspace_dir = None
 
-    mount = config.nextcloud_mount_path
-    user_dir = None
-    if mount:
-        mount = mount.resolve()
-        user_dir = mount / "Users" / task.user_id
-        _add(write, user_dir)
-        _add(read_only, mount / "Talk")  # attachments, RO
-        if task.conversation_token:
-            _add(write, mount / "Channels" / task.conversation_token)
-
-    # No database root of any kind. The file tools are the native brain's
-    # stand-in for the bwrap binds, and bwrap no longer exposes the framework
-    # DB or the module DBs to anyone — see the mask block in build_bwrap_cmd.
-
-    # Package-manager cache (RW) — mirrors the bwrap bind. `_add` skips a path
-    # that does not exist, and `resolve_sandbox_cache_dir` creates it, so the
-    # two agree.
-    #
-    # **Added only on the fallback branch, and the asymmetry with bwrap is the
-    # point (ISSUE-320).** On the derived branch the cache is
-    # `{repos_dir}/{user_id}/.package-caches`, which is *inside* the repos write
-    # root added below — so adding it here is redundant, and redundant is not
-    # free: `ToolEnv.__post_init__` realpaths every write root, so a symlink
-    # planted at `.package-caches` after `resolve_sandbox_cache_dir` validated
-    # the name would make the link's *target* a write root, and the file tools
-    # would then write wherever it pointed. Under bwrap the same swap is
-    # covered by the repos bind landing on top of the cache bind; there are no
-    # mounts here, so nothing lands on top of anything and the ordering
-    # argument has no counterpart. The repos root below is realpathed the same
-    # way, and is safe for a different reason: its parent is
-    # `developer.repos_dir`, which no task and no devbox can write.
-    #
-    # The fallback root is operator-owned, outside `repos_dir`, and bound into
-    # no sandbox, so there is no writer to race there.
-    # Called unconditionally, and only the `_add` is gated: the resolver
-    # *creates* the cache directory, and that side effect is what the rest of
-    # the task path expects to have happened by now. Folding the call into the
-    # branch would have skipped creating it on exactly the shape that needs it.
-    _native_cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
-    if not sandbox_cache_is_derived(config, task.user_id):
-        _add(write, _native_cache_dir)
-
-    # No deny root for another user's cache, and its absence is the point.
-    # ISSUE-319 needed one here because the cache root was shared and sat inside
-    # a write root, so the bwrap sibling masks were a namespace-only property
-    # the native brain's in-process file tools walked straight past. The cache
-    # is derived inside this user's own subtree now — there is no other user's
-    # cache under any root this function hands out, so there is nothing to deny
-    # and no second seam to keep in step with a first.
-
-    # Developer repos (RW, admin only). The task's own subtree, mirroring the
-    # bind in `build_bwrap_cmd` — another user's is not a write root here for
-    # the same reason it is not in the namespace there.
-    if is_admin and config.developer.enabled:
-        _add(write, get_user_repos_dir(config, task.user_id))
-
-    # Per-resource mounts (RW/RO) not already covered by the user dir.
-    if mount:
-        for r in user_resources:
-            if not r.resource_path:
-                continue
-            rpath = (mount / r.resource_path.lstrip("/")).resolve()
-            if not rpath.exists():
-                continue
-            if user_dir is not None:
-                try:
-                    rpath.relative_to(user_dir.resolve())
-                    continue  # already inside the user dir
-                except ValueError:
-                    pass
-            _add(write if r.permissions == "readwrite" else read_only, rpath)
-
-    read_roots = list(dict.fromkeys(write + read_only))
-    return read_roots, write, write_denied
+    plan = build_mount_plan(
+        config,
+        task,
+        is_admin,
+        user_resources,
+        user_temp_dir,
+        profile=SandboxProfile.NATIVE,
+        workspace_dir=workspace_dir,
+    )
+    return project_fs_roots(plan, control_dir)
 
 
 def _detect_notification_reply(
@@ -6643,330 +6312,36 @@ def execute_task(
         # a first run is attempt 1, as `task_usage.attempt_seq` is.
         task_attempt = task.attempt_count + 1
 
-        env = build_clean_env(config)
-        env.update({
-            "ISTOTA_TASK_ID": str(task.id),
-            # `tasks transcript` reads this to decide which log is the one being
-            # written right now. The row it used to read that from is bumped by
-            # the liveness reaper underneath a worker the reaper wrongly
-            # believes is dead, which handed that worker its own live
-            # transcript (ISSUE-377). Withheld from the model — see
-            # `_EXECUTOR_PROXY_ONLY_VARS`.
-            "ISTOTA_TASK_ATTEMPT": str(task_attempt),
-            "ISTOTA_USER_ID": task.user_id,
-            "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
-            "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
-            "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
-            "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
-        })
-
-        # NEXTCLOUD_MOUNT_PATH is the real mount root for everyone. Every
-        # consumer (the memory / memory_search skill CLIs, the schedules /
-        # reminders skill docs) builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/
-        # <uid>/…`, so a "scoped" non-admin value (real/Users/<uid>) doubled the
-        # Users/<uid> segment — a non-admin's USER.md write then landed at
-        # real/Users/<uid>/Users/<uid>/… , a phantom path the auto-loader never
-        # reads back (silent memory loss). Per-user filesystem isolation is
-        # enforced by the bwrap bind (build_bwrap_cmd binds only the user's own
-        # Users/<uid> dir, for admin and non-admin alike) and the CLIs self-scope
-        # by ISTOTA_USER_ID, so the real root is safe here; the prompt still
-        # shows non-admins their scoped path.
-        env["NEXTCLOUD_MOUNT_PATH"] = (
-            str(config.nextcloud_mount_path) if config.nextcloud_mount_path else ""
-        )
-        # Set for every user, admin or not, and then split out of Claude's env
-        # into the proxy's below. It used to be admin-gated, which was never a
-        # real boundary — the path is fixed and derivable from
-        # ISTOTA_CONFIG_PATH — while it *did* break every framework-DB skill CLI
-        # for non-admins (`tasks status`, `memory_search`, `kv` reads all
-        # self-scope by ISTOTA_USER_ID and returned an error instead of that
-        # user's own rows). The boundary is the SQL, plus the fact that the file
-        # is not in the sandbox at all.
-        if config.db_path:
-            env["ISTOTA_DB_PATH"] = str(config.db_path)
-
-        # Browser container credentials
-        if config.browser.enabled:
-            env["BROWSER_API_URL"] = config.browser.api_url
-            env["BROWSER_VNC_URL"] = config.browser.vnc_url
-
-        # Devbox: the agent's persistent dev container. The skill CLI speaks the
-        # exec transport to a server inside it; only `reset` still runs
-        # `docker`, host-side in the CLI's own process.
+        # The model's environment, the three-way credential split behind it,
+        # the two proxy objects and the sandbox's read-only bind list — all in
+        # `task_env`. Three orderings inside it are load-bearing (the proxy
+        # snapshot before `ISTOTA_SANDBOXED`, proxy-only before credentials,
+        # the PATH-prepend key consumed after the hook merge) and its docstring
+        # is where they are written down.
         #
-        # No socket path is exported, and that is load-bearing rather than
-        # tidiness (ISSUE-284, and Design 5 of the devbox transport). This
-        # environment is the *model's*, so a path named here is a path the model
-        # can replace: `ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine` would buy an `ok`
-        # acknowledgement and a fabricated exit 0 from a socket the model wrote.
-        # The CLI reads its socket from the config file instead, in a host-side
-        # process the model cannot reach.
-        #
-        # `ISTOTA_DEVBOX_EXEC_TIMEOUT` went with the 300-second default it
-        # carried: the transport imposes no timeout, the task's own budget
-        # governs, and a caller wanting a kill passes `--timeout`.
-        if config.devbox.enabled:
-            env["ISTOTA_DEVBOX_CONTAINER"] = (
-                f"{config.devbox.container_prefix}{task.user_id}"
-            )
-            env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
-            env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
-                config.devbox.max_output_bytes
-            )
-
-        # Declarative env vars from skill manifests
-        from .skills._env import (
-            EnvContext,
-            build_identity_env,
-            build_skill_env,
-            dispatch_setup_env_hooks,
-        )
-        env_ctx = EnvContext(
-            config=config,
-            task=task,
+        # Both proxies come back *constructed and not entered*. They are
+        # entered in the `ExitStack` below, which has to wrap the primary call,
+        # the reroute and the fallback call alike.
+        _runtime = task_env.build_task_runtime(
+            config,
+            task,
+            user_temp_dir=Path(user_temp_dir),
+            control_dir=control_dir,
+            task_attempt=task_attempt,
+            selected_skills=selected_skills,
+            skill_index=skill_index,
+            is_admin=is_admin,
             user_resources=user_resources,
             user_config=user_config,
-            user_temp_dir=Path(user_temp_dir),
-            is_admin=is_admin,
-            discovered_calendars=list(discovered_calendars or []),
+            discovered_calendars=discovered_calendars,
         )
-        # Phase 3: resolve manifest env vars for ``authorized_skills`` —
-        # the union of selected skills and skills auto-authorized via
-        # credential presence. ``derive_authorized_skills`` walks each
-        # skill's sensitive specs with ``fallbacks_disabled=True`` so
-        # operator-set EnvironmentFile fallbacks cannot fan out to per-
-        # user auto-authorization. Resolution itself (below) honors
-        # fallbacks for the value path.
-        # setup_env hooks self-gate; the dispatcher iterates the full
-        # skill_index regardless of the argument it's given. Dispatched
-        # *before* authorization because a hook-sourced credential is the
-        # only auto-auth signal a ``source="setup_env"`` skill has.
-        hook_env = dispatch_setup_env_hooks(selected_skills, skill_index, env_ctx)
-        authorized_skills = derive_authorized_skills(
-            selected_skills, skill_index, env_ctx, hook_env=hook_env,
-        )
-        skill_env = build_skill_env(authorized_skills, skill_index, env_ctx)
-        # A menu-loaded skill (the model self-selects it at runtime via
-        # ``skills show``) is neither eagerly selected nor credential-
-        # authorized, so the call above skips it. Its pure-identity vars
-        # (``source="user_id"``, e.g. ``MONEY_USER`` / ``FEEDS_USER``) are
-        # non-sensitive and required for the skill to run at all — resolve
-        # those over the full index so the proxied CLI isn't missing them
-        # ("MONEY_USER not set"). Config/secret-derived vars stay gated on
-        # ``authorized_skills`` (env minimisation for the untrusted model).
-        for k, v in build_identity_env(skill_index, env_ctx).items():
-            skill_env.setdefault(k, v)
-        # Declarative env vars don't override hardcoded ones
-        for k, v in skill_env.items():
-            if k not in env:
-                env[k] = v
-        for k, v in hook_env.items():
-            if k == HOOK_PATH_PREPEND_KEY:
-                # Never merged into ``env``: see the application site below.
-                continue
-            if k not in env:
-                env[k] = v
-
-        # Credential isolation via skill proxy: strip secrets from Claude's env
-        # and run skill CLIs through a Unix socket proxy that injects them.
-        _proxy_ctx = None
-        _proxy_sock = None
-        # Third bucket alongside credentials and the clean env: non-secret
-        # values (database paths) that belong to the host-side CLI and not to
-        # the model. Split *outside* the proxy branch — an operator who turns
-        # the proxy off has made skill CLIs unreachable, not made it acceptable
-        # to hand the model a path to every user's data.
-        proxy_only_env, env = _split_credential_env(
-            env, derive_proxy_only_set(skill_index),
-        )
-        if config.security.skill_proxy_enabled:
-            from .skill_proxy import SkillProxy
-            # Phase 3: credential set is derived from the loaded skill
-            # index; no hand-maintained constant. Same for the per-skill
-            # credential map and the lookup-endpoint allowlist.
-            credential_set = derive_credential_set(skill_index)
-            credential_env, env = _split_credential_env(env, credential_set)
-            # Started unconditionally. This used to be gated on
-            # ``if credential_env:``, so a task whose authorized skills declared
-            # no secret got no socket — and `istota-skill` then silently fell
-            # back to running the skill module *inside* the sandbox, which is
-            # the one place it must never run. On a Nextcloud deployment
-            # NC_PASS made the gate true nearly always, so the fallback was
-            # rare rather than absent; that is a property of the configuration,
-            # not an invariant.
-            #
-            # Use /tmp for the socket path to stay within the AF_UNIX length
-            # limit (~104 chars). build_bwrap_cmd() bind-mounts this file into
-            # the sandbox. PID is included so concurrent processes (xdist test
-            # workers, parallel scheduler instances on the same host) don't race
-            # on the same path — task.id alone collides when each process has
-            # its own DB.
-            _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
-            env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-            allowed_creds = derive_lookup_allowlist(
-                authorized_skills, skill_index,
-            )
-            skill_cred_map = derive_skill_credential_map(
-                authorized_skills, skill_index,
-            )
-            cli_skills = frozenset(
-                name for name, meta in skill_index.items() if meta.cli
-            )
-            logger.info(
-                "proxy_authorization task_id=%d selected=%d authorized=%d "
-                "selected_skills=%s authorized_skills=%s",
-                task.id, len(selected_skills), len(authorized_skills),
-                ",".join(sorted(selected_skills)),
-                ",".join(authorized_skills),
-            )
-            # Snapshot, not the live dict: ``env`` picks up ISTOTA_SANDBOXED
-            # below, and the proxy runs skills on the host where that would be
-            # a lie. Everything else the CLIs rely on rides along — notably
-            # ISTOTA_DEFERRED_DIR, whose absence is what makes a deferring skill
-            # take its direct-write fallback instead.
-            #
-            # Minus the Claude runtime credential, which is the second route
-            # ISSUE-390 had to close and the less obvious one. The token is
-            # declared in no skill manifest, so neither `derive_credential_set`
-            # nor `derive_proxy_only_set` takes it out of this snapshot, and the
-            # model reaches every host-side skill CLI through the same Bash tool
-            # the strips in `NativeBrain` just cleaned. No skill
-            # invokes the `claude` binary and none reads the variable, so it has
-            # no reader here either — and unlike a tool subprocess these run
-            # *unsandboxed as the daemon user*, which is the reason to be strict
-            # rather than a reason to relax.
-            proxy_base_env = without_claude_runtime_env(
-                {**env, **proxy_only_env}
-            )
-            _proxy_ctx = SkillProxy(
-                _proxy_sock, credential_env, proxy_base_env,
-                timeout=config.security.skill_proxy_timeout,
-                allowed_credentials=allowed_creds,
-                skill_credential_map=skill_cred_map,
-                allowed_skills=cli_skills,
-                authorized_skills=frozenset(authorized_skills),
-                task_id=task.id,
-            )
-
-        # Marks the env as one that will run under bwrap, so `istota-skill`
-        # refuses to execute a skill module in-process rather than silently
-        # doing it against databases that aren't there. Set after the proxy's
-        # base env is snapshotted (the proxy runs skills on the host, where the
-        # marker would be a lie), and only when the sandbox is really in
-        # effect — on macOS / a container without CAP_SYS_ADMIN,
-        # build_bwrap_cmd returns the command unwrapped.
-        #
-        # Gated on the proxy too. The marker means "the socket is how you run a
-        # skill"; with the proxy off there is no socket, and setting it anyway
-        # would turn a supported (if now discouraged) configuration into one
-        # where every skill CLI fails — including the many that never open a
-        # database. That combination gets a loud warning at config load instead.
-        if config.security.skill_proxy_enabled and effective_sandboxing(config):
-            env["ISTOTA_SANDBOXED"] = "1"
-
-        # Package-manager caches, pointed at the disk-backed directory
-        # `build_bwrap_cmd` binds RW from the same predicate (ISSUE-305).
-        #
-        # Here, not in `build_clean_env`, for two reasons. `proxy_base_env` was
-        # snapshotted above and is what SkillProxy hands every host-side skill
-        # CLI — a process running unsandboxed as the daemon user, which has no
-        # business resolving a cache out of a directory the model can write;
-        # that is the confused-deputy shape the ISTOTA_PATH_PREPEND comment
-        # below spells out. And the cache is per user, which needs the task.
-        #
-        # Gated on effective sandboxing, matching the bind exactly: without
-        # bwrap there is no root tmpfs and nothing to move off it.
-        if native_fs_confinement_active(config):
-            _cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
-            if _cache_dir is not None:
-                env["UV_CACHE_DIR"] = str(_cache_dir / SANDBOX_CACHE_UV)
-                env["XDG_CACHE_HOME"] = str(_cache_dir)
-                # npm on Linux uses ~/.npm and ignores XDG, so XDG_CACHE_HOME
-                # alone would leave it in RAM. Inert until ISSUE-304 opens the
-                # registry, and one line now rather than a rediscovery later.
-                env["npm_config_cache"] = str(_cache_dir / SANDBOX_CACHE_NPM)
-                # HF_HOME defaults to $XDG_CACHE_HOME/huggingface, so moving XDG
-                # would silently orphan the read-only `~/.cache/huggingface`
-                # bind — a pre-warmed model cache every task would re-download.
-                # Pin it back where the bind is.
-                env["HF_HOME"] = str(
-                    Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface"
-                )
-
-        # PATH entries contributed by setup_env hooks — today the developer
-        # skill's .developer dir, so the model can type `gh` and reach the
-        # wrapper rather than the real binary.
-        #
-        # Applied *here*, after the proxy's base env was snapshotted above, and
-        # never merged into ``env`` by the hook loop. That ordering is the
-        # whole point and must not be tidied away:
-        #
-        #   ``proxy_base_env`` is what SkillProxy hands every host-side skill
-        #   CLI, which runs outside bwrap as the daemon user. Some of those
-        #   resolve a binary by bare name — google_workspace does
-        #   ``os.execvp("gws", …)``, devbox does ``shutil.which("docker")``.
-        #   A task-temp directory on that PATH would therefore be a host-side
-        #   code-execution path, wide open to whatever the model can write
-        #   into it. The sandbox re-binds .developer read-only precisely to
-        #   stop that, but relying on a bind to contain a PATH entry that
-        #   never needed to be there is the wrong way round.
-        #
-        # ``build_claude_env`` already set PATH, so a hook returning "PATH"
-        # would be silently dropped by the ``if k not in env`` merge; this
-        # reserved key is the explicit alternative. It is consumed here and
-        # never reaches the model.
-        _path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY, "")
-        if _path_prepend:
-            _entries = [p for p in _path_prepend.split(os.pathsep) if p]
-            if _entries:
-                env["PATH"] = os.pathsep.join([*_entries, env["PATH"]])
-
-        # Network isolation via CONNECT proxy: outbound traffic restricted
-        # to an allowlist of host:port pairs via --unshare-net + proxy.
-        _net_proxy_ctx = None
-        _net_proxy_sock = None
-        if config.security.network.enabled and config.security.sandbox_enabled:
-            from .network_proxy import NetworkProxy, write_bridge_script
-
-            allowed_hosts = _build_network_allowlist(config, authorized_skills)
-
-            # Write bridge script to .developer/ (RO inside sandbox)
-            dev_dir = Path(user_temp_dir) / ".developer"
-            dev_dir.mkdir(parents=True, exist_ok=True)
-            write_bridge_script(dev_dir / "net-bridge")
-
-            _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{os.getpid()}-{task.id}.sock"
-            _net_proxy_ctx = NetworkProxy(
-                _net_proxy_sock, allowed_hosts,
-            )
-
-        # Collect extra paths to RO bind-mount into the sandbox.
-        #
-        # The task control directory is this parameter's production consumer,
-        # and it is a *directory* rather than the composed system prompt file
-        # it started as. A bind names one exact path and cannot express a
-        # filename pattern, so the per-file entry guarded the standing
-        # instructions and left `prompt.txt`, the briefing metadata and every
-        # prepared image rendition beside it unguarded — each one a thing
-        # somebody had to remember into this list by hand.
-        #
-        # `build_bwrap_cmd` applies these after every other bind, which is what
-        # keeps a read-only entry read-only under any bind added later; the
-        # `.developer` carve-out established the pattern. The directory is a
-        # sibling of `user_temp_dir` rather than a child, so nothing binds over
-        # it today either.
-        #
-        # Emitted under both profiles. Nothing inside a NATIVE namespace opens
-        # the system prompt — NativeBrain reads it in the daemon — but both
-        # backends put the prepared attachment paths into the prompt's
-        # `Attached files:` section, so a model that decides to `Read` one has
-        # to find it, and the tool server runs in there.
-        #
-        # This is half the protection: `Read`, `Write` and `Edit` run through
-        # `ToolEnv` and enter no mount namespace on the unsandboxed shapes. The
-        # other half is the pair of entries `native_fs_roots` returns, some
-        # four hundred lines below, plus the unconditional seed beside them.
-        _extra_ro_binds: list[Path] = [control_dir]
+        env = _runtime.env
+        _proxy_ctx = _runtime.proxy_ctx
+        _proxy_sock = _runtime.proxy_sock
+        _net_proxy_ctx = _runtime.net_proxy_ctx
+        _net_proxy_sock = _runtime.net_proxy_sock
+        _extra_ro_binds = _runtime.extra_ro_binds
+        authorized_skills = _runtime.authorized_skills
 
         # Sandbox wrapper closures — capture the per-task bind config so the
         # brain can wrap its raw cmd without knowing anything about bwrap.
@@ -6987,11 +6362,12 @@ def execute_task(
                     Path(user_temp_dir), proxy_sock=_proxy_sock,
                     net_proxy_sock=_net_proxy_sock,
                     extra_ro_binds=_extra_ro_binds,
-                    # The set computed ~190 lines above, not `selected_skills`.
-                    # See `build_bwrap_cmd`'s own docstring for why the
-                    # distinction decides whether the exec transport routes on
-                    # the first turn of a conversation.
-                    authorized_skills=frozenset(authorized_skills),
+                    # `TaskRuntime.authorized_skills` — the union credential
+                    # presence widened, not `selected_skills`. See
+                    # `build_bwrap_cmd`'s own docstring for why the distinction
+                    # decides whether the exec transport routes on the first
+                    # turn of a conversation.
+                    authorized_skills=authorized_skills,
                     workspace_dir=workspace_dir,
                     profile=sandbox_profile,
                 )
@@ -7001,261 +6377,12 @@ def execute_task(
         _sandbox_wrap = _build_wrap(SandboxProfile.CLAUDE)
         _native_sandbox_wrap = _build_wrap(SandboxProfile.NATIVE)
 
-        # Adapt the brain's (widened) StreamEvent stream to TaskEvents. Called
-        # by the brain in place of the old string callback. For loop-based
-        # brains (NativeBrain) this fires on a worker thread, not the brain's
-        # event loop (Layer 3 invariant) — the body stays plain-synchronous
-        # either way. progress_show_tool_use / progress_show_text gate whether
-        # tool_* and progress_text events are emitted at all.
-        show_tool_use = config.scheduler.progress_show_tool_use
-        show_text = config.scheduler.progress_show_text
-
-        # Stream surfaces (web chat, repl) get the answer text streamed live as
-        # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
-        # completely untouched — no text_delta rows. Computed once per task.
-        from .transport.registry import task_is_stream_surface
-        is_stream_surface = task_is_stream_surface(config, task)
-
-        # Per-task coalescing buffer for streamed answer text. Incoming deltas
-        # (NativeBrain's TextDeltaEvent, or ClaudeCodeBrain's block TextEvent)
-        # are buffered and flushed as one ``text_delta`` event every ~250 ms or
-        # ~120 chars, plus a forced flush on each tool/CM boundary and a final
-        # flush after the brain finishes. This bounds row volume to tens per
-        # answer (not thousands of token rows); the scheduler prunes them once
-        # the canonical ``result`` lands, so steady state retains zero. Events
-        # arrive serialized (NativeBrain awaits each run_in_executor hop;
-        # ClaudeCodeBrain's parse loop is sequential), so no lock is needed.
-        #
-        # Narration gate: a text run emits NOTHING until it crosses
-        # ``_DELTA_GATE_CHARS`` without an intervening tool call. This splits a
-        # text-then-tool block into two cases at the boundary (see
-        # ``_settle_deltas_at_tool_boundary``): a short lead-in ("Let me check…")
-        # stays under the ceiling, never streams, and is dropped; a SUBSTANTIAL
-        # block crosses the ceiling, "unlocks" (the held buffer flushes and
-        # subsequent deltas stream live at the cadence below), and is KEPT —
-        # flushed at the tool boundary so the full block reaches the stream
-        # surface, where the web client renders it as its own prose block rather
-        # than throwaway narration. The gate is thus a substance classifier, not
-        # an answer-vs-narration one: the final answer (after the last tool)
-        # always streams, and a short *final* answer that never crosses the gate
-        # still arrives via the canonical ``result`` event (and the final flush
-        # in the ``finally`` releases the held buffer), so gating costs only
-        # token-by-token animation on text too short to benefit. Threshold is
-        # the ``[scheduler]`` knob ``stream_text_gate_chars`` (0 disables —
-        # deltas stream immediately, legacy behaviour); the ``stream_gate:``
-        # telemetry below records every flush / discard so the value can be
-        # tuned against production.
-        _DELTA_FLUSH_MS = 250
-        _DELTA_FLUSH_CHARS = 120
-        _DELTA_GATE_CHARS = config.scheduler.stream_text_gate_chars
-        _delta_buf: list[str] = []
-        # ``unlocked``: this text run has crossed the narration gate; deltas now
-        # stream live. Reset to False at every tool boundary (new run re-gates).
-        _delta_state = {"chars": 0, "last_flush": time.monotonic(), "unlocked": False}
-        # True once any TextDeltaEvent has streamed this task. Used to dedupe a
-        # NativeBrain whole-turn TextEvent against the deltas that already
-        # carried the same text: the brain stays surface-agnostic (it always
-        # emits both per-token deltas and intermediate-turn TextEvents); the
-        # executor — which alone knows the surface — drops the redundant
-        # TextEvent on a stream surface once deltas have flowed, and forwards it
-        # as progress_text on a push surface (where deltas were dropped).
-        _delta_seen = {"value": False}
-        # Symmetric flag for reasoning: True once any ThinkingDeltaEvent has
-        # streamed. A brain that streams thinking deltas (NativeBrain, or
-        # ClaudeCodeBrain with --include-partial-messages) may *also* emit the
-        # whole-block ThinkingEvent afterward; on a stream surface that whole
-        # block is then a redundant re-render, so it is dropped here. Thinking is
-        # stream-surface-only either way (push drops both), so no push fallback.
-        _thinking_seen = {"value": False}
-
-        def _flush_deltas() -> None:
-            if event_writer is None or not _delta_buf:
-                return
-            text = "".join(_delta_buf)
-            _delta_buf.clear()
-            _delta_state["chars"] = 0
-            _delta_state["last_flush"] = time.monotonic()
-            # Best-effort: a flush failure means slightly less live text, never
-            # a failed task (matches EventWriter.emit's own swallow).
-            try:
-                event_writer.emit("text_delta", {"text": text})
-            except Exception:
-                logger.debug("text_delta flush failed", exc_info=True)
-
-        def _buffer_delta(text: str) -> None:
-            if not text:
-                return
-            _delta_buf.append(text)
-            _delta_state["chars"] += len(text)
-            if not _delta_state["unlocked"]:
-                # Gated: hold everything (emit nothing) until the run crosses
-                # the narration ceiling. Crucially NO time-based flush here —
-                # that was the race that leaked narration. A tool boundary
-                # before the ceiling discards the buffer; crossing it unlocks.
-                if _delta_state["chars"] >= _DELTA_GATE_CHARS:
-                    _delta_state["unlocked"] = True
-                    logger.debug(
-                        "stream_gate: unlocked at %d chars (task %s, gate=%d)",
-                        _delta_state["chars"], task.id, _DELTA_GATE_CHARS,
-                    )
-                    _flush_deltas()
-                return
-            now = time.monotonic()
-            if (
-                _delta_state["chars"] >= _DELTA_FLUSH_CHARS
-                or (now - _delta_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
-            ):
-                _flush_deltas()
-
-        def _settle_deltas_at_tool_boundary() -> None:
-            # Resolve the buffered answer text at a tool boundary. Text before a
-            # tool is one of two things, and the narration gate already told them
-            # apart:
-            #   (a) a SUBSTANTIAL block (the run crossed _DELTA_GATE_CHARS and
-            #       unlocked — analysis the model wrote, then acted on). It has
-            #       been streaming; FLUSH its unflushed tail so the full block
-            #       reaches the stream surface and renders as its own prose block
-            #       (the web client keeps substantial intermediate blocks — they
-            #       are not narration). A token-streaming brain (NativeBrain)
-            #       leaves up to one flush-window buffered here; a whole-block
-            #       brain already flushed everything on unlock, so this is a
-            #       no-op for it.
-            #   (b) a short LEAD-IN ("Let me search…", under the gate). It was
-            #       held and never emitted; DROP it intact so it doesn't flash in
-            #       the prominent answer area. Only reasoning + tool actions land
-            #       in the activity chip.
-            held = _delta_state["chars"]
-            if _delta_state["unlocked"]:
-                if held:
-                    logger.debug(
-                        "stream_gate: flushed %d-char tail of a substantial "
-                        "block at a tool boundary (task %s)", held, task.id,
-                    )
-                _flush_deltas()  # clears buf + resets chars/last_flush
-            else:
-                if held:
-                    logger.debug(
-                        "stream_gate: discarded %d chars of held narration at a "
-                        "tool boundary (task %s, gate=%d)",
-                        held, task.id, _DELTA_GATE_CHARS,
-                    )
-                _delta_buf.clear()
-                _delta_state["chars"] = 0
-                _delta_state["last_flush"] = time.monotonic()
-            _delta_state["unlocked"] = False  # next text run re-gates
-
-        # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
-        # text. It must be independent of the answer-text buffer above because the
-        # two render to different places on a stream surface: thinking folds into
-        # the activity chip, the answer streams prominent. Same flush cadence /
-        # boundaries; emits ``thinking`` task events instead of ``text_delta``.
-        _thinking_buf: list[str] = []
-        _thinking_state = {"chars": 0, "last_flush": time.monotonic()}
-
-        def _flush_thinking() -> None:
-            if event_writer is None or not _thinking_buf:
-                return
-            text = "".join(_thinking_buf)
-            _thinking_buf.clear()
-            _thinking_state["chars"] = 0
-            _thinking_state["last_flush"] = time.monotonic()
-            try:
-                event_writer.emit("thinking", {"text": text})
-            except Exception:
-                logger.debug("thinking flush failed", exc_info=True)
-
-        def _buffer_thinking(text: str) -> None:
-            if not text:
-                return
-            _thinking_buf.append(text)
-            _thinking_state["chars"] += len(text)
-            now = time.monotonic()
-            if (
-                _thinking_state["chars"] >= _DELTA_FLUSH_CHARS
-                or (now - _thinking_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
-            ):
-                _flush_thinking()
-
-        def _on_event(event: StreamEvent) -> None:
-            if event_writer is None:
-                return
-            if isinstance(event, ToolUseEvent):
-                # A tool boundary settles the reasoning chip and drops any
-                # pre-tool narration. This is a property of the STREAM SURFACE,
-                # not of whether the tool row is shown — so it must run even when
-                # progress_show_tool_use is off, or pre-tool narration would
-                # flush and flash in the answer area with no tool chip to explain
-                # it.
-                if is_stream_surface:
-                    _flush_thinking()  # tool boundary: settle the reasoning chip
-                    _settle_deltas_at_tool_boundary()  # keep substantial, drop lead-ins
-                if show_tool_use:
-                    event_writer.emit("tool_start", {
-                        "tool_name": event.tool_name,
-                        "description": event.description,
-                        "tool_call_id": event.tool_call_id,  # "" under ClaudeCodeBrain
-                    })
-            elif isinstance(event, ToolEndEvent) and show_tool_use:
-                event_writer.emit("tool_end", {
-                    "tool_name": event.tool_name,
-                    "tool_call_id": event.tool_call_id,
-                    "success": event.success,
-                    "duration_ms": event.duration_ms,
-                })
-            elif isinstance(event, ToolProgressEvent):
-                # Web SSE only; Talk/log subscribers ignore this kind.
-                event_writer.emit("tool_progress", {
-                    "tool_name": event.tool_name,
-                    "tool_call_id": event.tool_call_id,
-                    "text": event.text,
-                })
-            elif isinstance(event, ThinkingDeltaEvent):
-                # Incremental reasoning (NativeBrain, or ClaudeCodeBrain with
-                # --include-partial-messages). Stream surfaces only; a push task
-                # drops it (thinking is web/repl-only — no progress_text
-                # fallback).
-                if is_stream_surface:
-                    _thinking_seen["value"] = True
-                    _buffer_thinking(event.thinking)
-            elif isinstance(event, ThinkingEvent):
-                # Whole reasoning block. Stream surfaces only. Dropped when
-                # thinking deltas already carried this turn's reasoning live
-                # (mirrors the TextEvent-vs-deltas dedup above).
-                if is_stream_surface:
-                    if _thinking_seen["value"]:
-                        return
-                    _buffer_thinking(event.text)
-            elif isinstance(event, TextDeltaEvent):
-                # NativeBrain incremental answer text. Stream surfaces only; a
-                # push task drops it (the final result is delivered once).
-                if is_stream_surface:
-                    _flush_thinking()  # thinking → answer boundary: keep order
-                    _delta_seen["value"] = True
-                    _buffer_delta(event.text)
-            elif isinstance(event, TextEvent):
-                if is_stream_surface:
-                    if _delta_seen["value"]:
-                        # NativeBrain: the per-token deltas already carried this
-                        # intermediate turn's text live, so the whole-turn
-                        # TextEvent is a redundant re-render — drop it.
-                        return
-                    # ClaudeCodeBrain (no deltas): coarse streaming, one
-                    # TextEvent per completed block — route through the same
-                    # delta channel rather than progress_text so it renders live.
-                    _flush_thinking()  # thinking → answer boundary: keep order
-                    _buffer_delta(event.text)
-                elif show_text:
-                    # Push surface: deltas are dropped, so intermediate-turn
-                    # TextEvents are how NativeBrain narration reaches Talk. The
-                    # brain holds back the final turn's text (it becomes the
-                    # result); ClaudeCodeBrain's ResultEvent is a distinct frame.
-                    # Neither double-renders against the result.
-                    event_writer.emit("progress_text", {"text": event.text})
-            elif isinstance(event, ContextManagementEvent):
-                if is_stream_surface:
-                    _flush_thinking()  # turn/CM boundary
-                    _flush_deltas()  # turn/CM boundary
-                event_writer.emit("context_management")
+        # Adapts the brain's (widened) StreamEvent stream to TaskEvents:
+        # the coalescing buffers for answer text and reasoning, the
+        # narration gate and the delta-vs-whole-turn dedupe all live in
+        # `executor_stream`. `stream.on_event` is what goes on
+        # `BrainRequest.on_progress`.
+        stream = TaskStreamAdapter(config, task, event_writer)
 
         # Per-task cgroup (A6). Created before the brain is asked for anything,
         # because the pid it hands back has already been spawned and every
@@ -7450,7 +6577,7 @@ def execute_task(
             # and the fallback brain makes its own capability decision.
             images=image_prep.images,
             streaming=use_streaming,
-            on_progress=_on_event if use_streaming else None,
+            on_progress=stream.on_event if use_streaming else None,
             cancel_check=_cancel_check,
             # Steering channel — only for a brain that can act on it mid-run
             # (`!steer`). A non-steerable brain leaves this None (no extra DB
@@ -7485,82 +6612,9 @@ def execute_task(
                 "task %d: model=%s advisor=%s", task.id, req.model, req.advisor,
             )
 
-        # Availability failover (brain-fallback spec). Generalizes the old
-        # tmux→claude_code in-attempt fallback: when the primary brain is
-        # unavailable (usage limit / missing binary / tmux launch failure) and a
-        # fallback is configured, re-run this same attempt through the fallback
-        # brain — no new DB row, no attempt increment. Stickiness: once the
-        # primary reports a persistent unavailability, subsequent tasks skip it
-        # for a cooldown. All of it collapses to the plain primary call when no
-        # fallback is configured.
-        _primary_kind = _brain_config.kind
-        _fallback_kind = effective_fallback_kind(_brain_config)
-        _cooldown = config.brain.fallback_cooldown_seconds
-        _breaker = get_availability_breaker()
-        _dropped_pin = None
-        # The primary's result, held only when a fallback replaced it, so both
-        # attempts' usage can be written from the one call site that has a `conn`.
-        _primary_usage_result = None
-        # Whether the result being persisted came from the fallback brain. Not
-        # derivable from `_primary_usage_result`: on the breaker-cooldown path
-        # the fallback runs with no primary call at all, so there is nothing to
-        # hold and the flag would read false for every task in the window.
-        _ran_fallback = False
-        # The effort the attempt actually ran at. The fallback re-resolves it in
-        # its own namespace, so `req.effort` describes the primary only.
-        _usage_effort = req.effort
-        _primary_started_at = None
-        _primary_started_monotonic = None
-
-        def _notice(reason):
-            """A `brain_fallback` emitter bound to `reason`, for `on_start`.
-
-            Both reroute paths hand the same notice to the stream; only the
-            reason differs (a fresh primary failure vs. the breaker already
-            being open). Returns None when there is no stream to notify, so
-            `_run_fallback` skips the hook entirely.
-            """
-            if event_writer is None:
-                return None
-
-            def _emit(model, dropped_pin):
-                # A reroute is a stream boundary exactly like a tool call: what
-                # streamed before it came from the brain that just failed, and
-                # the fallback streams into these same buffers. Settle them
-                # first, or an unflushed primary tail is emitted as the opening
-                # of the fallback's answer — one paragraph, under a notice
-                # saying the primary failed — and the fallback's own narration
-                # gate starts pre-credited with the primary's characters.
-                # The settle runs whether or not the notice does, because it is
-                # about the daemon's own buffers rather than the sentence: a
-                # retry that called the primary and watched it fail again has a
-                # tail held here that must not open the fallback's answer.
-                if is_stream_surface:
-                    _flush_thinking()
-                    _settle_deltas_at_tool_boundary()
-                # ISSUE-361: once per turn, not once per failover attempt. The
-                # retry ladder re-runs this same task id, and every attempt
-                # after the breaker opens takes the cooldown path, so the
-                # per-attempt emit stacked the banner three deep under one user
-                # message. The first is what survives; `emit_once` is where the
-                # cases that costs something are written down.
-                event_writer.emit_once("brain_fallback", {
-                    "primary": _primary_kind,
-                    "reason": reason,
-                    "fallback": _fallback_kind,
-                    "model": model,
-                    "dropped_pin": dropped_pin or "",
-                    "text": fallback_notice_text(
-                        _primary_kind, reason, _fallback_kind, model, dropped_pin,
-                    ),
-                })
-
-            return _emit
-        _skip_primary = (
-            _fallback_kind is not None
-            and _cooldown > 0
-            and _breaker.should_skip(_primary_kind, _cooldown)
-        )
+        # Availability failover (brain-fallback spec) — see
+        # `run_with_failover`. The ExitStack stays here: the proxies must be
+        # live across the primary call, the reroute and the fallback call.
         try:
             with contextlib.ExitStack() as stack:
                 if _proxy_ctx is not None:
@@ -7573,157 +6627,28 @@ def execute_task(
                 if _task_cg is not None:
                     stack.callback(_release_task_cgroup, task.id, _task_cg)
 
-                if _skip_primary:
-                    # Cooling down — go straight to the fallback, no primary call.
-                    logger.info(
-                        "brain fallback: skipping primary %s (cooling down) "
-                        "-> %s task=%d",
-                        _primary_kind, _fallback_kind, task.id,
-                    )
-                    _fb, _dropped_pin, _fb_effort = _run_fallback(
-                        config, _brain_config, _fallback_kind, task, req,
-                        on_start=_notice("cooldown"),
-                    )
-                    if _fb is not None:
-                        # This branch is the steady state once the breaker
-                        # opens — every task for the cooldown window takes it —
-                        # so flagging the row here is what keeps the *majority*
-                        # of genuinely-fallback rows from being labelled
-                        # otherwise. There is no primary row: the primary was
-                        # never called. When construction failed instead, the
-                        # primary really did run below and the flag stays off.
-                        _ran_fallback = True
-                        _usage_effort = _fb_effort
-                    brain_result = _fb if _fb is not None else brain.execute(req)
-                else:
-                    _primary_started_at = time.time()
-                    _primary_started_monotonic = time.monotonic()
-                    brain_result = brain.execute(req)
-                    _triggers = set(TRIGGER_STOP_REASONS)
-                    if config.brain.fallback_on_transient:
-                        _triggers.add("transient_api_error")
-                    if brain_result.stop_reason in _triggers:
-                        # Open the availability breaker only for persistent
-                        # conditions (usage_limit / not_found). "fallback" is
-                        # excluded so tmux keeps being probed per-task (its own
-                        # launch _CircuitBreaker governs when to stop).
-                        #
-                        # Deliberately not gated on a fallback being configured
-                        # (ISSUE-362). The breaker is a shared signal: the
-                        # direct callers (sleep cycle, shared blocks) read it
-                        # through `primary_brain_unavailable`, and
-                        # `report_brain_result` already opens it for them with
-                        # no regard to a fallback. Gating it here left a
-                        # deployment with no fallback without the availability
-                        # record and without either operator alert, so the only
-                        # notice that a primary had gone down was the failed
-                        # task itself. Safe for the task path: `_skip_primary`
-                        # is separately gated on a fallback existing, so an open
-                        # breaker never skips a primary there is nothing to
-                        # replace.
-                        #
-                        # The window ends at the quota's reset where one is
-                        # known, not a flat `_cooldown` from the failure
-                        # (ISSUE-374). `open_primary_breaker` owns that and
-                        # publishes the same deadline it armed, so the
-                        # scheduler's breaker and the record the web process
-                        # reads describe one window.
-                        _armed_window = (
-                            open_primary_breaker(
-                                _primary_kind,
-                                _cooldown,
-                                brain_result.stop_reason,
-                                config=config,
-                            )
-                            if brain_result.stop_reason in COOLDOWN_STOP_REASONS
-                            else None
-                        )
-                        if _armed_window is not None:
-                            _fire_fallback_alert(
-                                config, task, _primary_kind, _fallback_kind,
-                                brain_result.stop_reason, _armed_window,
-                            )
-                        if _fallback_kind is not None:
-                            logger.error(
-                                "brain fallback: task=%d primary=%s reason=%s "
-                                "-> %s",
-                                task.id, _primary_kind,
-                                brain_result.stop_reason, _fallback_kind,
-                            )
-                        else:
-                            logger.error(
-                                "brain unavailable: task=%d primary=%s "
-                                "reason=%s, no [brain] fallback configured",
-                                task.id, _primary_kind,
-                                brain_result.stop_reason,
-                            )
-                        # Preserve tmux's own launch alert: its _CircuitBreaker
-                        # governs fallback/not_found (which are NOT in the
-                        # availability breaker's cooldown set), so its
-                        # 5-consecutive-launch-failure alert still routes here.
-                        if _primary_kind == "tmux_claude":
-                            try:
-                                from .brain.tmux_claude import (
-                                    consume_circuit_open_alert,
-                                )
-                                if consume_circuit_open_alert():
-                                    from . import notifications
-                                    _tail = (
-                                        "falling back."
-                                        if _fallback_kind is not None
-                                        else "no fallback configured, so tasks "
-                                             "keep failing."
-                                    )
-                                    notifications.send_notification(
-                                        config, task.user_id,
-                                        "⚠️ tmux_claude brain circuit opened — "
-                                        f"{_tail} Check the claude CLI "
-                                        "version / readiness markers.",
-                                        purpose="alert",
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "tmux circuit-open alert failed", exc_info=True
-                                )
-                        _fb = None
-                        if _fallback_kind is not None:
-                            _fb, _dropped_pin, _fb_effort = _run_fallback(
-                                config, _brain_config, _fallback_kind, task,
-                                req, on_start=_notice(brain_result.stop_reason),
-                            )
-                        if _fb is not None:
-                            # The fallback *replaces* brain_result, so without
-                            # this the single persist call below would record the
-                            # fallback's numbers under the primary's identity and
-                            # the primary's own spend would be unrecoverable. It
-                            # is captured rather than written here because
-                            # `_run_fallback` takes no `conn`: opening a second
-                            # one would block on the write lock for the full 30s
-                            # busy timeout whenever `execute_task` was entered
-                            # with an open write transaction, as the interactive
-                            # path does.
-                            _primary_usage_result = brain_result
-                            _ran_fallback = True
-                            _usage_effort = _fb_effort
-                            brain_result = _fb
-                    elif brain_result.success and _cooldown > 0:
-                        # Primary healthy again → close the breaker.
-                        _breaker.record_success(
-                            _primary_kind, started_at=_primary_started_monotonic,
-                        )
-                        from .brain_availability import clear_unavailable
-
-                        clear_unavailable(
-                            config, _primary_kind, started_at=_primary_started_at,
-                        )
+                _failover = run_with_failover(
+                    brain, req,
+                    config=config,
+                    brain_config=_brain_config,
+                    task=task,
+                    stream=stream,
+                    event_writer=event_writer,
+                )
+                brain_result = _failover.result
+                _primary_usage_result = _failover.primary_usage_result
+                _ran_fallback = _failover.ran_fallback
+                _usage_effort = _failover.usage_effort
+                _dropped_pin = _failover.dropped_pin
+                _primary_kind = _failover.primary_kind
+                _fallback_kind = _failover.fallback_kind
         finally:
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep
             # a lower seq than any trailing answer text. On success this precedes
             # the canonical ``result`` (which replaces the answer in the UI); on
             # an exception the finally still drains both buffers.
-            _flush_thinking()
-            _flush_deltas()
+            stream.finish()
 
         success = brain_result.success
         result = brain_result.result_text

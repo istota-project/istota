@@ -374,6 +374,10 @@ class SchedulerConfig:
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
+    # How often every Talk room is polled regardless of the `lastMessage` gate.
+    # Between sweeps only a room the room list says has something new is
+    # long-polled. `0` makes every cycle a full sweep, i.e. no gate at all.
+    talk_poll_full_sweep_interval: int = 300
     # Progress / event streaming. The event log (task_events table) is the
     # shared bus for all output surfaces; progress_show_* gate whether the
     # executor adapter emits tool_* / progress_text events at all.
@@ -2978,6 +2982,23 @@ def _positive_float(raw: object, key: str) -> object:
     return value
 
 
+def _positive_int(raw: object, key: str) -> object:
+    """A duration or count where zero is not a smaller value but a different mode.
+
+    ``_non_negative_int`` beside this one exists for the settings where ``0``
+    means *unlimited*; this is for the ones where it means *broken*.
+    """
+    value = coerce_int(raw, key)
+    if value is _KEEP:
+        return _KEEP
+    if value <= 0:
+        logger.warning(
+            "[config] %s=%r must be greater than 0; keeping the default", key, raw,
+        )
+        return _KEEP
+    return value
+
+
 def _forge_cli_list(raw: object, key: str) -> object:
     """A forge-CLI policy list, tolerating the bare-string hand-edit."""
     if isinstance(raw, str):
@@ -3040,6 +3061,20 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # alone.
     "security.sandbox_ro_paths": lambda raw, key: _validate_sandbox_ro_paths(raw),
     "scheduler.email_task_queue": lambda raw, key: _valid_task_queue(raw),
+    # A zero-second long-poll is a round trip that cannot carry news, and it
+    # used to be worse than useless: the same number was the `asyncio.wait`
+    # deadline for the whole cycle, so `0` cancelled every room mid-flight and
+    # turned Talk inbound into a silent no-op (ISSUE-399).
+    "scheduler.talk_poll_timeout": _positive_int,
+    # Load-bearing arithmetic since ISSUE-399: the cycle's own deadline is
+    # `talk_poll_timeout + talk_poll_wait`, so a negative here puts the deadline
+    # back *inside* the server's hold and restores the defect that pair exists
+    # to remove.
+    "scheduler.talk_poll_wait": _positive_float,
+    # 0 is a mode here (every cycle a full sweep, i.e. no gate), which is why
+    # this one is non-negative rather than positive. A negative is a typo that
+    # would read as that mode without saying so.
+    "scheduler.talk_poll_full_sweep_interval": _non_negative_int,
     "advisor_model": _advisor_model,
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.

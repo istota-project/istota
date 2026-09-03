@@ -4055,17 +4055,29 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
     created_tasks = []
     with db.get_db(db_path) as conn:
         for user_id, _user_tz_str, briefing in due_briefings:
-            task_id = db.create_task(
-                conn,
-                prompt=_deferred_briefing_placeholder(briefing.name),
-                user_id=user_id,
-                source_type="briefing",
-                conversation_token=briefing.conversation_token,
-                output_target=briefing.output,
-                priority=8,
-                queue="background",
-                briefing_name=briefing.name,
-            )
+            # One unusable user id costs its own briefing, not the batch. The
+            # loop shares a transaction, so an escaping `ValueError` would
+            # discard every earlier user's task *and* their `last_run` stamp
+            # and repeat the whole thing next tick, forever (ISSUE-402).
+            # `create_task` validates before it executes any statement, so
+            # nothing is half-written here.
+            try:
+                task_id = db.create_task(
+                    conn,
+                    prompt=_deferred_briefing_placeholder(briefing.name),
+                    user_id=user_id,
+                    source_type="briefing",
+                    conversation_token=briefing.conversation_token,
+                    output_target=briefing.output,
+                    priority=8,
+                    queue="background",
+                    briefing_name=briefing.name,
+                )
+            except ValueError as e:
+                logger.error(
+                    "Briefing '%s' skipped: %s", briefing.name, e,
+                )
+                continue
             db.set_briefing_last_run(conn, user_id, briefing.name)
             created_tasks.append(task_id)
 
@@ -7401,28 +7413,40 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         job.name, job.user_id, inflight,
                     )
                     continue
-                task_id = db.create_task(
-                    conn,
-                    prompt=job.prompt,
-                    user_id=job.user_id,
-                    source_type="scheduled",
-                    conversation_token=job.conversation_token,
-                    output_target=job.output_target,
-                    priority=5,
-                    heartbeat_silent=job.silent_unless_action,
-                    skip_log_channel=job.skip_log_channel,
-                    scheduled_job_id=job.id,
-                    command=job.command,
-                    skill=job.skill,
-                    skill_args=job.skill_args,
-                    queue="background",
-                    # Resolve aliases (role / provider) to canonical IDs at
-                    # task-creation time so the DB stays canonical, matching
-                    # the talk-poller's !model prefix path. Executor also
-                    # resolves as defense-in-depth, so legacy rows still work.
-                    model=make_brain(app_config.brain).resolve_model_name(job.model) or None,
-                    effort=job.effort or None,
-                )
+                # As in `check_briefings`: one unusable `job.user_id` costs its
+                # own row, not every job after it in the same transaction
+                # (ISSUE-402). `job.user_id` comes off the `scheduled_jobs`
+                # table rather than from `config.users`, so a legacy row can
+                # carry one this guard refuses.
+                try:
+                    task_id = db.create_task(
+                        conn,
+                        prompt=job.prompt,
+                        user_id=job.user_id,
+                        source_type="scheduled",
+                        conversation_token=job.conversation_token,
+                        output_target=job.output_target,
+                        priority=5,
+                        heartbeat_silent=job.silent_unless_action,
+                        skip_log_channel=job.skip_log_channel,
+                        scheduled_job_id=job.id,
+                        command=job.command,
+                        skill=job.skill,
+                        skill_args=job.skill_args,
+                        queue="background",
+                        # Resolve aliases (role / provider) to canonical IDs at
+                        # task-creation time so the DB stays canonical, matching
+                        # the talk-poller's !model prefix path. Executor also
+                        # resolves as defense-in-depth, so legacy rows still work.
+                        model=make_brain(app_config.brain).resolve_model_name(job.model) or None,
+                        effort=job.effort or None,
+                    )
+                except ValueError as e:
+                    logger.error(
+                        "Scheduled job '%s' (user: %s) skipped: %s",
+                        job.name, job.user_id, e,
+                    )
+                    continue
                 db.set_scheduled_job_last_run(conn, job.id)
                 created_tasks.append(task_id)
                 logger.info(

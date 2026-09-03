@@ -101,7 +101,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `dispatch_interval` | `0.5` | Sub-tick cadence for `pool.dispatch()` within a poll tick — bounds cold pending-task pickup latency. 0 or ≥ `poll_interval` = legacy one-dispatch-per-tick |
 | `talk_poll_interval` | `10` | Seconds between Talk polls |
 | `talk_poll_timeout` | `30` | Talk long-poll timeout |
-| `talk_poll_wait` | `2.0` | Max wait before processing available rooms |
+| `talk_poll_wait` | `2.0` | Max wait before processing available rooms. Also the slack the cycle's own deadline adds over `talk_poll_timeout`, since an answer to a server-side long-poll cannot arrive before that hold elapses |
+| `talk_poll_full_sweep_interval` | `300` | Seconds between polls of every room regardless of the `lastMessage` gate. Between sweeps only a room the room list says has a newer message is long-polled. `0` turns the gate off |
 | `email_poll_interval` | `60` | Seconds between email polls |
 | `email_poll_batch_size` | `50` | Messages one email poll walks. The remainder is left for the next tick and drains in arrival order, rather than falling off the end |
 | `email_rate_limit_messages` | `60` | Inbound email tasks one user's account will pay for per window. Over-budget mail is filed (`routing_method="throttled"`, left in the mailbox, one alert per window), never dropped. 0 disables |

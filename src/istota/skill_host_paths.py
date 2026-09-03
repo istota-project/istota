@@ -31,7 +31,11 @@ through `kv get`. The roots here are therefore the same three the sandbox
 binds: the task's deferred dir, `{mount}/Users/{ISTOTA_USER_ID}`, and the
 task's own `{mount}/Channels/{ISTOTA_CONVERSATION_TOKEN}` — plus `{mount}/Talk`
 for reads only, matching its read-only bind. With no `ISTOTA_USER_ID` in the
-environment the mount contributes nothing; the deferred dir stands alone.
+environment the mount contributes nothing; the deferred dir stands alone. An
+`ISTOTA_USER_ID` that is set but does not name a child of `{mount}/Users` costs
+that one root and no other — the channel and Talk roots are scoped by the
+conversation token and by nothing, not by the user id — because the collapsed
+join is `{mount}/Users`, every user's directory at once (ISSUE-402).
 
 `DEVELOPER_REPOS_DIR` is scoped the same way, and it did not used to be. It
 named the whole of `developer.repos_dir`, one tree shared by every admin, so
@@ -56,6 +60,8 @@ operate on what comes back and never to re-walk the argument.
 import os
 from pathlib import Path
 
+from .user_scope import scoped_user_dir
+
 
 def allowed_host_roots(*, writable: bool = False) -> list[Path]:
     """Host directories a skill CLI may read from (or write to).
@@ -79,7 +85,15 @@ def allowed_host_roots(*, writable: bool = False) -> list[Path]:
             mount = Path(mount_raw).resolve()
         except OSError:
             return roots
-        roots.append(mount / "Users" / user_id)
+        # Scoped the same way the token below already was. The two sat side by
+        # side with only the token guarded, so a `.` or an absolute
+        # `ISTOTA_USER_ID` collapsed this root to `{mount}/Users` — every
+        # user's directory, as a destination a skill CLI may write to
+        # (ISSUE-402). No root rather than a wider one; `resolve_host_path`
+        # refuses everything when the list comes back empty.
+        own = scoped_user_dir(mount / "Users", user_id)
+        if own is not None:
+            roots.append(own)
         token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip()
         # Guard the token the same way the container name is guarded: it lands
         # in a path, and "../.." would walk straight back out of Channels/.

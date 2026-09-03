@@ -28,6 +28,7 @@ from . import db
 from .config import Config
 from .kv_namespaces import is_reserved_namespace
 from .notification_store import deliver_pending
+from .user_scope import is_scopable_user_id
 
 # Use the parent scheduler's logger name so log lines remain identical to
 # pre-extraction output and any operator-side log routing keeps working.
@@ -123,6 +124,20 @@ def _process_deferred_subtasks(
         logger.warning(
             "Non-admin user %s attempted deferred subtask creation (task %d), ignoring",
             task.user_id, task.id,
+        )
+        path.unlink(missing_ok=True)
+        return 0
+
+    # `task.user_id` is pinned onto every subtask below and does not vary
+    # across the loop, so an id `db.create_task` refuses fails all of them
+    # identically — and would escape into `_drain_deferred_ops`, which calls
+    # its handlers in sequence with no guard between them and so would skip
+    # every later handler for this task (ISSUE-402). Refused once, here.
+    if not is_scopable_user_id(task.user_id):
+        logger.warning(
+            "Task %d deferred subtasks ignored: user id %r cannot name a "
+            "per-user directory",
+            task.id, task.user_id,
         )
         path.unlink(missing_ok=True)
         return 0

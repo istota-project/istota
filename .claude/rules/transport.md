@@ -230,7 +230,8 @@ the inbound side effects, so a create failure rolls the whole batch back and the
 messages are re-polled rather than silently lost.
 
 - **Talk**: `transport.talk.inbound.poll_talk_conversations(config) -> list[int]` owns every
-  Talk-specific step (conversation listing + cache, per-room long-poll,
+  Talk-specific step (conversation listing + cache, the `lastMessage` gate and
+  its periodic full sweep, per-room long-poll,
   system/own/unknown/unmentioned filtering, `!model` prefix, `!command` dispatch,
   confirmation-reply handling, the per-channel active-task gate, attachment
   extraction, cancelling superseded confirmations) **and** calls `ingest_message`
