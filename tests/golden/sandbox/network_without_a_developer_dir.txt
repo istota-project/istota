@@ -1,0 +1,30 @@
+bwrap	<HOST-SYSTEM-BINDS>
+--unshare-pid
+--proc	/proc
+--dev	/dev
+--tmpfs	/tmp
+--ro-bind	<VENV>	<VENV>
+--ro-bind	<SRC>	<SRC>
+--ro-bind	<HOME>/.local/bin	<HOME>/.local/bin
+--ro-bind	<HOME>/.local/share/claude	<HOME>/.local/share/claude
+--bind	<HOME>/.local/state/claude	<HOME>/.local/state/claude
+--tmpfs	<HOME>/.claude
+--ro-bind	<HOME>/.claude/.credentials.json	<HOME>/.claude/.credentials.json
+--ro-bind	<HOME>/.claude/settings.json	<HOME>/.claude/settings.json
+--bind	<HOME>/.claude/projects	<HOME>/.claude/projects
+--bind	<HOME>/.claude/debug	<HOME>/.claude/debug
+--bind	<HOME>/.claude/todos	<HOME>/.claude/todos
+--bind	<TMP>/temp/alice	<TMP>/temp/alice
+--unshare-net
+--ro-bind	<TMP>/sockets/net.sock	<TMP>/sockets/net.sock
+--bind	<TMP>/mount/Users/alice	<TMP>/mount/Users/alice
+--ro-bind	<TMP>/mount/Talk	<TMP>/mount/Talk
+--bind	<TMP>/mount/Channels/room123	<TMP>/mount/Channels/room123
+--ro-bind	<HOME>/.cache/huggingface	<HOME>/.cache/huggingface
+--tmpfs	<TMP>/data
+--remount-ro	<TMP>/data
+--unshare-user
+--disable-userns
+--die-with-parent
+--chdir	<TMP>/temp/alice
+--	/bin/sh	-c	python3 <TMP>/temp/alice/.developer/net-bridge <TMP>/sockets/net.sock 18080 </dev/null & exec env HTTPS_PROXY=http://127.0.0.1:18080 HTTP_PROXY=http://127.0.0.1:18080 NO_PROXY= "$@"	sh	claude	-p	test
