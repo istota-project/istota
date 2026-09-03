@@ -212,6 +212,20 @@ class TestMonarchProfiles:
         ).json()
         assert body["mapping"] == {"Bank": "Assets:Bank"}
 
+    def test_rejects_unparseable_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch/category-map?profile=global",
+            json={
+                "Internet Services (Reimbursed)":
+                    "Expenses:Uncategorized:InternetServices(Reimbursed)",
+            },
+        )
+        assert resp.status_code == 400
+        body = client.get(
+            "/istota/api/money/config/monarch/category-map?profile=global",
+        ).json()
+        assert body["mapping"] == {}
+
 
 class TestMonarchTagFilters:
     def test_replace(self, ctx, client):

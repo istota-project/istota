@@ -457,8 +457,32 @@ class TestMonarchGranular:
     def test_unknown_profile_raises(self, tmp_path):
         db_path = tmp_path / "money.db"
         cs.init_db(db_path)
-        with pytest.raises(ValueError):
-            cs.set_account_map_entry(db_path, "nonexistent", "X", "Y")
+        with pytest.raises(ValueError, match="nonexistent"):
+            cs.set_account_map_entry(db_path, "nonexistent", "X", "Assets:Bank")
+
+    def test_map_rejects_unparseable_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with pytest.raises(ValueError, match="category-map"):
+            cs.set_category_map_entry(
+                db_path, None, "Internet Services (Reimbursed)",
+                "Expenses:Uncategorized:InternetServices(Reimbursed)",
+            )
+        with pytest.raises(ValueError, match="account-map"):
+            cs.set_account_map_entry(db_path, None, "Visa", "Liabilities Visa")
+        with pytest.raises(ValueError, match="category-map"):
+            cs.replace_category_map(db_path, None, {"Fees": "Expenses:Fees (Bank)"})
+        assert cs.get_category_map(db_path, None) == {}
+
+    def test_map_accepts_valid_account(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.set_category_map_entry(
+            db_path, None, "Internet Services (Reimbursed)",
+            "Expenses:Internet-Services",
+        )
+        assert cs.get_category_map(db_path, None) == {
+            "Internet Services (Reimbursed)": "Expenses:Internet-Services",
+        }
 
     def test_tag_filters(self, tmp_path):
         db_path = tmp_path / "money.db"

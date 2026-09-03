@@ -2449,10 +2449,25 @@ def delete_monarch_profile(db_path: Path | str, name: str) -> bool:
         return cur.rowcount > 0
 
 
+def _check_map_account(kind: str, key: str, value: str) -> None:
+    """Reject a mapping target that beancount could not parse.
+
+    A Monarch map is the only config that names an account the sync writes
+    straight into the ledger, so an unparseable one here is not caught until a
+    later `check` fails on a transaction already appended.
+    """
+    if not isinstance(value, str) or not _is_account(value):
+        raise ValueError(
+            f"invalid {kind} account for {key!r}: {value!r} — expected a "
+            "beancount account like Expenses:Internet-Services",
+        )
+
+
 def set_account_map_entry(
     db_path: Path | str, profile: str | None,
     monarch_name: str, beancount_account: str,
 ) -> str:
+    _check_map_account("account-map", monarch_name, beancount_account)
     init_db(db_path)
     with _connect(db_path) as conn:
         pid = _resolve_profile_id(conn, profile)
@@ -2503,6 +2518,8 @@ def get_account_map(
 def replace_account_map(
     db_path: Path | str, profile: str | None, mapping: dict[str, str],
 ) -> None:
+    for key, value in mapping.items():
+        _check_map_account("account-map", key, value)
     init_db(db_path)
     with _connect(db_path) as conn:
         pid = _resolve_profile_id(conn, profile)
@@ -2513,6 +2530,7 @@ def set_category_map_entry(
     db_path: Path | str, profile: str | None,
     category: str, beancount_account: str,
 ) -> str:
+    _check_map_account("category-map", category, beancount_account)
     init_db(db_path)
     with _connect(db_path) as conn:
         pid = _resolve_profile_id(conn, profile)
@@ -2564,6 +2582,8 @@ def get_category_map(
 def replace_category_map(
     db_path: Path | str, profile: str | None, mapping: dict[str, str],
 ) -> None:
+    for key, value in mapping.items():
+        _check_map_account("category-map", key, value)
     init_db(db_path)
     with _connect(db_path) as conn:
         pid = _resolve_profile_id(conn, profile)
