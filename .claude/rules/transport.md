@@ -270,6 +270,26 @@ messages are re-polled rather than silently lost.
   and a separate change, since ISSUE-399 was about how many connections this
   poller holds at once.
 
+  **Two hazards were closed ahead of a second inbound driver, and neither is
+  conditional on one arriving.** `db.set_talk_poll_state` advances with `MAX`
+  and can no longer move a cursor backwards: the cursor advances at the top of
+  the results loop *before* every filter, and below it sit `!command` dispatch,
+  the confirmation reply and its ack post, and `cancel_for_conversation` — none
+  idempotent and only `ingest_message` deduped, so a rewind re-runs that window
+  rather than being absorbed by it. Talk comment ids are global and monotonic
+  and no operation resets them, so there is no legitimate rewind to preserve.
+  And every `db.get_db` block reachable from the runtime loop is taken behind
+  one `asyncio.Lock` per loop (`transport/talk/_db_lock.py`) with a bounded
+  `busy_timeout_ms`. **That one is a deadlock rather than a race**: the results
+  block writes and then awaits Nextcloud five times with the WAL write lock
+  held, and `db.get_db` is synchronous `sqlite3` — a second writing coroutine
+  scheduled into one of those awaits blocks the loop thread itself, which is the
+  only thread that can resume the coroutine holding the lock. It must be an
+  `asyncio.Lock`; a `threading.Lock` there *is* the deadlock. The bound is what
+  keeps a writer outside the loop (the scheduler's threads) from stalling it for
+  `get_db`'s 30s default — the caller retries on the next cycle, which is safe
+  because the cursor advance and the task creation commit together.
+
   **What the measurement established before the fix**, and why the room half was
   worth doing on it: the room loop's awaits recur rather than being
   first-encounter work. `get_latest_message_id` persists a cursor only for a

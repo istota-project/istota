@@ -18,6 +18,7 @@ from ...config import Config
 from ...talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
 from ..ingest import ingest_message
+from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
 
 logger = logging.getLogger("istota.transport.talk.inbound")
 
@@ -874,12 +875,22 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     conv_types: dict[str, int] = {}  # token -> conversation type
     conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
 
-    with db.get_db(config.db_path) as conn:
+    async with talk_db(config.db_path) as conn:
         plans = _plan_room_pass(conn, config, conversations, conv_types, conv_names)
 
     await _fetch_room_pass(client, config, plans)
 
-    with _timed_poll_txn("rooms"), db.get_db(config.db_path) as conn:
+    async with contextlib.AsyncExitStack() as stack:
+        # Instrumentation outermost, then the transport lock, then the
+        # connection. `_TxnHold` counts the wait for the lock as part of what
+        # it reports, deliberately — the wait is the cost another writer pays —
+        # and the connection is opened last so the write lock is held for no
+        # longer than the transaction itself.
+        stack.enter_context(_timed_poll_txn("rooms"))
+        await stack.enter_async_context(loop_db_lock())
+        conn = stack.enter_context(
+            db.get_db(config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS),
+        )
         poll_tasks, gated = _apply_room_pass(
             conn, config, client, plans, full_sweep=full_sweep,
         )
@@ -965,7 +976,17 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     results = [t.result() for t in done]
 
     # Process results
-    with _timed_poll_txn("results") as hold, db.get_db(config.db_path) as conn:
+    async with contextlib.AsyncExitStack() as stack:
+        # Same order as the room pass above, and the same reason. This is the
+        # block the transport lock exists for: it writes before it awaits, so
+        # the WAL write lock is held across every one of the five Nextcloud
+        # round trips below, and a second writing coroutine scheduled into one
+        # of those awaits would block the loop thread this one has to resume on.
+        hold = stack.enter_context(_timed_poll_txn("results"))
+        await stack.enter_async_context(loop_db_lock())
+        conn = stack.enter_context(
+            db.get_db(config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS),
+        )
         for conversation_token, messages in results:
             if not messages:
                 continue
