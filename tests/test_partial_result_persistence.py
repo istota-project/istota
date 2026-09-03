@@ -11,6 +11,7 @@ match in three places in the scheduler, and a cancelled task that stopped
 matching would be sent back through the retry ladder.
 """
 
+import asyncio
 import json
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from istota.executor import execute_task
 from istota.scheduler import PARTIAL_WORK_MARKER, process_one_task
 
 from tests.test_executor_final_answer import _FakeBrain
+from .support.rooms import plain_talk_room
 from tests.test_executor_streaming import (
     _make_config,
     _make_task,
@@ -234,41 +236,45 @@ class TestTheSchedulerPersistsIt:
 
 class TestTheUserIsToldWhatSurvived:
     @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.run_coro", side_effect=asyncio.run)
     def test_the_talk_failure_notice_carries_the_partial_work(
-        self, _arun, db_path, tmp_path,
+        self, _run_coro, _arun, db_path, tmp_path, fake_talk,
     ):
+        """Read off the Talk seam rather than off a `post_result_to_talk`
+        capture, so "the user was told" means the message reached the room the
+        task names — not that a shim was handed a string."""
         from tests.test_scheduler import TestProcessOneTask
 
         config = TestProcessOneTask()._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
+            room = plain_talk_room(conn, "testuser", token="room1")
             task_id = db.create_task(
                 conn, prompt="investigate", user_id="testuser",
-                source_type="talk", conversation_token="room1",
+                source_type="talk", conversation_token=room.canonical,
             )
             conn.execute(
                 "UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,)
             )
 
-        posted: list[str] = []
-
-        def _capture(config_, task_, message, **kwargs):
-            posted.append(message)
-            return None
-
         def _fake(task, *args, **kwargs):
             task.partial_result = "The leak is in the poller's cursor."
             return (False, "Task execution timed out after 60 minutes", None, None)
 
-        with patch("istota.scheduler.execute_task", side_effect=_fake), patch(
-            "istota.scheduler.post_result_to_talk", side_effect=_capture,
-        ):
+        with patch("istota.scheduler.execute_task", side_effect=_fake):
             process_one_task(config)
 
-        assert posted, "no Talk message was composed for a permanent failure"
+        posted = [
+            c.args["message"]
+            for c in fake_talk.calls_to(room.talk_ref, method="send_message")
+        ]
+        assert posted, "no Talk message reached the room for a permanent failure"
         # posted[0] is the ack; the failure notice is the last thing posted.
         body = posted[-1]
         assert PARTIAL_WORK_MARKER in body
         assert "The leak is in the poller's cursor." in body
+        # A notice refused for naming an unpostable token would leave `posted`
+        # short rather than wrong, so the count is not enough on its own.
+        assert fake_talk.refusals == []
         # The failure still leads.
         assert body.index(PARTIAL_WORK_MARKER) > 0
 
