@@ -2070,6 +2070,38 @@ def _probe_output_line(text: str | None, limit: int = 160) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Names that only an environment istota itself built for something other than
+#: the daemon carries. Each is set by one of the two env builders and by
+#: nothing else on a deployment, so finding one is evidence that ``os.environ``
+#: here is not the daemon's.
+#:
+#: * ``ISTOTA_TASK_ID`` — `task_env.build_task_runtime` sets it on every task
+#:   env, and it is not in ``_EXECUTOR_PROXY_ONLY_VARS``, so it survives into
+#:   both the model's own environment and ``proxy_base_env``, which is what a
+#:   host-side skill CLI runs with. The general marker.
+#: * ``ISTOTA_SANDBOXED`` — narrower (it needs the sandbox in effect and the
+#:   proxy on), and kept because its meaning is exactly "this environment was
+#:   built for the model".
+#: * ``PRECOMMIT_SCANS_REQUIRED`` — `executor.build_stripped_env` sets it, which
+#:   is what a cron ``command`` job and a heartbeat ``shell-command`` run with;
+#:   that builder filters every name matching the credential patterns, so all
+#:   three names below are gone from it by construction. Unlike the other two an
+#:   operator can also set this one by hand (ISSUE-291 made it an override), so
+#:   it is evidence rather than proof. It errs toward a skip, which is the safe
+#:   direction for a check whose observed failure mode is crying wolf.
+#:
+#: Named markers rather than the ``ISTOTA_`` namespace: the daemon's own
+#: environment carries ``ISTOTA_CONFIG_PATH`` and ``ISTOTA_ADMINS_FILE``, so a
+#: namespace test would skip everywhere and the check would never fail at all.
+_NON_DAEMON_ENV_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED",
+                           "PRECOMMIT_SCANS_REQUIRED")
+
+
+def _non_daemon_env_markers() -> list[str]:
+    """Which of :data:`_NON_DAEMON_ENV_MARKERS` this process carries."""
+    return [n for n in _NON_DAEMON_ENV_MARKERS if os.environ.get(n)]
+
+
 def check_skill_model_credential(
     config: "Config", probe: bool
 ) -> list[CheckResult]:
@@ -2097,6 +2129,22 @@ def check_skill_model_credential(
     anything to inject. Only the presence of a name is ever read or reported;
     a credential's value never reaches a `CheckResult`, which is rendered into
     the admin dashboard and the boot log.
+
+    That half reads ``os.environ``, and the process it reads is not always the
+    daemon. Four of the six entry points are, and a fifth is the web unit, but
+    `istota doctor` is also a command a *task* can run, and a task environment
+    is the one ISSUE-390 deliberately strips the Claude credential out of. The
+    two API-key names reach a task env by no route at all, so on that shape all
+    three names are absent whatever the daemon holds, and the first version of
+    this check answered FAIL, and exited 1, about a deployment whose reviews
+    were working. So absence is only a verdict where the environment could have
+    held one: `_non_daemon_env_markers` names the environments istota built for
+    something other than the daemon, and the answer there is a skip.
+
+    Presence stays OK wherever it is read, which is the asymmetry that makes
+    the skip narrow rather than a hole. `build_clean_env` copies the token out
+    of the daemon's own environment into every task's, so seeing it inside a
+    task does answer the question; only absence is the unanswerable direction.
 
     Spawns nothing, so it is safe under ``probe=False``, and never raises.
     """
@@ -2197,6 +2245,26 @@ def check_skill_model_credential(
                 SKIP,
                 "[security] skill_proxy_enabled = false, so a skill CLI "
                 "inherits the daemon's environment directly",
+            )
+        )
+    elif markers := _non_daemon_env_markers():
+        # Absence in an environment that was never going to hold one is not a
+        # verdict about the daemon. Ordered after the OK arm on purpose:
+        # presence answers the question wherever it is read, so only absence is
+        # unanswerable here. See the docstring.
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                SKIP,
+                f"this process carries {', '.join(markers)}, so its "
+                f"environment is not the daemon's and the credential it would "
+                f"inject is not visible from here",
+                remedy=(
+                    "Run the check as the daemon's user with the daemon's "
+                    "environment loaded (the `<namespace>-run doctor` wrapper "
+                    "on a server install), or read it from the admin "
+                    "dashboard's Health pane."
+                ),
             )
         )
     else:
