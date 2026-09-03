@@ -26,7 +26,6 @@ from . import db
 from . import email_support
 from . import task_cgroup
 from . import task_env
-from . import config as istota_config
 from .claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401  — re-exported; the drift guard reads it beside `build_clean_env`
     without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
