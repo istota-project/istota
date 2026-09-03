@@ -52,6 +52,27 @@ if _has_web_deps:
 ORIGIN = {"origin": "https://example.com"}
 
 
+@pytest.fixture(autouse=True)
+def _clear_volume_state():
+    """Reset the poller's in-process volume counters between tests.
+
+    The same fixture `tests/test_transport_email_inbound.py` carries, for the
+    same reason. `_prompt_counts` collapses confirmation prompts past three per
+    `(user, sender)` per hour and is a module global nothing else resets, and
+    all four gated polls in `TestPromptRouting` are the same
+    `(carol, stranger@evil.com)` pair — so whichever of them runs fourth in a
+    given xdist worker gets no individual prompt and fails on an assertion
+    about the prompt rather than about anything it is testing. Order-dependent
+    since those tests were written; found when a test-count change elsewhere
+    redistributed them.
+    """
+    from istota.transport.email import inbound as _inbound
+
+    _inbound._reset_volume_state()
+    yield
+    _inbound._reset_volume_state()
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
