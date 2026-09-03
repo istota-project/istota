@@ -32,6 +32,68 @@ _CONVERSATION_CACHE_TTL = 60  # seconds
 # 1:1 DM token cache: user_id -> conversation_token (populated from list_conversations)
 _dm_token_cache: dict[str, str] = {}
 
+# When every room was last polled regardless of the `lastMessage` gate below.
+# `None` means "not this process yet", so the first cycle after a restart is a
+# full sweep — the safe direction, since the gate has no history to reason from.
+#
+# Mutated without a lock, like the caches above it. Nothing overlaps today:
+# `run_coro` blocks its submitting thread, `_talk_poll_loop` is the only daemon
+# caller and is single-threaded, and `TalkTransport.poll` has no live caller. A
+# registry-driven inbound driver — the shape `.claude/rules/transport.md`
+# describes as intended — would be the first thing to break that, and would
+# race `_conversation_cache` in the same breath.
+_last_full_sweep: float | None = None
+
+
+def _gate_enabled(config: Config) -> bool:
+    """Whether this deployment gates the per-room fetch at all.
+
+    One knob rather than a boolean beside it: `talk_poll_full_sweep_interval`
+    at `0` means every cycle is a full sweep, which is exactly the ungated
+    behaviour, so an operator can switch the gate off without the codebase
+    carrying two polling paths for ever.
+    """
+    return config.scheduler.talk_poll_full_sweep_interval > 0
+
+
+def _has_news(conv: dict, last_known_id: int) -> bool:
+    """Whether the room list says this room holds a message we have not seen.
+
+    Reads `lastMessage` out of the `/api/v4/room` payload the poll cycle has
+    already fetched, so answering it costs no extra request.
+
+    **Fails toward fetching.** A missing `lastMessage`, a shape that is not a
+    dict, or an id that is not an integer all read as "poll it". The two wrong
+    answers are not symmetric: a needless poll costs one request that the gate
+    exists to save, while a wrongly skipped room loses its message until the
+    next full sweep — and the behaviour this replaces re-fetched a cycle later
+    rather than dropping anything.
+
+    **The accepted trade is latency, and it is a floor rather than a spike.** A
+    quiet room used to have a long-poll open for most of every cycle, so the
+    server pushed a message the moment it arrived. A gated room has no
+    connection open at all, so a new message waits for the next room listing —
+    up to `talk_poll_interval` plus a round trip, every time. `talk_poll_interval`
+    is therefore the responsiveness knob now, where it used to be a backoff.
+
+    **What is not established anywhere is that a real `lastMessage.id` tracks a
+    real cursor.** Every test here builds both sides by hand. Talk is reported
+    to skip `Room::setLastMessage` for some message classes and to return an
+    empty `lastMessage` for oversized ones; the first would gate a room whose
+    chat endpoint does have something to return. The sweep is what bounds that,
+    and its interval is the recovery time nobody has measured against a live
+    Nextcloud.
+    """
+    last_message = conv.get("lastMessage")
+    if not isinstance(last_message, dict):
+        return True
+    newest = last_message.get("id")
+    # A bool is an int in Python and would compare as 0 or 1 against a real
+    # cursor, so it is refused here rather than read as an id.
+    if not isinstance(newest, int) or isinstance(newest, bool):
+        return True
+    return newest > last_known_id
+
 
 def get_dm_token(user_id: str) -> str | None:
     """Get the 1:1 DM conversation token for a user, if known.
@@ -304,15 +366,36 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     if not config.nextcloud.url:
         return []
 
-    global _conversation_cache
+    global _conversation_cache, _last_full_sweep
 
     client = get_talk_client(config)
     created: list[int] = []
 
-    # Get all conversations, using cache to avoid blocking every cycle
     now = time.monotonic()
+
+    # A cycle is either gated or a full sweep. Gated, only a room whose
+    # `lastMessage` is newer than our cursor is long-polled; on a sweep every
+    # room is, which is what bounds the cost of a gate that reads wrongly.
+    sweep_interval = config.scheduler.talk_poll_full_sweep_interval
+    full_sweep = (
+        sweep_interval <= 0
+        or _last_full_sweep is None
+        or now - _last_full_sweep >= sweep_interval
+    )
+
+    # Get all conversations, using cache to avoid blocking every cycle.
+    #
+    # The gate reads `lastMessage` out of this payload, so on a gated cycle the
+    # cache would be a stale gate: at a 60s TTL and a 10s poll interval six
+    # consecutive cycles read one snapshot, and a message arriving just after a
+    # refresh would be held for the rest of the minute — worse inbound latency
+    # than the long-poll the gate replaces. So a gated cycle always refetches,
+    # and the cache degrades to what it is still needed for: the last known
+    # room list for a cycle where Nextcloud did not answer. One short request
+    # per cycle against N held ones is the trade (ISSUE-399).
     cache_valid = (
-        _conversation_cache is not None
+        not _gate_enabled(config)
+        and _conversation_cache is not None
         and now - _conversation_cache[1] < _CONVERSATION_CACHE_TTL
     )
 
@@ -329,12 +412,23 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     type(e).__name__, e, len(_conversation_cache[0]),
                 )
                 conversations = _conversation_cache[0]
+                # A list the server did not just hand us says which rooms exist
+                # and nothing about what is new in them. Its `lastMessage` is
+                # frozen at the last successful fetch while the cursors keep
+                # advancing from whatever the polls return, so once a cursor
+                # reaches that frozen id the room gates shut on every cycle for
+                # as long as the listing keeps failing — an outage that used to
+                # cost nothing would instead cut inbound to one sweep per
+                # `talk_poll_full_sweep_interval`. So a stale list ungates the
+                # cycle rather than gating it (ISSUE-399 review).
+                full_sweep = True
             else:
                 logger.warning("Error listing Talk conversations: %s: %s", type(e).__name__, e)
                 return []
 
     # Build list of conversations to poll and initialize new ones
     poll_tasks = []
+    gated = 0  # rooms the lastMessage gate held back this cycle
     conv_types: dict[str, int] = {}  # token -> conversation type
     conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
     with db.get_db(config.db_path) as conn:
@@ -407,6 +501,12 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             # Get last known message ID for this conversation
             last_message_id = db.get_talk_poll_state(conn, conversation_token)
 
+            # The gate needs a cursor we have actually seen. A room being polled
+            # for the first time has none, and the branch below invents one from
+            # the server's own latest id — comparing the room list against that
+            # would skip the very message the initialisation is there to catch.
+            known_cursor = last_message_id
+
             # First-time poll behavior depends on conversation type
             if last_message_id is None:
                 if conv_type == 1:
@@ -422,6 +522,17 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         latest_id = await client.get_latest_message_id(conversation_token)
                         if latest_id:
                             last_message_id = latest_id - 1
+                            # Persist it. The only other writer is the message
+                            # loop below, which fires solely for a message a
+                            # poll actually returned — so a room whose polls
+                            # keep coming back empty never acquired a cursor at
+                            # all, and `known_cursor is None` bypassed the gate
+                            # on every cycle for ever. `latest_id - 1` is behind
+                            # the newest message by construction, so the next
+                            # poll still returns it (ISSUE-399 review).
+                            db.set_talk_poll_state(
+                                conn, conversation_token, last_message_id,
+                            )
                             logger.debug("First poll for room %s - starting from message %d", conversation_token, last_message_id)
                         else:
                             last_message_id = 0
@@ -448,6 +559,19 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                         conversation_token, e,
                     )
 
+            # The gate: on an ordinary cycle, skip a room the room list says
+            # holds nothing we have not already read. This is what stops the
+            # cycle opening one long-poll per room around the clock — 97% of
+            # which were being abandoned client-side having carried nothing
+            # (ISSUE-399). A full sweep ignores it.
+            if (
+                not full_sweep
+                and known_cursor is not None
+                and not _has_news(conv, known_cursor)
+            ):
+                gated += 1
+                continue
+
             # Add to concurrent poll list
             poll_tasks.append(
                 _poll_single_conversation(
@@ -464,13 +588,38 @@ async def poll_talk_conversations(config: Config) -> list[int]:
         # surfacing in the web room list forever. `conversations` is the bot's
         # *complete* room list; only reconcile when it's non-empty so a transient
         # empty/failed fetch can't mass-archive every room.
-        live_talk_tokens = {
-            c.get("token") for c in conversations if c.get("token")
-        }
-        if live_talk_tokens:
-            n = db.archive_orphaned_talk_rooms(conn, live_talk_tokens)
-            if n:
-                logger.info("Archived %d Talk room(s) no longer in Nextcloud", n)
+        #
+        # Only on a full sweep. Gating made a quiet cycle return without
+        # awaiting anything, so cycles now come round roughly every
+        # `talk_poll_interval` instead of every `talk_poll_timeout +
+        # talk_poll_interval` — and this is a mass-archive whose only guard is
+        # that the token set is non-empty, so a listing that came back
+        # truncated for any reason archives every room missing from it. Room
+        # membership changes on a human timescale and does not need re-deciding
+        # every ten seconds; running it on the sweep keeps the number of draws
+        # against that guard where it was (ISSUE-399 review).
+        if full_sweep:
+            live_talk_tokens = {
+                c.get("token") for c in conversations if c.get("token")
+            }
+            if live_talk_tokens:
+                n = db.archive_orphaned_talk_rooms(conn, live_talk_tokens)
+                if n:
+                    logger.info("Archived %d Talk room(s) no longer in Nextcloud", n)
+
+    # Stamped here rather than beside the decision above, so the timestamp
+    # records a sweep that happened. Stamped early, a cycle that died on the
+    # listing fetch or anywhere in the room loop still spent the credit, and
+    # the next sweep was deferred a full interval — which matters because the
+    # sweep is the gate's only safety net (ISSUE-399 review).
+    if full_sweep:
+        _last_full_sweep = now
+
+    if gated or full_sweep:
+        logger.debug(
+            "Talk poll: %d room(s) polled, %d held by the lastMessage gate%s",
+            len(poll_tasks), gated, " (full sweep)" if full_sweep else "",
+        )
 
     if not poll_tasks:
         return []
@@ -479,10 +628,23 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     # FIRST_COMPLETED preserves instant detection (server responds immediately
     # when a message arrives) while not blocking on quiet rooms.  Once any room
     # responds, give remaining rooms a brief grace period then move on.
+    #
+    # The gate has to outlast the server's own long-poll rather than equal it.
+    # `talk_poll_timeout` is sent to Nextcloud as the `timeout` parameter, so it
+    # is how long the *server* holds the request; the answer to a request held
+    # for N seconds cannot arrive before N seconds have passed. A gate of
+    # exactly N therefore expires just as every room is about to reply, and
+    # since only `done` is read below, their messages are dropped and refetched
+    # a poll interval later. `talk_poll_wait` is the slack, the same allowance
+    # already used for stragglers (ISSUE-399: a deployment set the timeout to 1
+    # to stop holding a PHP worker per room, at which point the skew was the
+    # whole window and every cycle opened a full round of connections and
+    # abandoned them).
+    gate = config.scheduler.talk_poll_timeout + config.scheduler.talk_poll_wait
     tasks = [asyncio.create_task(t) for t in poll_tasks]
     done, pending = await asyncio.wait(
         tasks,
-        timeout=config.scheduler.talk_poll_timeout,
+        timeout=gate,
         return_when=asyncio.FIRST_COMPLETED,
     )
 

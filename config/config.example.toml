@@ -579,6 +579,13 @@ talk_poll_timeout = 30
 # Rooms that respond faster (with new messages) are processed immediately;
 # quiet rooms still long-polling are cancelled and re-polled next cycle
 talk_poll_wait = 2.0
+# How often every room is long-polled regardless of the lastMessage gate.
+# Between sweeps only a room the room list already says has a newer message is
+# polled, so a quiet cycle costs one short request instead of one held
+# connection per room. The sweep is the safety net: it bounds what a gate that
+# read wrongly can cost to this interval. 0 turns the gate off entirely and
+# polls every room every cycle.
+talk_poll_full_sweep_interval = 300
 # Seconds between polling for new emails
 email_poll_interval = 60
 # Messages one email poll walks. The rest wait for the next tick and drain in order.

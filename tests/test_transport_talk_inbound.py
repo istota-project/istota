@@ -30,10 +30,12 @@ def _reset_poller_caches():
     """Reset module-level caches between tests."""
     _participant_cache.clear()
     _talk_poller_mod._conversation_cache = None
+    _talk_poller_mod._last_full_sweep = None
     _dm_token_cache.clear()
     yield
     _participant_cache.clear()
     _talk_poller_mod._conversation_cache = None
+    _talk_poller_mod._last_full_sweep = None
     _dm_token_cache.clear()
 
 
@@ -1847,8 +1849,17 @@ class TestConversationListCache:
 
     @pytest.mark.asyncio
     async def test_cached_list_avoids_api_call(self, make_config):
-        """Second poll cycle uses cached conversation list."""
+        """Second poll cycle uses cached conversation list.
+
+        Only where the `lastMessage` gate is off. The gate reads `lastMessage`
+        out of this payload, so a gated deployment must refetch every cycle or
+        it gates on a snapshot up to a TTL old — see
+        `TestThePerRoomFetchIsGatedOnLastMessage`. `talk_poll_full_sweep_interval
+        = 0` is what turns the gate off, and it is the shape this TTL still
+        serves (ISSUE-399).
+        """
         config = make_config()
+        config.scheduler.talk_poll_full_sweep_interval = 0
 
         with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
             mock_instance = MockClient.return_value
@@ -1868,8 +1879,14 @@ class TestConversationListCache:
 
     @pytest.mark.asyncio
     async def test_cache_expires_after_ttl(self, make_config):
-        """Conversation list is refreshed after TTL expires."""
+        """Conversation list is refreshed after TTL expires.
+
+        Gate off, for the reason its sibling above says: with the gate on,
+        `cache_valid` is False whatever the timestamp holds, so this test would
+        pass against a deleted TTL check (ISSUE-399).
+        """
         config = make_config()
+        config.scheduler.talk_poll_full_sweep_interval = 0
 
         with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
             mock_instance = MockClient.return_value
@@ -2059,3 +2076,431 @@ class TestPollUnderPersistentRuntime:
         finally:
             reset_talk_client()
             reset_async_runtime()
+
+
+class TestThePollGateOutlastsTheServerLongPoll:
+    """`talk_poll_timeout` is two different durations, and they must not be equal.
+
+    `poll_messages` sends it to Nextcloud as the `timeout` query parameter, so
+    it is how long the *server* holds the request open. `poll_talk_conversations`
+    then passes the same number to `asyncio.wait` as how long the *client* waits
+    for an answer. An answer to a request the server holds for N seconds cannot
+    arrive before N seconds have passed — it is late by construction, by a
+    network hop and Nextcloud's own dispatch — so a gate of exactly N expires
+    first and the room is cancelled.
+
+    `results = [t.result() for t in done]` reads only the finished tasks, so a
+    cancelled room's messages are dropped: the poll cursor does not advance and
+    the message is refetched a `talk_poll_interval` later. The `talk_poll_wait`
+    grace does not cover it, because `if done and pending` requires some room to
+    have answered *before* the gate — and on a cycle where every room is running
+    the same server-side timer, none has.
+
+    Found while investigating ISSUE-399, where the deployment had set
+    `talk_poll_timeout = 1` to stop holding a Nextcloud PHP worker per room. At
+    30 the skew is a fraction of the window; at 1 it is the whole of it, so
+    every cycle became a full round of connections opened and abandoned.
+    """
+
+    @staticmethod
+    def _answers_after(delay: float, messages: list[dict]):
+        """A `poll_messages` that answers `delay` seconds late, like the server."""
+        async def _poll(*args, **kwargs):
+            await asyncio.sleep(delay)
+            return list(messages)
+        return _poll
+
+    @pytest.mark.asyncio
+    async def test_a_late_answer_is_collected_rather_than_cancelled(self, make_config):
+        config = make_config()
+        config.scheduler.talk_poll_timeout = 1
+        config.scheduler.talk_poll_wait = 2.0
+
+        msg = _msg(id=101, actor_id="alice", message="answered just after the gate")
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = self._answers_after(1.15, [msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1, (
+            "the room answered 0.15s after a 1s server-side long-poll — the "
+            "earliest it could — and the cycle threw the answer away"
+        )
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, result[0]).talk_message_id == 101
+
+    @pytest.mark.asyncio
+    async def test_the_grace_window_applies_when_no_room_beat_the_gate(
+        self, make_config,
+    ):
+        """Two rooms on the same server-side timer, neither answering early.
+
+        This is the ordinary quiet cycle: every room was started together and
+        carries the same `timeout`, so they all answer at once and all of them
+        answer late. `if done and pending` is False for want of an early
+        responder, so the grace never runs and both rooms are cancelled — the
+        case a single-room test cannot distinguish from a gate that is merely
+        too short.
+        """
+        config = make_config()
+        config.scheduler.talk_poll_timeout = 1
+        config.scheduler.talk_poll_wait = 2.0
+
+        async def _poll(token, *args, **kwargs):
+            await asyncio.sleep(1.15)
+            return [_msg(id=200 if token == "room1" else 300, actor_id="alice")]
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+                {"token": "room2", "type": 1},
+            ])
+            mock_instance.poll_messages = _poll
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+                db.set_talk_poll_state(conn, "room2", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 2, (
+            "both rooms answered and both were cancelled: the grace window is "
+            "guarded on a room having beaten the gate, and none can"
+        )
+
+
+class TestThePerRoomFetchIsGatedOnLastMessage:
+    """Only poll a room the room list already says has something new.
+
+    ISSUE-399. The poll loop opened one long-poll per room per cycle and held
+    each one on a Nextcloud PHP-FPM worker for `talk_poll_timeout` seconds,
+    around the clock, for every room the bot is in — 41 rows against 6 or 7 live
+    rooms on the production deployment. A day's nginx log showed 95,703 such
+    requests, 92,678 of them (97%) ending in a 499: opened, held, and abandoned
+    client-side having carried nothing.
+
+    `/api/v4/room` — the call that enumerates the rooms — already returns a
+    `lastMessage` object per room, and `talk_poll_state` already holds the
+    cursor. Comparing the two says whether a room can possibly have news before
+    a single long-poll is opened, so the quiet case, which is nearly every case,
+    costs one short request for the whole cycle instead of N held ones.
+
+    The gate fails toward fetching: a missing `lastMessage`, an unexpected
+    shape, or a room with no cursor yet is polled. A gate that guesses wrong in
+    the other direction loses a message permanently, where the behaviour it
+    replaces merely re-fetched a cycle later.
+    """
+
+    @staticmethod
+    def _client(conversations, poll):
+        mock_instance = MagicMock()
+        mock_instance.list_conversations = AsyncMock(return_value=conversations)
+        mock_instance.poll_messages = poll
+        mock_instance.fetch_chat_history = AsyncMock(return_value=[])
+        mock_instance.get_latest_message_id = AsyncMock(return_value=0)
+        return mock_instance
+
+    @staticmethod
+    def _room(token, last_message_id, *, conv_type=1):
+        room = {"token": token, "type": conv_type}
+        if last_message_id is not None:
+            room["lastMessage"] = {"id": last_message_id}
+        return room
+
+    @staticmethod
+    def _swept_just_now():
+        """Put the cycle under test *between* sweeps.
+
+        `_last_full_sweep` is None in a fresh process, and the first cycle after
+        a restart is deliberately a full sweep — the gate has no history to
+        reason from at that point. A test that calls the poller once therefore
+        measures a sweep, not the gate, and would pass against no gate at all.
+        """
+        _talk_poller_mod._last_full_sweep = time.monotonic()
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_room_is_not_polled(self, make_config):
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = self._client(
+                [self._room("quiet", 100)], poll,
+            )
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "quiet", 100)
+            self._swept_just_now()
+            await poll_talk_conversations(config)
+
+        assert poll.await_count == 0, (
+            "the room list said the newest message is the one we already have, "
+            "and a long-poll was opened and held anyway"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_room_with_a_newer_last_message_is_polled(self, make_config):
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = self._client(
+                [self._room("quiet", 100), self._room("busy", 205)], poll,
+            )
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "quiet", 100)
+                db.set_talk_poll_state(conn, "busy", 200)
+            self._swept_just_now()
+            await poll_talk_conversations(config)
+
+        polled = {c.args[0] for c in poll.await_args_list}
+        assert polled == {"busy"}, f"expected only the busy room, polled {polled}"
+
+    @pytest.mark.parametrize("last_message", [
+        None,
+        "not-a-dict",
+        {},
+        {"id": None},
+        {"id": "12"},
+    ])
+    @pytest.mark.asyncio
+    async def test_an_unfamiliar_shape_is_polled_rather_than_skipped(
+        self, make_config, last_message,
+    ):
+        """Fail toward fetching. A skipped room's message is lost for good."""
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+        room = {"token": "odd", "type": 1}
+        if last_message is not None:
+            room["lastMessage"] = last_message
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = self._client([room], poll)
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "odd", 100)
+            self._swept_just_now()
+            await poll_talk_conversations(config)
+
+        assert poll.await_count == 1, (
+            f"lastMessage={last_message!r} was read as 'nothing new' — an "
+            f"unrecognised shape must fail toward fetching"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_full_sweep_polls_a_quiet_room(self, make_config):
+        """The gate's safety net: every room is polled on a fixed cadence.
+
+        A gate that never opens loses a message permanently, where a dropped
+        cycle self-heals. The sweep bounds that to the sweep interval.
+        """
+        config = make_config()
+        config.scheduler.talk_poll_full_sweep_interval = 300
+        poll = AsyncMock(return_value=[])
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = self._client(
+                [self._room("quiet", 100)], poll,
+            )
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "quiet", 100)
+
+            _talk_poller_mod._last_full_sweep = time.monotonic() - 301
+            await poll_talk_conversations(config)
+            assert poll.await_count == 1, "the overdue sweep did not run"
+
+            poll.reset_mock()
+            await poll_talk_conversations(config)
+            assert poll.await_count == 0, (
+                "every cycle swept; the sweep timestamp is not being recorded"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_zero_sweep_interval_turns_the_gate_off(self, make_config):
+        """The operator's escape hatch, with an honest meaning at every value.
+
+        `0` means every cycle is a full sweep, which is exactly the behaviour
+        the gate replaced — so a deployment that finds the gate wrong for it can
+        say so without a second boolean and a second code path.
+        """
+        config = make_config()
+        config.scheduler.talk_poll_full_sweep_interval = 0
+        poll = AsyncMock(return_value=[])
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = self._client(
+                [self._room("quiet", 100)], poll,
+            )
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "quiet", 100)
+            await poll_talk_conversations(config)
+            await poll_talk_conversations(config)
+
+        assert poll.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_the_room_list_is_refetched_every_cycle_while_gating(
+        self, make_config,
+    ):
+        """The gate reads `lastMessage`, so a cached room list is a stale gate.
+
+        The issue assumed `/api/v4/room` was fetched every cycle. It was not:
+        `_CONVERSATION_CACHE_TTL` is 60 seconds, so with a 10-second poll
+        interval six consecutive cycles read one snapshot. Gating on a
+        `lastMessage` up to a minute old would hold a real message for that
+        minute — worse inbound latency than the long-poll it replaces, and the
+        one outcome that would make the gate not worth having.
+
+        One short request per cycle against N held ones is still the trade the
+        issue asked for.
+        """
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+        client = self._client([self._room("quiet", 100)], poll)
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = client
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "quiet", 100)
+            await poll_talk_conversations(config)
+            await poll_talk_conversations(config)
+
+        assert client.list_conversations.await_count == 2, (
+            "the second cycle gated on a cached room list"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_stale_list_still_serves_when_the_fetch_fails(
+        self, make_config,
+    ):
+        """Refetching every cycle must not cost the failure fallback.
+
+        The cache stops being a TTL and becomes what it is now only useful for:
+        the last known room list, for a cycle where Nextcloud did not answer.
+        """
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+        client = self._client([self._room("busy", 205)], poll)
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = client
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "busy", 200)
+            await poll_talk_conversations(config)
+            assert poll.await_count == 1
+
+            poll.reset_mock()
+            client.list_conversations.side_effect = RuntimeError("nextcloud down")
+            await poll_talk_conversations(config)
+
+        assert poll.await_count == 1, (
+            "the cached room list was not used when list_conversations failed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_stale_list_ungates_rather_than_gating_on_frozen_evidence(
+        self, make_config,
+    ):
+        """A room list the server did not just hand us is not evidence of news.
+
+        The defect this pins is a *permanent* hold, not a delayed one, and it is
+        the one case where the gate is worse than what it replaced. On the
+        fallback path `lastMessage` is frozen at the last successful listing
+        while the cursor keeps advancing from whatever the polls return. Once
+        the cursor reaches that frozen id, `_has_news` is False for that room on
+        every subsequent cycle — so for as long as `/api/v4/room` keeps failing,
+        inbound runs at one full sweep per `talk_poll_full_sweep_interval`
+        instead of every cycle. Before the gate existed the same outage cost
+        nothing, because the cached list was only ever used to enumerate rooms.
+
+        The first version of the test beside this one could not see it: it
+        mocked the poll to return no messages, so the cursor never advanced to
+        meet the frozen id and the gate stayed open by construction. Letting the
+        first cycle actually deliver message 205 is the whole difference.
+        """
+        config = make_config()
+        poll = AsyncMock(return_value=[_msg(id=205, actor_id="alice")])
+        client = self._client([self._room("busy", 205)], poll)
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = client
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "busy", 200)
+
+            # Cycle one succeeds and advances the cursor to the id the room
+            # list reports, which is what arms the trap.
+            await poll_talk_conversations(config)
+            with db.get_db(config.db_path) as conn:
+                assert db.get_talk_poll_state(conn, "busy") == 205
+
+            # Cycle two: the listing fails, so the frozen list comes back — and
+            # its lastMessage now equals the cursor.
+            poll.reset_mock()
+            poll.return_value = []
+            client.list_conversations.side_effect = RuntimeError("nextcloud down")
+            self._swept_just_now()
+            await poll_talk_conversations(config)
+
+        assert poll.await_count == 1, (
+            "the room was gated on a frozen lastMessage: while the listing "
+            "keeps failing this room is only ever polled on a full sweep"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_initialised_cursor_is_persisted(self, make_config):
+        """Otherwise a room whose polls come back empty is never gated.
+
+        The only other writer of `talk_poll_state` is the message loop, which
+        fires solely for a message a poll actually returned. A room initialised
+        from `get_latest_message_id` whose long-poll then returns nothing wrote
+        no cursor at all, so `known_cursor` stayed None and the gate was
+        bypassed on every cycle for ever — the dormant-room shape the issue
+        counted (41 rows against 6-7 live).
+        """
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+        client = self._client([self._room("fresh", 500, conv_type=2)], poll)
+        client.get_latest_message_id = AsyncMock(return_value=500)
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = client
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "fresh") == 499, (
+                "the initialised cursor was not written, so the next cycle "
+                "re-initialises and the gate can never apply"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_listing_does_not_spend_the_sweep_credit(
+        self, make_config,
+    ):
+        """The sweep is the gate's only safety net, so a cycle that swept
+        nothing must not consume its interval.
+
+        Stamped beside the decision rather than after the work, a cycle that
+        died on the listing fetch still counted as the sweep, deferring the real
+        one by a whole `talk_poll_full_sweep_interval`.
+        """
+        config = make_config()
+        poll = AsyncMock(return_value=[])
+        client = self._client([self._room("quiet", 100)], poll)
+        client.list_conversations.side_effect = RuntimeError("nextcloud down")
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            MockClient.return_value = client
+            # No cached list yet, so this cycle returns having done nothing.
+            await poll_talk_conversations(config)
+
+        assert _talk_poller_mod._last_full_sweep is None, (
+            "a cycle that never reached the room loop recorded a full sweep"
+        )

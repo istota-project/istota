@@ -454,3 +454,100 @@ class TestApplySection:
         unknown: list[str] = []
         apply_section(cfg, {"scheduler": {"nope": 1}, "alsonope": 2}, unknown=unknown)
         assert sorted(unknown) == ["alsonope", "scheduler.nope"]
+
+
+class TestTalkPollTimeoutIsRefusedAtZero:
+    """``scheduler.talk_poll_timeout`` at ``0`` silently kills Talk inbound.
+
+    The setting has two consumers meaning different durations. It is sent to
+    Nextcloud as the ``timeout`` query parameter — how long the *server* holds
+    the request — and it used to be handed to ``asyncio.wait`` as well, as how
+    long the client waits for every room at once. At ``0`` the second one
+    returns before any round trip can finish: ``done`` comes back empty, the
+    ``if done and pending`` grace window is skipped for want of an early
+    responder, every request is cancelled mid-flight and ``results`` is empty on
+    every cycle. No exception, no log line, and the poll loop keeps running
+    while messages simply never arrive.
+
+    ISSUE-399 split the two durations, so a ``0`` no longer starves the wait.
+    It is still refused, because a zero-second server-side long-poll is a
+    request that can never carry news and only costs a round trip — and because
+    a value that turns a whole inbound surface into a no-op is a trap rather
+    than a setting.
+    """
+
+    def test_zero_keeps_the_default(self, tmp_path, caplog):
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_timeout = 0
+""")
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config(p)
+        assert cfg.scheduler.talk_poll_timeout == 30, (
+            "0 was accepted; it makes every long-poll a round trip that cannot "
+            "carry news"
+        )
+        assert any(
+            "talk_poll_timeout" in r.getMessage() for r in caplog.records
+        ), "the refusal was silent"
+
+    def test_a_negative_keeps_the_default(self, tmp_path):
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_timeout = -5
+""")
+        assert load_config(p).scheduler.talk_poll_timeout == 30
+
+    def test_an_ordinary_value_is_still_read(self, tmp_path):
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_timeout = 3
+""")
+        assert load_config(p).scheduler.talk_poll_timeout == 3
+
+    def test_the_full_sweep_interval_is_read(self, tmp_path):
+        """Including ``0``, which is a mode rather than a broken value here.
+
+        The gate is switched off by making every cycle a full sweep, so unlike
+        ``talk_poll_timeout`` this one must accept zero — which is exactly the
+        distinction ``_positive_int`` and ``_non_negative_int`` exist to keep
+        apart.
+        """
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_full_sweep_interval = 0
+""")
+        assert load_config(p).scheduler.talk_poll_full_sweep_interval == 0
+
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_full_sweep_interval = 900
+""")
+        assert load_config(p).scheduler.talk_poll_full_sweep_interval == 900
+
+    def test_a_negative_sweep_interval_keeps_the_default(self, tmp_path):
+        """`0` is a mode; a negative is a typo that would read as that mode.
+
+        Both `_gate_enabled` and the sweep predicate ask `<= 0`, so `-1` would
+        silently disable the gate while every document says `0` is the switch.
+        """
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_full_sweep_interval = -1
+""")
+        assert load_config(p).scheduler.talk_poll_full_sweep_interval == 300
+
+    def test_a_negative_poll_wait_keeps_the_default(self, tmp_path):
+        """`talk_poll_wait` became load-bearing arithmetic with this fix.
+
+        The cycle deadline is `talk_poll_timeout + talk_poll_wait`, so a
+        negative puts the deadline back inside the server's own hold and
+        restores the defect the pair exists to remove. It also makes the
+        straggler grace `asyncio.wait(pending, timeout=<negative>)` return
+        immediately.
+        """
+        p = write(tmp_path, """
+[scheduler]
+talk_poll_wait = -3.0
+""")
+        assert load_config(p).scheduler.talk_poll_wait == 2.0
