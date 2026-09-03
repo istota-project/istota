@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import sqlite3
 import tomllib
 from datetime import datetime, timezone
@@ -84,7 +85,7 @@ def _section_already_populated(db_path: Path, section: str) -> bool:
     if section == "tax":
         return config_store.has_tax_data(db_path)
     if section == "monarch":
-        return config_store.has_monarch_data(db_path)
+        return config_store.has_monarch_config_rows(db_path)
     return False
 
 
@@ -136,6 +137,54 @@ def _finalize_migration(db_path: Path, section: str) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             (sentinel_key, _iso_now()),
+        )
+        conn.commit()
+
+
+_REJECTED_KEY_PREFIX = "_migrate_rejected_"
+
+
+def _file_fingerprint(path: Path) -> str:
+    """Enough to tell an edited file from an untouched one."""
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _remember_rejection(
+    db_path: Path, section: str, path: Path, exc: Exception,
+) -> None:
+    config_store.set_meta(
+        db_path, _REJECTED_KEY_PREFIX + section,
+        json.dumps({"fingerprint": _file_fingerprint(path), "error": str(exc)}),
+    )
+
+
+def _rejection_still_stands(db_path: Path, section: str, path: Path) -> bool:
+    """Whether this exact file was already refused.
+
+    Without this the refusal is re-derived on every money call — a re-parse, a
+    rolled-back write and a warning line per skill invocation and per web
+    request, for as long as the file sits there. Keyed on the file rather than
+    on the section so correcting it still imports on the next run.
+    """
+    raw = config_store.get_meta(db_path, _REJECTED_KEY_PREFIX + section)
+    if not raw:
+        return False
+    try:
+        recorded = json.loads(raw).get("fingerprint")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
+    return bool(recorded) and recorded == _file_fingerprint(path)
+
+
+def _clear_rejection(db_path: Path, section: str) -> None:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "DELETE FROM schema_meta WHERE key = ?",
+            (_REJECTED_KEY_PREFIX + section,),
         )
         conn.commit()
 
@@ -223,6 +272,9 @@ def _migrate_section(ctx: UserContext, section: str) -> dict | None:
         )
         return None
 
+    if _rejection_still_stands(db_path, section, legacy_path):
+        return None
+
     if not _claim_lock(db_path, section):
         # Another worker won the race.
         return None
@@ -240,12 +292,24 @@ def _migrate_section(ctx: UserContext, section: str) -> dict | None:
 
         try:
             summary = _IMPORTERS[section](db_path, parsed)
+        except config_store.InvalidAccountError as exc:
+            # Content the importer refuses, same class as an unparseable file.
+            # `ensure_initialised` runs on every money call, so raising here
+            # would take the module down for that user until the file was fixed.
+            logger.warning(
+                "money_legacy_rejected section=%s path=%s error=%s",
+                section, legacy_path, exc,
+            )
+            _remember_rejection(db_path, section, legacy_path, exc)
+            _release_lock(db_path, section)
+            return None
         except Exception:
             # Importer failed; release the lock so the next run can retry.
             _release_lock(db_path, section)
             raise
 
         new_path = _rename_imported(legacy_path)
+        _clear_rejection(db_path, section)
         _finalize_migration(db_path, section)
     except Exception:
         raise

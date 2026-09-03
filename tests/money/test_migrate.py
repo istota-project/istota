@@ -518,3 +518,113 @@ class TestBackfillWorkEntryIds:
         year = self._write_legacy_entry(ctx)
         _migrate.ensure_initialised(ctx)
         assert "uid = " in year.read_text()
+
+
+MONARCH_TOML_BAD_ACCOUNT = """\
+[monarch.sync]
+lookback_days = 45
+default_account = "Assets:Bank (Checking)"
+"""
+
+
+class TestMigrateRejectedContent:
+    """A legacy file the importer refuses must not take the module down.
+
+    `ensure_initialised` runs on every money call, so a raise here would make
+    the module unusable for that user until somebody edited a file nothing had
+    told them about.
+    """
+
+    def test_a_rejected_file_is_skipped_not_fatal(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        path = _write_workspace_config(
+            tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT,
+        )
+        _migrate.ensure_initialised(ctx)
+
+        assert config_store.get_meta(
+            ctx.db_path, "monarch_legacy_imported_at",
+        ) is None
+        assert path.exists(), "the legacy file stays put so it can be corrected"
+        assert config_store.load_monarch(ctx.db_path).sync.default_account == (
+            "Assets:Bank:Checking"
+        )
+
+    def test_the_corrected_file_imports_on_the_next_run(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        path = _write_workspace_config(
+            tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT,
+        )
+        _migrate.ensure_initialised(ctx)
+        path.write_text(MONARCH_TOML)
+        _migrate.ensure_initialised(ctx)
+
+        assert config_store.load_monarch(ctx.db_path).sync.lookback_days == 45
+
+
+class TestMigrateRejectionIsRemembered:
+    """A file that will never be corrected must stop being retried.
+
+    `ensure_initialised` runs on every money call, so an unbounded retry is a
+    re-parse plus a rolled-back write plus a warning on every skill invocation
+    and every web request, forever.
+    """
+
+    def _warnings(self, caplog):
+        return [r for r in caplog.records if "money_legacy_rejected" in r.getMessage()]
+
+    def test_a_rejected_file_is_not_retried_while_it_is_unchanged(
+        self, tmp_path, caplog,
+    ):
+        import logging
+
+        ctx = _make_ctx(tmp_path)
+        _write_workspace_config(tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT)
+        with caplog.at_level(logging.WARNING):
+            _migrate.ensure_initialised(ctx)
+            first = len(self._warnings(caplog))
+            _migrate.ensure_initialised(ctx)
+            _migrate.ensure_initialised(ctx)
+            assert len(self._warnings(caplog)) == first == 1
+
+    def test_correcting_the_file_makes_it_import_again(self, tmp_path):
+        ctx = _make_ctx(tmp_path)
+        path = _write_workspace_config(
+            tmp_path, "monarch.toml", MONARCH_TOML_BAD_ACCOUNT,
+        )
+        _migrate.ensure_initialised(ctx)
+        path.write_text(MONARCH_TOML)
+        _migrate.ensure_initialised(ctx)
+        assert config_store.load_monarch(ctx.db_path).sync.lookback_days == 45
+
+    def test_any_other_valueerror_is_not_swallowed(self, tmp_path):
+        """Only an account the validator refuses is content. A coercion failure
+        or a JSONDecodeError is a defect and must stay visible."""
+        from unittest.mock import patch
+
+        def _raise(db_path, data):
+            raise ValueError("int() argument must be a string")
+
+        ctx = _make_ctx(tmp_path)
+        _write_workspace_config(tmp_path, "monarch.toml", MONARCH_TOML)
+        with patch.dict(_migrate._IMPORTERS, {"monarch": _raise}), \
+             pytest.raises(ValueError, match=r"int\(\)"):
+            _migrate.ensure_initialised(ctx)
+
+
+class TestMigrateDoesNotClobberStoredConfig:
+    def test_a_hand_set_global_mapping_survives_a_legacy_import(self, tmp_path):
+        """The importer replaces the global maps wholesale, so a mapping set
+        before the one-time import would otherwise be deleted in silence."""
+        ctx = _make_ctx(tmp_path)
+        config_store.init_db(ctx.db_path)
+        config_store.set_category_map_entry(
+            ctx.db_path, None, "Internet Services (Reimbursed)",
+            "Expenses:Internet-Services",
+        )
+        _write_workspace_config(tmp_path, "monarch.toml", MONARCH_TOML)
+        _migrate.ensure_initialised(ctx)
+
+        assert config_store.get_category_map(ctx.db_path, None) == {
+            "Internet Services (Reimbursed)": "Expenses:Internet-Services",
+        }

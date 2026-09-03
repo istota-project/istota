@@ -90,6 +90,48 @@ MONARCH_CATEGORY_MAP = {
 }
 
 
+# Beancount's own ACCOUNT_RE is Unicode-aware, so the slug keeps Unicode
+# letters and digits; `\w` covers those but also underscore, which it rejects.
+_ACCOUNT_COMPONENT_DISALLOWED = re.compile(r"[^\w-]|_")
+
+# A script with no case of its own still needs an uppercase-or-digit initial.
+_UNCASED_INITIAL = "X"
+
+
+def account_component(name: str) -> str:
+    """Slug an arbitrary string into a valid beancount account component.
+
+    A component may hold only letters, digits and dashes and must start with an
+    uppercase letter or a digit, so a category like "Internet Services
+    (Reimbursed)" has to be stripped before it can go in an account name — an
+    invalid one is not rejected at import, it lands in the ledger and breaks the
+    parser for every later read.
+
+    Deleting a disallowed character rather than replacing it means two names
+    differing only in punctuation collapse together — "Food & Drink" and "Food
+    Drink" are both `FoodDrink`. That is inherited from the `replace(" ", "")`
+    this replaced, and kept deliberately: substituting a dash instead would give
+    every multi-word category a new account name and split its balance across
+    the old one and the new at the next sync.
+
+    What is not inherited is a shared fallback for a name with nothing to slug.
+    A name in an uncased script gets an initial rather than `Unknown`, since
+    merging unrelated categories into one account is a wrong number in a report
+    rather than a parse error somebody notices.
+
+    Only a *leading* dash is stripped. Beancount's component class allows a
+    trailing one, so removing it would rename an account that already worked.
+    """
+    slug = _ACCOUNT_COMPONENT_DISALLOWED.sub("", name).lstrip("-")
+    if not slug:
+        return "Unknown"
+    if not (slug[0].isupper() or slug[0].isdigit()):
+        slug = slug[0].upper() + slug[1:]
+    if not (slug[0].isupper() or slug[0].isdigit()):
+        slug = _UNCASED_INITIAL + slug
+    return slug
+
+
 def map_monarch_category(category: str) -> str:
     """Map a Monarch category to a beancount account."""
     if category in MONARCH_CATEGORY_MAP:
@@ -99,7 +141,7 @@ def map_monarch_category(category: str) -> str:
         if key.lower() == category.lower():
             return value
 
-    return f"Expenses:Uncategorized:{category.replace(' ', '')}"
+    return f"Expenses:Uncategorized:{account_component(category)}"
 
 
 def map_monarch_category_with_config(category: str, config: MonarchConfig) -> str:

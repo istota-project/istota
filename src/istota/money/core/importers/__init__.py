@@ -15,6 +15,7 @@ from typing import Callable
 from istota.money.core.dedup import compute_transaction_hash, parse_ledger_transactions
 from istota.money.core.ids import new_txn_id
 from istota.money.core.transactions import (
+    account_component,
     format_beancount_transaction,
     map_monarch_category,
     append_to_ledger,
@@ -227,4 +228,4 @@ def _map_category(category: str, category_map: dict[str, str]) -> str:
     for key, value in category_map.items():
         if key.lower() == category.lower():
             return value
-    return f"Expenses:Uncategorized:{category.replace(' ', '')}"
+    return f"Expenses:Uncategorized:{account_component(category)}"

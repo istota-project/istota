@@ -54,6 +54,10 @@ istota-skill money backfill-ids [--ledger NAME]
 # Sync from Monarch Money (syncs all configured profiles by default)
 istota-skill money sync-monarch [--dry-run] [--ledger NAME] [--no-match-invoices] [--tolerance 5]
 
+# Read or set which beancount account a Monarch category posts to
+istota-skill money monarch-category-map list (--global | --profile NAME)
+istota-skill money monarch-category-map set (--global | --profile NAME) --category "Internet Services (Reimbursed)" --account Expenses:Internet-Services
+
 # Import from CSV
 istota-skill money import-csv /path/to/export.csv --account Assets:Bank:Checking [--tag TAG] [--exclude-tag TAG] [--ledger NAME]
 
@@ -63,7 +67,7 @@ istota-skill money run-scheduled [--dry-run] [--skip-monarch] [--no-match-invoic
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/create`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/create`, `monarch-category-map set`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `monarch-category-map list`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
 
 ## Adding transactions
 
@@ -72,6 +76,22 @@ Never manually type amounts into ledger files. Use CLI commands:
 - **User tells you a specific amount**: use `add-transaction` with exact amount
 - **Import from bank/Monarch export**: use `import-csv` or `sync-monarch` (syncs all profiles when no `--ledger` specified)
 - **Check balances/transactions**: use `query` or `balances`
+
+## Monarch category mapping
+
+`sync-monarch` decides which beancount account a transaction posts to from the Monarch category. A category with no mapping falls back to `Expenses:Uncategorized:<slug>`, which parses but is rarely where it belongs — so a recurring category is worth mapping once instead of correcting each transaction it produces.
+
+```bash
+istota-skill money monarch-category-map list --global
+istota-skill money monarch-category-map set --global --category "Internet Services (Reimbursed)" --account Expenses:Internet-Services
+```
+
+The scope flag is required. `--global` is the map every profile falls back to; `--profile NAME` is one profile's own map, which wins over the global one for that ledger. Give `--category` exactly as Monarch spells it, punctuation included — the lookup falls back to a case-insensitive match but nothing else.
+
+`--account` must be an account beancount accepts: two or more components separated by `:`, holding only letters, digits and dashes, with the first component starting with an uppercase letter and later ones with an uppercase letter or a digit. An account it cannot parse is refused here rather than reaching the ledger, where it would break every later read of that file rather than just its own entry. `set` overwrites an existing mapping; removing one is an operator command (`istota money monarch category-map unset`) and is not available here.
+
+Setting a mapping does not move transactions already in the ledger. Correct those with `edit-transaction`, which stamps `edited:` so the next sync leaves them alone.
+
 
 ## Invoice commands
 

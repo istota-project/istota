@@ -212,6 +212,20 @@ class TestMonarchProfiles:
         ).json()
         assert body["mapping"] == {"Bank": "Assets:Bank"}
 
+    def test_rejects_unparseable_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch/category-map?profile=global",
+            json={
+                "Internet Services (Reimbursed)":
+                    "Expenses:Uncategorized:InternetServices(Reimbursed)",
+            },
+        )
+        assert resp.status_code == 400
+        body = client.get(
+            "/istota/api/money/config/monarch/category-map?profile=global",
+        ).json()
+        assert body["mapping"] == {}
+
 
 class TestMonarchTagFilters:
     def test_replace(self, ctx, client):
@@ -845,5 +859,48 @@ class TestInvoicingScalarHardening:
     def test_zero_invoice_number_refused(self, client):
         resp = client.put(
             "/istota/api/money/config/invoicing", json={"next_invoice_number": 0},
+        )
+        assert resp.status_code == 400
+
+
+class TestMonarchSyncSettings:
+    def test_rejects_unparseable_default_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch",
+            json={"default_account": "Assets:Bank (Checking)"},
+        )
+        assert resp.status_code == 400
+        body = client.get("/istota/api/money/config/monarch").json()
+        assert body["sync"]["default_account"] == "Assets:Bank:Checking"
+
+    def test_accepts_a_valid_default_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch",
+            json={"default_account": "Assets:Bank:Savings"},
+        )
+        assert resp.status_code == 200
+        body = client.get("/istota/api/money/config/monarch").json()
+        assert body["sync"]["default_account"] == "Assets:Bank:Savings"
+
+    def test_an_unrelated_bad_row_does_not_block_the_edit(self, ctx, client):
+        import sqlite3
+
+        with sqlite3.connect(ctx.db_path) as conn:
+            conn.execute(
+                "INSERT INTO monarch_category_map(profile_id, monarch_category, "
+                "beancount_account) VALUES (?, ?, ?)",
+                (config_store.GLOBAL_PROFILE_ID, "Fees", "Expenses:Fees (Bank)"),
+            )
+        resp = client.put(
+            "/istota/api/money/config/monarch", json={"lookback_days": 30},
+        )
+        assert resp.status_code == 200
+        assert client.get("/istota/api/money/config/monarch").json()[
+            "sync"
+        ]["lookback_days"] == 30
+
+    def test_rejects_an_empty_default_account(self, client):
+        resp = client.put(
+            "/istota/api/money/config/monarch", json={"default_account": ""},
         )
         assert resp.status_code == 400

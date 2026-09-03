@@ -4,6 +4,13 @@ Invokes the in-tree ``istota.money`` Click CLI in-process. The user's
 :class:`UserContext` is resolved up front via :func:`istota.money.resolve_for_user`
 against the istota config and injected into Click via ``obj=``. No env-var
 marshaling, no subprocess, no HTTP.
+
+Two shapes, and which one a verb takes follows the split the two CLIs already
+keep. An accounting operation goes through the Click tree via :func:`_run`,
+which is every verb here bar two. A verb reading or writing the money *config*
+calls :mod:`istota.money.config_store` directly against ``ctx.db_path``, the
+way ``istota/cli_money.py`` does, because the Click tree exposes no config
+commands. Both resolve the user through :func:`_resolve_context`.
 """
 
 import argparse
@@ -34,27 +41,39 @@ def _unwrap_inner_error(raw: str) -> str:
     return raw
 
 
-def _run(args: list[str]) -> dict:
-    """Resolve the user's UserContext, invoke money.cli.cli, return parsed JSON."""
-    from click.testing import CliRunner
+def _resolve_context():
+    """Resolve this task's money UserContext.
 
+    Returns ``(user_id, istota_config, user_ctx, None)``, or
+    ``(None, None, None, error_envelope)``. ``MONEY_USER`` is set by the
+    framework from the task's own user_id and is the only thing that decides
+    whose data is reached; no verb takes a user as an argument.
+    """
     from istota.config import load_config
-    from istota.money import (
-        UserNotFoundError,
-        load_user_secrets,
-        resolve_for_user,
-    )
-    from istota.money.cli import Context, cli
+    from istota.money import UserNotFoundError, resolve_for_user
 
     user_id = os.environ.get("MONEY_USER", "") or ""
     if not user_id:
-        return {"status": "error", "error": "MONEY_USER not set"}
+        return None, None, None, {"status": "error", "error": "MONEY_USER not set"}
 
     istota_cfg = load_config()
     try:
         user_ctx = resolve_for_user(user_id, istota_cfg)
     except UserNotFoundError as e:
-        return {"status": "error", "error": str(e)}
+        return None, None, None, {"status": "error", "error": str(e)}
+    return user_id, istota_cfg, user_ctx, None
+
+
+def _run(args: list[str]) -> dict:
+    """Resolve the user's UserContext, invoke money.cli.cli, return parsed JSON."""
+    from click.testing import CliRunner
+
+    from istota.money import load_user_secrets
+    from istota.money.cli import Context, cli
+
+    user_id, istota_cfg, user_ctx, err = _resolve_context()
+    if err:
+        return err
 
     obj = Context()
     obj.users[user_id] = user_ctx
@@ -211,6 +230,59 @@ def cmd_sync_monarch(args):
 
 def cmd_debug_monarch(args):  # noqa: ARG001
     _output(_run(["debug-monarch"]))
+
+
+# The category map is config, not a ledger operation, so it goes to
+# config_store the way `cli_money` does rather than through the Click tree.
+
+
+def _map_scope(args) -> str | None:
+    """``None`` is the global map, which every profile falls back to."""
+    return None if args.global_scope else args.profile
+
+
+def cmd_monarch_category_map_list(args):
+    _, _, ctx, err = _resolve_context()
+    if err:
+        _output(err)
+        return
+    from istota.money import config_store
+
+    profile = _map_scope(args)
+    try:
+        mapping = config_store.get_category_map(ctx.db_path, profile)
+    except ValueError as exc:
+        _output({"status": "error", "error": str(exc)})
+        return
+    _output({
+        "status": "ok",
+        "profile": profile or "__global__",
+        "mapping": mapping,
+    })
+
+
+def cmd_monarch_category_map_set(args):
+    _, _, ctx, err = _resolve_context()
+    if err:
+        _output(err)
+        return
+    from istota.money import config_store
+
+    profile = _map_scope(args)
+    try:
+        state = config_store.set_category_map_entry(
+            ctx.db_path, profile, args.category, args.account,
+        )
+    except ValueError as exc:
+        _output({"status": "error", "error": str(exc)})
+        return
+    _output({
+        "status": "ok",
+        "state": state,
+        "profile": profile or "__global__",
+        "category": args.category,
+        "account": args.account,
+    })
 
 
 def cmd_import_csv(args):
@@ -461,6 +533,14 @@ def cmd_portfolio_autoclass(args):
 # ---------------------------------------------------------------------------
 
 
+def _add_map_scope(p) -> None:
+    """Which map to act on. Required, so a write is never silently global."""
+    grp = p.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--profile", help="A Monarch profile's own map")
+    grp.add_argument("--global", dest="global_scope", action="store_true",
+                     help="The global map, which every profile falls back to")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.money",
@@ -531,6 +611,22 @@ def build_parser():
         "--tolerance", type=float,
         help="Dollar slack allowed between a credit and an invoice total (default exact)",
     )
+
+    p_mcm = sub.add_parser(
+        "monarch-category-map",
+        help="Read or set the Monarch category to beancount account mapping",
+    )
+    mcm_sub = p_mcm.add_subparsers(dest="category_map_action")
+
+    p_mcm_list = mcm_sub.add_parser("list", help="Show the mapping")
+    _add_map_scope(p_mcm_list)
+
+    p_mcm_set = mcm_sub.add_parser("set", help="Map one category to an account")
+    _add_map_scope(p_mcm_set)
+    p_mcm_set.add_argument("--category", required=True,
+                           help="Monarch category name, exactly as Monarch spells it")
+    p_mcm_set.add_argument("--account", required=True,
+                           help="Beancount account, e.g. Expenses:Internet-Services")
 
     sub.add_parser(
         "debug-monarch",
@@ -713,7 +809,17 @@ def main(argv=None):
         "run-scheduled": cmd_run_scheduled,
     }
 
-    if args.command == "invoice":
+    if args.command == "monarch-category-map":
+        map_commands = {
+            "list": cmd_monarch_category_map_list,
+            "set": cmd_monarch_category_map_set,
+        }
+        fn = map_commands.get(getattr(args, "category_map_action", None))
+        if fn:
+            fn(args)
+        else:
+            parser.parse_args(["monarch-category-map", "--help"])
+    elif args.command == "invoice":
         invoice_commands = {
             "generate": cmd_invoice_generate,
             "list": cmd_invoice_list,

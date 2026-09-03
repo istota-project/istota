@@ -47,6 +47,38 @@ class TestCategoryMapping:
         result = map_monarch_category("Unknown Category")
         assert result == "Expenses:Uncategorized:UnknownCategory"
 
+    def test_unknown_category_with_punctuation(self):
+        assert (
+            map_monarch_category("Internet Services (Reimbursed)")
+            == "Expenses:Uncategorized:InternetServicesReimbursed"
+        )
+        assert map_monarch_category("Fees & Charges") == "Expenses:Uncategorized:FeesCharges"
+        assert map_monarch_category("Utilities - Water") == "Expenses:Uncategorized:Utilities-Water"
+        assert map_monarch_category("401k match") == "Expenses:Uncategorized:401kmatch"
+        assert map_monarch_category("~~~") == "Expenses:Uncategorized:Unknown"
+
+    def test_unknown_category_accounts_parse(self, tmp_path):
+        from beancount import loader
+
+        for category in ("Internet Services (Reimbursed)", "Fees & Charges", "e-bike / repair"):
+            ledger = tmp_path / "t.beancount"
+            ledger.write_text(
+                'plugin "beancount.plugins.auto_accounts"\n'
+                "2026-08-30 * \"Joker.com\" \"note\"\n"
+                f"  {map_monarch_category(category)}  574.00 USD\n"
+                "  Liabilities:Visa-Fidelity\n"
+            )
+            _, errors, _ = loader.load_file(str(ledger))
+            assert errors == [], f"{category}: {errors}"
+
+    def test_csv_importer_map_slugs_unknown_category(self):
+        from istota.money.core.importers import _map_category
+
+        assert (
+            _map_category("Internet Services (Reimbursed)", {})
+            == "Expenses:Uncategorized:InternetServicesReimbursed"
+        )
+
     def test_all_mapped_categories_valid(self):
         for category, account in MONARCH_CATEGORY_MAP.items():
             assert ":" in account
@@ -1011,3 +1043,113 @@ class TestSyncMonarchImportedPayments:
             self._ledger(tmp_path), self._config(), transactions=txns, dry_run=True,
         )
         assert [r["amount"] for r in result["imported"]] == [500.00]
+
+
+class TestAccountComponentUnicode:
+    """The slug keeps the characters beancount keeps.
+
+    `config_store._is_account` is deliberately Unicode-aware — beancount's own
+    ACCOUNT_RE is — so an ASCII-only slug here would turn `Café` into `Caf` and
+    collapse every category with no Latin letters onto one account, silently
+    merging categories that have nothing to do with each other.
+    """
+
+    def test_accented_letters_survive(self):
+        from istota.money.core.transactions import account_component
+
+        assert account_component("Café") == "Café"
+        assert account_component("Bücher & Zeitschriften") == "BücherZeitschriften"
+        assert account_component("Forderungen Müller") == "ForderungenMüller"
+
+    def test_underscore_is_not_a_beancount_character(self):
+        from istota.money.core.transactions import account_component
+
+        assert account_component("internet_services") == "Internetservices"
+
+    def test_uncased_scripts_do_not_collapse_onto_one_account(self):
+        from istota.money.core.transactions import account_component
+
+        first = account_component("日用品")
+        second = account_component("交通費")
+        assert first != second
+        assert first != "Unknown" and second != "Unknown"
+
+    def test_every_slug_is_an_account_beancount_accepts(self):
+        from istota.money.config_store import _is_account
+        from istota.money.core.transactions import map_monarch_category
+
+        for category in (
+            "Internet Services (Reimbursed)", "Café", "Bücher & Zeitschriften",
+            "日用品", "e-bike / repair", "401k match", "~~~", "Forderungen Müller",
+        ):
+            account = map_monarch_category(category)
+            assert _is_account(account), f"{category!r} -> {account!r}"
+
+    def test_unicode_slugs_load_in_beancount(self, tmp_path):
+        from beancount import loader
+
+        from istota.money.core.transactions import map_monarch_category
+
+        for category in (
+            "Café", "Bücher & Zeitschriften", "日用品", "Ⅷ", "²x", "٣abc",
+            "Internet Services (Reimbursed)", "Sub-", "misc", "~~~",
+        ):
+            ledger = tmp_path / "t.beancount"
+            ledger.write_text(
+                'plugin "beancount.plugins.auto_accounts"\n'
+                '2026-08-30 * "Payee" "note"\n'
+                f"  {map_monarch_category(category)}  1.00 USD\n"
+                "  Liabilities:Visa-Fidelity\n"
+            )
+            _, errors, _ = loader.load_file(str(ledger))
+            assert errors == [], f"{category}: {errors}"
+
+
+class TestDefaultAccountReachesThePosting:
+    """Why an unparseable `default_account` is the same defect as a bad map.
+
+    `map_monarch_account` returns the configured default verbatim for every
+    Monarch account with no mapping, so whatever is stored there is written
+    into the ledger unexamined.
+    """
+
+    def test_unmapped_account_falls_back_to_the_configured_default(self):
+        from istota.money.core.models import (
+            MonarchConfig,
+            MonarchCredentials,
+            MonarchSyncSettings,
+            MonarchTagFilters,
+        )
+        from istota.money.core.transactions import map_monarch_account
+
+        cfg = MonarchConfig(
+            credentials=MonarchCredentials(),
+            sync=MonarchSyncSettings(default_account="Assets:Bank:Checking"),
+            accounts={}, categories={}, tags=MonarchTagFilters(),
+        )
+        assert map_monarch_account("Some Card", cfg) == "Assets:Bank:Checking"
+
+
+class TestAccountComponentShape:
+    def test_a_trailing_dash_is_kept(self):
+        """Beancount's component class allows one, so stripping it would rename
+        an account that already worked."""
+        from istota.money.core.transactions import account_component
+
+        assert account_component("Sub-") == "Sub-"
+        assert account_component("--Water") == "Water"
+        assert account_component("---") == "Unknown"
+
+    def test_a_lowercase_initial_is_raised(self):
+        """`Expenses:Uncategorized:misc` is not a valid account and never was —
+        beancount rejects a lowercase component initial."""
+        from istota.money.core.transactions import account_component
+
+        assert account_component("misc") == "Misc"
+
+    def test_punctuation_only_differences_collide(self):
+        """Documented rather than fixed: replacing a separator with a dash would
+        rename every multi-word category's account."""
+        from istota.money.core.transactions import account_component
+
+        assert account_component("Food & Drink") == account_component("Food Drink")
