@@ -6,6 +6,7 @@ inside it exists for, and each was previously asserted (where it was asserted
 at all) several hundred lines away from the line that establishes it.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -245,8 +246,21 @@ class TestTheClaudeRuntimeCredential:
 
         # An empty string is not a credential: injecting one gives the CLI
         # something to authenticate with that cannot work.
-        assert not runtime.proxy_ctx.credential_env
-        assert "code_review" not in runtime.proxy_ctx.skill_credential_map
+        #
+        # Asserted over the credential names rather than as `not
+        # credential_env`, which is what this said until ISSUE-410 put the
+        # scoped *reachability* names through the same dict. Emptiness was
+        # never the claim — it was true by accident of nothing else living
+        # there — and a deployment with a `NO_PROXY` set now legitimately puts
+        # one in, as does every test in this suite, since
+        # `tests/support/env_isolation.py` forces that name into `os.environ`.
+        proxy = runtime.proxy_ctx
+        for name in executor.SKILL_MODEL_CREDENTIAL_VARS:
+            assert name not in proxy.credential_env, name
+        assert not (
+            executor.SKILL_MODEL_CREDENTIAL_VARS
+            & proxy.skill_credential_map.get("code_review", set())
+        )
 
 
 class TestTheOrderOfTheTwoCredentialSplits:
@@ -311,6 +325,270 @@ class TestTheOrderOfTheTwoCredentialSplits:
             "glpat-xxxxxxxxxxxxxxxxxxxx"
         )
         assert "SECRET_ONLY" not in runtime.proxy_ctx.base_env
+
+
+def _code_review_inputs(runtime_inputs):
+    return {
+        **runtime_inputs,
+        "selected_skills": ["code_review"],
+        "skill_index": {"code_review": _skill("code_review")},
+    }
+
+
+class TestTheReachabilityNames:
+    """How a host-side skill CLI learns to reach anything (ISSUE-410).
+
+    The second half of ISSUE-409. ``build_model_cli_env`` tops its allowlist up
+    from ``os.environ``, which is the daemon's own for every daemon-side caller
+    and is ``proxy_base_env`` for the one that is not — ``code_review``, which
+    runs as a subprocess the skill proxy spawned — so the loop was reading the
+    wrong environment. ISSUE-409 put the credential names in reach; these are
+    what was left, and without them a deployment behind an outbound proxy, a
+    private CA or a gateway authenticates and then fails at connect or at the
+    handshake.
+
+    **They do not all go to the same place**, and the two halves are asserted
+    apart because the axis is the whole point: a trust store path only ever
+    adds a CA, so it is shared, while a proxy URL redirects traffic and can
+    carry userinfo, so it is scoped to the skills that call a model.
+
+    Each case sets a value on the daemon side and observes that same value on
+    the other. Asserting only that a name is *present* passes just as well
+    against a deployment that sets nothing, which is the failure this whole
+    group is a second instance of.
+
+    One ambient fact worth knowing before reading a failure here:
+    ``tests/support/env_isolation.py`` deliberately *forces* ``NO_PROXY`` and
+    ``no_proxy`` into ``os.environ`` for every test in the suite, so those two
+    names are present unless a case deletes them.
+    """
+
+    def test_the_tls_names_reach_every_host_side_cli(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/private-ca.pem")
+        monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/node-ca.pem")
+        monkeypatch.setenv("CURL_CA_BUNDLE", "/etc/ssl/curl-ca.pem")
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        base = runtime.proxy_ctx.base_env
+        assert base["SSL_CERT_FILE"] == "/etc/ssl/private-ca.pem"
+        assert base["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/node-ca.pem"
+        assert base["CURL_CA_BUNDLE"] == "/etc/ssl/curl-ca.pem"
+
+    def test_the_proxy_triple_does_not_reach_every_host_side_cli(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # The regression this split exists to avoid. `browse` calls
+        # `BROWSER_API_URL` — `http://localhost:9223` by default — over an
+        # httpx client with `trust_env=True`, which honours `HTTP_PROXY` and
+        # does not exempt loopback. A shared egress proxy would send that
+        # internal call at the proxy, which answers 403 or 405, on a
+        # deployment where it works today.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://egress.example:3128")
+        monkeypatch.setenv("HTTP_PROXY", "http://egress.example:3128")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/v1")
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        base = runtime.proxy_ctx.base_env
+        assert "HTTPS_PROXY" not in base
+        assert "HTTP_PROXY" not in base
+        assert "ANTHROPIC_BASE_URL" not in base
+
+    def test_the_proxy_triple_reaches_the_model_calling_skill(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://egress.example:3128")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/v1")
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(
+            config, **_code_review_inputs(runtime_inputs)
+        )
+
+        proxy = runtime.proxy_ctx
+        assert proxy.credential_env["HTTPS_PROXY"] == (
+            "http://egress.example:3128"
+        )
+        assert proxy.credential_env["ANTHROPIC_BASE_URL"] == (
+            "https://gateway.example/v1"
+        )
+        assert "HTTPS_PROXY" in proxy.skill_credential_map["code_review"]
+        assert "ANTHROPIC_BASE_URL" in proxy.skill_credential_map["code_review"]
+
+    def test_no_other_skill_gets_the_proxy_triple(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://egress.example:3128")
+        config = _config(tmp_path)
+        runtime_inputs = {
+            **runtime_inputs,
+            "selected_skills": ["code_review", "kv"],
+            "skill_index": {
+                "code_review": _skill("code_review"),
+                "kv": _skill("kv"),
+            },
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert "HTTPS_PROXY" not in (
+            runtime.proxy_ctx.skill_credential_map.get("kv", set())
+        )
+
+    def test_the_proxy_triple_is_never_fetchable_over_the_socket(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # A proxy URL can carry basic-auth userinfo, and `allowed_credentials`
+        # is a union anything holding the socket can fetch by name — the model
+        # included. Injection is scoped; a lookup would not be.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://user:pw@egress.example:3128")
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(
+            config, **_code_review_inputs(runtime_inputs)
+        )
+
+        assert "HTTPS_PROXY" not in runtime.proxy_ctx.allowed_credentials
+        assert "ANTHROPIC_BASE_URL" not in runtime.proxy_ctx.allowed_credentials
+
+    def test_nothing_arrives_when_the_daemon_sets_nothing(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # The negative control for both halves. Without it every assertion
+        # above is equally true of an env carrying the name for some other
+        # reason, which is how the first half of this went unnoticed.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        names = (
+            *executor.SKILL_CLI_TLS_VARS,
+            *executor.SKILL_MODEL_REACHABILITY_VARS,
+        )
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(
+            config, **_code_review_inputs(runtime_inputs)
+        )
+
+        proxy = runtime.proxy_ctx
+        for name in names:
+            assert name not in proxy.base_env, name
+            assert name not in proxy.credential_env, name
+
+    def test_an_empty_no_proxy_is_carried(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # Presence, not truthiness: `NO_PROXY=` blanks an inherited exemption
+        # list, so dropping it is a behaviour change rather than a no-op. This
+        # is also what separates `skill_model_reachability` from
+        # `skill_model_credentials`, which drops an empty value on purpose.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("NO_PROXY", "")
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(
+            config, **_code_review_inputs(runtime_inputs)
+        )
+
+        assert runtime.proxy_ctx.credential_env["NO_PROXY"] == ""
+
+    def test_a_name_the_credential_split_took_is_not_put_back(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # The top-up fills gaps; it does not overrule a decision made
+        # elsewhere. A manifest declaring one of these `sensitive` has moved
+        # it to the per-skill map on purpose, and re-adding it from the
+        # daemon's environment would undo that silently — putting it in front
+        # of every host-side CLI instead of the one that declared it.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/from-the-daemon.pem")
+        config = _config(tmp_path)
+        config.developer.enabled = True
+        config.developer.gitlab_token = "glpat-xxxxxxxxxxxxxxxxxxxx"
+        spec = EnvSpec(
+            var="SSL_CERT_FILE",
+            source="config",
+            config_path="developer.gitlab_token",
+            sensitive=True,
+        )
+        runtime_inputs = {
+            **runtime_inputs,
+            "skill_index": {"certskill": _skill("certskill", spec)},
+            "selected_skills": ["certskill"],
+        }
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        proxy = runtime.proxy_ctx
+        assert proxy.credential_env["SSL_CERT_FILE"] == (
+            "glpat-xxxxxxxxxxxxxxxxxxxx"
+        )
+        assert "SSL_CERT_FILE" not in proxy.base_env
+
+    def test_the_three_name_lists_are_disjoint(self):
+        # The scoped reachability names are merged into the same dict as the
+        # credentials and injected through the same per-skill map, and the
+        # shared TLS names land in `proxy_base_env` first. A name on two of
+        # these lists would be handled twice under two different rules —
+        # notably the empty-value rule, which differs between them.
+        tls = set(executor.SKILL_CLI_TLS_VARS)
+        reach = set(executor.SKILL_MODEL_REACHABILITY_VARS)
+        creds = set(executor.SKILL_MODEL_CREDENTIAL_VARS)
+        assert not tls & reach
+        assert not tls & creds
+        assert not reach & creds
+
+    def test_the_scoped_names_are_blocked_from_lookup_by_name(self):
+        # `_PROXY_LOOKUP_BLOCKED` is the endpoint-side half of the same rule
+        # the `allowed_credentials` assertion above checks from the outside,
+        # so the two do not depend on each other's ordering.
+        assert executor.SKILL_MODEL_REACHABILITY_VARS <= (
+            executor._PROXY_LOOKUP_BLOCKED
+        )
+
+    def test_the_reviewer_env_built_inside_the_subprocess_carries_them(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        # The seam the whole change exists for. `build_model_cli_env` runs
+        # *inside* the skill subprocess, so its `os.environ` is what the proxy
+        # handed that subprocess — the shared snapshot plus this skill's own
+        # injected names. Its existing top-up loop is what carries them the
+        # last hop into the `claude -p` each reviewer spawns; nothing in that
+        # function changed, only what its environment has to offer.
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://egress.example:3128")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/ssl/private-ca.pem")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/v1")
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(
+            config, **_code_review_inputs(runtime_inputs)
+        )
+
+        # Stand exactly where the skill CLI stands: `skill_proxy` builds its
+        # env as the base snapshot plus the names mapped to that skill.
+        proxy = runtime.proxy_ctx
+        cli_env = dict(proxy.base_env)
+        for var in proxy.skill_credential_map["code_review"]:
+            cli_env[var] = proxy.credential_env[var]
+        monkeypatch.setattr(os, "environ", cli_env)
+        reviewer_env = executor.build_model_cli_env(config)
+
+        assert reviewer_env["HTTPS_PROXY"] == "http://egress.example:3128"
+        assert reviewer_env["REQUESTS_CA_BUNDLE"] == "/etc/ssl/private-ca.pem"
+        assert reviewer_env["ANTHROPIC_BASE_URL"] == (
+            "https://gateway.example/v1"
+        )
 
 
 class TestThePathPrepend:
