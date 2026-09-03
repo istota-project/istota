@@ -625,6 +625,35 @@ class TestABearerTokenTheServerRejects:
         resp = await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
         assert resp["ocs"]["data"]["id"] == fake_talk.sent_ids[-1]
 
+    async def test_sent_id_for_survives_a_rejected_send(self, fake_talk, rooms):
+        """The 401 retry's own regression test, and it was a live defect.
+
+        `sent_id_for` used to keep its own index of accepted sends and read
+        `sent_ids` positionally. A credential rejection is recorded with
+        `refused=False` and mints no id, so from the first 401 the two lists
+        were one apart: this exact scenario raised `IndexError` out of a test
+        helper, and with one more send it silently returned the *previous*
+        post's id. The id now travels on the call.
+        """
+        fake_talk.bearer_rejections["stale-at"] = 401
+        factory = talk_client_factory(fake_talk)
+        factory(None, bearer_token="stale-at", timeout=5)
+        with pytest.raises(httpx.HTTPStatusError):
+            await fake_talk.send_message(
+                rooms["plain"].talk_ref, "hi", reference_id="istota:task:1:ack",
+            )
+        factory(None, bearer_token="fresh-at", timeout=5)
+        await fake_talk.send_message(
+            rooms["plain"].talk_ref, "hi", reference_id="istota:task:1:ack",
+        )
+        await fake_talk.send_message(
+            rooms["plain"].talk_ref, "and again", reference_id="istota:task:1:result",
+        )
+
+        assert fake_talk.sent_id_for("istota:task:1:ack") == fake_talk.sent_ids[0]
+        assert fake_talk.sent_id_for("istota:task:1:result") == fake_talk.sent_ids[1]
+        assert len(fake_talk.sent_ids) == 2, "a rejected send must mint nothing"
+
     async def test_the_bot_is_never_rejected_by_a_bearer_rule(
         self, fake_talk, rooms,
     ):
@@ -753,7 +782,7 @@ class TestTheSeamControl:
 
         A function-local import resolves the name at call time, so patching the
         definition site reaches every one of them — which is why this pins the
-        set rather than the patching. A third one appearing is covered
+        set rather than the patching. A third `from` import is reached
         automatically; it is listed here so somebody confirms that rather than
         assuming it.
         """
@@ -776,6 +805,24 @@ class TestTheSeamControl:
         stays green with this patch removed. Measured, not assumed.
         """
         assert async_runtime.get_talk_client(talk_config) is fake_talk
+
+    def test_nothing_reaches_it_as_an_attribute(self):
+        """The spelling both `_importers` pins are blind to.
+
+        `from . import async_runtime` followed by `async_runtime.get_talk_client(...)`
+        matches neither anchor, and a module that captured the function into a
+        local name would not be reached by the patch either. No such call site
+        exists; this is what keeps the two pins above honest about their own
+        scope, since their regex only ever sees the `from … import` form.
+        """
+        root = Path(async_runtime.__file__).parent
+        offenders = {
+            _module_name_for(path)
+            for path in root.rglob("*.py")
+            if re.search(r"\basync_runtime\.get_talk_client\b", path.read_text())
+            and _module_name_for(path) != "istota.async_runtime"
+        }
+        assert offenders == set()
 
     @staticmethod
     def _importers(anchor: str) -> set[str]:

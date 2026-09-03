@@ -274,10 +274,12 @@ def fake_talk(db_path):
     exactly like the bug the double exists to catch;
     `tests/test_support_talk_double.py` has a control for it.
 
-    It also patches `async_runtime.get_talk_client` itself, which is what covers
-    the two *function-local* importers — `web_app._delete_from_talk`'s bot
-    fallback and `commands`' `!search` — since a function-local import resolves
-    the name at call time. All three go through `talk_bot_client`, which clears
+    It also patches `async_runtime.get_talk_client` itself, which is what
+    *reaches* the two function-local importers — `web_app._delete_from_talk`'s
+    bot fallback and `commands`' `!search` — since a function-local import
+    resolves the name at call time. Reached is not covered: `!search` calls
+    `search_messages`, which is on no seam and not on the double, so it gets an
+    `AttributeError` rather than an answer. All three go through `talk_bot_client`, which clears
     any bearer token left on the shared instance by a `fake_talk_web`
     construction: `get_talk_client` returns the basic-auth bot client, and
     `_delete_from_talk` asks for it directly after a user-scoped attempt failed.

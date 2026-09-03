@@ -418,7 +418,9 @@ Two escape hatches, and they are not interchangeable:
 
 Every construction returns **the same instance**, which is what lets `calls` span an attempt and its retry. `constructions` is the history (`bearer_token`, `timeout`), `TalkCall.bearer_token` is what pins one call to one construction, and `created_tokens` holds what `create_conversation` minted — bound to nothing, deliberately, so `_chat_promote_to_talk`'s `add_participant` and seed post are refused unless the product wrote the binding first.
 
-**A bearer client can fail two ways, and the double keeps them apart.** `_post_as_user` and `_mark_read_as_user` each force-refresh the token once on a **401** and retry, so a double whose only unhappy answer was `UnknownTalkRoom` would turn a stale credential into a misroute and delete that coverage without failing anything. `bearer_rejections` maps a bearer token to the status the server answers with; the answer raises `httpx.HTTPStatusError` and is recorded as `TalkCall.status`, never as `refused`, so `refusals == []` goes on meaning "nothing was misrouted". The credential is checked before the room, as Nextcloud does it — so with a stale token *and* a misroute, the first attempt reports 401 and only the retry reaches the room check.
+**A bearer client can fail two ways, and the double keeps them apart.** `_post_as_user` and `_mark_read_as_user` each force-refresh the token once on a **401** and retry, so a double whose only unhappy answer was `UnknownTalkRoom` would turn a stale credential into a misroute and delete that coverage without failing anything. `bearer_rejections` maps a bearer token to the status the server answers with; the answer raises `httpx.HTTPStatusError` and is recorded as `TalkCall.status`, never as `refused`, so `refusals == []` goes on meaning "nothing that reached the room check was misrouted". Read that qualifier literally: the credential is checked first, as Nextcloud does it, so a call that was both stale-credentialled and misrouted never reaches the room check and leaves `refusals` empty. A test setting `bearer_rejections` pairs `refusals == []` with `auth_failures`; the ~30 existing assertions elsewhere are unaffected, since the bot carries no bearer.
+
+**One coroutine at a time.** Every construction returns the same instance, so `bearer_token` is a field two in-flight calls would share: `constructions` would interleave and a call would record whichever construction ran last. Nothing hits that today, because these tests drive the coroutines directly rather than through an endpoint — but `chat_read_all_rooms` fires one `_push_read_to_talk` per moved room, so an endpoint-driven test would, and it wants a per-construction facade over a shared ledger before it can read `constructions` positionally.
 
 ```python
 async def test_a_401_forces_a_refresh_and_retries_once(fake_talk_web, room, ...):
@@ -428,7 +430,14 @@ async def test_a_401_forces_a_refresh_and_retries_once(fake_talk_web, room, ...)
     assert fake_talk_web.refusals == []          # a stale token is not a misroute
 ```
 
-`tests/test_web_talk_seams.py` is the file that drives these. What is still uncovered: nothing puts the double behind a `!search` through `commands`, because `search_messages` is on no seam and is not on the double at all; and the double still accepts a dead binding (ISSUE-401), by the same rule that makes it accept a live one.
+`tests/test_web_talk_seams.py` is the file that drives these. **The fixture reaches all seven sites; five are driven end to end and two are not**, which is the honest form of the claim:
+
+- **The rename propagation** lives inside the `PATCH /chat/rooms/{id}` handler, so reaching it needs an ASGI-driven test rather than a direct call. It resolves its token through `_room_talk_binding`, which is exactly the canonical-vs-`surface_ref` question, so it is worth adding.
+- **`_talk_conversation_seen_by_user`** is reachable only through `_talk_conversation_verdict`'s **bot** 404, and the double's second failure mode is keyed on the bearer token, which the bot has none of. An unknown token there raises `UnknownTalkRoom`, lands in the generic handler and reads as `unknown`, so the `gone` / `bot_removed` verdicts and the whole rebind branch cannot be driven. Expressing it wants a token-keyed rejection map beside the bearer-keyed one, and the one-coroutine constraint above has to be lifted first, because the promote path holds a bot client across the call that would build a user one.
+
+Also still uncovered: nothing puts the double behind a `!search` through `commands` — the `async_runtime` patch *reaches* it, but `search_messages` is on no seam and not on the double, so such a call gets an `AttributeError` — and the double still accepts a dead binding (ISSUE-401), by the same rule that makes it accept a live one.
+
+One product defect the instrument found and did not fix: `_delete_from_talk` never closes its user-scoped client, alone among the seven, so every web message delete in a Talk-bound room leaks an `httpx` pool. `tests/test_web_talk_seams.py::TestTheMessageDelete::test_the_user_client_here_is_never_closed` pins today's answer, so a fix turns it red rather than passing unnoticed.
 
 ## Shared fixtures (`conftest.py`)
 

@@ -44,9 +44,23 @@ bearer token, so there is no factory to patch. `talk_client_factory` stands in a
 `istota.talk.TalkClient` for exactly those, and the `fake_talk_web` fixture
 installs it. `fake_talk` alone does not: a web test using only that fixture still
 reaches the real client. The two *function-local* `get_talk_client` imports
-(`web_app._delete_from_talk`'s bot fallback, `commands`' `!search`) are covered by
-`fake_talk` patching `async_runtime.get_talk_client` itself, since a
-function-local import resolves the name at call time.
+(`web_app._delete_from_talk`'s bot fallback, `commands`' `!search`) are *reached*
+by `fake_talk` patching `async_runtime.get_talk_client` itself, since a
+function-local import resolves the name at call time — reached, not covered:
+`!search` calls `search_messages`, which is on no seam and not on this double,
+so such a call gets an `AttributeError` rather than an answer.
+
+**One of the seven web sites is reached and still cannot be driven**, which is
+worth naming rather than leaving to be discovered. `_talk_conversation_verdict`
+tells a deleted conversation from one the bot was merely removed from by
+branching on the *bot's* own 404, and only then constructs the user client in
+`_talk_conversation_seen_by_user`. This double's second failure mode is keyed on
+the bearer token and the bot carries none, so an unknown token there comes back
+as `UnknownTalkRoom`, lands in the generic `except Exception` and reads as
+`unknown` — which leaves the `gone` and `bot_removed` verdicts, and the rebind
+branch behind them, unreachable under this fixture. Expressing it wants a
+token-keyed rejection map beside the bearer-keyed one, and the nesting hazard
+noted on `FakeTalkClient` has to be closed first.
 
 A bearer client brings a second way to fail, and flattening it into the first
 would destroy behaviour the product has: `_post_as_user` and `_mark_read_as_user`
@@ -73,7 +87,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -158,6 +172,16 @@ class TalkCall:
     assertion that needs it, "the retry used the *fresh* token", is otherwise a
     guess about which construction went with which call.
 
+    `sent_id` is the id an accepted `send_message` minted, and it is on the call
+    for a reason worth stating: `sent_id_for` used to walk `calls` and
+    `sent_ids` as parallel arrays, keeping its own index of "accepted sends so
+    far". A credential rejection is recorded with `refused=False` and mints no
+    id, so the two lists desynchronised the moment a 401 retry happened — which
+    is precisely the path this double gained for `_post_as_user` — and the
+    helper then returned another post's id, or raised `IndexError` out of a
+    test helper. Reading the id off the call it belongs to removes the
+    correspondence rather than correcting it.
+
     Frozen but **not hashable** — `args` is a dict, so `set(client.calls)` and
     `TalkCall(...) in {…}` raise `TypeError`. Compare the list, or compare
     fields.
@@ -169,15 +193,29 @@ class TalkCall:
     refused: bool = False
     status: int | None = None
     bearer_token: str | None = None
+    sent_id: int | None = None
 
 
 @dataclass(frozen=True)
 class TalkConstruction:
-    """One `TalkClient(...)` the product built, in order.
+    """One `TalkClient(...)` the product built through `talk_client_factory`.
 
-    `web_app` constructs a client per attempt and closes it in a `finally`, so
-    the count is the attempt count — which is how a test tells "retried once"
-    from "retried in a loop" without reaching into the product.
+    Six of `web_app`'s seven sites construct a client per attempt, so the count
+    is the attempt count — which is how a test tells "retried once" from
+    "retried in a loop" without reaching into the product.
+
+    Two exclusions, both found in review and both easy to trip over:
+
+    - **A client fetched through `get_talk_client` is not counted here.**
+      `talk_bot_client` hands back the same instance without recording a
+      construction, so `_delete_from_talk`'s two attempts — one bearer, one bot
+      — produce two `calls` and one construction. Read `calls` on any path with
+      a bot leg.
+    - **`_delete_from_talk` never closes its user client**, alone among the
+      seven, so `closes` is not the construction count either. That is a
+      product defect rather than a modelling choice; `tests/test_web_talk_seams.py`
+      pins the current behaviour so a fix turns it red instead of passing
+      unnoticed.
     """
 
     bearer_token: str | None
@@ -202,6 +240,24 @@ class FakeTalkClient:
     rebound at each construction and are the *current* credential, not a
     history — `constructions` is the history, and `TalkCall.bearer_token` is
     what pins a call to one.
+
+    **Which bounds what a test on this may do: one Talk-calling coroutine at a
+    time.** Two in flight share the credential field, so `constructions`
+    interleaves and a call records whichever construction ran last rather than
+    the one that owns it. `web_app` has both shapes — `chat_read_all_rooms`
+    fires `_push_read_to_talk` once per moved room through `_fire_and_forget`,
+    and `_chat_promote_to_talk` holds a bot client across a call that would
+    construct a *user* client inside it, so the outer one would come back
+    carrying the user's bearer. Neither is reachable today: the tests drive
+    these functions directly rather than through an endpoint, and the nested
+    case additionally needs the bot 404 that is inexpressible below. An
+    endpoint-driven test wants a per-construction facade over a shared ledger
+    first; do not read `constructions` positionally from one.
+
+    **`timeout` is a double-only observation field**, like `constructions`. The
+    real client stores it as `_timeout` and exposes nothing public, so nothing
+    in the product reads this and no pin covers it — attributes are outside the
+    signature walk, which only sees callables.
     """
 
     def __init__(
@@ -395,6 +451,10 @@ class FakeTalkClient:
         })
         self._next_message_id += 1
         self.sent_ids.append(self._next_message_id)
+        # Onto the call `_check` just recorded, so `sent_id_for` never has to
+        # walk two lists in step. `_check` returned, so that call is the last
+        # one and it was accepted.
+        self.calls[-1] = replace(self.calls[-1], sent_id=self._next_message_id)
         # The shape `TalkTransport.deliver` unwraps.
         return {"ocs": {"data": {"id": self._next_message_id}}}
 
@@ -597,10 +657,11 @@ class FakeTalkClient:
         product on every short message and disagree on exactly the long ones,
         which is the worst possible place for a test helper to differ.
 
-        `None` when no accepted send carried it — including when the send was
-        *refused*, which is the case a test must not read as "the post did not
-        happen for the reason I expected": pair this with `refusals` when the
-        distinction matters.
+        `None` when no send that *minted an id* carried it. That covers both
+        unhappy answers — a refused send (a misroute) and a
+        credential-rejected one (a 401) — and neither is a case a test should
+        read as "the post did not happen for the reason I expected": pair this
+        with `refusals` and `auth_failures` when the distinction matters.
         """
         # An unlabelled send records `reference_id: None`, so a `None` argument
         # would match every one of them and hand back a real id. No caller
@@ -609,13 +670,11 @@ class FakeTalkClient:
         if not reference_id:
             return None
         found = None
-        accepted = 0
         for call in self.calls:
-            if call.method != "send_message" or call.refused:
+            if call.method != "send_message" or call.sent_id is None:
                 continue
             if call.args.get("reference_id") == reference_id:
-                found = self.sent_ids[accepted]
-            accepted += 1
+                found = call.sent_id
         return found
 
     @property

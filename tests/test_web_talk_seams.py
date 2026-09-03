@@ -76,13 +76,24 @@ def web_app_module(monkeypatch, make_config, db_path):
     # holds only what the path under test did.
     config.web.chat.talk_read_sync_interval = 0
     monkeypatch.setattr(mod, "_config", config)
-    web_tokens._refresh_locks.clear()
-    mod._talk_read_pull_state.clear()
-    mod._token_degraded_logged.clear()
+    _clear_module_state(mod)
     yield mod
+    _clear_module_state(mod)
+
+
+def _clear_module_state(mod) -> None:
+    """The four process-lifetime globals these paths touch.
+
+    `_bg_tasks` is here for parity with the two neighbouring web fixtures
+    rather than for a leak that exists: nothing in this file reaches
+    `_fire_and_forget`, since every test drives a coroutine directly instead of
+    going through an endpoint. A stale entry would be a task from a closed
+    event loop, which is worth never inheriting.
+    """
     web_tokens._refresh_locks.clear()
     mod._talk_read_pull_state.clear()
     mod._token_degraded_logged.clear()
+    mod._bg_tasks.clear()
 
 
 @pytest.fixture
@@ -174,6 +185,9 @@ class TestThePostAsUserMirror:
 
         assert [(c.bearer_token, c.timeout) for c in
                 fake_talk_web.constructions] == [("live-at", 5)]
+        # And it is closed again. Six of the seven sites do this in a `finally`;
+        # the seventh is the subject of `TestTheMessageDelete`'s pinned gap.
+        assert fake_talk_web.closes == 1
 
     async def test_an_unbound_room_reaches_talk_at_all(
         self, fake_talk_web, web_app_module, db_path,
@@ -353,6 +367,7 @@ class TestTheReadPush:
         assert [(c.method, c.token) for c in fake_talk_web.calls] == [
             ("mark_conversation_read", room.talk_ref),
         ]
+        assert fake_talk_web.closes == 1
 
     async def test_a_401_is_recovered_here_too(
         self, fake_talk_web, web_app_module, db_path, room, monkeypatch,
@@ -405,14 +420,44 @@ class TestTheMessageDelete:
 
         assert [c.bearer_token for c in fake_talk_web.calls] == ["live-at"]
 
+    async def test_the_user_client_here_is_never_closed(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """A pinned product gap, not a passing assertion about correct code.
+
+        `_delete_from_talk` is the one site of seven that builds its client
+        inline as an argument to `_attempt` and never calls `aclose()`, so the
+        `httpx.AsyncClient` that `delete_message` opens is leaked on every web
+        message delete in a Talk-bound room. Found by this stage's review, left
+        for its own change: a deletion path is a boundary surface and deserves
+        one rather than a drive-by edit here.
+
+        Written as an equality against today's answer so that fixing the
+        product turns this red and whoever fixes it updates the number, instead
+        of the gap quietly outliving the note.
+        """
+        _store(db_path, "live-at")
+
+        await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+
+        assert fake_talk_web.calls, "nothing ran, so this proves nothing"
+        assert fake_talk_web.closes == 0
+
     async def test_a_non_numeric_id_reaches_no_client(
         self, fake_talk_web, web_app_module, db_path, room,
     ):
+        """Paired in one test, because `calls == []` alone is equally true of a
+        feature switched off, a missing token or an unconfigured Nextcloud —
+        any fixture regression would leave this green while its siblings go
+        red. The second half is the control: same room, same credential, an id
+        that parses."""
         _store(db_path, "live-at")
 
         await web_app_module._delete_from_talk("alice", room.talk_ref, "not-an-id")
-
         assert fake_talk_web.calls == []
+
+        await web_app_module._delete_from_talk("alice", room.talk_ref, "5150")
+        assert [c.method for c in fake_talk_web.calls] == ["delete_message"]
 
 
 class TestTheReadPull:
