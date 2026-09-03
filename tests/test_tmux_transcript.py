@@ -260,12 +260,24 @@ class TestParseSettled:
     """The post-Stop flush-race guard: poll for the final turn before parsing."""
 
     def test_returns_immediately_when_already_settled(self, tmp_path, monkeypatch):
+        # "Did not poll" is counted on the loop's own condition, not on
+        # `time.sleep`. `tmux_claude` does `import time`, so `mod.time` *is*
+        # the stdlib module and patching `sleep` on it replaces the function
+        # process-wide — a recorder there collects every sleep any thread in
+        # the xdist worker makes, so the assertion becomes a property of the
+        # worker rather than of this function, and a thread left running by an
+        # earlier test turns it red. Observed once in a full run and green on
+        # its own, which is the signature.
         p = _write(tmp_path, [_assistant([{"type": "text", "text": "hi"}])])
         import istota.brain.tmux_claude as mod
-        slept = []
-        monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+        checks = []
+        real = mod._transcript_has_final_turn
+        monkeypatch.setattr(
+            mod, "_transcript_has_final_turn",
+            lambda path: (checks.append(path), real(path))[1],
+        )
         events = TmuxClaudeBrain()._parse_transcript_settled(p)
-        assert slept == []  # no polling needed
+        assert len(checks) == 1  # settled on the first look, so never slept
         assert events[-1].text == "hi"
 
     def test_polls_until_final_turn_appears(self, tmp_path, monkeypatch):
@@ -287,7 +299,9 @@ class TestParseSettled:
             return real(p)
 
         monkeypatch.setattr(mod, "_transcript_has_final_turn", flaky)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        # The poll interval, not `time.sleep` — see the note above on why
+        # patching that one reaches every thread in the process.
+        monkeypatch.setattr(mod, "_TRANSCRIPT_SETTLE_POLL_S", 0)
         events = TmuxClaudeBrain()._parse_transcript_settled(p)
         assert calls["n"] >= 3
         assert events[-1].text == "final"
@@ -300,8 +314,9 @@ class TestParseSettled:
                        stop_reason="tool_use"),
         ])
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
-        # collapse the budget so the loop exits after one check
+        # Collapse the budget so the loop exits after one check. Nothing
+        # sleeps on this path — the deadline is already past when the first
+        # check comes back False — so there is no interval to collapse too.
         monkeypatch.setattr(mod, "_TRANSCRIPT_SETTLE_S", 0.0)
         events = TmuxClaudeBrain()._parse_transcript_settled(p)
         assert isinstance(events[-1], ResultEvent)  # best-effort parse returned

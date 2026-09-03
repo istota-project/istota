@@ -29,6 +29,7 @@ from istota.brain.tmux_claude import (
 )
 from istota.config import BrainConfig, TmuxBrainConfig
 from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
+from tests.support.sleep_spy import sleep_spy
 
 
 @pytest.fixture(autouse=True)
@@ -385,8 +386,10 @@ class TestTransientRetry:
         ok = (BrainResult(success=True, result_text="ok", stop_reason="completed"), False)
         h = _RetryHarness(monkeypatch, [err, ok])
         # Override the harness's no-op sleep with a spy (after construction).
-        slept = []
-        monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+        # Same-thread only: this patch lands on the stdlib `time` module, so a
+        # plain recorder would also collect every background thread's sleep and
+        # could satisfy the membership assertion below by coincidence.
+        slept = sleep_spy(monkeypatch, mod)
         h.brain.execute(_req(tmp_path))
         assert mod.API_RETRY_DELAY_SECONDS in slept
 

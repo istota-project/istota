@@ -18,6 +18,7 @@ from istota.health import garmin as gm
 from istota.health import garmin_sync
 from istota.health._migrate import ensure_initialised
 from istota.health.workspace import synthesize_health_context
+from tests.support.sleep_spy import sleep_spy
 
 
 @pytest.fixture(autouse=True)
@@ -302,8 +303,12 @@ class TestSyncEngine:
                 "2026-05-13": {"steps": {"totalSteps": 8000}},
             },
         )
-        slept: list[float] = []
-        monkeypatch.setattr(garmin_sync.time, "sleep", lambda s: slept.append(s))
+        # `assert slept` below is the false-green shape: patching
+        # `garmin_sync.time.sleep` replaces the stdlib function for every
+        # thread in the worker, so one foreign sleep satisfies it whether or
+        # not the sync paused at all. The spy records this thread's sleeps
+        # only and delegates everyone else's.
+        slept = sleep_spy(monkeypatch, garmin_sync)
 
         res = garmin_sync.sync_garmin(
             ctx, fdb, days_back=2, today=date(2026, 5, 15), adapter=adapter,
