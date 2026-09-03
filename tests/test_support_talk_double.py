@@ -1,8 +1,9 @@
 """The Talk double's negative controls, which are the point of this file.
 
 A double that cannot refuse is worse than no double: it reports coverage that
-does not exist, which is the failure `.claude/rules/testbed.md` records four
-instances of. So the tests here are mostly about what `FakeTalkClient` *rejects* — a canonical
+does not exist, which is the failure `.claude/rules/testbed.md` collects
+instances of — this double's own permissive predecessor being one of them. So
+the tests here are mostly about what `FakeTalkClient` *rejects* — a canonical
 room token, a string naming nothing, an unseeded attachment path — and about the
 two properties everything built on it depends on:
 
