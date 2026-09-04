@@ -130,7 +130,7 @@ UPDATE_ENV = "ISTOTA_UPDATE_GOLDEN"
 UPDATE_CMD = f"uv run env {UPDATE_ENV}=1 pytest tests/test_prompt_golden.py -n0"
 #: Taken from the product rather than restated, so a change to the dry-run
 #: rendering shows up here as a golden diff instead of as a prefix that no
-#: longer strips and thirteen goldens carrying a header line.
+#: longer strips and every golden carrying a header line.
 DRY_RUN_PREFIX = f"{DRY_RUN_PROMPT_HEADER}\n\n"
 
 
@@ -350,6 +350,12 @@ class Case:
     #: the on-demand menu and into a body section. Setting it also seeds
     #: `[brain] room_selectable`, without which `resolve_brain_kind` refuses the
     #: pin and the case silently reproduces its sibling.
+    #:
+    #: Pairing this with `history=True` would construct a real provider before
+    #: assembly reaches the `use_selection` short-circuit — `execute_task`
+    #: evaluates `_build_triage_completer` as a call argument, so it runs
+    #: eagerly and a native route reaches `_build_native_completer`. No case
+    #: does that today; the `_no_sockets` guard is what would catch it.
     brain: str | None = None
 
 
@@ -870,7 +876,7 @@ def test_every_database_rule_is_reachable_and_distinct():
     branch the merge's own argument bites hardest on — a golden cannot see a
     divergence it was regenerated from, and this one is not even regenerated.
 
-    Asserted here rather than by a fourteenth golden: the question is about
+    Asserted here rather than by another golden: the question is about
     four strings, and a whole assembled prompt to carry one paragraph is a
     15 KB file whose diff nobody reads.
     """

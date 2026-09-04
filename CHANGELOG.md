@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Upgrade note, for deployments running the native brain:** the web-fetch tool that brain provides is now available to admins only. It reaches the internet from the daemon itself rather than through the per-task network allowlist, so a standard user had wider access under that brain than the same person had under either Claude brain — and since a shared room applies one brain to every member's turns, an admin's choice decided it for them. Standard users lose the tool on upgrade: web search is unaffected, and where a browser service is configured that stays the way to read a page, but a deployment with neither leaves standard users with no way to read one at all.
+- **Upgrade note:** the web-fetch tool is now offered to admins only. On a deployment running the native brain a standard user genuinely loses it — it reaches the internet from the assistant's own process rather than through the per-task network allowlist, so they had wider access there than the same person had under either Claude brain, and a shared room applies one brain to every member's turns. On a Claude-brain deployment nothing is taken away; what changes is that a standard user is no longer told about the tool, since the two must agree or the instructions name something that is not there. Either way, web search is unaffected, and where a browser service is configured that stays the way to read a page — but a deployment with neither now leaves standard users with no page-reading tool named at all.
 
 ### Fixed
 

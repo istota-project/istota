@@ -65,13 +65,20 @@ def test_the_standalone_updater_migrates_from_the_new_code():
     `db.init_db`. A refactor back to the direct call would be invisible to
     every other test and would silently skip any migration shipped in the
     update itself.
+
+    This reads one function and does **not** assert it is the default `migrate`
+    the update path installs. That half is
+    `tests/test_updater.py::TestCheckoutFlow::test_default_migrate_runs_fresh_istota_init`,
+    which goes red on a rewiring this one cannot see; named here so neither is
+    deleted in the belief the other covers it.
     """
     from istota import updater
 
     source = inspect.getsource(updater._run_fresh_migrations)
-    # The docstring names `db.init_db` to say why it is *not* called, so the
-    # body is what has to be read. Dropping it is what keeps this assertion
-    # about the code rather than about the prose beside it.
+    # Defensive, not load-bearing today: that docstring names `db.init_db`
+    # without a paren, so neither needle matches it as written. The strip is so
+    # that a future docstring spelling `init_db(...)` cannot satisfy the check
+    # from the prose alone.
     body = source.replace(updater._run_fresh_migrations.__doc__ or "", "")
     assert '"init"' in body, "the migration no longer shells out to `istota init`"
     assert "init_db(" not in body, (

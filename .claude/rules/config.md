@@ -441,8 +441,11 @@ ISSUE-362 and an upgrade would otherwise drop failover silently. See
 `room_selectable` names the brain kinds a room may pin for itself through
 `!brain` or the web room settings. Empty is the default, so the feature ships
 inert and an operator opts in by naming kinds — a gate rather than a preference,
-because a brain kind selects an isolation posture and a change to an enforcement
-mechanism should not arrive switched on by an upgrade. The mapper hook
+because a brain kind decides which process holds the agent loop, what tool set
+it registers and which sandbox profile is built, and a change to an enforcement
+posture should not arrive switched on by an upgrade (`.claude/rules/brain.md` is
+exact about which posture, since the obvious answer went out of date with
+ISSUE-389). The mapper hook
 stringifies and strips each entry and drops the empties, and `_KEEP`s a
 non-list; `_validate_room_selectable` warns once at load about a name
 `make_brain` cannot build, since nothing else would — `resolve_brain_kind` warns
@@ -450,10 +453,17 @@ only when a room actually pins one, which for an unbuildable name is never. Two
 consequences beyond the room itself: an admitted pin clears `fallback` for that
 task, and `brain.reachable_brain_kinds` folds this list in, so allowlisting a
 kind widens the `doctor` checks for it whether or not a room has selected it.
-There is no env var — deployment policy rather than a credential or a
-per-container toggle — so an operator sets it in `config.toml`; adding one later
-means both `docker/istota/render-config.sh` and `docker/docker-compose.yml`, per
-the testbed two-file rule. See `.claude/rules/brain.md` "Per-room brain
+**Neither deployment path can set it, which is a gap rather than a decision
+about env vars.** There is no env var, deliberately — this is deployment policy
+rather than a credential or a per-container toggle — but the Ansible role has no
+variable for it either, and `templates/config.toml.j2` renders `[brain]` without
+it, so a hand edit to the rendered `config.toml` is overwritten by the next
+play. Setting it on the canonical deployment means adding the field to
+`deploy/ansible/defaults/main.yml` and that template, per the rule in
+`.claude/rules/deployment.md`; on Docker it means both
+`docker/istota/render-config.sh` and `docker/docker-compose.yml`, per the
+testbed two-file rule. Until one of those lands, the feature is reachable only
+on an install whose `config.toml` nothing regenerates. See `.claude/rules/brain.md` "Per-room brain
 selection".
 
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),

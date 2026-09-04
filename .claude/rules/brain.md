@@ -635,11 +635,17 @@ is set to a kind that is no longer offered and names what it is running
 instead.
 
 **The allowlist is empty by default and is a gate rather than a preference.**
-Brain kind selects an isolation posture — the two CLI brains run the whole
-agent inside bubblewrap, `native` runs the agent loop in the daemon process
-with its file confinement enforced in Python (`native_fs_confinement_active`)
-— and a change to an enforcement mechanism should not arrive switched on by an
-upgrade. Writing a room's brain is admin-gated on top of the list; reading is
+Brain kind decides which process holds the agent loop, which credentials that
+process carries, which `SandboxProfile` is built and what tool set is
+registered — so it changes an enforcement posture, and a change to one should
+not arrive switched on by an upgrade. Be exact about which posture, because the
+obvious answer is out of date: since ISSUE-389 the native brain's six core
+tools run in a per-attempt bwrap namespace of their own (`tool_server`, under
+`SandboxProfile.NATIVE`), so tool *execution* is no longer the difference.
+`native_fs_roots` is the error-message layer above that namespace, and the only
+confinement there is on macOS, the standalone install and the shipped Docker
+stack — where the CLI brains are equally unconfined, so it is not a
+native-versus-CLI delta there either. Writing a room's brain is admin-gated on top of the list; reading is
 not, since every member of a shared room is entitled to know what their turns
 run under. `room_selectable_kinds(brain_config)` is the allowlist intersected
 with the kinds `make_brain` can build, so a name that is not one is offered to
@@ -649,13 +655,20 @@ this case, since that fires when a room *pins* a kind and a name the picker
 never offered is a name no room can pin — the "typo that did nothing" shape,
 where the operator sees a feature that does not work and no reason why.
 
-A shared room's brain applies to every member's turns, admin or not — the fill
-is unconditional on sender. That is what forced `WebFetch` to become admin-only
-in `build_allowed_tools`: an admin pinning a room to `native` otherwise put a
-non-admin's turns on a daemon-netns fetch outside the CONNECT allowlist, which
-their CLI-brain task never had. The file-confinement half of the same gap
-cannot be closed and is accepted: same policy, a Python check instead of a
-kernel bind. That is what `native` is.
+**The live delta is egress, and a shared room is what made it reachable.** A
+room's brain applies to every member's turns, admin or not — the fill is
+unconditional on sender — so an admin pinning a room to `native` decides the
+posture for a non-admin who chose nothing. The native brain's `WebFetch` runs
+in the **daemon's** network namespace, outside the CONNECT allowlist, where the
+same user's CLI-brain task has `--unshare-net` plus that allowlist; and the
+tool-server namespace above does not cover it, since it is a daemon-side tool
+rather than one of the six. So `build_allowed_tools` withholds `WebFetch` from a
+non-admin, unconditionally rather than only for a pinned room — the asymmetry
+predates per-room selection and exists on any native-default deployment, and a
+rule scoped to pinned rooms would leave a non-admin *more* egress on the
+deployment default than in a room somebody pinned. `WebSearch` stays for
+everyone: it runs at the provider and returns titles and URLs, granting this
+host no egress at all.
 
 ### A pinned room has no failover
 
@@ -721,11 +734,14 @@ without the second:
    room_token, source_type)` on the command and Talk paths,
    `web_app._brain_for_room_token` on the web ones. Without this the next
    `!room model sonnet` writes an anthropic id back into a native room and
-   undoes the clear permanently. Seven sites: the `!model` prefix on Talk
-   (`transport/talk/inbound.py`) and on web (`chat_send_message`), `!room
-   model`, `!models`, `!help`, `_known_room_models` — which gates the web PATCH
-   — and `/chat/commands`, which takes an optional `room_id` for this and
-   nothing else. The composer's own autocomplete still asks unscoped, so its
+   undoes the clear permanently. Seven surfaces over six call expressions: the
+   `!model` prefix on Talk (`transport/talk/inbound.py`) and on web
+   (`chat_send_message`), `!room model`, `_known_room_models` — which gates the
+   web PATCH — `/chat/commands`, which takes an optional `room_id` for this and
+   nothing else, and then `!models` and `!help`, which share
+   `commands._ctx_brain`. A surface added through that helper costs no new call
+   and makes the count eight with nothing going red, so read the helper's
+   callers rather than the number. The composer's own autocomplete still asks unscoped, so its
    suggestions can be stale; a pick it produces is refused server-side against
    the room's brain rather than run.
 

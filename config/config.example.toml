@@ -132,9 +132,11 @@ features = []
 #
 # Which brain kinds a room may pin for itself. Empty (the default) means none
 # may, so the feature is inert until you name kinds here. A gate rather than a
-# preference: brain kind selects an isolation posture (the two CLI brains run
-# the whole agent inside bubblewrap; native runs the agent loop in the daemon
-# process), so it is not something an upgrade should switch on. Setting a room's
+# preference: brain kind decides which process holds the agent loop, what tool
+# set it registers and which sandbox profile is built, so it is not something an
+# upgrade should switch on. Note the Ansible role has no variable for this key
+# and does not render it, so on that deployment a hand edit here is overwritten
+# by the next play. Setting a room's
 # brain is admin-only on top of this. A room that pins a brain runs that brain
 # or fails saying why — the fallback above does not apply to it, which is what
 # makes the pin mean what it says. A name here that is not a buildable kind is

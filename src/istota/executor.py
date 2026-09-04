@@ -4002,11 +4002,20 @@ def native_fs_confinement_active(config: Config) -> bool:
 
     Keyed off *effective* sandboxing, exactly like the executor's cwd choice:
     on a real multi-user deployment (Linux + bwrap) the claude_code path
-    confines the filesystem via bwrap, so the native file tools — which run
-    in-process, outside any bwrap — must confine themselves to the same roots
-    (NB-1). Where bwrap is unavailable (Mac / dev), claude_code runs unconfined
-    too, so native stays unconfined for parity rather than surprising the
-    developer with a boundary the CLI path doesn't have.
+    confines the filesystem via bwrap, so the native file tools confine
+    themselves to the same roots (NB-1). Where bwrap is unavailable (Mac / dev),
+    claude_code runs unconfined too, so native stays unconfined for parity
+    rather than surprising the developer with a boundary the CLI path doesn't
+    have.
+
+    **"which run in-process, outside any bwrap" is what this used to say, and
+    it stopped being true in ISSUE-389.** The six core tools now run in a
+    per-attempt namespace of their own (`tool_server`, `SandboxProfile.NATIVE`),
+    so these roots are the error-message layer above that namespace — and the
+    only confinement there is on the shapes where nothing is confined, which is
+    the branch this predicate already returns False for. The stale sentence is
+    named rather than deleted because two documents cited it as the authority
+    for a native-versus-CLI difference that no longer exists.
     """
     return effective_sandboxing(config)
 
