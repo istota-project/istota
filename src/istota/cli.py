@@ -80,11 +80,20 @@ def cmd_doctor(args):
     """
     from . import doctor
 
-    config = load_config(Path(args.config) if args.config else None)
-    results = doctor.run_checks(
+    requested = Path(args.config) if args.config else None
+    config = load_config(requested)
+    # A run that loaded no config file describes a default `Config`, not this
+    # deployment, and says so nowhere (ISSUE-412). Render the one line that says
+    # it and stop: there is no subset of such a run worth reading. Inside a task
+    # this is the unconditional state — the config directory is bound into no
+    # sandbox. `scope` is passed because `--scope image` is the one narrowing
+    # flag the gate honours rather than swallows; `config_visibility` says why.
+    scope = args.scope or ""
+    gate = doctor.config_visibility(config, requested=requested, scope=scope)
+    results = [gate] if gate is not None else doctor.run_checks(
         config,
         only=tuple(args.only or ()),
-        scope=args.scope or "",
+        scope=scope,
         deep=bool(args.deep),
         probe=True,
     )

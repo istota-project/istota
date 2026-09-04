@@ -642,6 +642,37 @@ class TestFrameworkDb:
         r = run_checks(config, only=("runtime.framework_db",))[0]
         assert r.status == OK
 
+    def test_a_zero_length_db_warns_rather_than_reading_clean(self, make_config, tmp_path):
+        """SQLite treats a zero-length file as a valid empty database, so
+        `quick_check` returns no issues and the check used to report
+        `quick_check clean` about a file with nothing in it (ISSUE-412)."""
+        db_path = tmp_path / "istota.db"
+        db_path.touch()
+        assert db_path.stat().st_size == 0
+        r = run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))[0]
+        assert r.status == WARN
+        assert "0 bytes" in r.detail
+        assert "no schema" in r.detail
+        assert "quick_check clean" not in r.detail
+        assert "istota init" in r.remedy
+
+    def test_a_header_only_db_warns_too(self, make_config, tmp_path):
+        """The property is "has this file a schema", and size is only a proxy
+        for it. A header-only file is what an interrupted `istota init` or a
+        bare `PRAGMA journal_mode=WAL` leaves: non-zero, passes `quick_check`,
+        and has no more schema than an empty one. A size test misses it."""
+        import sqlite3
+
+        db_path = tmp_path / "istota.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()
+        assert db_path.stat().st_size > 0, "this test needs a non-empty file"
+        r = run_checks(make_config(db_path=db_path), only=("runtime.framework_db",))[0]
+        assert r.status == WARN
+        assert "no schema" in r.detail
+        assert "istota init" in r.remedy
+
     def test_unopenable_db_fails(self, make_config, tmp_path):
         db_path = tmp_path / "istota.db"
         db_path.write_bytes(b"this is definitely not a sqlite database")
@@ -6087,3 +6118,239 @@ def test_no_hand_rolled_health_probe(filename):
             "has grown back. The one copy lives in "
             "`doctor.check_model_execution`; call `doctor.run_checks` instead."
         )
+
+
+class TestConfigVisibility:
+    """The gate in front of the whole registry (ISSUE-412).
+
+    `load_config` returns a bare `Config()` when no candidate resolves, so
+    every path-and-policy check then answers about defaults — a relative
+    `data/istota.db`, the default temp dir, a whole `[security]` block the
+    operator never wrote — while reading exactly like a run about the real
+    deployment. Inside a task that is *unconditional*: `build_clean_env` exports
+    `ISTOTA_CONFIG_PATH` naming a file under `config/`, and `config/` is bound
+    into no sandbox by design.
+
+    The verdict splits on the same principle `_deployment_sandboxing` did and
+    not on the same predicate: a boundary doing its job is not a fault, so a
+    *task* gets a `SKIP`, and the question "is this the daemon" is answered by
+    `ISTOTA_TASK_ID` rather than by `ISTOTA_SANDBOXED`, which `task_env` sets
+    only under `skill_proxy_enabled and effective_sandboxing`.
+    """
+
+    def _loaded(self, make_config, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text("")
+        return make_config(config_path=path)
+
+    def test_a_loaded_config_opens_the_gate(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
+        assert doctor.config_visibility(self._loaded(make_config, tmp_path)) is None
+
+    def test_inside_a_task_it_skips_rather_than_failing(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """`config/` is bound into no sandbox on purpose. The boundary working
+        is not a fault — reporting it as one is the ISSUE-381 shape again."""
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r is not None
+        assert r.status == SKIP
+
+    def test_a_task_without_the_sandbox_marker_still_skips(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """The defect this predicate exists for. `task_env` sets
+        `ISTOTA_SANDBOXED` only under `skill_proxy_enabled and
+        effective_sandboxing`, while `executor` exports `ISTOTA_CONFIG_PATH` on
+        `config_path is not None` alone. So a `sandbox_enabled` deployment with
+        the proxy off — warned about since ISSUE-393, and shipped — puts a task
+        in a namespace with no marker and an unreachable config directory, and
+        keying on the marker would FAIL it with a remedy it cannot follow."""
+        monkeypatch.delenv("ISTOTA_SANDBOXED", raising=False)
+        monkeypatch.setenv("ISTOTA_TASK_ID", "41")
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r.status == SKIP
+
+    def test_a_cron_command_job_is_not_a_task_arm(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """`PRECOMMIT_SCANS_REQUIRED` is the third marker in
+        `_non_daemon_env_markers` and is deliberately not in this predicate: a
+        cron `command` job runs unsandboxed as the daemon user with the config
+        directory in front of it, so "run it on the host as the daemon user" is
+        telling it to do what it is already doing."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("PRECOMMIT_SCANS_REQUIRED", "1")
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r.status == FAIL
+
+    def test_the_task_detail_says_the_checks_would_be_about_defaults(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """A SKIP's remedy is not rendered by `render_text`, so the one line an
+        operator or a model actually sees has to carry the whole point."""
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert "default" in r.detail.lower()
+
+    def test_an_exported_path_that_does_not_resolve_fails_outside_a_task(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """The daemon named the file and the subprocess could not read it.
+        A broken install, wrong permissions, or a stale exported value."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r.status == FAIL
+        assert "ISTOTA_CONFIG_PATH" in r.detail
+        assert str(tmp_path / "absent.toml") in r.detail
+        assert r.remedy
+
+    def test_the_two_arms_are_reported_differently(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """The negative control for the whole change: without it both runs
+        report a clean bill of health about defaults."""
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "absent.toml"))
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        inside = doctor.config_visibility(make_config(config_path=None))
+        monkeypatch.delenv("ISTOTA_SANDBOXED")
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+        outside = doctor.config_visibility(make_config(config_path=None))
+        assert (inside.status, outside.status) == (SKIP, FAIL)
+
+    def test_an_explicit_c_that_does_not_resolve_fails_and_names_itself(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """`-c` is consulted instead of the environment, so the finding has to
+        name the argument rather than a variable the operator never set."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH"):
+            monkeypatch.delenv(name, raising=False)
+        asked = tmp_path / "typo.toml"
+        r = doctor.config_visibility(make_config(config_path=None), requested=asked)
+        assert r.status == FAIL
+        assert str(asked) in r.detail
+        assert "-c" in r.detail
+
+    def test_a_whitespace_path_is_not_reported_as_nothing_named(
+        self, make_config, monkeypatch
+    ):
+        """The arm is chosen from `source`, never from the rendered `named`: a
+        whitespace path collapses to empty, and reading that as "nothing was
+        named" gives the wrong cause and the wrong remedy."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "   ")
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r.status == FAIL
+        assert "ISTOTA_CONFIG_PATH" in r.detail
+        assert "standard locations" not in r.detail
+
+    def test_nothing_named_and_nothing_found_still_fails(
+        self, make_config, monkeypatch
+    ):
+        """A fresh checkout, or a run from the wrong directory. Nobody pointed
+        at anything, so the reason and the remedy differ — but the exit code
+        has to stay 1, because that invocation used to run 31 checks against
+        defaults and exit 1 on the several that fail. `verdict` draws the same
+        line for an empty list: a run that checked nothing must not read as a
+        run that passed everything."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH"):
+            monkeypatch.delenv(name, raising=False)
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r.status == FAIL
+        assert exit_code([r]) == 1
+        assert r.remedy
+
+    def test_only_the_task_arm_exits_zero(self, make_config, monkeypatch):
+        """A non-zero code every time a task runs doctor is noise about a
+        boundary behaving correctly."""
+        monkeypatch.setenv("ISTOTA_TASK_ID", "7")
+        monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
+        assert exit_code([doctor.config_visibility(make_config(config_path=None))]) == 0
+
+    def test_image_scope_is_exempt(self, make_config, monkeypatch):
+        """`IMAGE` is defined as what a bare `docker run` with no volumes can
+        answer, which is exactly a host with no config on any search path.
+        Swallowing that scope would make a loaded config a precondition for the
+        one scope declared not to need one."""
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/nonexistent/config.toml")
+        assert doctor.config_visibility(make_config(config_path=None), scope=IMAGE) is None
+
+    def test_deployment_scope_is_not_exempt(self, make_config, monkeypatch):
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/nonexistent/config.toml")
+        r = doctor.config_visibility(make_config(config_path=None), scope=DEPLOYMENT)
+        assert r is not None and r.status == FAIL
+
+    def test_the_named_path_cannot_forge_a_line_of_output(
+        self, make_config, monkeypatch
+    ):
+        """The value is quoted straight into a `detail` that lands on a terminal
+        line, and both sources are writable by anyone who can set an environment
+        on the machine."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(
+            "ISTOTA_CONFIG_PATH", "/a.toml\n  OK   security.sandbox_effective  fine"
+        )
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert r.status == FAIL
+        assert "\n" not in r.detail
+        assert len(r.detail.splitlines()) == 1
+
+    def test_a_very_long_named_path_is_capped_and_says_so(
+        self, make_config, monkeypatch
+    ):
+        """An operator told that a path did not resolve must not be shown a
+        different path from the one that was tried."""
+        for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/" + "x" * 5000 + ".toml")
+        r = doctor.config_visibility(make_config(config_path=None))
+        assert len(r.detail) < 500
+        assert "…" in r.detail
+
+    def test_the_gate_is_deliberately_outside_the_registry(self):
+        """It answers whether the run is about this host at all, so it has no
+        `only=` prefix to be selected by and nothing to filter. Stated as an
+        assertion rather than left as an absence, because the registry
+        invariants above would otherwise silently not cover it."""
+        assert doctor.CONFIG_GATE not in {name for name, _ in CHECKS}
+        assert doctor.CONFIG_GATE not in doctor.CHECK_SCOPES
+
+    def test_every_arm_satisfies_the_registry_invariants(
+        self, make_config, monkeypatch
+    ):
+        """It renders through the same two renderers and is read by the same
+        consumers, so `scope` is set explicitly rather than left to a default."""
+        arms = (
+            {"ISTOTA_TASK_ID": "1", "ISTOTA_CONFIG_PATH": "/nonexistent/c.toml"},
+            {"ISTOTA_CONFIG_PATH": "/nonexistent/c.toml"},
+            {},
+        )
+        seen = []
+        for env in arms:
+            with pytest.MonkeyPatch.context() as mp:
+                for name in ("ISTOTA_SANDBOXED", "ISTOTA_TASK_ID", "ISTOTA_CONFIG_PATH"):
+                    mp.delenv(name, raising=False)
+                for name, value in env.items():
+                    mp.setenv(name, value)
+                r = doctor.config_visibility(make_config(config_path=None))
+            seen.append(r.status)
+            assert r.detail.strip()
+            assert r.status in (OK, WARN, FAIL, SKIP)
+            assert r.scope == DEPLOYMENT
+            if r.status in (WARN, FAIL):
+                assert r.remedy.strip()
+        assert seen == [SKIP, FAIL, FAIL]
