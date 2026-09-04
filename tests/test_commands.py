@@ -4086,3 +4086,159 @@ class TestBrainForRoom:
         with db.get_db(db_path) as conn:
             _room(conn)
             assert brain_for_room(config, conn, "room1", "talk") is config.brain
+
+
+@pytest.mark.asyncio
+class TestTheReviewFindings:
+    """Cases added from the stage's own review. Each one is a defect the first
+    cut had, kept as a test rather than as a comment."""
+
+    async def test_a_pin_the_operator_dropped_still_loses_its_foreign_model(
+        self, make_config, db_path,
+    ):
+        """The outgoing namespace comes from the outgoing *kind*, not from a
+        routing pass that may refuse it.
+
+        Room pinned `native` with an openai_compat id, operator drops `native`
+        from the allowlist, admin moves the room to `claude_code`. Routing the
+        outgoing kind through `resolve_brain_kind` answers with the deployment
+        default's namespace — anthropic against anthropic — so the foreign id
+        survives as the room's standing default under a brain that cannot run
+        it, silently.
+        """
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("claude_code")  # native no longer offered
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            db.set_room_model_effort(conn, "room1", "endpoint/some-slug", "high")
+            out = await cmd_brain(_ctx(config, conn, args="claude_code"))
+            room = db.get_room(conn, "room1")
+        assert room.brain == "claude_code"
+        assert room.model is None
+        assert "endpoint/some-slug" in out
+
+    async def test_default_clears_even_with_the_allowlist_emptied(
+        self, make_config, db_path,
+    ):
+        """Emptying `[brain] room_selectable` is the documented way to switch
+        the feature off, and it is therefore exactly how a room ends up holding
+        a pin nothing honours. Clearing is a narrowing, so it needs no entry."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config()  # nothing selectable
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            out = await cmd_brain(_ctx(config, conn, args="default"))
+            assert db.get_room(conn, "room1").brain is None
+        assert "room_selectable" not in out
+
+    async def test_setting_is_still_refused_with_the_allowlist_emptied(
+        self, make_config, db_path,
+    ):
+        """The converse of the case above, so moving the `default` branch ahead
+        of the gate cannot be read as removing the gate."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config()
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+            assert db.get_room(conn, "room1").brain is None
+        assert "room_selectable" in out
+
+    async def test_the_reply_names_the_effort_it_dropped(self, make_config, db_path):
+        """`set_room_model_effort` moves the pair, so a reply naming only the
+        model under-reports what it just did."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_model_effort(conn, "room1", OPUS, "high")
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+            assert db.get_room(conn, "room1").effort is None
+        assert "high" in out
+
+    async def test_a_bare_effort_survives_a_brain_change(self, make_config, db_path):
+        """An effort level with no model pin is a semantic rung every brain
+        reads, so nothing namespaced is lost and nothing is cleared."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_effort(conn, "room1", "high")
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+            room = db.get_room(conn, "room1")
+        assert room.brain == "native"
+        assert room.effort == "high"
+        assert "cleared" not in out.lower()
+
+    async def test_help_offers_the_rooms_own_aliases(self, make_config, db_path):
+        """`!help` is a surface that offers model names, so D5 Rule 2 binds it
+        exactly as it binds the writers."""
+        from istota.commands import cmd_help
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            pinned = await cmd_help(_ctx(config, conn))
+            db.set_room_brain(conn, "room1", None)
+            inherited = await cmd_help(_ctx(config, conn))
+        # `cmd_help` lists alias *names*, and the two namespaces have different
+        # ones: native offers the three portable tiers, anthropic those plus its
+        # own provider shortcuts. `opus` is the discriminator.
+        assert "`opus`" not in pinned
+        assert "`smart`" in pinned
+        assert "`opus`" in inherited
+
+
+class TestBrainForRoomNeverRaises:
+    def test_a_non_string_column_value_does_not_raise(self, make_config, db_path):
+        """`rooms.brain` is `TEXT` with no `CHECK` and SQLite is dynamically
+        typed, so the column can hold a number. `resolve_brain_kind` calls
+        `.strip()` on it, which is why it has to be inside the guard rather than
+        after it — the Talk poll's per-message loop runs inside the batch
+        transaction with nothing above it to catch a raise, so one bad row would
+        drop every remaining conversation's messages and roll the cursors back,
+        every cycle.
+        """
+        from istota.commands import brain_for_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            conn.execute("UPDATE rooms SET brain = 5 WHERE token = 'room1'")
+            assert brain_for_room(config, conn, "room1", "talk").kind == "claude_code"
+
+
+class TestIsModelPrefix:
+    """The brain-free half of the `!model` grammar.
+
+    It exists so the Talk poll can decide whether it needs a brain at all — the
+    brain is the *room's* now, and building one constructs a provider client
+    nothing closes, so doing it per message rather than per `!model` message is
+    a cost paid on every turn in a native-pinned room.
+    """
+
+    def test_it_agrees_with_the_parser(self, brain):
+        from istota.commands import is_model_prefix, parse_model_prefix
+
+        for content in (
+            "!model opus do the thing", "!model", "  !MODEL opus x",
+            "hello", "!models", "!room model opus", "", "!modelfoo",
+        ):
+            assert is_model_prefix(content) is (
+                parse_model_prefix(content, brain) is not None
+            ), content

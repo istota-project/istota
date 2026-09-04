@@ -1945,14 +1945,25 @@ def _report_native_usage(on_usage, message, requested_model: str) -> None:
         logger.warning("native triage usage sink failed", exc_info=True)
 
 
-def _native_web_fetch_enabled(task: "db.Task", config: Config) -> bool:
-    """True when this task routes to the native brain with WebFetch enabled.
+def _native_web_fetch_enabled(
+    task: "db.Task", config: Config, is_admin: bool = True,
+) -> bool:
+    """True when this task will actually have the native WebFetch tool.
 
     Used to fold `untrusted_input` into the eager skill set — the native
     WebFetch tool ingests untrusted web content but, as a core tool, doesn't
     trigger the companion-skill machinery that surfaces that guidance for
     ingest *skills*.
+
+    ``is_admin`` is here because `build_allowed_tools` scopes the tool by it and
+    `NativeBrain._build_tools` filters on that list, so for a non-admin the tool
+    is not built and the guidance would be prompt weight with nothing behind it.
+    It defaults to True — the permissive answer — so a caller that only wants
+    the routing question keeps getting it, and the one caller that decides a
+    *prompt* passes the task's real value.
     """
+    if not is_admin:
+        return False
     from .brain import resolve_brain_kind
 
     try:
@@ -3211,6 +3222,18 @@ def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     asymmetry it closes was already there, and a rule that applied only to
     room-pinned rooms would leave the same user with more egress on the
     deployment default than on a room somebody pinned.
+
+    **On the two CLI brains this changes nothing**, and that is not an oversight
+    in either direction. They run with ``--dangerously-skip-permissions`` and
+    never receive this list as an allowlist, so a non-admin there keeps the
+    CLI's own `WebFetch` — which is the tool this scoping has no quarrel with,
+    since it runs inside the namespace behind ``--unshare-net`` and the CONNECT
+    allowlist. The tool being removed is the daemon-side one, and native is the
+    only brain that builds it.
+
+    Two callers read this list and only one of them is the brain.
+    `build_prompt`'s Tools section names `WebFetch` under the same condition, or
+    a non-admin native task is told to reach for a tool that is not registered.
     """
     tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch"]
     if is_admin:
@@ -5512,20 +5535,41 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     if config.browser.enabled:
         browser_tool = "\n- Web browser for JS-rendered pages: istota-skill browse (see browse skill for details)"
 
-    # Web tools line. WebSearch + WebFetch are always allowed. WebSearch only
-    # returns result titles + URLs, so reading a page needs a fetch tool — steer
-    # that to the browse skill when the browser service is up (it renders JS and
-    # reaches arbitrary sites); WebFetch is the lightweight fallback.
+    # Web tools line. WebSearch is always allowed; **WebFetch is admin-only**,
+    # matching `build_allowed_tools`, which is the list `NativeBrain` filters
+    # its in-process tool set by. The two have to agree or a non-admin native
+    # task is told to reach for a tool that is not registered.
+    #
+    # With no browser service and no WebFetch there is no page-reading tool at
+    # all, and the line is dropped rather than pointed at the browse skill:
+    # that skill *is* the browser service, so naming it there would be a second
+    # unavailable route rather than a remedy.
+    #
+    # WebSearch only returns result titles + URLs, so reading a page needs a
+    # fetch tool — steer that to the browse skill when the browser service is up
+    # (it renders JS and reaches arbitrary sites); WebFetch is the lightweight
+    # fallback where the caller has it.
+    web_search_line = (
+        "\n- Web search: WebSearch — finds result titles and URLs; "
+        "it does not fetch page content."
+    )
     if config.browser.enabled:
-        web_tools = (
-            "\n- Web search: WebSearch — finds result titles and URLs; it does not fetch page content."
-            "\n- Reading web pages: prefer the browse skill (istota-skill browse) — it renders JavaScript and follows links. Use WebFetch only as a lightweight fallback for simple static pages."
+        read_line = (
+            "\n- Reading web pages: prefer the browse skill (istota-skill browse) — "
+            "it renders JavaScript and follows links."
+        )
+        if is_admin:
+            read_line += (
+                " Use WebFetch only as a lightweight fallback for simple static pages."
+            )
+    elif is_admin:
+        read_line = (
+            "\n- Reading web pages: WebFetch fetches a URL and extracts content "
+            "against your prompt."
         )
     else:
-        web_tools = (
-            "\n- Web search: WebSearch — finds result titles and URLs; it does not fetch page content."
-            "\n- Reading web pages: WebFetch fetches a URL and extracts content against your prompt."
-        )
+        read_line = ""
+    web_tools = web_search_line + read_line
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
     # once because it changes what an exit status means.
@@ -6074,7 +6118,10 @@ def execute_task(
     # enabled, fold `untrusted_input` into the eager set explicitly — mirroring
     # how the ingest skills pull it in via companion expansion — so its
     # inbound-handling guardrails reach the prompt whenever the tool is present.
-    if _native_web_fetch_enabled(task, config) and "untrusted_input" in skill_index:
+    if (
+        _native_web_fetch_enabled(task, config, is_admin)
+        and "untrusted_input" in skill_index
+    ):
         if "untrusted_input" not in selected_skills and (
             not _disabled or "untrusted_input" not in _disabled
         ):

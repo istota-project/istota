@@ -1272,9 +1272,15 @@ gated by the CONNECT allowlist. It is `build_default_tools`-registered
 (native-only) iff `env.web_fetch` is set and enabled; `NativeBrain._build_tools`
 maps `[brain.native.web_fetch]` (`WebFetchConfig`) → `session.tools.WebFetchPolicy`
 onto `ToolEnv.web_fetch` (`_web_fetch_policy()`), and the tool passes the
-`allowed_tools` filter because `executor.build_allowed_tools` already lists
-`WebFetch`. Empty `allowed_tools` (text-only, e.g. sleep cycle) still yields no
-tools.
+`allowed_tools` filter iff `executor.build_allowed_tools` listed `WebFetch` —
+which it does **for an admin only**. A non-admin's native task therefore builds
+no such tool, whatever `[brain.native.web_fetch] enabled` says: the tool reaches
+the network from the daemon's namespace outside the CONNECT allowlist, while
+that same user's task under a CLI brain has `--unshare-net` plus the allowlist,
+and a shared room an admin pinned to native puts a non-admin's turns on the
+native path without their choosing it. `build_prompt`'s Tools section is scoped
+by the same flag, or the prompt would name a tool that is not registered. Empty
+`allowed_tools` (text-only, e.g. sleep cycle) still yields no tools.
 
 Because it runs in the daemon netns (bypassing the CONNECT boundary), its
 hardening carries the whole load:
@@ -1297,8 +1303,8 @@ hardening carries the whole load:
   `Fetched: <final-url> (HTTP <status>, <mime>)` provenance header. Because a core
   tool doesn't drive `companion_skills`, the executor folds `untrusted_input` into
   the **eager** skill set when a task routes to the native brain with WebFetch
-  enabled (`_native_web_fetch_enabled`), so its inbound-handling guidance reaches
-  the prompt.
+  enabled *and the caller is an admin* (`_native_web_fetch_enabled`), so its
+  inbound-handling guidance reaches the prompt exactly where the tool does.
 - **Residual**: model-driven exfiltration via a GET query string is not
   eliminated (a GET is a canonical exfil channel), but it's the same bounded
   residual the `browse` skill already carries. `require_url_provenance` (default

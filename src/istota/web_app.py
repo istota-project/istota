@@ -3939,22 +3939,22 @@ def _brain_for_room_token(room_token: str, source_type: str):
         return resolve_brain_kind(source_type, _config.brain)
 
 
-def _known_room_models(brain_config=None) -> set[str]:
+def _known_room_models(brain_config) -> set[str]:
     """Canonical model ids a room default may be set to — the distinct targets
     the brain exposes via its alias table. Used to validate the PATCH.
 
-    `brain_config` is the room's own resolved brain (`_brain_for_room_token`).
-    Omitting it falls back to the deployment default, which is only right for a
-    caller that has no room in hand: a room pinned to another model namespace
-    would otherwise have an id from the wrong namespace accepted into its
-    standing default, which is the same defect `!room model` had.
+    `brain_config` is **required**, and is the *room's* own resolved brain
+    (`_brain_for_room_token`). It used to be implicit and was the deployment
+    default, which let the PATCH accept an anthropic id for a room pinned to a
+    brain in another namespace — the same defect `!room model` had. Every caller
+    of this validator is a writer of `rooms.model`, so there is no caller for
+    whom the deployment default is the right answer, and an optional parameter
+    would be a path nothing exercises and the wrong one if somebody took it.
     """
     try:
         return {
             model
-            for _alias, model, _effort in make_brain(
-                brain_config if brain_config is not None else _config.brain
-            ).list_aliases()
+            for _alias, model, _effort in make_brain(brain_config).list_aliases()
             if model
         }
     except Exception:  # noqa: BLE001 — validation degrades to "reject all" safely

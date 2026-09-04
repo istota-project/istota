@@ -1981,3 +1981,87 @@ class TestChatFileDownload:
         disposition = resp.headers["content-disposition"]
         assert disposition.startswith("attachment")
         assert "Q3%20report.csv" in disposition
+
+
+@_needs_web_deps
+class TestTheRoomPatchValidatesInTheRoomsNamespace:
+    """D5 Rule 2, the web writer.
+
+    `PATCH /api/chat/rooms/{id}` writes `rooms.model`, so an id from the wrong
+    model namespace accepted here is the same standing-default defect `!room
+    model` had. Both directions in one class, because a rejection alone passes
+    against a validator that rejects everything.
+    """
+
+    @pytest.fixture
+    async def pinned_client(self, tmp_path):
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", room_selectable=["native"])
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            yield c, config
+
+    async def _room(self, client, cookies):
+        return (await client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+
+    async def test_a_native_room_rejects_an_anthropic_id(self, pinned_client):
+        client, config = pinned_client
+        cookies = await _login(client, "alice")
+        created = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, created["token"], "native")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-5"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, created["token"]).model is None
+
+    async def test_the_same_id_is_accepted_when_the_room_is_not_pinned(
+        self, pinned_client,
+    ):
+        """The control. Same deployment, same payload, same endpoint — the only
+        difference is the room's brain, which is what the assertion is about."""
+        client, config = pinned_client
+        cookies = await _login(client, "alice")
+        created = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-5"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "claude-opus-5"
+
+
+@_needs_web_deps
+class TestKnownRoomModels:
+    def test_it_lists_the_brain_it_is_given(self, tmp_path):
+        import istota.web_app as mod
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        _patch_app(_make_config(tmp_path))
+        anthropic = mod._known_room_models(BrainConfig(kind="claude_code"))
+        native = mod._known_room_models(
+            BrainConfig(kind="native", native=NativeBrainConfig(model="endpoint/m")),
+        )
+        assert "claude-opus-5" in anthropic
+        assert "claude-opus-5" not in native
+        assert "endpoint/m" in native
+
+    def test_an_unbuildable_brain_rejects_everything(self, tmp_path):
+        """The validator degrades to "reject all" rather than to "accept all" —
+        an unusable answer must not widen what may be written."""
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+
+        _patch_app(_make_config(tmp_path))
+        assert mod._known_room_models(BrainConfig(kind="no-such-brain")) == set()

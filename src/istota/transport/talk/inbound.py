@@ -1068,8 +1068,10 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 effort_override: str | None = None
                 from ...brain import make_brain
                 from ...commands import (
+                    ModelPrefixOutcome,
                     brain_for_room,
                     dispatch as dispatch_command,
+                    is_model_prefix,
                     resolve_model_prefix,
                 )
 
@@ -1087,16 +1089,26 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 # resolution happens later, inside `record_inbound`), so it is
                 # mapped first; `conn` is the poll batch's transaction and spans
                 # this point.
-                brain = make_brain(brain_for_room(
-                    config,
-                    conn,
-                    db.resolve_room_token(conn, "talk", conversation_token)
-                    or conversation_token,
-                    "talk",
-                ))
-                prefix = resolve_model_prefix(
-                    content, brain, has_attachments=bool(attachments),
-                )
+                # Gated on the prefix actually being there. The brain is now the
+                # *room's*, and building one constructs a provider client that
+                # nothing closes — per message, for every message, on a room
+                # pinned to native. `is_model_prefix` is the same test
+                # `parse_model_prefix` makes first, so nothing that used to
+                # match stops matching.
+                if is_model_prefix(content):
+                    prefix = resolve_model_prefix(
+                        content,
+                        make_brain(brain_for_room(
+                            config,
+                            conn,
+                            db.resolve_room_token(conn, "talk", conversation_token)
+                            or conversation_token,
+                            "talk",
+                        )),
+                        has_attachments=bool(attachments),
+                    )
+                else:
+                    prefix = ModelPrefixOutcome(matched=False, content=content)
                 if prefix.usage is not None:
                     await _await_in_txn(
                         hold,

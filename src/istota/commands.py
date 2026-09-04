@@ -1,5 +1,6 @@
 """!command dispatch system — synchronous commands intercepted before task queue."""
 
+import dataclasses
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ from . import db
 from .brain import (
     Brain,
     EFFORT_LEVELS,
+    KNOWN_BRAIN_KINDS,
     effective_fallback_kind,
     make_brain,
     resolve_brain_kind,
@@ -163,6 +165,23 @@ def parse_command(content: str) -> tuple[str, str] | None:
 # ``brain._roles``.
 
 
+# The `!model <alias> <prompt>` grammar, in one place. `is_model_prefix` is the
+# half a caller can ask *before* building a brain, which matters on the Talk
+# poll's per-message path: the brain is now the room's own, so constructing one
+# per message would build (and never close) a provider client for every message
+# in a native-pinned room, not only for the `!model` ones.
+_MODEL_PREFIX_RE = re.compile(r"^!model\b\s*(\S+)?\s*(.*)", re.DOTALL | re.IGNORECASE)
+
+
+def is_model_prefix(content: str) -> bool:
+    """Whether ``content`` is a ``!model`` prefix at all, without needing a brain.
+
+    Exactly the test ``parse_model_prefix`` makes before it touches the brain,
+    so the two cannot disagree about what counts as a prefix.
+    """
+    return bool(_MODEL_PREFIX_RE.match((content or "").strip()))
+
+
 @dataclass
 class ModelPrefix:
     """Result of parsing a `!model` prefix.
@@ -190,7 +209,7 @@ def parse_model_prefix(content: str, brain: Brain) -> ModelPrefix | None:
     delegates resolution.
     """
     stripped = content.strip()
-    match = re.match(r"^!model\b\s*(\S+)?\s*(.*)", stripped, re.DOTALL | re.IGNORECASE)
+    match = _MODEL_PREFIX_RE.match(stripped)
     if not match:
         return None
     alias = (match.group(1) or "").lower()
@@ -266,17 +285,28 @@ def brain_for_room(config: Config, conn, room_token: str, source_type: str):
 
     Never raises. An unreadable room falls through to the source-type layer,
     which is the answer this returned before the column existed.
+
+    ``resolve_brain_kind`` is **inside** the guard, not after it. `rooms.brain`
+    is a `TEXT` column with no `CHECK`, SQLite is dynamically typed, and that
+    function opens with `(override or "").strip()` — so a non-string value on
+    the row raises `AttributeError` from a call that looks total. The one caller
+    that most needs this never to raise is the Talk poll's per-message loop,
+    which runs inside the batch transaction with nothing between it and the
+    top: an exception there drops every remaining conversation's messages and
+    rolls back the cursors, so the batch is re-read and re-aborts every cycle.
+    `executor._native_web_fetch_enabled` guards the identical call for the same
+    reason.
     """
-    override = None
     try:
+        override = None
         if room_token:
             room = db.get_room(conn, room_token)
             if room is not None:
                 override = getattr(room, "brain", None)
+        return resolve_brain_kind(source_type, config.brain, override=override)
     except Exception:  # noqa: BLE001 — a room read must not raise into a poll loop
-        logger.debug("brain_for_room: room read failed", exc_info=True)
-        override = None
-    return resolve_brain_kind(source_type, config.brain, override=override)
+        logger.debug("brain_for_room: falling back to the source-type answer", exc_info=True)
+        return resolve_brain_kind(source_type, config.brain)
 
 
 def _model_namespace(brain_config) -> str | None:
@@ -427,14 +457,16 @@ async def dispatch(
 
 @command("help", "List available commands")
 async def cmd_help(ctx: CommandContext):
-    config = ctx.config
     lines = ["**Available commands:**", ""]
     for name, (_, help_text) in sorted(COMMANDS.items()):
         lines.append(f"- `!{name}` -- {help_text}")
     lines.append("")
     lines.append("**Per-task model override:**")
     lines.append("")
-    aliases = [alias for alias, _m, _e in make_brain(config.brain).list_aliases()]
+    # The room's own brain: `!help` offers model names, which D5 Rule 2 binds
+    # exactly as it binds the writers. Advertising `opus` in a room whose brain
+    # resolves no such alias is the same defect as writing it, one step earlier.
+    aliases = [alias for alias, _m, _e in make_brain(_ctx_brain(ctx)).list_aliases()]
     lines.append(f"- `!model <alias> <prompt>` — one-shot. Aliases: {', '.join(f'`{a}`' for a in aliases)}.")
     return "\n".join(lines)
 
@@ -724,12 +756,14 @@ async def cmd_steer(ctx: CommandContext):
     # (tmux). Reading the task's column rather than the deployment default is
     # what makes the refusal name the brain this room actually runs.
     #
-    # Not a one-way improvement, and the residue is recorded rather than implied:
-    # a task whose primary the availability breaker skipped, or which rerouted
-    # mid-attempt, is running something other than what its row says, so the gate
-    # can still accept a note that reaches nothing. That state is reachable
-    # without this column too — nothing today records the brain that actually ran
-    # on a *live* task row — so this neither creates nor fixes it.
+    # Not a one-way improvement, and the residue is recorded rather than implied.
+    # Three states leave the row disagreeing with what is actually running: the
+    # availability breaker skipped the primary, a reroute replaced it
+    # mid-attempt, or the operator *widened* `room_selectable` after the task
+    # started, so this resolution admits a pin the executor refused at dispatch.
+    # The first two are reachable without this column — nothing today records the
+    # brain that actually ran on a *live* task row — and the third is the price
+    # of resolving a stored value at read time rather than freezing the answer.
     resolved_kind = resolve_brain_kind(
         source_type, config.brain, override=row["brain"],
     ).kind
@@ -869,6 +903,29 @@ def _describe_room_default(model: str | None, effort: str | None) -> str:
     return "Room default: " + " + ".join(parts) + "."
 
 
+def _outgoing_namespace(config: Config, source_type: str, outgoing: str) -> str | None:
+    """The model namespace `rooms.model` was resolved in, before this change.
+
+    Deliberately **not** routed through `resolve_brain_kind`. That function
+    refuses an override the operator has since dropped from the allowlist, so
+    routing the outgoing kind through it answers with the namespace of the
+    *deployment default* — and a room pinned to `native`, then dropped from the
+    allowlist, then moved to `claude_code` would compare anthropic against
+    anthropic, keep an `openai_compat` id as its standing default, and say
+    nothing. The refusal is the right answer to "what is this room running";
+    it is the wrong answer to "which namespace produced this pin".
+
+    A kind this deployment cannot build yields None, which the caller reads as
+    "not established" and therefore clears.
+    """
+    kind = (outgoing or "").strip()
+    if not kind:
+        return _model_namespace(resolve_brain_kind(source_type, config.brain))
+    if kind not in KNOWN_BRAIN_KINDS:
+        return None
+    return _model_namespace(dataclasses.replace(config.brain, kind=kind))
+
+
 def _room_pin_admitted(config: Config, pinned: str) -> bool:
     """Whether ``resolve_brain_kind`` would admit this room's stored kind.
 
@@ -980,13 +1037,12 @@ async def cmd_brain(ctx: CommandContext):
     if not config.is_admin(ctx.user_id):
         return "Only an admin can change this room's brain. `!brain` shows what it runs."
 
-    selectable = room_selectable_kinds(config.brain)
-    if not selectable:
-        return (
-            "Room brain selection is switched off on this deployment — the "
-            "operator has not listed any kinds under `[brain] room_selectable`."
-        )
-
+    # `default` is checked ahead of the allowlist deliberately. Clearing is a
+    # narrowing, so it needs no entry — and emptying `[brain] room_selectable`
+    # is the documented way to switch the feature off, which is exactly how a
+    # room ends up holding a pin nothing will honour. Gating the clear behind
+    # the same check leaves that pin in place for good, with `!room` reporting
+    # it as ignored on every read and no command able to remove it.
     if wanted == "default":
         if not pinned:
             return "This room already inherits its brain. Nothing to clear."
@@ -1001,6 +1057,13 @@ async def cmd_brain(ctx: CommandContext):
             *cleared,
             _describe_failover(config, ctx.surface, ""),
         ])
+
+    selectable = room_selectable_kinds(config.brain)
+    if not selectable:
+        return (
+            "Room brain selection is switched off on this deployment — the "
+            "operator has not listed any kinds under `[brain] room_selectable`."
+        )
 
     offered = ", ".join(f"`{k}`" for k in sorted(selectable))
     if wanted not in selectable:
@@ -1043,12 +1106,12 @@ def _clear_pin_across_namespaces(
     while a cleared pin costs one command to set again.
     """
     if not room.model:
-        # Nothing namespaced to lose. A bare `!room effort` level is a semantic
-        # rung every brain reads, so it survives a brain change on its own.
+        # With no model pin there is nothing namespaced to lose: an effort level
+        # on its own is a semantic rung every brain reads, so it survives the
+        # change. This is the *only* case in which effort survives — below, it
+        # goes with the model, because the two were set as a pair.
         return []
-    before = _model_namespace(
-        resolve_brain_kind(source_type, config.brain, override=outgoing or None)
-    )
+    before = _outgoing_namespace(config, source_type, outgoing)
     after = _model_namespace(
         resolve_brain_kind(source_type, config.brain, override=incoming or None)
     )
@@ -1059,10 +1122,14 @@ def _clear_pin_across_namespaces(
         "(%s -> %s)", token, room.model, before, after,
     )
     db.set_room_model_effort(conn, token, None, None)
+    dropped = f"model default (`{room.model}`)"
+    if room.effort:
+        # Named too, because `set_room_model_effort` moves the pair and a reply
+        # that mentioned only the model would under-report what it just did.
+        dropped += f" and effort (`{room.effort}`)"
     return [
-        f"Its model default (`{room.model}`) was cleared — that id belongs to "
-        "the previous brain's namespace. Set a new one with `!room model "
-        "<alias>`."
+        f"Its {dropped} was cleared — that id belongs to the previous brain's "
+        "namespace. Set a new one with `!room model <alias>`."
     ]
 
 
