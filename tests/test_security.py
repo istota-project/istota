@@ -632,10 +632,16 @@ class TestBuildAllowedTools:
         tools = build_allowed_tools(is_admin=False, skill_names=[])
         assert "Bash" in tools
 
-    def test_returns_same_tools_regardless_of_admin(self):
+    def test_webfetch_is_the_only_thing_admin_changes(self):
+        """`is_admin` used to change nothing here and now changes exactly one
+        entry — see `tests/test_executor_allowed_tools.py` for why `WebFetch`
+        is the one. Kept as the narrowed form of the old "same regardless of
+        admin" assertion so a second admin-scoped tool arriving without its own
+        reasoning turns this red."""
         admin_tools = build_allowed_tools(is_admin=True, skill_names=[])
         non_admin_tools = build_allowed_tools(is_admin=False, skill_names=[])
-        assert admin_tools == non_admin_tools
+        assert set(admin_tools) - set(non_admin_tools) == {"WebFetch"}
+        assert set(non_admin_tools) - set(admin_tools) == set()
 
     def test_returns_same_tools_regardless_of_skills(self):
         base = build_allowed_tools(is_admin=False, skill_names=[])
@@ -656,11 +662,13 @@ class TestBuildAllowedTools:
         assert "Read" in tools
 
     def test_includes_web_tools(self):
-        """WebSearch + WebFetch are allowed; page reading is steered to browse
-        in the prompt, not by withholding the tools."""
+        """WebSearch is allowed for everyone and WebFetch for an admin; page
+        reading is steered to browse in the prompt, not by withholding the
+        tools. `WebFetch` is the one exception, and it is about egress from the
+        daemon's own network namespace rather than about steering."""
         tools = build_allowed_tools(is_admin=False, skill_names=[])
         assert "WebSearch" in tools
-        assert "WebFetch" in tools
+        assert "WebFetch" in build_allowed_tools(is_admin=True, skill_names=[])
 
 
 class TestConfigEnvVarOverrides:

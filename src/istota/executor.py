@@ -3191,11 +3191,31 @@ def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     distinguishes a tool-bearing task from a text-only one (empty => sleep cycle
     / OCR / explainer, which get no tools and no skip-permissions).
 
-    WebSearch / WebFetch are included; WebSearch runs server-side (Anthropic's
-    backend) and only returns result titles + URLs, so page reading is steered to
-    the `browse` skill in the prompt's Tools section.
+    WebSearch is included for everyone; it runs server-side at the provider and
+    returns result titles + URLs rather than page bodies, so it grants this host
+    no egress, and page reading is steered to the `browse` skill in the prompt's
+    Tools section.
+
+    **`WebFetch` is admin-only**, and this is the one place ``is_admin`` changes
+    the answer. On the native path the tool makes a GET from the *daemon's* own
+    network namespace, outside the CONNECT allowlist — where the same user's
+    task under a CLI brain has ``--unshare-net`` plus that allowlist and can
+    reach only what the operator listed. Scoping it here rather than in the
+    brain covers both shapes that reach it: a deployment running native by
+    default, and a shared room an admin pinned to native whose other members are
+    not admins (the fill is unconditional on sender, so a non-admin's turns run
+    under whatever the room chose).
+
+    Scoped unconditionally rather than only for a room-selected brain, which is
+    a behaviour change for an existing native deployment and is deliberate: the
+    asymmetry it closes was already there, and a rule that applied only to
+    room-pinned rooms would leave the same user with more egress on the
+    deployment default than on a room somebody pinned.
     """
-    return ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]
+    tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch"]
+    if is_admin:
+        tools.append("WebFetch")
+    return tools
 
 
 def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
