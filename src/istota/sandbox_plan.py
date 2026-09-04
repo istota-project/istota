@@ -470,6 +470,14 @@ def build_mount_plan(
     # projects the flag rather than naming these two a second time.
     _ro(venv_path, "venv", protected=True)
     _ro(istota_src, "istota_src", protected=True)
+    # The interpreter a `bin/python` symlink points at, where that is not the
+    # distro's — both spellings of it when a symlink separates them, since the
+    # kernel walks the link's stored string inside the namespace. `protected`
+    # for the same reason the venv is: a mask over it takes the interpreter
+    # away. Empty on a system-python host, which is every deployment that has
+    # one, so this emits nothing there.
+    for base_python in executor.python_base_prefix_binds():
+        _ro(base_python, "python_base", protected=True)
 
     # --- Custom system prompt (RO, this one file) --- CLAUDE only.
     # The config directory is not in the sandbox and should not be: it holds

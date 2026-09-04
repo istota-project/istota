@@ -67,7 +67,6 @@ import os
 import signal
 import socket
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -583,11 +582,21 @@ async def _safe_update(on_update, text: str) -> None:
 def server_command() -> list[str]:
     """The raw argv, before the sandbox wrap.
 
-    ``sys.executable`` and the package are both bound into the namespace
-    already: ``build_bwrap_cmd`` ro-binds the venv and the source tree at their
-    own paths for every profile.
+    The interpreter and the package are both bound into the namespace already:
+    ``build_bwrap_cmd`` ro-binds the venv and the source tree at their own
+    paths for every profile. Which is why this is not ``sys.executable`` —
+    ``executor.sandbox_interpreter`` names the interpreter as it exists *in
+    there*, under the venv path that is actually bound, rather than under a
+    symlink to it that no bind carries in.
     """
-    return [sys.executable, "-m", "istota.tool_server"]
+    # Function scope, and not for a cycle — there is none today, measured.
+    # `istota.tool_server` imports this module's package from *inside* the
+    # namespace, and `executor` pulls the brains and their provider clients in
+    # behind it. The daemon has paid for that graph; the tool server has not,
+    # and it starts one per task attempt.
+    from ...executor import sandbox_interpreter
+
+    return [str(sandbox_interpreter()), "-m", "istota.tool_server"]
 
 
 async def start_tool_server(
@@ -605,12 +614,18 @@ async def start_tool_server(
 
     Raises ``ToolServerError`` if it cannot be started or does not answer.
     """
+    # Before the socketpair, so nothing is allocated yet if it raises. It was a
+    # list literal until `sandbox_interpreter` went in behind it; inside the
+    # `try` below, whose only handler is `(OSError, ValueError)`, anything else
+    # it raised would escape the `ToolServerError` contract *and* leak `parent`,
+    # since that handler is the sole place the parent end is closed.
+    base_cmd = server_command()
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     raw = child.detach()  # take the fd out of the socket object; we own it now
     proc = None
     try:
         os.set_inheritable(raw, True)
-        cmd = server_command() + ["--fd", str(raw)]
+        cmd = base_cmd + ["--fd", str(raw)]
         if sandbox_wrap is not None:
             cmd = sandbox_wrap(cmd)
         # Placement from `preexec_fn`, not a write after the spawn: membership

@@ -149,6 +149,14 @@ class Case:
     ro_paths: tuple[str, ...] = ()
     custom_system_prompt: bool = False
     cache_dir: bool = False
+    #: Whether the venv's `bin/python` links to an interpreter outside /usr —
+    #: a uv- or pyenv-managed standalone build, which needs a bind of its own.
+    #: False is the distro-python deployment, where `python_base_prefix_bind`
+    #: returns None and no such mount is emitted. Never read from the host's
+    #: real `sys.base_prefix`: this machine's venv is built from a uv download,
+    #: so an unpatched derivation would write a developer's home directory into
+    #: every golden file.
+    standalone_base_python: bool = False
     #: Whether a Nextcloud mount is configured at all. Off is the single-user
     #: install, where `if mount:` skips both the Users/Talk/Channels block and
     #: the per-resource loop.
@@ -181,6 +189,15 @@ _RO = "read"
 CASES: list[Case] = [
     Case("claude_baseline"),
     Case("native_baseline", profile=SandboxProfile.NATIVE),
+    # The venv's `bin/python` links outside /usr — a uv-downloaded or
+    # pyenv-built interpreter. NATIVE because the tool server is the thing that
+    # execs it; without the bind the link dangles in the namespace and the
+    # handshake fails with the same 127 `sandbox_interpreter` exists to remove.
+    Case(
+        "native_with_a_standalone_base_python",
+        profile=SandboxProfile.NATIVE,
+        standalone_base_python=True,
+    ),
     Case("claude_without_a_claude_home", claude_home=False),
     Case("no_conversation_token", conversation_token=""),
     Case(
@@ -364,6 +381,8 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
         (src / "config" / "users").mkdir(parents=True)
     venv = root / "venv"
     venv.mkdir()
+    base_python = root / "base-python"
+    base_python.mkdir()
 
     mount = root / "mount"
     for rel in ("Users/alice", "Users/bob", "Talk", "Channels/room123", "Docs", "Notes"):
@@ -408,6 +427,7 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
         "home": home,
         "src": src,
         "venv": venv,
+        "base_python": base_python,
         "mount": mount,
         "user_temp": user_temp,
         "workspace": root / "workspace",
@@ -493,6 +513,10 @@ def build_argv(case: Case, root: Path, monkeypatch, *, raw: bool = False) -> lis
             return_value=(world["src"], world["venv"]),
         ),
         patch(
+            "istota.executor.python_base_prefix_binds",
+            return_value=[world["base_python"]] if case.standalone_base_python else [],
+        ),
+        patch(
             "istota.executor._bwrap_supports_disable_userns",
             return_value=case.disable_userns,
         ),
@@ -537,6 +561,7 @@ def normalize(argv: list[str], root: Path, world: dict[str, Path]) -> list[str]:
         (str(world["home"]), "<HOME>"),
         (str(world["src"]), "<SRC>"),
         (str(world["venv"]), "<VENV>"),
+        (str(world["base_python"]), "<BASE_PYTHON>"),
         (str(world["base"]), "<TMP>"),
         (str(root), "<TMP>"),
     ]

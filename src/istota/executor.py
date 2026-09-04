@@ -3455,6 +3455,138 @@ def _source_and_venv_paths() -> tuple[Path, Path]:
     return istota_src, venv_path
 
 
+def _reroot_interpreter(exe: Path, spelled_root: Path, bound_root: Path) -> Path:
+    """``exe``, renamed from the root it was spelled under to the bound one.
+
+    The one rule this module exists for, in one place because it is needed on
+    both branches below and getting it on only one is how this bug is written.
+
+    **Re-rooted, never resolved.** ``resolve()`` would follow
+    ``{venv}/bin/python`` on through to ``/usr/bin/python3`` — a path that does
+    exist in the namespace, and that is not in a venv, so the server would
+    start and fail to import istota. Only the root is rewritten, so the
+    interpreter keeps the ``bin/`` whose parent holds the ``pyvenv.cfg`` that
+    makes it a venv at all.
+    """
+    if spelled_root == bound_root:
+        return exe
+    try:
+        rel = exe.relative_to(spelled_root)
+    except ValueError:
+        # Nothing to re-root against. Better the path we were started with
+        # than one assembled out of two unrelated trees — but this is the
+        # pre-fix behaviour, so on a layout that needed the rewrite it is the
+        # `exit 127` all over again, reported as a bare connection reset.
+        # CPython derives both prefixes by walking up from `sys.executable`, so
+        # reaching here at all means something upstream is unusual; say so
+        # rather than leaving an operator with only the reset.
+        logger.warning(
+            "the running interpreter (%s) is not under %s, so it cannot be "
+            "named against the %s the sandbox binds; a sandboxed tool server "
+            "may fail to start",
+            exe, spelled_root, bound_root,
+        )
+        return exe
+    return bound_root / rel
+
+
+def sandbox_interpreter() -> Path:
+    """The running interpreter, named the way it exists *inside* the namespace.
+
+    The sandbox binds Python at a **resolved** path — the venv at
+    :func:`_source_and_venv_paths`'s answer, a standalone base interpreter at
+    :func:`python_base_prefix_binds`'s — while ``sys.executable`` is spelled
+    however the process was started. Where a symlink stands between the two (the
+    Ansible role's ``/srv/app/{ns}/.venv -> /srv/app/{ns}/istota/.venv``) the
+    argv names a path that exists nowhere in the namespace, since bwrap
+    materializes a bind's parents as empty mount points and a symlink is not
+    among them. The tool server then dies at exec: ``exit 127: env:
+    '.../python': No such file or directory``, every native task. This is the
+    other half of 88c36d54, which moved the bind onto ``sys.prefix`` and left
+    the argv alone; the two agree wherever no symlink stands between them, which
+    is every test host and no deployed one.
+
+    **Both branches re-root, and that is not symmetry for its own sake.** The
+    first draft returned ``sys.executable`` unchanged whenever
+    ``sys.prefix == sys.base_prefix``, on the reasoning that a non-venv
+    interpreter is under ``/usr``. That is true of a distro Python and false of
+    a pyenv- or uv-managed one, which
+    :func:`python_base_prefix_binds` now binds — resolved — so the branch
+    reproduced the very bug above the moment it acquired a bind to disagree
+    with. Found in review, measured, not reasoned about.
+    """
+    exe = Path(sys.executable)
+    if sys.prefix == sys.base_prefix:
+        binds = python_base_prefix_binds()
+        if not binds:
+            # Under /usr, which is bound unconditionally and as written.
+            return exe
+        return _reroot_interpreter(exe, Path(sys.base_prefix), binds[0])
+    _, venv_path = _source_and_venv_paths()
+    return _reroot_interpreter(exe, Path(sys.prefix), venv_path)
+
+
+def python_base_prefix_binds() -> list[Path]:
+    """The interpreter installation a ``bin/python`` symlink points at, if it
+    needs binds of its own. Empty where something already covers it.
+
+    Binding a venv carries its ``bin/python`` in as a *symlink*, not as an
+    interpreter: every venv builder — ``python -m venv`` without ``--copies``,
+    and uv — writes a link to the Python it was built from. Where that is the
+    distro's, the target is under the unconditional ``/usr`` bind and there is
+    nothing to do. Where it is a uv- or pyenv-managed standalone build under
+    ``$HOME``, nothing binds it, and the argv then resolves to a link that
+    dangles inside the namespace — the same ``exit 127``, one level down.
+
+    Which one a host has is not a property of this deployment: the Ansible role
+    runs a bare ``uv sync``, so uv downloads an interpreter wherever it does not
+    find a suitable system one. The host that reported the symlinked-venv bug
+    happened to have used ``/usr``, which is the only reason that surfaced as
+    the outage it did rather than as this one.
+
+    **Two spellings, not one, when they differ.** A symlink stores the literal
+    string it was written with, and the kernel walks that string component by
+    component *inside* the namespace — so binding only the resolved path leaves
+    a venv whose ``bin/python`` names the unresolved one pointing at nothing.
+    Binding both costs a second read-only mount of the same content and makes
+    the traversal work whichever spelling the link carries. `[0]` is the
+    resolved one, which is what :func:`sandbox_interpreter` re-roots onto.
+
+    **It refuses rather than widening.** A resolved value that is not
+    recognisably a Python installation — no ``bin/`` under it — drops the bind
+    instead of binding whatever it names, and ``/`` is refused outright: the
+    containment test below is an ancestor check, which ``/`` passes on neither
+    arm, so without this it would ro-bind the entire host filesystem into every
+    namespace. That is `user_scope`'s posture and `sandbox_cache_sweeper`'s, for
+    their reason — the fallback would be the shared root, which is the exposure.
+
+    Read-only, and what it exposes is a Python installation, which is what
+    ``/usr`` already puts in every namespace. Empty for the ``/usr`` case, so
+    the mount plan is byte-identical on a deployment with a distro Python.
+    """
+    spelled = Path(sys.base_prefix)
+    base = spelled.resolve()
+    usr = Path("/usr")
+    if base == usr or usr in base.parents:
+        return []
+    if base == Path(base.root) or not base.parent.name:
+        logger.warning(
+            "sys.base_prefix resolves to %s, which is not a Python "
+            "installation; not binding it into the sandbox", base,
+        )
+        return []
+    if not (base / "bin").is_dir():
+        logger.warning(
+            "sys.base_prefix (%s) has no bin/ under it, so it does not look "
+            "like a Python installation; not binding it into the sandbox", base,
+        )
+        return []
+    binds = [base]
+    if spelled != base:
+        binds.append(spelled)
+    return binds
+
+
 def mask_protected_paths(
     config: Config,
     *,
@@ -3530,6 +3662,11 @@ def mask_protected_paths(
             Path(user_temp_dir) if user_temp_dir is not None else Path(config.temp_dir)
         )
         protected = [temp.resolve(), src, venv]
+        # The interpreter symlink target, where it needs binds of its own.
+        # `build_mount_plan` marks those mounts `protected`, so this branch has
+        # to name them too or the two derivations disagree — which is exactly
+        # what `test_sandbox_plan_parity` holds them to.
+        protected.extend(python_base_prefix_binds())
         if workspace_dir is not None:
             protected.append(Path(workspace_dir))
     mount = config.nextcloud_mount_path

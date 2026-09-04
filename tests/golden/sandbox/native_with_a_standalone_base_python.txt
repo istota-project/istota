@@ -1,0 +1,21 @@
+bwrap	<HOST-SYSTEM-BINDS>
+--unshare-pid
+--proc	/proc
+--dev	/dev
+--tmpfs	/tmp
+--ro-bind	<VENV>	<VENV>
+--ro-bind	<SRC>	<SRC>
+--ro-bind	<BASE_PYTHON>	<BASE_PYTHON>
+--bind	<TMP>/temp/alice	<TMP>/temp/alice
+--ro-bind	<TMP>/temp/alice/.developer	<TMP>/temp/alice/.developer
+--bind	<TMP>/mount/Users/alice	<TMP>/mount/Users/alice
+--ro-bind	<TMP>/mount/Talk	<TMP>/mount/Talk
+--bind	<TMP>/mount/Channels/room123	<TMP>/mount/Channels/room123
+--ro-bind	<HOME>/.cache/huggingface	<HOME>/.cache/huggingface
+--tmpfs	<TMP>/data
+--remount-ro	<TMP>/data
+--unshare-user
+--disable-userns
+--die-with-parent
+--chdir	<TMP>/temp/alice
+--	claude	-p	test
