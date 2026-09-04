@@ -39,7 +39,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 12. **Write prompt files**: into the control directory from step 1 — the user half to `prompt.txt`, the system half to `system_prompt.txt`, both opened `O_NOFOLLOW` at mode `0600`; see "The two prompt files" below for why
 13. **Build env**: `task_env.build_task_runtime()` returns a `TaskRuntime` — the env (see the var table below), the two proxy objects, their socket paths, the sandbox's read-only bind list and `authorized_skills`. Credential vars split via `_split_credential_env()`, twice, proxy-only first. Both context managers come back *constructed and not entered*: the `ExitStack` at step 15 is what enters them, because they must be live across the primary call, a reroute and the fallback call. The three orderings inside that function are load-bearing and its docstring is where they are written down
 14. **Build BrainRequest**: prompt (the **user half only**) + `composed_system_prompt_path` (the system file) + allowed_tools + env + model/effort + the two sandbox-wrap closures (one per `SandboxProfile`) + on_progress/cancel_check/on_pid callbacks + `images` (the prepared attachments)
-15. **Execute**: `make_brain(config.brain).execute(req)` — see `.claude/rules/brain.md`
+15. **Execute**: `make_brain(resolve_brain_kind(task.source_type, config.brain, override=task.brain)).execute(req)` — the room's pin, then the source-type rule, then `[brain] kind`; see `.claude/rules/brain.md`
 16. **Compose result**: `_compose_full_result(result, trace)` reconciles result-text vs trace (CM-aware + terse-result recovery)
 16b. **Image notes**: `_append_vision_dropped_note` when the brain that actually ran cannot see, `unread_images` + `_append_unread_images_note` when a CLI brain skipped a `Read` the directive required
 17. **Update fingerprint**: on success, interactive only
@@ -192,10 +192,20 @@ won't itself emit `--advisor`, closing the inherited channel on every
 
 ## Brain invocation
 The executor no longer spawns `claude` directly — it composes a `BrainRequest`
-and calls `make_brain(config.brain).execute(req)`. The brain owns command
-construction, sandboxing (via the supplied `sandbox_wrap` callback),
-subprocess/HTTP, stream parsing, and transient-API retries. Phase 1 ships
-only `ClaudeCodeBrain`; details in `.claude/rules/brain.md`.
+and hands it to a brain. The brain owns command construction, sandboxing (via
+the supplied `sandbox_wrap` callback), subprocess/HTTP, stream parsing, and
+transient-API retries. Three ship; details in `.claude/rules/brain.md`.
+
+**Which brain is not `config.brain`.** It is
+`resolve_brain_kind(task.source_type, config.brain, override=task.brain)`, so a
+room's standing pick (frozen onto `tasks.brain` at creation) beats an operator's
+`[brain.source_type_overrides]` entry, which beats `[brain] kind`. Returned
+unchanged as the same object when neither applies, which is the common case and
+what the no-routing check reads. An admitted room pin also clears `fallback` on
+the returned config, so the failover machinery collapses to a plain primary call
+for that task — see `.claude/rules/brain.md` § Per-room brain selection. Three
+sites here resolve it, and each is handed `task.brain` rather than re-reading
+the room.
 
 Per-task BrainRequest fields the executor populates:
 - `prompt`, `allowed_tools` (from `build_allowed_tools`), `cwd=config.temp_dir`,
