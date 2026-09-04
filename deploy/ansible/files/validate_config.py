@@ -56,9 +56,9 @@ def main() -> int:
     # "claude_code" and "source_type_overrides" are legitimate sub-tables
     # ([brain.native], [brain.tmux], [brain.claude_code],
     # [brain.source_type_overrides]); without them the corresponding brain
-    # config would trip the leaked-keys guard. The template renders no
-    # [brain.claude_code] today — every field of it is defaulted — but an
-    # operator or a later template change that adds one must not fail the play.
+    # config would trip the leaked-keys guard. The template renders
+    # [brain.claude_code] whenever istota_brain_claude_code_model/_effort
+    # resolves, which since ISSUE-418 they do by default from istota_model.
     brain_allowlist = {
         "kind", "native", "tmux", "claude_code", "source_type_overrides",
         "fallback", "fallback_on_transient", "fallback_cooldown_seconds",
@@ -83,6 +83,9 @@ def main() -> int:
             print("validate_config: [brain.tmux] must be a table", file=sys.stderr)
             return 1
         tmux_allowlist = {
+            # This brain's own default model / effort (ISSUE-418). The template
+            # renders them, so an allowlist without them fails the play.
+            "model", "effort",
             "fallback_trip_threshold", "fallback_cooldown_seconds",
             "ready_timeout_seconds", "tmux_command_timeout", "cli_version_pin",
             "ready_markers", "trust_markers", "theme_markers",
@@ -108,6 +111,35 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+
+    # Validate [brain.claude_code] shape, for the reason [brain.tmux] gets one
+    # above: a typo templates cleanly and falls back to the default in silence,
+    # and since ISSUE-418 this table carries `model`, which decides what a
+    # deployment bills against.
+    claude_code = brain.get("claude_code", {})
+    if claude_code:
+        if not isinstance(claude_code, dict):
+            print(
+                "validate_config: [brain.claude_code] must be a table",
+                file=sys.stderr,
+            )
+            return 1
+        claude_code_allowlist = {
+            "model", "effort",
+            "subscription_usage", "subscription_usage_cache_ttl_seconds",
+            "subscription_usage_timeout_seconds",
+            "subscription_usage_warn_percent", "subscription_usage_high_percent",
+            "subscription_usage_stale_after_seconds",
+        }
+        bad_keys = sorted(k for k in claude_code if k not in claude_code_allowlist)
+        if bad_keys:
+            print(
+                "validate_config: unknown keys under [brain.claude_code]: "
+                + ", ".join(bad_keys)
+                + f" — expected one of {sorted(claude_code_allowlist)}",
+                file=sys.stderr,
+            )
+            return 1
 
     # Validate [brain.native.web_fetch] shape: reject unknown keys (a typo would
     # template cleanly and silently fall back to the safe default).

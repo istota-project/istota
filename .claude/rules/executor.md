@@ -210,7 +210,7 @@ the room.
 Per-task BrainRequest fields the executor populates:
 - `prompt`, `allowed_tools` (from `build_allowed_tools`), `cwd=config.temp_dir`,
   `env` (built per task), `timeout_seconds=config.scheduler.task_timeout_minutes * 60`
-- `model = (task.model or config.model)`, `effort = (task.effort or config.effort)`
+- `model = task.model or ""`, `effort = task.effort or ""` — the task's own pin or nothing, never a deployment default (ISSUE-418). The brain fills its own from `[brain.<kind>] model` / `effort`. `_resolve_effort` keeps its one rule: a task pinning a model with no effort carries none, since an effort chosen for one model need not be valid on another
 - `advisor = brain.resolve_model_name(_resolve_advisor(task, config))` when
   `brain.model_namespace == "anthropic"`, else `""`. `_resolve_advisor` returns
   `config.advisor_model` unless `task.model` is set (a per-task model pin drops

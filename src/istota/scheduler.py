@@ -3461,9 +3461,39 @@ def process_one_task(
                         selected_skills = json.loads(refreshed.selected_skills)
             except Exception:
                 pass
+        from .brain import configured_default_model_effort, resolve_brain_kind
         from .executor import _resolve_effort
-        resolved_model = (task.model or "").strip() or config.model or None
-        resolved_effort = _resolve_effort(task, config) or None
+        # What actually ran, preferring the brain's own report. `config.model`
+        # used to stand in here and named claude_code's model on every line
+        # whatever brain produced the answer (ISSUE-418).
+        #
+        # `task.model_used` leads because it is the only one of the three that
+        # survives an in-attempt fallback: the reroute happens inside
+        # `run_with_failover` and is invisible from here, so `resolve_brain_kind`
+        # below still answers with the *primary's* config and would name
+        # claude_code's default for an answer native produced — the same
+        # misattribution this change exists to remove. It is also the canonical
+        # id rather than the unresolved alias an operator wrote.
+        _brain_config = resolve_brain_kind(
+            task.source_type, config.brain, override=getattr(task, "brain", None),
+        )
+        _default_model, _default_effort = configured_default_model_effort(_brain_config)
+        _task_model = (task.model or "").strip()
+        resolved_model = (
+            (getattr(task, "model_used", "") or "").strip()
+            or _task_model
+            or _default_model
+            or None
+        )
+        # The brain's default effort applies only where the task pinned no
+        # *model*, which is the rule both `_resolve_effort` and
+        # `ClaudeCodeBrain.with_defaults` implement: an effort chosen for one
+        # model need not be valid on another, so a task pinning a model runs
+        # with no effort at all. Reporting one here would name a setting the
+        # task did not use.
+        resolved_effort = _resolve_effort(task, config) or (
+            None if _task_model else (_default_effort or None)
+        )
         _finalize_log_channel(
             config, task, log_dests, log_channel_prefix,
             log_callback, success, error=error_msg,

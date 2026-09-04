@@ -1795,15 +1795,16 @@ def _admin_models_section() -> dict:
         brain_config = _config.brain
         brain = make_brain(brain_config)
 
-        # Effective default model: resolve the top-level `model` (may be an
-        # alias) to a canonical id. Empty = the brain's own default, which for
-        # the native brain is the endpoint's configured model.
-        default_model = brain.resolve_model_name(_config.model)
+        # Effective default model: the *active brain's* own configured default
+        # (may be an alias), resolved to a canonical id. It used to read the
+        # top-level `model`, which was claude_code's own and which this card
+        # therefore reported as the deployment's on a native deployment too
+        # (ISSUE-418). Empty = the backend's own default.
+        default_model = brain.resolve_model_name(brain.default_model)
         if not default_model:
-            if brain_config.kind == "native":
-                default_model = brain_config.native.model or "endpoint default"
-            else:
-                default_model = "CLI default"
+            default_model = (
+                "endpoint default" if brain_config.kind == "native" else "CLI default"
+            )
 
         roles: list[dict] = []
         for role in CANONICAL_ROLES:
@@ -1814,7 +1815,7 @@ def _admin_models_section() -> dict:
         section: dict = {
             "brain_kind": brain_config.kind,
             "default_model": default_model,
-            "default_effort": _config.effort or None,
+            "default_effort": brain.default_effort or None,
             "roles": roles,
         }
 

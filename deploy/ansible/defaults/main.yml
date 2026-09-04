@@ -28,16 +28,37 @@ istota_bot_name: ""
 istota_emissaries_enabled: true
 
 # Model selection. Per-task model+effort precedence: !model override (Talk) >
-# istota_model/istota_effort > role tier (resolved by the active brain) > brain
-# default. See .claude/rules/config.md, docs/configuration/native-brain.md. A
-# per-task model pin (from any of the above) also suppresses istota_advisor_model
-# for that task — see the comment below.
+# a per-task pin > the running brain's own configured default. See
+# .claude/rules/config.md, docs/configuration/native-brain.md. A per-task model
+# pin (from any of the above) also suppresses istota_advisor_model for that
+# task — see the comment below.
 
-# Global default model + effort ("" = brain default). Each accepts a canonical
-# id, a shortcut (opus/sonnet/haiku), or a role tier (smart/general/fast), plus an
-# optional orthogonal :effort modifier (opus:high). istota_effort still works too.
+# DEPRECATED (ISSUE-418). These were the claude_code brain's own default living
+# at the top level, where the executor applied them to whatever brain ran and
+# they shadowed that brain's configured default — so a room pinned to `native`
+# with istota_brain_native_model set still ran the Claude model, against the
+# native endpoint and billed per token. They still work: each per-brain value
+# below falls back to them, so an existing host keeps its behaviour with no
+# variable change. Set the per-brain ones instead.
 istota_model: ""
 istota_effort: ""
+
+# Each CLI brain's own default model + effort ("" = the CLI's own default).
+# Both accept a canonical id, a shortcut (opus/sonnet/haiku), or a role tier
+# (smart/general/fast), plus an optional orthogonal :effort modifier
+# (opus:high). Both blocks are read whatever istota_brain_kind is, since a
+# fallback or a source_type_overrides entry can route to either.
+#
+# They default from istota_model / istota_effort, which is what makes the
+# migration exactly behaviour-preserving: that value *was* the default for
+# whichever CLI brain ran, and these two share the anthropic namespace and the
+# same `claude` binary, so it is equally valid in either. istota_brain_native_*
+# deliberately does not default from them — an Anthropic model id cannot carry
+# to an openai_compat endpoint, which is the defect itself.
+istota_brain_claude_code_model: "{{ istota_model }}"
+istota_brain_claude_code_effort: "{{ istota_effort }}"
+istota_brain_tmux_model: "{{ istota_model }}"
+istota_brain_tmux_effort: "{{ istota_effort }}"
 
 # Advisor model ("" = no advisor). Anthropic-namespace brains only
 # (claude_code / tmux_claude) — the advisor tool has no wire over the native

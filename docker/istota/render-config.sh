@@ -141,10 +141,14 @@ temp_dir = "/data/tmp"
 max_memory_chars = ${ISTOTA_MAX_MEMORY_CHARS:-0}
 TOML
 
-    # Model (optional)
-    if [ -n "${ISTOTA_MODEL:-}" ]; then
-        echo "model = \"${ISTOTA_MODEL}\"" >> "$CONFIG_FILE"
-    fi
+    # No top-level `model` key any more. It was the claude_code brain's own
+    # default living at the root, where the executor applied it to whatever
+    # brain ran and it shadowed that brain's configured default (ISSUE-418).
+    # ISTOTA_MODEL still works and is migrated onto the per-brain keys by the
+    # [brain.claude_code] / [brain.tmux] render below — done here rather than by
+    # the loader's deprecation path so a Docker deployment that never changes
+    # its .env stops warning at every boot. The generator is what a generated
+    # config is for.
 
     # Disabled skills (optional)
     if [ -n "${ISTOTA_DISABLED_SKILLS:-}" ]; then
@@ -235,6 +239,37 @@ TOML
     if [ -n "$_brain_fallback" ]; then
         echo "fallback = \"${_brain_fallback}\"" >> "$CONFIG_FILE"
     fi
+
+    # Each CLI brain's own default model / effort (ISSUE-418). Both blocks are
+    # rendered whatever `kind` is, unlike [brain.native] below, because both are
+    # read whatever it is: a native primary with a claude_code fallback, or a
+    # source_type_overrides entry, runs the other brain and needs its default.
+    #
+    # ISTOTA_MODEL is the legacy spelling and feeds both, which is what makes
+    # the migration exactly behaviour-preserving: it *was* the default for
+    # whichever CLI brain ran, and the two share the anthropic namespace and the
+    # same binary, so the value is equally valid in either. It is deliberately
+    # not fed to [brain.native] — a value written in the Anthropic vocabulary
+    # cannot carry to an openai_compat endpoint, which is the defect itself.
+    #
+    # A section header is written only when the block has a key to hold, so an
+    # unconfigured deployment renders neither and loads the dataclass defaults.
+    _cc_model="${ISTOTA_BRAIN_CLAUDE_CODE_MODEL:-${ISTOTA_MODEL:-}}"
+    _cc_effort="${ISTOTA_BRAIN_CLAUDE_CODE_EFFORT:-}"
+    if [ -n "$_cc_model" ] || [ -n "$_cc_effort" ]; then
+        echo "" >> "$CONFIG_FILE"
+        echo "[brain.claude_code]" >> "$CONFIG_FILE"
+        if [ -n "$_cc_model" ]; then
+            echo "model = \"$(toml_escape "$_cc_model")\"" >> "$CONFIG_FILE"
+        fi
+        if [ -n "$_cc_effort" ]; then
+            echo "effort = \"$(toml_escape "$_cc_effort")\"" >> "$CONFIG_FILE"
+        fi
+    fi
+    # [brain.tmux]'s own model/effort are emitted with the rest of that block
+    # further down, not here: this file already writes a `[brain.tmux]` header
+    # for the tmux kind, and a second one is a duplicate table — invalid TOML,
+    # which on this shape is a container that will not boot.
     if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "native" ]; then
         cat >> "$CONFIG_FILE" <<TOML
 
@@ -287,12 +322,31 @@ TOML
         fi
     fi
 
-    # Tmux-driven interactive-TUI brain (subscription billing). Only emitted
-    # when selected; all fields default in code to the prototype's pinned values.
+    # Tmux-driven interactive-TUI brain (subscription billing). The operability
+    # knobs are emitted only when the kind is selected; all of them default in
+    # code to the prototype's pinned values.
+    #
+    # The block itself is also emitted when only this brain's own model/effort
+    # are set (ISSUE-418), because those are read whatever `kind` is — a
+    # claude_code primary with a tmux fallback, or a source_type_overrides entry,
+    # runs this brain and needs its default. One header either way: this file
+    # writes `[brain.tmux]` exactly once, since a duplicate table is invalid TOML
+    # and on this shape that is a container that will not boot.
+    _tmux_model="${ISTOTA_BRAIN_TMUX_MODEL:-${ISTOTA_MODEL:-}}"
+    _tmux_effort="${ISTOTA_BRAIN_TMUX_EFFORT:-}"
+    if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "tmux_claude" ] \
+        || [ -n "$_tmux_model" ] || [ -n "$_tmux_effort" ]; then
+        echo "" >> "$CONFIG_FILE"
+        echo "[brain.tmux]" >> "$CONFIG_FILE"
+        if [ -n "$_tmux_model" ]; then
+            echo "model = \"$(toml_escape "$_tmux_model")\"" >> "$CONFIG_FILE"
+        fi
+        if [ -n "$_tmux_effort" ]; then
+            echo "effort = \"$(toml_escape "$_tmux_effort")\"" >> "$CONFIG_FILE"
+        fi
+    fi
     if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "tmux_claude" ]; then
         cat >> "$CONFIG_FILE" <<TOML
-
-[brain.tmux]
 fallback_trip_threshold = ${ISTOTA_BRAIN_TMUX_FALLBACK_TRIP_THRESHOLD:-5}
 fallback_cooldown_seconds = ${ISTOTA_BRAIN_TMUX_FALLBACK_COOLDOWN_SECONDS:-300}
 ready_timeout_seconds = ${ISTOTA_BRAIN_TMUX_READY_TIMEOUT_SECONDS:-30}

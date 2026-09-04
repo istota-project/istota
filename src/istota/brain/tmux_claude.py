@@ -600,11 +600,29 @@ class TmuxClaudeBrain:
         # Composed, not inherited: we forward the four resolution methods and
         # own execute. The CLI brain holds no per-instance state, so a fresh
         # one here is free.
-        self._cli = ClaudeCodeBrain()
+        #
+        # The `[brain.tmux]` block is handed straight to it, which works because
+        # the only fields it reads off a config are `model` and `effort` and
+        # this block declares both (ISSUE-418). So this brain's own default
+        # arrives through the same delegation the alias table already uses,
+        # rather than as a second copy of `_with_defaults` here.
+        self._cli = ClaudeCodeBrain(config)
         self._p = _Params(config)
         _warn_cli_version_once(self._p.cli_version_pin)
 
     # --- Model resolution (delegated to ClaudeCodeBrain) -------------------
+
+    @property
+    def default_model(self):
+        return self._cli.default_model
+
+    @property
+    def default_effort(self):
+        return self._cli.default_effort
+
+    def with_defaults(self, req: BrainRequest) -> BrainRequest:
+        return self._cli.with_defaults(req)
+
 
     def resolve_alias(self, alias):
         return self._cli.resolve_alias(alias)
@@ -621,6 +639,20 @@ class TmuxClaudeBrain:
     # --- Execution --------------------------------------------------------
 
     def execute(self, req: BrainRequest) -> BrainResult:
+        # This brain's own configured default, filled before anything reads
+        # `req.model` (ISSUE-418). At the top rather than beside the argv build,
+        # because the session-retry loop below re-enters that build per attempt.
+        #
+        # A thin wrapper around the body, mirroring `ClaudeCodeBrain.execute`:
+        # `_execute` has ~20 return sites and the effort stamp has to reach all
+        # of them, so it is applied on the way out rather than at each one.
+        req = self.with_defaults(req)
+        result = self._execute(req)
+        if not result.effort_used:
+            result.effort_used = req.effort
+        return result
+
+    def _execute(self, req: BrainRequest) -> BrainResult:
         # One-shot cleanup of any legacy shared hook a prior prototype build left
         # behind (§2) — best-effort, never fatal.
         self._cleanup_legacy_hook(req)

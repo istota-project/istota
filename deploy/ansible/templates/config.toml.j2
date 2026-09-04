@@ -6,12 +6,9 @@ namespace = "{{ istota_namespace }}"
 # Bot identity
 bot_name = "{{ istota_bot_name | default(istota_namespace | capitalize, true) }}"
 emissaries_enabled = {{ istota_emissaries_enabled | lower }}
-{% if istota_model %}
-model = "{{ istota_model }}"
-{% endif %}
-{% if istota_effort %}
-effort = "{{ istota_effort }}"
-{% endif %}
+{# No top-level model/effort: they were claude_code's own defaults living at the
+   root, applied to every brain (ISSUE-418). Rendered as [brain.claude_code] and
+   [brain.tmux] below, which is where the role's own defaults migrate them. #}
 {% if istota_advisor_model %}
 advisor_model = "{{ istota_advisor_model }}"
 {% endif %}
@@ -82,6 +79,19 @@ fallback = "{{ istota_brain_fallback }}"
    would silently get the opt-in back. #}
 fallback_on_transient = {{ istota_brain_fallback_on_transient | default(true) | lower }}
 fallback_cooldown_seconds = {{ istota_brain_fallback_cooldown_seconds | default(900, true) }}
+{% if istota_brain_claude_code_model or istota_brain_claude_code_effort %}
+
+[brain.claude_code]
+# The headless `claude -p` brain's own default model and effort, used when
+# nothing pins one for the task. Rendered whatever `kind` is, since a fallback
+# or a source_type_overrides entry can route here from another primary.
+{% if istota_brain_claude_code_model %}
+model = "{{ istota_brain_claude_code_model }}"
+{% endif %}
+{% if istota_brain_claude_code_effort %}
+effort = "{{ istota_brain_claude_code_effort }}"
+{% endif %}
+{% endif %}
 {% if istota_brain_kind == 'native' or istota_brain_fallback == 'native' or istota_brain_source_type_overrides %}
 
 [brain.native]
@@ -172,6 +182,12 @@ extra_blocked_cidrs = {{ istota_brain_native_web_fetch_extra_blocked_cidrs | to_
 # All fields default in code to the prototype's pinned values; emit only the
 # operability knobs here. Marker lists stay in code unless a CLI reword needs a
 # hotfix (set istota_brain_tmux_ready_markers etc. then).
+{% if istota_brain_tmux_model %}
+model = "{{ istota_brain_tmux_model }}"
+{% endif %}
+{% if istota_brain_tmux_effort %}
+effort = "{{ istota_brain_tmux_effort }}"
+{% endif %}
 fallback_trip_threshold = {{ istota_brain_tmux_fallback_trip_threshold | default(5, true) }}
 fallback_cooldown_seconds = {{ istota_brain_tmux_fallback_cooldown_seconds | default(300, true) }}
 ready_timeout_seconds = {{ istota_brain_tmux_ready_timeout_seconds | default(30, true) }}

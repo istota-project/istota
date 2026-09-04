@@ -247,13 +247,8 @@ class TestFallbackDropsAdvisor:
 
         reset_availability_breaker()
 
-    def test_dropped_config_model_pin_also_drops_the_advisor(self, tmp_path):
-        # config.model = "opus" is a non-portable pin (a provider shortcut, not
-        # a portable tier) — _resolve_fallback_model_effort can't carry it
-        # across an anthropic->anthropic fallback either, so the fallback
-        # brain runs on its own default model. The advisor was never evaluated
-        # against that model, so it must drop too, even though the fallback
-        # brain's namespace is still anthropic.
+    def _run_fallback_with(self, tmp_path, *, task_model):
+        """Primary hits a usage limit; return the request the fallback got."""
         from istota.brain._fallback import reset_availability_breaker
         from istota.brain._types import BrainResult
 
@@ -265,7 +260,6 @@ class TestFallbackDropsAdvisor:
         fallback = _FakeAnthropicBrain()
 
         config = _make_config(tmp_path)
-        config.model = "opus"
         config.advisor_model = "sonnet"
         config.brain = BrainConfig(kind="claude_code", fallback="tmux_claude")
         config.security.sandbox_enabled = False
@@ -279,11 +273,39 @@ class TestFallbackDropsAdvisor:
             patch("istota.notifications.send_notification"),
         ]
         with contextmanager_chain(patches):
-            task = _task(source_type="cli", model="")
+            task = _task(source_type="cli", model=task_model)
             execute_task(task, config, [])
 
         assert fallback.received_reqs
-        assert fallback.received_reqs[0].model == ""  # dropped_pin: fb default
-        assert fallback.received_reqs[0].advisor == ""
-
         reset_availability_breaker()
+        return fallback.received_reqs[0]
+
+    def test_a_dropped_task_model_pin_also_drops_the_advisor(self, tmp_path):
+        # "opus" is a non-portable pin (a provider shortcut, not a portable
+        # tier) — _resolve_fallback_model_effort can't carry it across an
+        # anthropic->anthropic fallback either, so the fallback brain runs on
+        # its own default model. The advisor was never evaluated against that
+        # model, so it must drop too, even though the fallback brain's
+        # namespace is still anthropic.
+        #
+        # The pin is the *task's*. It used to be `config.model`, which the
+        # executor substituted into every request; since ISSUE-418 a request
+        # carries a genuine per-task pin or nothing, which is the only case
+        # this rule was ever written for.
+        req = self._run_fallback_with(tmp_path, task_model="opus")
+        assert req.model == ""  # dropped_pin: fb default
+        assert req.advisor == ""
+
+    def test_an_unpinned_task_keeps_its_advisor_across_the_fallback(self, tmp_path):
+        """The ISSUE-418 half: no pin means nothing to drop.
+
+        The deployment default used to stand in as a pin here, so an unpinned
+        task reached the fallback carrying a non-portable id, had it dropped,
+        lost its advisor, and showed the user a "your pin was dropped" note
+        about a pin they never set. With no pin the fallback applies its own
+        default and the advisor survives — the same condition that keeps it on
+        the primary, which is also unpinned.
+        """
+        req = self._run_fallback_with(tmp_path, task_model="")
+        assert req.model == ""
+        assert req.advisor == "sonnet"

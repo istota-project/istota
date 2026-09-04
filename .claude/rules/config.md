@@ -476,7 +476,10 @@ would go stale at the fourth kind. `TestTheRoomSelectableAllowlist` in both
 asserts each shape from both ends. See `.claude/rules/brain.md` "Per-room brain
 selection".
 
-`TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),
+`TmuxBrainConfig` (`[brain.tmux]`): `model` / `effort` (this brain's own
+defaults, ISSUE-418 — same values and same `anthropic` namespace as
+`[brain.claude_code]`, which is why the retired top-level keys migrate onto
+both), `fallback_trip_threshold` (5),
 `fallback_cooldown_seconds` (300), `ready_timeout_seconds` (30),
 `tmux_command_timeout` (10), `cli_version_pin` ("2.1.168"), plus the readiness /
 dialog / error / usage-limit marker lists (`ready_markers`, `trust_markers`,
@@ -492,10 +495,12 @@ executor routes per task via `brain.resolve_brain_kind(task.source_type, config.
 unknown target kinds are logged and ignored. See `.claude/rules/brain.md` for the
 protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
 
-`ClaudeCodeBrainConfig` (`[brain.claude_code]`) — today this block is the
-**subscription usage poll only**; the headless brain's model selection still
-comes from `[brain]` and `[models]`, and its subprocess behaviour is not
-configurable. It is read whatever `kind` is set to, because a `native` primary
+`ClaudeCodeBrainConfig` (`[brain.claude_code]`) — this brain's own `model` and
+`effort` (ISSUE-418), plus the subscription usage poll. The two model fields
+replaced the top-level keys, which were this brain's defaults sitting where they
+read as deployment-wide and were therefore applied to every brain, shadowing each
+one's own; `[brain.tmux]` gained the same pair, and the retired keys migrate onto
+both. Its subprocess behaviour is not configurable. It is read whatever `kind` is set to, because a `native` primary
 with a `claude_code` fallback (or a `source_type_overrides` entry) burns the
 same plan. Every field is defaulted, so an absent block is the shipping
 behaviour. Read by `istota.subscription_usage.get_snapshot`, which the doctor
@@ -807,8 +812,8 @@ populate).
 ```
 db_path: Path = Path("data/istota.db")
 bot_name: str = "Istota"            emissaries_enabled: bool = True
-model: str = ""                     # Claude model override; pin to a version like "claude-opus-5" so updates don't silently switch us. Empty = CLI default
-effort: str = ""                    # Effort level: low/medium/high/xhigh/max (Opus 5 + Opus 4.8 + Opus 4.7 + Opus 4.6 + Sonnet 4.6). Empty = model default
+model: str = ""                     # DEPRECATED (ISSUE-418): was claude_code's own default at the root, applied to every brain. Migrated onto [brain.claude_code] + [brain.tmux] with a warning; never onto [brain.native]
+effort: str = ""                    # DEPRECATED (ISSUE-418), migrated the same way
 advisor_model: str = ""             # Advisor model (anthropic-namespace brains only); resolves through the alias table like `model`, no effort. Empty = no advisor. Dropped for a task carrying a model pin (executor._resolve_advisor)
 custom_system_prompt: bool = False  # Use config/system-prompt.md instead of CC default
 nextcloud: NextcloudConfig          talk: TalkConfig

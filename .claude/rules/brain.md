@@ -62,7 +62,77 @@ class Brain(Protocol):
     def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None: ...
     def resolve_model_name(self, name: str | None) -> str: ...
     def list_aliases(self) -> list[tuple[str, str | None, str | None]]: ...
+
+    # This brain's own configured default, unresolved. The model a request
+    # that pins none runs on; empty = the backend's own idea of a default.
+    # On the protocol because the question is per-brain and the answer used
+    # to be deployment-wide (ISSUE-418).
+    @property
+    def default_model(self) -> str: ...
+    @property
+    def default_effort(self) -> str: ...
 ```
+
+## Per-brain model defaults (ISSUE-418)
+
+Each brain's default model and effort live in **its own** config block:
+`[brain.claude_code] model` / `effort`, `[brain.tmux] model` / `effort`,
+`[brain.native] model` / `effort`. The executor sends a genuine *task* pin or
+nothing, and the brain applies its own default — the `or` chain in each brain
+is the single place a default is applied.
+
+Before this, `claude_code`'s defaults were the **top-level** `model` / `effort`,
+a vestige of there having been one brain. Sitting at the root they read as
+deployment-wide and the executor treated them as one, filling every request
+whatever brain was about to run. `NativeBrain` already had the right shape
+(`req.model or self._config.model`) and that `or` was simply never reached, so a
+room pinned to `native` with `[brain.native] model = "z-ai/glm-5.3-flash"` ran
+`claude-opus-5` against the OpenRouter endpoint — billed per token as
+`cost_basis=api`, and a hard failure rather than a wrong bill anywhere the
+endpoint does not happen to serve Anthropic ids. The operator could not avoid
+it: the top-level key was the only way to set Claude Code's model, so setting it
+correctly for one brain necessarily mis-set it for the other.
+
+**The retired top-level keys still load** and are migrated by
+`config._apply_legacy_brain_defaults` onto `[brain.claude_code]` **and**
+`[brain.tmux]`, with a warning, filling only a block that set nothing itself.
+Both, because those two share the `anthropic` namespace and the same `claude`
+binary, so the value is equally valid in either and a `tmux_claude` deployment
+would otherwise lose its model silently on upgrade. **Never onto
+`[brain.native]`** — a name written in the Anthropic vocabulary cannot carry to
+an `openai_compat` endpoint, which is the defect itself. Both deployment
+generators do the same migration a step earlier, so a host that never edits its
+variables gets the new keys without a warning at every boot:
+`render-config.sh` reads `ISTOTA_BRAIN_CLAUDE_CODE_MODEL` /
+`ISTOTA_BRAIN_TMUX_MODEL` falling back to `ISTOTA_MODEL`, and the Ansible role's
+`istota_brain_claude_code_model` / `istota_brain_tmux_model` default from
+`istota_model`.
+
+`Brain.with_defaults(req)` is where a brain applies its own default, and it is
+**idempotent** — a request whose model is already set takes neither branch, so a
+caller may apply it before `execute` without double-counting. Effort precedence
+inside it is **request > the block's own `effort` > the effort carried by the
+alias the block's `model` resolves through**. The block's explicit key outranks
+the alias's because the operator wrote it beside that model, and getting this
+backwards makes the key *unreachable* whenever `model` names an effort-carrying
+alias — which also breaks the migration's one promise, since the old path
+resolved the model with `resolve_model_name` (which strips the modifier) and
+took the top-level `effort` verbatim.
+
+A deployment that reaches `native` while `[brain.native] model` is empty and the
+retired top-level key was set is warned about once at load
+(`config._warn_native_lost_its_only_model`). That shape used to work — the
+executor substituted the top-level value into every request, which is the defect
+— and now sends an empty model, which most endpoints reject. A warning rather
+than a refusal: a failed config load takes the whole daemon down, and native may
+be only the fallback there.
+
+`brain.configured_default_model_effort(brain_config)` is the same answer as a
+**lookup rather than a construction**, for the callers that only report the
+default — the scheduler's log-channel line and the admin dashboard. Building a
+brain to ask costs a `claude` CLI version probe per task on the tmux kind and a
+provider client on native. It returns the value unresolved, since resolving an
+alias needs the brain's own table.
 
 ## Model identity (single source of truth)
 
@@ -176,8 +246,8 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `cwd: Path` | Subprocess working dir (`config.temp_dir`) |
 | `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled). The one thing that split does **not** take out is the Claude runtime credential, which `build_clean_env` sets for every task whatever brain runs it and which no skill manifest declares — `NativeBrain` removes it on both its ways into the tool server — the `hello` frame and the spawn env (see `CLAUDE_RUNTIME_ENV_VARS` below), so the field as the two CLI brains read it still carries the token they authenticate with. Mutable and shared: `ClaudeCodeBrain` writes `IS_SANDBOX` / `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` onto this dict in place, and `_run_fallback` hands the same object to the fallback brain, so anything filtering it must copy. |
 | `timeout_seconds: int` | `config.scheduler.task_timeout_minutes * 60` |
-| `model: str` | `task.model` or `config.model`; brain default if empty |
-| `effort: str` | `task.effort` or `config.effort`; brain default if empty |
+| `model: str` | The **task's own pin, or empty** — never a deployment default (ISSUE-418). An empty value reaches the brain, which fills in its own configured default (`[brain.claude_code] model`, `[brain.tmux] model`, `[brain.native] model`). The executor used to substitute the top-level `config.model` here, which was claude_code's own default living at the root and was therefore applied to every brain, making each brain's own `or` unreachable. |
+| `effort: str` | The task's own pin, or empty, on the same rule. A task pinning a *model* with no effort carries no effort at all, at either layer: an effort chosen for one model need not be valid on another. |
 | `advisor: str` | Anthropic-namespace brains only; `""` = no advisor. Set only by the executor, only when `config.advisor_model` is configured and the task carries no model pin (advisor-model spec). `ClaudeCodeBrain` / `TmuxClaudeBrain` emit `--advisor <value>` when both this and `allowed_tools` are non-empty, and otherwise set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` in the child env so a host's `~/.claude/settings.json` `advisorModel` can't run one Istota didn't ask for. `NativeBrain` ignores it. |
 | `custom_system_prompt_path: Path \| None` | The **operator's** own file (`config/system-prompt.md` under `custom_system_prompt`), and the older of the two system channels. Optional in the strict sense: a configured path that no longer exists is omitted rather than failing the attempt, which is the behaviour every deployment has today. Each backend keeps its own override position for it — `ClaudeCodeBrain` passes `--system-prompt-file`, which *replaces* the CLI's default harness prompt; `NativeBrain` appends it after its built-in coding block. |
 | `composed_system_prompt_path: Path \| None` | **Istota's** own composed standing instructions — the system half of `executor.ComposedPrompt`, written by the executor to `system_prompt.txt` in the task's control directory (`{temp_dir}/.control/{user_id}/task_<id>/`, daemon-owned and writable by no task): identity, execution constraints, emissaries, persona, accessible resources, tool descriptions, rules, response guidelines, the skills changelog and the eager skill bodies. A third channel rather than a reuse of the row above, because the two have different owners and different contracts. `None` means this caller has no Istota-composed standing instructions, which is the default and what every direct text-only caller passes (the sleep cycle, shared-block synthesis, health OCR and explanation, the code reviewer, conversation triage), so their behaviour is unchanged. A non-`None` value is **required** input and a brain must not quietly ignore it because the file disappeared: the Claude CLI path emits its flag and lets the CLI refuse to start, and the native path reads the file with no `exists()` branch, the existing brain error boundary turning either into an ordinary failed `BrainResult`. Silent omission would run the task with the user half alone — no persona, no rules, no tool descriptions — which is ISSUE-375 recreated by a filesystem race. **Must be absolute**, and the producer is what guarantees it: `NativeBrain` opens it in the daemon process while the CLI opens it inside the sandbox, against two different working directories, and a reroute carries one value between them. Carried across a reroute by `_run_fallback`'s `dataclasses.replace`, which names it nowhere. |
@@ -201,6 +271,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `execution_trace: str \| None` | JSON-encoded `[{type:"tool"\|"text"\|"cm_boundary", ...}]`. A `tool` entry carries an optional `raw` = the verbatim Bash command (`_tool_invocation`), threaded by all three brains for playbook command extraction (ISSUE-174) |
 | `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `terminated` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` = a subscription/quota/billing limit (a persistent "brain unavailable" condition the executor reroutes to the configured fallback brain — see "Brain fallback" below). `terminated` = the subprocess was killed by a signal other than SIGKILL — see "Signal deaths" below. |
 | `usage: BrainUsage | None` | Per-attempt token/cost telemetry, normalized across brains (`istota.usage`). **Retyped from `TaskUsage`** — the two vocabularies differ and the difference is load-bearing: `TaskUsage.input_tokens` is OpenAI-compat `prompt_tokens`, *inclusive* of cache reads (and `native._log_cache_telemetry` depends on that), while `BrainUsage.billed_input_tokens` excludes them, matching Anthropic's convention. `from_task_usage` reconciles the two at the boundary and labels the result `totals_source='derived'`; `session/usage.py` keeps its shape and that function still runs on the raw `TaskUsage`, before conversion. Set on **every** return, success or failure — tokens are spent either way. `TmuxClaudeBrain` leaves it `None`: it drives the interactive TUI and reconstructs events from a JSONL transcript, so there is no result frame to read, and a synthetic zero would drag every average. |
+| `effort_used: str` | The effort the attempt actually ran with. Same contract as `model_used` and added for the same reason (ISSUE-418): a brain fills its own configured default onto a `dataclasses.replace` copy, so the executor's `req.effort` stops describing the attempt and `task_usage.effort` held the empty string for every unpinned task — which `!usage --by effort` reads. Stamped at each brain's single `execute` seam, beside `brain_kind`, rather than at the ~20 return sites below it. Empty = the brain has none to report, and the executor falls back to the requested effort. |
 | `brain_kind: str` | Which brain produced this result, for the usage row. Set by the brain on the way out rather than threaded from the executor's construction site, so it stays correct on the fallback path for free — there the executor's own variable no longer describes the result it holds. One of `KNOWN_BRAIN_KINDS`; empty for `tmux_claude`. |
 
 ## ClaudeCodeBrain

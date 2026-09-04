@@ -329,6 +329,16 @@ class BrainResult:
     # determine it — the executor then falls back to the requested model.
     model_used: str = ""
 
+    # The effort the brain actually ran with. Same contract as `model_used`
+    # above and added for the same reason (ISSUE-418): a brain fills its own
+    # configured default into a `dataclasses.replace` copy of the request, so
+    # the executor's own `req.effort` no longer describes the attempt and
+    # `task_usage.effort` recorded the empty string for every unpinned task —
+    # which `!usage --by effort` and the admin usage surfaces read. Empty when
+    # the brain has none to report, and the executor then falls back to the
+    # requested effort, exactly as it does for the model.
+    effort_used: str = ""
+
     # True when the run reached the model and may have executed tools before
     # failing, so re-running the same prompt would repeat those side effects
     # (a re-sent email, a re-applied edit). Set by the paths that reclassify a
@@ -389,6 +399,47 @@ class Brain(Protocol):
         that hasn't opted in is never asked to steer.
         """
         return False
+
+    @property
+    def default_model(self) -> str:
+        """This brain's own configured default model, unresolved.
+
+        The model a request that pins none runs on, read from this brain's own
+        config block (``[brain.native] model``, ``[brain.claude_code] model``,
+        ``[brain.tmux] model``). Empty means the backend's own idea of a
+        default — the CLI's for the two ``claude`` brains, the endpoint's for
+        native.
+
+        It is on the protocol because the *question* is per-brain and the
+        answer used to be deployment-wide: a single top-level `model` was
+        applied to every brain, shadowing each brain's own (ISSUE-418). Every
+        surface that reports "what does this deployment run by default" now
+        asks the brain that would run the task. Declared here with a default so
+        a third-party brain that never grew one still satisfies the protocol.
+        """
+        return ""
+
+    @property
+    def default_effort(self) -> str:
+        """This brain's own configured default effort. Empty = the model's own."""
+        return ""
+
+    def with_defaults(self, req: BrainRequest) -> BrainRequest:
+        """``req`` with this brain's own defaults filled in where it pinned none.
+
+        Idempotent, and called from **two** places for two different reasons.
+        Each brain applies it inside ``execute``, which is what covers the
+        direct brain callers that never go through the executor. The executor
+        applies it before ``execute`` so that ``req.model`` and ``req.effort``
+        are the *effective* values at every site downstream of the request —
+        ``task_usage``'s two columns and ``model_used``'s fallback both read
+        them, and a brain that defaults on a copy leaves those holding the
+        empty string for every unpinned task.
+
+        The identity default is correct for a brain with no configured default
+        of its own, and keeps a third-party brain conforming without a change.
+        """
+        return req
 
     def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None:
         """Resolve a ``!model <alias>`` name to ``(model_id, effort)`` or None.

@@ -9,7 +9,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from istota import db
-from istota.config import Config, SchedulerConfig, SecurityConfig, UserConfig
+from istota.config import (
+    BrainConfig,
+    ClaudeCodeBrainConfig,
+    Config,
+    SchedulerConfig,
+    SecurityConfig,
+    UserConfig,
+)
 from istota.cron_loader import (
     CronJob,
     generate_cron_md,
@@ -227,6 +234,14 @@ class TestSchedulerPropagatesModel:
 
 class TestExecutorModelArg:
     def _make_config(self, tmp_path, model=""):
+        """The deployment default now lives on the brain that will run the task.
+
+        It used to be the top-level `model`, which the executor substituted into
+        every request whatever brain was about to run (ISSUE-418). Passing it
+        here rather than at the root is the whole behaviour change these tests
+        pin: the default still reaches the argv, by the brain's own `or` instead
+        of the executor's substitution.
+        """
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
@@ -236,7 +251,7 @@ class TestExecutorModelArg:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            model=model,
+            brain=BrainConfig(claude_code=ClaudeCodeBrainConfig(model=model)),
             security=SecurityConfig(skill_proxy_enabled=False),
         )
 
@@ -459,6 +474,7 @@ class TestSchedulerPropagatesEffort:
 
 class TestExecutorEffortArg:
     def _make_config(self, tmp_path, model="", effort=""):
+        """Per-brain defaults, for the reason above (ISSUE-418)."""
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
@@ -468,8 +484,9 @@ class TestExecutorEffortArg:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            model=model,
-            effort=effort,
+            brain=BrainConfig(
+                claude_code=ClaudeCodeBrainConfig(model=model, effort=effort)
+            ),
             security=SecurityConfig(skill_proxy_enabled=False),
         )
 

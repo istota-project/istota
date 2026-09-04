@@ -989,17 +989,32 @@ def discover_calendars_for_task(
 
 
 def _resolve_effort(task, config: Config) -> str:
-    """Resolve the effort flag for a task.
+    """Resolve the effort flag for a task: the task's own pin, or nothing.
 
-    Why: a per-job model override (e.g. cron job pinned to Haiku) shouldn't
-    inherit `config.effort` set for the default model — Haiku doesn't accept
-    --effort and would fail the subprocess.
+    Why the empty return rather than a deployment default: `config.effort` was
+    the *claude_code* brain's default living at the root, and returning it here
+    put it on every request whatever brain was about to run — which is one half
+    of ISSUE-418, and is why a room pinned to `native` with
+    `[brain.native] effort = "high"` ran at the top-level `medium`. Each brain
+    now applies its own, so a request carries an effort only when something
+    actually chose one for this task.
+
+    The `task_model and not task_effort` branch survives the change and is not
+    made redundant by it. It says a per-task *model* pin drops an effort that
+    was chosen for a different model — a cron job pinned to Haiku must not
+    inherit `high` from anywhere, since Haiku rejects the flag outright. That
+    now bites on the brain's own default rather than on the top-level one, and
+    the brains implement it: `ClaudeCodeBrain._with_defaults` fills its default
+    effort only when the request pins no model.
+
+    `config` is still taken, and still read by nothing here. Kept because every
+    caller has it and the signature is the seam ISSUE-417 widens.
     """
     task_model = (task.model or "").strip()
     task_effort = (task.effort or "").strip()
     if task_model and not task_effort:
         return ""
-    return task_effort or config.effort
+    return task_effort
 
 
 def _resolve_advisor(task, config: Config) -> str:
@@ -1197,8 +1212,15 @@ def _resolve_fallback_model_effort(task, config, fallback_brain, effort):
     canonical ID) can't cross, so the fallback uses its own default and the
     requested name is returned as ``dropped_pin`` (for the visible note + the
     INFO log). An empty requested model → the fallback's own default, no note.
+
+    Reads the task's pin alone. It used to fall back to `config.model`, which
+    made an *unpinned* task on a `claude_code` deployment carry a non-portable
+    anthropic id into the fallback, have it dropped, and put a "your pin was
+    dropped" note in front of a user who had pinned nothing (ISSUE-418). With
+    the deployment default gone the empty branch below is the ordinary case,
+    and it already does the right thing: the fallback brain applies its own.
     """
-    raw = (task.model or "").strip() or config.model
+    raw = (task.model or "").strip()
     if not raw:
         return ("", effort, None)
     if is_portable_alias(raw, config_alias_portable_names(config)):
@@ -6978,7 +7000,13 @@ def execute_task(
             conversation_token=task.conversation_token or "",
             is_group_chat=bool(task.is_group_chat),
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
-            model=brain.resolve_model_name((task.model or "").strip() or config.model),
+            # The task's own pin, or nothing. Never a deployment default: the
+            # top-level `config.model` was claude_code's own, and substituting
+            # it here shadowed every other brain's (ISSUE-418). An empty value
+            # reaches the brain, which fills in its own configured default —
+            # which is what `NativeBrain`'s long-dead `req.model or
+            # self._config.model` was always waiting to do.
+            model=brain.resolve_model_name((task.model or "").strip()),
             effort=_resolve_effort(task, config),
             # Anthropic-namespace brains only — the advisor tool has no wire
             # over NativeBrain's openai_compat endpoint.
@@ -7119,7 +7147,13 @@ def execute_task(
                 config, conn, task.id, _primary_usage_result.usage,
                 user_id=task.user_id, source_type=task.source_type,
                 brain_kind=_primary_usage_result.brain_kind,
-                model=_primary_usage_result.model_used, effort=req.effort,
+                # `effort_used` first, for the reason `model_used` is read
+                # rather than `req.model`: the brain fills its own configured
+                # default onto a copy, so this request no longer describes the
+                # attempt (ISSUE-418). `req.effort` remains the fallback for a
+                # brain that reports none.
+                model=_primary_usage_result.model_used,
+                effort=_primary_usage_result.effort_used or req.effort,
                 stop_reason=_primary_usage_result.stop_reason,
                 success=_primary_usage_result.success,
             )
@@ -7128,7 +7162,8 @@ def execute_task(
             user_id=task.user_id, source_type=task.source_type,
             brain_kind=brain_result.brain_kind,
             is_fallback=_ran_fallback,
-            model=brain_result.model_used, effort=_usage_effort,
+            model=brain_result.model_used,
+            effort=brain_result.effort_used or _usage_effort,
             stop_reason=brain_result.stop_reason, success=brain_result.success,
         )
 

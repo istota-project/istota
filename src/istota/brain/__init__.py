@@ -90,6 +90,47 @@ BRAIN_KIND_LABELS = {
 }
 
 
+BRAIN_CONFIG_BLOCK = {
+    "claude_code": "claude_code",
+    "native": "native",
+    "tmux_claude": "tmux",
+}
+"""Which nested config block holds each kind's own settings.
+
+``tmux_claude`` reads ``[brain.tmux]``, which is the one place kind and block
+name disagree — the reason this is a table rather than `getattr(cfg, kind)`.
+"""
+
+
+def configured_default_model_effort(brain_config) -> tuple[str, str]:
+    """The (model, effort) the configured kind runs when nothing pins one.
+
+    A **lookup, not a construction** (ISSUE-418). The same answer is available
+    from `make_brain(brain_config).default_model`, and that is what a caller
+    already holding a brain should use — `web_app._admin_models_section` does,
+    since it has constructed one anyway. This is for a caller that wants only to
+    *report* the default and would otherwise construct a brain to ask: the
+    scheduler's log-channel line, which runs per task, where building one costs
+    a `claude` CLI version probe (a `tmux_brain cli_version_mismatch` WARNING
+    each time — exactly the cost `web_app`'s per-kind `make_brain` loop already
+    pays) and, for native, a provider client.
+
+    Returns the value **unresolved**: it may be an alias, and resolving it needs
+    the brain's own table. A caller rendering it for a human wants what the
+    operator wrote; a caller putting it on the wire should go through the brain.
+
+    Never raises: an unknown kind or a config missing the block answers
+    ``("", "")``, which reads as "the backend's own default" everywhere.
+    """
+    block = BRAIN_CONFIG_BLOCK.get(getattr(brain_config, "kind", ""))
+    if block is None:
+        return ("", "")
+    cfg = getattr(brain_config, block, None)
+    model = (getattr(cfg, "model", "") or "").strip()
+    effort = (getattr(cfg, "effort", "") or "").strip()
+    return (model, effort)
+
+
 def make_brain(brain_config: BrainConfig) -> Brain:
     """Construct a brain instance from config.
 
@@ -98,7 +139,7 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     """
     kind = brain_config.kind
     if kind == "claude_code":
-        return ClaudeCodeBrain()
+        return ClaudeCodeBrain(getattr(brain_config, "claude_code", None))
     if kind == "native":
         from .native import NativeBrain
 
