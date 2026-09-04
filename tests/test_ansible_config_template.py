@@ -1101,3 +1101,139 @@ class TestTalkSignalingIsReachableFromTheRole:
             "these signaling fields are on the dataclass but the Ansible "
             "template renders none of them, so an operator cannot set them"
         )
+
+
+class TestThePerBrainModelDefaults:
+    """`[brain.claude_code]` / `[brain.tmux]` model + effort (ISSUE-418).
+
+    The top-level `model` was the claude_code brain's own default living at the
+    root, where the executor applied it to whatever brain ran. The role now
+    renders the per-brain keys, and `istota_brain_claude_code_model` /
+    `istota_brain_tmux_model` default from `istota_model` in `defaults/main.yml`
+    — which means the migration on this shape is **one Jinja expression per
+    key**, and `config._apply_legacy_brain_defaults` never runs here at all,
+    since the template stops writing the top-level key. A typo in either default
+    is a silent model change on every existing host, and every loader-path test
+    would stay green.
+
+    The docker generator's half of the same migration shipped a duplicate
+    `[brain.tmux]` table before `tests/test_render_config.py` grew the matching
+    class; that is what this one is here to prevent on the other shape.
+    """
+
+    def test_the_legacy_variable_fills_the_claude_code_block(self):
+        config = load_config_from(render(istota_model="claude-opus-5"))
+        assert config.brain.claude_code.model == "claude-opus-5"
+
+    def test_the_legacy_effort_fills_the_claude_code_block(self):
+        config = load_config_from(
+            render(istota_model="claude-opus-5", istota_effort="high")
+        )
+        assert config.brain.claude_code.effort == "high"
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"istota_brain_kind": "tmux_claude"},
+            {"istota_brain_fallback": "tmux_claude"},
+            {"istota_brain_source_type_overrides": {"scheduled": "tmux_claude"}},
+        ],
+        ids=["kind", "fallback", "routed"],
+    )
+    def test_the_legacy_variable_reaches_tmux_wherever_tmux_can_run(self, overrides):
+        """`[brain.tmux]` is rendered only where that brain is reachable.
+
+        Unlike the docker generator, which writes the block whenever a value
+        resolves, this template gates it on kind / fallback / a routed target —
+        the same condition `[brain.native]` carries. That is not a gap: a brain
+        no task can reach has no default worth writing, and the block appears
+        the moment the operator makes it reachable. What must hold is that the
+        migration reaches it *there*, which is what this asserts.
+        """
+        config = load_config_from(render(istota_model="claude-opus-5", **overrides))
+        assert config.brain.tmux.model == "claude-opus-5"
+
+    def test_no_tmux_block_where_tmux_cannot_run(self):
+        rendered = render(istota_model="claude-opus-5")
+        assert "\n[brain.tmux]" not in rendered
+
+    def test_the_top_level_key_is_no_longer_rendered(self):
+        rendered = render(istota_model="claude-opus-5")
+        assert "\nmodel = " not in rendered.split("[brain")[0]
+        assert load_config_from(rendered).model == ""
+
+    def test_the_legacy_variable_never_reaches_the_native_brain(self):
+        """The one direction the migration must refuse.
+
+        An Anthropic model id cannot carry to an openai_compat endpoint, so
+        migrating it there would be the defect inside the fix.
+        """
+        config = load_config_from(
+            render(
+                istota_brain_kind="native",
+                istota_model="claude-opus-5",
+                istota_brain_native_model="z-ai/glm-5.3-flash",
+            )
+        )
+        assert config.brain.native.model == "z-ai/glm-5.3-flash"
+
+    def test_an_explicit_per_brain_value_wins(self):
+        config = load_config_from(
+            render(
+                istota_brain_kind="tmux_claude",
+                istota_model="claude-opus-5",
+                istota_brain_claude_code_model="claude-haiku-4-5",
+            )
+        )
+        assert config.brain.claude_code.model == "claude-haiku-4-5"
+        assert config.brain.tmux.model == "claude-opus-5"
+
+    def test_neither_block_is_rendered_without_a_value(self):
+        rendered = render(istota_model="", istota_effort="")
+        assert "[brain.claude_code]" not in rendered
+        config = load_config_from(rendered)
+        assert config.brain.claude_code.model == ""
+        assert config.brain.tmux.model == ""
+
+    def test_the_tmux_kind_renders_one_table_with_both_halves(self):
+        """Model keys and operability knobs share the one `[brain.tmux]`."""
+        rendered = render(
+            istota_brain_kind="tmux_claude", istota_model="claude-opus-5"
+        )
+        # Line-anchored: the `[brain]` block's own comment names the table too,
+        # so a bare substring count reads 2 on a correct render.
+        assert rendered.count("\n[brain.tmux]") == 1
+        config = load_config_from(rendered)
+        assert config.brain.tmux.model == "claude-opus-5"
+        assert config.brain.tmux.cli_version_pin == "2.1.168"
+
+    def test_the_rendered_blocks_pass_the_play_validator(self):
+        """`validate_config.py` allowlists keys per brain sub-table.
+
+        `[brain.tmux]` had one before this change and `[brain.claude_code]` did
+        not; both now carry operator-facing `model` keys, and an allowlist that
+        does not know about them fails the play on a host that sets one.
+        """
+        import subprocess
+        import sys
+
+        rendered = render(
+            istota_brain_kind="tmux_claude",
+            istota_model="claude-opus-5",
+            istota_effort="high",
+        )
+        path = _write_temp(rendered)
+        config = load_config_from(rendered)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ANSIBLE / "files" / "validate_config.py"),
+                path,
+                "istota",
+                str(config.db_path),
+                str(config.temp_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr

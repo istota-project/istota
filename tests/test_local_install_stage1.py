@@ -399,9 +399,8 @@ class TestAdminModelsSection:
                 ),
                 source_type_overrides={"scheduled": "native"},
             ),
-            model="general",
-            effort="high",
         )
+        cfg.brain.native.effort = "high"
         out = self._run(cfg)
         assert out["brain_kind"] == "native"
         assert out["default_model"] == "claude-sonnet-4-6"
@@ -411,6 +410,36 @@ class TestAdminModelsSection:
         # On the native brain every role collapses to the single configured model.
         assert all(r["resolved"] == "claude-sonnet-4-6" for r in out["roles"])
         assert out["source_type_overrides"] == {"scheduled": "native"}
+
+    def test_the_card_names_the_running_brains_default_not_the_retired_key(
+        self, tmp_path
+    ):
+        """ISSUE-418: the top-level keys were claude_code's own, not the card's.
+
+        This card reports what the deployment runs by default, and it used to
+        read the top-level `model` / `effort` — so on a native deployment it
+        named the Claude model and effort while native ran its own. It now asks
+        the brain that would actually run the task.
+        """
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            brain=BrainConfig(
+                kind="native",
+                native=NativeBrainConfig(
+                    model="z-ai/glm-5.3-flash",
+                    effort="low",
+                    base_url="https://openrouter.ai/api/v1",
+                ),
+            ),
+            # The retired keys, still loadable and read by nothing.
+            model="claude-opus-5",
+            effort="high",
+        )
+        out = self._run(cfg)
+        assert out["default_model"] == "z-ai/glm-5.3-flash"
+        assert out["default_effort"] == "low"
 
     def test_native_empty_model_falls_back_to_endpoint_default(self, tmp_path):
         from istota.config import BrainConfig, NativeBrainConfig

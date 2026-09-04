@@ -36,22 +36,42 @@
 
   // Base model choices (dedup + provider-alias-preferred labels) shared with
   // the room header badge, so the dropdown and the badge name a model the same.
-  // Scoped to this room's brain, so a room pinned to another model namespace is
-  // not offered ids it cannot run — which the PATCH would reject anyway.
+  // Scoped to the brain that would have to run the model, so a room on another
+  // model namespace is not offered ids it cannot run — which the PATCH would
+  // reject anyway.
+  //
+  // That brain is the one **selected in this modal**, not the one the room
+  // still holds (ISSUE-417). The room keeps its old brain until the save lands,
+  // so keying on it offered the outgoing brain's models for a change the user
+  // had already made — which is why the select used to be disabled on a
+  // crossing change with "pick a new one after saving". Reading `brainValue`
+  // inside the effect is what subscribes it, so switching the brain refetches.
   $effect(() => {
-    // Captured, and the result dropped if the modal has moved to another room
-    // meanwhile: the fetch is per room now, so a stale resolution would paint
-    // one room's aliases into another's dropdown — which before the scoping
-    // was harmless by construction, since every room got the same list.
+    // Both captured, and the result dropped if either has moved on: the fetch
+    // is per room *and* per pending brain now, so a stale resolution would
+    // otherwise paint one selection's aliases under another.
     const forRoom = room.id;
-    getBaseModelChoices(forRoom).then((choices) => {
-      if (room.id !== forRoom) return;
+    const forBrain = brainValue;
+    getBaseModelChoices(forRoom, forBrain || undefined).then((choices) => {
+      if (room.id !== forRoom || brainValue !== forBrain) return;
       // Show the canonical model id in parens next to the alias, so the pick
       // is unambiguous (e.g. `opus (claude-opus-4-8)`).
       modelOptions = [
         { value: '', label: 'Default model' },
         ...choices.map((c) => ({ value: c.value, label: `${c.label} (${c.value})` })),
       ];
+    });
+  });
+
+  // A model chosen for the previous brain cannot carry to a crossing one, and
+  // the server would refuse it. Clearing it back to "Default model" as the list
+  // changes is what keeps the select showing something it actually offers,
+  // rather than a stale id rendered against a list that no longer holds it.
+  $effect(() => {
+    if (!crossesNamespace) return;
+    untrack(() => {
+      if (modelValue) modelValue = '';
+      if (effortValue) effortValue = '';
     });
   });
 
@@ -98,11 +118,14 @@
     const after = namespaceOf(brainValue);
     return before === undefined || after === undefined || before !== after;
   });
-  // Disabled rather than merely warned about: the server applies `model` first
-  // and then clears it, so a model sent alongside a crossing brain change is
-  // written and dropped in the same request. Showing that before the save is
-  // the point — the alternative is the user reading it in the response.
-  const modelLocked = $derived(crossesNamespace);
+  // There is deliberately no lock any more (ISSUE-417). The model and effort
+  // selects used to be disabled while a namespace-crossing brain change was
+  // pending, because the server applied `model` first and the brain change then
+  // cleared it — so a model sent in the same body was written and dropped in
+  // one request, and the caption told the user to come back after saving. The
+  // server applies the brain first now and validates a model in the same body
+  // against the brain being switched to, so both go in one save; the selects
+  // stay live and the effect above repopulates them from the pending brain.
 
   // A room is on Talk when it originated there or has been promoted.
   const onTalk = $derived(room.origin === 'talk' || !!room.talk_token);
@@ -160,8 +183,8 @@
   // Both are gated on the lock, so a model picked before the brain select was
   // touched is neither counted as a change nor sent: the server would write it
   // and clear it in the same request, which reads as the pick not having taken.
-  const modelChanged = $derived(!modelLocked && modelValue !== (room.model ?? ''));
-  const effortChanged = $derived(!modelLocked && effortValue !== (room.effort ?? ''));
+  const modelChanged = $derived(modelValue !== (room.model ?? ''));
+  const effortChanged = $derived(effortValue !== (room.effort ?? ''));
   // Saveable when anything changed, and the name is never blanked.
   const canSave = $derived(
     trimmed.length > 0 && (nameChanged || modelChanged || effortChanged || brainChanged),
@@ -237,13 +260,13 @@
       options={modelOptions}
       onValueChange={(v) => (modelValue = v)}
       ariaLabel="Room model default"
-      disabled={modelLocked}
       fullWidth
     />
-    {#if modelLocked}
+    {#if crossesNamespace}
       <p class="caption">
-        Saving this brain change clears the room's model and effort defaults — the stored model
-        belongs to the previous brain and cannot run on the new one. Pick a new one after saving.
+        Now listing the models the new brain can run — the one this room had reads model names
+        differently and has been cleared. Pick a new one here, or leave it on
+        <em>Default model</em> to use that brain's own.
       </p>
     {:else}
       <p class="caption">
@@ -260,7 +283,6 @@
       options={EFFORT_OPTIONS}
       onValueChange={(v) => (effortValue = v)}
       ariaLabel="Room effort default"
-      disabled={modelLocked}
       fullWidth
     />
   </div>

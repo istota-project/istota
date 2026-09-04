@@ -139,11 +139,18 @@ def main() -> int:
     config = load_config(Path(args.config))
     tools = [t.strip() for t in args.tools.split(",") if t.strip()]
 
-    cc_brain = make_brain(BrainConfig(kind="claude_code"))
+    # Each brain is built from its own block, so each reports its own default
+    # (ISSUE-418). This used to pass the top-level `config.model` as the
+    # claude_code model, which is permanently empty on a migrated deployment —
+    # the comparison would then have run each brain on whatever its endpoint
+    # chose, silently, which is the one thing a shadow comparison must not do.
+    cc_brain = make_brain(
+        BrainConfig(kind="claude_code", claude_code=config.brain.claude_code)
+    )
     native_brain = make_brain(BrainConfig(kind="native", native=config.brain.native))
 
     print("running claude_code ...", file=sys.stderr)
-    cc = _run_brain(cc_brain, args.prompt, config.model, tools)
+    cc = _run_brain(cc_brain, args.prompt, cc_brain.default_model, tools)
     print("running native ...", file=sys.stderr)
     nat = _run_brain(native_brain, args.prompt, config.brain.native.model, tools)
 

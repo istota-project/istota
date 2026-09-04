@@ -62,6 +62,7 @@ from .brain import (
     CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
+    model_namespace_for_kind,
 )
 from .brain._roles import PORTABLE_KEY
 from .brain._fallback import (
@@ -989,17 +990,32 @@ def discover_calendars_for_task(
 
 
 def _resolve_effort(task, config: Config) -> str:
-    """Resolve the effort flag for a task.
+    """Resolve the effort flag for a task: the task's own pin, or nothing.
 
-    Why: a per-job model override (e.g. cron job pinned to Haiku) shouldn't
-    inherit `config.effort` set for the default model — Haiku doesn't accept
-    --effort and would fail the subprocess.
+    Why the empty return rather than a deployment default: `config.effort` was
+    the *claude_code* brain's default living at the root, and returning it here
+    put it on every request whatever brain was about to run — which is one half
+    of ISSUE-418, and is why a room pinned to `native` with
+    `[brain.native] effort = "high"` ran at the top-level `medium`. Each brain
+    now applies its own, so a request carries an effort only when something
+    actually chose one for this task.
+
+    The `task_model and not task_effort` branch survives the change and is not
+    made redundant by it. It says a per-task *model* pin drops an effort that
+    was chosen for a different model — a cron job pinned to Haiku must not
+    inherit `high` from anywhere, since Haiku rejects the flag outright. That
+    now bites on the brain's own default rather than on the top-level one, and
+    the brains implement it: `ClaudeCodeBrain._with_defaults` fills its default
+    effort only when the request pins no model.
+
+    `config` is still taken, and still read by nothing here. Kept because every
+    caller has it and the signature is the seam ISSUE-417 widens.
     """
     task_model = (task.model or "").strip()
     task_effort = (task.effort or "").strip()
     if task_model and not task_effort:
         return ""
-    return task_effort or config.effort
+    return task_effort
 
 
 def _resolve_advisor(task, config: Config) -> str:
@@ -1188,32 +1204,129 @@ def config_alias_portable_names(config) -> set[str]:
     return names
 
 
-def _resolve_fallback_model_effort(task, config, fallback_brain, effort):
-    """Resolve (model, effort, dropped_pin) for a fallback brain run.
+def _resolve_crossing_model_effort(
+    task, config, target_brain, effort, *, origin_namespace,
+):
+    """Resolve (model, effort, dropped_pin) for a pin meeting another brain.
 
-    A portable intent (tier fast/general/smart + operator ``portable = true``
-    custom aliases) is re-resolved in the fallback brain's namespace — the intent
-    crosses the provider boundary. A non-portable pin (provider shortcut /
-    canonical ID) can't cross, so the fallback uses its own default and the
-    requested name is returned as ``dropped_pin`` (for the visible note + the
-    INFO log). An empty requested model → the fallback's own default, no note.
+    The question is whether the model name **crossed into a brain that speaks a
+    different vocabulary**, and until ISSUE-417 nothing asked it. This function
+    crossed unconditionally, so a `claude_code -> tmux_claude` fallback — the
+    same `claude` binary, the same ``anthropic`` namespace, the same valid
+    ``claude-opus-5`` — dropped the pin anyway *and* put a "your pin was
+    dropped" note in front of the user, for no reason. Measured both ways
+    before the fix::
+
+        claude_code -> native       ns=openai_compat  dropped_pin='claude-opus-5'
+        claude_code -> tmux_claude  ns=anthropic      dropped_pin='claude-opus-5'
+
+    Where the namespace is **unchanged** the name is used exactly as it arrived,
+    which is what the primary path does and must stay byte-identical to. Where
+    it changed, the rule is the one this function always had: a portable intent
+    (tier fast/general/smart, plus operator ``portable = true`` aliases) is
+    re-resolved in the target's namespace, and a non-portable pin (provider
+    shortcut, canonical id) cannot carry — the target uses its own default and
+    the requested name comes back as ``dropped_pin`` for the visible note and
+    the INFO log.
+
+    ``origin_namespace`` is where the *name* was written, not where the task
+    ran: on the fallback path it is the primary brain's. ``None`` means it could
+    not be established, and is deliberately **not** treated as "matches" — a
+    pin whose portability is unknown is dropped, the same direction
+    ``commands._clear_pin_across_namespaces`` takes for the same reason.
+
+    Reads the task's pin alone. It used to fall back to `config.model`, which
+    made an *unpinned* task on a `claude_code` deployment carry a non-portable
+    anthropic id into the fallback, have it dropped, and put that same note in
+    front of a user who had pinned nothing (ISSUE-418). With the deployment
+    default gone the empty branch below is the ordinary case, and it already
+    does the right thing: the target brain applies its own.
     """
-    raw = (task.model or "").strip() or config.model
+    raw = (task.model or "").strip()
     if not raw:
         return ("", effort, None)
-    if is_portable_alias(raw, config_alias_portable_names(config)):
-        # Re-resolve the intent in the fallback brain's own namespace, carrying
-        # its effort too — a customized ``smart`` falling back claude_code→native
-        # must land on a valid openai_compat slug + effort, not the anthropic
-        # value. Fall back to the id-only path defensively if the pair is empty.
-        pair = fallback_brain.resolve_alias(raw)
+    target_namespace = getattr(target_brain, "model_namespace", None)
+    # `None` is "not established" and must never compare equal — an origin we
+    # could not resolve is treated as a crossing, which drops a pin whose
+    # portability is unknown rather than sending it to a wire that may not
+    # take it. Same direction `commands._clear_pin_across_namespaces` takes.
+    crossing = origin_namespace is None or origin_namespace != target_namespace
+    if not crossing or is_portable_alias(raw, config_alias_portable_names(config)):
+        # Resolve through the target brain's own alias table. Two cases share
+        # this arm, and folding them is what keeps the non-crossing branch
+        # honest: a portable intent crossing a boundary must land on a valid
+        # slug and effort in the new namespace (a customized ``smart`` falling
+        # back claude_code→native must not carry the anthropic value), and a
+        # pin that crossed nothing must come out exactly as the *primary* path
+        # would have produced it — which is `resolve_model_name`, not the raw
+        # string. Returning `raw` here was a regression on a previously correct
+        # path: the alias tables are namespace-keyed, so within one namespace
+        # this is by construction the same answer the primary got, while the
+        # raw string hands the CLI an alias it does not accept and drops the
+        # effort an alias like ``smart`` carries. Fall back to the id-only path
+        # defensively if the pair is empty.
+        pair = target_brain.resolve_alias(raw)
         if pair and pair[0]:
             return (pair[0], pair[1] or effort, None)
-        return (fallback_brain.resolve_model_name(raw), effort, None)
+        return (target_brain.resolve_model_name(raw), effort, None)
     logger.info(
-        "fallback_model: non-portable %r dropped; using fallback brain default", raw
+        "fallback_model: non-portable %r dropped across a namespace change "
+        "(%s -> %s); using the target brain's default",
+        raw, origin_namespace, target_namespace,
     )
     return ("", effort, raw)
+
+
+def _pin_origin_namespace(task, config) -> str | None:
+    """The namespace a task's own model pin was written in (ISSUE-417).
+
+    Not where the task *runs* — where the name came from, which is the only
+    thing that says whether it can carry. Two producers, and the task row
+    distinguishes them:
+
+    - ``tasks.brain`` set means the pin came from the room, and every writer of
+      ``rooms.model`` resolves through that room's own brain
+      (``commands.brain_for_room``, ``web_app._brain_for_room_token``), so the
+      pin is in *that* kind's namespace. Read from the column rather than from
+      ``resolve_brain_kind``, which is the whole point: a kind the operator has
+      since dropped from ``room_selectable`` is refused and falls through, and
+      the stored pin is still the dropped kind's. That is one of the two routes
+      this function exists for.
+    - Otherwise the pin is operator- or API-written (``[[jobs]] model``), whose
+      vocabulary is the deployment default's — the brain a name written in
+      config would have been written against.
+
+    ``None`` where the kind does not resolve, which the crossing rule reads as
+    "not established" and therefore treats as a crossing.
+    """
+    pinned = (getattr(task, "brain", None) or "").strip()
+    return model_namespace_for_kind(pinned or config.brain.kind)
+
+
+def _request_model(task, config, brain) -> str:
+    """The model name a task's request carries: its own pin, resolved, or "".
+
+    Wraps the crossing rule so `execute_task`'s request build reads as one
+    expression. Within one namespace this is exactly
+    ``brain.resolve_model_name(task.model)``, which is what it replaced, so the
+    ordinary path is unchanged; across one it re-resolves a portable intent and
+    drops a pin that cannot carry, letting the brain apply its own default.
+
+    The dropped pin is deliberately **not** reported to the user here, unlike
+    the fallback path's `dropped_pin`. A fallback is a substitution the user did
+    not ask for and is worth a note; this is a pin that was never runnable on
+    the brain the room or the routing selected, and the note has no action
+    behind it — the model surfaces already refuse an id the room's brain cannot
+    run (`_known_room_models`), so this is the residue of a room whose brain
+    moved out from under a stored pin. It is logged by the rule itself.
+    """
+    raw = (task.model or "").strip()
+    if not raw:
+        return ""
+    model, _effort, _dropped = _resolve_crossing_model_effort(
+        task, config, brain, "", origin_namespace=_pin_origin_namespace(task, config),
+    )
+    return model
 
 
 # Prefixed onto a fallback failure text when the fallback was *also* unavailable,
@@ -1274,8 +1387,14 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
         logger.warning("brain fallback: could not construct %s: %s", fallback_kind, e)
         return None, None, ""
 
-    fb_model, fb_effort, dropped_pin = _resolve_fallback_model_effort(
-        task, config, fb_brain, req.effort
+    # The origin is where the *pin* was written, which on this path is the
+    # primary brain — `brain_config.kind` is the routed kind this attempt ran,
+    # not `[brain] kind` (ISSUE-417). A move within one namespace is not a
+    # crossing and the pin is kept; `claude_code -> tmux_claude` is the case
+    # that was dropping a valid id and reporting it to the user.
+    fb_model, fb_effort, dropped_pin = _resolve_crossing_model_effort(
+        task, config, fb_brain, req.effort,
+        origin_namespace=model_namespace_for_kind(brain_config.kind),
     )
     # An advisor pairing can only be right for the model it was resolved
     # against. anthropic->native drops it (mirrors the non-portable-pin drop
@@ -6978,7 +7097,25 @@ def execute_task(
             conversation_token=task.conversation_token or "",
             is_group_chat=bool(task.is_group_chat),
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
-            model=brain.resolve_model_name((task.model or "").strip() or config.model),
+            # The task's own pin, or nothing. Never a deployment default: the
+            # top-level `config.model` was claude_code's own, and substituting
+            # it here shadowed every other brain's (ISSUE-418). An empty value
+            # reaches the brain, which fills in its own configured default —
+            # which is what `NativeBrain`'s long-dead `req.model or
+            # self._config.model` was always waiting to do.
+            #
+            # Resolved through the crossing rule rather than by
+            # `resolve_model_name` alone, because a *pin* can still meet a brain
+            # of another namespace here (ISSUE-417) — ISSUE-418 removed the
+            # deployment default, not the pin. Two live routes: a
+            # `[[jobs]] model` on a cron job that `source_type_overrides` sends
+            # to native, which put an Anthropic id on an openai_compat wire; and
+            # a room whose `brain` the operator has since dropped from
+            # `room_selectable`, where `resolve_brain_kind` warns and falls
+            # through while `rooms.model` still holds the previous namespace's
+            # id. Within one namespace the rule resolves exactly as
+            # `resolve_model_name` did, so the ordinary path is unchanged.
+            model=_request_model(task, config, brain),
             effort=_resolve_effort(task, config),
             # Anthropic-namespace brains only — the advisor tool has no wire
             # over NativeBrain's openai_compat endpoint.
@@ -7119,7 +7256,13 @@ def execute_task(
                 config, conn, task.id, _primary_usage_result.usage,
                 user_id=task.user_id, source_type=task.source_type,
                 brain_kind=_primary_usage_result.brain_kind,
-                model=_primary_usage_result.model_used, effort=req.effort,
+                # `effort_used` first, for the reason `model_used` is read
+                # rather than `req.model`: the brain fills its own configured
+                # default onto a copy, so this request no longer describes the
+                # attempt (ISSUE-418). `req.effort` remains the fallback for a
+                # brain that reports none.
+                model=_primary_usage_result.model_used,
+                effort=_primary_usage_result.effort_used or req.effort,
                 stop_reason=_primary_usage_result.stop_reason,
                 success=_primary_usage_result.success,
             )
@@ -7128,7 +7271,8 @@ def execute_task(
             user_id=task.user_id, source_type=task.source_type,
             brain_kind=brain_result.brain_kind,
             is_fallback=_ran_fallback,
-            model=brain_result.model_used, effort=_usage_effort,
+            model=brain_result.model_used,
+            effort=brain_result.effort_used or _usage_effort,
             stop_reason=brain_result.stop_reason, success=brain_result.success,
         )
 

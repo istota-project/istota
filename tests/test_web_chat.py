@@ -2310,9 +2310,18 @@ class TestBrainAndModelInOneBody:
             headers=self.HDRS,
         )).json()
 
-    async def test_a_crossing_change_keeps_the_brain_and_drops_the_model(
+    async def test_a_model_for_the_outgoing_brain_is_refused(
         self, client_and_config,
     ):
+        """`model` is validated against the brain the request is moving *to*.
+
+        This body used to be accepted and the model silently cleared, because
+        the model was applied first and the brain change then took it back out.
+        Since the two can now be chosen together (ISSUE-417), an id the incoming
+        brain cannot run is a refusal rather than a silent drop — the picker
+        offers that brain's own models, so this shape is a client bug rather
+        than the ordinary edit it used to be.
+        """
         client, config = client_and_config
         cookies = await _login(client, "alice")
         room = await self._room(client, cookies)
@@ -2321,15 +2330,61 @@ class TestBrainAndModelInOneBody:
             json={"brain": "native", "model": "claude-opus-5"},
             cookies=cookies, headers=self.HDRS,
         )
+        assert resp.status_code == 400
+        # Nothing was written: the refusal happens before `_chat_update_room`.
+        with db.get_db(config.db_path) as conn:
+            stored = db.get_room(conn, room["token"])
+        assert stored.brain is None
+        assert stored.model is None
+
+    async def test_a_brain_and_its_own_model_are_set_together(
+        self, client_and_config,
+    ):
+        """The one-save flow this ordering exists for.
+
+        The modal offers the incoming brain's models, so a crossing change and
+        a model picked from that brain arrive in one body and both stick —
+        where the user previously had to save the brain, wait, and come back to
+        pick a model.
+        """
+        client, config = client_and_config
+        config.brain.native.model = "vendor/some-model"
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "native", "model": "vendor/some-model"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["brain"] == "native"
+        assert body["model"] == "vendor/some-model"
+        # Replaced, not lost, so the report says nothing was cleared.
+        assert "cleared" not in body
+        with db.get_db(config.db_path) as conn:
+            stored = db.get_room(conn, room["token"])
+        assert (stored.brain, stored.model) == ("native", "vendor/some-model")
+
+    async def test_a_stored_pin_still_goes_when_the_body_replaces_nothing(
+        self, client_and_config,
+    ):
+        """The clearing rule's own case, unchanged: a brain-only crossing PATCH
+        over a room already holding an id from the outgoing namespace."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_model_effort(conn, room["token"], "claude-opus-5", None)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
+            cookies=cookies, headers=self.HDRS,
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["brain"] == "native"
         assert body["model"] is None
         assert body["cleared"] == ["model"]
-        with db.get_db(config.db_path) as conn:
-            stored = db.get_room(conn, room["token"])
-        assert stored.brain == "native"
-        assert stored.model is None
 
     async def test_a_move_inside_one_namespace_keeps_the_pin(
         self, client_and_config,
@@ -2390,13 +2445,22 @@ class TestBrainAndModelInOneBody:
         )
         assert "cleared" not in resp.json()
 
-    async def test_an_effort_in_the_body_goes_with_the_model_and_is_named(
+    async def test_an_effort_in_the_body_survives_the_brain_change(
         self, client_and_config,
     ):
-        """The brain change wins over anything else in the body. The effort is
-        written by the model block and then taken out again with the model,
-        because the pair was set as a pair — so the response has to say so
-        rather than leave the caller to notice their explicit value gone."""
+        """An effort the caller asked for in *this* request is a fresh choice.
+
+        The stored pair still goes — the model was resolved in the outgoing
+        namespace and the effort was set alongside it — but the effort named in
+        the body is not part of that pair, and an effort level is a semantic
+        rung every brain reads. So it is written after the clear and reported as
+        replaced rather than lost.
+
+        This is the ordering change (ISSUE-417) rather than a new rule: the
+        model block used to run *first*, so the body's effort was written and
+        then taken out again with the stored model, and the response named it in
+        `cleared` to stop the caller finding their explicit value silently gone.
+        """
         client, config = client_and_config
         cookies = await _login(client, "alice")
         room = await self._room(client, cookies)
@@ -2408,9 +2472,12 @@ class TestBrainAndModelInOneBody:
             cookies=cookies, headers=self.HDRS,
         )
         assert resp.status_code == 200
-        assert resp.json()["cleared"] == ["model", "effort"]
+        # The model went and is named; the effort was replaced, so it is not.
+        assert resp.json()["cleared"] == ["model"]
         with db.get_db(config.db_path) as conn:
-            assert db.get_room(conn, room["token"]).effort is None
+            stored = db.get_room(conn, room["token"])
+        assert stored.model is None
+        assert stored.effort == "high"
 
     async def test_a_bare_effort_survives_a_brain_change(self, client_and_config):
         """The converse, and the command layer's own rule: with no model pin

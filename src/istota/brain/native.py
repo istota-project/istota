@@ -891,6 +891,47 @@ class NativeBrain:
             return (base, suffix_effort)
         return None
 
+    @property
+    def default_model(self) -> str:
+        """This brain's configured default (``[brain.native] model``).
+
+        A property on the Brain protocol rather than a reach into each brain's
+        own config block, so a surface that displays a deployment's effective
+        default asks the brain that would run the task (ISSUE-418). This brain
+        applies it at the wire (``req.model or self._config.model``); the
+        property is the read-only view of the same value.
+        """
+        return (getattr(self._config, "model", "") or "").strip()
+
+    @property
+    def default_effort(self) -> str:
+        return (getattr(self._config, "effort", "") or "").strip()
+
+    def with_defaults(self, req):
+        """``req`` with this brain's configured model/effort where it pinned none.
+
+        The same two `or`s `_run` has always applied at the wire, lifted so the
+        *executor* can apply them too and `req.model` / `req.effort` become the
+        effective values for the usage row and `model_used` (ISSUE-418). `_run`
+        keeps its own, which is what covers the direct brain callers; both being
+        applied is a no-op, since neither branch fires once the field is set.
+
+        No alias resolution: `openai_compat` does no aliasing, so the configured
+        id goes to the wire as written — which is the deliberate behaviour
+        `resolve_model_name` documents for this brain.
+
+        A request pinning a model takes no effort from here, matching the rule
+        `executor._resolve_effort` and `ClaudeCodeBrain.with_defaults` apply:
+        an effort chosen for one model need not be valid on another.
+        """
+        import dataclasses as _dc
+
+        model = req.model or self.default_model
+        effort = req.effort or ("" if req.model else self.default_effort)
+        if model == req.model and effort == req.effort:
+            return req
+        return _dc.replace(req, model=model, effort=effort)
+
     def resolve_model_name(self, name):
         if not name:
             return ""
@@ -940,9 +981,14 @@ class NativeBrain:
         The scheduler calls brains from a thread pool, so ``asyncio.run`` here is
         safe — each task gets its own loop.
         """
+        # Idempotent with `_run`'s own two `or`s; applied here so the stamp
+        # below reports the effort this attempt really used (ISSUE-418).
+        req = self.with_defaults(req)
         result = self._execute_sync(req)
         # Stamped on the way out, so a return added later cannot forget it.
         result.brain_kind = BRAIN_KIND
+        if not result.effort_used:
+            result.effort_used = req.effort
         return result
 
     def _execute_sync(self, req: BrainRequest) -> BrainResult:

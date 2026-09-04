@@ -179,6 +179,11 @@ services:
       # Bot identity
       ISTOTA_BOT_NAME: ${ISTOTA_BOT_NAME:-Istota}
       ISTOTA_EMISSARIES_ENABLED: ${ISTOTA_EMISSARIES_ENABLED:-true}
+      # Deprecated: this was the claude_code brain's default living at the top
+      # level, where it was applied to every brain and shadowed each one's own
+      # (ISSUE-418). Still honoured — the entrypoint migrates it onto
+      # ISTOTA_BRAIN_CLAUDE_CODE_MODEL and ISTOTA_BRAIN_TMUX_MODEL below — but
+      # set those instead, and never expect it to reach the native brain.
       ISTOTA_MODEL: ${ISTOTA_MODEL:-}
       ISTOTA_DISABLED_SKILLS: ${ISTOTA_DISABLED_SKILLS:-}
       ISTOTA_MAX_MEMORY_CHARS: ${ISTOTA_MAX_MEMORY_CHARS:-0}
@@ -202,6 +207,13 @@ services:
       ISTOTA_BRAIN_FALLBACK: ${ISTOTA_BRAIN_FALLBACK:-}
       ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT: ${ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT:-false}
       ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS: ${ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS:-900}
+      # Each CLI brain's own default model / effort. Both blocks are read
+      # whatever `kind` is, since a fallback or a source_type_overrides entry
+      # can route to either. Unset falls back to ISTOTA_MODEL above.
+      ISTOTA_BRAIN_CLAUDE_CODE_MODEL: ${ISTOTA_BRAIN_CLAUDE_CODE_MODEL:-}
+      ISTOTA_BRAIN_CLAUDE_CODE_EFFORT: ${ISTOTA_BRAIN_CLAUDE_CODE_EFFORT:-}
+      ISTOTA_BRAIN_TMUX_MODEL: ${ISTOTA_BRAIN_TMUX_MODEL:-}
+      ISTOTA_BRAIN_TMUX_EFFORT: ${ISTOTA_BRAIN_TMUX_EFFORT:-}
       ISTOTA_BRAIN_NATIVE_PROVIDER: ${ISTOTA_BRAIN_NATIVE_PROVIDER:-openai_compat}
       ISTOTA_BRAIN_NATIVE_MODEL: ${ISTOTA_BRAIN_NATIVE_MODEL:-}
       ISTOTA_BRAIN_NATIVE_EFFORT: ${ISTOTA_BRAIN_NATIVE_EFFORT:-}

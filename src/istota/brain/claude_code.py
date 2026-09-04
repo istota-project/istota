@@ -12,6 +12,7 @@ stays in the executor — both brains will produce result_text + execution_trace
 and need the same downstream cleanup.
 """
 
+import dataclasses
 import json
 import logging
 import os
@@ -1085,6 +1086,92 @@ class ClaudeCodeBrain:
     # it (same `claude` binary), so an ``anthropic`` value covers both.
     model_namespace = "anthropic"
 
+    def __init__(self, config=None) -> None:
+        """``config`` is the ``[brain.claude_code]`` block, or None for none.
+
+        Optional because this class is constructed bare in several places, and
+        None is honest for each: they have no deployment default to apply.
+        Most only resolve model *names* — the web brain catalogue and the two
+        alias validators in ``config.py``. ``TmuxClaudeBrain`` composes one and
+        hands it the ``[brain.tmux]`` block instead, which works because the
+        only fields read off a config here are ``model`` and ``effort`` and that
+        block declares both.
+
+        One bare-constructing caller does *execute*: ``context._claude_cli_triage``
+        builds one for conversation triage. It is unaffected because that request
+        always sets ``model`` itself (from ``conversation.selection_model``), so
+        ``with_defaults`` takes neither branch — a fact about the caller rather
+        than about the construction, which is why it is written down here.
+        """
+        self._config = config
+
+    @property
+    def default_model(self) -> str:
+        """This brain's configured default, unresolved (alias or canonical id).
+
+        Empty means the CLI's own default, which is what an omitted ``--model``
+        gets. Read by the surfaces that display a deployment's effective default
+        rather than by ``execute``, which goes through ``_with_defaults``.
+        """
+        return (getattr(self._config, "model", "") or "").strip()
+
+    @property
+    def default_effort(self) -> str:
+        return (getattr(self._config, "effort", "") or "").strip()
+
+    def with_defaults(self, req: BrainRequest) -> BrainRequest:
+        """Fill an unpinned request from this brain's own configured default.
+
+        The ``or`` that `NativeBrain` has always had, and that the executor used
+        to pre-empt by substituting the deployment-wide `config.model` into
+        every request (ISSUE-418).
+
+        **Public, and the executor calls it before `execute`.** It is also
+        applied inside `execute`, which is idempotent — a request whose model is
+        already set takes neither branch — and the two callers answer different
+        needs. `execute` covers the direct brain callers, which never go through
+        the executor. The executor's call is what makes `req.model` and
+        `req.effort` the *effective* values at every site downstream of the
+        request rather than only inside the brain: `_persist_task_usage` writes
+        both to `task_usage`, and `execute_task` reads `req.model` as the
+        `model_used` fallback. Defaulting on a `dataclasses.replace` copy the
+        executor never saw left those columns holding the empty string for every
+        unpinned task, where they used to hold the deployment default.
+
+        The configured name goes through ``resolve_alias`` rather than being
+        passed to the CLI verbatim: ``model = "opus"`` in the block must mean
+        what ``!model opus`` means, and an alias entry can carry an effort of its
+        own. A pinned model with no effort deliberately takes no effort from
+        here — the same rule ``executor._resolve_effort`` applies for the same
+        reason, that an effort chosen for one model need not be valid on
+        another.
+
+        **Effort precedence is request > this block's own key > the alias's.**
+        The block's explicit ``effort`` outranks an effort carried by the alias
+        its ``model`` resolves through, because the operator wrote it beside
+        that model and the alias's is a default for the alias rather than for
+        this deployment. Getting this backwards made the block's key
+        *unreachable* whenever ``model`` named an effort-carrying alias, which
+        also broke the migration's one promise: the old path resolved the model
+        with ``resolve_model_name``, which strips the modifier, and took
+        ``config.effort`` verbatim — so ``model = "smart"`` + ``effort = "low"``
+        ran at ``low`` before and would have run at the alias's ``high`` after.
+        """
+        model, effort = req.model, req.effort
+        if not req.model:
+            alias_effort = ""
+            if self.default_model:
+                resolved = self.resolve_alias(self.default_model)
+                if resolved is not None and resolved[0]:
+                    model = resolved[0]
+                    alias_effort = resolved[1] or ""
+                else:
+                    model = self.resolve_model_name(self.default_model)
+            effort = effort or self.default_effort or alias_effort
+        if model == req.model and effort == req.effort:
+            return req
+        return dataclasses.replace(req, model=model, effort=effort)
+
     # --- Model resolution (Brain Protocol) ---------------------------------
 
     def resolve_alias(
@@ -1208,8 +1295,21 @@ class ClaudeCodeBrain:
         # the usage row records as the brain that ran, and it has to be right on
         # the fallback path, where the executor's own variable no longer
         # describes the result it is holding.
+        #
+        # The default is applied here, above `_execute`, for the same reason:
+        # `_execute` re-issues once on an image rejection and every argv build
+        # below reads `req.model`, so filling it at the single entry point is
+        # what keeps the re-issue on the same model as the first attempt.
+        req = self.with_defaults(req)
         result = self._execute(req)
         result.brain_kind = BRAIN_KIND
+        # What this attempt actually ran with, for `task_usage.effort`. Stamped
+        # here because `with_defaults` fills the default onto a *copy*, so the
+        # executor's own `req` no longer describes the attempt (ISSUE-418) —
+        # the same reason `model_used` exists. `if not` rather than an
+        # unconditional write, so an inner path that knows better keeps it.
+        if not result.effort_used:
+            result.effort_used = req.effort
         return result
 
     def _execute(self, req: BrainRequest) -> BrainResult:

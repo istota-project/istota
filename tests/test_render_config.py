@@ -1273,3 +1273,103 @@ class TestTheModelAliasTable:
         rendered = tomllib.loads(render(tmp_path, **REQUIRED).read_text())
 
         assert "models" not in rendered
+
+
+class TestThePerBrainModelDefaults:
+    """`[brain.claude_code]` / `[brain.tmux]` model + effort (ISSUE-418).
+
+    The top-level `model` was the claude_code brain's own default living at the
+    root, where the executor applied it to whatever brain ran. The generator now
+    writes the per-brain keys instead, migrating `ISTOTA_MODEL` onto both CLI
+    brains — done here rather than by the loader's deprecation path so a Docker
+    deployment that never changes its `.env` stops warning at every boot.
+    """
+
+    def test_the_legacy_variable_fills_both_cli_brains(self, tmp_path):
+        rendered = tomllib.loads(
+            render(tmp_path, **REQUIRED, ISTOTA_MODEL="claude-opus-5").read_text()
+        )
+
+        assert rendered["brain"]["claude_code"]["model"] == "claude-opus-5"
+        assert rendered["brain"]["tmux"]["model"] == "claude-opus-5"
+
+    def test_the_top_level_key_is_no_longer_written(self, tmp_path):
+        rendered = tomllib.loads(
+            render(tmp_path, **REQUIRED, ISTOTA_MODEL="claude-opus-5").read_text()
+        )
+
+        assert "model" not in rendered, (
+            "the top-level key is deprecated; writing it would make the loader "
+            "warn on every boot about a value this generator controls"
+        )
+
+    def test_the_legacy_variable_never_reaches_the_native_brain(self, tmp_path):
+        """The one direction the migration must refuse.
+
+        An Anthropic model id cannot carry to an openai_compat endpoint, so
+        migrating it there would be the defect inside the fix.
+        """
+        rendered = tomllib.loads(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_BRAIN_KIND="native",
+                ISTOTA_MODEL="claude-opus-5",
+                ISTOTA_BRAIN_NATIVE_MODEL="z-ai/glm-5.3-flash",
+            ).read_text()
+        )
+
+        assert rendered["brain"]["native"]["model"] == "z-ai/glm-5.3-flash"
+
+    def test_an_explicit_per_brain_value_wins_over_the_legacy_one(self, tmp_path):
+        rendered = tomllib.loads(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_MODEL="claude-opus-5",
+                ISTOTA_BRAIN_CLAUDE_CODE_MODEL="haiku",
+            ).read_text()
+        )
+
+        assert rendered["brain"]["claude_code"]["model"] == "haiku"
+
+    def test_neither_block_is_written_without_a_value(self, tmp_path):
+        """A key printed at its own default invites editing a generated file."""
+        rendered = tomllib.loads(render(tmp_path, **REQUIRED).read_text())
+
+        assert "claude_code" not in rendered.get("brain", {})
+        assert "tmux" not in rendered.get("brain", {})
+
+    def test_the_tmux_kind_renders_one_table_not_two(self, tmp_path):
+        """The regression this class exists for.
+
+        This file already wrote a `[brain.tmux]` header for the tmux kind, so
+        emitting a second one for the model keys produced a duplicate table.
+        That is invalid TOML, and on this shape a config.toml that does not
+        parse is a container that will not boot — `render` itself still exits 0
+        and writes the file, so nothing short of parsing it catches this.
+        """
+        rendered = tomllib.loads(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_BRAIN_KIND="tmux_claude",
+                ISTOTA_MODEL="claude-opus-5",
+            ).read_text()
+        )
+
+        tmux = rendered["brain"]["tmux"]
+        assert tmux["model"] == "claude-opus-5"
+        # The operability knobs still land in the same table.
+        assert tmux["cli_version_pin"] == "2.1.168"
+        assert tmux["fallback_trip_threshold"] == 5
+
+    def test_the_tmux_block_carries_no_knobs_off_its_own_kind(self, tmp_path):
+        """A claude_code primary with a tmux model set: keys, no operability."""
+        rendered = tomllib.loads(
+            render(
+                tmp_path, **REQUIRED, ISTOTA_BRAIN_TMUX_MODEL="claude-opus-5"
+            ).read_text()
+        )
+
+        assert rendered["brain"]["tmux"] == {"model": "claude-opus-5"}

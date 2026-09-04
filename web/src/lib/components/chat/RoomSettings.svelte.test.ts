@@ -62,7 +62,7 @@ const NATIVE: SelectableBrain = {
   label: 'Native',
   model_namespace: 'openai_compat',
 };
-/** Every kind the server can build, which is what `brain_namespaces` carries —
+/** Every kind the server knows, which is what `brain_namespaces` carries —
  *  deliberately wider than whatever a given test puts on the menu. */
 const ALL_BRAINS = [CLAUDE, TMUX, NATIVE];
 
@@ -201,7 +201,7 @@ describe('RoomSettings — brain', () => {
   const BRAIN = 'Room brain';
   const MODEL = 'Room model default';
   const EFFORT = 'Room effort default';
-  const CLEAR_WARNING = /clears the room's model and effort defaults/i;
+  const CROSSING_NOTE = /listing the models the new brain can run/i;
 
   it('renders no control where the server offered no kinds', async () => {
     // The shipped default, and also every non-admin: the endpoint publishes an
@@ -231,7 +231,11 @@ describe('RoomSettings — brain', () => {
     expect(screen.getByRole('button', { name: BRAIN })).toHaveTextContent('Default brain');
   });
 
-  it('sends the brain alone when only the brain changed', async () => {
+  it('clears the stale pin explicitly when the brain crosses', async () => {
+    // The selects are live now (ISSUE-417) and the crossing effect resets them
+    // to "Default model", so the modal sends what it is showing rather than
+    // leaving the server to infer it. Same end state as the server's own
+    // clearing rule, arrived at by saying so.
     offer([CLAUDE, NATIVE]);
     models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
     const onSave = vi.fn();
@@ -239,8 +243,21 @@ describe('RoomSettings — brain', () => {
     await pick(BRAIN, 'Native');
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(onSave).toHaveBeenCalledTimes(1);
-    // Only what changed: the backend leaves an absent key untouched, and
-    // re-sending the model here is exactly what the lock below prevents.
+    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({
+      brain: 'native',
+      model: null,
+    });
+  });
+
+  it('sends the brain alone when the room had no pin to clear', async () => {
+    // The backend leaves an absent key untouched, so a room with nothing
+    // stored must not grow a redundant `model: null`.
+    offer([CLAUDE, NATIVE]);
+    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    const onSave = vi.fn();
+    await mountSettled(room({ brain: 'claude_code' }), onSave);
+    await pick(BRAIN, 'Native');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ brain: 'native' });
   });
 
@@ -253,25 +270,46 @@ describe('RoomSettings — brain', () => {
     expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ brain: null });
   });
 
-  it('disables the model select while a namespace-crossing change is pending', async () => {
-    // The server applies `model` first and then clears it, so a model sent
-    // alongside this change would be written and dropped in one request. The
-    // user sees the consequence here rather than in the response.
+  it('keeps the model select usable across a namespace-crossing change', async () => {
+    // The selects used to be disabled here, because the server applied `model`
+    // first and the brain change then cleared it. The server applies the brain
+    // first now and validates a model in the same body against it, so both go
+    // in one save (ISSUE-417) — the control stays live and says what it is
+    // listing.
     offer([CLAUDE, NATIVE]);
     models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
     const model = () => screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
     const effort = () => screen.getByRole('button', { name: EFFORT }) as HTMLButtonElement;
     expect(model().disabled).toBe(false);
-    expect(screen.queryByText(CLEAR_WARNING)).toBeNull();
+    expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
 
     await pick(BRAIN, 'Native');
 
-    expect(model().disabled).toBe(true);
-    // Effort goes with the model: the server clears the pair, because the two
-    // were set as one.
-    expect(effort().disabled).toBe(true);
-    expect(screen.getByText(CLEAR_WARNING)).toBeTruthy();
+    expect(model().disabled).toBe(false);
+    expect(effort().disabled).toBe(false);
+    expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
+  });
+
+  it("asks for the pending brain's models when the selection crosses", async () => {
+    // The room still holds its old brain until the save lands, so `room_id`
+    // alone would offer the outgoing brain's list for a change already made.
+    offer([CLAUDE, NATIVE]);
+    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    await mountSettled(room({ id: 7, brain: 'claude_code' }));
+    models.mockClear();
+    await pick(BRAIN, 'Native');
+    expect(models).toHaveBeenCalledWith(7, 'native');
+  });
+
+  it('resets a stale pin to the brain default as the list changes', async () => {
+    // The select must not go on showing an id the new list does not hold.
+    offer([CLAUDE, NATIVE]);
+    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
+    expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent('opus (claude-opus-5)');
+    await pick(BRAIN, 'Native');
+    expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent('Default model');
   });
 
   it('leaves the model select alone for a move inside one namespace', async () => {
@@ -284,7 +322,7 @@ describe('RoomSettings — brain', () => {
     await pick(BRAIN, 'Tmux Claude');
     const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
     expect(model.disabled).toBe(false);
-    expect(screen.queryByText(CLEAR_WARNING)).toBeNull();
+    expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
   });
 
   // The outgoing brain is the one the modal is most likely not to have on its
@@ -302,16 +340,15 @@ describe('RoomSettings — brain', () => {
     await pick(BRAIN, 'Claude Code');
     const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
     expect(model.disabled).toBe(false);
-    expect(screen.queryByText(CLEAR_WARNING)).toBeNull();
+    expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
   });
 
-  it('locks an unpinned room moving out of the inherited namespace', async () => {
+  it('reads an unpinned room moving out of the inherited namespace as crossing', async () => {
     offer([CLAUDE, NATIVE], CLAUDE);
     models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
     await mountSettled(room({ brain: null, model: 'claude-opus-5' }));
     await pick(BRAIN, 'Native');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
-    expect(model.disabled).toBe(true);
+    expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
   });
 
   it('does not lock a clear back to a same-namespace inherited brain', async () => {
@@ -325,13 +362,12 @@ describe('RoomSettings — brain', () => {
     expect(model.disabled).toBe(false);
   });
 
-  it('locks a clear whose inherited brain is in another namespace', async () => {
+  it('reads a clear whose inherited brain is elsewhere as crossing', async () => {
     offer([CLAUDE, NATIVE], NATIVE);
     models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Default brain');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
-    expect(model.disabled).toBe(true);
+    expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
   });
 
   it('reads a pin the operator dropped from the allowlist off the wider map', async () => {
@@ -345,23 +381,22 @@ describe('RoomSettings — brain', () => {
     expect(model.disabled).toBe(false);
   });
 
-  it('still locks when the outgoing kind is in neither the menu nor the map', async () => {
+  it('still reads an unknown outgoing kind as crossing', async () => {
     // The residual unknown, and the direction that stays safe: a kind this
-    // build cannot construct has no namespace anywhere, and the server clears
-    // a pin whose portability it could not establish.
+    // build does not know has no namespace anywhere, and the server clears a
+    // pin whose portability it could not establish.
     offer([CLAUDE, NATIVE], CLAUDE);
     models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
     await mountSettled(room({ brain: 'ghost_brain', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Claude Code');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
-    expect(model.disabled).toBe(true);
+    expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
   });
 
-  it('drops a model already picked when the brain change locks it', async () => {
-    // Order matters: pick a model, then cross a namespace. The lock is read by
-    // `modelChanged` as well as by the control, so the abandoned pick is not
-    // sent — the alternative is the server writing it and clearing it, which
-    // reads as the pick not having taken.
+  it('drops a model picked for the outgoing brain when the selection crosses', async () => {
+    // Order matters: pick a model, then cross a namespace. That pick was made
+    // against the previous brain's list and cannot run on the new one, so the
+    // crossing effect resets it rather than sending an id the server would
+    // refuse.
     offer([CLAUDE, NATIVE]);
     models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
     const onSave = vi.fn();
@@ -423,6 +458,8 @@ describe('RoomSettings — brain', () => {
     // — the id is what scopes it.
     offer([CLAUDE, NATIVE]);
     await mountSettled(room({ id: 7 }));
-    expect(models).toHaveBeenCalledWith(7);
+    // `undefined` for the brain: the room's own is what scopes an unedited
+    // modal, and the pending-selection override is the crossing case above.
+    expect(models).toHaveBeenCalledWith(7, undefined);
   });
 });

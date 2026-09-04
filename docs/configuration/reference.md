@@ -8,8 +8,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 |---|---|---|
 | `bot_name` | `"Istota"` | User-facing name (chat, emails, folder names) |
 | `emissaries_enabled` | `true` | Include emissaries.md in system prompts |
-| `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-5"`. |
-| `effort` | `""` | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` (empty = model default) |
+| `model` | `""` | **Deprecated** (ISSUE-418). This was the `claude_code` brain's own default living at the top level, where it was applied to whatever brain ran and shadowed that brain's configured default — so a room pinned to `native` still got the Claude model. Still loads, and is migrated onto `[brain.claude_code]` and `[brain.tmux]` with a warning; never onto `[brain.native]`. Set the per-brain key instead. |
+| `effort` | `""` | **Deprecated** (ISSUE-418), migrated the same way as `model` above. |
 | `advisor_model` | `""` | Advisor model — Anthropic-namespace brains only (`claude_code` / `tmux_claude`); resolves through the same alias table as `model` but carries no effort. Must resolve to a model capable of *being* an advisor (a weak/cheap tier fails every task it runs on). Dropped for any task carrying its own model pin (`!model`, `!room model`, a `[[jobs]] model`). |
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default. That file — and nothing else in the config directory — is bind-mounted read-only into the sandbox, since the CLI opens it there |
 | `namespace` | `"istota"` | Instance namespace — prefixes systemd units, lock paths and similar, so two instances can share a host |
@@ -305,10 +305,14 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 
 ### `[brain.claude_code]`
 
-Today this block is the **subscription usage poll only**. The brain's model selection still comes from `[brain]` and `[models]`, and its subprocess behaviour is not configurable here. Every field defaults in code, so an absent block is the shipping behaviour. See [the subscription reading](../features/usage.md#the-subscription-reading) for what it does and why.
+This brain's own default model and effort, plus the subscription usage poll. Every field defaults in code, so an absent block is the shipping behaviour. See [the subscription reading](../features/usage.md#the-subscription-reading) for what the poll does and why.
+
+`model` and `effort` are read whatever `kind` is set to, because a fallback or a `source_type_overrides` entry can route here from another primary. They replaced the top-level keys, which were this brain's defaults sitting where they read as deployment-wide (ISSUE-418).
 
 | Setting | Default | Description |
 |---|---|---|
+| `model` | `""` | This brain's default model when the task pins none. Same values the top-level key took: a canonical id, a shortcut (`opus`), a role tier (`smart`), any of them plus a `:effort` modifier. Empty = the CLI's own default |
+| `effort` | `""` | This brain's default effort: `low`, `medium`, `high`, `xhigh`, `max`. Empty = the model's own. A task that pins a *model* takes no effort from here, since an effort chosen for one model need not be valid on another |
 | `subscription_usage` | `true` | Poll `api.anthropic.com` for plan utilization at all. Off = the doctor check SKIPs and the admin card is absent rather than showing a reason |
 | `subscription_usage_cache_ttl_seconds` | `1800` | One deployment-wide fetch per this window, and the **minimum** backoff after a failure. A server-stated `Retry-After` overrides it, capped at six hours. Floored at 1 — a 0 would fetch on every read. 30 minutes rather than 5 because the shortest window reported is five hours, so polling faster buys no accuracy for the requests it spends, and the endpoint rate-limits a deployment that tries |
 | `subscription_usage_timeout_seconds` | `10.0` | Matches `doctor.PROBE_TIMEOUT`. Floored at 1 |
@@ -318,7 +322,7 @@ Today this block is the **subscription usage poll only**. The brain's model sele
 
 The credential is not configured here. It is read — never written, never refreshed — from `CLAUDE_CODE_OAUTH_TOKEN`, then `~/.claude/.credentials.json`, then the macOS keychain.
 
-`[brain.tmux]` (used when `kind = "tmux_claude"` or routed-to): every field defaults in code to the prototype's pinned values, so an absent block is behavioral parity. Knobs include `fallback_trip_threshold`, `fallback_cooldown_seconds`, `ready_timeout_seconds`, `tmux_command_timeout`, `cli_version_pin`, and the pane-text marker lists (`ready_markers`, `trust_markers`, `theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`, `usage_limit_markers` — the last is what drives `stop_reason=usage_limit` and therefore failover) — heuristics pinned to a `claude` CLI version, so a CLI reword that breaks readiness detection is a config hotfix, not a code release. See `config.example.toml` for the full annotated block.
+`[brain.tmux]` (used when `kind = "tmux_claude"` or routed-to): every field defaults in code to the prototype's pinned values, so an absent block is behavioral parity. It carries this brain's own `model` and `effort` (ISSUE-418), on the same footing as `[brain.claude_code]`'s and taking the same values — it shares that brain's `anthropic` namespace and runs the same binary, which is why the retired top-level keys migrate onto both. Other knobs include `fallback_trip_threshold`, `fallback_cooldown_seconds`, `ready_timeout_seconds`, `tmux_command_timeout`, `cli_version_pin`, and the pane-text marker lists (`ready_markers`, `trust_markers`, `theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`, `usage_limit_markers` — the last is what drives `stop_reason=usage_limit` and therefore failover) — heuristics pinned to a `claude` CLI version, so a CLI reword that breaks readiness detection is a config hotfix, not a code release. See `config.example.toml` for the full annotated block.
 
 ## `[sleep_cycle]`
 

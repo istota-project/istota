@@ -2581,13 +2581,18 @@ export interface ChatCommands {
   model_aliases: ChatModelAlias[];
   /** What a room may be pinned to. */
   selectable_brains?: SelectableBrain[];
-  /** Every buildable kind's model namespace, not only the offered ones — the
+  /** Every *known* kind's model namespace, not only the offered ones — the
    *  brain a change moves *away from* need not be on the menu. It is the
    *  inherited one when the room pins nothing, and it can be a kind the
-   *  operator has since dropped from the allowlist. */
+   *  operator has since dropped from the allowlist.
+   *
+   *  Known rather than buildable (ISSUE-417): a namespace is a property of the
+   *  kind, not of the server's ability to construct the brain, so a kind whose
+   *  construction fails still has one here — and the server's own clearing rule
+   *  answers the same way, which is what keeps the two agreeing. */
   brain_namespaces?: Record<string, string>;
-  /** What a room with no pin of its own runs, on the web surface. Null where
-   *  the deployment's own kind cannot be built, or for a non-admin. */
+  /** What a room with no pin of its own runs, on the web surface. Null only for
+   *  a non-admin, or where the deployment's kind is not a known one. */
   inherited_brain?: SelectableBrain | null;
 }
 
@@ -2598,9 +2603,16 @@ export interface ChatCommands {
  *  another model namespace must not be offered names it cannot run. Omit it for
  *  the deployment default, which is what the composer's `!model` completion
  *  wants and what every caller got before rooms could pin a brain. */
-export function fetchChatCommands(roomId?: number): Promise<ChatCommands> {
-  const q = roomId === undefined ? '' : `?room_id=${roomId}`;
-  return apiFetch<ChatCommands>(`/chat/commands${q}`);
+export function fetchChatCommands(roomId?: number, brain?: string): Promise<ChatCommands> {
+  const params = new URLSearchParams();
+  if (roomId !== undefined) params.set('room_id', String(roomId));
+  // The kind the caller is *considering*, which `room_id` cannot express: the
+  // room holds its old brain until the save lands, so the settings modal asks
+  // for the pending selection's models (ISSUE-417). Ignored server-side for a
+  // non-admin or a kind the operator has not listed.
+  if (brain) params.set('brain', brain);
+  const q = params.toString();
+  return apiFetch<ChatCommands>(`/chat/commands${q ? `?${q}` : ''}`);
 }
 
 export function getChatRooms(timeoutMs = 0): Promise<{ rooms: ChatRoom[] }> {

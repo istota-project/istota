@@ -28,7 +28,23 @@ bot_name = "Istota"
 # (no need to also set `effort =`); the modifier's effort wins.
 # =============================================================================
 
-# Model to use. Accepts:
+# DEPRECATED (ISSUE-418): top-level `model` / `effort`.
+#
+# These were the claude_code brain's own defaults living at the root. Because
+# they sat here they read as deployment-wide, and the executor treated them as
+# one -- filling every request with them whatever brain was about to run, which
+# shadowed that brain's own configured default. A room pinned to `native` with
+# `[brain.native] model` set still ran the Claude model, against the native
+# endpoint, billed per token.
+#
+# They still load, and are migrated onto `[brain.claude_code]` and
+# `[brain.tmux]` with a warning -- both, because those two share the anthropic
+# namespace and the same `claude` binary, so the value is valid in either.
+# Never onto `[brain.native]`: an Anthropic model id cannot carry to an
+# openai_compat endpoint, which is the defect itself.
+#
+# Set the per-brain keys instead. Each brain's block takes the same values this
+# one did:
 #   - canonical IDs    "claude-opus-5", "claude-opus-4-7", "claude-sonnet-5"
 #   - shortcuts        "opus", "sonnet", "haiku"
 #   - role tiers       "smart", "general", "fast", or any custom alias from
@@ -36,13 +52,7 @@ bot_name = "Istota"
 #   - any of the above + an optional :effort modifier ("opus:high")
 # Bare shortcuts ("opus", "sonnet") float to the current latest version each
 # release; canonical IDs are immutable. Pin to a versioned ID for stability.
-# Empty or omitted = brain default.
 # model = "claude-opus-5"
-
-# Effort level: low, medium, high, xhigh, max. Support varies by model.
-# Opus 5 defaults to high on all surfaces. Other models may differ.
-# Read independently of `model` (or set inline via the :effort modifier above).
-# Empty or omitted = model default.
 # effort = "high"
 
 # Use config/system-prompt.md instead of Claude Code's default system prompt.
@@ -284,6 +294,10 @@ features = []
 # readiness detection is a config hotfix (override the relevant marker), not a
 # code release.
 # [brain.tmux]
+# model = "claude-opus-5"           # this brain's own default model (ISSUE-418);
+# effort = "high"                   #   same values as [brain.claude_code] above,
+#                                   #   same anthropic namespace, same binary.
+#                                   #   "" = the CLI's own default
 # fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
 # fallback_cooldown_seconds = 300   # how long the circuit stays open (routes to the
 #                                   # configured [brain] fallback, if any)
@@ -306,6 +320,13 @@ features = []
 # fallback burns the same plan. All fields default in code, so an absent block
 # is the shipping behaviour.
 # [brain.claude_code]
+# This brain's own default model and effort, used when nothing pins one for the
+# task (ISSUE-418). Read whatever `kind` is set to -- a native primary with a
+# claude_code fallback, or a source_type_overrides entry, routes here.
+# Empty or omitted = the CLI's own default.
+# model = "claude-opus-5"
+# effort = "high"
+#
 # Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
 # on /admin and in `istota doctor`. Read-only: the credential is never written or
 # refreshed. Off = the doctor check SKIPs and the admin card is absent; there is

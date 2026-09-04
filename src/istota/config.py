@@ -1442,8 +1442,22 @@ class TmuxBrainConfig:
     lists let a ``claude`` CLI reword be a config hotfix rather than a code
     release (the readiness / dialog / error heuristics are pane-text substring
     matches pinned to a CLI version — see ``cli_version_pin``).
+
+    ``model`` and ``effort`` are this brain's own defaults, on the same footing
+    as ``[brain.claude_code]``'s and ``[brain.native]``'s (ISSUE-418). This
+    brain shares ``ClaudeCodeBrain``'s ``anthropic`` namespace and runs the same
+    binary, so the two blocks accept the same values and the retired top-level
+    keys migrate onto **both** — which is what makes the migration exactly
+    behaviour-preserving for a deployment running either CLI brain. They are
+    still separate fields rather than one shared with ``[brain.claude_code]``:
+    an operator running both (a ``tmux_claude`` primary with a ``claude_code``
+    fallback is a shipped pairing) has no way to say "the same model" that does
+    not also mean "and I can never differ".
     """
 
+    # This brain's own default model / effort, used when the task pins none.
+    model: str = ""
+    effort: str = ""  # low/medium/high/xhigh/max (empty = the model's own default)
     # Operability / fallback (§4)
     fallback_trip_threshold: int = 5          # consecutive launch failures before the circuit opens
     fallback_cooldown_seconds: float = 300.0  # how long the circuit stays open
@@ -1489,13 +1503,27 @@ class ClaudeCodeBrainConfig:
     """Settings for the headless ``claude -p`` brain (``brain.kind =
     "claude_code"``, the default).
 
-    Today this block is the **subscription usage poll only** — the brain's model
-    selection still comes from ``[brain]`` and ``[models]``, and its subprocess
-    behaviour is not configurable here. On a subscription deployment the
-    dashboard's cost column is deliberately blank (a plan-equivalent list price
-    is not spend), so the real budget is the rate-limit windows Anthropic
-    reports at ``GET /api/oauth/usage``. ``istota.subscription_usage`` fetches
-    them; the doctor check, the ``/admin`` card and ``!usage`` render them.
+    ``model`` and ``effort`` are **this brain's** defaults, applied when nothing
+    pins one for the task. They used to be the top-level ``model`` / ``effort``,
+    a vestige of there having been one brain: sitting at the root they read as a
+    deployment-wide default, and the executor treated them as one, filling every
+    request with them whatever brain was about to run. That shadowed the other
+    brains' own configured defaults, so a room pinned to ``native`` with
+    ``[brain.native] model`` set ran the *Claude Code* model against the native
+    endpoint — billed per token, and a hard failure rather than a wrong bill
+    anywhere the endpoint does not happen to serve Anthropic ids (ISSUE-418).
+    The top-level keys still load and are migrated onto this block and
+    ``[brain.tmux]`` by ``_apply_legacy_brain_defaults``, with a warning; they
+    are not read anywhere else. Per-brain rather than deployment-wide is what
+    ``[brain.native]`` already did, and the ``or`` chain in each brain is now
+    the single place a default is applied.
+
+    Beyond those two the block is the **subscription usage poll**. On a
+    subscription deployment the dashboard's cost column is deliberately blank (a
+    plan-equivalent list price is not spend), so the real budget is the
+    rate-limit windows Anthropic reports at ``GET /api/oauth/usage``.
+    ``istota.subscription_usage`` fetches them; the doctor check, the ``/admin``
+    card and ``!usage`` render them.
 
     Every field is defaulted, so an absent ``[brain.claude_code]`` block is the
     shipping behaviour. The poll is read-only: the credential is never written
@@ -1511,6 +1539,12 @@ class ClaudeCodeBrainConfig:
     would make the feature misbehave — see its docstring for the three rules.
     """
 
+    # This brain's own default model / effort, used when the task pins none.
+    # Accepts everything `model` has always accepted: a canonical id, a
+    # shortcut, a role tier, any of them plus a `:effort` modifier. Resolved
+    # through this brain's alias table at the point of use, not here.
+    model: str = ""
+    effort: str = ""  # low/medium/high/xhigh/max (empty = the model's own default)
     # Poll api.anthropic.com for plan utilization at all.
     subscription_usage: bool = True
     # One deployment-wide fetch per this window; every surface reads the same
@@ -1684,8 +1718,15 @@ class Config:
     namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
-    model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-5") rather than a floating alias so upgrades are explicit. Empty = brain default
-    effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Support varies by model
+    # DEPRECATED (ISSUE-418): these were the *claude_code* brain's defaults
+    # living at the root, where they read as deployment-wide and were applied to
+    # every brain — shadowing each other brain's own configured default. They
+    # are migrated onto `[brain.claude_code]` and `[brain.tmux]` by
+    # `_apply_legacy_brain_defaults` and are read nowhere else. Kept as fields
+    # because every existing deployment sets them; a rollback has to load a
+    # config written by the newer version and vice versa.
+    model: str = ""  # deprecated alias for [brain.claude_code] / [brain.tmux] model
+    effort: str = ""  # deprecated alias for [brain.claude_code] / [brain.tmux] effort
     advisor_model: str = ""  # Advisor model ID or alias (anthropic-namespace brains only); resolved through the alias table like `model`, but carries no effort. Empty = no advisor. Dropped whenever a task pins its own model (see executor._resolve_advisor). Must resolve to a model capable of *being* an advisor — a weak/cheap tier (e.g. haiku) fails every task the advisor runs on; Istota does not validate this (no pairing table — see the spec's "Not doing")
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
@@ -2997,6 +3038,102 @@ def _apply_renamed_keys(data: dict, config: "Config") -> None:
             setattr(target, new, value)
 
 
+_LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code", "tmux")
+"""The blocks the retired top-level ``model`` / ``effort`` migrate onto.
+
+Both, not just ``claude_code``, and that is what makes the migration exactly
+behaviour-preserving rather than approximately. The top-level value *was* the
+default for whichever brain ran, and both of these are the same ``anthropic``
+namespace running the same ``claude`` binary, so the value is equally valid in
+either. A deployment with ``kind = "tmux_claude"`` and a top-level ``model``
+would otherwise lose its model on upgrade — silently, since an empty model is a
+legal request meaning "the CLI's own default".
+
+``native`` is deliberately absent. That is the whole defect: the top-level value
+is written in the Anthropic vocabulary and cannot carry to an
+``openai_compat`` endpoint, so migrating it there would re-create ISSUE-418
+inside the fix.
+"""
+
+
+def _apply_legacy_brain_defaults(data: dict, config: "Config") -> None:
+    """Migrate the retired top-level ``model`` / ``effort`` onto the CLI brains.
+
+    Runs after the walk, so a block that sets its own value keeps it — the new
+    spelling always wins, and only an unset field is filled. Warns whenever the
+    old key is present at all, because the file is rewritten by Ansible on every
+    deploy but not on the Docker or hand-written shapes, so an unwarned config
+    carries the old name for years.
+
+    Keyed on the key's **presence in the file**, not on its resolved value: the
+    dataclass default and an explicit ``model = ""`` are the same value, so
+    presence is the only way to tell an operator who wrote the retired key from
+    one who has already migrated. An explicitly empty key therefore warns too,
+    which is right — it is still the retired spelling sitting in the file. The
+    *value* comes off ``config``, so it has been through the walk's own type
+    coercion.
+    """
+    for old in ("model", "effort"):
+        if old not in data:
+            continue
+        value = getattr(config, old, "")
+        targets = [
+            name for name in _LEGACY_BRAIN_DEFAULT_TARGETS
+            if not getattr(getattr(config.brain, name, None), old, "")
+        ]
+        logger.warning(
+            "[config] top-level `%s` is deprecated: it is the claude_code "
+            "brain's default, not a deployment-wide one, and setting it here "
+            "shadowed every other brain's own (ISSUE-418). Move it to "
+            "[brain.claude_code] %s and/or [brain.tmux] %s.", old, old, old,
+        )
+        if not value:
+            continue
+        for name in targets:
+            block = getattr(config.brain, name, None)
+            if block is not None:
+                setattr(block, old, value)
+    _warn_native_lost_its_only_model(data, config)
+
+
+def _warn_native_lost_its_only_model(data: dict, config: "Config") -> None:
+    """Name the one upgrade this change can leave with no model at all.
+
+    A deployment that runs the native brain and set its model *only* at the top
+    level used to work, because the executor substituted that value into every
+    request — which is exactly the ISSUE-418 defect, an Anthropic id on an
+    ``openai_compat`` endpoint, but it did resolve to something. The migration
+    deliberately refuses to carry that value onto ``[brain.native]``, so such a
+    deployment now sends an empty model, which most endpoints reject outright.
+
+    Silence would be the worst outcome here: the failure is at the provider, per
+    task, and names nothing an operator could connect to an upgrade. So this
+    says it once at load, naming the key to set. It cannot be a refusal — a
+    config that fails to load takes the whole daemon down, and this is a
+    deployment that may also reach native only as a fallback, where the primary
+    is fine.
+
+    Reachability is asked the way ``_validate_brain_fallback`` asks it: kind,
+    fallback, or any ``source_type_overrides`` target. A deployment that cannot
+    reach native has nothing to warn about.
+    """
+    if "model" not in data or not getattr(config, "model", ""):
+        return
+    if getattr(config.brain.native, "model", ""):
+        return
+    targets = {config.brain.kind, config.brain.fallback}
+    targets |= set((config.brain.source_type_overrides or {}).values())
+    if "native" not in targets:
+        return
+    logger.warning(
+        "[config] the native brain is reachable but [brain.native] model is "
+        "empty, and the top-level `model` is no longer applied to it "
+        "(ISSUE-418) — an Anthropic model id cannot carry to an openai_compat "
+        "endpoint. Native tasks will send an empty model, which most endpoints "
+        "reject. Set [brain.native] model.",
+    )
+
+
 def _advisor_model(raw: object, key: str) -> object:
     """The advisor model name, which must be a string or nothing.
 
@@ -3233,6 +3370,10 @@ def load_config(config_path: Path | None = None) -> Config:
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
     _apply_renamed_keys(data, config)
+    # After the walk, so a `[brain.claude_code] model` in the same file wins
+    # over the top-level key it replaces, and before anything reads a brain
+    # block: `_validate_alias_overrides` below resolves names through the brain.
+    _apply_legacy_brain_defaults(data, config)
     report_unknown(unknown, config_path)
 
     if "users" in data:
