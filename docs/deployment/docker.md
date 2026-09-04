@@ -109,6 +109,30 @@ docker compose --profile browser --profile location up -d  # Combine as needed
 
 The browser container requires x86-64 (Chrome has no ARM packages).
 
+### Talk over the signaling server
+
+```bash
+docker compose --profile signaling up -d
+```
+
+This replaces polling Nextcloud for Talk messages with a WebSocket that Nextcloud pushes to. It cuts inbound latency to a single round trip and removes a request per room per cycle, which is what makes it worth the extra container on a deployment with more than a handful of rooms.
+
+**Three things have to line up, and the profile is only the first.**
+
+1. Talk has to have the server registered. `provision-nc.sh` does that in the post-installation hook, so `ISTOTA_TALK_SIGNALING_SERVER` and `ISTOTA_TALK_SIGNALING_SECRET` have to be set **before the first install**. Setting them later means running `occ talk:signaling:add` by hand.
+2. `ISTOTA_TALK_SIGNALING_ENABLED=true`, which is what tells the daemon to use it.
+3. The `websockets` library, which comes with the `signaling` extra and is already in the image.
+
+If the daemon is told to use it and cannot — Talk still in `internal` signaling mode, or the library missing — **it refuses to boot**. That is deliberate: a daemon quietly polling while you believe push is live is worse than one that did not start. `istota doctor --only talk.signaling_reachable` says which of the three is missing.
+
+**Registering an external signaling server changes call signaling for every Talk user on this Nextcloud**, not only for istota. With no MCU configured media stays peer to peer and calls keep working, but it is a change to a shared service. The container itself is one small Go binary — no Janus, no external NATS, and istota never publishes or subscribes to a media stream.
+
+**Two consequences to expect once it is on.** istota holds an active Talk session in every room it watches, around the clock, so it shows as present to everyone else in those rooms; it is not in a call and never joins one. And a second daemon pointed at the same Nextcloud opens its own sessions and receives every event — Talk allows several sessions per attendee — so duplicate work is prevented by the read cursor rather than by the transport. Point a staging daemon at a staging Nextcloud.
+
+There is no secret to configure on istota's side. It authenticates as its own Nextcloud user, so the server URL, the connection token and the per-room session are minted on demand from calls the bot account can already make. The shared secret above is Talk's, for the server to trust Nextcloud.
+
+`ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT=true` goes one step further and ingests the message the server relays instead of refetching it. Leave it off unless you have a reason: it is the only part of this path that can be wrong about message content rather than about timing, and Talk only relays a message at all from roughly Talk 21 — below that every event is a bare notification and the setting changes nothing.
+
 ### The devbox is Ansible-only
 
 This stack ships no devbox service, and the `devbox` skill cannot be used on it. That is a decision rather than a gap. Three separate reasons, any one of which is enough on its own:

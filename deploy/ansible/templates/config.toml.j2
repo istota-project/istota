@@ -232,6 +232,13 @@ share_default_expire_days = {{ istota_nextcloud_share_default_expire_days }}
 enabled = {{ istota_talk_enabled | lower }}
 bot_username = "{{ istota_talk_bot_username }}"
 
+[talk.signaling]
+enabled = {{ istota_talk_signaling_enabled | lower }}
+url = "{{ istota_talk_signaling_url }}"
+room_sync_interval = {{ istota_talk_signaling_room_sync_interval }}
+reconnect_backoff_max = {{ istota_talk_signaling_reconnect_backoff_max }}
+payload_direct = {{ istota_talk_signaling_payload_direct | lower }}
+
 [email]
 enabled = {{ istota_email_enabled | lower }}
 {% if istota_email_enabled %}

@@ -18,6 +18,7 @@ from ...config import Config
 from ...talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
 from ..ingest import ingest_message
+from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
 
 logger = logging.getLogger("istota.transport.talk.inbound")
 
@@ -220,6 +221,11 @@ class _TxnHold:
     it commits, so it includes `sqlite3.connect`, the `PRAGMA synchronous` write
     and any wait for the lock itself. That is deliberate — the wait for the lock
     is the cost another writer pays, and it is the number an investigator wants.
+    It covers **two** locks: the transport's `asyncio.Lock` (entered inside
+    `_timed_poll_txn`, so a wait for another coroutine on the loop is counted
+    here rather than being invisible) and then SQLite's own. A hold dominated by
+    the first is a queue on the loop, not a long write transaction, which is
+    worth knowing before reading a large `held_ms` as a slow write.
 
     `awaits` counts only the awaits that took at least `_TXN_AWAIT_FLOOR_SECONDS`
     and `await_seconds` sums only those. The floor is applied per await rather
@@ -637,8 +643,19 @@ def _apply_room_pass(
     plans: list[_RoomPlan],
     *,
     full_sweep: bool,
+    open_poll=None,
 ) -> tuple[list, int]:
     """Apply the room pass and return the polls to open plus the gated count.
+
+    ``open_poll`` is what a room that passed the gate becomes, and it is a seam
+    rather than a generalisation: the signaling reconciler applies these same
+    writes and wants the *decision* — which rooms are behind their cursor —
+    without issuing the request, because on that driver the fetch is the
+    drain's job and happens one room at a time behind the transport lock.
+    Calling ``_poll_single_conversation`` for it would build a coroutine
+    nobody awaits. It defaults to ``None`` and is resolved at call time rather
+    than in the signature, so a test that monkeypatches
+    ``inbound._poll_single_conversation`` still reaches the real default.
 
     Writes only, and no await — this is the block that takes the write lock, and
     the whole point of the split is that nothing in it waits on a socket.
@@ -647,12 +664,20 @@ def _apply_room_pass(
     lock was free while Nextcloud answered, which is the fix, and that is
     exactly the window in which another writer can register the room or advance
     its cursor. `register_room` / `add_room_binding` / `add_room_member` are all
-    `INSERT OR IGNORE` and need no help, but `set_talk_poll_state` is an
-    unconditional upsert: writing `latest_id - 1` over a cursor somebody
-    advanced would rewind the room and re-poll messages already read.
+    `INSERT OR IGNORE` and need no help, and `set_talk_poll_state` no longer
+    rewinds a cursor — but the re-read below is still required, and now for the
+    opposite reason. The cursor seed is `latest_id - 1`, computed from the
+    server's newest message, so it is *ahead* of a cursor another writer
+    initialised from anywhere further back, and with the `MAX` guard in place
+    it would carry the room past every message between the two. So the re-read
+    decides **both** halves: the seed is written only when the cursor is still
+    absent, and the room is polled from whatever the re-read found. Guarding
+    the write alone leaves the poll starting at the seed, which skips that same
+    range and then advances the stored cursor over it.
     """
     poll_tasks = []
     gated = 0
+    open_one = open_poll if open_poll is not None else _poll_single_conversation
 
     for plan in plans:
         if plan.cursor_init_failed:
@@ -702,19 +727,27 @@ def _apply_room_pass(
         last_message_id = plan.last_message_id
         if plan.needs_cursor_init:
             if plan.latest_id:
-                last_message_id = plan.latest_id - 1
-                # Persist it. The only other writer is the message loop, which
-                # fires solely for a message a poll actually returned — so a
-                # room whose polls keep coming back empty never acquired a
-                # cursor at all, and `known_cursor is None` bypassed the gate on
-                # every cycle for ever. `latest_id - 1` is behind the newest
-                # message by construction, so the next poll still returns it
-                # (ISSUE-399 review).
+                # Re-read, and use what it says — see this function's
+                # docstring. The seed is `latest_id - 1`, which is behind the
+                # newest message by construction so the next poll still returns
+                # it (ISSUE-399 review), and which the message loop would never
+                # write itself: it fires only for a message a poll returned, so
+                # a room whose polls keep coming back empty never acquired a
+                # cursor at all and bypassed the gate on every cycle for ever.
                 #
-                # Only when the cursor is *still* absent: see the re-read note
-                # in this function's docstring.
-                if db.get_talk_poll_state(conn, plan.token) is None:
+                # Guarding only the *write* is not enough, and the difference is
+                # lost messages rather than a tidier branch: `last_message_id`
+                # is also where this room is polled from, so taking the seed
+                # while another writer's cursor sits further back skips every
+                # message between the two — and the results loop then advances
+                # the stored cursor past them, since it writes the ids the poll
+                # did return.
+                existing = db.get_talk_poll_state(conn, plan.token)
+                if existing is None:
+                    last_message_id = plan.latest_id - 1
                     db.set_talk_poll_state(conn, plan.token, last_message_id)
+                else:
+                    last_message_id = existing
                 logger.debug(
                     "First poll for room %s - starting from message %d",
                     plan.token, last_message_id,
@@ -746,7 +779,7 @@ def _apply_room_pass(
             continue
 
         poll_tasks.append(
-            _poll_single_conversation(
+            open_one(
                 client,
                 plan.token,
                 last_message_id,
@@ -755,6 +788,545 @@ def _apply_room_pass(
         )
 
     return poll_tasks, gated
+
+
+@dataclass(frozen=True)
+class RoomContext:
+    """What the results block needs about a room and the message does not carry.
+
+    Two fields, both read out of the ``/api/v4/room`` listing, and both passed
+    explicitly wherever they are needed rather than looked up with a default —
+    see :func:`poll_one_conversation` for what a default costs.
+
+    ``conv_type`` is ``None`` when the listing named no type. That reads
+    through to ``_get_participants`` exactly as the poll path's
+    ``conv_types.get(token)`` does: the participant list is fetched and the
+    @mention gate applies. It is the safe direction. The unsafe value is
+    ``1``, which is a DM and skips the gate entirely.
+    """
+
+    conv_type: int | None
+    display_name: str | None
+
+
+@dataclass
+class RoomPass:
+    """One reconciliation pass over the bot's Talk conversations.
+
+    The room-registration half of a poll cycle, plus everything the signaling
+    supervisor needs to decide its watcher set. Both drivers call
+    :func:`reconcile_talk_rooms` and read this, which is what keeps
+    ``resolve_room_token`` / ``register_room`` / ``rename_room`` /
+    ``archive_orphaned_talk_rooms`` and the cursor-initialisation rule in one
+    implementation rather than two.
+
+    ``behind`` is the safety net, and it is a comparison rather than a sweep:
+    the rooms whose ``lastMessage.id`` the listing put ahead of their stored
+    cursor. On the poll path each entry is a live ``_poll_single_conversation``
+    coroutine; on the signaling path ``open_poll`` makes it a
+    ``(token, cursor)`` pair, because there the fetch is the drain's job.
+
+    ``watchable`` is deliberately narrower than ``live_tokens``: a room whose
+    cursor could not be initialised gets no watcher, because catch-up reads
+    *forward from the cursor* and a NULL one means reading from zero, which
+    ingests a room's recent history as new tasks.
+
+    ``behind_cursor`` is narrower than ``behind``, and the two must not be
+    confused — one is a work list and the other is a diagnostic. The gate
+    un-gates a room for **two** reasons: because its `lastMessage.id` is ahead
+    of its cursor, and because there is no cursor to compare against at all. A
+    room in the second state stays there indefinitely — an empty group room
+    acquires no cursor until somebody speaks — so counting it as "behind" would
+    have `doctor` WARN for ever that "messages are arriving over the fallback
+    fetch rather than over the event stream" on a deployment whose event stream
+    is working perfectly. That number is the one thing that distinguishes a
+    stream that is delivering from one the safety net is carrying, so a
+    permanent false positive in it is worse than not having it. Both rooms
+    still need fetching, so both are in ``behind``.
+    """
+
+    conversations: list[dict]
+    conv_types: dict
+    conv_names: dict
+    context: dict[str, RoomContext]
+    live_tokens: set[str]
+    cursors: dict[str, int | None]
+    watchable: set[str]
+    behind: list
+    behind_cursor: set[str]
+    gated: int
+    full_sweep: bool
+    stale_listing: bool
+    listing_failed: bool
+
+
+def _empty_room_pass(*, listing_failed: bool) -> RoomPass:
+    return RoomPass(
+        conversations=[], conv_types={}, conv_names={}, context={},
+        live_tokens=set(), cursors={}, watchable=set(), behind=[],
+        behind_cursor=set(), gated=0,
+        full_sweep=False, stale_listing=False, listing_failed=listing_failed,
+    )
+
+
+async def reconcile_talk_rooms(
+    config: Config,
+    *,
+    client: TalkClient | None = None,
+    full_sweep: bool | None = None,
+    archive: bool | None = None,
+    open_poll=None,
+) -> RoomPass:
+    """List the bot's conversations, register them, and say which are behind.
+
+    The room half of a poll cycle, lifted out so the signaling supervisor and
+    the poller run the same one. It is the whole of what used to sit between
+    ``poll_talk_conversations``' guards and its ``asyncio.wait``: the listing
+    with its cache and ISSUE-399's stale-list rule, the three phases of the
+    room pass (ISSUE-406), the orphan archival, and the sweep stamp.
+
+    **It takes no ``conn``, and that is the point rather than an omission.** A
+    connection parameter puts the caller's SQLite transaction across the
+    network phase, which is precisely what the ``_plan`` / ``_fetch`` /
+    ``_apply`` split removed: under WAL the first write turns the transaction
+    into a writer, and every await after it holds the write lock across a
+    round trip. This opens its own scopes around the read and the write phase,
+    both behind the transport lock, with nothing open while Nextcloud answers.
+
+    ``full_sweep`` defaults to the module's own ``_last_full_sweep`` clock and
+    stamps it, which is the poller's behaviour. A caller passing the flag
+    explicitly — the supervisor, which runs on its own interval and must not
+    move a clock the poller reads — neither consults nor stamps it. A stale
+    listing still forces a sweep either way: a list the server did not just
+    hand us says which rooms exist and nothing about what is new in them.
+
+    ``archive`` defaults to ``full_sweep``, so the poller keeps archiving on
+    the sweep alone; the supervisor passes ``True`` because its own interval
+    *is* the sweep cadence. The non-empty-token-set guard is inside
+    ``archive_orphaned_talk_rooms``' caller either way.
+    """
+    if not config.talk.enabled or not config.nextcloud.url:
+        return _empty_room_pass(listing_failed=True)
+
+    global _conversation_cache, _last_full_sweep
+
+    if client is None:
+        client = get_talk_client(config)
+
+    now = time.monotonic()
+
+    # A cycle is either gated or a full sweep. Gated, only a room whose
+    # `lastMessage` is newer than our cursor is fetched; on a sweep every room
+    # is, which is what bounds the cost of a gate that reads wrongly.
+    stamp_sweep = full_sweep is None
+    if stamp_sweep:
+        sweep_interval = config.scheduler.talk_poll_full_sweep_interval
+        full_sweep = (
+            sweep_interval <= 0
+            or _last_full_sweep is None
+            or now - _last_full_sweep >= sweep_interval
+        )
+
+    # Get all conversations, using cache to avoid blocking every cycle.
+    #
+    # The gate reads `lastMessage` out of this payload, so on a gated cycle the
+    # cache would be a stale gate: at a 60s TTL and a 10s poll interval six
+    # consecutive cycles read one snapshot, and a message arriving just after a
+    # refresh would be held for the rest of the minute — worse inbound latency
+    # than the long-poll the gate replaces. So a gated cycle always refetches,
+    # and the cache degrades to what it is still needed for: the last known
+    # room list for a cycle where Nextcloud did not answer. One short request
+    # per cycle against N held ones is the trade (ISSUE-399).
+    cache_valid = (
+        not _gate_enabled(config)
+        and _conversation_cache is not None
+        and now - _conversation_cache[1] < _CONVERSATION_CACHE_TTL
+    )
+
+    stale_listing = False
+    if cache_valid:
+        conversations = _conversation_cache[0]
+    else:
+        try:
+            conversations = await client.list_conversations()
+            _conversation_cache = (conversations, now)
+        except Exception as e:
+            if _conversation_cache is not None:
+                logger.debug(
+                    "list_conversations failed (%s: %s), using cached list (%d rooms)",
+                    type(e).__name__, e, len(_conversation_cache[0]),
+                )
+                conversations = _conversation_cache[0]
+                # A list the server did not just hand us says which rooms exist
+                # and nothing about what is new in them. Its `lastMessage` is
+                # frozen at the last successful fetch while the cursors keep
+                # advancing from whatever the polls return, so once a cursor
+                # reaches that frozen id the room gates shut on every cycle for
+                # as long as the listing keeps failing — an outage that used to
+                # cost nothing would instead cut inbound to one sweep per
+                # `talk_poll_full_sweep_interval`. So a stale list ungates the
+                # cycle rather than gating it (ISSUE-399 review).
+                full_sweep = True
+                stale_listing = True
+            else:
+                logger.warning("Error listing Talk conversations: %s: %s", type(e).__name__, e)
+                return _empty_room_pass(listing_failed=True)
+
+    # Build list of conversations to poll and initialize new ones.
+    #
+    # Three phases, and the split is the fix rather than a tidy-up (ISSUE-406).
+    # This used to be one `db.get_db` block that read the registry, wrote to it,
+    # awaited Nextcloud and wrote again. `db.get_db` commits at the end of the
+    # `with` and SQLite's deferred transaction becomes a *writer* at the first
+    # write, so every await after that first write was a WAL write lock held
+    # across a round trip — and every other writer in the daemon queued behind
+    # it, each for up to `db.get_db`'s 30s wait. Readers were unaffected, which
+    # is why it went unseen.
+    #
+    # It also recurred rather than being first-encounter work: a group room
+    # nobody has written in fails both the cursor guard and the history-cache
+    # guard on every cycle for ever, and paid two round trips each time.
+    #
+    # So: read what the registry says, close, ask Nextcloud, reopen to write.
+    # The results block cannot be split this way — see the atomicity note in
+    # `poll_talk_conversations` — and keeps its instrumented awaits.
+    conv_types: dict[str, int] = {}  # token -> conversation type
+    conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
+
+    async with talk_db(config.db_path) as conn:
+        plans = _plan_room_pass(conn, config, conversations, conv_types, conv_names)
+
+    await _fetch_room_pass(client, config, plans)
+
+    async with contextlib.AsyncExitStack() as stack:
+        # Instrumentation outermost, then the transport lock, then the
+        # connection. `_TxnHold` counts the wait for the lock as part of what
+        # it reports, deliberately — the wait is the cost another writer pays —
+        # and the connection is opened last so the write lock is held for no
+        # longer than the transaction itself.
+        stack.enter_context(_timed_poll_txn("rooms"))
+        await stack.enter_async_context(loop_db_lock())
+        conn = stack.enter_context(
+            db.get_db(config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS),
+        )
+        behind, gated = _apply_room_pass(
+            conn, config, client, plans,
+            full_sweep=full_sweep, open_poll=open_poll,
+        )
+
+        # Read back rather than reconstructed from the plans: `_apply_room_pass`
+        # re-reads a cursor another writer may have initialised since the plan
+        # and polls from *that*, so the plan's own idea of the cursor is not
+        # what the room is now filed under. This is the value the watcher set
+        # is decided from, so it has to be the stored one.
+        cursors = {
+            plan.token: db.get_talk_poll_state(conn, plan.token)
+            for plan in plans if not plan.cursor_init_failed
+        }
+
+        # Reconcile the unified registry against Nextcloud: a Talk room the bot
+        # is no longer in (deleted in NC, or bot removed) drops out of the
+        # conversation list, so archive its registry row — otherwise it keeps
+        # surfacing in the web room list forever. `conversations` is the bot's
+        # *complete* room list; only reconcile when it's non-empty so a transient
+        # empty/failed fetch can't mass-archive every room.
+        #
+        # Only on a full sweep for the poller. Gating made a quiet cycle return
+        # without awaiting anything, so cycles now come round roughly every
+        # `talk_poll_interval` instead of every `talk_poll_timeout +
+        # talk_poll_interval` — and this is a mass-archive whose only guard is
+        # that the token set is non-empty, so a listing that came back
+        # truncated for any reason archives every room missing from it. Room
+        # membership changes on a human timescale and does not need re-deciding
+        # every ten seconds; running it on the sweep keeps the number of draws
+        # against that guard where it was (ISSUE-399 review). The supervisor's
+        # own interval is that cadence, so it asks for it directly.
+        live_talk_tokens = {
+            c.get("token") for c in conversations if c.get("token")
+        }
+        if (full_sweep if archive is None else archive) and live_talk_tokens:
+            n = db.archive_orphaned_talk_rooms(conn, live_talk_tokens)
+            if n:
+                logger.info("Archived %d Talk room(s) no longer in Nextcloud", n)
+
+    # Stamped here rather than beside the decision above, so the timestamp
+    # records a sweep that happened. Stamped early, a cycle that died on the
+    # listing fetch or anywhere in the room loop still spent the credit, and
+    # the next sweep was deferred a full interval — which matters because the
+    # sweep is the gate's only safety net (ISSUE-399 review).
+    if stamp_sweep and full_sweep:
+        _last_full_sweep = now
+
+    if gated or full_sweep:
+        logger.debug(
+            "Talk poll: %d room(s) polled, %d held by the lastMessage gate%s",
+            len(behind), gated, " (full sweep)" if full_sweep else "",
+        )
+
+    context = {
+        plan.token: RoomContext(
+            conv_type=plan.conv_type, display_name=plan.display_name,
+        )
+        for plan in plans
+    }
+    # The gate's own question, asked again and only where it can be answered.
+    # `_has_news` is cheap and pure — it reads the listing entry the pass
+    # already holds — so this costs nothing and is not a second source of
+    # truth: a room with no `known_cursor` has nothing to be behind, whatever
+    # the gate did with it.
+    behind_cursor = {
+        plan.token for plan in plans
+        if not plan.cursor_init_failed
+        and plan.known_cursor is not None
+        and _has_news(plan.conv, plan.known_cursor)
+    }
+    return RoomPass(
+        conversations=conversations,
+        conv_types=conv_types,
+        conv_names=conv_names,
+        context=context,
+        live_tokens=live_talk_tokens,
+        cursors=cursors,
+        watchable={t for t, c in cursors.items() if c is not None},
+        behind=behind,
+        behind_cursor=behind_cursor,
+        gated=gated,
+        full_sweep=bool(full_sweep),
+        stale_listing=stale_listing,
+        listing_failed=False,
+    )
+
+
+async def poll_one_conversation(
+    config: Config,
+    conversation_token: str,
+    *,
+    conv_type: int | None,
+    display_name: str | None,
+    client: TalkClient | None = None,
+) -> list[int]:
+    """Fetch one room and run the results transaction for it alone.
+
+    The signaling trigger path: a watcher decoded a chat event, the drain hands
+    the token here, and everything below is the poller's own code — the same
+    ``_poll_single_conversation`` and the same results block, so the cursor
+    contract, the filter chain, the confirmation handling and the atomicity
+    guarantee are untouched.
+
+    **The room context is required and has no default anywhere on this path.**
+    The results block reads ``conv_types.get(token, 1)``, and 1 is a DM:
+    ``_get_participants`` returns ``[]`` for type 1, ``_is_multi_user`` is then
+    False, and the ``is_bot_mentioned`` gate is skipped. A
+    ``poll_one_conversation(config, token)`` with no listing would take that
+    default and ingest **every** message in every group room the bot sits in,
+    from any configured user, with no @mention required — and would also stop
+    stripping the mention, drop the ``[Room participants: …]`` prefix and pass
+    a null channel name. So the supervisor holds a token → context map built
+    from the same ``list_conversations`` payload it builds the watcher set
+    from, which gives the invariant that makes this safe: a watcher exists only
+    because that listing named its room, so a watcher always has context. A
+    drain that cannot find context does not guess — it counts and returns, and
+    the reconciliation pass fetches the room with context in hand.
+
+    ``None`` for either field is not a default: it is what the listing said,
+    and it reads through exactly as the poll path's ``.get(token)`` does.
+
+    **A room with no stored cursor is fetched from zero, and that is the
+    poller's behaviour rather than a hazard here.** The two rooms that reach
+    this with a NULL cursor are a DM on first sight — where the history fetch
+    is the point, since a DM is initiated by messaging the bot — and a room
+    with no messages at all. A group room with history and no cursor cannot:
+    ``_apply_room_pass`` either seeds its cursor or marks it
+    ``cursor_init_failed`` and drops it from the pass entirely.
+
+    ``client`` defaults to the pooled one, and exists for the same reason
+    :func:`reconcile_talk_rooms` takes it: the supervisor resolves the client
+    once for its whole lifetime rather than per fetch, and a caller on a loop
+    that is not the runtime's must be able to hand in its own — ``
+    get_talk_client`` refuses that caller outright, since the pool binds to
+    whichever loop issued the first request.
+
+    **Two things it deliberately does not borrow from the poll path**, both
+    found in review, and both of which would have made the design's headline
+    claim false while every test stayed green.
+
+    ``timeout=0``, not ``scheduler.talk_poll_timeout``. The trigger path fetches
+    because a message already exists, so nothing needs to be waited for — but
+    the coalescing rule makes the *second* fetch of a burst the normal case,
+    and that one reads from a cursor the first fetch just advanced past every
+    message. With the poller's 30-second timeout Nextcloud holds it for the
+    full 30, on the one drain task every other dirty room queues behind, so the
+    push path would degrade to worse-than-poll latency under exactly the
+    traffic it exists for — and would reintroduce a held request per burst,
+    against "no held request remains anywhere in the steady state".
+
+    And ``client.poll_messages`` directly rather than through
+    ``_poll_single_conversation``, which catches every exception and returns
+    ``(token, [])``. That is right for the poll path, where the cycle carries
+    on and the room is re-polled ten seconds later. Here it is the failure the
+    drain's whole error contract is written against: a read timeout would
+    arrive as a clean empty result, the drain would count a success, clear the
+    dirty bit and strand the room until the next reconciliation — with nothing
+    anywhere saying so, because the socket is fine. The fetch raises, the drain
+    preserves the dirty bit, and the failure is counted.
+    """
+    if client is None:
+        client = get_talk_client(config)
+
+    async with talk_db(config.db_path) as conn:
+        cursor = db.get_talk_poll_state(conn, conversation_token)
+
+    messages = await client.poll_messages(
+        conversation_token,
+        last_known_message_id=cursor if cursor is not None else 0,
+        timeout=0,
+    )
+    if not messages:
+        return []
+
+    return await _process_poll_results(
+        config, client, [(conversation_token, messages)],
+        {conversation_token: conv_type},
+        {conversation_token: display_name} if display_name else {},
+    )
+
+
+async def ingest_relayed_comments(
+    config: Config,
+    conversation_token: str,
+    comments: list[dict],
+    *,
+    conv_type: int | None,
+    display_name: str | None,
+    client: TalkClient | None = None,
+) -> list[int]:
+    """The relayed payload, into the same transaction the fetch path uses.
+
+    ``payload_direct``. The signaling server forwards the comment Talk
+    serialised, so a room whose every event carried one needs no ``GET /chat``
+    at all — this is the last request the design removes. It is deliberately
+    the last thing built, because it is the only part that can be wrong about
+    message *content* rather than about timing: everything above it refetches,
+    so a bug there is a latency bug.
+
+    **A relayed comment is the same dict the fetch path reads.** Both sides
+    call ``$message->toArray()``; measured field-for-field identical on
+    Nextcloud 34 / Talk 24.0.4 across four shapes (plain, @mention with
+    ``messageParameters``, a reply with a ``parent``, and one the bot posted),
+    each against the OCS message read both as the bot and as the human. The
+    relay carries exactly one key OCS does not put in the body,
+    ``lastCommonRead``, which the chat endpoint returns as a response header;
+    nothing here reads it. So this hands the comments to
+    ``_process_poll_results`` unchanged rather than translating them, and the
+    filter chain, the confirmation handling, the cursor advance and the
+    atomicity guarantee are the fetch path's own.
+
+    **Two things it does that the fetch path gets for free**, and both are
+    corrections rather than polish:
+
+    ``id > cursor``, applied here. On the fetch path the cursor is an argument
+    to the *server*, so a message already processed is never returned. Here the
+    payload arrived unasked, and a comment the watcher queued moments before a
+    reconnect has already been ingested by ``catch_up_conversation`` reading
+    forward from the same cursor. ``ingest_message`` dedups on the Talk message
+    id, but ``dispatch_command``, ``handle_confirmation_reply`` with its ack
+    post, and ``confirmations.cancel_for_conversation`` do not — so without
+    this filter a reconnect landing mid-burst re-runs a command, re-posts an
+    acknowledgement and re-cancels a confirmation. The read is safe against the
+    obvious race because the caller holds the room's in-flight flag, which is
+    what ``catch_up`` defers to and what the drain takes: inside that window
+    nothing else advances this room's cursor, and the poll loop is not running
+    at all when signaling is enabled.
+
+    Sorted by id. ``_process_poll_results`` walks messages in order and
+    advances the cursor as it goes, and a batch here is accumulated across
+    several events rather than returned by one call, so arrival order is the
+    only thing that would otherwise carry it.
+
+    A comment with no usable id is dropped rather than guessed at: the id is
+    what the cursor, the dedup and the ordering are all keyed on.
+    """
+    if not comments:
+        return []
+    if client is None:
+        client = get_talk_client(config)
+
+    async with talk_db(config.db_path) as conn:
+        cursor = db.get_talk_poll_state(conn, conversation_token)
+
+    floor = cursor if isinstance(cursor, int) else 0
+    fresh = []
+    for comment in comments:
+        message_id = comment.get("id")
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            continue
+        if message_id > floor:
+            fresh.append((message_id, comment))
+    if not fresh:
+        return []
+    fresh.sort(key=lambda pair: pair[0])
+
+    return await _process_poll_results(
+        config, client, [(conversation_token, [c for _id, c in fresh])],
+        {conversation_token: conv_type},
+        {conversation_token: display_name} if display_name else {},
+    )
+
+
+async def catch_up_conversation(
+    config: Config,
+    conversation_token: str,
+    *,
+    conv_type: int | None,
+    display_name: str | None,
+    client: TalkClient | None = None,
+) -> list[int]:
+    """Read one room forward from its cursor. Runs on every join and reconnect.
+
+    **``fetch_messages_since``, never ``poll_messages``**, and the difference
+    is not cosmetic. ``poll_messages`` sends ``timeout=talk_poll_timeout``,
+    which Nextcloud holds for 30 seconds on a quiet room — and the ingress in
+    front of the signaling server drops every connection hourly regardless of
+    traffic, so N watchers reconnect at once, 24 times a day. With
+    ``poll_messages`` this path would reissue exactly the synchronised burst of
+    held requests the design exists to remove. It also caps at 50 messages
+    silently, so a gap longer than that would be truncated with the cursor
+    advanced past what was never read, and it is not documented oldest-first,
+    which the results loop requires.
+
+    **A room with no cursor gets no catch-up**, because reading forward from a
+    NULL cursor means reading from zero, which ingests a room's recent history
+    as new tasks. It is not reachable — the supervisor starts no watcher for
+    such a room — so this logs rather than fetching, and the room is left to
+    the reconciliation pass.
+
+    ``client`` defaults to the pooled one; see :func:`poll_one_conversation`.
+    """
+    if client is None:
+        client = get_talk_client(config)
+
+    async with talk_db(config.db_path) as conn:
+        cursor = db.get_talk_poll_state(conn, conversation_token)
+
+    if cursor is None:
+        logger.error(
+            "Talk catch-up for %s has no cursor to read forward from; "
+            "skipping rather than reading from zero",
+            conversation_token,
+        )
+        return []
+
+    messages = await client.fetch_messages_since(
+        conversation_token, since_id=cursor,
+    )
+    if not messages:
+        return []
+
+    return await _process_poll_results(
+        config, client, [(conversation_token, messages)],
+        {conversation_token: conv_type},
+        {conversation_token: display_name} if display_name else {},
+    )
 
 
 async def poll_talk_conversations(config: Config) -> list[int]:
@@ -788,136 +1360,13 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     if not config.nextcloud.url:
         return []
 
-    global _conversation_cache, _last_full_sweep
-
     client = get_talk_client(config)
-    created: list[int] = []
 
-    now = time.monotonic()
+    room_pass = await reconcile_talk_rooms(config, client=client)
+    if room_pass.listing_failed:
+        return []
 
-    # A cycle is either gated or a full sweep. Gated, only a room whose
-    # `lastMessage` is newer than our cursor is long-polled; on a sweep every
-    # room is, which is what bounds the cost of a gate that reads wrongly.
-    sweep_interval = config.scheduler.talk_poll_full_sweep_interval
-    full_sweep = (
-        sweep_interval <= 0
-        or _last_full_sweep is None
-        or now - _last_full_sweep >= sweep_interval
-    )
-
-    # Get all conversations, using cache to avoid blocking every cycle.
-    #
-    # The gate reads `lastMessage` out of this payload, so on a gated cycle the
-    # cache would be a stale gate: at a 60s TTL and a 10s poll interval six
-    # consecutive cycles read one snapshot, and a message arriving just after a
-    # refresh would be held for the rest of the minute — worse inbound latency
-    # than the long-poll the gate replaces. So a gated cycle always refetches,
-    # and the cache degrades to what it is still needed for: the last known
-    # room list for a cycle where Nextcloud did not answer. One short request
-    # per cycle against N held ones is the trade (ISSUE-399).
-    cache_valid = (
-        not _gate_enabled(config)
-        and _conversation_cache is not None
-        and now - _conversation_cache[1] < _CONVERSATION_CACHE_TTL
-    )
-
-    if cache_valid:
-        conversations = _conversation_cache[0]
-    else:
-        try:
-            conversations = await client.list_conversations()
-            _conversation_cache = (conversations, now)
-        except Exception as e:
-            if _conversation_cache is not None:
-                logger.debug(
-                    "list_conversations failed (%s: %s), using cached list (%d rooms)",
-                    type(e).__name__, e, len(_conversation_cache[0]),
-                )
-                conversations = _conversation_cache[0]
-                # A list the server did not just hand us says which rooms exist
-                # and nothing about what is new in them. Its `lastMessage` is
-                # frozen at the last successful fetch while the cursors keep
-                # advancing from whatever the polls return, so once a cursor
-                # reaches that frozen id the room gates shut on every cycle for
-                # as long as the listing keeps failing — an outage that used to
-                # cost nothing would instead cut inbound to one sweep per
-                # `talk_poll_full_sweep_interval`. So a stale list ungates the
-                # cycle rather than gating it (ISSUE-399 review).
-                full_sweep = True
-            else:
-                logger.warning("Error listing Talk conversations: %s: %s", type(e).__name__, e)
-                return []
-
-    # Build list of conversations to poll and initialize new ones.
-    #
-    # Three phases, and the split is the fix rather than a tidy-up (ISSUE-406).
-    # This used to be one `db.get_db` block that read the registry, wrote to it,
-    # awaited Nextcloud and wrote again. `db.get_db` commits at the end of the
-    # `with` and SQLite's deferred transaction becomes a *writer* at the first
-    # write, so every await after that first write was a WAL write lock held
-    # across a round trip — and every other writer in the daemon queued behind
-    # it, each for up to `db.get_db`'s 30s wait. Readers were unaffected, which
-    # is why it went unseen.
-    #
-    # It also recurred rather than being first-encounter work: a group room
-    # nobody has written in fails both the cursor guard and the history-cache
-    # guard on every cycle for ever, and paid two round trips each time.
-    #
-    # So: read what the registry says, close, ask Nextcloud, reopen to write.
-    # The results block below cannot be split this way — see the atomicity note
-    # in this function's docstring — and keeps its instrumented awaits.
-    conv_types: dict[str, int] = {}  # token -> conversation type
-    conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
-
-    with db.get_db(config.db_path) as conn:
-        plans = _plan_room_pass(conn, config, conversations, conv_types, conv_names)
-
-    await _fetch_room_pass(client, config, plans)
-
-    with _timed_poll_txn("rooms"), db.get_db(config.db_path) as conn:
-        poll_tasks, gated = _apply_room_pass(
-            conn, config, client, plans, full_sweep=full_sweep,
-        )
-
-        # Reconcile the unified registry against Nextcloud: a Talk room the bot
-        # is no longer in (deleted in NC, or bot removed) drops out of the
-        # conversation list, so archive its registry row — otherwise it keeps
-        # surfacing in the web room list forever. `conversations` is the bot's
-        # *complete* room list; only reconcile when it's non-empty so a transient
-        # empty/failed fetch can't mass-archive every room.
-        #
-        # Only on a full sweep. Gating made a quiet cycle return without
-        # awaiting anything, so cycles now come round roughly every
-        # `talk_poll_interval` instead of every `talk_poll_timeout +
-        # talk_poll_interval` — and this is a mass-archive whose only guard is
-        # that the token set is non-empty, so a listing that came back
-        # truncated for any reason archives every room missing from it. Room
-        # membership changes on a human timescale and does not need re-deciding
-        # every ten seconds; running it on the sweep keeps the number of draws
-        # against that guard where it was (ISSUE-399 review).
-        if full_sweep:
-            live_talk_tokens = {
-                c.get("token") for c in conversations if c.get("token")
-            }
-            if live_talk_tokens:
-                n = db.archive_orphaned_talk_rooms(conn, live_talk_tokens)
-                if n:
-                    logger.info("Archived %d Talk room(s) no longer in Nextcloud", n)
-
-    # Stamped here rather than beside the decision above, so the timestamp
-    # records a sweep that happened. Stamped early, a cycle that died on the
-    # listing fetch or anywhere in the room loop still spent the credit, and
-    # the next sweep was deferred a full interval — which matters because the
-    # sweep is the gate's only safety net (ISSUE-399 review).
-    if full_sweep:
-        _last_full_sweep = now
-
-    if gated or full_sweep:
-        logger.debug(
-            "Talk poll: %d room(s) polled, %d held by the lastMessage gate%s",
-            len(poll_tasks), gated, " (full sweep)" if full_sweep else "",
-        )
-
+    poll_tasks = room_pass.behind
     if not poll_tasks:
         return []
 
@@ -959,8 +1408,43 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     await asyncio.gather(*pending, return_exceptions=True)
     results = [t.result() for t in done]
 
-    # Process results
-    with _timed_poll_txn("results") as hold, db.get_db(config.db_path) as conn:
+    return await _process_poll_results(
+        config, client, results, room_pass.conv_types, room_pass.conv_names,
+    )
+
+
+async def _process_poll_results(
+    config: Config,
+    client: TalkClient,
+    results: list[tuple[str, list[dict]]],
+    conv_types: dict,
+    conv_names: dict,
+) -> list[int]:
+    """The filter chain, the cursor advance and task creation, in one transaction.
+
+    Extracted so the poller and the signaling drain run the same one, byte for
+    byte. Both callers hand it ``(token, messages)`` pairs and the room context
+    the listing gave them; nothing here knows which driver produced the fetch.
+
+    The atomicity contract is ``poll_talk_conversations``' and is unchanged:
+    ``ingest_message`` runs in the same ``db.get_db`` transaction as
+    ``set_talk_poll_state``, so a ``create_task`` failure rolls the whole batch
+    back and **propagates** — unlike ``_poll_single_conversation``, which
+    swallows fetch errors. A drain calling this owes the raise a ``finally``.
+    """
+    created: list[int] = []
+
+    async with contextlib.AsyncExitStack() as stack:
+        # Same order as the room pass above, and the same reason. This is the
+        # block the transport lock exists for: it writes before it awaits, so
+        # the WAL write lock is held across every one of the five Nextcloud
+        # round trips below, and a second writing coroutine scheduled into one
+        # of those awaits would block the loop thread this one has to resume on.
+        hold = stack.enter_context(_timed_poll_txn("results"))
+        await stack.enter_async_context(loop_db_lock())
+        conn = stack.enter_context(
+            db.get_db(config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS),
+        )
         for conversation_token, messages in results:
             if not messages:
                 continue

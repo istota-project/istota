@@ -7583,8 +7583,23 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     except Exception as e:
         logger.warning("User config hydration failed: %s", e)
 
-    # Poll Talk conversations
-    if config.talk.enabled:
+    # Poll Talk conversations.
+    #
+    # Gated on signaling the same way `run_daemon` is, and for a sharper reason
+    # than tidiness: this is a *second process*, so the supervisor's in-flight
+    # set and `inbound.py`'s module globals do not reach it. A one-shot run
+    # against a signaling-enabled deployment would read the same cursor the
+    # daemon's drain just read, fetch the same messages and run the filter
+    # chain over them again — and `dispatch_command`, `handle_confirmation_reply`
+    # with its ack post, the `!model` usage reply and the channel-gate notice
+    # are none of them idempotent. On such a deployment the daemon owns Talk
+    # inbound; a one-shot has no supervisor and is not a substitute for one.
+    if config.talk.enabled and config.talk.signaling.enabled:
+        logger.info(
+            "Skipping the Talk poll: [talk.signaling] enabled = true, so "
+            "inbound belongs to the signaling supervisor in the daemon",
+        )
+    elif config.talk.enabled:
         try:
             from .transport.talk import poll_talk_conversations
             # Single-pass mode still lazily uses the persistent loop here:
@@ -7679,6 +7694,92 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     reset_async_runtime()
 
     return processed
+
+
+def _start_talk_signaling(config: Config) -> bool:
+    """Refuse, or start the signaling supervisor. True when it is driving inbound.
+
+    **The two startup refusals are called from here**, which is the only place
+    they can be: `signaling.py` has held `require_websockets` and `require_hpb`
+    since the protocol landed, and until this function existed a deployment
+    with `enabled = true` and no library booted normally with only `doctor`
+    saying otherwise.
+
+    Neither degrades to the poller. The poll path is a *capability floor* for a
+    deployment with no high-performance backend, not a redundant branch, so a
+    daemon that quietly took it would report every signaling counter healthy
+    for want of any watchers to be unhealthy — while the operator who asked for
+    push believes messages arrive within a second and they arrive within a poll
+    cycle.
+
+    **A settings call that could not be made is not one of those refusals, and
+    the distinction is deliberate.** The two refusals are misconfigurations:
+    a library that is not installed, and a Talk that reports `internal` mode
+    because no server is registered with it. Both are settled facts that a
+    retry cannot change. A Nextcloud that did not answer is neither — it is a
+    fact about this second — and refusing there would make a transient blip on
+    one service take down a daemon that also runs cron jobs, briefings, email
+    and the web scheduler, which is a single point of failure the poll path
+    never had. So a failed settings call starts the supervisor anyway: its own
+    `settings()` raises a watcher fault and backs off, the reconciliation pass
+    carries inbound meanwhile at `room_sync_interval`, and
+    `doctor`'s `talk.signaling_reachable` and `talk.signaling_auth` are what
+    report it. A Talk that *answers* and names no backend still refuses.
+    """
+    from .transport.talk import signaling as sig
+
+    # Refusal 1: no WebSocket client, so no connection can be opened at all.
+    sig.require_websockets()
+
+    # Refusal 2 needs an answer from Talk, and only an answer can refuse.
+    from .async_runtime import get_talk_client, run_coro, spawn_task
+
+    try:
+        payload = run_coro(
+            get_talk_client(config).get_signaling_settings(), timeout=30.0,
+        )
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        logger.error(
+            "STARTUP Could not read Talk's signaling settings (%s: %s). "
+            "Starting the supervisor anyway: an unreachable Nextcloud is not "
+            "the misconfiguration the startup refusal is for, and the watchers "
+            "retry on their own backoff. Check doctor's talk.signaling_* "
+            "checks if inbound stays on the reconciliation interval.",
+            type(e).__name__, e,
+        )
+    else:
+        settings = sig.parse_settings(
+            payload, nextcloud_url=config.nextcloud.url,
+        )
+        if not settings.signaling_mode:
+            # `require_hpb` refuses on *three* states, and only two of them are
+            # the settled misconfigurations this gate is for. The third —
+            # "Talk reported no signaling mode" — is what `parse_settings`
+            # yields for any payload it could not read: a 200 carrying a proxy
+            # error page, an OCS envelope shaped differently, an upstream field
+            # rename. Refusing there is the same single point of failure the
+            # docstring above rejects, wearing a different hat, and
+            # `require_hpb`'s own remedy for it says "check that Nextcloud is
+            # reachable" — a transient-fault remedy attached to a hard refusal.
+            logger.error(
+                "STARTUP Talk answered the signaling settings call with "
+                "nothing this client could read, so whether a "
+                "high-performance backend is registered is unknown. Starting "
+                "the supervisor anyway; see doctor's talk.signaling_auth and "
+                "talk.signaling_reachable.",
+            )
+        else:
+            sig.require_hpb(settings)
+
+    from .transport.talk.supervisor import SignalingSupervisor
+
+    supervisor = SignalingSupervisor(config)
+    # `spawn`, not `submit`: this runs for the life of the daemon and must not
+    # block the boot sequence. The handle is held by the runtime's own
+    # registry, which cancels it by name during `stop()`; the supervisor's
+    # `finally` then cancels and awaits its watchers.
+    spawn_task(supervisor.run(), name="talk-signaling-supervisor")
+    return True
 
 
 def _talk_poll_loop(config: Config) -> None:
@@ -8089,8 +8190,15 @@ def run_daemon(
     get_async_runtime()
     logger.info("STARTUP Started persistent asyncio runtime")
 
-    # Start Talk polling in background thread so it runs independently of task processing
-    if config.talk.enabled:
+    # Talk inbound has exactly one driver. With signaling enabled it is the
+    # event stream, and `_talk_poll_loop` is **not started at all** — two
+    # drivers at different cadences would double every fetch, race the module
+    # globals in `inbound.py` across their awaits, and leave the sweep clock
+    # owned by nobody. Without it the poller is the capability floor, unchanged.
+    if config.talk.enabled and config.talk.signaling.enabled:
+        _start_talk_signaling(config)
+        logger.info("STARTUP Started Talk signaling supervisor (poller not started)")
+    elif config.talk.enabled:
         talk_thread = threading.Thread(
             target=_talk_poll_loop, args=(config,), daemon=True, name="talk-poller",
         )

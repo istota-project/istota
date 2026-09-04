@@ -484,6 +484,77 @@ class NextcloudService:
             for row in (answer.data or [])
         ]
 
+    def participant_rows(self, token: str, *, user: str = "") -> list[dict]:
+        """Every participant row of one room, whole.
+
+        `participants()` reduces each row to an actor id, which is the right
+        answer for "is the bot in this room" and cannot answer the three
+        questions the signaling transport raises: whether the bot's session is
+        in a *call* (`inCall`), whether the signaling server's ping loop is
+        keeping the Talk session alive (`lastPing`), and whether there is a
+        session at all (`sessionIds`). Presence is what this design gives up in
+        exchange for Nextcloud authorizing every join, so "present" is a word
+        that has to be checked in its parts rather than as a yes.
+        """
+        answer = self._ocs(
+            f"/ocs/v2.php/apps/spreed/api/v4/room/{token}/participants",
+            user=user or self.bot_user,
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(f"listing participants of {token}: {answer.message}")
+        return list(answer.data or [])
+
+    def signaling_settings(self, *, user: str = "") -> dict:
+        """Talk's own answer to "where is the signaling server and who am I".
+
+        The same call the daemon makes before every non-resume hello: it carries
+        the HPB URL, the signaling mode, and both hello parameter sets — the
+        hello-v2 JWT among them, which is why a harness client can authenticate
+        as a real Nextcloud user rather than through the internal-client door.
+        """
+        answer = self._ocs(
+            "/ocs/v2.php/apps/spreed/api/v3/signaling/settings",
+            user=user or self.bot_user,
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(f"reading signaling settings: {answer.message}")
+        return dict(answer.data or {})
+
+    def join_room_session(
+        self, token: str, *, user: str = "", tolerate: tuple[int, ...] = ()
+    ) -> str:
+        """`POST …/participants/active`, and the Talk session id it mints.
+
+        This is what puts a client in the room's participant list and what the
+        signaling server's ping loop then keeps warm.
+
+        **`force` supersedes the caller's own previous session in that room, and
+        the caller is the bot by default** — which on a stack with the signaling
+        supervisor running means this call can terminate the daemon's watcher
+        session while its WebSocket stays up. That is the silent-loss state
+        `lastPing` exists to detect, so a scenario calling this as the bot in a
+        room the daemon watches is inducing it deliberately or by accident. The
+        daemon repairs it at its next reconnect; a scenario that cannot wait
+        should pass `user=` a human instead.
+
+        `tolerate` is how the authorization-boundary case reads a refusal: for a
+        room the caller is not a participant of, Talk raises `Unauthorized` and
+        answers 404 — the same generic answer it gives for a room that does not
+        exist, deliberately, so that room existence does not leak.
+        """
+        answer = self._ocs(
+            f"/ocs/v2.php/apps/spreed/api/v4/room/{token}/participants/active",
+            user=user or self.bot_user,
+            method="POST",
+            body={"force": True},
+            tolerate=tolerate,
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(
+                f"joining {token} as a session: {answer.status_code} {answer.message}"
+            )
+        return str((answer.data or {}).get("sessionId") or "")
+
     # -- driving Talk, as a person rather than as the bot -----------------
 
     def create_room(

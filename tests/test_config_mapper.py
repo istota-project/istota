@@ -551,3 +551,127 @@ talk_poll_full_sweep_interval = -1
 talk_poll_wait = -3.0
 """)
         assert load_config(p).scheduler.talk_poll_wait == 2.0
+
+
+class TestTalkSignalingIsReadFromTheFile:
+    """Every ``[talk.signaling]`` key set from TOML and read back.
+
+    This is the "field the loader never read" class, on a nested dataclass one
+    level deeper than any it has been exercised on: ``[talk.signaling]`` is a
+    sub-table of ``[talk]``, so it is the walk's recursion rather than a
+    hand-written line that has to carry it. The five keys are the entire
+    operator-facing surface of the signaling transport — there is no credential
+    among them, deliberately — so a key the walk misses is a setting an
+    operator writes, every document agrees exists, and the daemon never reads.
+    """
+
+    def test_every_key_is_read(self, tmp_path):
+        p = write(tmp_path, """
+[talk.signaling]
+enabled = true
+url = "wss://hpb.example.com/standalone-signaling"
+room_sync_interval = 120
+reconnect_backoff_max = 45
+payload_direct = true
+""")
+        cfg = load_config(p)
+
+        assert cfg.talk.signaling.enabled is True
+        assert cfg.talk.signaling.url == "wss://hpb.example.com/standalone-signaling"
+        assert cfg.talk.signaling.room_sync_interval == 120
+        assert cfg.talk.signaling.reconnect_backoff_max == 45
+        assert cfg.talk.signaling.payload_direct is True
+
+    def test_the_declared_keys_are_exactly_the_five(self):
+        """A sixth key is a design change, not a config addition.
+
+        In particular there is no secret here (D1): a credential field would
+        need an ``_env_secret_overrides`` entry and an ``admin_config_view``
+        redaction, neither of which this spec adds, so one appearing without
+        them would ship unredacted onto the admin configuration page.
+        """
+        names = {f.name for f in dataclasses.fields(Config().talk.signaling)}
+        assert names == {
+            "enabled", "url", "room_sync_interval",
+            "reconnect_backoff_max", "payload_direct",
+        }
+
+    def test_the_defaults_are_off_and_discovering(self, tmp_path):
+        cfg = load_config(write(tmp_path, ""))
+        assert cfg.talk.signaling.enabled is False
+        assert cfg.talk.signaling.url == ""
+        assert cfg.talk.signaling.room_sync_interval == 300
+        assert cfg.talk.signaling.reconnect_backoff_max == 60
+        assert cfg.talk.signaling.payload_direct is False
+
+    def test_a_bare_section_header_changes_nothing(self, tmp_path):
+        """The "two defaults for one field" class, on this section."""
+        cfg = load_config(write(tmp_path, "[talk.signaling]\n"))
+        assert cfg.talk.signaling.enabled is False
+        assert cfg.talk.signaling.room_sync_interval == 300
+
+    def test_the_talk_section_still_loads_beside_it(self, tmp_path):
+        p = write(tmp_path, """
+[talk]
+enabled = false
+bot_username = "robot"
+
+[talk.signaling]
+enabled = true
+""")
+        cfg = load_config(p)
+        assert cfg.talk.enabled is False
+        assert cfg.talk.bot_username == "robot"
+        assert cfg.talk.signaling.enabled is True
+
+    def test_a_misspelled_signaling_key_is_named(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            load_config(write(tmp_path, """
+[talk.signaling]
+room_sync_intervall = 120
+"""))
+        assert any(
+            "talk.signaling.room_sync_intervall" in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_a_non_positive_room_sync_interval_keeps_the_default(
+        self, tmp_path, caplog, value
+    ):
+        """Zero is not a smaller interval here; it is a busy loop.
+
+        The reconciliation pass is the safety net — it is what compares every
+        room's ``lastMessage.id`` against its cursor — and at ``0`` it would
+        run continuously, reissuing ``list_conversations`` as fast as the loop
+        can schedule it against the one endpoint this design exists to stop
+        calling six times a minute.
+        """
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config(write(tmp_path, f"""
+[talk.signaling]
+room_sync_interval = {value}
+"""))
+        assert cfg.talk.signaling.room_sync_interval == 300
+        assert any("room_sync_interval" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_a_non_positive_backoff_ceiling_keeps_the_default(
+        self, tmp_path, caplog, value
+    ):
+        """A zero ceiling clamps every reconnect delay to zero.
+
+        ``backoff_delay`` raises its floor to the ceiling rather than dividing
+        by it, so this does not crash — it reconnects as fast as the loop can
+        schedule it, which is exactly the behaviour the jittered floor exists
+        to prevent for a watcher failing at connect.
+        """
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config(write(tmp_path, f"""
+[talk.signaling]
+reconnect_backoff_max = {value}
+"""))
+        assert cfg.talk.signaling.reconnect_backoff_max == 60
+        assert any(
+            "reconnect_backoff_max" in r.getMessage() for r in caplog.records
+        )

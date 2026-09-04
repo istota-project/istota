@@ -125,6 +125,18 @@ def render(**overrides) -> str:
     return env.from_string(TEMPLATE.read_text()).render(**variables)
 
 
+def _write_temp(text: str) -> str:
+    """A rendered config on disk, for the one test that needs `load_config`."""
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".toml", delete=False, encoding="utf-8",
+    )
+    with handle:
+        handle.write(text)
+    return handle.name
+
+
 @pytest.fixture(scope="module")
 def rendered() -> str:
     return render()
@@ -983,3 +995,65 @@ class TestTheReposRelocationTask:
         ):
             index = next(i for i, other in enumerate(names) if other == name)
             assert migrator < index, f"the migration runs after {name!r}"
+
+
+class TestTalkSignalingIsReachableFromTheRole:
+    """The gap the emitted-keys guard above structurally cannot see.
+
+    That guard asks whether every key the template emits exists on a dataclass,
+    which catches a typo. It cannot catch a dataclass section the template
+    emits **no** keys for — and `[talk.signaling]` was exactly that: the field
+    was on `TalkSignalingConfig`, documented in `config.example.toml`, read by
+    `render-config.sh` and passed through `docker-compose.yml`, and absent from
+    this template. So the whole feature was unreachable on the Ansible shape,
+    which is the canonical production one, with nothing anywhere saying so —
+    an operator setting it would have got the dataclass default and a daemon
+    that polled.
+
+    Same defect class `config_mapper.py`'s docstring names, one level up: a
+    value an operator can set that nothing downstream reads. `docs/deployment/
+    ansible.md`'s own four-step procedure for adding a config field is what was
+    half-followed.
+    """
+
+    def test_the_defaults_render_it_off(self, parsed):
+        assert parsed["talk"]["signaling"]["enabled"] is False
+
+    def test_an_operator_can_switch_it_on(self):
+        """The whole point: a rendered config the loader reads as enabled.
+
+        Through `load_config` rather than `tomllib` alone, because the question
+        is what the *daemon* sees — a key the walk does not recognise is only a
+        warning, so a section that parses proves nothing on its own.
+        """
+        text = render(
+            istota_talk_signaling_enabled=True,
+            istota_talk_signaling_url="https://hpb.example.com/standalone-signaling",
+            istota_talk_signaling_room_sync_interval=120,
+            istota_talk_signaling_reconnect_backoff_max=30,
+            istota_talk_signaling_payload_direct=True,
+        )
+        config = load_config(Path(_write_temp(text)))
+
+        assert config.talk.signaling.enabled is True
+        assert config.talk.signaling.url == (
+            "https://hpb.example.com/standalone-signaling"
+        )
+        assert config.talk.signaling.room_sync_interval == 120
+        assert config.talk.signaling.reconnect_backoff_max == 30
+        assert config.talk.signaling.payload_direct is True
+
+    def test_every_signaling_field_is_rendered(self, parsed):
+        """The inverse of the emitted-keys guard, scoped to this one section.
+
+        A field added to `TalkSignalingConfig` later and not added here is the
+        same silent hole again, and this is the cheapest place to notice.
+        """
+        emitted = set(parsed["talk"]["signaling"])
+        declared = {
+            f.name for f in fields(config_module.TalkSignalingConfig)
+        }
+        assert declared - emitted == set(), (
+            "these signaling fields are on the dataclass but the Ansible "
+            "template renders none of them, so an operator cannot set them"
+        )

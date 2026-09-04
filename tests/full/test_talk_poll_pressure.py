@@ -263,6 +263,24 @@ def many_rooms(stack):
 
     A long-poll needs a cursor and a cursor needs a message, so the seed post is
     part of the fixture rather than an afterthought.
+
+    **The seed is posted as the bot, and that is what keeps this fixture from
+    costing forty tasks** (ISSUE-415). Every room here is new, so the room pass
+    seeds its cursor at `latest_id - 1` — deliberately one behind the newest
+    message, so the next poll still returns it — and the ingest path then reads
+    the seed as an ordinary message from a configured user in a room with no
+    @mention gate to stop it. Forty rooms, forty tasks, arriving faster than the
+    worker pool drains them, and every later scenario in this file then failed
+    its reset quiesce with the backlog still in flight. A message from the bot's
+    own account is dropped by `actor_id == config.talk.bot_username` *after* the
+    cursor has advanced, so the room still has a `lastMessage`, still has a
+    cursor, and creates no work.
+
+    That this only became visible when the `full` profile gained signaling is a
+    fact about throughput, not about the two drivers disagreeing: both ingest
+    the seed, and the event stream simply discovers all forty rooms in one
+    reconciliation instead of over several poll cycles. Nothing in this file
+    asserts on a task, so producing none is the honest fixture either way.
     """
     nextcloud = stack.service("nextcloud")
     prefix = f"pressure-{uuid.uuid4().hex[:8]}"
@@ -273,7 +291,7 @@ def many_rooms(stack):
         for i in range(ROOM_COUNT)
     ]
     for token in tokens:
-        nextcloud.post_message(token, message="seed")
+        nextcloud.post_message(token, actor=nextcloud.bot_user, message="seed")
     return tokens
 
 

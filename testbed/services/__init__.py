@@ -165,6 +165,12 @@ def _feeds_service(*args, **kwargs) -> Service:
     return feeds.serve(*args, **kwargs)
 
 
+def _signaling_service(*args, **kwargs) -> Service:
+    from . import signaling
+
+    return signaling.serve(*args, **kwargs)
+
+
 #: Profile service names to the factory that produces one. A profile names
 #: services by string, so a typo is a `KeyError` at fixture setup rather than an
 #: import error; `tests/test_testbed_services.py` closes that by checking every
@@ -176,6 +182,7 @@ REGISTRY: dict[str, Callable[..., Service]] = {
     "mail": _mail_service,
     "ntfy": _ntfy_service,
     "feeds": _feeds_service,
+    "signaling": _signaling_service,
 }
 
 #: Registry names that open a listening socket in the pytest process.
@@ -196,7 +203,14 @@ HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds"})
 #: declared by the shipped compose file; `mail` is added by the profile's own
 #: overlay. Neither opens a socket in the pytest process, so neither has a
 #: credential to publish and the credential rule does not reach them.
-ATTACHED = frozenset({"nextcloud", "mail"})
+#: `signaling` is here rather than in `HOST_STUBS` because the compose files
+#: run it: `docker-compose.yml` declares it behind the `signaling` profile and
+#: `docker-compose.test.yml` does the same, so on either shape this object
+#: configures a container and then attaches to it. It opens no socket of its
+#: own, which is why the credential rule does not reach it — the secrets it
+#: generates are the *server's*, published into the compose env-file rather
+#: than expected by a listener in this process.
+ATTACHED = frozenset({"nextcloud", "mail", "signaling"})
 
 
 def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
@@ -280,6 +294,16 @@ def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
         # rebuilds its repositories rather than clearing them: a stack whose
         # documents were added at boot would lose them at the first reset.
         return feeds.serve(host=host, credential=feeds.FEEDS_CREDENTIAL)
+
+    if name == "signaling":
+        from . import signaling
+
+        # Starts nothing, like `mail`: the compose profile runs the container
+        # inside the project, where the daemon reaches it by service name. What
+        # this produces is the set of per-session secrets that container is
+        # configured from, so nothing credential-shaped is committed and the
+        # image's published defaults never stand.
+        return signaling.serve()
 
     if name == "mail":
         from . import mail

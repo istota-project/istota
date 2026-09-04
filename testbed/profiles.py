@@ -76,6 +76,19 @@ class Profile:
     compose_overlays: tuple[Path, ...] = ()
     """Extra `-f` files, merged over the shape's base in order."""
 
+    compose_profiles: tuple[str, ...] = ()
+    """Compose profiles to activate, as `--profile` arguments.
+
+    Distinct from this class's own `name`, which is a *testbed* profile and
+    keys the pool. A compose profile is the shipped file's mechanism for a
+    service that is declared but not started by default — `browser`,
+    `location`, and now `signaling` — and activating one is what makes the tier
+    boot the file an operator boots rather than substituting a harness file for
+    it. It rides in the argument list beside `--project-name`, so `ps`, `logs`
+    and `down` see the same service set `up` did; a profile passed only to `up`
+    leaves a running container that `down` does not know to remove.
+    """
+
 
 #: Both mail profiles poll every five seconds rather than every sixty.
 #:
@@ -128,6 +141,28 @@ FEEDS = Profile(
     config={"ISTOTA_FEEDS_ENABLED": "true"},
 )
 
+#: The signaling server, run for real, driven from the harness.
+#:
+#: The honest limit of this profile is that it cannot exercise istota's own
+#: authentication at all: hello-v2 needs a Nextcloud to mint and sign a JWT and
+#: to publish the public key the server verifies it against, and there is no
+#: Nextcloud on the lean shape. `ISTOTA_TALK_SIGNALING_ENABLED` is therefore
+#: *not* set here — the daemon's `require_hpb` refusal would stop the container
+#: booting — so the daemon in this stack is a bystander and the scenario drives
+#: istota's protocol module against the container itself.
+#:
+#: What that buys is everything the full tier is too slow and too coarse for:
+#: the `welcome` feature negotiation against a real server, the `chat-relay`
+#: gate and its refresh-only fallback, real relayed frames through
+#: `parse_event`, a server restart mid-session, resume versus a fresh hello, and
+#: an idle connection outliving the server's 60-second read deadline. Six to
+#: nine seconds a boot against fifty to eighty-four.
+SIGNALING = Profile(
+    "signaling",
+    services=("model", "signaling"),
+    compose_profiles=("signaling",),
+)
+
 # The negative control: the same profile on an image with the forge binaries
 # removed, reproducing ISSUE-263. The tag is empty here and filled in by the
 # fixture that builds the control, because it is derived from whatever the
@@ -169,14 +204,38 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 #: without it, and decides between a message that runs and one that is held on
 #: the strength of a header. That is two of this stage's settings interacting,
 #: which is exactly what neither could do before compose passed them.
-FULL_CONFIG = {**MAIL_CONFIG, "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify"}
+#: And it reconciles rooms every 30 seconds rather than every 300.
+#:
+#: That interval is two things at once and the scenarios read it both ways. It
+#: is the worst-case delay before a room created mid-session gets a watcher, so
+#: 300 would mean five minutes of dead wait in any test that makes a room. And
+#: it is the safety net — the reconciler compares each room's `lastMessage.id`
+#: against the stored cursor and fetches the rooms that are behind — so it is
+#: also the *slow* path a delivery assertion has to out-run to mean anything.
+#: 30 keeps both usable: a watcher inside half a minute, and a delivery
+#: assertion with a window well inside it that only the event stream can meet.
+#:
+#: Lower would be worse, not better. At 5 or 10 seconds the safety net would
+#: deliver almost as fast as the stream and no latency assertion could tell the
+#: two apart, which is the failure this tier has documented eight times.
+FULL_CONFIG = {
+    **MAIL_CONFIG,
+    "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify",
+    "ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL": "30",
+}
 
+#: And it carries signaling, on the same arithmetic and for a reason of its own:
+#: this is the *only* shape that can answer anything about hello-v2,
+#: `participants/active` or Nextcloud's authorization, because all three need a
+#: real Talk behind them. A second full profile would be a second cold boot of
+#: the same six containers to run one chain.
 FULL = Profile(
     "full",
     shape="full",
-    services=("model", "nextcloud", "mail"),
+    services=("model", "nextcloud", "mail", "signaling"),
     config=FULL_CONFIG,
     compose_overlays=(MAIL_OVERLAY,),
+    compose_profiles=("signaling",),
 )
 
 # The lean deployed mail path: a real mail server, a real daemon polling it, and
@@ -193,7 +252,16 @@ MAIL = Profile(
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
-ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, NOTIFY, FEEDS, MAIL, FULL)
+ALL: tuple[Profile, ...] = (
+    BASE,
+    FORGE,
+    NO_FORGE,
+    NOTIFY,
+    FEEDS,
+    MAIL,
+    SIGNALING,
+    FULL,
+)
 
 
 def by_name(name: str) -> Profile:

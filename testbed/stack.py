@@ -282,6 +282,7 @@ def compose_args(
     project: str,
     env_file: Path | None = None,
     overlays: list[Path] | None = None,
+    compose_profiles: tuple[str, ...] | list[str] = (),
 ) -> list[str]:
     """The invariant prefix for every compose call against one stack.
 
@@ -294,10 +295,17 @@ def compose_args(
     base file they ride in the argument list, so every subcommand sees the same
     merged model — an overlay applied only to `up` would leave `ps`, `logs` and
     `down` reasoning about a different stack than the one running.
+
+    `compose_profiles` rides here for the same reason, and the failure it avoids
+    is worse than a confusing `ps`: a service started under a profile that
+    `down` was not told about is not torn down, so an interrupted session leaves
+    a container holding a published port and the next one collides with it.
     """
     args = ["docker", "compose", "-f", str(compose_file)]
     for overlay in overlays or []:
         args += ["-f", str(overlay)]
+    for compose_profile in compose_profiles:
+        args += ["--profile", compose_profile]
     args += ["--project-name", project]
     if env_file is not None:
         args += ["--env-file", str(env_file)]
@@ -781,6 +789,7 @@ PLANNED_SERVICES: frozenset[str] = frozenset()
 #: be the fixture side-loading config.
 FULL_MODULE_SWITCHES: dict[str, str] = {
     "ISTOTA_TALK_ENABLED": "nextcloud",
+    "ISTOTA_TALK_SIGNALING_ENABLED": "signaling",
     "ISTOTA_EMAIL_ENABLED": "mail",
     "ISTOTA_FEEDS_ENABLED": "feeds",
     "ISTOTA_DEVELOPER_ENABLED": "gitlab",
@@ -837,6 +846,25 @@ class FullCredentials:
     user_password: str
     nc_port: int
 
+    signaling_port: int = 0
+    """Where the signaling server is published, reserved beside `nc_port`.
+
+    Defaulted rather than required, because it arrived after the keep file did
+    and a persisted set from an earlier session has no such key —
+    `_full_credentials` reserves one in that case rather than accepting the
+    default, since `0` hands the choice back to Docker and that is the
+    collision `reserve_ports` exists to prevent. Unlike `nc_port` nothing bakes
+    this port into the kept volumes, so a different one each session is free.
+
+    **What KEEP does not carry is the signaling *secret*.** `provision-nc.sh`
+    registers it with Talk at first install and never revisits it, exactly like
+    the OAuth2 redirect URI, while `signaling.serve()` generates a fresh one per
+    session — so a second kept session would hand the container a secret Talk
+    does not hold and every hello would be refused. `tests/full/` refuses to run
+    under KEEP for its own reasons, which is what masks this today. Putting the
+    secret on this dataclass is the fix if that ever changes.
+    """
+
     def as_env(self) -> dict[str, str]:
         return {
             "POSTGRES_PASSWORD": self.postgres_password,
@@ -846,29 +874,59 @@ class FullCredentials:
         }
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic
-        return f"FullCredentials(<4 redacted>, nc_port={self.nc_port})"
+        return (
+            f"FullCredentials(<4 redacted>, nc_port={self.nc_port}, "
+            f"signaling_port={self.signaling_port})"
+        )
 
 
-def reserve_port() -> int:
-    """Bind an ephemeral port, read it back, release it.
+def reserve_ports(count: int = 1) -> tuple[int, ...]:
+    """Bind `count` ephemeral ports at once, read them back, release them all.
 
-    `docker-compose.yml:456` binds `${NC_PORT:-8080}:80` on nginx — a *fixed*
-    host port, unlike the lean stack which publishes nothing — so a developer's
+    `docker-compose.yml` binds `${NC_PORT:-8080}:80` on nginx and
+    `${ISTOTA_TALK_SIGNALING_PORT:-8081}:8080` on the signaling server — *fixed*
+    host ports, unlike the lean stack which publishes nothing — so a developer's
     own demo stack or a second worktree collides and `up` fails. Measured while
     this was written: a demo stack was holding 8080 on the machine.
 
-    Racy by construction, and knowingly so: the kernel can hand the same port to
-    something else between the release here and compose's bind. The alternative
-    is holding the socket open, which compose then cannot bind at all. A lost
-    race fails `up` loudly with "address already in use", which is the right
-    failure for a condition this rare.
+    **All the sockets are held until every port has been read**, which is what
+    makes two reservations distinct rather than merely probable. One at a time
+    the kernel is free to hand the second call the port the first just released,
+    and two services would then be told to bind the same one.
+
+    That is not hypothetical and it is not only about two reservations. Letting
+    the signaling service publish on `:0` and take Docker's own ephemeral choice
+    was measured colliding with the reserved `NC_PORT` on the first full boot
+    that ran both — Docker picked the number this function had reserved and
+    released moments earlier, the signaling container bound it, and nginx failed
+    with "address already in use" naming a port whose real claimant was in
+    another service's port map. Reserving both here means nothing is left to
+    Docker to choose.
+
+    Racy against the rest of the machine by construction, and knowingly so: the
+    kernel can hand one of these to something else between the release here and
+    compose's bind. The alternative is holding the sockets open, which compose
+    then cannot bind at all. A lost race fails `up` loudly with "address already
+    in use", which is the right failure for a condition this rare.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    probes = []
+    try:
+        for _ in range(count):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", 0))
+            probes.append(probe)
+        return tuple(probe.getsockname()[1] for probe in probes)
+    finally:
+        for probe in probes:
+            probe.close()
 
 
-def generate_credentials(nc_port: int) -> FullCredentials:
+def reserve_port() -> int:
+    """One port, for a caller that needs no second one."""
+    return reserve_ports(1)[0]
+
+
+def generate_credentials(nc_port: int, signaling_port: int = 0) -> FullCredentials:
     """Four fresh passwords for one session.
 
     `token_urlsafe` rather than anything with punctuation in it, because these
@@ -882,6 +940,7 @@ def generate_credentials(nc_port: int) -> FullCredentials:
         bot_password=secrets.token_urlsafe(24),
         user_password=secrets.token_urlsafe(24),
         nc_port=nc_port,
+        signaling_port=signaling_port,
     )
 
 
@@ -942,10 +1001,32 @@ def full_env(
     environment["ISTOTA_WEB_CALLBACK_URL"] = (
         f"http://localhost:{credentials.nc_port}/istota/callback"
     )
+    # Beside `NC_PORT` and reserved for the same reason, which is not that the
+    # signaling service owns it — that service is what reads it — but that both
+    # are fixed host ports on one machine and something has to hold them apart.
+    # See `reserve_ports`: leaving this one to Docker's ephemeral choice was
+    # measured taking the number reserved for nginx.
+    environment["ISTOTA_TALK_SIGNALING_PORT"] = str(credentials.signaling_port)
+    # Written out for the same reason `ISTOTA_WEB_CALLBACK_URL` is, and the cost
+    # of leaving it interpolated is larger. Compose derives it through four
+    # nested defaults ending at `${DOMAIN:-localhost:${NC_PORT}}`, and `DOMAIN`
+    # is not an `ISTOTA_` name — so it survives the process-environment scrub,
+    # it is in no env-file key, and `conflicting_process_env` compares only keys
+    # that *are*, which makes it invisible to the refusal. A developer with
+    # `DOMAIN` exported would drop `http://localhost:<NC_PORT>` — the value Talk
+    # stamps on every backend request — out of the signaling server's allowlist,
+    # and the compose comment beside that key says what an unmatched backend
+    # request costs: counted as a bruteforce attempt, then `429`, then every
+    # room creation failing with a 500 that names nothing.
+    environment["ISTOTA_TALK_SIGNALING_BACKEND_URLS"] = (
+        f"http://nextcloud,http://localhost:{credentials.nc_port}"
+    )
 
     reserved = set(FULL_IDENTITY) | set(CREDENTIAL_KEYS) | {
         "NC_PORT",
         "ISTOTA_WEB_CALLBACK_URL",
+        "ISTOTA_TALK_SIGNALING_PORT",
+        "ISTOTA_TALK_SIGNALING_BACKEND_URLS",
     }
     claimed: dict[str, str] = {}
     for name, service in services.items():
@@ -985,15 +1066,27 @@ def compose_env(
     Distinct from `config_env()`, and held to a different rule. That one points
     the *daemon* at a service and may only name variables the shipped generator
     reads and `docker-compose.yml` passes through — the property that makes the
-    whole tier honest. These are host paths and image tags a compose *overlay*
-    binds, which configure nothing about istota and appear in no shipped file.
+    whole tier honest. These configure the compose *stack* instead: host paths
+    and image tags an overlay binds, and the container secrets and ports a
+    shipped service is declared from.
 
-    They exist because compose resolves a relative bind against the first `-f`
-    file's directory, which is `docker/` rather than this package, so an overlay
-    living here can only name an absolute path handed to it. That is already how
-    `docker-compose.test.yml` receives the rendered config directory.
+    An earlier statement of the rule said these "appear in no shipped file", and
+    that was true of the only implementer at the time rather than being the
+    principle. `signaling.compose_env()` names `ISTOTA_TALK_SIGNALING_SECRET`
+    and its neighbours, every one of them read by `docker-compose.yml` — and
+    none of them by `render-config.sh`, because they configure the signaling
+    container and `provision-nc.sh`, not the daemon. The line that matters is
+    which side of the generator a variable lands on: anything that reaches
+    istota's own config goes through `config_env()` and is held to the two-file
+    rule, and nothing here does.
 
-    Optional on the protocol, read by `getattr`: five of the six services need
+    The mechanism half is unchanged: compose resolves a relative bind against
+    the first `-f` file's directory, which is `docker/` rather than this
+    package, so an overlay living here can only name an absolute path handed to
+    it. That is already how `docker-compose.test.yml` receives the rendered
+    config directory.
+
+    Optional on the protocol, read by `getattr`: five of the seven services need
     no overlay and would otherwise carry an empty method apiece. The same claim
     and reservation guards apply as for `config_env`, so an overlay variable
     cannot silently overwrite a config one or the stack's own identity.
@@ -1813,6 +1906,17 @@ class Stack:
             credential = getattr(service, "credential", None)
             if isinstance(credential, str) and credential:
                 secrets.append((f"{name} credential", credential))
+            # A second, plural source, because one service holds four secrets
+            # and none of them is "the" credential: the signaling server's
+            # internal-client door and its two session keys are the *server's*,
+            # generated by the harness and written into a compose env-file, so
+            # on the lean shape — which puts nothing credential-shaped in
+            # `Stack.env` — they are in no source above.
+            extra = getattr(service, "credentials", None)
+            if isinstance(extra, dict):
+                for label, value in extra.items():
+                    if isinstance(value, str) and value:
+                        secrets.append((f"{name} {label}", value))
         for key, value in sorted(secrets, key=lambda p: len(p[1]), reverse=True):
             if value in text:
                 text = text.replace(value, f"<{key}>")
@@ -1822,12 +1926,12 @@ class Stack:
 def _bind_services(stack: "Stack") -> None:
     """Hand the running stack to any service that cannot exist without one.
 
-    Two so far, for the same reason and on both shapes. `NextcloudService`
+    Three so far, for the same reason and on both shapes. `NextcloudService`
     attaches to a container the boot just started and needs a way to run `occ`
-    inside it. `MailService` needs the host ports compose published, which are
-    ephemeral and do not exist until `up` returns.
+    inside it. `MailService` and `SignalingService` need the host ports compose
+    published, which are ephemeral and do not exist until `up` returns.
 
-    Duck-typed rather than a protocol member, because four of the six services
+    Duck-typed rather than a protocol member, because four of the seven services
     have nothing to bind and would carry an empty method apiece.
     """
     for service in stack.services.values():
@@ -2204,15 +2308,23 @@ class StackPool:
         """
         keep_file = self._keep_file()
         if keep_file is None:
-            return generate_credentials(reserve_port())
+            return generate_credentials(*reserve_ports(2))
 
         if self._credentials is not None:
             return self._credentials
         if keep_file.exists():
-            self._credentials = FullCredentials(**json.loads(keep_file.read_text()))
+            persisted = json.loads(keep_file.read_text())
+            # A keep file written before `signaling_port` existed has no such
+            # key, and the dataclass default is `0` — which hands the port back
+            # to Docker's ephemeral choice and reinstates exactly the collision
+            # `reserve_ports` exists to prevent. Reserved rather than defaulted,
+            # because unlike `nc_port` nothing has baked this one into the kept
+            # volumes: a different port each session costs nothing.
+            persisted.setdefault("signaling_port", reserve_port())
+            self._credentials = FullCredentials(**persisted)
             return self._credentials
 
-        self._credentials = generate_credentials(reserve_port())
+        self._credentials = generate_credentials(*reserve_ports(2))
         keep_file.parent.mkdir(parents=True, exist_ok=True)
         _write_private(keep_file, json.dumps(self._credentials.__dict__))
         return self._credentials
@@ -2253,6 +2365,7 @@ class StackPool:
                 project=project,
                 env_file=env_file,
                 overlays=overlays,
+                compose_profiles=profile.compose_profiles,
             ),
             env_file,
         )
@@ -2305,6 +2418,7 @@ class StackPool:
             project=project,
             env_file=env_file,
             overlays=overlays,
+            compose_profiles=profile.compose_profiles,
         )
 
     #: Under `KEEP`, the volumes that are wiped anyway, by unqualified name.

@@ -68,9 +68,62 @@ class NextcloudConfig:
 
 
 @dataclass
+class TalkSignalingConfig:
+    """Inbound Talk over the standalone signaling server (the HPB).
+
+    Five keys, one of which an operator normally sets, and **no credential** —
+    that absence is the design rather than an omission. istota authenticates
+    to the signaling server as its own Nextcloud user, so everything the
+    connection needs is minted on demand by Talk: the HPB URL, the hello token
+    and the per-room Talk session id all come from calls the bot account can
+    already make. The alternative the protocol offers is an *internal client*
+    authenticated with the signaling server's shared secret, which joins any
+    room on the instance and is rejected for that reason; a field here holding
+    that secret would also need an ``_env_secret_overrides`` entry and an
+    ``admin_config_view`` redaction, neither of which exists because neither is
+    needed.
+
+    ``enabled = true`` on a deployment that cannot do it **refuses to boot**,
+    rather than falling back to the poller: Talk in ``internal`` signaling mode
+    (no HPB registered) and the ``websockets`` library absent are both refusals,
+    because a daemon that quietly polls while an operator believes push is live
+    is worse than one that does not start.
+    """
+
+    # Off unless the operator has a high-performance backend. A deployment
+    # without one keeps today's poll loop, which is the capability floor.
+    enabled: bool = False
+    # HPB base URL override. Empty is the normal case and means "read `server`
+    # from Talk's own signaling settings"; an explicit value exists for a
+    # deployment where the daemon must reach the HPB by a different route than
+    # the one Nextcloud advertises to browsers.
+    url: str = ""
+    # Seconds between room reconciliations. This pass is also the safety net —
+    # it compares every room's `lastMessage.id` against its stored cursor and
+    # fetches only the rooms that are behind — so it bounds recovery when the
+    # event stream is down, and it is the worst-case latency for the first
+    # message in a brand-new room.
+    room_sync_interval: int = 300
+    # Reconnect backoff ceiling, seconds. The nginx ingress in front of the HPB
+    # drops every connection hourly regardless of traffic, so this path is
+    # exercised routinely rather than only on a fault.
+    reconnect_backoff_max: int = 60
+    # Consume the relayed `chat.comments` payload directly instead of
+    # refetching the room. The diff this was gated on is done: measured
+    # field-for-field identical on Nextcloud 34 / Talk 24.0.4, across four
+    # message shapes, each read both as the bot and as the human. Still off by
+    # default, because it is the only part of this design that can be wrong
+    # about message *content* rather than about timing, and Talk relays a
+    # comment at all only from about Talk 21 — below that every event is a bare
+    # refresh, so switching this on changes nothing.
+    payload_direct: bool = False
+
+
+@dataclass
 class TalkConfig:
     enabled: bool = True
     bot_username: str = "istota"  # istota's Nextcloud username (to filter own messages)
+    signaling: TalkSignalingConfig = field(default_factory=TalkSignalingConfig)
 
 
 @dataclass
@@ -3075,6 +3128,20 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # this one is non-negative rather than positive. A negative is a typo that
     # would read as that mode without saying so.
     "scheduler.talk_poll_full_sweep_interval": _non_negative_int,
+    # Positive rather than non-negative, unlike the sweep interval above, and
+    # the difference is not stylistic. `0` there is a *mode* (every cycle a
+    # full sweep, i.e. no gate); here it is a loop. The reconciliation pass
+    # re-runs `list_conversations` — the endpoint that enumerates every
+    # conversation and computes `lastMessage` for each, the expensive one this
+    # whole design exists to stop calling six times a minute — so a zero
+    # interval reissues it as fast as the loop can schedule it.
+    "talk.signaling.room_sync_interval": _positive_int,
+    # At `0` the ceiling clamps every reconnect delay to zero rather than
+    # crashing: `backoff_delay` raises its floor to meet the ceiling, so a
+    # watcher failing at connect (bad URL, refused TLS) reconnects as fast as
+    # the loop can schedule it — which is the one thing the jittered floor is
+    # there to prevent.
+    "talk.signaling.reconnect_backoff_max": _positive_int,
     "advisor_model": _advisor_model,
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
