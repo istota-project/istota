@@ -677,7 +677,16 @@ services:
       # one value: `occ talk:signaling:add` on the Nextcloud side and the
       # backend secret here have to match or every hello is refused.
       BACKENDS: nextcloud
-      BACKEND_NEXTCLOUD_URLS: http://nextcloud
+      # **Two URLs, and both are needed.** The server matches an incoming
+      # request against this list twice over, from opposite directions: Talk
+      # stamps every backend request with the URL a *browser* reaches it on
+      # (`overwrite.cli.url`), while the daemon's hello names the URL *it*
+      # reaches Nextcloud on, which on this network is the service name. A list
+      # with only one of them refuses the other, and the refusal is not obvious
+      # from where it lands — an unmatched backend request is counted as a
+      # bruteforce attempt, so after a handful of them Talk gets `429 Too Many
+      # Requests` and every room creation fails with a 500 that names nothing.
+      BACKEND_NEXTCLOUD_URLS: ${ISTOTA_TALK_SIGNALING_BACKEND_URLS:-http://nextcloud,${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}}
       BACKEND_NEXTCLOUD_SHARED_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
       # Session checksum and encryption keys. Distinct from the backend secret
       # and from each other; the block key must be 16, 24 or 32 bytes.

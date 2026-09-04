@@ -79,6 +79,17 @@ def render(tmp_path: Path, **env: str) -> Path:
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
     assert config_file.exists(), f"no config written\n{proc.stdout}\n{proc.stderr}"
+    # **Empty stderr is part of the contract, and it is not tidiness.** Every
+    # heredoc in this script is unquoted so that ${...} expands, which means a
+    # backtick pair inside one is a *command substitution*: bash runs the word,
+    # says "command not found" on stderr, substitutes nothing, and exits 0. The
+    # render then reports success having silently deleted text from its own
+    # output — measured on the `[talk.signaling]` block, whose comment named two
+    # files in backticks and rendered with both names missing.
+    assert proc.stderr == "", (
+        "render-config.sh wrote to stderr while exiting 0, so it produced a "
+        f"config that is quietly not the one it was written to produce:\n{proc.stderr}"
+    )
     return config_file
 
 
@@ -242,6 +253,70 @@ class TestTheRenderedConfigLoads:
 
         assert profile.display_name == "Test Person"
         assert profile.timezone == "Europe/Warsaw"
+
+
+class TestNoHeredocRunsACommand:
+    """A structural guard for the class of defect the stderr check catches late.
+
+    Every heredoc in `render-config.sh` is unquoted, so `${...}` expands — which
+    is the point — and a backtick pair is therefore a command substitution
+    rather than the prose markup a reader writing a comment intends. The
+    consequence is silent in both directions: bash writes "command not found" to
+    stderr, substitutes the empty string, and the script exits 0 with the words
+    gone from its own output. In a *value* rather than a comment it is worse
+    than cosmetic, and worse than a mangled string: it is an unquoted shell
+    executing a word.
+
+    `render()` asserting empty stderr catches this on the default path only. A
+    backtick inside one of the conditional blocks — the email one, the developer
+    one, either brain block — is not on that path and is caught by nothing else,
+    which is why this reads the file instead of running it.
+
+    `$(...)` is not checked, because the script uses it deliberately outside
+    heredocs and there is no such use inside one to distinguish. Backticks have
+    no legitimate use in this file at all: its own header comments use them for
+    markup and every one of those is outside a heredoc, which is what makes the
+    heredoc-scoped rule expressible rather than a style edict.
+    """
+
+    def test_no_backtick_appears_inside_a_heredoc(self):
+        heredoc = None
+        offenders = []
+        for number, line in enumerate(RENDER_CONFIG.read_text().splitlines(), 1):
+            if heredoc is None:
+                match = re.search(r"<<-?\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", line)
+                if match:
+                    heredoc = match.group(1)
+                continue
+            if line.strip() == heredoc:
+                heredoc = None
+                continue
+            if "`" in line:
+                offenders.append(f"{number}: {line.strip()[:80]}")
+
+        assert heredoc is None, (
+            f"a heredoc opened with {heredoc} never closed; the scan below saw "
+            "the rest of the file as heredoc body and may be reporting nonsense"
+        )
+        assert not offenders, (
+            "these lines sit inside an unquoted heredoc and contain a backtick, "
+            "so the shell runs whatever is between the pair and substitutes its "
+            "output:\n" + "\n".join(offenders)
+        )
+
+    def test_the_guard_can_fail(self):
+        """The scan above is a regex over a file, which is the shape that rots
+        quietly. A heredoc that opened and closed is what it has to recognise
+        before an absence of offenders means anything."""
+        script = RENDER_CONFIG.read_text()
+
+        assert re.search(r"<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$", script, re.M), (
+            "no heredoc opener matched, so the scan above examined nothing"
+        )
+        assert "`" in script, (
+            "no backtick anywhere in the file, so the scan above cannot "
+            "distinguish a pass from a regex that stopped matching"
+        )
 
 
 class TestTheStorageBackend:

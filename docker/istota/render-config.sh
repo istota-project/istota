@@ -282,9 +282,17 @@ enabled = ${ISTOTA_TALK_ENABLED:-true}
 bot_username = "${BOT_USER:-istota}"
 
 # Inbound Talk over the standalone signaling server (the "high-performance
-# backend"). Off unless the operator runs one: `docker-compose.yml` ships the
-# container behind the `signaling` compose profile, and a deployment without it
+# backend"). Off unless the operator runs one: docker-compose.yml ships the
+# container behind the signaling compose profile, and a deployment without it
 # keeps the poll loop, which is the capability floor rather than a fallback.
+#
+# No backticks in this comment, and none in any heredoc in this file, for a
+# reason that is invisible until it bites: every heredoc here is unquoted so
+# that variable references expand, which means a backtick pair is a command
+# substitution. Written with them, this block silently ran "docker-compose.yml"
+# and "signaling" as commands and rendered the words out of its own text.
+# A dollar-brace sequence in prose is the same trap one step along: it is a bad
+# substitution, and that one at least fails loudly.
 #
 # There is no credential here, and the absence is the design. istota
 # authenticates to the signaling server as its own Nextcloud user, so the HPB
@@ -293,7 +301,7 @@ bot_username = "${BOT_USER:-istota}"
 # shared secret — joins any room on the instance and is rejected for that
 # reason, so there is nothing to render, redact or vault.
 #
-# `url` is normally empty, which means "read `server` from Talk's own signaling
+# An empty url means "read the server address from Talk's own signaling
 # settings". Set it where the daemon must reach the HPB by a different route
 # than the one Nextcloud advertises to browsers — which is exactly the shape of
 # a compose deployment, where Talk hands out the public URL and the daemon is on
