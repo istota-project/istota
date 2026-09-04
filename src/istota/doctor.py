@@ -275,28 +275,54 @@ def check_bwrap(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def _reachable_kinds(config: "Config") -> frozenset[str]:
+    """The brain kinds a task on this deployment could run under.
+
+    Imported per call rather than at module scope: ``istota.brain`` pulls in
+    every brain implementation, and this module is reached from the config-load
+    path, where three checks run inside every ``load_config``.
+    """
+    from .brain import reachable_brain_kinds
+
+    return reachable_brain_kinds(getattr(config, "brain", None))
+
+
+#: The kinds that exec the ``claude`` CLI, so a deployment reaching either of
+#: them needs the binary. Restated here rather than asked of a brain instance,
+#: which would mean constructing one to answer a question about a name.
+_CLI_BRAIN_KINDS = frozenset({"claude_code", "tmux_claude"})
+
+
 def check_model_cli(config: "Config", probe: bool) -> CheckResult:
     """The ``claude`` CLI the subprocess brains exec.
 
     Resolved from the daemon's PATH, matching ``ClaudeCodeBrain``'s own spawn
     (``["claude", "-p", "-"]``) — a check against a path the brain does not use
     would be asserting about the wrong thing.
+
+    Asks the *reachable* set rather than ``brain.kind``, so a deployment whose
+    base kind is ``native`` but which routes a source type to the CLI, falls
+    back to it, or lets a room pin it is still told when the binary is missing.
+    Before that it SKIPped, and the operator found out from a failed task.
     """
-    kind = getattr(config.brain, "kind", "claude_code")
-    if kind not in ("claude_code", "tmux_claude"):
+    reachable = _reachable_kinds(config)
+    kinds = sorted(reachable & _CLI_BRAIN_KINDS)
+    if not kinds:
         return CheckResult(
             "runtime.model_cli",
             SKIP,
-            f"brain.kind = {kind!r} runs the agent loop in-process (native), no CLI needed",
+            "no reachable brain kind execs the `claude` CLI "
+            f"(reachable: {', '.join(sorted(reachable)) or 'none'})",
             scope=IMAGE,
         )
+    reached = ", ".join(kinds)
     path = shutil.which("claude")
     if path is None:
         return CheckResult(
             "runtime.model_cli",
             FAIL,
-            f"brain.kind = {kind!r} but no `claude` on PATH",
-            remedy="Install the Claude Code CLI, or switch to brain.kind = \"native\".",
+            f"{reached} is reachable on this deployment but there is no `claude` on PATH",
+            remedy="Install the Claude Code CLI, or stop routing tasks to it.",
             scope=IMAGE,
         )
     status, detail = _binary_status(path, probe=probe)
@@ -310,19 +336,28 @@ def check_model_cli(config: "Config", probe: bool) -> CheckResult:
 
 
 def check_tmux(config: "Config", probe: bool) -> CheckResult:
-    """``tmux``, needed only by the brain that drives the interactive TUI."""
-    kind = getattr(config.brain, "kind", "claude_code")
-    if kind != "tmux_claude":
+    """``tmux``, needed only by the brain that drives the interactive TUI.
+
+    Reachability rather than ``brain.kind``, for the reason
+    ``check_model_cli`` gives: a routing entry, a fallback or a room allowlist
+    can put a task on ``tmux_claude`` without it being the base kind.
+    """
+    reachable = _reachable_kinds(config)
+    if "tmux_claude" not in reachable:
         return CheckResult(
-            "runtime.tmux", SKIP, f"brain.kind = {kind!r} does not use tmux", scope=IMAGE
+            "runtime.tmux",
+            SKIP,
+            "no reachable brain kind uses tmux "
+            f"(reachable: {', '.join(sorted(reachable)) or 'none'})",
+            scope=IMAGE,
         )
     path = shutil.which("tmux")
     if path is None:
         return CheckResult(
             "runtime.tmux",
             FAIL,
-            "brain.kind = 'tmux_claude' but no `tmux` on PATH",
-            remedy="Install tmux, or switch brain.kind.",
+            "tmux_claude is reachable on this deployment but there is no `tmux` on PATH",
+            remedy="Install tmux, or stop routing tasks to tmux_claude.",
             scope=IMAGE,
         )
     # tmux answers `-V`, not `--version`.
@@ -345,6 +380,91 @@ def check_tmux(config: "Config", probe: bool) -> CheckResult:
         )
     return CheckResult(
         "runtime.tmux", OK, f"{path}: {(result.stdout or '').strip()}", scope=IMAGE
+    )
+
+
+def _native_key_holders(config: "Config") -> int:
+    """How many configured users have a ``native_brain``/``api_key`` secret.
+
+    ``secret_exists`` rather than ``get_secret``: it neither decrypts nor bumps
+    ``last_accessed_at``, so a diagnostic neither writes to the table it is
+    diagnosing nor brings a provider credential into this process. Gated on the
+    store's key being available, since without it no stored row can be read and
+    counting one would report a credential the daemon cannot use.
+
+    Never raises — a missing database or an unreadable table is nought holders,
+    which is the direction that reports a problem rather than hiding one.
+    """
+    try:
+        from . import secrets_store
+
+        if not secrets_store.secret_key_available():
+            return 0
+        users = getattr(config, "users", None) or {}
+        return sum(
+            1
+            for user_id in users
+            if secrets_store.secret_exists(
+                config.db_path, user_id, "native_brain", "api_key"
+            )
+        )
+    except Exception:  # noqa: BLE001 — a check reports, it does not propagate
+        logger.debug("native key secret lookup failed", exc_info=True)
+        return 0
+
+
+def check_native_brain(config: "Config", probe: bool) -> CheckResult:
+    """The native brain has a provider credential to run on.
+
+    Buildable is not runnable. ``make_brain("native")`` constructs a defaulted
+    dataclass and asserts nothing about a key, and the per-user overlay falls
+    back to the instance key rather than refusing — so a deployment that can
+    reach the native brain with no credential anywhere is one where every
+    native task fails at the provider, with nothing in the registry naming it.
+    ``claude`` and ``tmux`` have had a check since they were added; this one
+    did not.
+
+    Any one of three sources satisfies it: ``[brain.native] api_key``, the
+    ``ISTOTA_BRAIN_NATIVE_API_KEY`` variable that normally populates that field
+    at load, and a per-user ``native_brain``/``api_key`` secret, which the
+    executor overlays per task. The variable is asked separately even though
+    ``load_config`` folds it in, because a ``Config`` assembled any other way
+    holds the variable and not the field, and telling a process that is holding
+    a credential it has none is how a check stops being believed.
+
+    SKIPs where ``native`` is not reachable, so it stays silent on the
+    deployments it does not describe — which is most of them.
+    """
+    name = "runtime.native_brain"
+    reachable = _reachable_kinds(config)
+    if "native" not in reachable:
+        return CheckResult(
+            name,
+            SKIP,
+            "no task on this deployment can run the native brain "
+            f"(reachable: {', '.join(sorted(reachable)) or 'none'})",
+        )
+    native = getattr(getattr(config, "brain", None), "native", None)
+    if str(getattr(native, "api_key", "") or "").strip():
+        return CheckResult(name, OK, "[brain.native] api_key is set")
+    if (os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY") or "").strip():
+        return CheckResult(name, OK, "ISTOTA_BRAIN_NATIVE_API_KEY is set")
+    holders = _native_key_holders(config)
+    if holders:
+        return CheckResult(
+            name,
+            OK,
+            f"a per-user native_brain/api_key secret is stored for {holders} user(s)",
+        )
+    return CheckResult(
+        name,
+        FAIL,
+        "the native brain is reachable but no provider API key resolves from "
+        "config, the environment or the secrets store",
+        remedy=(
+            "Set ISTOTA_BRAIN_NATIVE_API_KEY, or store one per user with "
+            "`istota secret ensure -s native_brain -k api_key`."
+        ),
     )
 
 
@@ -5513,6 +5633,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
     ("runtime.tmux", check_tmux),
+    ("runtime.native_brain", check_native_brain),
     ("runtime.framework_db", check_framework_db),
     ("runtime.task_failure_rate", check_task_failure_rate),
     ("runtime.writable_dirs", check_writable_dirs),
@@ -5569,6 +5690,10 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,
     "runtime.tmux": IMAGE,
+    # Deployment, not image: a credential is a property of an install, and the
+    # per-user arm reads the install's own secrets table. A bare `docker run`
+    # has neither and would report a missing key about nothing.
+    "runtime.native_brain": DEPLOYMENT,
     "runtime.framework_db": DEPLOYMENT,
     # Deployment, not image: it queries the `tasks` table of an install's own
     # database, which a bare `docker run` has none of.

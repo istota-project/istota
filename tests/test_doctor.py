@@ -623,6 +623,220 @@ class TestTmux:
         assert r.status == FAIL
 
 
+class TestTheBinaryChecksFollowTheReachableSet:
+    """`runtime.model_cli` and `runtime.tmux` ask which kinds a task could run
+    under, not which one is the base kind.
+
+    Both halves are here on purpose. A test that only asserts the widening
+    passes just as happily against a check that widened unconditionally — which
+    would report a missing `claude` on every native-only deployment in the
+    estate — so the negative is what says the answer tracks the allowlist.
+    """
+
+    def _native(self, make_config, **brain_fields):
+        from istota.config import BrainConfig
+
+        return make_config(brain=BrainConfig(kind="native", **brain_fields))
+
+    def test_model_cli_runs_when_a_room_may_pin_claude_code(
+        self, make_config, monkeypatch,
+    ):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, room_selectable=["claude_code"])
+        r = run_checks(config, only=("runtime.model_cli",))[0]
+        assert r.status == FAIL
+        assert "claude_code" in r.detail
+
+    def test_model_cli_still_skips_with_an_empty_allowlist(
+        self, make_config, monkeypatch,
+    ):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, room_selectable=[])
+        r = run_checks(config, only=("runtime.model_cli",))[0]
+        assert r.status == SKIP
+
+    def test_model_cli_ignores_an_unbuildable_allowlist_entry(
+        self, make_config, monkeypatch,
+    ):
+        """The allowlist is not a free-text widener: a name no brain answers to
+        must not turn a check on."""
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, room_selectable=["claude_kode"])
+        r = run_checks(config, only=("runtime.model_cli",))[0]
+        assert r.status == SKIP
+
+    def test_tmux_runs_when_a_room_may_pin_tmux_claude(
+        self, make_config, monkeypatch,
+    ):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, room_selectable=["tmux_claude"])
+        r = run_checks(config, only=("runtime.tmux",))[0]
+        assert r.status == FAIL
+        assert "tmux_claude" in r.detail
+
+    def test_tmux_still_skips_with_an_empty_allowlist(
+        self, make_config, monkeypatch,
+    ):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, room_selectable=[])
+        r = run_checks(config, only=("runtime.tmux",))[0]
+        assert r.status == SKIP
+
+    def test_tmux_is_unmoved_by_an_allowlist_naming_another_kind(
+        self, make_config, monkeypatch,
+    ):
+        """Allowlisting `claude_code` widens `runtime.model_cli` and nothing
+        else; each check reads its own kinds out of the same set."""
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, room_selectable=["claude_code"])
+        r = run_checks(config, only=("runtime.tmux",))[0]
+        assert r.status == SKIP
+
+    def test_a_source_type_route_also_widens_the_cli_check(
+        self, make_config, monkeypatch,
+    ):
+        """Not a room-allowlist property: routing a lane to a CLI brain has
+        always put tasks on the binary, and the check SKIPped through it."""
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(
+            make_config, source_type_overrides={"scheduled": "claude_code"},
+        )
+        r = run_checks(config, only=("runtime.model_cli",))[0]
+        assert r.status == FAIL
+
+    def test_a_configured_fallback_also_widens_the_cli_check(
+        self, make_config, monkeypatch,
+    ):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        config = self._native(make_config, fallback="claude_code")
+        r = run_checks(config, only=("runtime.model_cli",))[0]
+        assert r.status == FAIL
+
+
+class TestNativeBrainCredential:
+    """`runtime.native_brain` — buildable is not runnable.
+
+    `make_brain("native")` constructs a defaulted dataclass and asserts nothing
+    about a key, so before this check an operator who allowlisted `native` got
+    a room where every turn failed at the provider with nothing in the registry
+    naming it.
+    """
+
+    def _native(self, make_config, **brain_fields):
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        native = NativeBrainConfig(api_key=brain_fields.pop("api_key", ""))
+        return make_config(
+            brain=BrainConfig(kind="native", native=native, **brain_fields)
+        )
+
+    def test_skips_where_native_is_unreachable(self, make_config, monkeypatch):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        r = run_checks(make_config(), only=("runtime.native_brain",))[0]
+        assert r.status == SKIP
+
+    def test_fails_with_no_key_anywhere(self, make_config, monkeypatch):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = self._native(make_config)
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+        assert r.remedy
+
+    def test_the_instance_key_satisfies_it(self, make_config, monkeypatch):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = self._native(make_config, api_key="sk-test")
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == OK
+
+    def test_a_whitespace_only_key_does_not(self, make_config, monkeypatch):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = self._native(make_config, api_key="   ")
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+
+    def test_the_env_var_satisfies_it(self, make_config, monkeypatch):
+        """Asked separately from the field: `load_config` folds the variable
+        into `api_key`, but a Config assembled any other way holds one and not
+        the other."""
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "sk-env")
+        config = self._native(make_config)
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == OK
+
+    def test_a_per_user_secret_satisfies_it(self, make_config, monkeypatch, tmp_path):
+        """The executor overlays this per task, so a deployment where every
+        user brings their own key needs no instance-wide one."""
+        from istota import db, secrets_store
+        from istota.config import UserConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        db_path = tmp_path / "secrets.db"
+        db.init_db(db_path)
+        secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
+
+        config = self._native(make_config)
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == OK
+        assert "1 user" in r.detail
+
+    def test_another_users_secret_is_not_confused_for_one(
+        self, make_config, monkeypatch, tmp_path,
+    ):
+        """A row for a service that is not the native brain must not count."""
+        from istota import db, secrets_store
+        from istota.config import UserConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        db_path = tmp_path / "secrets.db"
+        db.init_db(db_path)
+        secrets_store.set_secret(db_path, "alice", "ntfy", "token", "t")
+
+        config = self._native(make_config)
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+
+    def test_a_missing_database_is_no_key_rather_than_a_traceback(
+        self, make_config, monkeypatch, tmp_path,
+    ):
+        from istota.config import UserConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        config = self._native(make_config)
+        config.db_path = tmp_path / "absent.db"
+        config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+
+    def test_a_room_allowlisting_native_is_enough_to_run_it(
+        self, make_config, monkeypatch,
+    ):
+        """The D11 case: the base kind is a CLI brain and native is reachable
+        only because a room may pin it."""
+        from istota.config import BrainConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = make_config(
+            brain=BrainConfig(kind="claude_code", room_selectable=["native"])
+        )
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+
+    def test_and_stays_silent_without_the_allowlist(self, make_config, monkeypatch):
+        from istota.config import BrainConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = make_config(brain=BrainConfig(kind="claude_code"))
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == SKIP
+
+
 class TestFrameworkDb:
     def test_missing_db_warns(self, make_config, tmp_path):
         config = make_config(db_path=tmp_path / "absent.db")
