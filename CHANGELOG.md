@@ -9,9 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A chat room can now be told which brain to run, with `!brain` in the room or from its settings in web chat. Only an admin can set one, and only to a kind the operator has listed under `[brain] room_selectable` — empty by default, so nothing changes until an operator opts in. A room that names its brain runs that brain or fails saying why, rather than quietly answering from the deployment's backup: `!brain` on its own reports what the room runs and what it falls back to, and `!brain default` restores both. Switching a room to a brain that reads model names differently clears the room's model default and says so, since the stored name would not resolve under the new one.
+
 - `istota doctor` now reports whether a skill that calls a model on its own — code review is the one today — can actually authenticate. Nothing in the deployment said so before, so the only way to find out was to run a review and read the result. It checks two things separately: that the skill the credential is meant for still exists under the name the code looks it up by, which is what a rename would silently break, and that the daemon holds a credential to hand it. That second half only answers where the environment it reads is the daemon's own; run from inside a task, where the credential is stripped on purpose, it says so and skips instead of reporting a failure. Credential names are reported, never values.
 
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
+
+### Changed
+
+- **Upgrade note, for deployments running the native brain:** the web-fetch tool that brain provides is now available to admins only. It reaches the internet from the daemon itself rather than through the per-task network allowlist, so a standard user had wider access under that brain than the same person had under either Claude brain — and since a shared room applies one brain to every member's turns, an admin's choice decided it for them. Standard users lose the tool on upgrade: web search is unaffected, and where a browser service is configured that stays the way to read a page, but a deployment with neither leaves standard users with no way to read one at all.
 
 ### Fixed
 

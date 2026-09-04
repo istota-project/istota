@@ -6,7 +6,7 @@ Claude Code-powered assistant bot with Nextcloud Talk interface.
 
 For module-specific internals, see `.claude/rules/`:
 
-- `brain.md` — Brain protocol + ClaudeCodeBrain + NativeBrain (in-process agent loop)
+- `brain.md` — Brain protocol + ClaudeCodeBrain + NativeBrain (in-process agent loop), plus per-room brain selection
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — every dataclass field + TOML mapping
@@ -159,6 +159,14 @@ Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-jo
 ### Heartbeat
 
 `HEARTBEAT.md` — `file-watch`, `shell-command`, `url-health`, `calendar-conflicts`, `task-deadline`, `self-check`. Cooldown + quiet hours.
+
+### Which brain a task runs
+
+`tasks.brain` > `[brain.source_type_overrides][source_type]` > `[brain] kind`, resolved by `brain.resolve_brain_kind`. The first is filled from `rooms.brain` at task creation, in the same `record_inbound` block that fills `model` and `effort` and under the same `room_surface` guard — so Talk and web, and deliberately not email, cron, heartbeat, briefing or skill tasks, which run the `source_type` answer even into a room that pinned a brain. The column is what makes a room edited mid-flight change nothing already running; retries and subtasks inherit it, so a subtask does not silently take `source_type_overrides["subtask"]` and differ from its parent.
+
+**A room may only pin a kind the operator listed in `[brain] room_selectable`, which is empty by default, and only an admin may write it.** Both gates are there because brain kind selects an isolation posture rather than a preference: the two CLI brains run the whole agent inside bubblewrap, `native` runs the agent loop in the daemon process with its file confinement enforced in Python. An unknown or unlisted pin is a WARNING and a fallthrough, never a failed task, which is what lets an operator shorten the list without anything having to rewrite stored rows.
+
+**A pinned room has no availability failover.** `resolve_brain_kind` clears `fallback` on the admission path, so a turn the pinned brain cannot run fails with that brain's own reason instead of answering from another model. The breaker still opens and the operator is still alerted — only the reroute goes. Set from chat with `!brain` (show / `<kind>` / `default`) and from the web room settings; changing across a model namespace clears the room's model pin and says so. Full rules in `.claude/rules/brain.md`.
 
 ### Security
 
