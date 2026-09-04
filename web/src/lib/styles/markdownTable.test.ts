@@ -87,10 +87,14 @@ describe('markdown table cells', () => {
     const body = cellRule() ?? '';
     const match = body.match(/min-width:\s*([\d.]+)ch/);
     expect(match, 'cells need a min-width floor, in ch so it tracks the type scale').toBeTruthy();
-    // The value is a judgement (10ch measured best: it fixes the reported
-    // table while a two-column table still fits a 320px phone, where 12ch
-    // forced even that to scroll). The floor asserted here is only that it is
-    // large enough to be a column rather than a rounding error.
+    // The value is a judgement, and it has to be measured at the app's own
+    // text scale: `ch` tracks it, so 8ch is ~67px under the default 110% root
+    // rather than the ~60px a browser-default page shows. 8ch is the tightest
+    // floor that is not already inert (below it the longest word in a short
+    // label wins anyway) and the widest that leaves a two-column table fitting
+    // a 320px phone — 9ch put the reported table into a 4px scroll and 10ch
+    // into a 13px one. The bound asserted here is only that the floor is a
+    // column rather than a rounding error.
     expect(Number(match![1])).toBeGreaterThanOrEqual(8);
   });
 });
