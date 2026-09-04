@@ -13,7 +13,8 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!resume [#ID]` | Re-run a failed or cancelled task, continuing from its captured progress |
 | `!status` | Show running/pending tasks and system stats |
 | `!usage` | Show token usage; adds a by-brain split and the Claude Code plan's rate-limit windows for admins (hidden alias: `!limits`) |
-| `!room` | Show this room's standing model/effort default; `!room model ALIAS` / `!room effort LEVEL` set it, `default` clears |
+| `!room` | Show this room's standing model/effort default and the brain it runs; `!room model ALIAS` / `!room effort LEVEL` set the first two, `default` clears |
+| `!brain` | Show which brain this room runs and why; `!brain KIND` pins one (admin, and only where the operator allows it), `!brain default` clears |
 | `!memory user` | Show USER.md contents |
 | `!memory channel` | Show CHANNEL.md contents |
 | `!memory facts [ENTITY]` | Show knowledge graph facts, optionally filtered to one subject |
@@ -67,6 +68,16 @@ That block appears when a reading is available, not when `brain.kind` is `claude
 ## Room model default
 
 `!room` shows the room's standing model/effort default; `!room model <alias>` and `!room effort <level>` set it, and `default` clears it. The default lives on the shared room registry, so it applies to every message in that room on both Talk and web, and to every participant. Precedence: an inline `!model` prefix wins over the room default, which wins over the instance `model` config.
+
+## Room brain
+
+`!brain` on its own reports which brain the room's turns run under and how that was decided — the room's own setting, the rule for this surface, the instance default, and what happens if the brain is unavailable. Anyone in the room can read it.
+
+`!brain <kind>` pins the room to one brain and `!brain default` clears the pin. Both are admin-only, and the kinds on offer are whatever the operator listed under `[brain] room_selectable`, which is empty by default — so on a deployment that has not opted in, `!brain <kind>` says so and names no kinds. A pin applies to every participant's turns in that room, the way the model default does, and to Talk and web turns only: mail threaded into the room, and scheduled work delivering into it, run the deployment's own answer.
+
+Two consequences the set reply names, because neither is obvious. **A pinned room does not fail over.** If the brain it names is unavailable, a turn fails with the real reason instead of quietly being answered by the deployment's backup brain; `!brain default` restores both the inherited brain and its failover. And **switching to a brain that reads model names differently clears the room's model default**, since the stored name would not resolve under the new one — the reply says what it dropped. Switching between two brains that share a namespace keeps the pin.
+
+Settable from the web room settings too, under the same admin gate and the same allowlist.
 
 ## Model override prefix
 
