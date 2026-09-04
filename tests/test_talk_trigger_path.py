@@ -35,6 +35,7 @@ from istota.config import (
 )
 from istota.transport.talk import inbound as poller
 from istota.transport.talk.inbound import (
+    catch_up_conversation,
     poll_one_conversation,
     poll_talk_conversations,
 )
@@ -160,20 +161,82 @@ class TestTheTriggerPathKeepsTheMentionGate:
 
         assert len(created) == 1
 
-    def test_the_room_context_has_no_default_anywhere_on_the_path(self):
-        """Both arguments are keyword-only and required.
+    @pytest.mark.parametrize(
+        "entry_point", [poll_one_conversation, catch_up_conversation],
+        ids=["trigger", "catch_up"],
+    )
+    def test_the_room_context_has_no_default_anywhere_on_the_path(
+        self, entry_point,
+    ):
+        """Both arguments are keyword-only and required, on **both** entry points.
 
         The defect this file is about is a *default*, so the signature is the
         thing to pin: a `conv_type: int = 1` added later would make every test
-        above pass while reopening the hole.
+        above pass while reopening the hole. Catch-up is the second door onto
+        the same `_process_poll_results`, and it runs on every join and every
+        reconnect, so a default there is the same hole opened more often.
         """
         import inspect
 
-        sig = inspect.signature(poll_one_conversation)
+        sig = inspect.signature(entry_point)
         for name in ("conv_type", "display_name"):
             param = sig.parameters[name]
             assert param.kind is inspect.Parameter.KEYWORD_ONLY, name
             assert param.default is inspect.Parameter.empty, name
+
+    @pytest.mark.asyncio
+    async def test_the_trigger_fetch_does_not_hold_a_nextcloud_worker(
+        self, make_config,
+    ):
+        """`timeout=0`, not `scheduler.talk_poll_timeout`.
+
+        The coalescing rule makes the *second* fetch of a burst the normal
+        case, and it reads from a cursor the first fetch just advanced past
+        every message — so with the poller's 30-second timeout Nextcloud holds
+        it for the full 30, on the one drain task every other dirty room queues
+        behind. That is a held request per burst, against the design's claim
+        that none remains in the steady state.
+        """
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "group1", 50)
+        client = _client([_msg()])
+        client.poll_messages = AsyncMock(return_value=[])
+
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client", return_value=client,
+        ):
+            await poll_one_conversation(
+                config, "group1", conv_type=2, display_name="team",
+            )
+
+        assert client.poll_messages.await_args.kwargs["timeout"] == 0
+        assert client.poll_messages.await_args.kwargs[
+            "last_known_message_id"
+        ] == 50
+
+    @pytest.mark.asyncio
+    async def test_a_failed_fetch_raises_rather_than_reading_as_empty(
+        self, make_config,
+    ):
+        """`_poll_single_conversation` swallows every fetch error and returns
+        `(token, [])`, which is right for the poll path and is the drain's
+        whole error contract defeated: a read timeout would arrive as a clean
+        empty result, the dirty bit would be cleared and the room stranded with
+        nothing saying so."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "group1", 50)
+        client = _client([_msg()])
+        client.poll_messages = AsyncMock(side_effect=RuntimeError("read timeout"))
+
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client", return_value=client,
+        ):
+            with pytest.raises(RuntimeError, match="read timeout"):
+                await poll_one_conversation(
+                    config, "group1", conv_type=2, display_name="team",
+                )
 
 
 class TestTheTwoPathsProduceTheSameTask:

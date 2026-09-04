@@ -830,6 +830,19 @@ class RoomPass:
     cursor could not be initialised gets no watcher, because catch-up reads
     *forward from the cursor* and a NULL one means reading from zero, which
     ingests a room's recent history as new tasks.
+
+    ``behind_cursor`` is narrower than ``behind``, and the two must not be
+    confused — one is a work list and the other is a diagnostic. The gate
+    un-gates a room for **two** reasons: because its `lastMessage.id` is ahead
+    of its cursor, and because there is no cursor to compare against at all. A
+    room in the second state stays there indefinitely — an empty group room
+    acquires no cursor until somebody speaks — so counting it as "behind" would
+    have `doctor` WARN for ever that "messages are arriving over the fallback
+    fetch rather than over the event stream" on a deployment whose event stream
+    is working perfectly. That number is the one thing that distinguishes a
+    stream that is delivering from one the safety net is carrying, so a
+    permanent false positive in it is worse than not having it. Both rooms
+    still need fetching, so both are in ``behind``.
     """
 
     conversations: list[dict]
@@ -840,6 +853,7 @@ class RoomPass:
     cursors: dict[str, int | None]
     watchable: set[str]
     behind: list
+    behind_cursor: set[str]
     gated: int
     full_sweep: bool
     stale_listing: bool
@@ -849,7 +863,8 @@ class RoomPass:
 def _empty_room_pass(*, listing_failed: bool) -> RoomPass:
     return RoomPass(
         conversations=[], conv_types={}, conv_names={}, context={},
-        live_tokens=set(), cursors={}, watchable=set(), behind=[], gated=0,
+        live_tokens=set(), cursors={}, watchable=set(), behind=[],
+        behind_cursor=set(), gated=0,
         full_sweep=False, stale_listing=False, listing_failed=listing_failed,
     )
 
@@ -1054,6 +1069,17 @@ async def reconcile_talk_rooms(
         )
         for plan in plans
     }
+    # The gate's own question, asked again and only where it can be answered.
+    # `_has_news` is cheap and pure — it reads the listing entry the pass
+    # already holds — so this costs nothing and is not a second source of
+    # truth: a room with no `known_cursor` has nothing to be behind, whatever
+    # the gate did with it.
+    behind_cursor = {
+        plan.token for plan in plans
+        if not plan.cursor_init_failed
+        and plan.known_cursor is not None
+        and _has_news(plan.conv, plan.known_cursor)
+    }
     return RoomPass(
         conversations=conversations,
         conv_types=conv_types,
@@ -1063,6 +1089,7 @@ async def reconcile_talk_rooms(
         cursors=cursors,
         watchable={t for t, c in cursors.items() if c is not None},
         behind=behind,
+        behind_cursor=behind_cursor,
         gated=gated,
         full_sweep=bool(full_sweep),
         stale_listing=stale_listing,
@@ -1118,6 +1145,30 @@ async def poll_one_conversation(
     that is not the runtime's must be able to hand in its own — ``
     get_talk_client`` refuses that caller outright, since the pool binds to
     whichever loop issued the first request.
+
+    **Two things it deliberately does not borrow from the poll path**, both
+    found in review, and both of which would have made the design's headline
+    claim false while every test stayed green.
+
+    ``timeout=0``, not ``scheduler.talk_poll_timeout``. The trigger path fetches
+    because a message already exists, so nothing needs to be waited for — but
+    the coalescing rule makes the *second* fetch of a burst the normal case,
+    and that one reads from a cursor the first fetch just advanced past every
+    message. With the poller's 30-second timeout Nextcloud holds it for the
+    full 30, on the one drain task every other dirty room queues behind, so the
+    push path would degrade to worse-than-poll latency under exactly the
+    traffic it exists for — and would reintroduce a held request per burst,
+    against "no held request remains anywhere in the steady state".
+
+    And ``client.poll_messages`` directly rather than through
+    ``_poll_single_conversation``, which catches every exception and returns
+    ``(token, [])``. That is right for the poll path, where the cycle carries
+    on and the room is re-polled ten seconds later. Here it is the failure the
+    drain's whole error contract is written against: a read timeout would
+    arrive as a clean empty result, the drain would count a success, clear the
+    dirty bit and strand the room until the next reconciliation — with nothing
+    anywhere saying so, because the socket is fine. The fetch raises, the drain
+    preserves the dirty bit, and the failure is counted.
     """
     if client is None:
         client = get_talk_client(config)
@@ -1125,11 +1176,10 @@ async def poll_one_conversation(
     async with talk_db(config.db_path) as conn:
         cursor = db.get_talk_poll_state(conn, conversation_token)
 
-    _token, messages = await _poll_single_conversation(
-        client,
+    messages = await client.poll_messages(
         conversation_token,
-        cursor if cursor is not None else 0,
-        config.scheduler.talk_poll_timeout,
+        last_known_message_id=cursor if cursor is not None else 0,
+        timeout=0,
     )
     if not messages:
         return []

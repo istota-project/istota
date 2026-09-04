@@ -5806,6 +5806,7 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
     watchers = _as_count(stats.get("watchers"))
     connected = _as_count(stats.get("connected"))
     behind = _as_count(stats.get("rooms_behind"))
+    stranded = _as_count(stats.get("stale_dirty"))
     # Type-guarded like the three counters beside it, and for a sharper reason:
     # `or []` on the *string* "abc123" iterates it into six single-character
     # tokens, each of which passes the filter, so the WARN would name six rooms
@@ -5836,6 +5837,18 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
             "reconciliation, so messages are arriving over the fallback fetch "
             "rather than over the event stream"
         )
+    # The one failure no other counter can show. A room whose triggered fetch
+    # raised keeps its dirty bit — deliberately, so the next event re-runs it
+    # rather than coalescing into a fetch that already died — and until
+    # something re-wakes the drain it is owed a fetch nobody is making. Its
+    # watcher is connected, its socket is fine, and every other number here is
+    # healthy, which is exactly why the supervisor counts it.
+    if stranded:
+        findings.append(
+            f"{stranded} room(s) have been waiting on a triggered fetch for "
+            "longer than one room_sync_interval, so a fetch failed and has "
+            "not been retried"
+        )
 
     if findings:
         return CheckResult(
@@ -5851,7 +5864,8 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
 
     return CheckResult(
         name, OK,
-        f"{connected} of {watchers} watchers connected, no room behind its cursor",
+        f"{connected} of {watchers} watchers connected, no room behind its "
+        "cursor and none waiting on a failed fetch",
         scope=DEPLOYMENT,
     )
 

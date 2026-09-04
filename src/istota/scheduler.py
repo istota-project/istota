@@ -7583,8 +7583,23 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     except Exception as e:
         logger.warning("User config hydration failed: %s", e)
 
-    # Poll Talk conversations
-    if config.talk.enabled:
+    # Poll Talk conversations.
+    #
+    # Gated on signaling the same way `run_daemon` is, and for a sharper reason
+    # than tidiness: this is a *second process*, so the supervisor's in-flight
+    # set and `inbound.py`'s module globals do not reach it. A one-shot run
+    # against a signaling-enabled deployment would read the same cursor the
+    # daemon's drain just read, fetch the same messages and run the filter
+    # chain over them again — and `dispatch_command`, `handle_confirmation_reply`
+    # with its ack post, the `!model` usage reply and the channel-gate notice
+    # are none of them idempotent. On such a deployment the daemon owns Talk
+    # inbound; a one-shot has no supervisor and is not a substitute for one.
+    if config.talk.enabled and config.talk.signaling.enabled:
+        logger.info(
+            "Skipping the Talk poll: [talk.signaling] enabled = true, so "
+            "inbound belongs to the signaling supervisor in the daemon",
+        )
+    elif config.talk.enabled:
         try:
             from .transport.talk import poll_talk_conversations
             # Single-pass mode still lazily uses the persistent loop here:
@@ -7733,9 +7748,28 @@ def _start_talk_signaling(config: Config) -> bool:
             type(e).__name__, e,
         )
     else:
-        sig.require_hpb(
-            sig.parse_settings(payload, nextcloud_url=config.nextcloud.url),
+        settings = sig.parse_settings(
+            payload, nextcloud_url=config.nextcloud.url,
         )
+        if not settings.signaling_mode:
+            # `require_hpb` refuses on *three* states, and only two of them are
+            # the settled misconfigurations this gate is for. The third —
+            # "Talk reported no signaling mode" — is what `parse_settings`
+            # yields for any payload it could not read: a 200 carrying a proxy
+            # error page, an OCS envelope shaped differently, an upstream field
+            # rename. Refusing there is the same single point of failure the
+            # docstring above rejects, wearing a different hat, and
+            # `require_hpb`'s own remedy for it says "check that Nextcloud is
+            # reachable" — a transient-fault remedy attached to a hard refusal.
+            logger.error(
+                "STARTUP Talk answered the signaling settings call with "
+                "nothing this client could read, so whether a "
+                "high-performance backend is registered is unknown. Starting "
+                "the supervisor anyway; see doctor's talk.signaling_auth and "
+                "talk.signaling_reachable.",
+            )
+        else:
+            sig.require_hpb(settings)
 
     from .transport.talk.supervisor import SignalingSupervisor
 

@@ -62,6 +62,16 @@ on top of one still holding its socket and its Talk room session. Nothing here
 restarts from a callback: a watcher that ends for good is noticed by the next
 reconciliation, which is a bounded, capped restart cadence by construction.
 
+**A stopped watcher leaves its Talk participant session to expire, and that is
+a decision.** `join_room_session` POSTs `participants/active` with
+`force: true` and nothing here posts the corresponding leave, so a room that
+left the listing keeps the bot marked active until Talk reaps the session at
+`SESSION_TIMEOUT_KILL` (100 seconds). A leave POST would be a new network call
+on the shutdown path, inside `AsyncRuntime.stop`'s budget, that can fail and
+must then be swallowed — for a window that closes on its own, in a room the bot
+is no longer in. `force: true` supersedes on the way back in, so nothing
+depends on the session having gone.
+
 The whole module is best-effort by contract. A push transport that can fail a
 task or block ingestion is worse than the poll it replaces, so nothing here
 raises into the daemon; the one exception is startup, where the two refusals in
@@ -103,6 +113,25 @@ _HANDSHAKE_TIMEOUT_SECONDS = 15.0
 # The reconcile loop wakes at least this often even with a nonsense interval
 # configured, so a supervisor cannot become a busy loop on a bad value.
 _MIN_SYNC_INTERVAL_SECONDS = 5.0
+
+# A session that lived this long is evidence the deployment works, so the
+# reconnect ladder starts again from the bottom. Resetting on *any* successful
+# connect is the plausible wrong version: a server that accepts a session and
+# drops it immediately would then reconnect every one to two seconds for ever,
+# POSTing `participants/active` each time. Resetting on nothing at all is the
+# other one, and is what this replaced — the ingress drops every connection
+# hourly, so within a day every watcher sat at the ceiling and each of those 24
+# daily reconnects cost a 30-60 second inbound blackout instead of one second.
+_HEALTHY_SESSION_SECONDS = 60.0
+
+# How long a watcher that stopped for a fatal reason is left alone before it is
+# tried again. `WatcherFatal` means "this will not fix itself", so restarting it
+# on the reconciliation interval would be the churn the class exists to avoid —
+# a settings fetch, a `participants/active` POST and a connect per room every
+# five minutes, with `doctor` reporting watchers that are trying. It is a long
+# window rather than never, because the operator who fixes `invalid_backend`
+# should not also have to restart the daemon.
+_FATAL_RETRY_SECONDS = 3600.0
 
 
 class WatcherFatal(RuntimeError):
@@ -148,8 +177,13 @@ class RoomWatcher:
         self._sup = supervisor
         self.token = token
         self.connected = False
+        # Set when `run` returns because the watcher will not fix itself. The
+        # supervisor reads it rather than inferring from `task.done()`, which
+        # cannot tell a fatal stop from any other kind of ending.
+        self.fatal = False
         self._state = _RoomWatcherState()
         self._frame_seq = 0
+        self._connected_at = 0.0
 
     # -- frame plumbing ----------------------------------------------------
 
@@ -184,18 +218,16 @@ class RoomWatcher:
     async def run(self) -> None:
         attempt = 0
         while True:
+            self._connected_at = 0.0
             try:
                 await self._session()
-                # A clean end of the socket is not evidence of a broken
-                # deployment, so the ladder starts again. The hourly ingress
-                # drop is this case, N times a day.
-                attempt = 0
             except asyncio.CancelledError:
                 raise
             except WatcherFatal as e:
                 logger.error(
                     "Talk signaling watcher for %s stopped: %s", self.token, e,
                 )
+                self.fatal = True
                 self._sup.count("watchers_stopped")
                 return
             except Exception as e:  # noqa: BLE001 — a watcher never raises out
@@ -205,6 +237,17 @@ class RoomWatcher:
                 )
             finally:
                 self.connected = False
+
+            # The ladder resets on evidence that the session *worked*, never on
+            # how it ended. `_session` has no normal return — `_consume` loops
+            # until something raises, and a clean socket close arrives as
+            # `ConnectionClosedOK` — so a reset placed on the non-exception
+            # path is unreachable, which is what this replaced.
+            if (
+                self._connected_at
+                and time.monotonic() - self._connected_at >= _HEALTHY_SESSION_SECONDS
+            ):
+                attempt = 0
 
             delay = sig.backoff_delay(
                 attempt,
@@ -226,6 +269,7 @@ class RoomWatcher:
             await self._join(ws)
 
             self.connected = True
+            self._connected_at = time.monotonic()
             self._state.recoveries.clear()
 
             # Always, resume or not. A resumed session replays only what the
@@ -386,6 +430,9 @@ class SignalingSupervisor:
         self._stop = asyncio.Event()
 
         self._rooms_behind = 0
+        # token -> the monotonic time before which a fatally-stopped watcher is
+        # not tried again.
+        self._fatal_until: dict[str, float] = {}
         self._counters: dict[str, int] = {}
         self._settings = None
         self._settings_at = 0.0
@@ -516,10 +563,37 @@ class SignalingSupervisor:
         return await self._client().join_room_session(token)
 
     async def catch_up(self, token: str) -> None:
+        """Read one room forward from its cursor, behind the room's in-flight flag.
+
+        **The flag is what makes this safe against the drain**, and skipping it
+        is a correctness bug rather than a tidiness one. Both this and
+        `poll_one_conversation` read the cursor under the transport lock,
+        *release it*, fetch, then take it again to process — so a reconnect
+        landing while a drain fetch is in flight reads the same cursor, fetches
+        the same messages and runs the whole filter chain over them a second
+        time. `set_talk_poll_state` is MAX-guarded and `ingest_message` dedups
+        on the Talk message id, so no duplicate task results; but
+        `dispatch_command`, `handle_confirmation_reply` and its ack post, the
+        `!model` usage reply and the channel-gate notice are none of them
+        idempotent, and those are exactly the side effects the cursor's
+        monotonicity rule was written to protect. The transport lock does not
+        help: it serializes the two transactions, not the read-fetch-process
+        sequence around them.
+
+        The check and the add have no `await` between them, so on one loop they
+        are atomic. A room already in flight is marked dirty instead, which
+        hands it to the drain — the catch-up's messages are not lost, they are
+        read by the fetch that follows.
+        """
         context = self._context.get(token)
         if context is None:
             self.count("catch_up_without_context")
             return
+        if token in self._inflight:
+            self.count("catch_up_deferred")
+            self.mark_dirty(token)
+            return
+        self._inflight.add(token)
         try:
             created = await catch_up_conversation(
                 self.config, token,
@@ -538,6 +612,8 @@ class SignalingSupervisor:
             # The room is now behind its cursor, so the next reconciliation
             # fetches it. Marking it dirty here would retry immediately.
             return
+        finally:
+            self._inflight.discard(token)
         if created:
             logger.info(
                 "Talk signaling catch-up queued %d task(s) in %s",
@@ -645,6 +721,13 @@ class SignalingSupervisor:
 
     async def reconcile(self) -> None:
         """One room pass: register, decide the watcher set, fetch what is behind."""
+        if not self.config.talk.enabled or not self.config.nextcloud.url:
+            # `reconcile_talk_rooms` answers this with the same empty pass it
+            # returns for a failed listing, and counting a configuration state
+            # as an outage makes the two indistinguishable in `stats()` for the
+            # life of the process.
+            self.count("reconcile_unconfigured")
+            return
         try:
             room_pass = await reconcile_talk_rooms(
                 self.config, client=self._client(),
@@ -687,7 +770,13 @@ class SignalingSupervisor:
             entry[0] if isinstance(entry, tuple) else entry
             for entry in room_pass.behind
         ]
-        self._rooms_behind = len(behind)
+        # The **diagnostic** is the strict set, not the work list. The gate
+        # un-gates a room both for being ahead of its cursor and for having no
+        # cursor to compare against, and the second state is permanent for an
+        # empty room — so counting it here would have `doctor` report the event
+        # stream as failing for ever on a deployment where it works. Both are
+        # still fetched.
+        self._rooms_behind = len(room_pass.behind_cursor)
 
         await self._stop_departed()
         for token in behind:
@@ -701,8 +790,14 @@ class SignalingSupervisor:
             # A room we no longer watch must not keep a queue entry, or the
             # drain would fetch a room the listing no longer names.
             self._dirty.pop(token, None)
+        # A room that left the listing altogether takes its hold-off with it,
+        # so re-invitation is a clean start rather than an hour of silence.
+        for token in list(self._fatal_until):
+            if token not in self._watchable:
+                self._fatal_until.pop(token, None)
 
     def _start_missing(self) -> None:
+        now = time.monotonic()
         for token in sorted(self._watchable):
             task = self._tasks.get(token)
             if task is not None and not task.done():
@@ -712,9 +807,26 @@ class SignalingSupervisor:
                 # Restarted here rather than from a done-callback: this loop
                 # runs on `room_sync_interval`, which is the bounded, capped
                 # cadence the restart needs, and the handle is known finished.
+                watcher = self._watchers.pop(token, None)
                 self._tasks.pop(token, None)
-                self._watchers.pop(token, None)
-                self.count("watchers_restarted")
+                if watcher is not None and watcher.fatal:
+                    # `WatcherFatal` means this will not fix itself, so
+                    # restarting it every `room_sync_interval` is the churn the
+                    # exception exists to avoid: `doctor` would report watchers
+                    # that are trying rather than one that cannot work, and each
+                    # attempt costs a settings fetch, a `participants/active`
+                    # POST and a connect. Held off rather than abandoned, so an
+                    # operator who fixes the deployment needs no restart.
+                    self._fatal_until[token] = now + _FATAL_RETRY_SECONDS
+                    self.count("watchers_fatal")
+                else:
+                    self.count("watchers_restarted")
+            held = self._fatal_until.get(token)
+            if held is not None:
+                if now < held:
+                    continue
+                self._fatal_until.pop(token, None)
+                self.count("watchers_retried_after_fatal")
             if not self._may_watch(token):
                 self.count("refused_joins")
                 continue
@@ -727,6 +839,7 @@ class SignalingSupervisor:
     async def _stop_watcher(self, token: str) -> None:
         task = self._tasks.pop(token, None)
         self._watchers.pop(token, None)
+        self._fatal_until.pop(token, None)
         if task is None:
             return
         task.cancel()
@@ -741,10 +854,45 @@ class SignalingSupervisor:
 
     async def run(self) -> None:
         sig.set_stats_source(self.stats)
-        drain = asyncio.create_task(self._drain_loop(), name="talk-signaling-drain")
+        drain = self._spawn_drain()
         try:
             while not self._stop.is_set():
-                await self.reconcile()
+                # **The whole pass, not just the listing call.** `reconcile`
+                # guards its own network step, but `_stop_departed` awaits a
+                # cancelled watcher task and re-raises anything that was not a
+                # `CancelledError` — and an exception escaping here unwinds
+                # straight into the `finally` below, tearing down the drain and
+                # every watcher and leaving Talk inbound dead for the life of
+                # the process with nothing saying why. One bad pass costs a
+                # cycle instead.
+                try:
+                    await self.reconcile()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — one pass, not the daemon
+                    self.count("reconcile_failures")
+                    logger.error(
+                        "Talk signaling reconciliation pass failed: %s: %s",
+                        type(e).__name__, e,
+                    )
+
+                # A drain that died takes the whole trigger path with it, and
+                # invisibly: every counter `doctor` reads stays healthy while
+                # `mark_dirty` sets an event nobody is waiting on. That is the
+                # module's own stranding failure one level up, so it is checked
+                # here rather than left to a done-callback whose exception
+                # nobody retrieves.
+                if drain.done():
+                    self.count("drain_restarted")
+                    logger.error(
+                        "Talk signaling drain task ended (%r); restarting it",
+                        drain.exception() if not drain.cancelled() else "cancelled",
+                    )
+                    drain = self._spawn_drain()
+                    # Anything queued while it was dead is still queued.
+                    if self._dirty:
+                        self._wake.set()
+
                 interval = max(
                     _MIN_SYNC_INTERVAL_SECONDS,
                     float(self.config.talk.signaling.room_sync_interval or 0),
@@ -755,9 +903,23 @@ class SignalingSupervisor:
             drain.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await drain
-            for token in list(self._tasks):
-                await self._stop_watcher(token)
+            # Cancel every watcher first, then wait for them together.
+            # `AsyncRuntime.stop` gives the whole shutdown half its budget
+            # (5 seconds by default), and each cancel unwinds through a
+            # WebSocket close handshake — so N sequential awaits spend N close
+            # handshakes out of one budget where they can all run at once.
+            tasks = [self._tasks.pop(t) for t in list(self._tasks)]
+            self._watchers.clear()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             sig.clear_stats_source()
+
+    def _spawn_drain(self) -> asyncio.Task:
+        return asyncio.create_task(
+            self._drain_loop(), name="talk-signaling-drain",
+        )
 
     def stop(self) -> None:
         """Ask `run` to return. Cancellation is the other way in and is fine."""
@@ -780,23 +942,29 @@ class SignalingSupervisor:
             _MIN_SYNC_INTERVAL_SECONDS,
             float(self.config.talk.signaling.room_sync_interval or 0),
         )
+        # **Snapshotted before anything walks them.** This is called from
+        # whichever thread `doctor` runs on while the loop thread mutates all
+        # four mappings, and a comprehension over a live dict raises
+        # `RuntimeError: dictionary changed size during iteration`.
+        # `read_stats` catches that and returns `None`, so the visible symptom
+        # would be `doctor` intermittently reporting "no signaling supervisor
+        # is running in this process" on a healthy deployment — the exact
+        # misreport that registration exists to avoid. `list(d)` is a single
+        # C-level call under the GIL and cannot be interrupted part-way.
+        watchers = list(self._watchers.items())
+        marks = list(self._dirty.values())
         # The counters go in first, so a diagnostic that happens to be named
         # like one of the four contract keys can never displace it.
         stats = dict(self._counters)
         stats.update({
             "watchers": len(self._tasks),
-            "connected": sum(
-                1 for w in self._watchers.values() if w.connected
-            ),
+            "connected": sum(1 for _t, w in watchers if w.connected),
             "disconnected": sorted(
-                token for token, w in self._watchers.items()
-                if not w.connected
+                token for token, w in watchers if not w.connected
             ),
             "rooms_behind": self._rooms_behind,
-            "dirty": len(self._dirty),
+            "dirty": len(marks),
             "in_flight": len(self._inflight),
-            "stale_dirty": sum(
-                1 for marked in self._dirty.values() if now - marked > interval
-            ),
+            "stale_dirty": sum(1 for marked in marks if now - marked > interval),
         })
         return stats

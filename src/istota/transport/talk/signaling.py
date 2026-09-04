@@ -795,7 +795,18 @@ def read_stats() -> dict | None:
     ``rooms_behind``   int — rooms whose ``lastMessage.id`` was ahead of their
                        cursor at the last reconciliation, which is the one
                        number that distinguishes a stream that is delivering
-                       from one the safety-net fetch is carrying
+                       from one the safety-net fetch is carrying. Rooms with
+                       **no** cursor to compare against are not in it: that
+                       state is permanent for a room nobody has spoken in, and
+                       a diagnostic with a permanent false positive is worse
+                       than none
+    ``stale_dirty``    int — rooms owed a triggered fetch for longer than one
+                       ``room_sync_interval``. A fetch that raises preserves
+                       the room's dirty bit rather than retrying into a
+                       transaction that just failed, so this is the only
+                       counter that can show one nothing has come back to:
+                       the watcher is connected and every other number is
+                       healthy
 
     A missing key reads as ``0`` or empty rather than as an error: this is a
     diagnostic, and half an answer beats none.

@@ -110,6 +110,25 @@ class TestTheStartupRefusals:
         assert spawned.call_count == 1
         assert spawned.call_args.kwargs["name"] == "talk-signaling-supervisor"
 
+    def test_an_unreadable_settings_payload_starts_rather_than_refusing(
+        self, config, caplog,
+    ):
+        """`require_hpb` refuses on three states; only two are settled facts.
+
+        `parse_settings` is total, so a 200 carrying a proxy error page, an OCS
+        envelope shaped differently, or an upstream field rename all yield an
+        empty `signalingMode` — and refusing there is the same single point of
+        failure as refusing on an unreachable Nextcloud, which this gate
+        deliberately does not do.
+        """
+        nc, run, spawn = _patched({"nothing": "recognisable"})
+        with patch.object(sig, "require_websockets", return_value=object()), \
+                nc, run, spawn as spawned:
+            with caplog.at_level("ERROR"):
+                assert _start_talk_signaling(config) is True
+        assert spawned.call_count == 1
+        assert "nothing this client could read" in caplog.text
+
     def test_an_unreachable_nextcloud_starts_rather_than_refusing(
         self, config, caplog,
     ):

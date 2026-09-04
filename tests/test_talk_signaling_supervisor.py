@@ -19,6 +19,7 @@ see because none of them is about a frame:
 """
 
 import asyncio
+import contextlib
 import json
 import time
 
@@ -96,6 +97,17 @@ def _client(conversations=None):
 
 def _supervisor(config, client):
     return SignalingSupervisor(config, client_factory=lambda _c: client)
+
+
+async def _named_task(name, *, timeout):
+    """The running task with this name, or fail. Bounded rather than spun."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for task in asyncio.all_tasks():
+            if task.get_name() == name and not task.done():
+                return task
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"no running task named {name!r}")
 
 
 class TestTheWatcherSetIsClosedOverTheListing:
@@ -276,8 +288,11 @@ class TestTheCoalescingQueue:
             assert sup._dirty == {"grp": marked_at}
             assert sup.stats()["fetch_failures"] == 1
 
-            # And not retried inside the same pass: an immediate re-run of a
-            # transaction that just raised is a hot loop against Nextcloud.
+            # `calls == ["grp"]` above is the within-pass half: `_drain_once`
+            # returned rather than picking the room straight back up, which is
+            # what stops "preserve the dirty bit" becoming a hot loop against a
+            # transaction that just raised. A *later* pass does retry it, which
+            # is the point of preserving it at all.
             await sup._drain_once()
             assert calls == ["grp", "grp"]
         finally:
@@ -645,3 +660,242 @@ class TestTheConnectionLifecycle:
         # The public session id is not a credential and is what makes a
         # connection traceable at all, so it is deliberately present.
         assert "public-session" in blob
+
+
+class TestWhatTheReviewFound:
+    """Cases added from the Stage 3 review, each pinning one finding."""
+
+    @pytest.mark.asyncio
+    async def test_a_cursorless_room_is_fetched_but_not_reported_behind(
+        self, config,
+    ):
+        """`rooms_behind` is a diagnostic, not the work list.
+
+        An empty group room never acquires a cursor, so the gate un-gates it on
+        every pass — for want of anything to compare against, not because it is
+        behind. Counting it would have `doctor` report the event stream as
+        failing for ever on a deployment where it works.
+        """
+        client = _client([
+            {"token": "empty", "type": 2, "lastMessage": {"id": 0}},
+        ])
+        client.get_latest_message_id = AsyncMock(return_value=None)
+        sup = _supervisor(config, client)
+
+        await sup.reconcile()
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "empty") is None
+        # Still fetched, so a first message is not missed…
+        assert "empty" in sup._dirty
+        # …and not reported as evidence the stream has stopped delivering.
+        assert sup.stats()["rooms_behind"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_room_genuinely_behind_is_reported(self, config):
+        """The control for the case above."""
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 900}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+
+        await sup.reconcile()
+        assert sup.stats()["rooms_behind"] == 1
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_catch_up_defers_to_an_in_flight_drain_fetch(self, config):
+        """Both read the cursor, release the lock, fetch, then process.
+
+        A reconnect landing while a drain fetch is in flight would otherwise
+        read the same cursor and run the filter chain over the same messages
+        twice — and `dispatch_command`, the confirmation ack, the `!model`
+        usage reply and the channel-gate notice are none of them idempotent.
+        """
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+        await sup.reconcile()
+        sup._dirty.clear()
+
+        sup._inflight.add("grp")
+        await sup.catch_up("grp")
+
+        assert client.fetch_messages_since.await_count == 0
+        assert sup.stats()["catch_up_deferred"] == 1
+        # Not lost: handed to the drain, which reads from the cursor anyway.
+        assert "grp" in sup._dirty
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_catch_up_takes_the_in_flight_flag_and_releases_it(
+        self, config,
+    ):
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+        await sup.reconcile()
+
+        seen = []
+
+        async def fetch_since(token, since_id, **_kw):
+            seen.append(sorted(sup._inflight))
+            return []
+
+        client.fetch_messages_since = AsyncMock(side_effect=fetch_since)
+        await sup.catch_up("grp")
+
+        assert seen == [["grp"]]
+        assert sup._inflight == set()
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_a_fatally_stopped_watcher_is_not_restarted_every_pass(
+        self, config,
+    ):
+        """`WatcherFatal` means it will not fix itself.
+
+        Restarting on the reconciliation interval would be the churn the class
+        exists to avoid: a settings fetch, a `participants/active` POST and a
+        connect per room every five minutes, with `doctor` reporting watchers
+        that are trying rather than one that cannot work.
+        """
+        from istota.transport.talk.supervisor import RoomWatcher
+
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+        await sup.reconcile()
+
+        # Stand in for a watcher that ended on `invalid_backend`.
+        task = sup._tasks["grp"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        sup._watchers["grp"].fatal = True
+
+        await sup.reconcile()
+        assert sup.stats()["watchers_fatal"] == 1
+        assert "grp" not in sup._tasks
+        assert sup.stats().get("watchers_restarted", 0) == 0
+
+        # …and tried again once the hold-off has passed, so an operator who
+        # fixes the deployment needs no daemon restart.
+        sup._fatal_until["grp"] = time.monotonic() - 1
+        await sup.reconcile()
+        assert isinstance(sup._watchers.get("grp"), RoomWatcher)
+        assert sup.stats()["watchers_retried_after_fatal"] == 1
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_a_dead_drain_is_noticed_and_restarted(
+        self, config, monkeypatch,
+    ):
+        """A drain that died takes the whole trigger path with it, invisibly:
+        every counter `doctor` reads stays healthy while `mark_dirty` sets an
+        event nobody is waiting on. Nothing retrieves its exception either."""
+        import istota.transport.talk.supervisor as mod
+
+        # The reconcile interval is clamped to a floor so a nonsense config
+        # cannot make a busy loop; this test needs the loop to come round
+        # several times inside a second.
+        monkeypatch.setattr(mod, "_MIN_SYNC_INTERVAL_SECONDS", 0.005)
+        config.talk.signaling.room_sync_interval = 0
+
+        client = _client([])
+        sup = _supervisor(config, client)
+
+        run = asyncio.create_task(sup.run())
+        try:
+            drain = await _named_task("talk-signaling-drain", timeout=2)
+            drain.cancel()
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if sup.stats().get("drain_restarted"):
+                    break
+                await asyncio.sleep(0.005)
+
+            assert sup.stats().get("drain_restarted") == 1
+            fresh = await _named_task("talk-signaling-drain", timeout=2)
+            assert fresh is not drain and not fresh.done()
+        finally:
+            sup.stop()
+            run.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run
+
+    @pytest.mark.asyncio
+    async def test_stats_survives_a_mapping_mutated_while_it_reads(
+        self, config,
+    ):
+        """`read_stats` catches a raise and returns None, which `doctor` shows
+        as "no supervisor in this process" — a misreport on a healthy
+        deployment. So `stats()` snapshots before it walks anything."""
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+        await sup.reconcile()
+
+        sig.set_stats_source(sup.stats)
+        try:
+            for i in range(200):
+                sup._dirty[f"room-{i}"] = time.monotonic()
+                assert sig.read_stats() is not None
+        finally:
+            sig.clear_stats_source()
+            await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_talk_being_unusable_is_not_counted_as_an_outage(
+        self, config,
+    ):
+        config.nextcloud.url = ""
+        sup = _supervisor(config, _client([]))
+
+        await sup.reconcile()
+
+        assert sup.stats()["reconcile_unconfigured"] == 1
+        assert sup.stats().get("reconcile_failures", 0) == 0
+
+
+class TestDoctorReadsTheStrandedCount:
+    @pytest.mark.asyncio
+    async def test_a_stale_dirty_bit_reaches_the_check(self, config):
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+        await sup.reconcile()
+        for watcher in sup._watchers.values():
+            watcher.connected = True
+        sup._dirty["grp"] = time.monotonic() - 10_000
+
+        sig.set_stats_source(sup.stats)
+        try:
+            result = doctor.check_signaling_watchers(config, probe=False)
+            assert result.status == doctor.WARN
+            assert "waiting on a triggered fetch" in result.detail
+        finally:
+            sig.clear_stats_source()
+            await sup._stop_watcher("grp")
