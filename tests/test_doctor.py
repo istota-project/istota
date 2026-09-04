@@ -725,7 +725,11 @@ class TestNativeBrainCredential:
     def _native(self, make_config, **brain_fields):
         from istota.config import BrainConfig, NativeBrainConfig
 
-        native = NativeBrainConfig(api_key=brain_fields.pop("api_key", ""))
+        native = NativeBrainConfig(
+            api_key=brain_fields.pop("api_key", ""),
+            base_url=brain_fields.pop("base_url", "https://api.anthropic.com/v1"),
+            extra_headers=brain_fields.pop("extra_headers", {}),
+        )
         return make_config(
             brain=BrainConfig(kind="native", native=native, **brain_fields)
         )
@@ -804,13 +808,152 @@ class TestNativeBrainCredential:
     def test_a_missing_database_is_no_key_rather_than_a_traceback(
         self, make_config, monkeypatch, tmp_path,
     ):
+        """And it must not *create* one on the way to finding out.
+
+        `secrets_store.secret_exists` opens read-write and commits, so against
+        an absent path it leaves a zero-byte database that a later read reports
+        as `no such table` — which reads as corruption rather than absence — and
+        against a live WAL database it materializes the sidecars. `sudo istota
+        doctor` beside a stopped daemon would leave both owned by root.
+        `check_framework_db` states the rule; this check now follows it.
+        """
         from istota.config import UserConfig
 
         monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        root = tmp_path / "empty"
+        root.mkdir()
         config = self._native(make_config)
-        config.db_path = tmp_path / "absent.db"
+        config.db_path = root / "absent.db"
         config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+        assert list(root.iterdir()) == []
+
+    def test_it_opens_the_database_read_only(
+        self, make_config, monkeypatch, tmp_path,
+    ):
+        """The mechanism, not a side effect of it.
+
+        Asserted on the `sqlite3.connect` arguments because the observable
+        outcomes are both weak: a WAL database already has its sidecars from
+        `init_db`, so a before/after listing cannot see a read-write open, and
+        the missing-file case is covered by an `exists()` guard that a partial
+        revert would leave in place. Reverting to `secrets_store.secret_exists`
+        — which connects read-write and commits — turns this red, because that
+        helper's own connect carries no `mode=ro`.
+        """
+        import sqlite3
+
+        from istota import db, secrets_store
+        from istota.config import UserConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
+
+        opens: list[tuple[tuple, dict]] = []
+        real_connect = sqlite3.connect
+
+        def _recording(*args, **kwargs):
+            opens.append((args, kwargs))
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", _recording)
+
+        config = self._native(make_config)
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+
+        assert r.status == OK
+        assert opens, "the check reached no database at all"
+        for args, kwargs in opens:
+            assert kwargs.get("uri") is True, (args, kwargs)
+            assert "mode=ro" in str(args[0]), (args, kwargs)
+
+    def test_a_secret_for_a_user_the_config_does_not_list_does_not_count(
+        self, make_config, monkeypatch, tmp_path,
+    ):
+        """A row left behind by a removed user is not a credential any current
+        user has."""
+        from istota import db, secrets_store
+        from istota.config import UserConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        db_path = tmp_path / "secrets.db"
+        db.init_db(db_path)
+        secrets_store.set_secret(db_path, "gone", "native_brain", "api_key", "sk-u")
+
+        config = self._native(make_config)
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+
+    def test_a_stored_key_needs_the_store_key_to_be_readable(
+        self, make_config, monkeypatch, tmp_path,
+    ):
+        """Without `ISTOTA_SECRET_KEY` no stored row can be decrypted, so
+        counting one would report a credential the daemon cannot use."""
+        from istota import db, secrets_store
+        from istota.config import UserConfig
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
+        db_path = tmp_path / "secrets.db"
+        db.init_db(db_path)
+        secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
+        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+
+        config = self._native(make_config)
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == FAIL
+
+    def test_a_local_endpoint_warns_rather_than_fails(self, make_config, monkeypatch):
+        """An Ollama / vLLM / llama.cpp endpoint takes no key, and a FAIL is not
+        inert — it reaches the start-up report, the scheduler sweep and the
+        self-check heartbeat, each of which alerts on FAIL and none on WARN."""
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        for url in (
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://192.168.1.5:11434/v1",
+            "http://ollama:11434/v1",
+            "http://box.lan:11434/v1",
+        ):
+            config = self._native(make_config, base_url=url)
+            r = run_checks(config, only=("runtime.native_brain",))[0]
+            assert r.status == WARN, url
+
+    def test_a_public_endpoint_still_fails(self, make_config, monkeypatch):
+        """The converse: without it the WARN above would be every deployment."""
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        for url in ("https://api.anthropic.com/v1", "https://openrouter.ai/api/v1"):
+            config = self._native(make_config, base_url=url)
+            r = run_checks(config, only=("runtime.native_brain",))[0]
+            assert r.status == FAIL, url
+
+    def test_extra_headers_warns_rather_than_fails(self, make_config, monkeypatch):
+        """The provider merges `extra_headers` over the Authorization header it
+        builds, so an operator can authenticate entirely through them. This
+        check cannot confirm one of them is a credential, so it says so."""
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = self._native(make_config, extra_headers={"x-api-key": "v"})
+        r = run_checks(config, only=("runtime.native_brain",))[0]
+        assert r.status == WARN
+        assert "extra_headers" in r.detail
+
+    def test_an_empty_extra_headers_table_does_not_soften_it(
+        self, make_config, monkeypatch,
+    ):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        config = self._native(make_config, extra_headers={})
         r = run_checks(config, only=("runtime.native_brain",))[0]
         assert r.status == FAIL
 

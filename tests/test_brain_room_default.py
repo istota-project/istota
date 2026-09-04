@@ -450,11 +450,41 @@ class TestReachableBrainKinds:
         assert "tmux_claude" not in seen
 
     def test_it_never_raises_on_a_malformed_config(self):
+        """Three shapes, and the second is the one a narrow guard missed.
+
+        `effective_fallback_kind` calls `.strip()` on whatever `fallback` holds
+        and coerces nothing, so a non-string there raised straight out of a
+        `doctor` check — which `run_checks` then reports as the check itself
+        being broken, on a function whose docstring promises a safe default.
+        """
         assert reachable_brain_kinds(None) == frozenset()
 
         base = _brain("claude_code")
         base.source_type_overrides = "scheduled=native"  # not a dict
         assert reachable_brain_kinds(base) == frozenset({"claude_code"})
+
+        numeric_fallback = _brain("claude_code")
+        numeric_fallback.fallback = 5
+        assert reachable_brain_kinds(numeric_fallback) == frozenset({"claude_code"})
+
+        class _Hostile:
+            def __str__(self):
+                raise RuntimeError("no")
+
+        hostile = _brain("claude_code")
+        hostile.source_type_overrides = {"talk": _Hostile()}
+        assert reachable_brain_kinds(hostile) == frozenset({"claude_code"})
+
+    def test_an_unbuildable_base_kind_is_reported_rather_than_dropped(self):
+        """The one entry not filtered against the buildable set.
+
+        `make_brain` raises on it at start-up, which is where a typo belongs;
+        dropping it here would let a check say the reachable set is empty about
+        a deployment that named a kind.
+        """
+        assert reachable_brain_kinds(_brain("claude-kode")) == frozenset(
+            {"claude-kode"}
+        )
 
 
 # =============================================================================

@@ -150,9 +150,21 @@ def reachable_brain_kinds(brain_config) -> frozenset[str]:
     override clears ``fallback``, so a pinned room contributes its own kind and
     no failover target.
 
-    Never raises. A malformed config still yields the base kind, which is the
-    safe direction here — a check that runs where it need not is noise, one that
-    skips where it was needed is a missing dependency nothing reports.
+    The base ``kind`` is the one entry **not** filtered against
+    ``KNOWN_BRAIN_KINDS``, deliberately: it is what the deployment says it will
+    run, and a name ``make_brain`` cannot build is that function's ``ValueError``
+    at start-up rather than something to silently drop here. Reporting it is
+    what lets a check say "reachable: claude-kode" instead of asserting the
+    deployment is native.
+
+    Never raises, and the guards are broad on purpose. Two of the three reads
+    reach code this module does not own — ``effective_fallback_kind`` coerces
+    neither ``fallback`` nor ``kind``, and ``str(value)`` runs whatever
+    ``__str__`` a mapping value brought with it — so a narrow ``except`` here is
+    a contract that holds only for the inputs somebody thought of. A malformed
+    config still yields the base kind, which is the safe direction: a check that
+    runs where it need not is noise, one that skips where it was needed is a
+    missing dependency nothing reports.
     """
     kind = str(getattr(brain_config, "kind", "") or "").strip()
     kinds = {kind} if kind else set()
@@ -160,17 +172,24 @@ def reachable_brain_kinds(brain_config) -> frozenset[str]:
     overrides = getattr(brain_config, "source_type_overrides", None) or {}
     try:
         targets = [str(value).strip() for value in overrides.values()]
-    except (AttributeError, TypeError):
+    except Exception:  # noqa: BLE001 — a routing read must not raise into a check
         targets = []
     kinds |= {target for target in targets if target in KNOWN_BRAIN_KINDS}
 
     failover: set[str] = set()
     for one in kinds:
+        # `replace` and the fallback read are inside one guard because the
+        # second is where the raise actually comes from: `replace` cannot fail
+        # on a real `BrainConfig` (no `__post_init__`, no `init=False` field),
+        # while `effective_fallback_kind` calls `.strip()` on whatever
+        # `fallback` holds. Note `replace` copies shallowly, so `routed` shares
+        # every nested block with the original — read-only here, and it must
+        # stay that way.
         try:
             routed = dataclasses.replace(brain_config, kind=one)
-        except (TypeError, ValueError):
+            target = effective_fallback_kind(routed)
+        except Exception:  # noqa: BLE001 — same contract
             continue
-        target = effective_fallback_kind(routed)
         if target in KNOWN_BRAIN_KINDS:
             failover.add(target)
 

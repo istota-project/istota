@@ -386,31 +386,88 @@ def check_tmux(config: "Config", probe: bool) -> CheckResult:
 def _native_key_holders(config: "Config") -> int:
     """How many configured users have a ``native_brain``/``api_key`` secret.
 
-    ``secret_exists`` rather than ``get_secret``: it neither decrypts nor bumps
-    ``last_accessed_at``, so a diagnostic neither writes to the table it is
-    diagnosing nor brings a provider credential into this process. Gated on the
-    store's key being available, since without it no stored row can be read and
-    counting one would report a credential the daemon cannot use.
+    **Its own read-only query rather than ``secrets_store.secret_exists``**, for
+    the reason ``check_framework_db`` states two ways below: that helper opens
+    the database read-write and commits, which materializes the ``-wal`` /
+    ``-shm`` sidecars, and against a *missing* file creates a zero-byte database
+    that later reads as corruption rather than as absence. A diagnostic run as
+    root beside a stopped daemon would leave all of that owned by the wrong
+    user. So this opens ``mode=ro`` like every other database-touching check
+    here.
+
+    Presence, never the value: no decryption, so no provider credential enters
+    this process and no ``last_accessed_at`` is bumped. Gated on the store's key
+    being available, since without it no stored row can be read and counting one
+    would report a credential the daemon cannot use. A row stored under a
+    *rotated* key still reads as present — the one false OK left, and narrower
+    than decrypting here would be worth.
+
+    One query, and the user scoping is applied in Python rather than as an
+    ``IN`` clause: the parameter count would then be the deployment's user
+    count, which has a SQLite limit behind it, while the rows this selects are
+    bounded by however many native keys exist. Scoped at all because a row left
+    behind by a removed user would otherwise report a credential no current user
+    has.
 
     Never raises — a missing database or an unreadable table is nought holders,
     which is the direction that reports a problem rather than hiding one.
     """
+    import sqlite3
+
+    conn = None
     try:
         from . import secrets_store
 
         if not secrets_store.secret_key_available():
             return 0
-        users = getattr(config, "users", None) or {}
-        return sum(
-            1
-            for user_id in users
-            if secrets_store.secret_exists(
-                config.db_path, user_id, "native_brain", "api_key"
-            )
-        )
+        users = {str(u) for u in (getattr(config, "users", None) or {})}
+        if not users:
+            return 0
+        db_path = Path(getattr(config, "db_path", "") or "")
+        if not db_path.name or not db_path.exists():
+            return 0
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT DISTINCT user_id FROM secrets WHERE service = ? AND key = ?",
+            ("native_brain", "api_key"),
+        ).fetchall()
+        return len({str(row[0]) for row in rows} & users)
     except Exception:  # noqa: BLE001 — a check reports, it does not propagate
         logger.debug("native key secret lookup failed", exc_info=True)
         return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+#: Host spellings that mean "an endpoint on this machine or this network", where
+#: a native provider commonly takes no API key at all. Lexical only: a check on
+#: the config-load-adjacent path must not resolve a name, so a DNS-backed
+#: private host is not recognised and takes the FAIL below.
+_LOCAL_NATIVE_HOSTS = frozenset({"localhost", "host.docker.internal"})
+_LOCAL_NATIVE_SUFFIXES = (".local", ".internal", ".lan", ".localhost")
+
+
+def _native_endpoint_is_local(base_url: object) -> bool:
+    """Whether ``base_url`` names an endpoint that plausibly needs no key.
+
+    A single-label host counts, since a bare name is not a public provider —
+    the cost of being wrong is a WARN where a FAIL was wanted, and the remedy
+    is printed either way.
+    """
+    try:
+        host = (urlsplit(str(base_url or "")).hostname or "").strip().lower()
+    except Exception:  # noqa: BLE001 — a malformed URL is not a local endpoint
+        return False
+    if not host:
+        return False
+    if host in _LOCAL_NATIVE_HOSTS or host.endswith(_LOCAL_NATIVE_SUFFIXES):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host
+    return address.is_loopback or address.is_private or address.is_link_local
 
 
 def check_native_brain(config: "Config", probe: bool) -> CheckResult:
@@ -431,6 +488,17 @@ def check_native_brain(config: "Config", probe: bool) -> CheckResult:
     ``load_config`` folds it in, because a ``Config`` assembled any other way
     holds the variable and not the field, and telling a process that is holding
     a credential it has none is how a check stops being believed.
+
+    **Two shapes resolve no key and are not defects**, and both WARN rather than
+    FAIL, because a FAIL here is not inert: it reaches the start-up report, the
+    scheduler's sweep and the ``self-check`` heartbeat, all of which alert on
+    ``FAIL`` and none of which alert on ``WARN`` — so a working deployment would
+    get a permanently red Health pane and a repeating alert. An
+    ``openai_compat`` endpoint on this machine (Ollama, vLLM, llama.cpp) takes
+    no key, and an operator can authenticate through ``extra_headers`` instead,
+    which the provider merges over the ``Authorization`` header it builds. This
+    check cannot confirm either is really a credential, so it says what it found
+    rather than passing them as OK.
 
     SKIPs where ``native`` is not reachable, so it stays silent on the
     deployments it does not describe — which is most of them.
@@ -456,15 +524,36 @@ def check_native_brain(config: "Config", probe: bool) -> CheckResult:
             OK,
             f"a per-user native_brain/api_key secret is stored for {holders} user(s)",
         )
+    remedy = (
+        "Set ISTOTA_BRAIN_NATIVE_API_KEY, or store one per user with "
+        "`istota secret ensure -s native_brain -k api_key`."
+    )
+    unresolved = (
+        "no provider API key resolves from config, the environment or the "
+        "secrets store"
+    )
+    if getattr(native, "extra_headers", None):
+        return CheckResult(
+            name,
+            WARN,
+            f"{unresolved}; [brain.native] extra_headers is set, so a credential "
+            "may be travelling there — this check cannot tell",
+            remedy=remedy,
+        )
+    base_url = getattr(native, "base_url", "")
+    if _native_endpoint_is_local(base_url):
+        return CheckResult(
+            name,
+            WARN,
+            f"{unresolved}; base_url names a local endpoint, which commonly "
+            "needs none",
+            remedy=remedy,
+        )
     return CheckResult(
         name,
         FAIL,
-        "the native brain is reachable but no provider API key resolves from "
-        "config, the environment or the secrets store",
-        remedy=(
-            "Set ISTOTA_BRAIN_NATIVE_API_KEY, or store one per user with "
-            "`istota secret ensure -s native_brain -k api_key`."
-        ),
+        f"the native brain is reachable but {unresolved}",
+        remedy=remedy,
     )
 
 

@@ -185,7 +185,7 @@ class TestTheLoaderIsNotTheGate:
 
     def test_an_unbuildable_kind_survives_the_load(self, tmp_path):
         """Kept on the field so the value an operator wrote is still visible in
-        the admin config view, and warned about where it is refused instead."""
+        the admin config view, while granting nothing."""
         config = _load(
             tmp_path,
             """
@@ -194,6 +194,43 @@ class TestTheLoaderIsNotTheGate:
             """,
         )
         assert config.brain.room_selectable == ["native", "gpt_5_brain"]
+
+    def test_an_unbuildable_kind_is_warned_about_at_load(self, tmp_path, caplog):
+        """Nothing else can say it.
+
+        `room_selectable_kinds` drops the name silently at every read, and
+        `resolve_brain_kind`'s refusal fires only when a room *pins* a kind —
+        which a name no picker ever offered cannot be. Without this line an
+        operator gets a gate that grants nothing and no reason why.
+        """
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            _load(
+                tmp_path,
+                """
+                [brain]
+                room_selectable = ["native", "gpt_5_brain"]
+                """,
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        # The valid entry must not be named as the problem. Matched on the
+        # sentence's subject rather than on the whole line, since the line also
+        # prints the known-kinds list, which contains `native` by construction.
+        assert any(
+            "room_selectable names 'gpt_5_brain'" in m for m in messages
+        ), messages
+
+    def test_an_all_valid_list_warns_about_nothing(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            _load(
+                tmp_path,
+                """
+                [brain]
+                room_selectable = ["native", "claude_code"]
+                """,
+            )
+        assert not any(
+            "room_selectable" in r.getMessage() for r in caplog.records
+        )
 
     def test_and_is_dropped_before_any_room_can_pin_it(self, tmp_path):
         config = _load(

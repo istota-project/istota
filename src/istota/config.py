@@ -3502,6 +3502,7 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     _validate_brain_fallback(config)
+    _validate_room_selectable(config)
     _validate_claude_code_brain(config)
     _validate_advisor_model(config)
     _validate_forge_clis(config)
@@ -3745,6 +3746,41 @@ def _validate_brain_fallback(config: "Config") -> None:
             "failure or usage limit fails the task rather than rerouting. Set "
             'fallback = "claude_code" to keep the behaviour it had before '
             "ISSUE-362.",
+        )
+
+
+def _validate_room_selectable(config: "Config") -> None:
+    """Warn about a ``[brain] room_selectable`` entry no brain answers to.
+
+    The entry is left on the field rather than corrected, unlike
+    ``_validate_brain_fallback``'s two guards: ``room_selectable_kinds`` filters
+    it out at every read anyway, so the value can stay visible in the admin
+    config view as what the operator wrote while granting nothing.
+
+    A warning rather than nothing, because this list is a gate and a name that
+    matches no kind is the "typo that did nothing" shape — it is offered to no
+    user and refused by nothing, so without a line here the operator sees a
+    feature that does not work and no reason why. ``resolve_brain_kind``'s own
+    refusal cannot cover it: that fires when a room *pins* a kind, and a name
+    the picker never offered is a name no room can pin.
+
+    Once per load, like the unknown-``fallback`` warning beside it, and only
+    where an entry is actually wrong.
+    """
+    from .brain import KNOWN_BRAIN_KINDS
+
+    unknown = [
+        name for name in (config.brain.room_selectable or [])
+        if name not in KNOWN_BRAIN_KINDS
+    ]
+    if unknown:
+        logging.getLogger("istota.config").warning(
+            "[brain] room_selectable names %s, which %s not a known brain kind "
+            "%s; no room will be offered %s",
+            ", ".join(repr(name) for name in unknown),
+            "are" if len(unknown) > 1 else "is",
+            sorted(KNOWN_BRAIN_KINDS),
+            "them" if len(unknown) > 1 else "it",
         )
 
 
