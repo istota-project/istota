@@ -435,6 +435,53 @@ enabled = true
 # Bot's Nextcloud username (to filter its own messages)
 bot_username = "istota"
 
+[talk.signaling]
+# Receive Talk messages over Nextcloud's standalone signaling server (the
+# high-performance backend) instead of polling for them. Off by default.
+#
+# What it needs, and what happens without it: the HPB has to be registered with
+# Talk already, which you can check with `occ talk:signaling:list`. If it is
+# not, istota **refuses to boot** rather than quietly polling — an operator who
+# believes push is live and is actually being polled for is worse off than one
+# whose daemon did not start. The same refusal covers the `websockets` library
+# being absent; install it with the `signaling` extra.
+#
+# There is no secret here, and that is the design. istota connects as its own
+# Nextcloud user, so the server URL, the hello token and the per-room session
+# id are all minted on demand by Talk from calls the bot account can already
+# make. The alternative the protocol offers is an internal client holding the
+# signaling server's shared secret, which can join any room on the instance;
+# that is why it is not used.
+#
+# Two consequences worth knowing before switching it on. istota holds an active
+# Talk session in every room it watches, around the clock, so it shows as
+# present to everyone else in those rooms — it is not in a call, and it never
+# joins one. And a second daemon pointed at the same Nextcloud opens its own
+# sessions and receives every event; duplicate work is prevented by the read
+# cursor rather than by the transport.
+enabled = false
+# HPB base URL. Empty is the normal case and means "use whatever Talk
+# advertises". Set it only where the daemon has to reach the server by a
+# different route than the one browsers are given.
+url = ""
+# Seconds between room reconciliations. This pass is also the safety net: it
+# compares every room's latest message id against the stored cursor and fetches
+# only the rooms that are behind. So it bounds how long a gap lasts when the
+# event stream is down, and it is the worst case for the first message in a
+# brand-new room.
+room_sync_interval = 300
+# Reconnect backoff ceiling, seconds. The proxy in front of the signaling
+# server drops every connection hourly whatever the traffic, so reconnect is an
+# ordinary event rather than a fault.
+reconnect_backoff_max = 60
+# Ingest the relayed message directly instead of refetching the room. The
+# relayed message was measured field-for-field identical to the fetched one on
+# Talk 24.0.4, but this stays off by default: it is the only part of the design
+# that can be wrong about message content rather than about timing. Talk sends
+# a message with the event only from about Talk 21 — below that every event is
+# a bare notification and switching this on changes nothing.
+payload_direct = false
+
 [email]
 # Enable email functionality (requires himalaya to be installed)
 enabled = true

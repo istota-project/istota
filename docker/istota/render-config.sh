@@ -41,6 +41,16 @@
 #   MONARCH_EMAIL, MONARCH_PASSWORD
 #   ISTOTA_*                        see docker/docker-compose.yml
 #
+# **No backticks inside a heredoc in this file.** Every heredoc here is
+# unquoted so that ${...} expands, which is the point, and a backtick pair is
+# therefore a command substitution rather than the prose markup a reader writing
+# a comment intends: the shell runs the words between them, says "command not
+# found" on stderr, substitutes the empty string, and the script exits 0 with
+# the words gone from its own output. Measured on the [talk.signaling] block,
+# whose comment named two files that way and rendered with both names missing.
+# `tests/test_render_config.py::TestNoHeredocRunsACommand` refuses one, and the
+# render helper there requires empty stderr for the same class of defect.
+#
 # `tests/test_render_config.py` holds entrypoint.sh's `export` list to this
 # contract, so a name added here without being exported fails a test rather than
 # rendering as empty on a real boot.
@@ -280,6 +290,30 @@ auto_share_bot_dir = ${ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR:-true}
 [talk]
 enabled = ${ISTOTA_TALK_ENABLED:-true}
 bot_username = "${BOT_USER:-istota}"
+
+# Inbound Talk over the standalone signaling server (the "high-performance
+# backend"). Off unless the operator runs one: docker-compose.yml ships the
+# container behind the signaling compose profile, and a deployment without it
+# keeps the poll loop, which is the capability floor rather than a fallback.
+#
+# There is no credential here, and the absence is the design. istota
+# authenticates to the signaling server as its own Nextcloud user, so the HPB
+# URL, the hello token and the per-room Talk session id are all minted on demand
+# by Talk. The protocol's other door — an internal client holding the server's
+# shared secret — joins any room on the instance and is rejected for that
+# reason, so there is nothing to render, redact or vault.
+#
+# An empty url means "read the server address from Talk's own signaling
+# settings". Set it where the daemon must reach the HPB by a different route
+# than the one Nextcloud advertises to browsers — which is exactly the shape of
+# a compose deployment, where Talk hands out the public URL and the daemon is on
+# the container network beside the server.
+[talk.signaling]
+enabled = ${ISTOTA_TALK_SIGNALING_ENABLED:-false}
+url = "${ISTOTA_TALK_SIGNALING_URL:-}"
+room_sync_interval = ${ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL:-300}
+reconnect_backoff_max = ${ISTOTA_TALK_SIGNALING_RECONNECT_BACKOFF_MAX:-60}
+payload_direct = ${ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT:-false}
 
 [email]
 enabled = ${ISTOTA_EMAIL_ENABLED:-false}

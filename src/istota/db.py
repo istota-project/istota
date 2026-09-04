@@ -7625,13 +7625,69 @@ def set_talk_poll_state(
     conversation_token: str,
     message_id: int,
 ) -> None:
-    """Set the last known message ID for a conversation."""
+    """Advance the last known message ID for a conversation. Never rewinds it.
+
+    **The cursor only ever moves forward**, and that is enforced here rather
+    than at the call sites. It used to be an unconditional upsert, so any
+    writer could move a room's cursor backwards — and the reassuring reading,
+    that redelivery is idempotent because the cursor guards it, is false: the
+    poll advances the cursor at the top of the results loop *before* every
+    filter, and below it sit `!command` dispatch, confirmation replies with
+    their ack post, and `cancel_for_conversation`. None of those is idempotent
+    and only `ingest_message` is deduped, so a rewind re-runs that window —
+    a command dispatched twice, an ack posted twice, a confirmation cancelled
+    twice.
+
+    There is no legitimate rewind to preserve. Talk comment ids are global and
+    monotonic; neither `clear-history` nor deleting a message resets them, so a
+    lower id reaching here is a stale writer rather than a correction. With a
+    second inbound driver on the way (the signaling event stream), "stale
+    writer" stops being hypothetical.
+
+    An INSERT is unguarded, because a room's first cursor has nothing to be
+    compared against: `_apply_room_pass` seeds it from `latest_id - 1`, which is
+    lower than everything the room will hold afterwards. `updated_at` moves on
+    every call, refused id or not — it records when a writer last reported on
+    the room, which is how an operator tells a quiet room from a stalled poller.
+
+    The guard does **not** make a forward jump safe, which is the other half of
+    the same problem: `_apply_room_pass` still writes its seed only when the
+    cursor is still absent, because `MAX` would otherwise carry a room's cursor
+    *past* messages nobody has read.
+
+    **A non-integer id is refused here rather than stored**, because with `MAX`
+    in place it would not merely look wrong — it would be permanent. SQLite's
+    `INTEGER` affinity converts a numeric string (`"501"` stores as `501`), but
+    a non-numeric one is stored as TEXT, TEXT sorts above every integer, and no
+    later integer can ever win the comparison again: the room goes deaf with
+    nothing in the log to say so. Refusing is a warning and a skipped advance,
+    which the next poll re-reads; raising would roll back the whole results
+    batch and replay the non-idempotent window this function exists to protect.
+    A `bool` is an `int` in Python and would compare as 0 or 1 against a real
+    id, so it is refused with the rest — the same rule `_has_news` applies to
+    the same field coming off the same payload.
+
+    **There is deliberately no way to lower a cursor from here**, which leaves
+    one legitimate case unserved: a Nextcloud restored from backup or
+    re-provisioned restarts its comment id space, and the room's stored cursor
+    is then permanently ahead of every message it will ever be sent. That is an
+    operator event with an operator remedy (delete the room's `talk_poll_state`
+    row), not something a poller should infer.
+    """
+    if not isinstance(message_id, int) or isinstance(message_id, bool):
+        logger.warning(
+            "Refusing a non-integer Talk poll cursor for %s: %r",
+            conversation_token, message_id,
+        )
+        return
     conn.execute(
         """
         INSERT INTO talk_poll_state (conversation_token, last_known_message_id, updated_at)
         VALUES (?, ?, datetime('now'))
         ON CONFLICT(conversation_token) DO UPDATE SET
-            last_known_message_id = excluded.last_known_message_id,
+            last_known_message_id = MAX(
+                excluded.last_known_message_id, last_known_message_id
+            ),
             updated_at = excluded.updated_at
         """,
         (conversation_token, message_id),

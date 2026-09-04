@@ -79,6 +79,17 @@ def render(tmp_path: Path, **env: str) -> Path:
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
     assert config_file.exists(), f"no config written\n{proc.stdout}\n{proc.stderr}"
+    # **Empty stderr is part of the contract, and it is not tidiness.** Every
+    # heredoc in this script is unquoted so that ${...} expands, which means a
+    # backtick pair inside one is a *command substitution*: bash runs the word,
+    # says "command not found" on stderr, substitutes nothing, and exits 0. The
+    # render then reports success having silently deleted text from its own
+    # output — measured on the `[talk.signaling]` block, whose comment named two
+    # files in backticks and rendered with both names missing.
+    assert proc.stderr == "", (
+        "render-config.sh wrote to stderr while exiting 0, so it produced a "
+        f"config that is quietly not the one it was written to produce:\n{proc.stderr}"
+    )
     return config_file
 
 
@@ -153,6 +164,75 @@ class TestTheRenderedConfigLoads:
         assert config.nextcloud.dav_prefix == "Shared Files"
         assert config.nextcloud.auto_share_bot_dir is False
 
+    def test_talk_signaling_is_off_and_undiscovered_unless_asked_for(self, tmp_path):
+        """The whole block has to be inert on a deployment with no HPB.
+
+        `enabled = false` is what keeps today's poll loop running, and every
+        other key has to arrive at the dataclass default rather than at
+        something the shell substituted — an empty `url` in particular, since a
+        non-empty one means "do not ask Talk where the server is" and would
+        point a discovering daemon at nothing.
+        """
+        config = load_config(render(tmp_path, **REQUIRED))
+
+        assert config.talk.signaling.enabled is False
+        assert config.talk.signaling.url == ""
+        assert config.talk.signaling.room_sync_interval == 300
+        assert config.talk.signaling.reconnect_backoff_max == 60
+        assert config.talk.signaling.payload_direct is False
+
+    def test_talk_signaling_round_trips_every_key_the_operator_can_set(self, tmp_path):
+        """Five keys, no credential, and the absence is the design.
+
+        Read this beside `test_every_var_the_render_reads_is_passed_by_compose`
+        above, which is the half that catches the family being read here and
+        withheld by compose. That guard is a blanket scan over every `ISTOTA_*`
+        name rather than the four prefixes it once ran over, so this family was
+        covered by it the moment the block was written — but a scan proves the
+        name arrives, not that it lands on the field it names, and every one of
+        these went to a different field the first time round.
+        """
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_TALK_SIGNALING_ENABLED="true",
+                ISTOTA_TALK_SIGNALING_URL="http://signaling:8080",
+                ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL="30",
+                ISTOTA_TALK_SIGNALING_RECONNECT_BACKOFF_MAX="15",
+                ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT="true",
+            )
+        )
+
+        assert config.talk.signaling.enabled is True
+        assert config.talk.signaling.url == "http://signaling:8080"
+        assert config.talk.signaling.room_sync_interval == 30
+        assert config.talk.signaling.reconnect_backoff_max == 15
+        assert config.talk.signaling.payload_direct is True
+
+    def test_no_signaling_credential_reaches_the_rendered_config(self, tmp_path):
+        """The two secrets in this family configure containers, never the daemon.
+
+        `ISTOTA_TALK_SIGNALING_SECRET` is Talk's credential for the signaling
+        server, read by `provision-nc.sh` and by the server's own container;
+        `_INTERNAL_SECRET` is the server's internal-client door, which joins any
+        room on the instance and which istota rejects by design. Neither has any
+        reader in the daemon, so a render that wrote either into `config.toml`
+        would be putting a deployment-wide credential in a task's reach for no
+        purpose — the shape of ISSUE-390.
+        """
+        path = render(
+            tmp_path,
+            **REQUIRED,
+            ISTOTA_TALK_SIGNALING_ENABLED="true",
+            ISTOTA_TALK_SIGNALING_SECRET="fabricated-backend-secret",
+            ISTOTA_TALK_SIGNALING_INTERNAL_SECRET="fabricated-internal-secret",
+        )
+        rendered = path.read_text()
+
+        assert "fabricated-backend-secret" not in rendered
+        assert "fabricated-internal-secret" not in rendered
+
     def test_user_display_name_and_timezone_default_from_the_user_name(self, tmp_path):
         config = load_config(render(tmp_path, **REQUIRED))
         profile = config.users["testuser"]
@@ -173,6 +253,118 @@ class TestTheRenderedConfigLoads:
 
         assert profile.display_name == "Test Person"
         assert profile.timezone == "Europe/Warsaw"
+
+
+def _backticks_in_heredocs(script: str) -> list[str]:
+    """Every line inside an unquoted heredoc that contains a backtick.
+
+    A function rather than a method, so the control below can feed it a
+    synthetic string. A scan whose only "control" asserts that the *file* still
+    contains a heredoc and a backtick has never run the parser at all, and the
+    parser is the part that rots: an opener with trailing content after the
+    delimiter would leave the whole body read as outside a heredoc, and every
+    offender in it invisible.
+
+    A quoted opener (`<<'PY'`) is deliberately not matched — quoting is exactly
+    what makes a backtick literal — and that is the one case the regex gets
+    right by construction rather than by intent, so it has a control too.
+    """
+    heredoc = None
+    offenders = []
+    for number, line in enumerate(script.splitlines(), 1):
+        if heredoc is None:
+            match = re.search(r"<<-?\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", line)
+            if match:
+                heredoc = match.group(1)
+            continue
+        if line.strip() == heredoc:
+            heredoc = None
+            continue
+        if "`" in line:
+            offenders.append(f"{number}: {line.strip()[:80]}")
+    if heredoc is not None:
+        raise AssertionError(
+            f"a heredoc opened with {heredoc} never closed; the scan saw the "
+            "rest of the input as heredoc body and may be reporting nonsense"
+        )
+    return offenders
+
+
+#: Every shipped shell script with an unquoted heredoc in it.
+#:
+#: `render-config.sh` is where the defect was found. `provision-nc.sh` and
+#: `entrypoint.sh` have one each and were covered by nothing — and the first of
+#: those is edited by the same work that found it, which is exactly when a
+#: second instance gets written.
+HEREDOC_SCRIPTS = (
+    REPO / "docker" / "istota" / "render-config.sh",
+    REPO / "docker" / "istota" / "provision-nc.sh",
+    REPO / "docker" / "istota" / "entrypoint.sh",
+)
+
+
+class TestNoHeredocRunsACommand:
+    """A structural guard for the class of defect the stderr check catches late.
+
+    Every heredoc in these scripts is unquoted, so `${...}` expands — which is
+    the point — and a backtick pair is therefore a command substitution rather
+    than the prose markup a reader writing a comment intends. The consequence is
+    silent in both directions: bash writes "command not found" to stderr,
+    substitutes the empty string, and the script exits 0 with the words gone
+    from its own output. In a *value* rather than a comment it is worse than a
+    mangled string: it is an unquoted shell executing a word.
+
+    `render()` asserting empty stderr catches this on the default path only. A
+    backtick inside one of the conditional blocks — the email one, the developer
+    one, either brain block — is not on that path and is caught by nothing else,
+    which is why this reads the files instead of running them.
+
+    `$(...)` is not checked, because these scripts use it deliberately outside
+    heredocs and there is no such use inside one to distinguish. Backticks have
+    no legitimate use in any of them: `render-config.sh`'s own header comments
+    use them for markup and every one of those is outside a heredoc, which is
+    what makes the heredoc-scoped rule expressible rather than a style edict.
+    """
+
+    @pytest.mark.parametrize("script", HEREDOC_SCRIPTS, ids=lambda p: p.name)
+    def test_no_backtick_appears_inside_a_heredoc(self, script):
+        offenders = _backticks_in_heredocs(script.read_text())
+
+        assert not offenders, (
+            f"these lines in {script.name} sit inside an unquoted heredoc and "
+            "contain a backtick, so the shell runs whatever is between the pair "
+            "and substitutes its output:\n" + "\n".join(offenders)
+        )
+
+    def test_the_scan_finds_an_offender_it_is_given(self):
+        """The control, and it runs the parser rather than the file.
+
+        Three inputs, because three different parser mistakes each produce an
+        empty offender list and would otherwise read as a pass.
+        """
+        # It sees inside a heredoc at all.
+        assert _backticks_in_heredocs("cat <<TOML\nx = `whoami`\nTOML\n") == [
+            "2: x = `whoami`"
+        ]
+        # It stops at the terminator rather than running to EOF.
+        assert _backticks_in_heredocs("cat <<TOML\na\nTOML\n# `markup`\n") == []
+        # A quoted opener makes a backtick literal, so it is not an offender —
+        # and this is the case the regex gets right by construction.
+        assert _backticks_in_heredocs("cat <<'PY'\n`literal`\nPY\n") == []
+
+    def test_the_scan_refuses_an_unbalanced_heredoc(self):
+        """An opener that never closes means the parser's answer is worthless,
+        and answering `[]` there would be the quiet pass this guard exists to
+        prevent."""
+        with pytest.raises(AssertionError, match="never closed"):
+            _backticks_in_heredocs("cat <<TOML\nx\n")
+
+    def test_every_scanned_script_actually_has_a_heredoc(self):
+        """Otherwise the parametrized case above is vacuous for that file."""
+        for script in HEREDOC_SCRIPTS:
+            assert re.search(
+                r"<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$", script.read_text(), re.M
+            ), f"{script.name} has no unquoted heredoc; drop it from the list"
 
 
 class TestTheStorageBackend:

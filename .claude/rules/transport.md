@@ -256,16 +256,42 @@ messages are re-polled rather than silently lost.
   answers, which is the fix, and that is exactly the window in which another
   writer can register the room or advance its cursor. `register_room` /
   `add_room_binding` / `add_room_member` are `INSERT OR IGNORE` and need
-  nothing, but `set_talk_poll_state` is an unconditional upsert — writing
-  `latest_id - 1` over a cursor somebody advanced rewinds the room and re-polls
-  messages already read, so the initialisation fires only when the cursor is
-  still absent. Registration carries a second guard of a different kind: a room
+  nothing, and `set_talk_poll_state` no longer rewinds a cursor — but the
+  re-read is still required, and now for the opposite reason. The seed is
+  `latest_id - 1`, taken from the server's newest message, so it is *ahead* of a
+  cursor another writer initialised from further back, and with the `MAX` guard
+  in place writing it would carry the room past every message in between and
+  drop them. The initialisation therefore fires only when the cursor is still
+  absent. Registration carries a second guard of a different kind: a room
   the read phase found present and the write phase finds gone has no fetched
   participant list, so it is left for the next cycle rather than registered with
   no members. The fetch phase stays **sequential**, matching what the single
   transaction did — running the round trips concurrently is a real latency win
   and a separate change, since ISSUE-399 was about how many connections this
   poller holds at once.
+
+  **Two hazards were closed ahead of a second inbound driver, and neither is
+  conditional on one arriving.** `db.set_talk_poll_state` advances with `MAX`
+  and can no longer move a cursor backwards: the cursor advances at the top of
+  the results loop *before* every filter, and below it sit `!command` dispatch,
+  the confirmation reply and its ack post, and `cancel_for_conversation` — none
+  idempotent and only `ingest_message` deduped, so a rewind re-runs that window
+  rather than being absorbed by it. Talk comment ids are global and monotonic
+  and no operation resets them, so there is no legitimate rewind to preserve.
+  And every `db.get_db` block in this package that is reachable from the runtime
+  loop is taken behind one `asyncio.Lock` per loop
+  (`transport/talk/_db_lock.py`) with a bounded `busy_timeout_ms` — the scope is
+  `transport/talk`, and the loop's other residents are covered by not opening a
+  connection on the loop thread at all (`WebTransport.deliver` hands its write
+  to `run_in_executor`, so it contends through SQLite from another thread). **That one is a deadlock rather than a race**: the results
+  block writes and then awaits Nextcloud five times with the WAL write lock
+  held, and `db.get_db` is synchronous `sqlite3` — a second writing coroutine
+  scheduled into one of those awaits blocks the loop thread itself, which is the
+  only thread that can resume the coroutine holding the lock. It must be an
+  `asyncio.Lock`; a `threading.Lock` there *is* the deadlock. The bound is what
+  keeps a writer outside the loop (the scheduler's threads) from stalling it for
+  `get_db`'s 30s default — the caller retries on the next cycle, which is safe
+  because the cursor advance and the task creation commit together.
 
   **What the measurement established before the fix**, and why the room half was
   worth doing on it: the room loop's awaits recur rather than being
@@ -1081,6 +1107,58 @@ resolving the canonical room token, when the incoming `model` is None (no inline
 override wins as a unit (effort follows model). Set via the `!room` command
 (surface-agnostic, through `commands.dispatch`) or the web room-settings PATCH
 (`db.set_room_model_effort` / `db.set_room_effort`).
+
+## Talk inbound over the signaling event stream (`[talk.signaling]`)
+
+Off by default. With `enabled = true` the daemon stops running `_talk_poll_loop` at all — one driver, never two — and Talk messages arrive over a WebSocket to Nextcloud's standalone signaling server (the HPB) instead of over a ten-second poll of every room. `signaling.py` is the wire protocol as a leaf module (it imports nothing from `istota`), `supervisor.py` owns everything the protocol deliberately does not: which rooms are watched, what a decoded event causes, and when either is re-decided.
+
+**No credential, and that absence is the design.** istota authenticates as its own Nextcloud user, so the server URL, the hello token and the per-room Talk session id are all minted on demand by Talk from calls the bot account can already make. The protocol's other option is an *internal client* holding the signaling server's shared secret, which can join any room on the instance; that is why it is not used, and it is why there is no field here for an operator to fill in, no `_env_secret_overrides` entry and nothing for `admin_config_view` to redact.
+
+**`enabled = true` on a deployment that cannot do it refuses to boot.** Talk in `internal` signaling mode and the `websockets` library absent are both refusals, rather than a fallback to the poller: a daemon quietly polling while an operator believes push is live is worse than one that did not start.
+
+### The rules that make it safe
+
+**A watcher may only join a token the current reconciliation's `list_conversations` returned.** Never one from an event payload, never one from a database row. This is a rule rather than a consequence: `ParticipantService::joinRoom` self-enrols the caller in a group room that is listable to them, and in any public room, so `participants/active` on an arbitrary token is not guaranteed to fail — it can quietly make istota a participant. "istota never joins a room it was not already in" is a property this module maintains, and the way it maintains it is that the only source of tokens is the bot's own listing. `_may_watch` is checked twice, at the point a watcher starts and again at the point the POST is made, because those are different moments.
+
+**Room context is a required argument with no default anywhere on the path.** The results block reads `conv_types.get(token, 1)`, and 1 is a DM — which skips the @mention gate for the whole room. A `poll_one_conversation(config, token)` with no listing would ingest every message in every group room the bot sits in, from any configured user. So the supervisor holds a token to context map built from the same listing it builds the watcher set from, and a drain that cannot find context counts and returns rather than guessing. `tests/test_talk_trigger_path.py` exists because the poll-path version of that test passes whether or not the bug is present.
+
+**Cursor initialisation comes before a watcher, not after.** Catch-up reads forward from the room's cursor, so a NULL one means reading from zero, which ingests a room's history as new tasks. A room whose initialisation failed gets no watcher and is retried next pass.
+
+**The safety net is a comparison, not a sweep.** Each reconciliation compares every room's `lastMessage.id` against its stored cursor and fetches only the rooms behind. It is free, because the listing is fetched for the watcher set anyway, and on a working deployment it issues no fetches at all. A non-zero count is the one number that says the stream has silently stopped delivering while every socket still looks fine; `doctor` reads it as `rooms_behind`.
+
+### Trigger mode and payload-direct
+
+Default is **trigger mode**: an event means "fetch this room", and the payload is not read. A relayed message and a bare refresh are the same instruction, which is what makes this path unable to be wrong about message content. It reuses `_process_poll_results` byte for byte, so the filter chain, the confirmation handling, the cursor advance and the atomicity guarantee are the poller's own.
+
+`payload_direct = true` ingests the relayed message instead of refetching, removing the last request. It is separable because it is the only part that can be wrong about message *content* rather than about *timing*. Measured field-for-field identical to the fetched message on Nextcloud 34 / Talk 24.0.4, across four shapes (plain, an @mention carrying `messageParameters`, a reply carrying a `parent`, and one the bot posted), each compared against the OCS message read both as the bot and as the human. The relay carries one key OCS does not put in the body, `lastCommonRead`, which the chat endpoint returns as a response header; nothing reads it.
+
+Three things about that path are decisions rather than plumbing:
+
+- **A payload-less event in a burst forces the whole room's next drain to fetch.** Talk sends a bare refresh for a message with no visible rendering and for a system message outside the relay set, so such an event means there is a message only a fetch can see. Ingesting the burst from payloads alone would carry the cursor past it and nothing would ever read it — the `rooms_behind` net is measured in minutes, not a substitute.
+- **`id > cursor` is applied on the direct path and nowhere else.** A fetch passes the cursor to the *server*, so a message already processed never comes back. A payload arrived unasked, and one queued moments before a reconnect has already been ingested by the catch-up reading forward from the same cursor. `ingest_message` dedups on the Talk id, but `dispatch_command`, `handle_confirmation_reply` with its ack post and `confirmations.cancel_for_conversation` do not.
+- **Payloads are queued for the drain, never ingested from the watcher.** The drain's in-flight flag is the one serializer, and it is what `catch_up` defers to. Going straight to ingestion from a watcher would run the non-idempotent half of the results block concurrently with a reconnect's catch-up over the same messages.
+
+A failed drain preserves the room's dirty bit and drops the queued payload, forcing a fetch on the retry: the results block is one transaction, so a raise rolled the cursor back with it, and a fetch from that cursor reads everything the batch held plus anything the relay did not carry.
+
+### Coalescing, and the error contract that is part of it
+
+At most one fetch in flight per room; an event arriving during one sets a dirty bit and re-runs once on completion. Ten messages in a burst cost one or two fetches, not ten. The in-flight flag is cleared in a `finally` and the dirty bit is *preserved* on failure, so the next event re-runs rather than coalescing into a fetch that already died. Clearing in-flight only on success strands that room for the life of the process and nothing notices, because the socket is fine — so `stats()` carries how many rooms have been dirty longer than one `room_sync_interval` and `doctor` reads it as `stale_dirty`. A restored dirty bit deliberately does **not** re-wake the drain: an immediate retry of a transaction that just raised is a hot loop against Nextcloud.
+
+### Two failure modes worth knowing before touching this
+
+**A 404 from `participants/active` is fatal to its watcher, and that is a throttler decision** (ISSUE-414). Nextcloud answers 404 for a room deleted between reconciliation passes. Retrying it is not merely wasteful: `RoomController::joinRoom` carries `#[BruteForceProtection(action: 'talkRoomToken')]` and `SignalingController::getSettings` declares **the same action**, and the throttler keys on (IP, action) — so 404s on one dead room impose a pre-controller sleep on the settings fetch for *every* room, climbing to a 25-second cap and never coming back down, because `joinRoom` clears the delay only on a successful join. Measured on a live stack: the unannotated `/room` listing answered in 0.31s while the annotated settings call took 25.31s and the 404 took 50.32s. It stayed invisible through three investigations because `TalkClient.DEFAULT_TIMEOUT` is 15s, below the server's worst-case sleep, so the daemon could only ever render a bare `ReadTimeout:` with an empty message — and because Nextcloud 29+ keeps bruteforce attempts in the distributed cache rather than the database, so `occ security:bruteforce:attempts` reads zero by design. Only 404 is fatal; a 502 or a restart is the transient case the backoff exists for.
+
+**A watcher that has never connected is a different state from one that is reconnecting**, and before ISSUE-416 nothing could tell them apart. `RoomWatcher.ever_connected` is that fact; a watcher alive past `_NEVER_CONNECTED_SECONDS` without it is cancelled and replaced on the reconciliation cadence, and `doctor` reports those rooms separately from the merely disconnected. The same issue fixed `settings()` sharing a *failure* the way it already shared a success: it held the lock across the fetch but stamped the cache only on success, so N watchers each paid their own serial 15-second timeout on the path where sharing matters most.
+
+### What an always-present bot session changes
+
+istota holds an active Talk session in every watched room around the clock, which it never did before. It is present to the other participants and it never joins a call. Nothing in the ingest path reads Talk notifications, so the expected answer to "does this change what Nextcloud tells istota" is "nothing" — written down because it is a behaviour change to a surface this design otherwise does not touch. A second daemon pointed at the same Nextcloud opens its own sessions and receives every event; Talk allows several sessions per attendee, and duplicate ingestion is prevented by the cursor and the echo filter rather than by the transport.
+
+### Where the tests are
+
+`tests/test_talk_signaling.py` (the frames), `tests/test_talk_signaling_supervisor.py` (the watcher set, the queue, the payload rules, the shape `doctor` reads), `tests/test_talk_trigger_path.py` (the @mention gate on the trigger and direct paths, and the identical-row comparison), `tests/test_talk_signaling_runtime.py` (spawn and shutdown), and `tests/full/test_signaling_e2e.py` (the deployed chain against a real HPB and a real Nextcloud, on the `full` profile). The lean `signaling` profile carries the protocol edge cases.
+
+The end-to-end payload-direct assertion is **not** available on the shipped stack: `docker/docker-compose.yml` pins `nextcloud:30-apache`, whose Talk is 20.1.11, and that version's `notifyMessageSent` sends `{'refresh': true}` and nothing else. The comment relay is a Talk-side feature that arrived later, and it is independent of the signaling server advertising `chat-relay` — that advertisement says the server will forward a message if Talk sends one, not that Talk sends one. So on the tier every event is a bare refresh, trigger mode carries all of it, and the payload scenarios skip rather than assert. Bumping that image is a separate product decision with its own blast radius, which is why it has not been made here.
 
 ## Post-as-user mirroring + echo prevention (user-scoped OAuth)
 

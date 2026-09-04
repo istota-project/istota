@@ -107,6 +107,22 @@ services:
       # PUBLIC_HOST after provisioning leaves a stale registration — wipe the
       # shared volume (or delete /mnt/shared/.istota-provisioned) to re-register.
       ISTOTA_WEB_CALLBACK_URL: ${ISTOTA_WEB_CALLBACK_URL:-${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}/istota/callback}
+      # Register the standalone signaling server (the "high-performance
+      # backend") with Talk at first install. Both empty is the default and
+      # means provision-nc.sh registers nothing, which leaves Talk in
+      # `internal` signaling mode — the shape every deployment without the
+      # `signaling` compose profile runs.
+      #
+      # This is Talk's own credential for talking to the HPB, and it is the
+      # same value the `signaling` service below is given as its backend
+      # secret. It is not istota's: the daemon authenticates to the signaling
+      # server as its own Nextcloud user and holds no shared secret at all.
+      #
+      # Baked in at first install like the OAuth2 redirect URI: the hook runs
+      # only when the image performs the install, so changing either value
+      # later means `occ talk:signaling:add` by hand.
+      ISTOTA_TALK_SIGNALING_SERVER: ${ISTOTA_TALK_SIGNALING_SERVER:-}
+      ISTOTA_TALK_SIGNALING_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true'"]
       interval: 15s
@@ -301,6 +317,24 @@ services:
       ISTOTA_LOGGING_BACKUP_COUNT: ${ISTOTA_LOGGING_BACKUP_COUNT:-5}
       # Talk
       ISTOTA_TALK_ENABLED: ${ISTOTA_TALK_ENABLED:-true}
+      # Inbound Talk over the standalone signaling server, which this file ships
+      # behind the `signaling` compose profile. Turning the profile on is not
+      # enough on its own — the daemon has to be told to use it, and Talk has to
+      # have the server registered (provision-nc.sh does that when
+      # ISTOTA_TALK_SIGNALING_SECRET is set at first install).
+      #
+      # No credential passes through here, deliberately: istota authenticates to
+      # the signaling server as its own Nextcloud user. The shared secret below
+      # in the `signaling` service is Talk's, not istota's.
+      ISTOTA_TALK_SIGNALING_ENABLED: ${ISTOTA_TALK_SIGNALING_ENABLED:-false}
+      # The URL override, and on this shape it is the normal case rather than
+      # the exception: Talk advertises the server on whatever public URL a
+      # browser reaches it by, while the daemon sits on the container network
+      # next to it. Empty means "read `server` from Talk's own settings".
+      ISTOTA_TALK_SIGNALING_URL: ${ISTOTA_TALK_SIGNALING_URL:-}
+      ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL: ${ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL:-300}
+      ISTOTA_TALK_SIGNALING_RECONNECT_BACKOFF_MAX: ${ISTOTA_TALK_SIGNALING_RECONNECT_BACKOFF_MAX:-60}
+      ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT: ${ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT:-false}
       # Email (optional)
       ISTOTA_EMAIL_ENABLED: ${ISTOTA_EMAIL_ENABLED:-true}
       ISTOTA_EMAIL_IMAP_HOST: ${ISTOTA_EMAIL_IMAP_HOST:-}
@@ -601,6 +635,119 @@ services:
       retries: 3
     volumes:
       - browser_profile:/data/browser-profile
+    restart: unless-stopped
+
+  # The Nextcloud Talk high-performance backend, which is what makes inbound
+  # Talk a push rather than a poll. Off by default, behind a compose profile:
+  #
+  #     docker compose --profile signaling up -d
+  #
+  # Three things have to line up, and turning the profile on is only the first.
+  # Talk has to have the server registered — set ISTOTA_TALK_SIGNALING_SERVER
+  # and ISTOTA_TALK_SIGNALING_SECRET *before* the first install, since
+  # provision-nc.sh registers it in the post-installation hook. And the daemon
+  # has to be told to use it, with ISTOTA_TALK_SIGNALING_ENABLED=true.
+  #
+  # Registering an external signaling server changes call signaling for every
+  # Talk user on this Nextcloud, not only for istota. With no MCU configured
+  # media stays peer-to-peer and calls keep working, but it is a change to a
+  # shared service.
+  #
+  # No Janus and no external NATS: `[mcu] type` is left empty and the image
+  # defaults `[nats] url` to `nats://loopback`, so this is one small Go binary
+  # with no dependencies of its own. istota never publishes or subscribes to a
+  # media stream.
+  signaling:
+    image: strukturag/nextcloud-spreed-signaling:${ISTOTA_TALK_SIGNALING_IMAGE_TAG:-2.1.1}
+    profiles:
+      - signaling
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    # Loopback by default. A browser has to reach this for Talk's own client to
+    # use it, so a real deployment fronts it with TLS at a public path and
+    # registers *that* URL with Talk; publishing it unencrypted on a public
+    # interface would put the hello token and every relayed chat message on the
+    # wire in clear.
+    ports:
+      - "${ISTOTA_TALK_SIGNALING_BIND:-127.0.0.1}:${ISTOTA_TALK_SIGNALING_PORT:-8081}:8080"
+    environment:
+      HTTP_LISTEN: 0.0.0.0:8080
+      BACKENDS: nextcloud
+      # **Two URLs, and both are needed.**  (This comment describes the key
+      # below it, `BACKEND_NEXTCLOUD_URLS`.) The server matches an incoming
+      # request against this list twice over, from opposite directions: Talk
+      # stamps every backend request with the URL a *browser* reaches it on
+      # (`overwrite.cli.url`), while the daemon's hello names the URL *it*
+      # reaches Nextcloud on, which on this network is the service name. A list
+      # with only one of them refuses the other, and the refusal is not obvious
+      # from where it lands — an unmatched backend request is counted as a
+      # bruteforce attempt, so after a handful of them Talk gets `429 Too Many
+      # Requests` and every room creation fails with a 500 that names nothing.
+      BACKEND_NEXTCLOUD_URLS: ${ISTOTA_TALK_SIGNALING_BACKEND_URLS:-http://nextcloud,${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}}
+      # Talk's credential for this server, and the reason the two variables are
+      # one value: `occ talk:signaling:add` on the Nextcloud side and the
+      # backend secret here have to match or every backend request is refused.
+      # Left empty it is generated at random by the entrypoint below, which
+      # makes the mismatch loud rather than leaving the server accepting a
+      # backend request signed with an empty key.
+      BACKEND_NEXTCLOUD_SHARED_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
+      # Session checksum and encryption keys. Distinct from the backend secret
+      # and from each other; the block key must be 16, 24 or 32 bytes.
+      HASH_KEY: ${ISTOTA_TALK_SIGNALING_HASH_KEY:-}
+      BLOCK_KEY: ${ISTOTA_TALK_SIGNALING_BLOCK_KEY:-}
+      # Deliberately *not* interpolated from ISTOTA_TALK_SIGNALING_SECRET or
+      # given a default — see the entrypoint below.
+      INTERNAL_SHARED_SECRET_KEY: ${ISTOTA_TALK_SIGNALING_INTERNAL_SECRET:-}
+    # The image's own entrypoint renders /config/server.conf from the variables
+    # above the first time it starts, substituting each placeholder in
+    # server.conf.in only where the matching variable is non-empty. Three of
+    # those placeholders are *published constants* in the upstream file, and one
+    # of them is the administrative door: `[clients] internalsecret` is what an
+    # internal client authenticates with, and an internal client can join any
+    # room on the instance, invisibly to everyone in it (hub.go:1922-1927). Left
+    # to the image's default this stack would ship that door with a password
+    # printed in a public repository.
+    #
+    # So a random value per container when the operator names none. Random
+    # rather than empty: an empty secret is still a secret an attacker can
+    # compute an HMAC with. istota holds no internal secret at all and needs
+    # none, so the generated value has no reader and that is the intent — an
+    # operator running a talk-recording server beside this one sets
+    # ISTOTA_TALK_SIGNALING_INTERNAL_SECRET and configures both ends.
+    #
+    # The two session keys get the same treatment for the same reason: with the
+    # published defaults, anyone can forge a session checksum. So does the
+    # backend secret, which is the door `publish_chat` in the testbed uses to
+    # write arbitrary chat events into any room — an operator who starts the
+    # profile without setting it gets a server Talk cannot reach rather than one
+    # anybody can.
+    #
+    # `tr '+/' '-_'` because these values are substituted into the config by the
+    # image's own `sed`, and an alphabet without the delimiter characters costs
+    # nothing and removes the question. `exec /entrypoint.sh` with no arguments
+    # is correct: the image declares no CMD (`docker image inspect … .Config.Cmd`
+    # is null), so there is nothing being discarded.
+    #
+    # **Nothing orders the istota container after this one**, and that is a
+    # limitation rather than an oversight: compose auto-enables the profile of
+    # any service a running service depends on, so a `depends_on` here would
+    # start the signaling server on every deployment. The daemon's watchers
+    # retry on their own backoff, so a late start costs nothing on that side —
+    # but Talk's own message path is coupled to the backend, and a chat POST
+    # made while the server is unreachable was measured answering HTTP 400. A
+    # stack whose provisioning posts during that window fails that post.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        for var in INTERNAL_SHARED_SECRET_KEY HASH_KEY BLOCK_KEY BACKEND_NEXTCLOUD_SHARED_SECRET; do
+          if [ -z "$${!var}" ]; then
+            export "$$var=$$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+            echo "[signaling] $$var was not set; generated a random one for this container."
+          fi
+        done
+        exec /entrypoint.sh
     restart: unless-stopped
 
   webhooks:

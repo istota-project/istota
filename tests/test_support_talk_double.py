@@ -885,7 +885,22 @@ class TestTheSeamControl:
         # `[ \t]`, not `\s`: with `re.MULTILINE` a `\s+` after `^` matches the
         # preceding newline, so every module-level import reads as indented and
         # the two sets collapse into one.
-        assert self._importers(r"^[ \t]+from") == {"istota.commands"}
+        assert self._importers(r"^[ \t]+from") == {
+            "istota.commands",
+            # `SignalingSupervisor._client()`, added with the signaling event
+            # stream. Confirmed rather than assumed, per the rule above: it is
+            # function-local, so the `async_runtime` patch reaches it, and it
+            # falls back to the singleton only when no `_client_factory` was
+            # injected — which is the shape the supervisor's own tests use.
+            "istota.transport.talk.supervisor",
+            # `scheduler._start_talk_signaling`, which fetches signaling settings
+            # to answer the second startup refusal ("Talk has no HPB registered").
+            # It runs once at daemon start, before any watcher exists, and it is
+            # the one caller here that must reach the real singleton rather than
+            # an injected factory — a refusal decided against a double would be
+            # a refusal about nothing.
+            "istota.scheduler",
+        }
 
     def test_the_definition_site_is_patched(self, fake_talk, talk_config):
         """Which is what actually reaches those two.
@@ -944,11 +959,30 @@ SEAM_METHODS = {
     "fetch_chat_history",
     "get_conversation_info",
     "get_latest_message_id",
+    "fetch_messages_since",
     "get_participants",
     "list_conversations",
     "poll_messages",
     "send_message",
 }
+
+# `fetch_messages_since` is the signaling catch-up (see `.claude/rules/transport.md`).
+# It is deliberately *not* `poll_messages`: it sends `lookIntoFuture=1&timeout=0`
+# where `poll_messages` sends `timeout=scheduler.talk_poll_timeout`, and catch-up
+# runs on every join and every reconnect. Both are on this seam and both are here.
+#
+# Not here, and not reachable by the walk at all: `get_signaling_settings` and
+# `join_room_session`, which `SignalingSupervisor` calls as `self._client().x()`.
+# The walk only sees a receiver literally named `client`, which is the blind spot
+# this set exists to compensate for — but it can only compensate for a method it
+# once saw, and these two have never been seen.
+#
+# That gap is recorded rather than closed here, because closing it is a change to
+# the supervisor's own suite: `tests/test_talk_signaling_supervisor.py` drives a
+# bare `AsyncMock()` rather than `talk_double`, so `join_room_session(token)` —
+# which takes a conversation token — is asserted against a double that accepts
+# any string. That is the shape this file's own preamble describes as how
+# ISSUE-400 shipped, and neither the double nor this walk governs it today.
 
 # The same, for `web_app`'s own `TalkClient(...)` constructions. A separate set
 # because the two seams are patched separately and a method can belong to one

@@ -205,7 +205,7 @@ The rule is not real-versus-stubbed. It is what the subsystem needs in order to 
 | Talk, storage, shares, notifications | full | The client negotiates capabilities. A stub that answers that wrongly is worse than no test |
 | Provisioning and first boot | full | The thing under test *is* `entrypoint.sh` and `provision-nc.sh` |
 
-Seven profiles carry that split. A profile is a named shape plus the services it runs plus any extra config, declared per test as `@pytest.mark.profile("forge")` and defaulting to `base`; `StackPool` keys by name and boots each one once per session.
+Eight profiles carry that split. A profile is a named shape plus the services it runs plus any extra config, declared per test as `@pytest.mark.profile("forge")` and defaulting to `base`; `StackPool` keys by name and boots each one once per session.
 
 | Profile | Shape | Services |
 |---|---|---|
@@ -215,7 +215,8 @@ Seven profiles carry that split. A profile is a named shape plus the services it
 | `notify` | lean | model, ntfy |
 | `feeds` | lean | model, feeds |
 | `mail` | lean | model, mail |
-| `full` | full | model, nextcloud, mail |
+| `signaling` | lean | model, signaling |
+| `full` | full | model, nextcloud, mail, signaling |
 
 Fine-grained on the lean shape, exactly one on the full shape. Many profiles is an argument about a thirty-second boot — a stack with every subsystem on has the daemon polling mail, feeds and Talk during every unrelated test — and it inverts at a cold six-container one, where a second full profile would be a second cold boot to run one more scenario. A test that needs a stack nobody else has touched declares `@pytest.mark.profile("full", fresh=True)` and pays for a private one.
 

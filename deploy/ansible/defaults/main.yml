@@ -407,6 +407,30 @@ istota_provision_talk_rooms: true
 istota_talk_enabled: true
 istota_talk_bot_username: "{{ istota_namespace }}"  # Nextcloud username (to filter own messages)
 
+# Receive Talk messages over Nextcloud's standalone signaling server (the
+# high-performance backend) instead of polling for them. Off by default, and
+# there is no credential here: istota authenticates as its own Nextcloud user,
+# so the server URL, the connection token and the per-room session are minted
+# on demand by Talk. Requires the server already registered with Talk
+# (`occ talk:signaling:list`) and the `websockets` library, and the daemon
+# **refuses to boot** if it is switched on without either — quietly polling
+# while an operator believes push is live is the worse failure.
+istota_talk_signaling_enabled: false
+# Empty means "use whatever Talk advertises". Set it only where the daemon must
+# reach the server by a different route than the one browsers are given.
+istota_talk_signaling_url: ""
+# Seconds between room reconciliations. Also the safety net: the pass compares
+# each room's latest message id against its cursor and fetches only the rooms
+# behind, so it bounds how long a gap lasts if the stream stops.
+istota_talk_signaling_room_sync_interval: 300
+# Reconnect backoff ceiling, seconds. A proxy in front of the server typically
+# drops every connection hourly whatever the traffic, so reconnect is routine.
+istota_talk_signaling_reconnect_backoff_max: 60
+# Ingest the relayed message instead of refetching the room. Off by default: it
+# is the only part of this path that can be wrong about message content rather
+# than timing, and Talk relays a message at all only from about Talk 21.
+istota_talk_signaling_payload_direct: false
+
 # Email settings (optional)
 istota_email_enabled: false
 istota_email_imap_host: ""

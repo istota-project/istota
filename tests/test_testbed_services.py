@@ -22,7 +22,7 @@ import pytest
 from testbed import profiles, services
 from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
-from testbed.services import REGISTRY, ServiceCall, gitlab, mail
+from testbed.services import REGISTRY, ServiceCall, gitlab, mail, signaling
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
@@ -342,16 +342,31 @@ class TestConfigEnvNamesOnlyShippedVariables:
 
         `mail` is here and costs nothing: `serve()` starts no container — the
         profile's compose overlay does that — so it is a certificate written
-        into `tmp_path` and a dictionary. `nextcloud` is absent because its
-        `config_env()` is empty by design, the shipped compose file already
-        pointing the daemon at its own service.
+        into `tmp_path` and a dictionary. `signaling` is the same shape: the
+        compose profile runs the container and `serve()` produces the secrets it
+        is configured from. `nextcloud` is absent because its `config_env()` is
+        empty by design, the shipped compose file already pointing the daemon at
+        its own service.
+
+        Hand-maintained, and that is the cost of the guard being written this
+        way: a service whose `config_env()` is empty today is vacuously
+        conforming, and adding a variable to it later is checked by nothing
+        until the name is added here. `ntfy` and `feeds` are in exactly that
+        state.
         """
         endpoint = serve_script([{"text": "ok"}])
         forge = gitlab.serve(tmp_path / "repos")
         post = mail.serve(tmp_path / "mail")
+        hpb = signaling.serve()
         try:
-            yield {endpoint.name: endpoint, forge.name: forge, post.name: post}
+            yield {
+                endpoint.name: endpoint,
+                forge.name: forge,
+                post.name: post,
+                hpb.name: hpb,
+            }
         finally:
+            hpb.close()
             post.close()
             forge.close()
             endpoint.close()
@@ -391,6 +406,28 @@ class TestConfigEnvNamesOnlyShippedVariables:
         # loopback finds nothing, and the symptom is a task that failed to
         # reach the model for no stated reason.
         assert "host.docker.internal" in rendered["ISTOTA_BRAIN_NATIVE_BASE_URL"]
+
+    def test_the_signaling_image_tag_matches_both_shipped_compose_defaults(self):
+        """One version, written in three places and held equal by nothing else.
+
+        The harness passes `ISTOTA_TALK_SIGNALING_IMAGE_TAG` explicitly, so a
+        compose default is only what an *operator* gets — and a bump in one
+        place would leave the tier exercising a version the shipped file does
+        not run. The drift is silent in exactly the direction that matters:
+        `chat-relay` landed in 2.1.0 and a server without it connects fine and
+        only ever sends a bare refresh.
+        """
+        pattern = re.compile(
+            r"strukturag/nextcloud-spreed-signaling:\$\{ISTOTA_TALK_SIGNALING_IMAGE_TAG"
+            r":-([0-9][^}]*)\}"
+        )
+        for path in (FULL_COMPOSE, REPO / "docker" / "docker-compose.test.yml"):
+            found = pattern.findall(path.read_text())
+            assert found == [signaling.IMAGE_TAG], (
+                f"{path.name} defaults the signaling image to {found}, and "
+                f"testbed.services.signaling.IMAGE_TAG is "
+                f"{signaling.IMAGE_TAG!r}"
+            )
 
     def test_the_forge_points_the_developer_skill_at_its_own_container_url(
         self, services
