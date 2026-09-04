@@ -282,6 +282,7 @@ def compose_args(
     project: str,
     env_file: Path | None = None,
     overlays: list[Path] | None = None,
+    compose_profiles: tuple[str, ...] | list[str] = (),
 ) -> list[str]:
     """The invariant prefix for every compose call against one stack.
 
@@ -294,10 +295,17 @@ def compose_args(
     base file they ride in the argument list, so every subcommand sees the same
     merged model — an overlay applied only to `up` would leave `ps`, `logs` and
     `down` reasoning about a different stack than the one running.
+
+    `compose_profiles` rides here for the same reason, and the failure it avoids
+    is worse than a confusing `ps`: a service started under a profile that
+    `down` was not told about is not torn down, so an interrupted session leaves
+    a container holding a published port and the next one collides with it.
     """
     args = ["docker", "compose", "-f", str(compose_file)]
     for overlay in overlays or []:
         args += ["-f", str(overlay)]
+    for compose_profile in compose_profiles:
+        args += ["--profile", compose_profile]
     args += ["--project-name", project]
     if env_file is not None:
         args += ["--env-file", str(env_file)]
@@ -781,6 +789,7 @@ PLANNED_SERVICES: frozenset[str] = frozenset()
 #: be the fixture side-loading config.
 FULL_MODULE_SWITCHES: dict[str, str] = {
     "ISTOTA_TALK_ENABLED": "nextcloud",
+    "ISTOTA_TALK_SIGNALING_ENABLED": "signaling",
     "ISTOTA_EMAIL_ENABLED": "mail",
     "ISTOTA_FEEDS_ENABLED": "feeds",
     "ISTOTA_DEVELOPER_ENABLED": "gitlab",
@@ -985,13 +994,25 @@ def compose_env(
     Distinct from `config_env()`, and held to a different rule. That one points
     the *daemon* at a service and may only name variables the shipped generator
     reads and `docker-compose.yml` passes through — the property that makes the
-    whole tier honest. These are host paths and image tags a compose *overlay*
-    binds, which configure nothing about istota and appear in no shipped file.
+    whole tier honest. These configure the compose *stack* instead: host paths
+    and image tags an overlay binds, and the container secrets and ports a
+    shipped service is declared from.
 
-    They exist because compose resolves a relative bind against the first `-f`
-    file's directory, which is `docker/` rather than this package, so an overlay
-    living here can only name an absolute path handed to it. That is already how
-    `docker-compose.test.yml` receives the rendered config directory.
+    An earlier statement of the rule said these "appear in no shipped file", and
+    that was true of the only implementer at the time rather than being the
+    principle. `signaling.compose_env()` names `ISTOTA_TALK_SIGNALING_SECRET`
+    and its neighbours, every one of them read by `docker-compose.yml` — and
+    none of them by `render-config.sh`, because they configure the signaling
+    container and `provision-nc.sh`, not the daemon. The line that matters is
+    which side of the generator a variable lands on: anything that reaches
+    istota's own config goes through `config_env()` and is held to the two-file
+    rule, and nothing here does.
+
+    The mechanism half is unchanged: compose resolves a relative bind against
+    the first `-f` file's directory, which is `docker/` rather than this
+    package, so an overlay living here can only name an absolute path handed to
+    it. That is already how `docker-compose.test.yml` receives the rendered
+    config directory.
 
     Optional on the protocol, read by `getattr`: five of the six services need
     no overlay and would otherwise carry an empty method apiece. The same claim
@@ -2253,6 +2274,7 @@ class StackPool:
                 project=project,
                 env_file=env_file,
                 overlays=overlays,
+                compose_profiles=profile.compose_profiles,
             ),
             env_file,
         )
@@ -2305,6 +2327,7 @@ class StackPool:
             project=project,
             env_file=env_file,
             overlays=overlays,
+            compose_profiles=profile.compose_profiles,
         )
 
     #: Under `KEEP`, the volumes that are wiped anyway, by unqualified name.

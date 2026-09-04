@@ -281,6 +281,30 @@ auto_share_bot_dir = ${ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR:-true}
 enabled = ${ISTOTA_TALK_ENABLED:-true}
 bot_username = "${BOT_USER:-istota}"
 
+# Inbound Talk over the standalone signaling server (the "high-performance
+# backend"). Off unless the operator runs one: `docker-compose.yml` ships the
+# container behind the `signaling` compose profile, and a deployment without it
+# keeps the poll loop, which is the capability floor rather than a fallback.
+#
+# There is no credential here, and the absence is the design. istota
+# authenticates to the signaling server as its own Nextcloud user, so the HPB
+# URL, the hello token and the per-room Talk session id are all minted on demand
+# by Talk. The protocol's other door — an internal client holding the server's
+# shared secret — joins any room on the instance and is rejected for that
+# reason, so there is nothing to render, redact or vault.
+#
+# `url` is normally empty, which means "read `server` from Talk's own signaling
+# settings". Set it where the daemon must reach the HPB by a different route
+# than the one Nextcloud advertises to browsers — which is exactly the shape of
+# a compose deployment, where Talk hands out the public URL and the daemon is on
+# the container network beside the server.
+[talk.signaling]
+enabled = ${ISTOTA_TALK_SIGNALING_ENABLED:-false}
+url = "${ISTOTA_TALK_SIGNALING_URL:-}"
+room_sync_interval = ${ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL:-300}
+reconnect_backoff_max = ${ISTOTA_TALK_SIGNALING_RECONNECT_BACKOFF_MAX:-60}
+payload_direct = ${ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT:-false}
+
 [email]
 enabled = ${ISTOTA_EMAIL_ENABLED:-false}
 TOML

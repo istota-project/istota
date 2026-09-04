@@ -22,7 +22,7 @@ import pytest
 from testbed import profiles, services
 from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
-from testbed.services import REGISTRY, ServiceCall, gitlab, mail
+from testbed.services import REGISTRY, ServiceCall, gitlab, mail, signaling
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
@@ -342,16 +342,31 @@ class TestConfigEnvNamesOnlyShippedVariables:
 
         `mail` is here and costs nothing: `serve()` starts no container — the
         profile's compose overlay does that — so it is a certificate written
-        into `tmp_path` and a dictionary. `nextcloud` is absent because its
-        `config_env()` is empty by design, the shipped compose file already
-        pointing the daemon at its own service.
+        into `tmp_path` and a dictionary. `signaling` is the same shape: the
+        compose profile runs the container and `serve()` produces the secrets it
+        is configured from. `nextcloud` is absent because its `config_env()` is
+        empty by design, the shipped compose file already pointing the daemon at
+        its own service.
+
+        Hand-maintained, and that is the cost of the guard being written this
+        way: a service whose `config_env()` is empty today is vacuously
+        conforming, and adding a variable to it later is checked by nothing
+        until the name is added here. `ntfy` and `feeds` are in exactly that
+        state.
         """
         endpoint = serve_script([{"text": "ok"}])
         forge = gitlab.serve(tmp_path / "repos")
         post = mail.serve(tmp_path / "mail")
+        hpb = signaling.serve()
         try:
-            yield {endpoint.name: endpoint, forge.name: forge, post.name: post}
+            yield {
+                endpoint.name: endpoint,
+                forge.name: forge,
+                post.name: post,
+                hpb.name: hpb,
+            }
         finally:
+            hpb.close()
             post.close()
             forge.close()
             endpoint.close()

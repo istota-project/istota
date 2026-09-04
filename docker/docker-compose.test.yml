@@ -165,5 +165,60 @@ services:
       retries: 30
       start_period: 2s
 
+  # The Talk high-performance backend, behind the same compose profile name the
+  # shipped file uses, so a profile is activated rather than a file substituted.
+  #
+  # This shape has no Nextcloud, so the daemon in this stack never connects to
+  # it: hello-v2 needs Talk to mint and sign a JWT, and `require_hpb` refuses to
+  # boot without a Nextcloud reporting `external` signaling mode. The scenario
+  # drives istota's protocol module from the pytest process instead, and
+  # publishes into a room through the backend API the way Talk's
+  # `BackendNotifier` does. The server, and everything it decides about
+  # relaying, is real.
+  #
+  # Every secret comes from the harness — `testbed/services/signaling.py`
+  # generates one set per session into the compose env-file — because upstream's
+  # `server.conf.in` carries published constants for all three, and one of them
+  # is the door an internal client joins any room through.
+  signaling:
+    image: strukturag/nextcloud-spreed-signaling:${ISTOTA_TALK_SIGNALING_IMAGE_TAG:-2.1.1}
+    profiles:
+      - signaling
+    # Port 0, so two sessions on one machine never collide; the harness reads
+    # the real one back with `docker compose port`.
+    ports:
+      - "${ISTOTA_TALK_SIGNALING_BIND:-127.0.0.1}:${ISTOTA_TALK_SIGNALING_PORT:-0}:8080"
+    environment:
+      HTTP_LISTEN: 0.0.0.0:8080
+      # There is nothing behind this name on this shape. The server only ever
+      # matches it against the `backend` a client names, and the round trip that
+      # would resolve it happens on auth paths this shape cannot reach.
+      BACKENDS: nextcloud
+      BACKEND_NEXTCLOUD_URLS: http://nextcloud
+      # `:-` and not `:?`, which would be the honest preflight and cannot be
+      # used: compose interpolates the whole file on every subcommand, before
+      # it filters by profile, so a required variable here would break `up` for
+      # `base`, `forge` and every other lean profile that never starts this
+      # container. The entrypoint below closes the same hole from inside.
+      BACKEND_NEXTCLOUD_SHARED_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
+      HASH_KEY: ${ISTOTA_TALK_SIGNALING_HASH_KEY:-}
+      BLOCK_KEY: ${ISTOTA_TALK_SIGNALING_BLOCK_KEY:-}
+      INTERNAL_SHARED_SECRET_KEY: ${ISTOTA_TALK_SIGNALING_INTERNAL_SECRET:-}
+    # The same wrapper the shipped file carries, for the same reason: three of
+    # the placeholders in upstream's `server.conf.in` are published constants,
+    # and `[clients] internalsecret` is the door an internal client joins any
+    # room through. A random value per container where the caller named none.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        for var in INTERNAL_SHARED_SECRET_KEY HASH_KEY BLOCK_KEY; do
+          if [ -z "$${!var}" ]; then
+            export "$$var=$$(head -c 24 /dev/urandom | base64 | tr -d '=')"
+            echo "[signaling] $$var was not set; generated a random one for this container."
+          fi
+        done
+        exec /entrypoint.sh
+
 volumes:
   istota_test_db:

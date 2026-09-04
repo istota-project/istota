@@ -153,6 +153,75 @@ class TestTheRenderedConfigLoads:
         assert config.nextcloud.dav_prefix == "Shared Files"
         assert config.nextcloud.auto_share_bot_dir is False
 
+    def test_talk_signaling_is_off_and_undiscovered_unless_asked_for(self, tmp_path):
+        """The whole block has to be inert on a deployment with no HPB.
+
+        `enabled = false` is what keeps today's poll loop running, and every
+        other key has to arrive at the dataclass default rather than at
+        something the shell substituted — an empty `url` in particular, since a
+        non-empty one means "do not ask Talk where the server is" and would
+        point a discovering daemon at nothing.
+        """
+        config = load_config(render(tmp_path, **REQUIRED))
+
+        assert config.talk.signaling.enabled is False
+        assert config.talk.signaling.url == ""
+        assert config.talk.signaling.room_sync_interval == 300
+        assert config.talk.signaling.reconnect_backoff_max == 60
+        assert config.talk.signaling.payload_direct is False
+
+    def test_talk_signaling_round_trips_every_key_the_operator_can_set(self, tmp_path):
+        """Five keys, no credential, and the absence is the design.
+
+        Read this beside `test_every_var_the_render_reads_is_passed_by_compose`
+        above, which is the half that catches the family being read here and
+        withheld by compose. That guard is a blanket scan over every `ISTOTA_*`
+        name rather than the four prefixes it once ran over, so this family was
+        covered by it the moment the block was written — but a scan proves the
+        name arrives, not that it lands on the field it names, and every one of
+        these went to a different field the first time round.
+        """
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_TALK_SIGNALING_ENABLED="true",
+                ISTOTA_TALK_SIGNALING_URL="http://signaling:8080",
+                ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL="30",
+                ISTOTA_TALK_SIGNALING_RECONNECT_BACKOFF_MAX="15",
+                ISTOTA_TALK_SIGNALING_PAYLOAD_DIRECT="true",
+            )
+        )
+
+        assert config.talk.signaling.enabled is True
+        assert config.talk.signaling.url == "http://signaling:8080"
+        assert config.talk.signaling.room_sync_interval == 30
+        assert config.talk.signaling.reconnect_backoff_max == 15
+        assert config.talk.signaling.payload_direct is True
+
+    def test_no_signaling_credential_reaches_the_rendered_config(self, tmp_path):
+        """The two secrets in this family configure containers, never the daemon.
+
+        `ISTOTA_TALK_SIGNALING_SECRET` is Talk's credential for the signaling
+        server, read by `provision-nc.sh` and by the server's own container;
+        `_INTERNAL_SECRET` is the server's internal-client door, which joins any
+        room on the instance and which istota rejects by design. Neither has any
+        reader in the daemon, so a render that wrote either into `config.toml`
+        would be putting a deployment-wide credential in a task's reach for no
+        purpose — the shape of ISSUE-390.
+        """
+        path = render(
+            tmp_path,
+            **REQUIRED,
+            ISTOTA_TALK_SIGNALING_ENABLED="true",
+            ISTOTA_TALK_SIGNALING_SECRET="fabricated-backend-secret",
+            ISTOTA_TALK_SIGNALING_INTERNAL_SECRET="fabricated-internal-secret",
+        )
+        rendered = path.read_text()
+
+        assert "fabricated-backend-secret" not in rendered
+        assert "fabricated-internal-secret" not in rendered
+
     def test_user_display_name_and_timezone_default_from_the_user_name(self, tmp_path):
         config = load_config(render(tmp_path, **REQUIRED))
         profile = config.users["testuser"]

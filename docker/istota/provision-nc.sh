@@ -35,6 +35,34 @@ $OCC app:enable spreed || true
 $OCC app:enable calendar || true
 $OCC app:enable files_external || true
 
+# --- Talk signaling server (the high-performance backend) ---
+#
+# Registering one puts Talk in `external` signaling mode, which is what makes
+# `helloAuthParams` available to a client and therefore what istota's inbound
+# event stream depends on. Skipped entirely when either value is empty, which
+# is the default and the shape of every deployment that does not run the
+# `signaling` compose profile.
+#
+# The secret is Talk's own credential for the server and must match the
+# server's `[backend] secret`; compose hands both ends the same value. It is
+# not istota's — the daemon authenticates to the signaling server as its own
+# Nextcloud user and holds no shared secret.
+#
+# Baked in here, at first install, like the OAuth2 client below: this hook runs
+# only when the image performs the install. Changing the server later means
+# `occ talk:signaling:add` by hand.
+#
+# `|| true` like every other occ call in this script, and the consequence is
+# worth naming: a failure here leaves Talk in `internal` mode, which the daemon
+# reports through `doctor`'s `talk.signaling_auth` check and refuses to start
+# on when `[talk.signaling] enabled` is true. It does not fail quietly.
+if [ -n "${ISTOTA_TALK_SIGNALING_SERVER:-}" ] && [ -n "${ISTOTA_TALK_SIGNALING_SECRET:-}" ]; then
+    echo "[istota-provision] Registering Talk signaling server: ${ISTOTA_TALK_SIGNALING_SERVER}"
+    $OCC talk:signaling:add "${ISTOTA_TALK_SIGNALING_SERVER}" "${ISTOTA_TALK_SIGNALING_SECRET}" --verify || true
+else
+    echo "[istota-provision] No Talk signaling server configured; Talk stays in internal signaling mode."
+fi
+
 # --- External storage ---
 
 echo "[istota-provision] Configuring external storage..."
