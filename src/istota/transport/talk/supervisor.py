@@ -490,7 +490,7 @@ class SignalingSupervisor:
         # `_settings_at`, which means "when `_settings` was fetched" — stamping
         # that on a failure would make a stale successful payload look fresh,
         # and the token it carries lives about two minutes.
-        self._settings_error: BaseException | None = None
+        self._settings_error: Exception | None = None
         self._settings_error_at = 0.0
         self._settings_lock = asyncio.Lock()
         # token -> how many times a watcher for it has been cancelled for never
@@ -620,13 +620,14 @@ class SignalingSupervisor:
                     raise RuntimeError(
                         f"Talk signaling settings unusable: {reason}"
                     )
-            except asyncio.CancelledError:
-                # Never cached. A cancelled fetch says nothing about the
-                # server, and holding it as a shared failure would refuse
-                # every other watcher over a shutdown that has nothing to do
-                # with them.
-                raise
-            except BaseException as e:
+            except Exception as e:  # noqa: BLE001 — cached and re-raised
+                # `Exception`, not `BaseException`, and that is the whole
+                # handling of cancellation: `asyncio.CancelledError` derives
+                # from `BaseException`, so it passes straight through here
+                # uncached. A cancelled fetch says nothing about the server,
+                # and holding it as a shared failure would refuse every other
+                # watcher over a shutdown that has nothing to do with them —
+                # `AsyncRuntime.stop` cancels in-flight work by design.
                 self._settings_error = e
                 self._settings_error_at = time.monotonic()
                 self.count("settings_failures")
@@ -1187,9 +1188,14 @@ class SignalingSupervisor:
     def stats(self) -> dict:
         """The counters `doctor`'s `talk.signaling_watchers` reads.
 
-        Four keys are the contract (`signaling.read_stats`): `watchers`,
-        `connected`, `disconnected` and `rooms_behind`. The rest is diagnosis
-        and is ignored by that check.
+        Five keys are the contract (`signaling.read_stats`): `watchers`,
+        `connected`, `disconnected`, `never_connected` and `rooms_behind`. The
+        rest is diagnosis and is ignored by that check.
+
+        `never_connected` is not a subset of `disconnected` and is not
+        comparable to it: that one is a moment, which a healthy watcher joins
+        for a second between reconnects, while this is a room nothing has ever
+        delivered for. `doctor` reports them apart for that reason.
 
         `stale_dirty` is the one the drain's error contract makes necessary: a
         room whose dirty bit has outlived a `room_sync_interval` is one whose
