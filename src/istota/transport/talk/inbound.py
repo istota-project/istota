@@ -1076,6 +1076,7 @@ async def poll_one_conversation(
     *,
     conv_type: int | None,
     display_name: str | None,
+    client: TalkClient | None = None,
 ) -> list[int]:
     """Fetch one room and run the results transaction for it alone.
 
@@ -1110,8 +1111,16 @@ async def poll_one_conversation(
     with no messages at all. A group room with history and no cursor cannot:
     ``_apply_room_pass`` either seeds its cursor or marks it
     ``cursor_init_failed`` and drops it from the pass entirely.
+
+    ``client`` defaults to the pooled one, and exists for the same reason
+    :func:`reconcile_talk_rooms` takes it: the supervisor resolves the client
+    once for its whole lifetime rather than per fetch, and a caller on a loop
+    that is not the runtime's must be able to hand in its own — ``
+    get_talk_client`` refuses that caller outright, since the pool binds to
+    whichever loop issued the first request.
     """
-    client = get_talk_client(config)
+    if client is None:
+        client = get_talk_client(config)
 
     async with talk_db(config.db_path) as conn:
         cursor = db.get_talk_poll_state(conn, conversation_token)
@@ -1138,6 +1147,7 @@ async def catch_up_conversation(
     *,
     conv_type: int | None,
     display_name: str | None,
+    client: TalkClient | None = None,
 ) -> list[int]:
     """Read one room forward from its cursor. Runs on every join and reconnect.
 
@@ -1157,8 +1167,11 @@ async def catch_up_conversation(
     as new tasks. It is not reachable — the supervisor starts no watcher for
     such a room — so this logs rather than fetching, and the room is left to
     the reconciliation pass.
+
+    ``client`` defaults to the pooled one; see :func:`poll_one_conversation`.
     """
-    client = get_talk_client(config)
+    if client is None:
+        client = get_talk_client(config)
 
     async with talk_db(config.db_path) as conn:
         cursor = db.get_talk_poll_state(conn, conversation_token)
