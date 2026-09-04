@@ -142,10 +142,20 @@ class _Opens:
         monkeypatch.setattr(db, "get_db", recording)
 
     def overlaps(self) -> list[tuple[dict, dict]]:
+        """Every pair of connections whose open windows intersect.
+
+        A record with no `closed` stamp is a connection still open, which
+        overlaps everything after it — the honest answer, and better than the
+        `TypeError` a comparison against `None` would raise from inside the
+        helper that is meant to be diagnosing the overlap.
+        """
+        def closed(record):
+            return record["closed"] if record["closed"] is not None else float("inf")
+
         out = []
         for i, a in enumerate(self.records):
             for b in self.records[i + 1:]:
-                if a["opened"] < b["closed"] and b["opened"] < a["closed"]:
+                if a["opened"] < closed(b) and b["opened"] < closed(a):
                     out.append((a, b))
         return out
 
@@ -156,6 +166,13 @@ def _run_with_deadline(factory, deadline=_SCENARIO_DEADLINE_SECONDS):
     A loop thread blocked on a synchronous lock cannot time itself out, so the
     deadline lives out here. The thread is a daemon: under the `threading.Lock`
     control it never returns, and the run has to be able to end anyway.
+
+    **A fired deadline leaves that thread alive for the rest of the session**,
+    holding an open connection to this test's `tmp_path` database and still
+    calling the recording wrapper after `monkeypatch` has restored `db.get_db`.
+    Nothing can be done about it — a thread blocked in C cannot be killed from
+    Python — so treat a failure here as poisoning the worker and re-run the file
+    on its own (`-n0`) rather than reading the tests after it.
     """
     outcome: dict = {}
 
@@ -250,13 +267,17 @@ class TestTheLoopNeverHoldsTwoWriteTransactionsAtOnce:
             assert db.get_talk_poll_state(conn, "drain_room") == 999
             assert db.get_talk_poll_state(conn, "grp") == 100
 
-    def test_every_connection_on_the_loop_path_bounds_its_lock_wait(
+    def test_the_polls_own_transactions_bound_their_lock_wait(
         self, config, monkeypatch,
     ):
-        """The lock orders the two coroutines; the busy timeout is what keeps a
-        writer *outside* the loop — the scheduler's own threads — from turning
-        into a 30-second stall of the loop thread. It has to surface as an
-        `OperationalError` the caller can retry instead."""
+        """The lock orders the two coroutines on the loop; the busy timeout is
+        what keeps a writer *outside* it — the scheduler's threads, the web
+        process — from turning into a 30-second stall of the loop thread. It has
+        to surface as an `OperationalError` the caller can retry instead.
+
+        Scoped to what the scenario opens, which is this poll's three blocks and
+        the drain's: an out-of-loop writer's connection is a different call site
+        in a different process and is not what this can speak for."""
         opens = _Opens()
         opens.install(monkeypatch)
 
@@ -277,18 +298,36 @@ class TestTheLockIsPerLoopAndAsync:
         raises for every loop after that. One lock per loop is what keeps the
         invariant — which is about one loop's own thread — from becoming a
         hazard of its own in a process that runs more than one loop over time.
-        The suite is such a process: every `asyncio.run` is a new loop."""
-        async with talk_db(config.db_path) as conn:
-            db.set_talk_poll_state(conn, "loop_a", 1)
+        The suite is such a process: every `asyncio.run` is a new loop.
+
+        **Asserted as lock identity, not as an absent `RuntimeError`.** A lock
+        binds itself on the first *contended* acquire — `Lock.acquire`'s
+        uncontended fast path never asks for the loop — so a sequential
+        two-loop scenario passes against a single module-level lock and proves
+        nothing. Two loops getting two objects is the property, and it is what
+        a single lock fails."""
+        from istota.transport.talk import _db_lock
+
+        mine = _db_lock.loop_db_lock()
+        assert _db_lock.loop_db_lock() is mine, "one loop, one lock"
+
+        theirs: list = []
 
         def other_loop():
             async def write():
+                theirs.append(_db_lock.loop_db_lock())
                 async with talk_db(config.db_path) as conn:
                     db.set_talk_poll_state(conn, "loop_b", 2)
             asyncio.run(write())
 
         await asyncio.wait_for(asyncio.to_thread(other_loop), timeout=10)
 
+        assert theirs and theirs[0] is not mine, (
+            "a second loop was handed the first loop's lock — it binds to the "
+            "loop that first contends on it and raises for every loop after"
+        )
+        async with talk_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "loop_a", 1)
         with db.get_db(config.db_path) as conn:
             assert db.get_talk_poll_state(conn, "loop_a") == 1
             assert db.get_talk_poll_state(conn, "loop_b") == 2
@@ -299,3 +338,12 @@ class TestTheLockIsPerLoopAndAsync:
         from istota.transport.talk import _db_lock
 
         assert isinstance(_db_lock.loop_db_lock(), asyncio.Lock)
+
+    def test_asking_for_the_lock_off_a_loop_raises(self):
+        """There is no invariant to enforce for a caller that is not on a
+        loop, and handing one something acquirable would let it believe it had
+        taken the lock the loop's coroutines are ordered by."""
+        from istota.transport.talk import _db_lock
+
+        with pytest.raises(RuntimeError):
+            _db_lock.loop_db_lock()

@@ -278,9 +278,12 @@ messages are re-polled rather than silently lost.
   idempotent and only `ingest_message` deduped, so a rewind re-runs that window
   rather than being absorbed by it. Talk comment ids are global and monotonic
   and no operation resets them, so there is no legitimate rewind to preserve.
-  And every `db.get_db` block reachable from the runtime loop is taken behind
-  one `asyncio.Lock` per loop (`transport/talk/_db_lock.py`) with a bounded
-  `busy_timeout_ms`. **That one is a deadlock rather than a race**: the results
+  And every `db.get_db` block in this package that is reachable from the runtime
+  loop is taken behind one `asyncio.Lock` per loop
+  (`transport/talk/_db_lock.py`) with a bounded `busy_timeout_ms` — the scope is
+  `transport/talk`, and the loop's other residents are covered by not opening a
+  connection on the loop thread at all (`WebTransport.deliver` hands its write
+  to `run_in_executor`, so it contends through SQLite from another thread). **That one is a deadlock rather than a race**: the results
   block writes and then awaits Nextcloud five times with the WAL write lock
   held, and `db.get_db` is synchronous `sqlite3` — a second writing coroutine
   scheduled into one of those awaits blocks the loop thread itself, which is the

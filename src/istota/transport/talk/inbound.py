@@ -221,6 +221,11 @@ class _TxnHold:
     it commits, so it includes `sqlite3.connect`, the `PRAGMA synchronous` write
     and any wait for the lock itself. That is deliberate — the wait for the lock
     is the cost another writer pays, and it is the number an investigator wants.
+    It covers **two** locks: the transport's `asyncio.Lock` (entered inside
+    `_timed_poll_txn`, so a wait for another coroutine on the loop is counted
+    here rather than being invisible) and then SQLite's own. A hold dominated by
+    the first is a queue on the loop, not a long write transaction, which is
+    worth knowing before reading a large `held_ms` as a slow write.
 
     `awaits` counts only the awaits that took at least `_TXN_AWAIT_FLOOR_SECONDS`
     and `await_seconds` sums only those. The floor is applied per await rather
@@ -650,12 +655,14 @@ def _apply_room_pass(
     its cursor. `register_room` / `add_room_binding` / `add_room_member` are all
     `INSERT OR IGNORE` and need no help, and `set_talk_poll_state` no longer
     rewinds a cursor — but the re-read below is still required, and now for the
-    opposite reason. The seed is `latest_id - 1`, computed from the server's
-    newest message, so it is *ahead* of a cursor another writer initialised
-    from anywhere further back: with the `MAX` guard in place, writing it would
-    carry the room past every message between the two and drop them silently.
-    So the seed lands only when the cursor is still absent, which is the one
-    state it describes.
+    opposite reason. The cursor seed is `latest_id - 1`, computed from the
+    server's newest message, so it is *ahead* of a cursor another writer
+    initialised from anywhere further back, and with the `MAX` guard in place
+    it would carry the room past every message between the two. So the re-read
+    decides **both** halves: the seed is written only when the cursor is still
+    absent, and the room is polled from whatever the re-read found. Guarding
+    the write alone leaves the poll starting at the seed, which skips that same
+    range and then advances the stored cursor over it.
     """
     poll_tasks = []
     gated = 0
@@ -708,19 +715,27 @@ def _apply_room_pass(
         last_message_id = plan.last_message_id
         if plan.needs_cursor_init:
             if plan.latest_id:
-                last_message_id = plan.latest_id - 1
-                # Persist it. The only other writer is the message loop, which
-                # fires solely for a message a poll actually returned — so a
-                # room whose polls keep coming back empty never acquired a
-                # cursor at all, and `known_cursor is None` bypassed the gate on
-                # every cycle for ever. `latest_id - 1` is behind the newest
-                # message by construction, so the next poll still returns it
-                # (ISSUE-399 review).
+                # Re-read, and use what it says — see this function's
+                # docstring. The seed is `latest_id - 1`, which is behind the
+                # newest message by construction so the next poll still returns
+                # it (ISSUE-399 review), and which the message loop would never
+                # write itself: it fires only for a message a poll returned, so
+                # a room whose polls keep coming back empty never acquired a
+                # cursor at all and bypassed the gate on every cycle for ever.
                 #
-                # Only when the cursor is *still* absent: see the re-read note
-                # in this function's docstring.
-                if db.get_talk_poll_state(conn, plan.token) is None:
+                # Guarding only the *write* is not enough, and the difference is
+                # lost messages rather than a tidier branch: `last_message_id`
+                # is also where this room is polled from, so taking the seed
+                # while another writer's cursor sits further back skips every
+                # message between the two — and the results loop then advances
+                # the stored cursor past them, since it writes the ids the poll
+                # did return.
+                existing = db.get_talk_poll_state(conn, plan.token)
+                if existing is None:
+                    last_message_id = plan.latest_id - 1
                     db.set_talk_poll_state(conn, plan.token, last_message_id)
+                else:
+                    last_message_id = existing
                 logger.debug(
                     "First poll for room %s - starting from message %d",
                     plan.token, last_message_id,

@@ -7619,12 +7619,31 @@ def set_talk_poll_state(
     cursor is still absent, because `MAX` would otherwise carry a room's cursor
     *past* messages nobody has read.
 
-    The comparison is SQLite's, so it reads an integer id — which every caller
-    has, since the value is Talk's own `id` field and the column is
-    `INTEGER NOT NULL`. A string would sort above every integer in SQLite's
-    ordering and freeze the cursor, so this is a type the callers owe rather
-    than one the SQL can defend.
+    **A non-integer id is refused here rather than stored**, because with `MAX`
+    in place it would not merely look wrong — it would be permanent. SQLite's
+    `INTEGER` affinity converts a numeric string (`"501"` stores as `501`), but
+    a non-numeric one is stored as TEXT, TEXT sorts above every integer, and no
+    later integer can ever win the comparison again: the room goes deaf with
+    nothing in the log to say so. Refusing is a warning and a skipped advance,
+    which the next poll re-reads; raising would roll back the whole results
+    batch and replay the non-idempotent window this function exists to protect.
+    A `bool` is an `int` in Python and would compare as 0 or 1 against a real
+    id, so it is refused with the rest — the same rule `_has_news` applies to
+    the same field coming off the same payload.
+
+    **There is deliberately no way to lower a cursor from here**, which leaves
+    one legitimate case unserved: a Nextcloud restored from backup or
+    re-provisioned restarts its comment id space, and the room's stored cursor
+    is then permanently ahead of every message it will ever be sent. That is an
+    operator event with an operator remedy (delete the room's `talk_poll_state`
+    row), not something a poller should infer.
     """
+    if not isinstance(message_id, int) or isinstance(message_id, bool):
+        logger.warning(
+            "Refusing a non-integer Talk poll cursor for %s: %r",
+            conversation_token, message_id,
+        )
+        return
     conn.execute(
         """
         INSERT INTO talk_poll_state (conversation_token, last_known_message_id, updated_at)
