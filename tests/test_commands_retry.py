@@ -53,10 +53,11 @@ def _ctx(config, conn, *, user_id="alice", token="room1", args="", surface="talk
 def _make_task(
     conn, *, user_id="alice", token="room1", source_type="talk",
     status="failed", prompt="do the thing", trace=None, model=None, effort=None,
+    brain=None,
 ):
     tid = db.create_task(
         conn, prompt=prompt, user_id=user_id, source_type=source_type,
-        conversation_token=token, model=model, effort=effort,
+        conversation_token=token, model=model, effort=effort, brain=brain,
     )
     db.update_task_status(conn, tid, status)
     if trace is not None:
@@ -179,6 +180,34 @@ class TestNewTaskCreation:
         assert new["effort"] == "high"
         assert new["status"] == "pending"
         assert new["source_type"] == "talk"
+
+    async def test_brain_is_copied(self, make_config):
+        """A retry runs what the original ran, so it carries `tasks.brain`
+        alongside model and effort."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            orig = _make_task(conn, brain="native")
+            await cmd_retry(_ctx(config, conn))
+            new = conn.execute(
+                "SELECT * FROM tasks WHERE parent_task_id = ?", (orig,),
+            ).fetchone()
+        assert new["brain"] == "native"
+
+    async def test_brain_comes_from_the_original_not_the_room(self, make_config):
+        """The room has since been switched. The retry re-runs the original
+        attempt, so it takes the original's brain — not the room's current one.
+        Asserted against a *different* room value, or the copy is vacuous."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+            db.set_room_brain(conn, "room1", "claude_code")
+            orig = _make_task(conn, brain="native")
+            await cmd_retry(_ctx(config, conn))
+            new = conn.execute(
+                "SELECT * FROM tasks WHERE parent_task_id = ?", (orig,),
+            ).fetchone()
+            assert db.get_room(conn, "room1").brain == "claude_code"
+        assert new["brain"] == "native"
 
     async def test_original_task_left_intact(self, make_config):
         config = make_config()

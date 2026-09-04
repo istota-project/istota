@@ -26,8 +26,13 @@ def _cfg(tmp_path, kind="claude_code", overrides=None):
     return c
 
 
-def _task(source_type="talk", user_id="alice"):
-    return SimpleNamespace(source_type=source_type, user_id=user_id)
+def _task(source_type="talk", user_id="alice", brain=None):
+    # `brain` is on the double because it is on `db.Task`: the routing reads a
+    # task's own pinned kind ahead of the source-type layer, and a stand-in
+    # missing the attribute would hide that read rather than exercise it.
+    return SimpleNamespace(
+        source_type=source_type, user_id=user_id, brain=brain,
+    )
 
 
 def test_claude_code_returns_none(tmp_path):
@@ -61,3 +66,32 @@ def test_per_source_type_override_routes_to_native(tmp_path):
     with patch("istota.executor._build_native_completer", return_value=sentinel):
         assert _build_triage_completer(_task("scheduled"), cfg) is sentinel
     assert _build_triage_completer(_task("talk"), cfg) is None
+
+
+def test_a_room_pinned_brain_routes_triage(tmp_path):
+    """The task's own pinned kind outranks the source-type layer here too.
+
+    Both directions, because a completer that only ever read ``[brain] kind``
+    would pass the first of these by accident: a ``native`` pin on a claude_code
+    deployment must reach the provider completer, and a ``claude_code`` pin must
+    keep the CLI even where the lane rule says native.
+    """
+    sentinel = lambda _p: "[]"  # noqa: E731
+    cfg = _cfg(tmp_path, "claude_code", overrides={"talk": "claude_code"})
+    cfg.brain.room_selectable = ["native", "claude_code"]
+    with patch("istota.executor._build_native_completer", return_value=sentinel):
+        assert _build_triage_completer(_task(brain="native"), cfg) is sentinel
+
+    cfg2 = _cfg(tmp_path, "claude_code", overrides={"talk": "native"})
+    cfg2.brain.room_selectable = ["claude_code"]
+    assert _build_triage_completer(_task(brain="claude_code"), cfg2) is None
+
+
+def test_an_unallowlisted_pin_falls_through_to_the_source_type_layer(tmp_path):
+    """The refusal `resolve_brain_kind` makes, seen from a call site: the pin is
+    dropped and the lane rule answers instead."""
+    sentinel = lambda _p: "[]"  # noqa: E731
+    cfg = _cfg(tmp_path, "claude_code", overrides={"talk": "native"})
+    cfg.brain.room_selectable = []
+    with patch("istota.executor._build_native_completer", return_value=sentinel):
+        assert _build_triage_completer(_task(brain="claude_code"), cfg) is sentinel

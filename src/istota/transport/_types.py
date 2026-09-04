@@ -63,6 +63,12 @@ class IncomingMessage:
     # per-room model default in record_inbound so an explicit per-message choice
     # — including an explicit "use the instance default" — always wins.
     model_prefix_used: bool = False
+    # An explicit per-message brain pick (a kind). No surface sets it today —
+    # there is no `!brain <kind> <prompt>` prefix, because a brain switch is a
+    # standing property of a conversation rather than a per-turn one. It exists
+    # so a surface that later grows one can carry it without changing
+    # `record_inbound`'s signature; left None, the room's own default fills it.
+    brain: str | None = None
     # Withhold this turn from the canonical transcript even when its token
     # resolves to a real room. Set by the email poller for a message facing the
     # untrusted-sender confirmation gate: publishing attacker-supplied text into

@@ -2076,7 +2076,9 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     turn. ``parent_task_id`` keeps the lineage queryable. Delivery-relevant
     fields (``output_target`` / ``talk_delivery_token`` / ``model`` / ``effort``
     / ``skill``) are copied so the retry lands on the same surface as the
-    original.
+    original. ``brain`` is copied for the neighbouring reason: the retry re-runs
+    the original attempt, so it runs the brain that attempt ran even if the room
+    has since been pointed at another one.
 
     ``withheld_from_room`` is copied for the same reason (ISSUE-255), and it is
     load-bearing here rather than tidy: the retry inherits `conversation_token`,
@@ -2098,6 +2100,7 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         talk_delivery_token=original.talk_delivery_token,
         model=original.model,
         effort=original.effort,
+        brain=original.brain,
         skill=original.skill,
         skill_args=original.skill_args,
         priority=original.priority,

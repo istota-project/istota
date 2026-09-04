@@ -1956,7 +1956,9 @@ def _native_web_fetch_enabled(task: "db.Task", config: Config) -> bool:
     from .brain import resolve_brain_kind
 
     try:
-        routed = resolve_brain_kind(task.source_type, config.brain)
+        routed = resolve_brain_kind(
+            task.source_type, config.brain, override=task.brain,
+        )
     except Exception:  # noqa: BLE001 — never let routing lookup fail selection
         return False
     if routed.kind != "native":
@@ -1981,7 +1983,7 @@ def _build_triage_completer(task: "db.Task", config: Config):
     """
     from .brain import resolve_brain_kind
 
-    routed = resolve_brain_kind(task.source_type, config.brain)
+    routed = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
     if routed.kind != "native":
         return None
 
@@ -6648,10 +6650,15 @@ def execute_task(
         sp_path = custom_system_prompt_path(config)
 
         from .brain import BrainRequest, resolve_brain_kind
-        # Per-source-type brain routing (gradual rollout): an operator can
-        # map this task's source_type to a different brain kind via
-        # [brain.source_type_overrides]. No-op for the common case.
-        _brain_config = resolve_brain_kind(task.source_type, config.brain)
+        # Brain routing. `tasks.brain` is the room's standing pick, frozen
+        # onto this row at creation; below it, an operator can map this task's
+        # source_type to a different kind via [brain.source_type_overrides].
+        # No-op for the common case, where both are unset. An admitted room pin
+        # also clears `fallback`, so the failover machinery below collapses to a
+        # plain primary call for that task.
+        _brain_config = resolve_brain_kind(
+            task.source_type, config.brain, override=task.brain,
+        )
         if _brain_config.kind != config.brain.kind:
             logger.info(
                 "brain routing: task %d source_type=%s -> kind=%s (default %s)",

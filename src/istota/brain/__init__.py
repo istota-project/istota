@@ -34,6 +34,7 @@ from ._events import (
 )
 import dataclasses
 import logging
+from collections.abc import Iterable
 
 from ._aliases import CANONICAL_ROLES, EFFORT_LEVELS, is_portable_alias, split_effort
 from ._fallback import (
@@ -98,19 +99,83 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     raise ValueError(f"Unknown brain kind: {kind!r}")
 
 
-def resolve_brain_kind(source_type, brain_config):
+def room_selectable_kinds(brain_config) -> frozenset[str]:
+    """The brain kinds a room may pin on this deployment.
+
+    ``[brain] room_selectable`` intersected with the kinds ``make_brain`` can
+    build. Nothing else: a pinned room does not fall back, so there is no
+    fallback kind to exclude — a room pinned to the kind the deployment already
+    falls back to has nothing left to collide with.
+
+    Never raises. A name that is not a buildable kind is dropped rather than
+    offered to a user whose room would then fail to start, and a malformed
+    setting yields the empty set, which is the safe direction: nothing is
+    selectable.
+    """
+    configured = getattr(brain_config, "room_selectable", None) or []
+    if isinstance(configured, (str, bytes)) or not isinstance(configured, Iterable):
+        return frozenset()
+    return frozenset(
+        name for name in (str(entry).strip() for entry in configured)
+        if name in KNOWN_BRAIN_KINDS
+    )
+
+
+def resolve_brain_kind(source_type, brain_config, override: str | None = None):
     """Return the BrainConfig to use for a task with the given source_type.
 
-    The instance default (``brain_config.kind``) applies unless an operator
-    has mapped this ``source_type`` to a different kind via
-    ``[brain.source_type_overrides]``. This is the gradual-rollout knob:
-    route cron/heartbeat tasks to the native brain while interactive tasks
-    stay on ``claude_code``, with no executor or DB change.
+    Resolution order, highest first::
 
-    Returns ``brain_config`` unchanged (same object) when no override applies,
-    so callers can cheaply detect the common no-routing case. Unknown override
-    targets are logged and ignored — a routing typo must never break a task.
+        override  >  [brain.source_type_overrides][source_type]  >  [brain] kind
+
+    ``override`` is the task's own pinned kind (``tasks.brain``, filled from
+    ``rooms.brain`` when the task was created). It wins outright when it names a
+    buildable kind that the operator listed in ``[brain] room_selectable``. It
+    sits above the source-type layer because the two answer different questions:
+    ``source_type_overrides`` is an operator's gradual-rollout knob keyed on a
+    lane, while a room's brain is an explicit human choice about one
+    conversation, and an explicit pick a lane rule silently overrode would be
+    indistinguishable from a bug.
+
+    Two refusals, each logged at WARNING and each falling through to the
+    source-type layer: a kind ``make_brain`` cannot build, and a kind the
+    operator does not offer. The second is what makes shortening
+    ``room_selectable`` take effect at the next dispatch without anything having
+    to rewrite stored rows. Neither ever wedges a task, which is the same
+    contract an unknown ``source_type_overrides`` target already has.
+
+    **An admitted override also turns availability failover off**, by returning
+    a config with ``fallback`` cleared. The room named *this* brain, so a task
+    that cannot run on it fails with the primary's own reason rather than
+    quietly answering from a different model — and the two failover asymmetries
+    a routed kind would otherwise inherit disappear with it. The decision is
+    made here rather than in the executor because it cannot be inferred
+    downstream: a room pinned to the kind that is already the instance default
+    resolves to a config equal to the unrouted one, so "was an override
+    admitted" has to be recorded at the moment of admission. Pinning the default
+    kind therefore still counts as pinning; the alternative is a rule with an
+    exception, which is harder to explain and no less surprising.
+
+    Returns ``brain_config`` unchanged (same object) when nothing applies, so
+    callers can cheaply detect the common no-routing case.
     """
+    pinned = (override or "").strip()
+    if pinned:
+        if pinned not in KNOWN_BRAIN_KINDS:
+            logger.warning(
+                "brain routing: unknown kind %r pinned for source_type %r; "
+                "ignoring it and resolving from config",
+                pinned, source_type,
+            )
+        elif pinned not in room_selectable_kinds(brain_config):
+            logger.warning(
+                "brain routing: kind %r pinned for source_type %r is not in "
+                "[brain] room_selectable; ignoring it and resolving from config",
+                pinned, source_type,
+            )
+        else:
+            return dataclasses.replace(brain_config, kind=pinned, fallback="")
+
     overrides = getattr(brain_config, "source_type_overrides", None) or {}
     target = overrides.get((source_type or "").strip())
     if not target or target == brain_config.kind:
@@ -170,6 +235,7 @@ __all__ = [
     "make_stream_parser",
     "parse_stream_line",
     "resolve_brain_kind",
+    "room_selectable_kinds",
     "set_alias_overrides",
     "split_effort",
     "task_postures_by_name",

@@ -1493,12 +1493,20 @@ class BrainConfig:
     matching tasks. This is the gradual-rollout knob: move cron/heartbeat to
     the native brain while interactive tasks stay on ``claude_code``. Set in
     TOML as ``[brain.source_type_overrides]``.
+
+    ``room_selectable`` names the brain kinds a room may pin for itself. Empty
+    (the default) means no room may override the brain, so the feature ships
+    inert and an operator opts in by naming kinds. It is a gate rather than a
+    preference: a brain kind selects an isolation posture, and a change to an
+    enforcement mechanism should not arrive switched on by an upgrade. Set in
+    TOML as ``[brain] room_selectable``.
     """
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
     tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
     claude_code: ClaudeCodeBrainConfig = field(default_factory=ClaudeCodeBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
+    room_selectable: list[str] = field(default_factory=list)
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found / tmux launch failure), the task runs
     # on ``fallback`` with that brain's own configured settings. "" = no
