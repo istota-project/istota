@@ -11,6 +11,7 @@ from contextlib import ExitStack
 
 from istota.config import Config, SleepCycleConfig, UserConfig
 from istota import executor
+from tests.support.sleep_spy import sleep_spy
 from istota.executor import execute_task, get_task_control_dir, get_user_temp_dir
 
 
@@ -1746,7 +1747,7 @@ class TestSimpleExecutionRetry:
     def _api_error_output(self, status_code=500):
         return f'API Error: {status_code} {{"error": {{"message": "Internal server error"}}, "request_id": "req_123"}}'
 
-    def test_retries_transient_api_error(self, tmp_path):
+    def test_retries_transient_api_error(self, tmp_path, monkeypatch):
         """Simple execution retries on 500 API error and succeeds on second attempt."""
         config = _make_config(tmp_path)
         task = _make_task()
@@ -1766,9 +1767,9 @@ class TestSimpleExecutionRetry:
                 mock.returncode = 0
             return mock
 
+        sleep_spy(monkeypatch, executor, record=False)
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.run", side_effect=fake_run),
-            patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(task, config, [])
@@ -1777,7 +1778,7 @@ class TestSimpleExecutionRetry:
         assert result == "Success on retry"
         assert call_count == 2
 
-    def test_no_retry_for_non_transient_error(self, tmp_path):
+    def test_no_retry_for_non_transient_error(self, tmp_path, monkeypatch):
         """Simple execution does NOT retry non-transient errors (e.g. 400)."""
         config = _make_config(tmp_path)
         task = _make_task()
@@ -1793,9 +1794,9 @@ class TestSimpleExecutionRetry:
             mock.returncode = 1
             return mock
 
+        sleep_spy(monkeypatch, executor, record=False)
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.run", side_effect=fake_run),
-            patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(task, config, [])
@@ -1803,7 +1804,7 @@ class TestSimpleExecutionRetry:
         assert success is False
         assert call_count == 1  # No retry
 
-    def test_fails_after_max_retries(self, tmp_path):
+    def test_fails_after_max_retries(self, tmp_path, monkeypatch):
         """Simple execution gives up after 3 transient API errors."""
         config = _make_config(tmp_path)
         task = _make_task()
@@ -1819,9 +1820,9 @@ class TestSimpleExecutionRetry:
             mock.returncode = 1
             return mock
 
+        sleep_spy(monkeypatch, executor, record=False)
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.run", side_effect=fake_run),
-            patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(task, config, [])
@@ -1830,7 +1831,7 @@ class TestSimpleExecutionRetry:
         assert "API Error" in result
         assert call_count == 3
 
-    def test_retries_429_rate_limit(self, tmp_path):
+    def test_retries_429_rate_limit(self, tmp_path, monkeypatch):
         """Simple execution retries on 429 rate limit errors."""
         config = _make_config(tmp_path)
         task = _make_task()
@@ -1850,9 +1851,9 @@ class TestSimpleExecutionRetry:
                 mock.returncode = 0
             return mock
 
+        sleep_spy(monkeypatch, executor, record=False)
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.run", side_effect=fake_run),
-            patch("istota.executor.time.sleep"),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(task, config, [])

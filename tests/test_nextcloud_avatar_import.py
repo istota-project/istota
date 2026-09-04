@@ -30,6 +30,7 @@ from istota import avatars, db, scheduler
 from istota.config import Config, NextcloudConfig, SchedulerConfig, WebConfig
 from istota.nextcloud import avatars as nc_avatars
 from istota.nextcloud._http import OcsError
+from tests.support.monotonic_spy import monotonic_spy
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -393,7 +394,7 @@ class TestTheBounds:
         runs.
         """
         clock = iter([0.0, 1e9, 1e9, 1e9])
-        monkeypatch.setattr(nc_avatars.time, "monotonic", lambda: next(clock))
+        monotonic_spy(monkeypatch, nc_avatars, lambda: next(clock))
         http(_response(200, content=_png(), headers=CUSTOM))
 
         with pytest.raises(OcsError) as excinfo:

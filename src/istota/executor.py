@@ -2549,12 +2549,131 @@ _MODEL_CLI_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
                          "https_proxy", "http_proxy", "no_proxy")
 #: Where the CLI's TLS trust store is, on a deployment terminating TLS at its
 #: own proxy. Without these the request fails at the handshake.
+#:
+#: `CURL_CA_BUNDLE` is here because `forge_cli._CARRY_EXACT` already answers
+#: this same question that way, and it is the one of the five that `curl` reads
+#: and the only one `requests` falls back to — so an operator who set just that
+#: name, which is the common single-variable choice, otherwise got nothing and
+#: a handshake error pointing nowhere near here. Widening a list of trust-store
+#: *paths* is safe in the one direction that matters: a CA bundle can only add
+#: trust, never redirect a request or carry a credential.
 _MODEL_CLI_TLS_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-                       "REQUESTS_CA_BUNDLE")
+                       "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 #: Where the provider *is*, on a gateway deployment, and how to authenticate
 #: to it. `ANTHROPIC_API_KEY` is the long-standing member of this group.
 _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                             "ANTHROPIC_BASE_URL")
+
+
+#: The reachability half of ISSUE-410, and the axis it is split on.
+#:
+#: `build_model_cli_env` tops its allowlist up from `os.environ`, which is the
+#: daemon's own for every daemon-side caller and is `proxy_base_env` for the
+#: one that is not: `code_review` runs as a subprocess the skill proxy
+#: spawned, so the top-up loop was reading the wrong environment and finding
+#: nothing. ISSUE-409 fixed the credential names by injecting them into the
+#: proxy's per-skill map; these are what was left.
+#:
+#: They do **not** all go to the same place, and the axis is not "secret or
+#: not". It is **whether handing the value to a CLI that did not ask for it
+#: can do harm**, which splits the eight names cleanly in two.
+#:
+#: A **trust store path** cannot. It only ever adds a CA, so a skill that
+#: needed it works and a skill that did not is unaffected, and the value is a
+#: path rather than a credential. Those are shared with every host-side skill
+#: CLI, below.
+#:
+#: A **proxy URL redirects traffic**, and that is the part the obvious reading
+#: misses. It is not merely inert for a CLI with no use for it — it captures
+#: that CLI's requests, including the ones aimed at this deployment's own
+#: services. `browse` is the live case: its only outbound call is to
+#: `BROWSER_API_URL`, which defaults to `http://localhost:9223`, over `httpx`
+#: with `trust_env=True` — which honours `HTTP_PROXY` and does not special-case
+#: loopback. Handing it the daemon's egress proxy would send that at the
+#: proxy, which answers 403 or 405, on a deployment where it works today.
+#: `tests/support/env_isolation.py` records exactly this failure already
+#: happening here, to nineteen loopback stub servers. And a proxy URL is not
+#: reliably a non-secret either: `http://user:pass@egress:3128` is an ordinary
+#: shape, `skill_proxy` returns a skill CLI's stderr verbatim to the model,
+#: and a connect failure is exactly what echoes the URL.
+#:
+#: So the proxy triple goes to the skills that call a model and nothing else,
+#: through the same per-skill map ISSUE-409 used — which is the structure for
+#: a value that must reach exactly one subprocess and stay out of the
+#: `credential-fetch` union, and that is what these need. `ANTHROPIC_BASE_URL`
+#: travels with them because no other skill reads it and a gateway URL can
+#: carry a key in its path.
+#:
+#: What this leaves undone is deliberate and is **not** what ISSUE-410 filed:
+#: `feeds` fetches external URLs and would want an egress proxy. Giving it one
+#: means exempting each deployment's own internal endpoints from it, which is
+#: a design question about per-skill network policy rather than about the
+#: reviewer's environment.
+#:
+#: Neither half collides with a sandboxed task's CONNECT bridge. That value is
+#: set by `sandbox_plan` as `exec env HTTPS_PROXY=…` inside the namespace at
+#: exec time, so it enters no env dict — and a host-side skill CLI is outside
+#: the namespace, where the daemon's own proxy is the correct answer.
+SKILL_CLI_TLS_VARS = _MODEL_CLI_TLS_VARS
+
+#: The half that is scoped rather than shared — see above.
+SKILL_MODEL_REACHABILITY_VARS = frozenset(
+    (*_MODEL_CLI_PROXY_VARS, "ANTHROPIC_BASE_URL")
+)
+
+
+def _reachability_env(
+    names: Iterable[str], *present: Mapping[str, str],
+) -> dict[str, str]:
+    """Those of ``names`` the daemon's environment has and ``present`` does not.
+
+    A gap-filler, never an override, which is what keeps it from undoing a
+    decision made elsewhere. A name an operator listed in
+    ``passthrough_env_vars`` is already in the task env and keeps that value,
+    matching :func:`build_model_cli_env`'s rule for the same names. A name a
+    skill manifest declared ``sensitive`` has been *moved* into the per-skill
+    credential map by ``_split_credential_env``, so re-reading it from the
+    daemon here would put it back in front of every host-side CLI instead of
+    the one that declared it.
+
+    That second case has a cost worth naming, because it is not the scoping it
+    looks like: ``derive_credential_set`` is index-wide, so **one** manifest
+    declaring ``SSL_CERT_FILE`` sensitive takes it out of `browse`, `feeds` and
+    `code_review` at once and leaves it only for the skills that declared it.
+    Declining to re-add it is right — the alternative silently overrules the
+    manifest — but a reader adding such an entry should expect that reach. No
+    shipped manifest names one of these today.
+
+    Presence, not truthiness, for the reason :data:`_MODEL_CLI_PROXY_VARS`
+    gives: ``NO_PROXY=`` is meaningfully empty, and dropping it restores an
+    inherited exemption list rather than changing nothing.
+    """
+    return {
+        name: os.environ[name]
+        for name in names
+        if name in os.environ
+        and not any(name in mapping for mapping in present)
+    }
+
+
+def skill_cli_tls_env(*present: Mapping[str, str]) -> dict[str, str]:
+    """:data:`SKILL_CLI_TLS_VARS` for the shared ``proxy_base_env`` snapshot."""
+    return _reachability_env(SKILL_CLI_TLS_VARS, *present)
+
+
+def skill_model_reachability(*present: Mapping[str, str]) -> dict[str, str]:
+    """:data:`SKILL_MODEL_REACHABILITY_VARS`, for :data:`SKILL_MODEL_CALLERS`.
+
+    The counterpart to :func:`skill_model_credentials`, and separate from it
+    for two reasons rather than one. That function drops an empty value,
+    because an empty credential is something a CLI would try to authenticate
+    with and cannot, whereas here an empty value is meaningful — ``NO_PROXY=``
+    blanks an inherited exemption list — so this reads presence. And it reads
+    the daemon's own environment rather than a list of sources, because
+    ``build_clean_env`` is an allowlist that carries none of these names, so
+    the daemon's is the only environment they are ever in.
+    """
+    return _reachability_env(SKILL_MODEL_REACHABILITY_VARS, *present)
 
 
 #: Skills whose CLI is itself a model caller.
@@ -2589,13 +2708,12 @@ SKILL_MODEL_CALLERS = frozenset({"code_review"})
 #: the fix from being true only of the deployment it was found on.
 #:
 #: Deliberately not the rest of `_MODEL_CLI_*`: a base URL, a CA bundle and an
-#: outbound proxy are *reachability*, and a deployment needing one of those
-#: fails at connect with an error that says so — which the reviewer's own
-#: output now carries into the envelope. A missing credential failed silently,
-#: which is why it is the half worth injecting. The other half is ISSUE-410,
-#: where the open question is not whether but where: they are not secrets, so
-#: `proxy_base_env` — every host-side skill CLI, several of which make outbound
-#: requests of their own — is the likelier home than a per-skill credential map.
+#: outbound proxy are *reachability*, which ISSUE-410 handled separately —
+#: :data:`SKILL_CLI_TLS_VARS` shared with every host-side CLI, and
+#: :data:`SKILL_MODEL_REACHABILITY_VARS` scoped here beside these. This set is
+#: what a CLI needs to *authenticate*, and it stays a set of its own because
+#: the empty-value rule differs: an empty credential is not a credential,
+#: while an empty `NO_PROXY` is meaningful.
 SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
     {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 )
@@ -2631,11 +2749,12 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
 
     Used by every call that reaches a model outside `execute_task` — the
     `!check` / self-check execution test and conversation-context triage,
-    which spawn or wrap the `claude` CLI directly, and the six modules that
-    build a `BrainRequest` of their own (the three OCR extractors, the
-    biomarker explainer, the nightly sleep cycle, shared briefing blocks and
-    the code-review agents). The rule rather than the roster: if it sends a
-    prompt to a model and there is no task behind it, its env comes from here.
+    which spawn or wrap the `claude` CLI directly, and the modules that build a
+    `BrainRequest` of their own (the three OCR extractors, the biomarker
+    explainer, the nightly sleep cycle, shared briefing blocks and the
+    code-review agents — seven, where this sentence said six until the roster
+    was counted). The rule rather than the roster: if it sends a prompt to a
+    model and there is no task behind it, its env comes from here.
 
     It is `build_clean_env`'s allowlist plus the names below. Everything else
     in the daemon environment — the master Fernet key, the Nextcloud app
@@ -2709,7 +2828,15 @@ def build_stripped_env() -> dict[str, str]:
 # allowlist is a union, and the socket is bound into the sandbox, so a name in
 # it is a name the model can ask for by hand. That would put the credential
 # back on the route ISSUE-390 closed, through a different door.
-_PROXY_LOOKUP_BLOCKED = frozenset({"ISTOTA_SECRET_KEY"}) | SKILL_MODEL_CREDENTIAL_VARS
+_PROXY_LOOKUP_BLOCKED = (
+    frozenset({"ISTOTA_SECRET_KEY"})
+    | SKILL_MODEL_CREDENTIAL_VARS
+    # The proxy triple and the gateway URL are injected per skill for the same
+    # reason the credentials are, so they need the same second door shut: an
+    # outbound proxy URL can carry basic-auth userinfo, and the lookup
+    # allowlist is a union anything holding the socket can fetch by name.
+    | SKILL_MODEL_REACHABILITY_VARS
+)
 
 
 # Reserved key a setup_env hook may return to prepend entries to the *model's*

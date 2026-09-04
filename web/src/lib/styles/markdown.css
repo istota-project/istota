@@ -104,11 +104,31 @@
   display: block;
   overflow-x: auto;
 }
+/* Two rules keep a column a column (ISSUE-413), and neither covers the other.
+   The break mode is inherited: the chat transcript sets `word-break:
+   break-word` on `.body`, which is the same element as `.markdown`, and that
+   is the legacy alias for `overflow-wrap: anywhere` — which reduces
+   min-content. Every cell's min-content became one glyph, so the table above
+   could never overflow and its `overflow-x` never had anything to scroll.
+   `break-word` here still breaks a long unbroken token rather than letting it
+   overflow, but sizes the column to a word. The floor is the other half: auto
+   layout distributes by content ratio, so a short label column beside a long
+   prose one is starved whatever the break mode. In `ch` so it tracks the type
+   scale, and at 8 because that is the tightest floor that is not already
+   inert: below it the longest word in a short label is wider than the floor
+   anyway, and above it a two-column table starts scrolling on a 320px phone,
+   which is the commonest shape and the one that should fit. Measure any change
+   at the app's own text scale (110% by default, so 8ch is ~67px, not the ~60px
+   a browser-default page would give) — the scale is what decides whether a
+   value tips that table into a scroll. */
 .markdown th,
 .markdown td {
   border: 1px solid var(--border-subtle);
   padding: 0.2rem 0.45rem;
   text-align: left;
+  word-break: normal;
+  overflow-wrap: break-word;
+  min-width: 8ch;
 }
 .markdown th {
   background: var(--surface-base);

@@ -29,6 +29,8 @@ from istota.brain.tmux_claude import (
 )
 from istota.config import BrainConfig, TmuxBrainConfig
 from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
+from tests.support.monotonic_spy import monotonic_spy
+from tests.support.sleep_spy import sleep_spy
 
 
 @pytest.fixture(autouse=True)
@@ -253,7 +255,7 @@ class _WaitHarness:
         monkeypatch.setattr(self.brain, "_capture", self._capture)
         monkeypatch.setattr(self.brain, "_pane_alive", lambda name: self._alive)
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_SENTINEL_POLL_S", 0.0)
         self.sentinel = sentinel
 
     def _capture(self, name):
@@ -321,8 +323,8 @@ class TestWaitForCompletion:
             except StopIteration:
                 return 999.0
 
-        monkeypatch.setattr(mod.time, "monotonic", fake_mono)
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monotonic_spy(monkeypatch, mod, fake_mono)
+        monkeypatch.setattr(mod, "_SENTINEL_POLL_S", 0.0)
         brain = TmuxClaudeBrain()
         monkeypatch.setattr(brain, "_capture", lambda name: "thinking")
         monkeypatch.setattr(brain, "_pane_alive", lambda name: True)
@@ -342,7 +344,7 @@ class _RetryHarness:
         self.attempts = 0
         import istota.brain.tmux_claude as mod
         monkeypatch.setattr(mod.shutil, "which", lambda _: "/usr/bin/tmux")
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "API_RETRY_DELAY_SECONDS", 0)
         monkeypatch.setattr(self.brain, "_cleanup_legacy_hook", lambda req: None)
         monkeypatch.setattr(self.brain, "_run_session", self._run_session)
 
@@ -385,8 +387,10 @@ class TestTransientRetry:
         ok = (BrainResult(success=True, result_text="ok", stop_reason="completed"), False)
         h = _RetryHarness(monkeypatch, [err, ok])
         # Override the harness's no-op sleep with a spy (after construction).
-        slept = []
-        monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+        # Same-thread only: this patch lands on the stdlib `time` module, so a
+        # plain recorder would also collect every background thread's sleep and
+        # could satisfy the membership assertion below by coincidence.
+        slept = sleep_spy(monkeypatch, mod)
         h.brain.execute(_req(tmp_path))
         assert mod.API_RETRY_DELAY_SECONDS in slept
 
@@ -418,7 +422,7 @@ class TestCircuitBreaker:
     def test_cooldown_elapses(self, monkeypatch):
         import istota.brain.tmux_claude as mod
         clock = [0.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, mod, lambda: clock[0])
         b = _CircuitBreaker()
         b.record_launch_failure(1)  # opens immediately
         assert b.should_skip(300) is True
@@ -434,7 +438,7 @@ class _ExecHarness:
         self.calls = 0
         import istota.brain.tmux_claude as mod
         monkeypatch.setattr(mod.shutil, "which", lambda _: "/usr/bin/tmux")
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "API_RETRY_DELAY_SECONDS", 0)
         monkeypatch.setattr(self.brain, "_cleanup_legacy_hook", lambda req: None)
 
         def run(req, attempt):
@@ -650,7 +654,7 @@ class TestThemeDialog:
         monkeypatch.setattr(brain, "_capture", capture)
         monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_READY_POLL_S", 0.0)
         import time as _t
         assert brain._wait_ready("s", _t.monotonic() + 100) is True
         payloads = [a[3] for a in keys if a[:3] == ("send-keys", "-t", "s")]
@@ -691,7 +695,8 @@ class TestPromptSubmission:
     def test_inject_submits_once_when_confirmed(self, monkeypatch, tmp_path):
         brain = TmuxClaudeBrain()
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_SUBMIT_SETTLE_S", 0.0)
+        monkeypatch.setattr(mod, "_READY_POLL_S", 0.0)
         keys = []
         monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
         # Turn starts immediately after the first Enter.
@@ -703,10 +708,11 @@ class TestPromptSubmission:
     def test_inject_resends_until_turn_starts(self, monkeypatch, tmp_path):
         brain = TmuxClaudeBrain()
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_SUBMIT_SETTLE_S", 0.0)
+        monkeypatch.setattr(mod, "_READY_POLL_S", 0.0)
         # monotonic advances so the per-attempt confirm window expires quickly.
         ticks = iter([float(i) for i in range(0, 200)])
-        monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks, 999.0))
+        monotonic_spy(monkeypatch, mod, lambda: next(ticks, 999.0))
         keys = []
         monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
         # Not started for the first two attempts, then started.
@@ -1031,7 +1037,7 @@ class TestExecuteStreamingPaths:
     def test_learn_transcript_path_reads_started_sentinel(self, tmp_path, monkeypatch):
         brain = TmuxClaudeBrain()
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_SENTINEL_POLL_S", 0.0)
         started = tmp_path / "started.json"
         started.write_text(json.dumps({"transcript_path": "/x/y.jsonl"}))
         got = brain._learn_transcript_path(started, tmp_path)

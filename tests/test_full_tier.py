@@ -31,6 +31,7 @@ import pytest
 from testbed import profiles
 from testbed import stack as compose_support
 from testbed.services import nextcloud as nextcloud_service
+from tests.support.monotonic_spy import monotonic_spy
 
 REPO = Path(__file__).resolve().parents[1]
 FULL_COMPOSE = REPO / "docker" / "docker-compose.yml"
@@ -423,7 +424,7 @@ class TestReadiness:
         """The message has to distinguish "b never got waited on" from "b timed
         out", because they are different faults: the first is a slow `a`."""
         clock = [0.0]
-        monkeypatch.setattr(compose_support.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, compose_support, lambda: clock[0])
 
         def slow(args, service, timeout, env=None):
             clock[0] += 1000
@@ -923,7 +924,7 @@ class TestTheConnectionRetry:
             raise URLError("connection refused")
 
         monkeypatch.setattr(nextcloud_service, "urlopen", refuse)
-        monkeypatch.setattr(nextcloud_service.time, "sleep", lambda _: None)
+        monkeypatch.setattr(nextcloud_service, "CONNECT_RETRY_POLL_SECONDS", 0.0)
 
         with pytest.raises(nextcloud_service.NextcloudError, match="not retried"):
             service._ocs("/ocs/v2.php/x", method="POST", body={"a": 1})
@@ -939,8 +940,14 @@ class TestTheConnectionRetry:
             raise URLError("connection refused")
 
         monkeypatch.setattr(nextcloud_service, "urlopen", refuse)
-        monkeypatch.setattr(nextcloud_service.time, "sleep", lambda _: None)
+        monkeypatch.setattr(nextcloud_service, "CONNECT_RETRY_POLL_SECONDS", 0.0)
         monkeypatch.setattr(nextcloud_service, "CONNECT_RETRY_SECONDS", 3)
+        # The window is wall-clock, so zeroing the poll alone would spin a core
+        # for the whole three seconds — in the default suite, under `-n auto`.
+        # Drive the clock instead: the deadline is start + 3, so the third
+        # failure is the one that gives up.
+        ticks = iter([0.0, 1.0, 2.0, 3.0])
+        monotonic_spy(monkeypatch, nextcloud_service, lambda: next(ticks, 99.0))
 
         with pytest.raises(nextcloud_service.NextcloudError, match="within 3s"):
             service._ocs("/ocs/v2.php/x")

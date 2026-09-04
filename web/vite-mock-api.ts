@@ -151,7 +151,7 @@ interface MockChatTask {
   roomToken: string;
   prompt: string;
   createdAt: number;
-  variant?: 'simple' | 'multiround';
+  variant?: 'simple' | 'multiround' | 'table';
   /** Milliseconds to stall after `task_started`, before any output.
    *
    * The send queue is only reachable while a turn is running, and an ordinary
@@ -388,6 +388,21 @@ let mockChatTaskSeq = 1000;
   // `external_turn_display` modes are reachable under VITE_MOCK_API=1. The
   // prompt is the mail's own text: the server strips the wrapper before it
   // reaches a reader, and the mock produces the payload, not the stored row.
+  // A turn whose answer is a wide markdown table (ISSUE-413). The simple
+  // variant's reply is the markdown sampler — headings, a list, a blockquote,
+  // a fenced block — and a table was the one block it never carried, which is
+  // why columns squashed to a character each in production without ever
+  // showing up on the dev server. The shape matters as much as the presence:
+  // a short label column beside a long prose one is what auto table layout
+  // starves, so a table of uniformly short cells would render fine and prove
+  // nothing. Newest turn in `general`, so /chat lands on it.
+  mockChatTasks.set(203, {
+    id: 203,
+    roomToken: 'web-carol-general',
+    prompt: 'what did the deployment check find',
+    createdAt: base + 36_000,
+    variant: 'table',
+  });
   mockChatTasks.set(202, {
     id: 202,
     roomToken: 'web-carol-general',
@@ -494,8 +509,54 @@ function mockTaskEvents(task: MockChatTask) {
   return events.map((e) => (e.kind === 'task_started' ? e : { ...e, at: e.at + task.holdMs! }));
 }
 
+// A turn whose answer is a wide table (ISSUE-413). Deliberately the shape that
+// broke: a short label column against a long prose one, with a couple of cells
+// carrying an unbroken token (a hash, a path) so the break mode is exercised
+// too. Two rows would do to see the layout; there are five because the
+// starvation gets worse as the prose column's longest row grows.
+function mockTableTaskEvents(task: MockChatTask) {
+  const answer =
+    'Deployment check finished. Everything passed except the egress allowlist, which is behaving as configured.\n\n' +
+    '| Check | Observed |\n' +
+    '| --- | --- |\n' +
+    '| Source parity | 390 files under `src/` + `config/`, **0 diffs**, 0 not in repo |\n' +
+    '| Egress allowlist | gitlab 301, pypi 200, npm 200; example.com and news.example.org **000** (correct — blocked) |\n' +
+    '| Browse | render/extract/links/screenshot/close all ok; 99,925 chars from the first source, 16,193 from the second; screenshot verified on disk, 166 KB PNG 1439x812 |\n' +
+    '| Devbox | running, restart_count 0, transport 6 ms; metadata endpoint 000 (blocked), open web 200 |\n' +
+    '| Image digest | `sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90` |\n\n' +
+    'Nothing here needs action.';
+  const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [];
+  let seq = 1;
+  let at = 0;
+  const push = (kind: string, payload: Record<string, unknown>, dt: number) => {
+    at += dt;
+    events.push({ seq: seq++, kind, payload, at });
+  };
+  push('task_started', { text: 'On it...' }, 0);
+  push(
+    'tool_start',
+    { tool_name: 'Bash', description: '🔧 run deployment check', tool_call_id: 'c1' },
+    300,
+  );
+  push(
+    'tool_end',
+    { tool_name: 'Bash', tool_call_id: 'c1', success: true, duration_ms: 1400 },
+    1400,
+  );
+  for (const chunk of answer.match(/.{1,14}/gs) ?? [answer])
+    push('text_delta', { text: chunk }, 40);
+  push('result', { text: answer, truncated: false }, 100);
+  push(
+    'done',
+    { stop_reason: 'completed', duration_seconds: at / 1000, model: 'claude-opus-4-8' },
+    200,
+  );
+  return events;
+}
+
 function mockTaskEventsRaw(task: MockChatTask) {
   if (task.variant === 'multiround') return mockMultiRoundTaskEvents(task);
+  if (task.variant === 'table') return mockTableTaskEvents(task);
   // A multi-paragraph markdown answer, chunked into small deltas so the live
   // prominent streaming (and incremental markdown) is visible.
   const reply =

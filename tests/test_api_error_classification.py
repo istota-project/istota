@@ -29,6 +29,8 @@ from istota.brain.claude_code import (
     parse_api_error,
     parse_retry_after,
 )
+from istota.brain import claude_code
+from tests.support.sleep_spy import sleep_spy
 
 
 # ---------------------------------------------------------------------------
@@ -444,49 +446,47 @@ class TestSuccessFrameApiErrorReclassified:
 
 
 class TestRetryLoopHonoursBodylessTransient:
-    def test_bare_529_is_retried_then_reported_transient(self):
+    def test_bare_529_is_retried_then_reported_transient(self, monkeypatch):
         brain = ClaudeCodeBrain()
         err = BrainResult(
             success=False,
             result_text="API Error: 529 Overloaded",
             stop_reason="transient_api_error",
         )
+        slept = sleep_spy(monkeypatch, claude_code)
         with patch.object(brain, "_execute_simple_once", return_value=err) as once:
-            with patch("istota.brain.claude_code.time.sleep") as sleep:
-                out = brain._execute_simple(["claude"], _req())
+            out = brain._execute_simple(["claude"], _req())
         assert once.call_count == 3
         # Two backoffs, slept in slices (so !stop lands during one).
-        assert sum(c.args[0] for c in sleep.call_args_list) == pytest.approx(
-            API_RETRY_DELAY_SECONDS * 2
-        )
+        assert sum(slept) == pytest.approx(API_RETRY_DELAY_SECONDS * 2)
         assert out.stop_reason == "transient_api_error"
 
-    def test_permanent_error_is_not_retried(self):
+    def test_permanent_error_is_not_retried(self, monkeypatch):
         brain = ClaudeCodeBrain()
         err = BrainResult(
             success=False, result_text="API Error: 400 Bad Request", stop_reason="error",
         )
+        slept = sleep_spy(monkeypatch, claude_code)
         with patch.object(brain, "_execute_simple_once", return_value=err) as once:
-            with patch("istota.brain.claude_code.time.sleep") as sleep:
-                out = brain._execute_simple(["claude"], _req())
+            out = brain._execute_simple(["claude"], _req())
         assert once.call_count == 1
-        sleep.assert_not_called()
+        assert slept == []
         assert out.stop_reason == "error"
 
-    def test_retry_after_overrides_the_fixed_delay(self):
+    def test_retry_after_overrides_the_fixed_delay(self, monkeypatch):
         brain = ClaudeCodeBrain()
         err = BrainResult(
             success=False,
             result_text="API Error: 429 retry-after: 12",
             stop_reason="transient_api_error",
         )
+        slept = sleep_spy(monkeypatch, claude_code)
         with patch.object(brain, "_execute_simple_once", return_value=err):
-            with patch("istota.brain.claude_code.time.sleep") as sleep:
-                brain._execute_simple(["claude"], _req())
+            brain._execute_simple(["claude"], _req())
         # Sliced so !stop lands during the backoff; the total is what matters.
-        assert sum(c.args[0] for c in sleep.call_args_list) == pytest.approx(24.0, abs=1.0)
+        assert sum(slept) == pytest.approx(24.0, abs=1.0)
 
-    def test_backoff_is_interruptible_by_cancellation(self):
+    def test_backoff_is_interruptible_by_cancellation(self, monkeypatch):
         brain = ClaudeCodeBrain()
         err = BrainResult(
             success=False,
@@ -497,15 +497,15 @@ class TestRetryLoopHonoursBodylessTransient:
             prompt="hi", allowed_tools=["Bash"], cwd=Path("/tmp"), env={},
             timeout_seconds=60, cancel_check=lambda: True,
         )
+        slept = sleep_spy(monkeypatch, claude_code)
         with patch.object(brain, "_execute_simple_once", return_value=err) as once:
-            with patch("istota.brain.claude_code.time.sleep") as sleep:
-                out = brain._execute_simple(["claude"], req)
+            out = brain._execute_simple(["claude"], req)
         # A 60s provider-requested wait must not hold a !stop for 60s.
         assert out.stop_reason == "cancelled"
         assert once.call_count == 1
-        assert all(c.args[0] <= 0.5 for c in sleep.call_args_list)
+        assert all(s <= 0.5 for s in slept)
 
-    def test_success_frame_reclassification_is_not_retried(self):
+    def test_success_frame_reclassification_is_not_retried(self, monkeypatch):
         # The CLI ran to completion and may have executed tools; re-invoking the
         # same prompt would repeat those side effects. Reroute, don't retry.
         brain = ClaudeCodeBrain()
@@ -515,11 +515,11 @@ class TestRetryLoopHonoursBodylessTransient:
             stop_reason="transient_api_error",
             work_committed=True,
         )
+        slept = sleep_spy(monkeypatch, claude_code)
         with patch.object(brain, "_execute_simple_once", return_value=err) as once:
-            with patch("istota.brain.claude_code.time.sleep") as sleep:
-                out = brain._execute_simple(["claude"], _req())
+            out = brain._execute_simple(["claude"], _req())
         assert once.call_count == 1
-        sleep.assert_not_called()
+        assert slept == []
         # Still a fallback trigger.
         assert out.stop_reason == "transient_api_error"
 

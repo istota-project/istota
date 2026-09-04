@@ -350,7 +350,7 @@ def check_tmux(config: "Config", probe: bool) -> CheckResult:
 
 
 def check_framework_db(config: "Config", probe: bool) -> CheckResult:
-    """The framework DB opens and ``PRAGMA quick_check`` is clean.
+    """The framework DB opens, ``PRAGMA quick_check`` is clean, and it has a schema.
 
     Read-only on purpose. ``scheduler.check_db_health`` owns the ``REINDEX``
     self-repair; a diagnostic that silently mutated the thing it was diagnosing
@@ -383,6 +383,17 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
         )
     try:
         issues = quick_check(conn)
+        # Asked here, on the connection already open, because the property is
+        # "has this file a schema" and file size is only a proxy for it
+        # (ISSUE-412). SQLite reads a zero-length file as a valid empty
+        # database, so `quick_check` returns no issues and this reported
+        # `quick_check clean` about a file with nothing in it — but so does a
+        # header-only 4096-byte file, which an interrupted `istota init` or a
+        # bare `PRAGMA journal_mode=WAL` leaves behind, and a size test misses
+        # that one entirely. The integrity/schema split stands: this is the
+        # empty-file case, and whether a *populated* schema is missing the
+        # table the daemon wants stays `check_task_failure_rate`'s.
+        tables = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
     except sqlite3.DatabaseError as exc:
         return CheckResult(
             "runtime.framework_db",
@@ -401,6 +412,22 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
                 "The scheduler's db-health sweep attempts a REINDEX; if it does not "
                 "clear, restore from a snapshot (`python -m istota.db_restore`)."
             ),
+        )
+    if not tables:
+        # A file with no schema is always either uninitialised or the wrong
+        # file — the state the not-exists branch above already warns about,
+        # arriving one step later, with the same remedy. The size is reported
+        # because it is the fact that separates the two ways to get here, and
+        # a `stat` that fails omits it rather than falling through to `OK`.
+        try:
+            size = f"{db_path.stat().st_size} bytes, "
+        except OSError:
+            size = ""
+        return CheckResult(
+            "runtime.framework_db",
+            WARN,
+            f"{db_path}: {size}no schema",
+            remedy="Run `istota init` to create the framework database.",
         )
     return CheckResult("runtime.framework_db", OK, f"{db_path}: quick_check clean")
 
@@ -644,6 +671,90 @@ def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> s
     return f"{prefix} — " + ", and ".join(reasons)
 
 
+#: Set in a task's environment by ``task_env.build_task_runtime``, and only
+#: where the sandbox was really in force. So a process carrying it is *inside* a
+#: bubblewrap namespace — one carrying ``--unshare-user --disable-userns``
+#: wherever bwrap supports them, which is what stops a second namespace being
+#: created in there.
+_IN_SANDBOX_MARKER = "ISTOTA_SANDBOXED"
+
+
+def _sandbox_probe_is_nested() -> bool:
+    """Would a bwrap probe in this process be a nested one, and so unanswerable."""
+    return bool(os.environ.get(_IN_SANDBOX_MARKER))
+
+
+def _deployment_sandboxing(
+    config: "Config", probe: bool,
+) -> tuple[bool | None, str]:
+    """Is the sandbox in force *on this deployment*, in three states.
+
+    ``(True, "")`` it is; ``(False, "")`` it is not; ``(None, reason)`` this run
+    could not establish which. The three consumers below each phrase their own
+    sentence around ``reason`` and read the bool in their own direction, but the
+    question and the way it is asked are one thing and live here: three copies
+    of the probe-versus-memo rule is the ``map_basemap`` two-consumers failure
+    waiting to happen, and the copies had already drifted into three spellings
+    of the same "could not be determined".
+
+    **The nested arm is the one that earns the function**, and it is the shape
+    ``check_skill_model_credential``'s value arm already answers for a
+    credential: a check reading the current process while its subject is the
+    daemon. ``effective_sandboxing`` asks whether *this* process can build a
+    namespace, which is the right question for the executor and the wrong one
+    for a diagnostic: run from inside a task's own sandbox the probe
+    fails with ``ENOSPC`` on the nesting depth — the task's namespace carries
+    ``--disable-userns`` — so the check reported that every task runs
+    unsandboxed, from inside a demonstrably sandboxed one, and ``istota doctor``
+    exited 1 about a deployment whose boundary was working.
+
+    Nesting is read from the environment rather than from the probe's stderr:
+    the marker is a fact the daemon recorded when it built the task, while the
+    text of a bwrap failure is not a contract. Two consequences, both accepted.
+    A task can set the marker itself and turn a real ``FAIL`` into an
+    unestablished answer — on a deployment where that FAIL is true the task
+    already has the daemon's own filesystem access, so it is not the cheapest
+    thing it could do, and every authoritative surface (the boot log, the
+    scheduler's sweep, the admin Health pane, the heartbeat) runs in the daemon,
+    where no marker exists. And a task on an *unconfined* deployment carries
+    ``ISTOTA_TASK_ID`` without this marker, so the probe there is a valid one
+    and the ISSUE-381 finding still reaches an operator reading a doctor run
+    from inside a task.
+
+    On a deployment whose bwrap predates ``--disable-userns`` a nested probe
+    could in fact succeed, so the marker costs that shape an ``OK`` it might
+    have earned. That is the safe direction, and the only one available without
+    reading bwrap's stderr for a reason.
+
+    Never raises: an unobtainable answer is ``None`` with a reason.
+    """
+    if _sandbox_probe_is_nested():
+        return None, (
+            "this process is itself inside a bubblewrap namespace "
+            f"({_IN_SANDBOX_MARKER}), which is built with --disable-userns, so "
+            "a probe from here cannot create a nested one and says nothing "
+            "about the daemon"
+        )
+    try:
+        from .executor import effective_sandboxing, effective_sandboxing_if_known
+
+        # `effective_sandboxing` consults the bwrap capability probe, which
+        # spawns. `probe=False` forbids that, so ask the memo instead — which is
+        # usually warm in the process that matters, since the daemon probes at
+        # start-up. Only a genuinely cold memo is reported as unlooked-at.
+        effective = (
+            effective_sandboxing(config) if probe
+            else effective_sandboxing_if_known(config)
+        )
+    except Exception:  # noqa: BLE001 - a diagnostic must not raise
+        logger.debug("sandbox availability lookup failed", exc_info=True)
+        return None, "whether bubblewrap works here could not be determined"
+
+    if effective is None:
+        return None, "whether bubblewrap works here was not probed on this run"
+    return effective, ""
+
+
 def _sandbox_mask_availability(
     config: "Config", probe: bool,
 ) -> tuple[bool | None, str]:
@@ -660,11 +771,15 @@ def _sandbox_mask_availability(
     is the finding; for ``runtime.task_control_dir`` a mask *over* the tree
     takes away a file every task must open, so the mask existing is the
     finding. One function either way, because a second copy of the ISSUE-381
-    reasoning — ``effective_sandboxing`` rather than ``sandbox_enabled``, and a
-    warm memo rather than a spawn under ``probe=False`` — is the
-    ``map_basemap`` two-consumers failure waiting to happen. The reasons it
+    reasoning — ``effective_sandboxing`` rather than ``sandbox_enabled`` — is
+    the ``map_basemap`` two-consumers failure waiting to happen. The reasons it
     returns are phrased about the deployment rather than about either
     directory, so both callers can quote them verbatim.
+
+    How the answer is obtained, and the three states it comes in, are
+    :func:`_deployment_sandboxing`'s: the warm-memo rule under ``probe=False``
+    and the nested-probe arm are shared with the other two consumers rather
+    than restated here.
 
     Never raises: an unobtainable answer is ``None`` with a reason, not an
     exception and not a quiet ``True``. Returning ``True`` there was the first
@@ -682,31 +797,9 @@ def _sandbox_mask_availability(
             "sandbox_enabled), so nothing masks anything"
         )
 
-    unknown = (
-        None,
-        "whether bubblewrap works here could not be determined, so no mask "
-        "can be confirmed",
-    )
-    try:
-        from .executor import effective_sandboxing, effective_sandboxing_if_known
-
-        # `effective_sandboxing` consults the bwrap capability probe, which
-        # spawns. `probe=False` forbids that, so ask the memo instead — which is
-        # usually warm in the process that matters, since the daemon probes at
-        # start-up. Only a genuinely cold memo is reported as unlooked-at.
-        effective = (
-            effective_sandboxing(config) if probe
-            else effective_sandboxing_if_known(config)
-        )
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("sandbox mask availability could not be determined", exc_info=True)
-        return unknown
-
+    effective, why = _deployment_sandboxing(config, probe)
     if effective is None:
-        return None, (
-            "whether bubblewrap works here was not probed on this run, so no "
-            "mask can be confirmed"
-        )
+        return None, f"{why}, so no mask can be confirmed"
     if not effective:
         return False, (
             "[security] sandbox_enabled is set but bubblewrap does not work "
@@ -2071,6 +2164,220 @@ def _probe_output_line(text: str | None, limit: int = 160) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Names that only an environment istota itself built for something other than
+#: the daemon carries. Each is set by one of the two env builders and by
+#: nothing else on a deployment, so finding one is evidence that ``os.environ``
+#: here is not the daemon's.
+#:
+#: * ``ISTOTA_TASK_ID`` — `task_env.build_task_runtime` sets it on every task
+#:   env, and it is not in ``_EXECUTOR_PROXY_ONLY_VARS``, so it survives into
+#:   both the model's own environment and ``proxy_base_env``, which is what a
+#:   host-side skill CLI runs with. The general marker.
+#: * ``ISTOTA_SANDBOXED`` — narrower (it needs the sandbox in effect and the
+#:   proxy on), and kept because its meaning is exactly "this environment was
+#:   built for the model".
+#: * ``PRECOMMIT_SCANS_REQUIRED`` — `executor.build_stripped_env` sets it, which
+#:   is what a cron ``command`` job and a heartbeat ``shell-command`` run with;
+#:   that builder filters every name matching the credential patterns, so all
+#:   three names below are gone from it by construction. Unlike the other two an
+#:   operator can also set this one by hand (ISSUE-291 made it an override), so
+#:   it is evidence rather than proof. It errs toward a skip, which is the safe
+#:   direction for a check whose observed failure mode is crying wolf.
+#:
+#: Named markers rather than the ``ISTOTA_`` namespace: the daemon's own
+#: environment carries ``ISTOTA_CONFIG_PATH`` and ``ISTOTA_ADMINS_FILE``, so a
+#: namespace test would skip everywhere and the check would never fail at all.
+_NON_DAEMON_ENV_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED",
+                           "PRECOMMIT_SCANS_REQUIRED")
+
+
+def _non_daemon_env_markers() -> list[str]:
+    """Which of :data:`_NON_DAEMON_ENV_MARKERS` this process carries."""
+    return [n for n in _NON_DAEMON_ENV_MARKERS if os.environ.get(n)]
+
+
+def check_skill_model_credential(
+    config: "Config", probe: bool
+) -> list[CheckResult]:
+    """Whether a skill CLI that calls a model can authenticate (ISSUE-409).
+
+    The fact this states was unstated anywhere, which is why the failure it
+    covers could only be found by running a review. `code_review` spawns
+    `claude -p` per reviewer from inside a skill CLI, and the skill proxy
+    strips the Claude credential out of the environment every host-side CLI
+    runs with, so for a while every review on a subscription deployment came
+    back `skipped / review_failed` while the daemon's own brain worked
+    perfectly. Nothing in the deployment said so.
+
+    Two results, because they fail independently and an operator fixes them
+    differently.
+
+    ``security.skill_model_credential.wiring`` is the drift guard, and it is
+    the one that catches a *re*-regression. `SKILL_MODEL_CALLERS` is a list of
+    skill *names*, matched against the loaded index at task-build time, so a
+    renamed or removed skill directory silently stops the injection — there is
+    no import to break and no test on a deployment to go red. A name that no
+    longer resolves is reported here rather than discovered by a review.
+
+    ``security.skill_model_credential.value`` asks whether the daemon holds
+    anything to inject. Only the presence of a name is ever read or reported;
+    a credential's value never reaches a `CheckResult`, which is rendered into
+    the admin dashboard and the boot log.
+
+    That half reads ``os.environ``, and the process it reads is not always the
+    daemon. Four of the six entry points are, and a fifth is the web unit, but
+    `istota doctor` is also a command a *task* can run, and a task environment
+    is the one ISSUE-390 deliberately strips the Claude credential out of. The
+    two API-key names reach a task env by no route at all, so on that shape all
+    three names are absent whatever the daemon holds, and the first version of
+    this check answered FAIL, and exited 1, about a deployment whose reviews
+    were working. So absence is only a verdict where the environment could have
+    held one: `_non_daemon_env_markers` names the environments istota built for
+    something other than the daemon, and the answer there is a skip.
+
+    Presence stays OK wherever it is read, which is the asymmetry that makes
+    the skip narrow rather than a hole. `build_clean_env` copies the token out
+    of the daemon's own environment into every task's, so seeing it inside a
+    task does answer the question; only absence is the unanswerable direction.
+
+    Spawns nothing, so it is safe under ``probe=False``, and never raises.
+    """
+    prefix = "security.skill_model_credential"
+    results: list[CheckResult] = []
+
+    try:
+        from .executor import (  # noqa: PLC0415
+            SKILL_MODEL_CALLERS,
+            SKILL_MODEL_CREDENTIAL_VARS,
+        )
+        from .skills._loader import (  # noqa: PLC0415
+            effective_disabled_skills,
+            load_skill_index,
+        )
+        index = load_skill_index(
+            config.skills_dir, bundled_dir=config.bundled_skills_dir
+        )
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return [
+            CheckResult(
+                f"{prefix}.wiring",
+                SKIP,
+                f"the skill index could not be loaded: {exc}",
+            )
+        ]
+
+    # The operator's own disabled set, not a user's: this is a deployment-scope
+    # statement, and `effective_disabled_skills` takes a user id because a user
+    # may disable a skill for themselves. "" is the deployment's own view —
+    # `config.disabled_skills` plus the capability gate — so a skill one user
+    # turned off is still reported as wired, which is what it is.
+    try:
+        disabled = effective_disabled_skills(config, "", index)
+    except Exception:  # noqa: BLE001 - a check never raises
+        disabled = set()
+
+    missing = sorted(n for n in SKILL_MODEL_CALLERS if n not in index)
+    turned_off = sorted(n for n in SKILL_MODEL_CALLERS if n in disabled)
+    live = sorted(
+        n for n in SKILL_MODEL_CALLERS if n in index and n not in disabled
+    )
+
+    if missing:
+        results.append(
+            CheckResult(
+                f"{prefix}.wiring",
+                FAIL,
+                f"SKILL_MODEL_CALLERS names {', '.join(missing)}, which the "
+                f"skill index does not have — the proxy injects no model "
+                f"credential for a name that does not resolve, so that skill's "
+                f"model calls fail unauthenticated",
+                remedy=(
+                    "A skill was renamed or removed without updating "
+                    "SKILL_MODEL_CALLERS in executor.py."
+                ),
+            )
+        )
+    elif not live:
+        results.append(
+            CheckResult(
+                f"{prefix}.wiring",
+                SKIP,
+                f"every model-calling skill is disabled on this deployment "
+                f"({', '.join(turned_off) or 'none configured'})",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                f"{prefix}.wiring",
+                OK,
+                f"the proxy injects a model credential for {', '.join(live)}",
+            )
+        )
+
+    if not live:
+        return results
+
+    present = sorted(n for n in SKILL_MODEL_CREDENTIAL_VARS if os.environ.get(n))
+    if present:
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                OK,
+                f"the daemon holds {', '.join(present)} to inject",
+            )
+        )
+    elif not getattr(config.security, "skill_proxy_enabled", True):
+        # With the proxy off there is no injection and no strip: the CLI is
+        # re-exec'd with the daemon's own inherited environment, so whatever
+        # authenticates the daemon authenticates it. Nothing to assert here,
+        # and asserting anyway would report a deployment shape as broken for a
+        # boundary it does not have.
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                SKIP,
+                "[security] skill_proxy_enabled = false, so a skill CLI "
+                "inherits the daemon's environment directly",
+            )
+        )
+    elif markers := _non_daemon_env_markers():
+        # Absence in an environment that was never going to hold one is not a
+        # verdict about the daemon. Ordered after the OK arm on purpose:
+        # presence answers the question wherever it is read, so only absence is
+        # unanswerable here. See the docstring.
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                SKIP,
+                f"this process carries {', '.join(markers)}, so its "
+                f"environment is not the daemon's and the credential it would "
+                f"inject is not visible from here",
+                remedy=(
+                    "Run the check as the daemon's user with the daemon's "
+                    "environment loaded (the `<namespace>-run doctor` wrapper "
+                    "on a server install), or read it from the admin "
+                    "dashboard's Health pane."
+                ),
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                FAIL,
+                "the daemon holds none of "
+                f"{', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}, so "
+                f"{', '.join(live)} will fail unauthenticated",
+                remedy=(
+                    "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the "
+                    "daemon's environment."
+                ),
+            )
+        )
+    return results
+
+
 def check_skill_proxy(config: "Config", probe: bool) -> list[CheckResult]:
     """The skill proxy's two independent facts.
 
@@ -2155,35 +2462,19 @@ def _sandbox_in_force_clause(config: "Config", probe: bool) -> str:
     here. What the sandbox state changes is how much the exposure costs, which
     is a clause, not a condition.
 
-    Three states, following ``_sandbox_mask_availability``: in force, not
-    in force, and not established on this run. The third is why the answer is
+    Three states, resolved by :func:`_deployment_sandboxing`: in force, not in
+    force, and not established on this run. The third is why the answer is
     not a bool — a check whose subject is a boundary must not report "fine"
     where it did not look, and must not assert an exposure it did not observe.
 
     Never raises: every branch returns a clause, so the caller appends
     unconditionally.
     """
-    try:
-        from .executor import effective_sandboxing, effective_sandboxing_if_known
-
-        # `effective_sandboxing` spawns the bwrap capability probe. Under
-        # `probe=False` ask the memo instead — warm in the daemon, which probes
-        # at start-up — and report a genuinely cold one as unlooked-at.
-        effective = (
-            effective_sandboxing(config) if probe
-            else effective_sandboxing_if_known(config)
-        )
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("sandbox credentials: availability failed", exc_info=True)
-        return (
-            "whether bubblewrap works here could not be determined, so whether "
-            "the sandbox is actually in force is unestablished"
-        )
-
+    effective, why = _deployment_sandboxing(config, probe)
     if effective is None:
         return (
-            "whether bubblewrap works here was not probed on this run, so "
-            "whether the sandbox is actually in force is unestablished"
+            f"{why}, so whether the sandbox is actually in force is "
+            "unestablished"
         )
     if effective:
         return (
@@ -2337,13 +2628,22 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
     tier never reaches this, and an operator running the whole registry gets
     both lines with the remedy on the one that has a repair.
 
-    **Three states, not two**, following ``_session_log_sandbox_availability``
-    and ``_sandbox_in_force_clause``. Under ``probe=False`` the answer would
-    cost a spawn, so it comes from ``effective_sandboxing_if_known`` — warm in
-    the daemon, which probes at start-up — and a genuinely cold memo is
-    reported as unestablished rather than as either answer. A boundary check
-    must not pass on a question it could not settle, and must not assert an
-    exposure it did not observe.
+    **Three states, not two**, resolved by :func:`_deployment_sandboxing` and
+    shared with ``_sandbox_mask_availability`` and ``_sandbox_in_force_clause``.
+    Under ``probe=False`` the answer would cost a spawn, so it comes from
+    ``effective_sandboxing_if_known`` — warm in the daemon, which probes at
+    start-up — and a genuinely cold memo is reported as unestablished rather
+    than as either answer. A boundary check must not pass on a question it could
+    not settle, and must not assert an exposure it did not observe.
+
+    **Run from inside a task's own sandbox it settles nothing, and says so.**
+    The probe fails in there on the nesting depth rather than on any capability
+    the deployment lacks, so this reported every task unsandboxed from inside a
+    confined one and exited 1 about a working boundary. That arm is a ``SKIP``,
+    not the ``WARN`` the other two unestablished causes get: probing again is
+    what settles those, and nothing settles this one from here. See
+    :func:`_deployment_sandboxing` for why the marker rather than the probe's
+    stderr answers it, and for the two consequences of that choice.
 
     Not in ``DEEP_CHECKS``: ``effective_sandboxing`` memoizes its probe and the
     daemon has already paid for it during prompt assembly, so inside the daemon
@@ -2375,35 +2675,35 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
             ),
         )
 
-    unestablished = CheckResult(
-        name,
-        WARN,
-        (
-            "[security] sandbox_enabled is set but whether bubblewrap can "
-            "create a namespace here was not established on this run, so "
-            "whether tasks are confined is unknown"
-        ),
-        remedy=(
-            "Run `istota doctor`, which probes, to settle it. "
-            + _SANDBOX_EFFECTIVE_REMEDY
-        ),
-    )
-
-    try:
-        from .executor import effective_sandboxing, effective_sandboxing_if_known
-
-        # `effective_sandboxing` consults the bwrap capability probe, which
-        # spawns. `probe=False` forbids that, so read the memo instead.
-        effective = (
-            effective_sandboxing(config) if probe
-            else effective_sandboxing_if_known(config)
-        )
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        logger.debug("sandbox effective: availability lookup failed", exc_info=True)
-        return unestablished
-
+    effective, why = _deployment_sandboxing(config, probe)
     if effective is None:
-        return unestablished
+        if _sandbox_probe_is_nested():
+            # SKIP rather than WARN: this process can never settle the question,
+            # so there is nothing for the reader to act on and a warning on every
+            # doctor run a task makes is noise. The two remaining unestablished
+            # causes are settled by probing, so they stay a WARN with the line
+            # that says so.
+            return CheckResult(
+                name,
+                SKIP,
+                f"{why}, so whether tasks are confined cannot be answered here",
+                remedy=(
+                    "Run `istota doctor` on the host as the daemon user; a "
+                    "probe from inside a task's own sandbox cannot answer it."
+                ),
+            )
+        return CheckResult(
+            name,
+            WARN,
+            (
+                f"[security] sandbox_enabled is set but {why}, so whether "
+                "tasks are confined is unknown"
+            ),
+            remedy=(
+                "Run `istota doctor`, which probes, to settle it. "
+                + _SANDBOX_EFFECTIVE_REMEDY
+            ),
+        )
     if not effective:
         return CheckResult(
             name,
@@ -5894,6 +6194,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
+    ("security.skill_model_credential", check_skill_model_credential),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -5976,6 +6277,7 @@ CHECK_SCOPES: dict[str, str] = {
     # chose in a rendered config. The image tier asserts over `--scope image`
     # and must not go red for a deployment's own decision.
     "security.sandbox_credentials": DEPLOYMENT,
+    "security.skill_model_credential": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,
@@ -6009,6 +6311,193 @@ CHECK_SCOPES: dict[str, str] = {
     "config.skill_overlays": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
+
+
+CONFIG_GATE = "config.loaded"
+"""Name of the gate result below.
+
+Deliberately in neither ``CHECKS`` nor ``CHECK_SCOPES``, and a test says so.
+Every check in the registry answers a question about the host; this one answers
+whether the run is about *this* host at all, and a run it says no to renders
+nothing else — so it has no ``only=`` prefix to be selected by and nothing to
+filter. Its ``scope`` is set explicitly on every result all the same, since a
+machine consumer reads the same field off it as off any other row.
+"""
+
+#: Cap for a config path quoted into a ``detail``. Wider than
+#: :func:`_probe_output_line`'s default because the whole value is the finding
+#: here rather than an excerpt of somebody's stderr, and a truncation is marked
+#: — an operator told that a path did not resolve must not be shown a different
+#: path from the one that was tried.
+_NAMED_PATH_CHARS = 200
+
+
+def _named_path(raw: str) -> str:
+    """One capped line for a config path, with a visible cut when it is capped."""
+    flat = " ".join(raw.split())
+    if len(flat) <= _NAMED_PATH_CHARS:
+        return flat
+    return flat[:_NAMED_PATH_CHARS] + "\u2026"
+
+
+#: Names that mean "this process is a *task*, not the daemon". Either is
+#: enough. ``ISTOTA_TASK_ID`` is the general one — `task_env.build_task_runtime`
+#: sets it on every task env unconditionally — and ``ISTOTA_SANDBOXED`` is a
+#: subset of it, kept so the answer does not depend on one name.
+#:
+#: **Not** ``_non_daemon_env_markers``, which is wider by one:
+#: ``PRECOMMIT_SCANS_REQUIRED`` marks a cron ``command`` job and a heartbeat
+#: shell command, both of which run unsandboxed as the daemon user with the
+#: config directory in front of them. Telling those to "run it on the host as
+#: the daemon user" would be telling them to do what they are already doing.
+_TASK_ENV_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED")
+
+
+def _is_task_process() -> bool:
+    """Was this process's environment built for a task by ``build_task_runtime``."""
+    return any(os.environ.get(name) for name in _TASK_ENV_MARKERS)
+
+
+def config_visibility(
+    config: "Config", requested: Path | None = None, scope: str = ""
+) -> CheckResult | None:
+    """``None`` when this run can see the deployment's config; a result when it cannot.
+
+    ``load_config`` returns a bare ``Config()`` when no candidate resolves, and
+    says so nowhere. Every path-and-policy check then answers about defaults — a
+    relative ``data/istota.db``, the default temp dir, a whole ``[security]``
+    block the operator never wrote — while reading exactly like a run about the
+    real deployment. Two findings from the run that produced ISSUE-412 are
+    explained by that and by nothing else: ``FAIL runtime.task_failure_rate —
+    data/istota.db: no such table: tasks`` and ``OK runtime.framework_db —
+    data/istota.db: quick_check clean``, both about a stray zero-byte file an
+    earlier probe left in the task's own workspace.
+
+    **Inside a task this is unconditional.** ``build_clean_env`` exports
+    ``ISTOTA_CONFIG_PATH`` naming a file under ``config/``, and ``config/`` is
+    bound into no sandbox on purpose — it holds emissaries, persona and
+    guidelines, which are prompt text. So the exported path never resolves in
+    there and a sandboxed doctor run can never be about the real deployment.
+
+    **The verdict splits on the same principle as ``_deployment_sandboxing``
+    and not on the same predicate.** A boundary doing its job is not a fault —
+    reporting the unreadable config as one is the ISSUE-381 shape 492a91e9
+    existed to remove — so a *task* gets a ``SKIP``. But the question here is
+    "is this process the daemon", not "would a bwrap probe from here be
+    nested", and ``ISTOTA_SANDBOXED`` answers only the second: `task_env` sets
+    it under ``skill_proxy_enabled and effective_sandboxing``, while
+    ``ISTOTA_CONFIG_PATH`` is set on ``config_path is not None`` alone. So on a
+    ``sandbox_enabled`` deployment with the proxy off — warned about at config
+    load since ISSUE-393, and shipped — the marker is absent while the config
+    directory is just as unreachable, and keying on it would ``FAIL`` a task
+    with a remedy it cannot follow. ``_is_task_process`` is the right width.
+
+    A task on an *unconfined* deployment reaches none of this: its exported path
+    resolves and the gate opens. So the only cost of the wider predicate is that
+    a genuinely broken install seen from inside a task reads as a ``SKIP``, and
+    492a91e9 accepted exactly that trade for exactly this reason — every
+    authoritative surface (the boot log, the interval sweep, the admin Health
+    pane, the heartbeat) runs in the daemon, where no marker exists.
+
+    Anything else that named a path it could not read is a ``FAIL``: a broken
+    install, wrong permissions, a stale exported value, and a state nothing
+    reported before. Naming nothing and finding nothing is a ``FAIL`` too, with
+    its own reason and remedy — the exit code has to stay 1 there, because that
+    invocation used to run 31 checks against defaults and exit 1 on the several
+    that fail, and ``verdict``'s own docstring already draws this line for the
+    empty list: a run that checked nothing must not read as a run that passed
+    everything. Only the task arm exits 0, where a non-zero code every time a
+    task runs doctor is noise about a boundary behaving correctly.
+
+    **``--scope image`` is exempt**, and that is the one narrowing flag that is
+    not just choosing which fiction to print. ``IMAGE`` is defined a few lines
+    below ``OK, WARN, FAIL, SKIP`` as what "can be answered by a bare ``docker
+    run`` with no volumes", which is precisely a host with no config on any
+    search path; swallowing that scope would make a loaded config a precondition
+    for the one scope declared not to need one. ``--only`` is *not* exempt: it
+    selects by name across both scopes and carries no such declaration.
+
+    **The caller renders this instead of the registry, rather than beside it.**
+    Pushing three-state discipline down into every config-reading check would be
+    faithful and would touch most of the 31; it would also leave a reader taking
+    ``OK runtime.framework_db`` as a statement about the deployment, since one
+    honest line among 31 fictional ones does not stop that. There is no subset
+    of a config-less deployment-scoped run worth reading.
+
+    The task arm's whole point has to live in ``detail``: ``render_text`` prints
+    a remedy only for ``WARN`` and ``FAIL``, so a ``SKIP``'s is seen by
+    ``--json`` and the admin pane and not by the operator or the model reading
+    the terminal.
+
+    Keyed on ``config.config_path``, which ``load_config`` sets to the file it
+    actually opened, rather than on the environment: the environment says what
+    was *asked for*, and a deployment can resolve a config without either
+    variable being set. ``executor`` and ``scheduler`` already ask the same
+    question the same way. Never raises — it runs on the CLI's own entry path,
+    where a traceback replaces the diagnostic it was asked for.
+    """
+    if config.config_path is not None:
+        return None
+    if scope == IMAGE:
+        return None
+
+    # Branch on `source`, never on `named`: the rendered form of a whitespace
+    # path collapses to empty, and reading that as "nothing was named" reports
+    # the wrong cause with the wrong remedy for `-c "   "`.
+    exported = os.environ.get("ISTOTA_CONFIG_PATH") or ""
+    if requested is not None:
+        source, named = "-c", _named_path(str(requested))
+    elif exported:
+        source, named = "ISTOTA_CONFIG_PATH", _named_path(exported)
+    else:
+        source, named = "", ""
+
+    if _is_task_process():
+        where = f" ({source} names {named}, which does not resolve here)" if source else ""
+        return CheckResult(
+            CONFIG_GATE,
+            SKIP,
+            (
+                f"no config file was loaded{where}, and this process is a task "
+                "rather than the daemon; the config directory is bound into no "
+                "sandbox by design, so every check would answer about a default "
+                "Config rather than about this deployment. Nothing else was run."
+            ),
+            remedy="Run `istota doctor` on the host as the daemon user.",
+            scope=DEPLOYMENT,
+        )
+
+    if source:
+        return CheckResult(
+            CONFIG_GATE,
+            FAIL,
+            (
+                f"{source} names {named or '(an empty path)'}, which does not "
+                "resolve, so no config file was loaded and every check would "
+                "answer about a default Config rather than about this "
+                "deployment. Nothing else was run."
+            ),
+            remedy=(
+                "Point it at the deployment's config.toml, or run this as a user "
+                "that can read it."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    return CheckResult(
+        CONFIG_GATE,
+        FAIL,
+        (
+            "no config file was found in any of the standard locations, so every "
+            "check would answer about a default Config rather than about a "
+            "deployment. Nothing else was run."
+        ),
+        remedy=(
+            "Pass `-c PATH`, or run this where one of `config/config.toml`, "
+            "`~/.config/istota/config.toml` or `/etc/istota/config.toml` resolves."
+        ),
+        scope=DEPLOYMENT,
+    )
 
 
 def run_checks(

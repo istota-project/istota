@@ -419,7 +419,7 @@ class TestWaitReadyDialogs:
                             lambda *a: keys.append(a) or _CP())
         # no real sleeping
         import istota.brain.tmux_claude as mod
-        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(mod, "_READY_POLL_S", 0.0)
         return brain
 
     def test_handles_trust_then_bypass_then_ready(self, monkeypatch):
