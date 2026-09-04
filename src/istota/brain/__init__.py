@@ -78,6 +78,17 @@ logger = logging.getLogger(__name__)
 # raising and wedging the task.
 KNOWN_BRAIN_KINDS = frozenset({"claude_code", "native", "tmux_claude"})
 
+# Display names for the kinds above, for a surface that offers a brain to a
+# person rather than to code — today `/chat/commands`' `selectable_brains`.
+# Here rather than in `web_app` so a second surface cannot invent its own
+# spelling of the same three kinds. `web/src/routes/admin/+page.svelte` keeps a
+# client-side copy for the admin payloads, which carry a bare kind.
+BRAIN_KIND_LABELS = {
+    "claude_code": "Claude Code",
+    "native": "Native",
+    "tmux_claude": "Tmux Claude",
+}
+
 
 def make_brain(brain_config: BrainConfig) -> Brain:
     """Construct a brain instance from config.
@@ -276,6 +287,7 @@ __all__ = [
     "COOLDOWN_STOP_REASONS",
     "ContextManagementEvent",
     "ImageInput",
+    "BRAIN_KIND_LABELS",
     "KNOWN_BRAIN_KINDS",
     "NativeBrain",
     "POSTURE_FAIL_CLEAN",

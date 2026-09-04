@@ -24,7 +24,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -1825,6 +1825,16 @@ def _admin_models_section() -> dict:
         if brain_config.source_type_overrides:
             section["source_type_overrides"] = dict(brain_config.source_type_overrides)
 
+        # The *effective* allowlist rather than the raw `[brain] room_selectable`
+        # list: `room_selectable_kinds` drops a name `make_brain` cannot build,
+        # and this pane says what the deployment does, not what was typed. The
+        # dropped name is reported where an operator can act on it — a warning at
+        # load, and `doctor`.
+        from .brain import room_selectable_kinds
+        selectable = sorted(room_selectable_kinds(brain_config))
+        if selectable:
+            section["room_selectable"] = selectable
+
         return section
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin models section failed")
@@ -3151,6 +3161,11 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "talk_token": talk_refs.get(r.token),
                 "model": r.model,
                 "effort": r.effort,
+                # The room's standing brain pin, beside the model and effort it
+                # is resolved against. A change made on another surface (`!brain`
+                # on Talk, or the settings modal on another device) reaches the
+                # client through this frame, the way a model change already does.
+                "brain": r.brain,
             }
     return out
 
@@ -4011,6 +4026,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
             # room (canonical), not the per-user web handle.
             d["model"] = r.model
             d["effort"] = r.effort
+            d["brain"] = r.brain
             # The sidebar renders this list in order and re-sorts on this stamp
             # as messages stream in, so it is normalized the same way a message
             # row's `created_at` is — the client compares the two directly.
@@ -4192,8 +4208,27 @@ def _is_talk_backed(conn, reg, token: str) -> bool:
 
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
-    model=_UNSET, effort=_UNSET,
+    model=_UNSET, effort=_UNSET, brain=_UNSET,
 ) -> dict | None:
+    """Apply a room PATCH. `_UNSET` on a field means its key was absent.
+
+    **`room.user_id != username` below is not the admin gate.** It checks
+    ownership of the per-user `web_chat_rooms` handle, which every member of a
+    shared room has. D8's gate on the `brain` key is `config.is_admin` at the
+    route, and this function is reached only once that has passed.
+
+    **`model` is applied before `brain`, deliberately** (D5 Rule 1 for the web
+    writer). Both keys can arrive in one body — the settings modal makes that
+    the common case, not an edge one — and the rule is that the brain change
+    wins: `{"brain": "native", "model": "claude-opus-5"}` ends with the brain
+    set and the model cleared, because the id was resolved in the outgoing
+    brain's namespace and the room stores no alias to re-resolve it from. The
+    alternative, 400 on the combination, was rejected because the modal would
+    then have to special-case it. The clearing rule itself is
+    `commands._clear_pin_across_namespaces` — the same function `!brain` calls,
+    not a second copy of it — and the response reports what it dropped through
+    `model_cleared`.
+    """
     from . import db
     with db.get_db(_config.db_path) as conn:
         room = db.get_web_chat_room(conn, room_id)
@@ -4202,6 +4237,7 @@ def _chat_update_room(
         updated = db.update_web_chat_room(
             conn, room_id, name=name, archived=archived,
         )
+        model_cleared = False
         # Keep the unified room registry in sync (the cross-surface room list /
         # future sidebar reads it, not web_chat_rooms).
         if updated is not None:
@@ -4213,6 +4249,26 @@ def _chat_update_room(
                 new_model = model if model is not _UNSET else (reg.model if reg else None)
                 new_effort = effort if effort is not _UNSET else (reg.effort if reg else None)
                 db.set_room_model_effort(conn, updated.token, new_model, new_effort)
+            if brain is not _UNSET:
+                # Re-read: the model key above may have just written the pin
+                # this is about to judge, and the rule reads `rooms.model` off
+                # the row rather than taking it as an argument.
+                reg = db.get_room(conn, updated.token)
+                if reg is not None:
+                    from .commands import _clear_pin_across_namespaces
+                    model_cleared = bool(_clear_pin_across_namespaces(
+                        _config, conn, updated.token, reg,
+                        source_type="web",
+                        # `str()` because `rooms.brain` is TEXT with no CHECK
+                        # against a dynamically typed store, and this is a
+                        # route: a non-string on the row would otherwise be an
+                        # AttributeError out of `.strip()`. A value that is not
+                        # a known kind reads as an unestablished namespace and
+                        # clears the pin, which is the safe direction.
+                        outgoing=str(reg.brain or "").strip(),
+                        incoming=brain,
+                    ))
+                db.set_room_brain(conn, updated.token, brain)
             if name is not None:
                 db.rename_room(conn, updated.token, updated.name)
             if archived is not None:
@@ -4252,6 +4308,14 @@ def _chat_update_room(
         reg = db.get_room(conn, updated.token)
         d["model"] = reg.model if reg else None
         d["effort"] = reg.effort if reg else None
+        d["brain"] = reg.brain if reg else None
+        if model_cleared:
+            # Not room state: a report of what this request did, so a client
+            # that PATCHed a brain and a model together can say the model was
+            # dropped rather than silently showing it gone. Present only when
+            # something was cleared, and the store strips it before merging the
+            # response into its room record.
+            d["model_cleared"] = True
         # The client merges this response into its room record, so it has to
         # carry the same identity keys the listing does — a key the listing
         # sends and this omits reads as absent to any consumer that replaces
@@ -4752,6 +4816,7 @@ def _promoted_room_dict(room_id: int, token: str, talk_token: str) -> dict | Non
         d["name"] = reg.name or handle.name
         d["model"] = reg.model
         d["effort"] = reg.effort
+        d["brain"] = reg.brain
     d["origin"] = reg.origin if reg else "web"
     d["talk_token"] = talk_token
     return d
@@ -6266,14 +6331,30 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
 
 
 @api_router.get("/chat/commands")
-async def chat_commands(user: dict = Depends(_require_api_auth)):
-    """Command, command-alias and model-alias catalogue for the web client.
+async def chat_commands(
+    room_id: int | None = None, user: dict = Depends(_require_api_auth),
+):
+    """Command, command-alias, model-alias and brain catalogue for the client.
 
     Derived at request time from the in-memory command registry, the hidden
-    command-alias table and the active brain's alias table — no storage. Model
-    aliases degrade to an empty list if the brain can't resolve them, so the
-    primary (command) feature still works. Command aliases come from a module
-    constant and cannot fail independently.
+    command-alias table and a brain's alias table — no storage. Model aliases
+    degrade to an empty list if the brain can't resolve them, so the primary
+    (command) feature still works. Command aliases come from a module constant
+    and cannot fail independently.
+
+    **`room_id` scopes `model_aliases` to that room's own brain** (D5 Rule 2:
+    every surface that *offers* a model name lists the aliases of the brain that
+    would have to run it). Without it the answer is the deployment default,
+    which is what the composer's `!command` autocomplete wants and what every
+    caller got before rooms could pin a brain. An unknown or unowned room falls
+    back to the deployment default rather than 404ing: this endpoint's primary
+    product is the command list, and a bad room id must not take that with it.
+
+    **`selectable_brains` is published to admins only**, which is what lets the
+    settings modal decide by emptiness alone. Writing the pin is admin-gated
+    (D8), so a list of kinds a non-admin cannot select is not information they
+    need, and a client that had to combine "is the list empty" with "am I an
+    admin" is one place for the two to disagree.
     """
     from . import commands
 
@@ -6297,15 +6378,70 @@ async def chat_commands(user: dict = Depends(_require_api_auth)):
         {"alias": alias, "target": target}
         for alias, target in sorted(commands._COMMAND_ALIASES.items())
     ]
+    brain_config = _config.brain
+    if room_id is not None:
+        room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
+        if room is not None:
+            brain_config = await asyncio.to_thread(
+                _brain_for_room_token, room.token, "web",
+            )
     aliases: list[dict] = []
     try:
         aliases = [
             {"alias": alias, "target": model, "effort": effort}
-            for alias, model, effort in make_brain(_config.brain).list_aliases()
+            for alias, model, effort in make_brain(brain_config).list_aliases()
         ]
     except Exception as e:  # noqa: BLE001 — aliases degrade independently
         logger.warning("chat_commands: model aliases unavailable: %s", e)
-    return {"commands": cmds, "command_aliases": cmd_aliases, "model_aliases": aliases}
+    return {
+        "commands": cmds,
+        "command_aliases": cmd_aliases,
+        "model_aliases": aliases,
+        "selectable_brains": _selectable_brains(user["username"]),
+    }
+
+
+def _selectable_brains(username: str) -> list[dict]:
+    """The brain kinds this user may pin to a room, for the settings picker.
+
+    Empty for a non-admin and empty where the operator has listed none — the
+    two states the modal treats alike, since neither leaves anything to offer.
+
+    `model_namespace` rides along because the modal needs it: a brain change
+    that crosses namespaces clears the room's model pin (D5 Rule 1), and the
+    control disables the model select while such a change is pending so the
+    user sees the consequence before saving rather than in the response. Read
+    off the built brain rather than from a table here, so it cannot drift from
+    what `_clear_pin_across_namespaces` will actually compare.
+
+    Never raises: a kind that fails to build is dropped, and the whole list
+    degrades to empty. An empty list renders no control, which is the same
+    answer this endpoint gave before the field existed.
+    """
+    try:
+        if not _config.is_admin(username):
+            return []
+        from .brain import BRAIN_KIND_LABELS, room_selectable_kinds
+        out: list[dict] = []
+        for kind in sorted(room_selectable_kinds(_config.brain)):
+            try:
+                namespace = make_brain(
+                    _dc_replace(_config.brain, kind=kind),
+                ).model_namespace
+            except Exception:  # noqa: BLE001 — one bad kind is not the whole list
+                logger.warning(
+                    "chat_commands: brain %r could not be built", kind, exc_info=True,
+                )
+                continue
+            out.append({
+                "kind": kind,
+                "label": BRAIN_KIND_LABELS.get(kind, kind),
+                "model_namespace": namespace,
+            })
+        return out
+    except Exception:  # noqa: BLE001 — the command list must survive this
+        logger.warning("chat_commands: selectable brains unavailable", exc_info=True)
+        return []
 
 
 @api_router.get("/chat/rooms")
@@ -6373,8 +6509,40 @@ async def chat_update_room(
         effort = str(data["effort"] or "").strip().lower() or None
         if effort is not None and effort not in _EFFORT_LEVELS:
             return JSONResponse({"error": "invalid effort"}, status_code=400)
+    # Per-room brain pin. Same key-presence contract as `model` — absent leaves
+    # it alone, "" / null clears it, a string sets it — and the same three
+    # answers `!brain` gives, in the same order and for the same reasons.
+    #
+    # The gate is `config.is_admin`, matching `cmd_brain`: brain choice selects
+    # an isolation posture (the CLI brains run the agent inside bubblewrap,
+    # `native` runs it in the daemon process), so the least-trusted user does
+    # not get to pick the weakest enforcement of the policy that constrains
+    # them (D8). It is keyed on the *presence* of the key, not on its value, so
+    # clearing is gated too — a non-admin has no business writing the column in
+    # either direction. `_chat_update_room`'s `room.user_id != username` check
+    # is ownership of the per-user handle, which every member of a shared room
+    # has, and is not this.
+    brain = _UNSET
+    if "brain" in data:
+        if not _config.is_admin(user["username"]):
+            return JSONResponse(
+                {"error": "only an admin can change this room's brain"},
+                status_code=403,
+            )
+        brain = str(data["brain"] or "").strip().lower() or None
+        # The allowlist bounds *setting*, never clearing. Emptying
+        # `[brain] room_selectable` is the documented way to switch the feature
+        # off, and it is exactly how a room ends up holding a pin nothing will
+        # honour — so gating the clear behind the same check would strand that
+        # pin for good. `cmd_brain` checks `default` ahead of the allowlist for
+        # this reason; this is the same order.
+        if brain is not None:
+            from .brain import room_selectable_kinds
+            if brain not in room_selectable_kinds(_config.brain):
+                return JSONResponse({"error": "brain not selectable"}, status_code=400)
     updated = await asyncio.to_thread(
         _chat_update_room, user["username"], room_id, name, archived, model, effort,
+        brain,
     )
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
