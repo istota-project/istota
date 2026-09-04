@@ -846,6 +846,16 @@ class FullCredentials:
     user_password: str
     nc_port: int
 
+    signaling_port: int = 0
+    """Where the signaling server is published, reserved beside `nc_port`.
+
+    Defaulted rather than required, because it arrived after the keep file did
+    and a persisted set from an earlier session has no such key. `0` means "let
+    Docker choose", which is what the lean shape does and what a kept full stack
+    falls back to — the port is not baked into anything the way `nc_port` is, so
+    a different one across sessions costs nothing.
+    """
+
     def as_env(self) -> dict[str, str]:
         return {
             "POSTGRES_PASSWORD": self.postgres_password,
@@ -855,29 +865,59 @@ class FullCredentials:
         }
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic
-        return f"FullCredentials(<4 redacted>, nc_port={self.nc_port})"
+        return (
+            f"FullCredentials(<4 redacted>, nc_port={self.nc_port}, "
+            f"signaling_port={self.signaling_port})"
+        )
 
 
-def reserve_port() -> int:
-    """Bind an ephemeral port, read it back, release it.
+def reserve_ports(count: int = 1) -> tuple[int, ...]:
+    """Bind `count` ephemeral ports at once, read them back, release them all.
 
-    `docker-compose.yml:456` binds `${NC_PORT:-8080}:80` on nginx — a *fixed*
-    host port, unlike the lean stack which publishes nothing — so a developer's
+    `docker-compose.yml` binds `${NC_PORT:-8080}:80` on nginx and
+    `${ISTOTA_TALK_SIGNALING_PORT:-8081}:8080` on the signaling server — *fixed*
+    host ports, unlike the lean stack which publishes nothing — so a developer's
     own demo stack or a second worktree collides and `up` fails. Measured while
     this was written: a demo stack was holding 8080 on the machine.
 
-    Racy by construction, and knowingly so: the kernel can hand the same port to
-    something else between the release here and compose's bind. The alternative
-    is holding the socket open, which compose then cannot bind at all. A lost
-    race fails `up` loudly with "address already in use", which is the right
-    failure for a condition this rare.
+    **All the sockets are held until every port has been read**, which is what
+    makes two reservations distinct rather than merely probable. One at a time
+    the kernel is free to hand the second call the port the first just released,
+    and two services would then be told to bind the same one.
+
+    That is not hypothetical and it is not only about two reservations. Letting
+    the signaling service publish on `:0` and take Docker's own ephemeral choice
+    was measured colliding with the reserved `NC_PORT` on the first full boot
+    that ran both — Docker picked the number this function had reserved and
+    released moments earlier, the signaling container bound it, and nginx failed
+    with "address already in use" naming a port whose real claimant was in
+    another service's port map. Reserving both here means nothing is left to
+    Docker to choose.
+
+    Racy against the rest of the machine by construction, and knowingly so: the
+    kernel can hand one of these to something else between the release here and
+    compose's bind. The alternative is holding the sockets open, which compose
+    then cannot bind at all. A lost race fails `up` loudly with "address already
+    in use", which is the right failure for a condition this rare.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    probes = []
+    try:
+        for _ in range(count):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", 0))
+            probes.append(probe)
+        return tuple(probe.getsockname()[1] for probe in probes)
+    finally:
+        for probe in probes:
+            probe.close()
 
 
-def generate_credentials(nc_port: int) -> FullCredentials:
+def reserve_port() -> int:
+    """One port, for a caller that needs no second one."""
+    return reserve_ports(1)[0]
+
+
+def generate_credentials(nc_port: int, signaling_port: int = 0) -> FullCredentials:
     """Four fresh passwords for one session.
 
     `token_urlsafe` rather than anything with punctuation in it, because these
@@ -891,6 +931,7 @@ def generate_credentials(nc_port: int) -> FullCredentials:
         bot_password=secrets.token_urlsafe(24),
         user_password=secrets.token_urlsafe(24),
         nc_port=nc_port,
+        signaling_port=signaling_port,
     )
 
 
@@ -951,10 +992,17 @@ def full_env(
     environment["ISTOTA_WEB_CALLBACK_URL"] = (
         f"http://localhost:{credentials.nc_port}/istota/callback"
     )
+    # Beside `NC_PORT` and reserved for the same reason, which is not that the
+    # signaling service owns it — that service is what reads it — but that both
+    # are fixed host ports on one machine and something has to hold them apart.
+    # See `reserve_ports`: leaving this one to Docker's ephemeral choice was
+    # measured taking the number reserved for nginx.
+    environment["ISTOTA_TALK_SIGNALING_PORT"] = str(credentials.signaling_port)
 
     reserved = set(FULL_IDENTITY) | set(CREDENTIAL_KEYS) | {
         "NC_PORT",
         "ISTOTA_WEB_CALLBACK_URL",
+        "ISTOTA_TALK_SIGNALING_PORT",
     }
     claimed: dict[str, str] = {}
     for name, service in services.items():
@@ -2225,7 +2273,7 @@ class StackPool:
         """
         keep_file = self._keep_file()
         if keep_file is None:
-            return generate_credentials(reserve_port())
+            return generate_credentials(*reserve_ports(2))
 
         if self._credentials is not None:
             return self._credentials
@@ -2233,7 +2281,7 @@ class StackPool:
             self._credentials = FullCredentials(**json.loads(keep_file.read_text()))
             return self._credentials
 
-        self._credentials = generate_credentials(reserve_port())
+        self._credentials = generate_credentials(*reserve_ports(2))
         keep_file.parent.mkdir(parents=True, exist_ok=True)
         _write_private(keep_file, json.dumps(self._credentials.__dict__))
         return self._credentials

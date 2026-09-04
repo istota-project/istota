@@ -127,9 +127,14 @@ class SignalingService:
         Both shapes read the same names, because both declare the service from
         the same set of variables.
 
-        `ISTOTA_TALK_SIGNALING_PORT` is `0`: the harness reads the real one back
-        with `docker compose port`, so two sessions never collide on a fixed
-        one. `_SERVER` and `_SECRET` are what `provision-nc.sh` registers with
+        `ISTOTA_TALK_SIGNALING_PORT` is deliberately **not** here: on the full
+        shape `stack.full_env` reserves it beside `NC_PORT` and owns it, because
+        both are fixed host ports on one machine and Docker's own ephemeral
+        choice was measured taking the number nginx had been promised. The lean
+        shape publishes on `:0` through the compose file's own default, where
+        there is no second fixed port to collide with.
+
+        `_SERVER` and `_SECRET` are what `provision-nc.sh` registers with
         Talk at first install, and registering *something* is what puts Talk in
         `external` signaling mode — without which there are no `helloAuthParams`
         for istota to authenticate with and the daemon refuses to start.
@@ -137,7 +142,6 @@ class SignalingService:
         return {
             "ISTOTA_TALK_SIGNALING_IMAGE_TAG": IMAGE_TAG,
             "ISTOTA_TALK_SIGNALING_BIND": "127.0.0.1",
-            "ISTOTA_TALK_SIGNALING_PORT": "0",
             "ISTOTA_TALK_SIGNALING_SERVER": self.container_url,
             "ISTOTA_TALK_SIGNALING_SECRET": self.backend_secret,
             "ISTOTA_TALK_SIGNALING_HASH_KEY": self.hash_key,
