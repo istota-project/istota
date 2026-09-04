@@ -41,6 +41,14 @@ vi.mock('$lib/stores/persisted', () => ({
   saveSetting: vi.fn(),
 }));
 
+// Partial rather than wholesale: the store reads `loadCommandNames` and
+// `resetCommandCatalogue` from this module on its own boot and teardown paths.
+const dropRoomCatalogue = vi.hoisted(() => vi.fn());
+vi.mock('$lib/components/chat/autocomplete/providers', async (importOriginal) => ({
+  ...((await importOriginal()) as object),
+  dropRoomCatalogue,
+}));
+
 function room(id: number, unread = 0, name = `Room ${id}`, last_activity?: string): ChatRoom {
   return {
     id,
@@ -915,6 +923,30 @@ describe('chat store — live room stream', () => {
     expect(get(s.rooms)[0].brain).toBe('native');
     es.current!.emit('room', frame(null));
     expect(get(s.rooms)[0].brain).toBeNull();
+    s.teardown();
+  });
+
+  it('drops the room model catalogue when a frame moves the brain', async () => {
+    // A `!brain` typed on Talk, or this user's other device. The room's model
+    // aliases were resolved through the brain it had when they were fetched
+    // and the picker caches them per session, so the frame is the only notice
+    // this client gets that the list is now wrong.
+    dropRoomCatalogue.mockClear();
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), brain: null }] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const frame = (extra: Record<string, unknown>) => ({
+      action: 'upsert',
+      room: { id: 1, token: 't1', name: 'Room 1', origin: 'web', ...extra },
+    });
+    // The control first: a rename arrives as the same frame, and every turn in
+    // a busy room can produce one.
+    es.current!.emit('room', frame({ name: 'Renamed', brain: null }));
+    expect(dropRoomCatalogue).not.toHaveBeenCalled();
+    es.current!.emit('room', frame({ brain: 'native' }));
+    expect(dropRoomCatalogue).toHaveBeenCalledWith(1);
     s.teardown();
   });
 

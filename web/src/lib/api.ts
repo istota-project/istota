@@ -2563,12 +2563,12 @@ export interface ChatCommandAlias {
   target: string;
 }
 
-/** A brain kind this user may pin to a room. `model_namespace` is what the
- *  room settings modal compares to decide whether a pending change will clear
- *  the room's model pin. The server publishes the list to admins only, so an
- *  empty array means "no control" whether that is because the operator listed
- *  no kinds or because this user may not write one. Optional so a client built
- *  against an older server still type-checks. */
+/** A brain kind, as the room settings modal shows it. `model_namespace` is
+ *  what the modal compares to decide whether a pending change will clear the
+ *  room's model pin. The server publishes all three brain fields to admins
+ *  only, so an empty `selectable_brains` means "no control" whether that is
+ *  because the operator listed no kinds or because this user may not write
+ *  one. Optional so a client built against an older server still type-checks. */
 export interface SelectableBrain {
   kind: string;
   label: string;
@@ -2579,7 +2579,16 @@ export interface ChatCommands {
   commands: ChatCommand[];
   command_aliases?: ChatCommandAlias[];
   model_aliases: ChatModelAlias[];
+  /** What a room may be pinned to. */
   selectable_brains?: SelectableBrain[];
+  /** Every buildable kind's model namespace, not only the offered ones — the
+   *  brain a change moves *away from* need not be on the menu. It is the
+   *  inherited one when the room pins nothing, and it can be a kind the
+   *  operator has since dropped from the allowlist. */
+  brain_namespaces?: Record<string, string>;
+  /** What a room with no pin of its own runs, on the web surface. Null where
+   *  the deployment's own kind cannot be built, or for a non-admin. */
+  inherited_brain?: SelectableBrain | null;
 }
 
 /** Command, model-alias and brain catalogue powering the composer autocomplete
@@ -2615,11 +2624,12 @@ export interface RoomPatch {
 }
 
 /** The PATCH response is the room, plus one field that is not room state:
- *  `model_cleared` reports that this request dropped the room's model pin
- *  because the brain change crossed a model namespace. Present only when it
- *  happened, and the store takes it off before merging the rest into its
- *  record. */
-export type UpdatedChatRoom = ChatRoom & { model_cleared?: boolean };
+ *  `cleared` names the standing defaults this request dropped because the
+ *  brain change crossed a model namespace — `["model"]`, or `["model",
+ *  "effort"]`, since the two are cleared as the pair they were set as. Present
+ *  only when something was dropped, and the store takes it off before merging
+ *  the rest into its record. */
+export type UpdatedChatRoom = ChatRoom & { cleared?: string[] };
 
 export function updateChatRoom(id: number, patch: RoomPatch): Promise<UpdatedChatRoom> {
   return apiFetch<UpdatedChatRoom>(`/chat/rooms/${id}`, {

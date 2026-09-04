@@ -151,11 +151,28 @@ function loadRoomCatalogue(roomId: number): Promise<ChatCommands> {
   if (!p) {
     p = fetchChatCommands(roomId).catch((e) => {
       console.warn('room model catalogue fetch failed', e);
+      // Drop the entry before answering, or one blip pins the deployment
+      // default to this room for the whole session — which for a room on
+      // another brain means every id the picker offers is one the save
+      // refuses. The fallback is for this call; the next one retries.
+      roomCatalogues.delete(roomId);
       return loadCatalogue();
     });
     roomCatalogues.set(roomId, p);
   }
   return p;
+}
+
+/** Forget one room's model catalogue.
+ *
+ *  Called when a room's brain changes, which is the one thing that invalidates
+ *  it: the aliases were resolved through the brain the room had at fetch time,
+ *  and the session cache would otherwise go on offering them until teardown —
+ *  so the modal's own "pick a new one after saving" caption sends the user
+ *  back to a list the save then rejects with a 400. Deterministic rather than
+ *  a race; the caption is what walks into it. */
+export function dropRoomCatalogue(roomId: number): void {
+  roomCatalogues.delete(roomId);
 }
 
 /** Brain kinds this user may pin to a room. Empty where the operator has listed
@@ -168,8 +185,35 @@ export async function getSelectableBrains(): Promise<SelectableBrain[]> {
   // `commandNamesOf` is: an older server omits the field entirely.
   if (!Array.isArray(brains)) return [];
   return brains.filter(
-    (b) => typeof b?.kind === 'string' && typeof b?.model_namespace === 'string',
+    (b) =>
+      typeof b?.kind === 'string' &&
+      typeof b?.label === 'string' &&
+      typeof b?.model_namespace === 'string',
   );
+}
+
+/** Every buildable kind's model namespace, and the brain an unpinned room
+ *  inherits. Both are what the modal needs to decide whether a pending change
+ *  crosses a namespace, and neither is answerable from `selectable_brains`
+ *  alone: the brain being moved *away from* need not be on the menu. Answering
+ *  "unknown" for it makes the modal disagree with the server's own clearing
+ *  rule, in the direction that drops an edit the server would have kept. */
+export async function getBrainNamespaces(): Promise<Record<string, string>> {
+  const map = (await loadCatalogue()).brain_namespaces;
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return {};
+  const out: Record<string, string> = {};
+  for (const [kind, ns] of Object.entries(map)) {
+    if (typeof kind === 'string' && typeof ns === 'string') out[kind] = ns;
+  }
+  return out;
+}
+
+export async function getInheritedBrain(): Promise<SelectableBrain | null> {
+  const b = (await loadCatalogue()).inherited_brain;
+  if (!b || typeof b.kind !== 'string' || typeof b.model_namespace !== 'string') {
+    return null;
+  }
+  return b;
 }
 
 /** Base model choices for the room-default picker: one `{value: canonical id,

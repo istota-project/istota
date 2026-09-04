@@ -4,6 +4,8 @@
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import {
     getBaseModelChoices,
+    getBrainNamespaces,
+    getInheritedBrain,
     getSelectableBrains,
   } from '$lib/components/chat/autocomplete/providers';
 
@@ -37,7 +39,13 @@
   // Scoped to this room's brain, so a room pinned to another model namespace is
   // not offered ids it cannot run — which the PATCH would reject anyway.
   $effect(() => {
-    getBaseModelChoices(room.id).then((choices) => {
+    // Captured, and the result dropped if the modal has moved to another room
+    // meanwhile: the fetch is per room now, so a stale resolution would paint
+    // one room's aliases into another's dropdown — which before the scoping
+    // was harmless by construction, since every room got the same list.
+    const forRoom = room.id;
+    getBaseModelChoices(forRoom).then((choices) => {
+      if (room.id !== forRoom) return;
       // Show the canonical model id in parens next to the alias, so the pick
       // is unambiguous (e.g. `opus (claude-opus-4-8)`).
       modelOptions = [
@@ -52,9 +60,13 @@
   // the endpoint collapses both conditions into an empty list, so emptiness is
   // the whole test rather than two the client could get out of step.
   let selectableBrains = $state<SelectableBrain[]>([]);
+  let brainNamespaces = $state<Record<string, string>>({});
+  let inheritedBrain = $state<SelectableBrain | null>(null);
   let brainValue = $state(untrack(() => room.brain ?? ''));
   $effect(() => {
     getSelectableBrains().then((brains) => (selectableBrains = brains));
+    getBrainNamespaces().then((map) => (brainNamespaces = map));
+    getInheritedBrain().then((b) => (inheritedBrain = b));
   });
   const showBrain = $derived(selectableBrains.length > 0);
   const brainOptions = $derived<SelectOption[]>([
@@ -64,13 +76,21 @@
   const brainChanged = $derived(brainValue !== (room.brain ?? ''));
 
   // Whether saving this brain change would drop the room's model pin (D5
-  // Rule 1). `undefined` for a kind the catalogue does not carry — an inherited
-  // brain (the room names none), or a pin the operator has since dropped from
-  // the allowlist — and an unknown namespace never compares equal, which is the
-  // same safe direction the server takes: it clears a pin whose portability it
-  // could not establish.
+  // Rule 1), answered the way `commands._clear_pin_across_namespaces` answers
+  // it rather than approximately.
+  //
+  // An empty kind is the *inherited* brain — the room pinning none on the way
+  // in, or being cleared back to it on the way out — and the server resolves
+  // that through `resolve_brain_kind` to a real namespace, so reading it as
+  // unknown here would warn and lock on the two commonest changes there are.
+  // `brain_namespaces` rather than `selectable_brains` for the same reason in
+  // the other direction: a room can be pinned to a kind the operator has since
+  // dropped from the allowlist, which the server still resolves and the picker
+  // no longer lists. Unknown remains "not established", and never compares
+  // equal, which is the direction the server takes for a kind it cannot build.
   function namespaceOf(kind: string): string | undefined {
-    return selectableBrains.find((b) => b.kind === kind)?.model_namespace;
+    if (!kind) return inheritedBrain?.model_namespace;
+    return brainNamespaces[kind];
   }
   const crossesNamespace = $derived.by(() => {
     if (!brainChanged) return false;
