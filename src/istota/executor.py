@@ -1945,18 +1945,31 @@ def _report_native_usage(on_usage, message, requested_model: str) -> None:
         logger.warning("native triage usage sink failed", exc_info=True)
 
 
-def _native_web_fetch_enabled(task: "db.Task", config: Config) -> bool:
-    """True when this task routes to the native brain with WebFetch enabled.
+def _native_web_fetch_enabled(
+    task: "db.Task", config: Config, is_admin: bool = True,
+) -> bool:
+    """True when this task will actually have the native WebFetch tool.
 
     Used to fold `untrusted_input` into the eager skill set — the native
     WebFetch tool ingests untrusted web content but, as a core tool, doesn't
     trigger the companion-skill machinery that surfaces that guidance for
     ingest *skills*.
+
+    ``is_admin`` is here because `build_allowed_tools` scopes the tool by it and
+    `NativeBrain._build_tools` filters on that list, so for a non-admin the tool
+    is not built and the guidance would be prompt weight with nothing behind it.
+    It defaults to True — the permissive answer — so a caller that only wants
+    the routing question keeps getting it, and the one caller that decides a
+    *prompt* passes the task's real value.
     """
+    if not is_admin:
+        return False
     from .brain import resolve_brain_kind
 
     try:
-        routed = resolve_brain_kind(task.source_type, config.brain)
+        routed = resolve_brain_kind(
+            task.source_type, config.brain, override=task.brain,
+        )
     except Exception:  # noqa: BLE001 — never let routing lookup fail selection
         return False
     if routed.kind != "native":
@@ -1981,7 +1994,7 @@ def _build_triage_completer(task: "db.Task", config: Config):
     """
     from .brain import resolve_brain_kind
 
-    routed = resolve_brain_kind(task.source_type, config.brain)
+    routed = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
     if routed.kind != "native":
         return None
 
@@ -3189,11 +3202,43 @@ def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     distinguishes a tool-bearing task from a text-only one (empty => sleep cycle
     / OCR / explainer, which get no tools and no skip-permissions).
 
-    WebSearch / WebFetch are included; WebSearch runs server-side (Anthropic's
-    backend) and only returns result titles + URLs, so page reading is steered to
-    the `browse` skill in the prompt's Tools section.
+    WebSearch is included for everyone; it runs server-side at the provider and
+    returns result titles + URLs rather than page bodies, so it grants this host
+    no egress, and page reading is steered to the `browse` skill in the prompt's
+    Tools section.
+
+    **`WebFetch` is admin-only**, and this is the one place ``is_admin`` changes
+    the answer. On the native path the tool makes a GET from the *daemon's* own
+    network namespace, outside the CONNECT allowlist — where the same user's
+    task under a CLI brain has ``--unshare-net`` plus that allowlist and can
+    reach only what the operator listed. Scoping it here rather than in the
+    brain covers both shapes that reach it: a deployment running native by
+    default, and a shared room an admin pinned to native whose other members are
+    not admins (the fill is unconditional on sender, so a non-admin's turns run
+    under whatever the room chose).
+
+    Scoped unconditionally rather than only for a room-selected brain, which is
+    a behaviour change for an existing native deployment and is deliberate: the
+    asymmetry it closes was already there, and a rule that applied only to
+    room-pinned rooms would leave the same user with more egress on the
+    deployment default than on a room somebody pinned.
+
+    **On the two CLI brains this changes nothing**, and that is not an oversight
+    in either direction. They run with ``--dangerously-skip-permissions`` and
+    never receive this list as an allowlist, so a non-admin there keeps the
+    CLI's own `WebFetch` — which is the tool this scoping has no quarrel with,
+    since it runs inside the namespace behind ``--unshare-net`` and the CONNECT
+    allowlist. The tool being removed is the daemon-side one, and native is the
+    only brain that builds it.
+
+    Two callers read this list and only one of them is the brain.
+    `build_prompt`'s Tools section names `WebFetch` under the same condition, or
+    a non-admin native task is told to reach for a tool that is not registered.
     """
-    return ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]
+    tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch"]
+    if is_admin:
+        tools.append("WebFetch")
+    return tools
 
 
 def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
@@ -3957,11 +4002,20 @@ def native_fs_confinement_active(config: Config) -> bool:
 
     Keyed off *effective* sandboxing, exactly like the executor's cwd choice:
     on a real multi-user deployment (Linux + bwrap) the claude_code path
-    confines the filesystem via bwrap, so the native file tools — which run
-    in-process, outside any bwrap — must confine themselves to the same roots
-    (NB-1). Where bwrap is unavailable (Mac / dev), claude_code runs unconfined
-    too, so native stays unconfined for parity rather than surprising the
-    developer with a boundary the CLI path doesn't have.
+    confines the filesystem via bwrap, so the native file tools confine
+    themselves to the same roots (NB-1). Where bwrap is unavailable (Mac / dev),
+    claude_code runs unconfined too, so native stays unconfined for parity
+    rather than surprising the developer with a boundary the CLI path doesn't
+    have.
+
+    **"which run in-process, outside any bwrap" is what this used to say, and
+    it stopped being true in ISSUE-389.** The six core tools now run in a
+    per-attempt namespace of their own (`tool_server`, `SandboxProfile.NATIVE`),
+    so these roots are the error-message layer above that namespace — and the
+    only confinement there is on the shapes where nothing is confined, which is
+    the branch this predicate already returns False for. The stale sentence is
+    named rather than deleted because two documents cited it as the authority
+    for a native-versus-CLI difference that no longer exists.
     """
     return effective_sandboxing(config)
 
@@ -5490,20 +5544,41 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     if config.browser.enabled:
         browser_tool = "\n- Web browser for JS-rendered pages: istota-skill browse (see browse skill for details)"
 
-    # Web tools line. WebSearch + WebFetch are always allowed. WebSearch only
-    # returns result titles + URLs, so reading a page needs a fetch tool — steer
-    # that to the browse skill when the browser service is up (it renders JS and
-    # reaches arbitrary sites); WebFetch is the lightweight fallback.
+    # Web tools line. WebSearch is always allowed; **WebFetch is admin-only**,
+    # matching `build_allowed_tools`, which is the list `NativeBrain` filters
+    # its in-process tool set by. The two have to agree or a non-admin native
+    # task is told to reach for a tool that is not registered.
+    #
+    # With no browser service and no WebFetch there is no page-reading tool at
+    # all, and the line is dropped rather than pointed at the browse skill:
+    # that skill *is* the browser service, so naming it there would be a second
+    # unavailable route rather than a remedy.
+    #
+    # WebSearch only returns result titles + URLs, so reading a page needs a
+    # fetch tool — steer that to the browse skill when the browser service is up
+    # (it renders JS and reaches arbitrary sites); WebFetch is the lightweight
+    # fallback where the caller has it.
+    web_search_line = (
+        "\n- Web search: WebSearch — finds result titles and URLs; "
+        "it does not fetch page content."
+    )
     if config.browser.enabled:
-        web_tools = (
-            "\n- Web search: WebSearch — finds result titles and URLs; it does not fetch page content."
-            "\n- Reading web pages: prefer the browse skill (istota-skill browse) — it renders JavaScript and follows links. Use WebFetch only as a lightweight fallback for simple static pages."
+        read_line = (
+            "\n- Reading web pages: prefer the browse skill (istota-skill browse) — "
+            "it renders JavaScript and follows links."
+        )
+        if is_admin:
+            read_line += (
+                " Use WebFetch only as a lightweight fallback for simple static pages."
+            )
+    elif is_admin:
+        read_line = (
+            "\n- Reading web pages: WebFetch fetches a URL and extracts content "
+            "against your prompt."
         )
     else:
-        web_tools = (
-            "\n- Web search: WebSearch — finds result titles and URLs; it does not fetch page content."
-            "\n- Reading web pages: WebFetch fetches a URL and extracts content against your prompt."
-        )
+        read_line = ""
+    web_tools = web_search_line + read_line
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
     # once because it changes what an exit status means.
@@ -6052,7 +6127,10 @@ def execute_task(
     # enabled, fold `untrusted_input` into the eager set explicitly — mirroring
     # how the ingest skills pull it in via companion expansion — so its
     # inbound-handling guardrails reach the prompt whenever the tool is present.
-    if _native_web_fetch_enabled(task, config) and "untrusted_input" in skill_index:
+    if (
+        _native_web_fetch_enabled(task, config, is_admin)
+        and "untrusted_input" in skill_index
+    ):
         if "untrusted_input" not in selected_skills and (
             not _disabled or "untrusted_input" not in _disabled
         ):
@@ -6648,10 +6726,15 @@ def execute_task(
         sp_path = custom_system_prompt_path(config)
 
         from .brain import BrainRequest, resolve_brain_kind
-        # Per-source-type brain routing (gradual rollout): an operator can
-        # map this task's source_type to a different brain kind via
-        # [brain.source_type_overrides]. No-op for the common case.
-        _brain_config = resolve_brain_kind(task.source_type, config.brain)
+        # Brain routing. `tasks.brain` is the room's standing pick, frozen
+        # onto this row at creation; below it, an operator can map this task's
+        # source_type to a different kind via [brain.source_type_overrides].
+        # No-op for the common case, where both are unset. An admitted room pin
+        # also clears `fallback`, so the failover machinery below collapses to a
+        # plain primary call for that task.
+        _brain_config = resolve_brain_kind(
+            task.source_type, config.brain, override=task.brain,
+        )
         if _brain_config.kind != config.brain.kind:
             logger.info(
                 "brain routing: task %d source_type=%s -> kind=%s (default %s)",

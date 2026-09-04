@@ -417,6 +417,7 @@ native: NativeBrainConfig                       # [brain.native] block (native h
 tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
 claude_code: ClaudeCodeBrainConfig              # [brain.claude_code] block (subscription usage poll)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
+room_selectable: list[str] = []                 # [brain] room_selectable — kinds a room may pin; empty = none
 fallback: str = ""                              # brain kind to fall back to when primary unavailable
 fallback_on_transient: bool = True              # also reroute a persistent transient_api_error (ISSUE-212)
 fallback_cooldown_seconds: int = 900            # skip an unavailable primary this long; 0 disables stickiness
@@ -436,6 +437,34 @@ it over to the CLI" — with another. It also logs one INFO line per process whe
 `tmux_claude` runs with no fallback, since that pairing was unconfigurable before
 ISSUE-362 and an upgrade would otherwise drop failover silently. See
 `.claude/rules/brain.md` "Brain fallback" + `.claude/rules/executor.md`.
+
+`room_selectable` names the brain kinds a room may pin for itself through
+`!brain` or the web room settings. Empty is the default, so the feature ships
+inert and an operator opts in by naming kinds — a gate rather than a preference,
+because a brain kind decides which process holds the agent loop, what tool set
+it registers and which sandbox profile is built, and a change to an enforcement
+posture should not arrive switched on by an upgrade (`.claude/rules/brain.md` is
+exact about which posture, since the obvious answer went out of date with
+ISSUE-389). The mapper hook
+stringifies and strips each entry and drops the empties, and `_KEEP`s a
+non-list; `_validate_room_selectable` warns once at load about a name
+`make_brain` cannot build, since nothing else would — `resolve_brain_kind` warns
+only when a room actually pins one, which for an unbuildable name is never. Two
+consequences beyond the room itself: an admitted pin clears `fallback` for that
+task, and `brain.reachable_brain_kinds` folds this list in, so allowlisting a
+kind widens the `doctor` checks for it whether or not a room has selected it.
+**Neither deployment path can set it, which is a gap rather than a decision
+about env vars.** There is no env var, deliberately — this is deployment policy
+rather than a credential or a per-container toggle — but the Ansible role has no
+variable for it either, and `templates/config.toml.j2` renders `[brain]` without
+it, so a hand edit to the rendered `config.toml` is overwritten by the next
+play. Setting it on the canonical deployment means adding the field to
+`deploy/ansible/defaults/main.yml` and that template, per the rule in
+`.claude/rules/deployment.md`; on Docker it means both
+`docker/istota/render-config.sh` and `docker/docker-compose.yml`, per the
+testbed two-file rule. Until one of those lands, the feature is reachable only
+on an install whose `config.toml` nothing regenerates. See `.claude/rules/brain.md` "Per-room brain
+selection".
 
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),
 `fallback_cooldown_seconds` (300), `ready_timeout_seconds` (30),

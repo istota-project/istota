@@ -227,6 +227,12 @@ def _process_deferred_subtasks(
                 # same level unless the deferred JSON explicitly overrides.
                 model=entry.get("model") or task.model,
                 effort=entry.get("effort") or task.effort,
+                # And the parent's brain, which is not the deferred JSON's to
+                # choose. A subtask's source_type is "subtask", so without this
+                # it would take `[brain.source_type_overrides]["subtask"]` and
+                # could silently run a different brain from the parent that
+                # spawned it.
+                brain=task.brain,
             )
             count += 1
 

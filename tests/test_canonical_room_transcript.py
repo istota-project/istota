@@ -334,7 +334,7 @@ class TestLLMContextIsolation:
         cfg.db_path = db_path
         task = SimpleNamespace(
             id=999, conversation_token="R", reply_to_talk_id=None,
-            user_id="u", source_type="email", prompt="new email",
+            user_id="u", source_type="email", prompt="new email", brain=None,
         )
         with db.get_db(db_path) as conn:
             ctx, ids = executor._build_db_context(task, cfg, conn)

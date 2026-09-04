@@ -318,6 +318,10 @@ export interface AdminStats {
     endpoint?: string;
     provider?: string;
     source_type_overrides?: Record<string, string>;
+    /** Brain kinds a room may pin (`[brain] room_selectable`, intersected with
+     * the kinds this build can construct). Absent when the operator has listed
+     * none, which is the shipped default. */
+    room_selectable?: string[];
     error?: string;
   };
   brain_status?: {
@@ -2289,6 +2293,11 @@ export interface ChatRoom {
   model?: string | null;
   /** Standing per-room effort level (low/medium/high/xhigh/max). */
   effort?: string | null;
+  /** Standing per-room brain kind, shared across Talk and web. null / absent →
+   * inherit the deployment's own routing. Writing it is admin-only, and the
+   * kinds on offer are an operator allowlist (`selectable_brains` below), so a
+   * client that has none renders no control rather than an empty dropdown. */
+  brain?: string | null;
   /** ISO-UTC stamp of the room's newest message, falling back to the room's
    * creation time when nobody has spoken in it. The sidebar's sort key — it is
    * normalized the same way a message row's `created_at` is, so an arriving
@@ -2554,15 +2563,44 @@ export interface ChatCommandAlias {
   target: string;
 }
 
+/** A brain kind, as the room settings modal shows it. `model_namespace` is
+ *  what the modal compares to decide whether a pending change will clear the
+ *  room's model pin. The server publishes all three brain fields to admins
+ *  only, so an empty `selectable_brains` means "no control" whether that is
+ *  because the operator listed no kinds or because this user may not write
+ *  one. Optional so a client built against an older server still type-checks. */
+export interface SelectableBrain {
+  kind: string;
+  label: string;
+  model_namespace: string;
+}
+
 export interface ChatCommands {
   commands: ChatCommand[];
   command_aliases?: ChatCommandAlias[];
   model_aliases: ChatModelAlias[];
+  /** What a room may be pinned to. */
+  selectable_brains?: SelectableBrain[];
+  /** Every buildable kind's model namespace, not only the offered ones — the
+   *  brain a change moves *away from* need not be on the menu. It is the
+   *  inherited one when the room pins nothing, and it can be a kind the
+   *  operator has since dropped from the allowlist. */
+  brain_namespaces?: Record<string, string>;
+  /** What a room with no pin of its own runs, on the web surface. Null where
+   *  the deployment's own kind cannot be built, or for a non-admin. */
+  inherited_brain?: SelectableBrain | null;
 }
 
-/** Command + model-alias catalogue powering the composer autocomplete. */
-export function fetchChatCommands(): Promise<ChatCommands> {
-  return apiFetch<ChatCommands>('/chat/commands');
+/** Command, model-alias and brain catalogue powering the composer autocomplete
+ *  and the room settings modal.
+ *
+ *  `roomId` scopes `model_aliases` to that room's own brain — a room pinned to
+ *  another model namespace must not be offered names it cannot run. Omit it for
+ *  the deployment default, which is what the composer's `!model` completion
+ *  wants and what every caller got before rooms could pin a brain. */
+export function fetchChatCommands(roomId?: number): Promise<ChatCommands> {
+  const q = roomId === undefined ? '' : `?room_id=${roomId}`;
+  return apiFetch<ChatCommands>(`/chat/commands${q}`);
 }
 
 export function getChatRooms(timeoutMs = 0): Promise<{ rooms: ChatRoom[] }> {
@@ -2577,11 +2615,24 @@ export function createChatRoom(name: string): Promise<ChatRoom> {
   });
 }
 
-export function updateChatRoom(
-  id: number,
-  patch: { name?: string; archived?: boolean; model?: string | null; effort?: string | null },
-): Promise<ChatRoom> {
-  return apiFetch<ChatRoom>(`/chat/rooms/${id}`, {
+export interface RoomPatch {
+  name?: string;
+  archived?: boolean;
+  model?: string | null;
+  effort?: string | null;
+  brain?: string | null;
+}
+
+/** The PATCH response is the room, plus one field that is not room state:
+ *  `cleared` names the standing defaults this request dropped because the
+ *  brain change crossed a model namespace — `["model"]`, or `["model",
+ *  "effort"]`, since the two are cleared as the pair they were set as. Present
+ *  only when something was dropped, and the store takes it off before merging
+ *  the rest into its record. */
+export type UpdatedChatRoom = ChatRoom & { cleared?: string[] };
+
+export function updateChatRoom(id: number, patch: RoomPatch): Promise<UpdatedChatRoom> {
+  return apiFetch<UpdatedChatRoom>(`/chat/rooms/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),

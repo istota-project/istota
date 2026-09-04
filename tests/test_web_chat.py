@@ -1981,3 +1981,554 @@ class TestChatFileDownload:
         disposition = resp.headers["content-disposition"]
         assert disposition.startswith("attachment")
         assert "Q3%20report.csv" in disposition
+
+
+@_needs_web_deps
+class TestTheRoomPatchValidatesInTheRoomsNamespace:
+    """D5 Rule 2, the web writer.
+
+    `PATCH /api/chat/rooms/{id}` writes `rooms.model`, so an id from the wrong
+    model namespace accepted here is the same standing-default defect `!room
+    model` had. Both directions in one class, because a rejection alone passes
+    against a validator that rejects everything.
+    """
+
+    @pytest.fixture
+    async def pinned_client(self, tmp_path):
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", room_selectable=["native"])
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            yield c, config
+
+    async def _room(self, client, cookies):
+        return (await client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+
+    async def test_a_native_room_rejects_an_anthropic_id(self, pinned_client):
+        client, config = pinned_client
+        cookies = await _login(client, "alice")
+        created = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, created["token"], "native")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-5"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, created["token"]).model is None
+
+    async def test_the_same_id_is_accepted_when_the_room_is_not_pinned(
+        self, pinned_client,
+    ):
+        """The control. Same deployment, same payload, same endpoint — the only
+        difference is the room's brain, which is what the assertion is about."""
+        client, config = pinned_client
+        cookies = await _login(client, "alice")
+        created = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-5"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "claude-opus-5"
+
+
+@_needs_web_deps
+class TestKnownRoomModels:
+    def test_it_lists_the_brain_it_is_given(self, tmp_path):
+        import istota.web_app as mod
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        _patch_app(_make_config(tmp_path))
+        anthropic = mod._known_room_models(BrainConfig(kind="claude_code"))
+        native = mod._known_room_models(
+            BrainConfig(kind="native", native=NativeBrainConfig(model="endpoint/m")),
+        )
+        assert "claude-opus-5" in anthropic
+        assert "claude-opus-5" not in native
+        assert "endpoint/m" in native
+
+    def test_an_unbuildable_brain_rejects_everything(self, tmp_path):
+        """The validator degrades to "reject all" rather than to "accept all" —
+        an unusable answer must not widen what may be written."""
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+
+        _patch_app(_make_config(tmp_path))
+        assert mod._known_room_models(BrainConfig(kind="no-such-brain")) == set()
+
+
+@_needs_web_deps
+class TestTheRoomPatchWritesTheBrain:
+    """`PATCH /api/chat/rooms/{id}` is the web writer of `rooms.brain`.
+
+    Three questions, each with its own branch and its own case: is the caller an
+    admin (D8), is the kind one the operator offers (`room_selectable_kinds`),
+    and does the change cross a model namespace (D5 Rule 1). The command layer
+    answers all three already, so what these assert is that the endpoint reaches
+    the same answers rather than growing a second copy of the rules.
+    """
+
+    HDRS = {"origin": "https://example.com"}
+
+    async def _client(self, tmp_path, **brain_kwargs):
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(**brain_kwargs)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            yield c, config
+
+    @pytest.fixture
+    async def selectable(self, tmp_path):
+        async for pair in self._client(
+            tmp_path, kind="claude_code",
+            room_selectable=["native", "tmux_claude", "claude_code"],
+        ):
+            yield pair
+
+    @pytest.fixture
+    async def feature_off(self, tmp_path):
+        async for pair in self._client(tmp_path, kind="claude_code"):
+            yield pair
+
+    async def _room(self, client, cookies):
+        return (await client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers=self.HDRS,
+        )).json()
+
+    def _brain(self, config, token):
+        with db.get_db(config.db_path) as conn:
+            return db.get_room(conn, token).brain
+
+    async def test_it_sets_the_column_and_publishes_it(self, selectable):
+        client, config = selectable
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["brain"] == "native"
+        assert self._brain(config, room["token"]) == "native"
+
+    async def test_an_absent_key_leaves_it_alone(self, selectable):
+        """The key-presence contract `model` and `effort` already use: a
+        name-only rename must not clear a pin the user set on another device."""
+        client, config = selectable
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, room["token"], "native")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"name": "renamed"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert self._brain(config, room["token"]) == "native"
+
+    @pytest.mark.parametrize("value", ["", None])
+    async def test_an_empty_value_clears_it(self, selectable, value):
+        client, config = selectable
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, room["token"], "native")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": value},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["brain"] is None
+        assert self._brain(config, room["token"]) is None
+
+    async def test_an_unknown_kind_is_refused(self, selectable):
+        client, config = selectable
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "no-such-brain"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 400
+        assert self._brain(config, room["token"]) is None
+
+    async def test_a_buildable_kind_the_operator_did_not_list_is_refused(
+        self, tmp_path,
+    ):
+        """A separate branch from the unknown-kind one: `tmux_claude` builds
+        fine and is simply not on offer here. Refusing only unknown names would
+        pass every case above while leaving the allowlist inert."""
+        async for client, config in self._client(
+            tmp_path, kind="claude_code", room_selectable=["native"],
+        ):
+            cookies = await _login(client, "alice")
+            room = await self._room(client, cookies)
+            resp = await client.patch(
+                f"/istota/api/chat/rooms/{room['id']}",
+                json={"brain": "tmux_claude"}, cookies=cookies, headers=self.HDRS,
+            )
+            assert resp.status_code == 400
+            assert self._brain(config, room["token"]) is None
+
+    async def test_the_shipped_default_refuses_every_kind(self, feature_off):
+        """`room_selectable` is empty out of the box, so the feature ships
+        inert and the endpoint offers nothing — including the deployment's own
+        kind, which is otherwise the most plausible thing to let through."""
+        client, config = feature_off
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "claude_code"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 400
+        assert self._brain(config, room["token"]) is None
+
+
+@_needs_web_deps
+class TestTheRoomPatchBrainIsAdminGated:
+    """D8. The gate is on the *presence* of the key, so a non-admin is refused
+    on the clear as well as on the set — and the ownership check that already
+    guards this route is not it: every member of a shared room owns their own
+    `web_chat_rooms` handle."""
+
+    HDRS = {"origin": "https://example.com"}
+
+    @pytest.fixture
+    async def two_users(self, tmp_path):
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.admin_users = {"alice"}
+        config.brain = BrainConfig(kind="claude_code", room_selectable=["native"])
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            yield c, config
+
+    async def _room(self, client, cookies):
+        return (await client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers=self.HDRS,
+        )).json()
+
+    async def test_a_non_admin_cannot_set_it(self, two_users):
+        client, config = two_users
+        cookies = await _login(client, "bob")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 403
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).brain is None
+
+    async def test_a_non_admin_cannot_clear_it_either(self, two_users):
+        client, config = two_users
+        cookies = await _login(client, "bob")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, room["token"], "native")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": ""},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 403
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).brain == "native"
+
+    async def test_a_non_admin_may_still_set_the_model(self, two_users):
+        """The control. The gate is on the `brain` key alone, so the rest of the
+        route is unchanged for a non-admin — a 403 on every PATCH would pass
+        both assertions above."""
+        client, config = two_users
+        cookies = await _login(client, "bob")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"model": "claude-opus-5"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).model == "claude-opus-5"
+
+    async def test_an_admin_can_set_it(self, two_users):
+        """The other control: the same request from an admin on the same
+        deployment succeeds, so the 403s above are about the caller."""
+        client, config = two_users
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).brain == "native"
+
+
+@_needs_web_deps
+class TestBrainAndModelInOneBody:
+    """D5 Rule 1 on the web writer, and the precedence the spec states: the
+    `model` key is applied first, then the brain change clears it if it crossed
+    a namespace. The settings modal sends both keys in one PATCH, so this is the
+    common path rather than an edge one."""
+
+    HDRS = {"origin": "https://example.com"}
+
+    @pytest.fixture
+    async def client_and_config(self, tmp_path):
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(
+            kind="claude_code", room_selectable=["native", "tmux_claude"],
+        )
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            yield c, config
+
+    async def _room(self, client, cookies):
+        return (await client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers=self.HDRS,
+        )).json()
+
+    async def test_a_crossing_change_keeps_the_brain_and_drops_the_model(
+        self, client_and_config,
+    ):
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "native", "model": "claude-opus-5"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["brain"] == "native"
+        assert body["model"] is None
+        assert body["cleared"] == ["model"]
+        with db.get_db(config.db_path) as conn:
+            stored = db.get_room(conn, room["token"])
+        assert stored.brain == "native"
+        assert stored.model is None
+
+    async def test_a_move_inside_one_namespace_keeps_the_pin(
+        self, client_and_config,
+    ):
+        """The converse, which is what stops the assertion above passing against
+        an implementation that clears unconditionally. `claude_code` and
+        `tmux_claude` share the `anthropic` namespace, so the same id runs under
+        both and there is nothing to lose."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "tmux_claude", "model": "claude-opus-5"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["brain"] == "tmux_claude"
+        assert body["model"] == "claude-opus-5"
+        assert "cleared" not in body
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).model == "claude-opus-5"
+
+    async def test_it_clears_a_pin_that_was_already_stored(
+        self, client_and_config,
+    ):
+        """A brain-only PATCH still applies the rule — the modal's model select
+        is disabled while a crossing change is pending, so this is the shape it
+        actually sends."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_model_effort(conn, room["token"], "claude-opus-5", "high")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        # Both, because the rule moves the pair it was set as — and naming the
+        # effort is what stops the caller finding it silently gone.
+        assert resp.json()["cleared"] == ["model", "effort"]
+        with db.get_db(config.db_path) as conn:
+            stored = db.get_room(conn, room["token"])
+        assert stored.model is None
+        assert stored.effort is None
+
+    async def test_a_room_with_no_pin_reports_nothing_cleared(
+        self, client_and_config,
+    ):
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert "cleared" not in resp.json()
+
+    async def test_an_effort_in_the_body_goes_with_the_model_and_is_named(
+        self, client_and_config,
+    ):
+        """The brain change wins over anything else in the body. The effort is
+        written by the model block and then taken out again with the model,
+        because the pair was set as a pair — so the response has to say so
+        rather than leave the caller to notice their explicit value gone."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_model_effort(conn, room["token"], "claude-opus-5", "low")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "native", "effort": "high"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == ["model", "effort"]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).effort is None
+
+    async def test_a_bare_effort_survives_a_brain_change(self, client_and_config):
+        """The converse, and the command layer's own rule: with no model pin
+        there is nothing namespaced to lose, so an effort level — a semantic
+        rung every brain reads — is kept."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "native", "effort": "high"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert "cleared" not in resp.json()
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).effort == "high"
+
+    async def test_the_model_is_validated_against_the_outgoing_brain(
+        self, client_and_config,
+    ):
+        """The order has a visible consequence: `model` is checked against the
+        brain the room has *now*, so an anthropic id sent alongside a move to
+        native is accepted by the validator and then cleared by the rule. The
+        400 comes only when the room was already pinned."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, room["token"], "native")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "claude_code", "model": "claude-opus-5"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 400
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).brain == "native"
+
+
+@_needs_web_deps
+class TestTheBrainRidesEveryRoomPayload:
+    """The client merges a room payload into its own record, so a key one
+    producer sends and another omits reads as absent to any consumer that
+    replaces rather than spreads (ISSUE-342, the same argument `model` and
+    `talk_token` are here for). Four producers, one assertion each."""
+
+    HDRS = {"origin": "https://example.com"}
+
+    @pytest.fixture
+    async def client_and_config(self, tmp_path):
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", room_selectable=["native"])
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as c:
+            yield c, config
+
+    async def _pinned_room(self, client, config, cookies):
+        room = (await client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers=self.HDRS,
+        )).json()
+        with db.get_db(config.db_path) as conn:
+            db.set_room_brain(conn, room["token"], "native")
+        return room
+
+    async def test_the_listing_carries_it(self, client_and_config):
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._pinned_room(client, config, cookies)
+        listing = (await client.get(
+            "/istota/api/chat/rooms", cookies=cookies,
+        )).json()["rooms"]
+        entry = next(r for r in listing if r["id"] == room["id"])
+        assert entry["brain"] == "native"
+
+    async def test_the_stream_snapshot_carries_it(self, client_and_config):
+        import istota.web_app as mod
+
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._pinned_room(client, config, cookies)
+        # The snapshot is read-only and skips a registry room with no handle;
+        # the listing above minted one.
+        await client.get("/istota/api/chat/rooms", cookies=cookies)
+        snap = mod._room_snapshot("alice")
+        assert snap[room["token"]]["brain"] == "native"
+
+    async def test_the_patch_response_carries_it(self, client_and_config):
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._pinned_room(client, config, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}", json={"name": "renamed"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.json()["brain"] == "native"
+
+    def test_the_promote_response_carries_it(self, tmp_path):
+        """A fourth producer the spec's list predates. `_promoted_room_dict`'s
+        own docstring gives the reason `model` and `effort` ride it, and the
+        brain is the same kind of standing room default."""
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", room_selectable=["native"])
+        _patch_app(config)
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "web-alice-1", origin="web", user_id="alice",
+                             name="general")
+            db.add_room_member(conn, "web-alice-1", "alice")
+            db.set_room_brain(conn, "web-alice-1", "native")
+            handle = db.ensure_web_chat_handle(
+                conn, "alice", "web-alice-1", "general",
+            )
+        payload = mod._promoted_room_dict(handle.id, "web-alice-1", "tk123")
+        assert payload["brain"] == "native"

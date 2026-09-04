@@ -198,6 +198,218 @@ class TestRecordInboundRoomDefault:
 
 
 # =============================================================================
+# record_inbound — the per-room brain default rides the same choke point
+# =============================================================================
+
+class TestRecordInboundRoomBrain:
+    """`rooms.brain` fills `tasks.brain` in the same block model and effort use,
+    and under the same `room_surface` guard — so Talk and web, never email."""
+
+    def test_room_brain_fills_the_task(self, config, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+            db.set_room_brain(conn, "room1", "native")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="hi", source_type="web",
+            )
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).brain == "native"
+
+    def test_room_brain_applies_across_the_talk_surface(self, config, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tk123", "alice", origin="talk")
+            db.add_room_binding(conn, "tk123", "talk", "tk123")
+            db.set_room_brain(conn, "tk123", "native")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="talk", surface_ref="tk123",
+                user_id="alice", text="hi", channel_name="#room",
+            )
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).brain == "native"
+
+    def test_a_null_room_brain_leaves_the_task_null(self, config, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="hi", source_type="web",
+            )
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).brain is None
+
+    def test_an_explicit_brain_argument_wins_over_the_room(self, config, db_path):
+        """No surface passes one today; the parameter exists so a future one
+        can carry an explicit pick without changing the choke point."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+            db.set_room_brain(conn, "room1", "native")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="hi", source_type="web",
+                brain="claude_code",
+            )
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).brain == "claude_code"
+
+    def test_apply_room_default_false_still_takes_the_room_brain(
+        self, config, db_path,
+    ):
+        """The one asymmetry between this fill and the model/effort fill above
+        it, and the only thing stopping the two being folded into one condition.
+
+        `apply_room_default=False` is what an explicit `!model default` sets so
+        it can escape the room's model pin. There is no `!brain` message prefix,
+        so nothing should read that flag as "drop the room's brain too": a turn
+        that opted out of the model default must still run the room's brain.
+        Model and effort are asserted alongside, or the test cannot tell the two
+        fills apart.
+        """
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+            db.set_room_brain(conn, "room1", "native")
+            db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="hi", source_type="web",
+                model=None, effort=None, apply_room_default=False,
+            )
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.brain == "native"
+        assert (task.model or "") == ""
+        assert (task.effort or "") == ""
+
+    def test_a_model_prefix_turn_still_takes_the_room_brain(
+        self, config, db_path,
+    ):
+        """The same asymmetry through the Talk/web caller, which reaches it as
+        `model_prefix_used=True` rather than by passing the flag directly."""
+        from istota.transport import IncomingMessage, ingest_message
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tk1", "alice", origin="talk")
+            db.add_room_binding(conn, "tk1", "talk", "tk1")
+            db.set_room_brain(conn, "tk1", "native")
+            db.set_room_model_effort(conn, "tk1", "claude-opus-4-8", "high")
+        with db.get_db(db_path) as conn:
+            tid = ingest_message(conn, config, IncomingMessage(
+                user_id="alice", text="hi", source_type="talk", surface="talk",
+                channel_token="tk1", channel_name="#room",
+                model=None, effort=None, model_prefix_used=True,
+            ))
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, tid)
+        assert task.brain == "native"
+        assert (task.model or "") == ""
+
+    def test_an_explicit_empty_brain_escapes_the_room_default(
+        self, config, db_path,
+    ):
+        """The counterpart of `!model default` for a surface that later grows a
+        brain prefix: "" is distinguishable from None and stores NULL."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+            db.set_room_brain(conn, "room1", "native")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="hi", source_type="web", brain="",
+            )
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).brain is None
+
+    def test_an_email_turn_in_the_same_room_does_not_take_its_brain(
+        self, config, db_path,
+    ):
+        """Email is not a room *member* surface, so the whole room-default block
+        is skipped for it — the existing `ROOM_SURFACES` boundary, now asserted
+        against `brain` too. Model and effort are checked alongside so a future
+        change that hoists the block out of the guard fails here."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+            db.set_room_brain(conn, "room1", "native")
+            db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
+        with db.get_db(db_path) as conn:
+            _tok, task_id = record_inbound(
+                conn, config, surface="email", surface_ref="room1",
+                user_id="alice", text="hi", source_type="email",
+            )
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.brain is None
+        assert (task.model or "") == ""
+        assert (task.effort or "") == ""
+
+    def test_an_edit_between_two_turns_changes_only_the_second(
+        self, config, db_path,
+    ):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web")
+            db.add_room_binding(conn, "room1", "web", "room1")
+            db.set_room_brain(conn, "room1", "native")
+        with db.get_db(db_path) as conn:
+            _tok, first = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="one", source_type="web",
+            )
+        with db.get_db(db_path) as conn:
+            db.set_room_brain(conn, "room1", "claude_code")
+        with db.get_db(db_path) as conn:
+            _tok, second = record_inbound(
+                conn, config, surface="web", surface_ref="room1",
+                user_id="alice", text="two", source_type="web",
+            )
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, first).brain == "native"
+            assert db.get_task(conn, second).brain == "claude_code"
+
+    def test_ingest_message_carries_the_room_brain(self, config, db_path):
+        from istota.transport import IncomingMessage, ingest_message
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tk1", "alice", origin="talk")
+            db.add_room_binding(conn, "tk1", "talk", "tk1")
+            db.set_room_brain(conn, "tk1", "native")
+        with db.get_db(db_path) as conn:
+            tid = ingest_message(conn, config, IncomingMessage(
+                user_id="alice", text="hi", source_type="talk", surface="talk",
+                channel_token="tk1", channel_name="#room",
+            ))
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, tid).brain == "native"
+
+    def test_ingest_message_passes_an_explicit_brain_through(
+        self, config, db_path,
+    ):
+        from istota.transport import IncomingMessage, ingest_message
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tk1", "alice", origin="talk")
+            db.add_room_binding(conn, "tk1", "talk", "tk1")
+            db.set_room_brain(conn, "tk1", "native")
+        with db.get_db(db_path) as conn:
+            tid = ingest_message(conn, config, IncomingMessage(
+                user_id="alice", text="hi", source_type="talk", surface="talk",
+                channel_token="tk1", channel_name="#room",
+                brain="tmux_claude",
+            ))
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, tid).brain == "tmux_claude"
+
+
+# =============================================================================
 # !room command — both surfaces
 # =============================================================================
 

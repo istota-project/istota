@@ -62,6 +62,7 @@ def main() -> int:
     brain_allowlist = {
         "kind", "native", "tmux", "claude_code", "source_type_overrides",
         "fallback", "fallback_on_transient", "fallback_cooldown_seconds",
+        "room_selectable",
     }
     brain = raw.get("brain", {})
     leaked = sorted(k for k in brain if k not in brain_allowlist)

@@ -13,6 +13,7 @@ import tomli
 from .config_mapper import (
     Hook,
     _KEEP,
+    _warn,
     apply_section,
     coerce_float,
     coerce_int,
@@ -1546,12 +1547,20 @@ class BrainConfig:
     matching tasks. This is the gradual-rollout knob: move cron/heartbeat to
     the native brain while interactive tasks stay on ``claude_code``. Set in
     TOML as ``[brain.source_type_overrides]``.
+
+    ``room_selectable`` names the brain kinds a room may pin for itself. Empty
+    (the default) means no room may override the brain, so the feature ships
+    inert and an operator opts in by naming kinds. It is a gate rather than a
+    preference: a brain kind selects an isolation posture, and a change to an
+    enforcement mechanism should not arrive switched on by an upgrade. Set in
+    TOML as ``[brain] room_selectable``.
     """
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
     tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
     claude_code: ClaudeCodeBrainConfig = field(default_factory=ClaudeCodeBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
+    room_selectable: list[str] = field(default_factory=list)
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found / tmux launch failure), the task runs
     # on ``fallback`` with that brain's own configured settings. "" = no
@@ -3156,6 +3165,19 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "brain.source_type_overrides": lambda raw, key: (
         {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else _KEEP
     ),
+    # Same reason as `brain.fallback`, one level down: each entry is compared
+    # literally against the buildable kinds, so a stray space in a rendered
+    # config is a name that matches nothing and grants nothing — and this list
+    # is the gate on which brains a room may pin, so a silently inert entry
+    # reads to an operator as a feature that does not work. An empty string
+    # survives the generic list coercion and would sit in the admin config view
+    # as a kind, so blanks go too. Stringified for the reason the override
+    # map's values are: TOML will hold a bare number quite happily.
+    "brain.room_selectable": lambda raw, key: (
+        [name for name in (str(entry).strip() for entry in raw) if name]
+        if isinstance(raw, (list, tuple))
+        else _warn(key, raw, "a list of brain kinds")
+    ),
 }
 
 
@@ -3547,6 +3569,7 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     _validate_brain_fallback(config)
+    _validate_room_selectable(config)
     _validate_claude_code_brain(config)
     _validate_advisor_model(config)
     _validate_forge_clis(config)
@@ -3702,12 +3725,21 @@ def _validate_advisor_model(config: "Config") -> None:
 _TMUX_NO_FALLBACK_NOTICE_SAID = False
 
 
-def _runnable_brain_kinds(config: "Config") -> set[str]:
-    """Every brain kind this deployment can actually put a task on.
+def _fallback_scoped_kinds(config: "Config") -> set[str]:
+    """The brain kinds ``[brain] fallback`` still governs.
 
     ``kind`` plus the ``source_type_overrides`` targets, minus any target
     ``resolve_brain_kind`` would log and ignore — an override naming a kind that
     does not exist runs on ``kind``, so it must not count as a second brain.
+
+    This is **not** every kind a task can run under, which is
+    ``brain.reachable_brain_kinds``: a room may pin any kind in
+    ``[brain] room_selectable``, and those are deliberately absent here. An
+    admitted room override clears ``fallback``, so a pinned room has no failover
+    — counting those kinds would keep a fallback alive that no task could use,
+    and would fire the tmux notice below recommending one for a shape that is
+    meant to have none. Widen this and both guards start answering a question
+    neither caller asked.
     """
     from .brain import KNOWN_BRAIN_KINDS
 
@@ -3756,7 +3788,7 @@ def _validate_brain_fallback(config: "Config") -> None:
             fb, sorted(KNOWN_BRAIN_KINDS),
         )
         config.brain.fallback = ""
-    elif fb and _runnable_brain_kinds(config) == {fb}:
+    elif fb and _fallback_scoped_kinds(config) == {fb}:
         # Only where *nothing* the deployment can run would benefit. A
         # `source_type_overrides` entry routing to another kind makes this a real
         # target for those tasks even though it equals `kind`, and blanking it
@@ -3771,7 +3803,7 @@ def _validate_brain_fallback(config: "Config") -> None:
         config.brain.fallback = ""
     global _TMUX_NO_FALLBACK_NOTICE_SAID
     if (
-        "tmux_claude" in _runnable_brain_kinds(config)
+        "tmux_claude" in _fallback_scoped_kinds(config)
         and not (config.brain.fallback or "").strip()
         and not _TMUX_NO_FALLBACK_NOTICE_SAID
     ):
@@ -3781,6 +3813,41 @@ def _validate_brain_fallback(config: "Config") -> None:
             "failure or usage limit fails the task rather than rerouting. Set "
             'fallback = "claude_code" to keep the behaviour it had before '
             "ISSUE-362.",
+        )
+
+
+def _validate_room_selectable(config: "Config") -> None:
+    """Warn about a ``[brain] room_selectable`` entry no brain answers to.
+
+    The entry is left on the field rather than corrected, unlike
+    ``_validate_brain_fallback``'s two guards: ``room_selectable_kinds`` filters
+    it out at every read anyway, so the value can stay visible in the admin
+    config view as what the operator wrote while granting nothing.
+
+    A warning rather than nothing, because this list is a gate and a name that
+    matches no kind is the "typo that did nothing" shape — it is offered to no
+    user and refused by nothing, so without a line here the operator sees a
+    feature that does not work and no reason why. ``resolve_brain_kind``'s own
+    refusal cannot cover it: that fires when a room *pins* a kind, and a name
+    the picker never offered is a name no room can pin.
+
+    Once per load, like the unknown-``fallback`` warning beside it, and only
+    where an entry is actually wrong.
+    """
+    from .brain import KNOWN_BRAIN_KINDS
+
+    unknown = [
+        name for name in (config.brain.room_selectable or [])
+        if name not in KNOWN_BRAIN_KINDS
+    ]
+    if unknown:
+        logging.getLogger("istota.config").warning(
+            "[brain] room_selectable names %s, which %s not a known brain kind "
+            "%s; no room will be offered %s",
+            ", ".join(repr(name) for name in unknown),
+            "are" if len(unknown) > 1 else "is",
+            sorted(KNOWN_BRAIN_KINDS),
+            "them" if len(unknown) > 1 else "it",
         )
 
 

@@ -41,6 +41,7 @@ import {
   type ChatAttachment,
   type ChatConfig,
   type ChatRoom,
+  type RoomPatch,
   type ChatHistory,
   type ChatView,
   type ExternalTurnDisplay,
@@ -81,6 +82,7 @@ import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
 import {
   isKnownCommand,
+  dropRoomCatalogue,
   loadCommandNames,
   resetCommandCatalogue,
 } from '$lib/components/chat/autocomplete/providers';
@@ -329,10 +331,7 @@ export interface ChatSession {
   scrollTarget: Writable<{ cid: number; nonce: number } | null>;
   newRoom: (name: string) => Promise<void>;
   renameRoom: (id: number, name: string) => Promise<void>;
-  updateRoomSettings: (
-    id: number,
-    patch: { name?: string; model?: string | null; effort?: string | null },
-  ) => Promise<void>;
+  updateRoomSettings: (id: number, patch: RoomPatch) => Promise<void>;
   promoteRoom: (id: number) => Promise<void>;
   archiveRoom: (id: number) => Promise<void>;
   deleteRoom: (id: number) => Promise<void>;
@@ -1568,10 +1567,12 @@ function createSession(): ChatSession {
           name: fresh.name,
           origin: fresh.origin,
           talk_token: fresh.talk_token,
-          // model/effort ride along so the header's model badge can't go stale
-          // until reload when the default is changed on another device.
+          // model/effort/brain ride along so the header's model badge and the
+          // settings modal can't go stale until reload when a default is
+          // changed on another device.
           model: fresh.model,
           effort: fresh.effort,
+          brain: fresh.brain,
           unread_count: unreadFor(fresh),
           // Whichever stamp is newer. This response was built before it was
           // awaited, so a frame that landed in between is ahead of it — taking
@@ -2106,7 +2107,12 @@ function createSession(): ChatSession {
         talk_token: fresh.talk_token ?? next[idx].talk_token,
         model: fresh.model ?? null,
         effort: fresh.effort ?? null,
+        brain: fresh.brain ?? null,
       };
+      // Same invalidation the local save does, for a brain changed on another
+      // surface: `!brain` on Talk, or this user's other device. The frame is
+      // the only notice this client gets.
+      if ((fresh.brain ?? null) !== (rs[idx].brain ?? null)) dropRoomCatalogue(fresh.id);
       return next;
     });
   }
@@ -3297,12 +3303,31 @@ function createSession(): ChatSession {
     rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
   }
 
-  async function updateRoomSettings(
-    id: number,
-    patch: { name?: string; model?: string | null; effort?: string | null },
-  ) {
-    const updated = await updateChatRoom(id, patch);
+  async function updateRoomSettings(id: number, patch: RoomPatch) {
+    // `cleared` is a report about this request, not room state, so it is taken
+    // off before the merge — spread onto the record it would stay there for the
+    // life of the session and read as a standing property of the room.
+    const { cleared, ...updated } = await updateChatRoom(id, patch);
+    if (patch.brain !== undefined) {
+      // The room's model aliases were resolved through the brain it had when
+      // they were fetched, and the picker's cache is per session. Without this
+      // the modal's own "pick a new one after saving" caption walks the user
+      // back into a list the next save refuses with a 400.
+      dropRoomCatalogue(id);
+    }
     rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
+    if (cleared?.length) {
+      // Said after the fact as well as before it. The modal disables the model
+      // select when it can see the change coming, but it is not the only client
+      // and it cannot see a brain someone changed on another surface between
+      // the modal opening and the save.
+      notifyWarning(
+        cleared.length > 1
+          ? "This room's model and effort defaults were cleared — that model belongs to the previous brain."
+          : "This room's model default was cleared — that model belongs to the previous brain.",
+        { key: 'chat:room-model-cleared' },
+      );
+    }
   }
 
   async function promoteRoom(id: number) {

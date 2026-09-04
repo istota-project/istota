@@ -66,6 +66,11 @@ class Task:
     model: str | None = None  # Per-task model override; empty/None = use config default
     effort: str | None = None  # Per-task effort override; empty/None = use config default
     model_used: str | None = None  # Model the brain actually ran (resolved canonical ID), set post-run
+    # Per-task brain override (a kind: claude_code / native / tmux_claude);
+    # None = resolve from config. Frozen here at creation from `rooms.brain` so
+    # a room edited while this task runs cannot change what it is, and copied by
+    # retries and subtasks. Outranks `[brain.source_type_overrides]`.
+    brain: str | None = None
     talk_delivery_token: str | None = None  # Real Talk room for this task's notifications; NULL falls back to conversation_token
     # Phase 1.3 (unified credential resolution refactor): skill-task
     # dispatch. Set when the task should run a single CLI skill (e.g.
@@ -306,6 +311,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # Phase 1.3 — skill-task dispatch
         ("skill", "TEXT"),
         ("skill_args", "TEXT"),
+        # Per-task brain override, frozen from `rooms.brain` at creation. No
+        # backfill: NULL is the right answer for every existing row and reads
+        # as "resolve from config", which is what they all did.
+        ("brain", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -739,14 +748,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 archived    INTEGER NOT NULL DEFAULT 0,
                 model       TEXT,
-                effort      TEXT
+                effort      TEXT,
+                brain       TEXT
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived)")
-        # Backfill the per-room model/effort columns on an existing rooms table
-        # (created by an earlier build without them). Placed here, after the
-        # CREATE, so the table exists before the ALTER.
-        for _room_col in ("model", "effort"):
+        # Backfill the per-room model / effort / brain columns on an existing
+        # rooms table (created by an earlier build without them). Placed here,
+        # after the CREATE, so the table exists before the ALTER.
+        for _room_col in ("model", "effort", "brain"):
             try:
                 conn.execute(f"ALTER TABLE rooms ADD COLUMN {_room_col} TEXT")
             except sqlite3.OperationalError:
@@ -1152,6 +1162,7 @@ def create_task(
     queue: str = "foreground",
     model: str | None = None,
     effort: str | None = None,
+    brain: str | None = None,
     talk_delivery_token: str | None = None,
     skill: str | None = None,
     skill_args: str | None = None,
@@ -1197,9 +1208,9 @@ def create_task(
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             reply_to_message_id, withheld_from_room,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
-            queue, model, effort,
+            queue, model, effort, brain,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1226,6 +1237,7 @@ def create_task(
             queue,
             model or None,
             effort or None,
+            brain or None,
             talk_delivery_token,
             skill,
             skill_args,
@@ -1251,7 +1263,7 @@ _TASK_COLUMNS = (
     "reply_to_content, reply_to_message_id, withheld_from_room, "
     "heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
-    "talk_delivery_token, skill, skill_args"
+    "brain, talk_delivery_token, skill, skill_args"
 )
 
 
@@ -1301,6 +1313,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         model=row["model"],
         effort=row["effort"],
         model_used=row["model_used"],
+        brain=row["brain"],
         talk_delivery_token=row["talk_delivery_token"],
         skill=row["skill"],
         skill_args=row["skill_args"],
@@ -3635,6 +3648,9 @@ class Room:
     archived: bool
     model: str | None = None
     effort: str | None = None
+    #: Standing brain default for this room (a kind), or None to inherit the
+    #: instance default. Copied onto `tasks.brain` at `record_inbound`.
+    brain: str | None = None
     # Newest row in the room's canonical transcript, falling back to the room's
     # own creation time when it has never been spoken in. Populated only by the
     # queries that compute it (`list_member_rooms`) — a room fetched by token
@@ -3688,6 +3704,7 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         # Older DBs mid-migration may lack these columns; default to None.
         model=row["model"] if "model" in keys else None,
         effort=row["effort"] if "effort" in keys else None,
+        brain=row["brain"] if "brain" in keys else None,
         last_activity=row["last_activity"] if "last_activity" in keys else None,
     )
 
@@ -3989,6 +4006,25 @@ def set_room_model(conn: sqlite3.Connection, token: str, model: str | None) -> N
     via set_room_model_effort — that's the caller's explicit both-pick.)"""
     conn.execute(
         "UPDATE rooms SET model = ? WHERE token = ?", (model, token)
+    )
+
+
+def set_room_brain(conn: sqlite3.Connection, token: str, brain: str | None) -> None:
+    """Set the room's standing brain default (a kind), or None to clear it.
+
+    Its own knob: unlike the alias resolution behind `set_room_model_effort`,
+    nothing about a brain kind implies a model or an effort. Clearing a model
+    pin that the new brain's namespace cannot resolve is a decision the command
+    and HTTP layers make, above this, because only they know what the outgoing
+    brain was.
+
+    The value is stored as given and validated at *dispatch* rather than here,
+    so that an operator shortening `[brain] room_selectable` takes effect at the
+    next turn without a sweep, and a later restoration brings the room's setting
+    back rather than finding it erased.
+    """
+    conn.execute(
+        "UPDATE rooms SET brain = ? WHERE token = ?", (brain, token)
     )
 
 

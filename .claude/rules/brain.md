@@ -535,6 +535,9 @@ kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
 fallback = "native"               # brain kind to fall back to when primary unavailable
 fallback_on_transient = true      # also reroute a persistent transient_api_error (default on)
 fallback_cooldown_seconds = 900   # skip an unavailable primary this long; 0 disables stickiness
+# Brain kinds a room may pin for itself. Empty (the default) = none may.
+# See "Per-room brain selection" below.
+room_selectable = ["claude_code", "native"]
 
 [brain.native]         # only used when kind = "native" (or routed-to/fallen-back-to below)
 provider = "openai_compat"
@@ -589,6 +592,209 @@ scheduled = "native"
 heartbeat = "native"
 ```
 
+## Per-room brain selection
+
+A room carries a standing brain default the way it already carries `model` and
+`effort`. Two nullable columns hold it: `rooms.brain`, the standing choice, and
+`tasks.brain`, the answer for one task. `record_inbound` copies the first onto
+the second at task creation, in the same block that fills `model` and `effort`
+and under the same `room_surface` guard — so Talk and web, and deliberately not
+email, which joins a room's transcript without being a room surface
+(`.claude/rules/transport.md`).
+
+A task column as well as a room column, for the reason `model` and `effort`
+have both: every site that resolves the brain already holds the task row, so
+the resolution stays a pure function of that row rather than a second read of
+the rooms table on a hot path; an edit to the room must not change a task
+already running; and retry and subtask inheritance then come free
+(`_create_retry_task` and the deferred subtask writer copy the column). A `source_type` of `subtask` would otherwise
+take `source_type_overrides["subtask"]` and could silently differ from its
+parent.
+
+**Resolution order**, highest first:
+
+```
+tasks.brain  >  [brain.source_type_overrides][source_type]  >  [brain] kind
+```
+
+`resolve_brain_kind(source_type, brain_config, override=None)` is where all
+three meet. The room sits *above* the source-type layer because the two answer
+different questions: `source_type_overrides` is an operator's gradual-rollout
+knob keyed on a lane, a room's brain is an explicit human choice about one
+conversation, and an explicit pick a lane rule silently overrode would be
+indistinguishable from a bug.
+
+An override is admitted only when it names a buildable kind **and** one the
+operator listed in `[brain] room_selectable`. Those are two separate refusal
+branches, each a WARNING and a fallthrough to the source-type layer, never a
+failed task — the same contract an unknown `source_type_overrides` target
+already has. The allowlist branch is what makes shortening the list take effect
+at the next dispatch with nothing having to rewrite stored rows: the column
+keeps its value, the operator may restore the list, and `!brain` says the room
+is set to a kind that is no longer offered and names what it is running
+instead.
+
+**The allowlist is empty by default and is a gate rather than a preference.**
+Brain kind decides which process holds the agent loop, which credentials that
+process carries, which `SandboxProfile` is built and what tool set is
+registered — so it changes an enforcement posture, and a change to one should
+not arrive switched on by an upgrade. Be exact about which posture, because the
+obvious answer is out of date: since ISSUE-389 the native brain's six core
+tools run in a per-attempt bwrap namespace of their own (`tool_server`, under
+`SandboxProfile.NATIVE`), so tool *execution* is no longer the difference.
+`native_fs_roots` is the error-message layer above that namespace, and the only
+confinement there is on macOS, the standalone install and the shipped Docker
+stack — where the CLI brains are equally unconfined, so it is not a
+native-versus-CLI delta there either. Writing a room's brain is admin-gated on top of the list; reading is
+not, since every member of a shared room is entitled to know what their turns
+run under. `room_selectable_kinds(brain_config)` is the allowlist intersected
+with the kinds `make_brain` can build, so a name that is not one is offered to
+nobody. `config._validate_room_selectable` warns about it once per load and
+leaves the value on the field: `resolve_brain_kind`'s own refusal cannot cover
+this case, since that fires when a room *pins* a kind and a name the picker
+never offered is a name no room can pin — the "typo that did nothing" shape,
+where the operator sees a feature that does not work and no reason why.
+
+**The live delta is egress, and a shared room is what made it reachable.** A
+room's brain applies to every member's turns, admin or not — the fill is
+unconditional on sender — so an admin pinning a room to `native` decides the
+posture for a non-admin who chose nothing. The native brain's `WebFetch` runs
+in the **daemon's** network namespace, outside the CONNECT allowlist, where the
+same user's CLI-brain task has `--unshare-net` plus that allowlist; and the
+tool-server namespace above does not cover it, since it is a daemon-side tool
+rather than one of the six. So `build_allowed_tools` withholds `WebFetch` from a
+non-admin, unconditionally rather than only for a pinned room — the asymmetry
+predates per-room selection and exists on any native-default deployment, and a
+rule scoped to pinned rooms would leave a non-admin *more* egress on the
+deployment default than in a room somebody pinned. `WebSearch` stays for
+everyone: it runs at the provider and returns titles and URLs, granting this
+host no egress at all.
+
+### A pinned room has no failover
+
+An admitted override returns `replace(brain_config, kind=…, fallback="")`, so
+`effective_fallback_kind` answers None and the failover machinery collapses to
+a plain primary call. The room named *this* brain; a task that cannot run on it
+fails with the primary's own `stop_reason` rather than answering from a
+different model — and rather than `FALLBACK_EXHAUSTED_MARKER`'s "both brains
+are down" wording, which would be false, since only one was tried.
+
+One rule rather than three patches. Left alone, a routed kind inherits
+`fallback` and the asymmetries are arbitrary in both directions: a
+`native`-pinned room on a deployment whose fallback is `native` would have none
+while every other room did, and a room pinned to the deployment's own fallback
+kind would rerun a failed attempt through the identical brain. With no fallback
+there is nothing to collide with, which is also why `room_selectable_kinds`
+needs no exclusion rule for the fallback kind and why `reachable_brain_kinds`
+folds failover over the base kind and the `source_type_overrides` targets and
+**not** over `room_selectable`.
+
+The decision is made at the moment of admission rather than inferred
+downstream, and it has to be: a room pinned to the kind that is already the
+instance default resolves to a config equal to the unrouted one, so "was an
+override admitted" is not a question the executor can ask of a `BrainConfig`.
+Pinning the default kind therefore still counts as pinning. The alternative is
+a rule with an exception, which is harder to explain and no less surprising; the
+surprise is removed by saying it instead, in the `!brain` set reply and in the
+failover line every `!brain` read carries.
+
+**What a pinned room does not lose is the breaker and the alert.** The
+breaker-open block in `executor` is deliberately not gated on a fallback being
+configured (ISSUE-362) — the breaker is a shared signal the direct callers read
+through `primary_brain_unavailable` — and `_fire_fallback_alert` fires there
+with `fallback_kind=None`. Only `_skip_primary` is gated on a fallback
+existing. So through an outage a pinned room's task makes one doomed primary
+attempt rather than being skipped straight to a substitute that does not exist,
+the operator is alerted, the availability record is written, and the first task
+after the provider recovers succeeds. The cooldown holds back the direct
+callers, not the room's tasks. This is the same shape any deployment running
+the shipped `fallback = ""` already has. `!brain default` restores the
+inherited brain and its failover.
+
+### The model-namespace rule
+
+`rooms.model` holds a canonical id resolved in one brain's namespace, and the
+room does not store the alias that produced it — so an id that crossed from
+`anthropic` (`claude_code`, `tmux_claude`) to `openai_compat` (`native`) is not
+re-resolvable, only unrunnable. Two halves, and the first is worth nothing
+without the second:
+
+1. **A brain change across a namespace clears `rooms.model` and `rooms.effort`
+   as a unit**, and the reply or the PATCH response says what it dropped.
+   `commands._clear_pin_across_namespaces` is the one implementation; the web
+   PATCH calls it rather than restating the rule. A move within a namespace
+   keeps the pin, which is correct — the same id runs under both. An
+   undeterminable namespace clears, which is the opposite of this module's
+   usual "behave as before" and is right here: leaving a pin whose portability
+   is unknown is the failure being prevented. Effort alone survives a change,
+   since a semantic rung is portable; it goes only when the model goes, because
+   the two were written as a pair.
+2. **Every writer of `rooms.model`, and every surface that offers a model name,
+   resolves through the room's brain** — `commands.brain_for_room(config, conn,
+   room_token, source_type)` on the command and Talk paths,
+   `web_app._brain_for_room_token` on the web ones. Without this the next
+   `!room model sonnet` writes an anthropic id back into a native room and
+   undoes the clear permanently. Seven surfaces over six call expressions: the
+   `!model` prefix on Talk (`transport/talk/inbound.py`) and on web
+   (`chat_send_message`), `!room model`, `_known_room_models` — which gates the
+   web PATCH — `/chat/commands`, which takes an optional `room_id` for this and
+   nothing else, and then `!models` and `!help`, which share
+   `commands._ctx_brain`. A surface added through that helper costs no new call
+   and makes the count eight with nothing going red, so read the helper's
+   callers rather than the number. The composer's own autocomplete still asks unscoped, so its
+   suggestions can be stale; a pick it produces is refused server-side against
+   the room's brain rather than run.
+
+`brain_for_room` returns a `BrainConfig`, so a caller that needs to resolve an
+alias composes `make_brain(brain_for_room(...))`. It never raises: the whole
+call including `resolve_brain_kind` is inside the guard, because `rooms.brain`
+is TEXT in a dynamically typed store and `.strip()` on a non-string would
+otherwise escape into the Talk poll loop. The per-user native API-key overlay
+the executor applies is deliberately not applied here — this path resolves
+alias names and reaches no provider.
+
+### Surfaces
+
+`!brain` has three forms. Bare, it reports the chain — the room's own setting,
+the rule for this lane, the instance default, and a failover line — and is
+ungated. `!brain <kind>` sets it, admin-only, bounded by the allowlist, naming
+both consequences. `!brain default` clears it; `default` is checked ahead of
+the allowlist, since clearing is a narrowing and emptying `room_selectable` is
+the documented way to switch the feature off, which is exactly how a room ends
+up holding a pin nothing honours. `!room` gains a read-only brain line and no
+setter — one writer, for the "several ways to name the same destination" reason
+that has produced three room bugs in this codebase already.
+
+`PATCH /api/chat/rooms/{id}` is the second writer, on the key-presence contract
+`model` and `effort` already use, with the admin gate keyed on the key's
+presence so a clear is gated too. `brain` and `model` can arrive in one body,
+which the settings modal makes the common case: `model` is applied first, then
+the brain, then the namespace rule against the pin this request just wrote. See
+`.claude/rules/web-chat.md`.
+
+`doctor` reads `reachable_brain_kinds(brain_config)` rather than
+`config.brain.kind`, so `runtime.model_cli` and `runtime.tmux` run on a
+deployment that can only reach those kinds through a room, and
+`runtime.native_brain` is new — `make_brain("native")` constructs a defaulted
+dataclass and asserts no credential, so "buildable" was never "runnable" and an
+allowlisted `native` could otherwise give a room where every turn fails at the
+provider with nothing naming it. Config only, no database: a
+`SELECT DISTINCT brain FROM rooms` would make two pure checks
+database-dependent and would still answer wrongly for a room nobody has used
+yet. The cost is stated rather than hidden — allowlisting a kind gets that
+kind's checks whether or not a room selected it, which is the safe direction.
+
+`!steer`'s gate reads the task's own `brain` rather than `config.brain.kind`,
+so a refusal names the brain that room actually runs. Better in the static case
+and not a one-way improvement: a task whose primary fell back mid-attempt runs
+a brain the column does not name, so the gate can still accept a note that
+reaches nothing. That state is reachable today for the same reason and this
+neither creates nor fixes it — a pinned room can no longer get into it at all,
+since it has no failover.
+
+`task_usage.brain_kind` is written per attempt and is already a `!usage` group
+key, so the "By brain" split becomes a per-room readout with no reporting work.
+
 ## Brain fallback (availability failover)
 
 When the primary brain is **unavailable**, the executor reruns the same attempt
@@ -632,7 +838,10 @@ same-attempt rerun already lives there). Three cooperating pieces:
   `replace(brain_config, kind=target)` and the routed config inherits `fallback`,
   so `kind = "claude_code"` + `source_type_overrides = {scheduled = "tmux_claude"}`
   + `fallback = "claude_code"` is a self-fallback for an interactive task and a
-  real target for a scheduled one. A
+  real target for a scheduled one. A routed config is also how a **room-pinned**
+  brain gets no failover at all: `resolve_brain_kind` clears `fallback` on the
+  admission path, so nothing here needs a condition of its own — see "Per-room
+  brain selection" above for why that is one rule rather than three. A
   `tmux_claude` primary used to resolve to `claude_code` there with nothing
   configured; that shim predated the generalized `fallback` key and was removed
   in ISSUE-362, because it left no value of `fallback` meaning "no failover" on
@@ -1272,9 +1481,15 @@ gated by the CONNECT allowlist. It is `build_default_tools`-registered
 (native-only) iff `env.web_fetch` is set and enabled; `NativeBrain._build_tools`
 maps `[brain.native.web_fetch]` (`WebFetchConfig`) → `session.tools.WebFetchPolicy`
 onto `ToolEnv.web_fetch` (`_web_fetch_policy()`), and the tool passes the
-`allowed_tools` filter because `executor.build_allowed_tools` already lists
-`WebFetch`. Empty `allowed_tools` (text-only, e.g. sleep cycle) still yields no
-tools.
+`allowed_tools` filter iff `executor.build_allowed_tools` listed `WebFetch` —
+which it does **for an admin only**. A non-admin's native task therefore builds
+no such tool, whatever `[brain.native.web_fetch] enabled` says: the tool reaches
+the network from the daemon's namespace outside the CONNECT allowlist, while
+that same user's task under a CLI brain has `--unshare-net` plus the allowlist,
+and a shared room an admin pinned to native puts a non-admin's turns on the
+native path without their choosing it. `build_prompt`'s Tools section is scoped
+by the same flag, or the prompt would name a tool that is not registered. Empty
+`allowed_tools` (text-only, e.g. sleep cycle) still yields no tools.
 
 Because it runs in the daemon netns (bypassing the CONNECT boundary), its
 hardening carries the whole load:
@@ -1297,8 +1512,8 @@ hardening carries the whole load:
   `Fetched: <final-url> (HTTP <status>, <mime>)` provenance header. Because a core
   tool doesn't drive `companion_skills`, the executor folds `untrusted_input` into
   the **eager** skill set when a task routes to the native brain with WebFetch
-  enabled (`_native_web_fetch_enabled`), so its inbound-handling guidance reaches
-  the prompt.
+  enabled *and the caller is an admin* (`_native_web_fetch_enabled`), so its
+  inbound-handling guidance reaches the prompt exactly where the tool does.
 - **Residual**: model-driven exfiltration via a GET query string is not
   eliminated (a GET is a canonical exfil channel), but it's the same bounded
   residual the `browse` skill already carries. `require_url_provenance` (default

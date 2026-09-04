@@ -160,6 +160,15 @@ def record_inbound(
     output_target: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    # An explicit per-message brain pick, or None to take the room's standing
+    # default; "" escapes the room default without naming a kind. This is the
+    # one place `apply_room_default` deliberately does *not* apply: that flag
+    # exists so `!model default` can escape the room's model pin while
+    # resolving to no override of its own, and with no `!brain` message prefix
+    # there is nothing for it to be the counterpart of. Folding this fill into
+    # the condition above would therefore look like tidying and would silently
+    # let a `!model default` turn drop the room's brain too.
+    brain: str | None = None,
     apply_room_default: bool = True,
     priority: int = 5,
     # The worker queue the resulting task lands on. Interactive surfaces leave
@@ -333,6 +342,14 @@ def record_inbound(
             if effort is None:
                 effort = existing.effort
 
+        # The room's standing brain, on the same terms and inside the same
+        # guard: Talk and web, never email, matching what `model` and `effort`
+        # already do (ISSUE-136 — a guest surface joins a room's transcript and
+        # takes none of its settings). Frozen onto the task here so a later edit
+        # to the room cannot change a task already running.
+        if brain is None and existing is not None:
+            brain = existing.brain
+
         # 2b. Idempotent replay. Checked after the room is resolved (the key is
         #     scoped to a room, so the same key in two rooms is two messages)
         #     and before the task is created, so a retry adds nothing.
@@ -394,6 +411,7 @@ def record_inbound(
         talk_delivery_token=delivery_token,
         model=model,
         effort=effort,
+        brain=brain,
         priority=priority,
         queue=queue,
     )
@@ -463,6 +481,7 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         output_target=msg.output_target,
         model=msg.model,
         effort=msg.effort,
+        brain=msg.brain,
         queue=msg.queue,
         apply_room_default=not msg.model_prefix_used,
         external_id=str(msg.platform_message_id)

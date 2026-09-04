@@ -8,7 +8,11 @@ vi.mock('$lib/api', () => ({
 import { fetchChatCommands } from '$lib/api';
 import {
   commandProvider,
+  dropRoomCatalogue,
   getBaseModelChoices,
+  getBrainNamespaces,
+  getInheritedBrain,
+  getSelectableBrains,
   isKnownCommand,
   loadCommandNames,
   modelAliasProvider,
@@ -156,6 +160,97 @@ describe('getBaseModelChoices', () => {
       { value: 'claude-sonnet-5', label: 'sonnet' },
       { value: 'claude-haiku-4-5', label: 'haiku' },
     ]);
+    expect(fetchChatCommands).toHaveBeenCalledWith();
+  });
+
+  it('asks for one room at a time and caches per room', async () => {
+    // D5 Rule 2: the picker offers the aliases of the brain that would have to
+    // run them, and the catalogue has no room of its own.
+    const native = {
+      ...CATALOGUE,
+      model_aliases: [{ alias: 'fast', target: 'endpoint/m', effort: null }],
+    };
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) =>
+      roomId === 7 ? native : CATALOGUE,
+    );
+    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+    // The control: a different room on the same session gets its own answer,
+    // so the cache is keyed rather than shared.
+    expect((await getBaseModelChoices(8)).map((c) => c.value)).toContain('claude-opus-4-8');
+    const before = (fetchChatCommands as ReturnType<typeof vi.fn>).mock.calls.length;
+    await getBaseModelChoices(7);
+    expect((fetchChatCommands as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
+  });
+
+  it('degrades a failed room fetch, and retries next time rather than caching it', async () => {
+    // Caching the fallback would pin the deployment default to this room for
+    // the whole session — which for a room on another brain means every id the
+    // picker offers is one the save then refuses.
+    let fail = true;
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) => {
+      if (roomId === undefined) return CATALOGUE;
+      if (fail) throw new Error('boom');
+      return {
+        ...CATALOGUE,
+        model_aliases: [{ alias: 'fast', target: 'endpoint/m', effort: null }],
+      };
+    });
+    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+    fail = false;
+    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+  });
+
+  it('refetches a room whose catalogue was dropped', async () => {
+    // What a brain change calls: the aliases were resolved through the brain
+    // the room had at fetch time, and the cache outlives the change.
+    const native = {
+      ...CATALOGUE,
+      model_aliases: [{ alias: 'fast', target: 'endpoint/m', effort: null }],
+    };
+    let current = CATALOGUE;
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) =>
+      roomId === 7 ? current : CATALOGUE,
+    );
+    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+    current = native;
+    // The control: without the drop the stale list is still what comes back.
+    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+    dropRoomCatalogue(7);
+    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+  });
+});
+
+describe('getSelectableBrains', () => {
+  it('publishes what the server offered', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      selectable_brains: [{ kind: 'native', label: 'Native', model_namespace: 'openai_compat' }],
+    });
+    expect(await getSelectableBrains()).toEqual([
+      { kind: 'native', label: 'Native', model_namespace: 'openai_compat' },
+    ]);
+  });
+
+  it('reads an older server, which sends no such field, as no kinds', async () => {
+    expect(await getSelectableBrains()).toEqual([]);
+  });
+
+  it('drops a misshapen entry rather than handing the modal a broken option', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      selectable_brains: [
+        { kind: 'native', label: 'Native', model_namespace: 'openai_compat' },
+        { label: 'Broken' },
+        { kind: 'no_namespace', label: 'No namespace' },
+        { kind: 'no_label', model_namespace: 'anthropic' },
+      ],
+    });
+    expect((await getSelectableBrains()).map((b) => b.kind)).toEqual(['native']);
+  });
+
+  it('degrades to no kinds when the catalogue fetch fails', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom'));
+    expect(await getSelectableBrains()).toEqual([]);
   });
 });
 
@@ -220,5 +315,50 @@ describe('isKnownCommand', () => {
     const sugg = await commandProvider().getSuggestions('');
     expect(sugg.map((s) => s.label)).not.toContain('!inject');
     expect(sugg.map((s) => s.label)).toContain('!stop');
+  });
+});
+
+describe('getBrainNamespaces and getInheritedBrain', () => {
+  // The two fields the modal needs to answer "does this change cross a
+  // namespace" for a brain that is not on its own menu.
+  const PAYLOAD = {
+    ...CATALOGUE,
+    brain_namespaces: { claude_code: 'anthropic', native: 'openai_compat' },
+    inherited_brain: {
+      kind: 'claude_code',
+      label: 'Claude Code',
+      model_namespace: 'anthropic',
+    },
+  };
+
+  it('publishes what the server sent', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue(PAYLOAD);
+    expect(await getBrainNamespaces()).toEqual(PAYLOAD.brain_namespaces);
+    expect(await getInheritedBrain()).toEqual(PAYLOAD.inherited_brain);
+  });
+
+  it('reads an older server as no answer rather than a wrong one', async () => {
+    expect(await getBrainNamespaces()).toEqual({});
+    expect(await getInheritedBrain()).toBeNull();
+  });
+
+  it('refuses a misshapen payload of either kind', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      brain_namespaces: { good: 'anthropic', bad: 7 },
+      inherited_brain: { kind: 'claude_code' },
+    });
+    expect(await getBrainNamespaces()).toEqual({ good: 'anthropic' });
+    expect(await getInheritedBrain()).toBeNull();
+  });
+
+  it('refuses an array where a map was expected', async () => {
+    // `Object.entries` on an array yields index keys, so a bare shape test
+    // would turn `["anthropic"]` into `{ "0": "anthropic" }`.
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      brain_namespaces: ['anthropic'],
+    });
+    expect(await getBrainNamespaces()).toEqual({});
   });
 });

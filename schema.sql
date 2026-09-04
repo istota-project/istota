@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Distinct from `model`: stays NULL for default-model tasks so retries
     -- re-resolve the current default; surfaces (web-chat meta) read this.
     model_used TEXT,
+    -- Per-task brain override (a kind: claude_code / native / tmux_claude);
+    -- NULL = no override, resolve from config. Frozen at task creation from
+    -- `rooms.brain` so a room edited mid-flight does not change a running task,
+    -- and copied by retries and subtasks. Outranks
+    -- `[brain.source_type_overrides]`; see `brain.resolve_brain_kind`.
+    brain TEXT,
 
     -- Real Talk room for this task's notifications. Distinct from
     -- conversation_token, which doubles as an email-thread grouping key for
@@ -822,7 +828,13 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- record_inbound when the message carries no inline `!model` override.
     -- NULL = inherit the instance default.
     model       TEXT,
-    effort      TEXT
+    effort      TEXT,
+    -- Standing per-room brain default (a kind: claude_code / native /
+    -- tmux_claude). NULL = inherit. Copied onto `tasks.brain` by record_inbound
+    -- for a room-member surface, and resolved
+    -- `tasks.brain > [brain.source_type_overrides] > [brain] kind`. Admitted
+    -- only for a kind the operator listed in `[brain] room_selectable`.
+    brain       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 
