@@ -24,6 +24,7 @@
     type PointerSample,
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
+  import type { RoomPatch } from '$lib/api';
   import { REPLY_EXCERPT_CHARS, isClientOnly, type MessageReply } from '$lib/stores/segments';
   import { notifyError, notifyWarning, dismissNotice } from '$lib/stores/notices';
   import { online } from '$lib/stores/connectivity';
@@ -725,11 +726,7 @@
     sidebarOpen = false;
   }
 
-  async function saveRoomSettings(patch: {
-    name?: string;
-    model?: string | null;
-    effort?: string | null;
-  }) {
+  async function saveRoomSettings(patch: RoomPatch) {
     if (!settingsRoom) return;
     await session.updateRoomSettings(settingsRoom.id, patch);
     settingsRoom = null;
