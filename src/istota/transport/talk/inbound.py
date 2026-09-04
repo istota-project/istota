@@ -1191,6 +1191,88 @@ async def poll_one_conversation(
     )
 
 
+async def ingest_relayed_comments(
+    config: Config,
+    conversation_token: str,
+    comments: list[dict],
+    *,
+    conv_type: int | None,
+    display_name: str | None,
+    client: TalkClient | None = None,
+) -> list[int]:
+    """The relayed payload, into the same transaction the fetch path uses.
+
+    ``payload_direct``. The signaling server forwards the comment Talk
+    serialised, so a room whose every event carried one needs no ``GET /chat``
+    at all — this is the last request the design removes. It is deliberately
+    the last thing built, because it is the only part that can be wrong about
+    message *content* rather than about timing: everything above it refetches,
+    so a bug there is a latency bug.
+
+    **A relayed comment is the same dict the fetch path reads.** Both sides
+    call ``$message->toArray()``; measured field-for-field identical on
+    Nextcloud 34 / Talk 24.0.4 across four shapes (plain, @mention with
+    ``messageParameters``, a reply with a ``parent``, and one the bot posted),
+    each against the OCS message read both as the bot and as the human. The
+    relay carries exactly one key OCS does not put in the body,
+    ``lastCommonRead``, which the chat endpoint returns as a response header;
+    nothing here reads it. So this hands the comments to
+    ``_process_poll_results`` unchanged rather than translating them, and the
+    filter chain, the confirmation handling, the cursor advance and the
+    atomicity guarantee are the fetch path's own.
+
+    **Two things it does that the fetch path gets for free**, and both are
+    corrections rather than polish:
+
+    ``id > cursor``, applied here. On the fetch path the cursor is an argument
+    to the *server*, so a message already processed is never returned. Here the
+    payload arrived unasked, and a comment the watcher queued moments before a
+    reconnect has already been ingested by ``catch_up_conversation`` reading
+    forward from the same cursor. ``ingest_message`` dedups on the Talk message
+    id, but ``dispatch_command``, ``handle_confirmation_reply`` with its ack
+    post, and ``confirmations.cancel_for_conversation`` do not — so without
+    this filter a reconnect landing mid-burst re-runs a command, re-posts an
+    acknowledgement and re-cancels a confirmation. The read is safe against the
+    obvious race because the caller holds the room's in-flight flag, which is
+    what ``catch_up`` defers to and what the drain takes: inside that window
+    nothing else advances this room's cursor, and the poll loop is not running
+    at all when signaling is enabled.
+
+    Sorted by id. ``_process_poll_results`` walks messages in order and
+    advances the cursor as it goes, and a batch here is accumulated across
+    several events rather than returned by one call, so arrival order is the
+    only thing that would otherwise carry it.
+
+    A comment with no usable id is dropped rather than guessed at: the id is
+    what the cursor, the dedup and the ordering are all keyed on.
+    """
+    if not comments:
+        return []
+    if client is None:
+        client = get_talk_client(config)
+
+    async with talk_db(config.db_path) as conn:
+        cursor = db.get_talk_poll_state(conn, conversation_token)
+
+    floor = cursor if isinstance(cursor, int) else 0
+    fresh = []
+    for comment in comments:
+        message_id = comment.get("id")
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            continue
+        if message_id > floor:
+            fresh.append((message_id, comment))
+    if not fresh:
+        return []
+    fresh.sort(key=lambda pair: pair[0])
+
+    return await _process_poll_results(
+        config, client, [(conversation_token, [c for _id, c in fresh])],
+        {conversation_token: conv_type},
+        {conversation_token: display_name} if display_name else {},
+    )
+
+
 async def catch_up_conversation(
     config: Config,
     conversation_token: str,

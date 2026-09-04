@@ -25,7 +25,7 @@ import time
 
 import httpx
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from istota import db, doctor
 from istota.config import (
@@ -1239,3 +1239,149 @@ class TestAWatcherThatNeverConnectsEscalates:
         finally:
             sig.clear_stats_source()
             await sup._stop_watcher("grp")
+
+
+class TestPayloadDirectIsDecidedByTheSupervisor:
+    """Stage 5's safety rule lives in `mark_dirty`, not in the watcher.
+
+    A watcher offers what the relay carried; the supervisor decides whether it
+    can be used, because that depends on what else landed in the same burst.
+    """
+
+    def _config(self, config, *, payload_direct):
+        config.talk.signaling.payload_direct = payload_direct
+        return config
+
+    async def _armed(self, config):
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = _supervisor(config, client)
+        sup._live = {"grp"}
+        sup._watchable = {"grp"}
+        sup._context = {
+            "grp": poller.RoomContext(conv_type=2, display_name="team"),
+        }
+        return sup
+
+    @pytest.mark.asyncio
+    async def test_a_comment_is_queued_when_payload_direct_is_on(self, config):
+        sup = await self._armed(self._config(config, payload_direct=True))
+
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 11}])
+
+        assert sup._pending["grp"] == [{"id": 11}]
+        assert "grp" not in sup._force_fetch
+
+    @pytest.mark.asyncio
+    async def test_a_comment_is_ignored_when_payload_direct_is_off(
+        self, config,
+    ):
+        """The default. Trigger mode must be untouched by this stage."""
+        sup = await self._armed(self._config(config, payload_direct=False))
+
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 11}])
+
+        assert sup._pending == {}
+        assert "grp" in sup._force_fetch
+
+    @pytest.mark.asyncio
+    async def test_a_refresh_in_the_same_burst_forces_a_fetch(self, config):
+        """The rule the whole stage rests on.
+
+        Talk sends a bare refresh for a message with no visible rendering and
+        for a system message outside the relay set, so a payload-less event
+        means there is a message only a fetch can see. Ingesting the burst from
+        payloads alone would advance the cursor past it and nothing would ever
+        read it — the reconciliation `behind` comparison is a safety net
+        measured in minutes, not a substitute.
+        """
+        sup = await self._armed(self._config(config, payload_direct=True))
+
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 11}])
+        sup.mark_dirty("grp", watcher_token="grp", comments=None)
+
+        assert "grp" in sup._force_fetch
+
+        with patch(
+            "istota.transport.talk.supervisor.ingest_relayed_comments",
+            new=AsyncMock(return_value=[]),
+        ) as direct, patch(
+            "istota.transport.talk.supervisor.poll_one_conversation",
+            new=AsyncMock(return_value=[]),
+        ) as fetch:
+            await sup._drain_once()
+
+        assert direct.await_count == 0
+        assert fetch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_pure_payload_burst_makes_no_request(self, config):
+        """The win: N messages, no `GET /chat` at all."""
+        sup = await self._armed(self._config(config, payload_direct=True))
+
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 11}])
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 12}])
+
+        with patch(
+            "istota.transport.talk.supervisor.ingest_relayed_comments",
+            new=AsyncMock(return_value=[]),
+        ) as direct, patch(
+            "istota.transport.talk.supervisor.poll_one_conversation",
+            new=AsyncMock(return_value=[]),
+        ) as fetch:
+            await sup._drain_once()
+
+        assert fetch.await_count == 0
+        assert direct.await_count == 1
+        assert direct.await_args.args[2] == [{"id": 11}, {"id": 12}]
+        assert sup.stats()["payload_ingests"] == 1
+        # Taken with the dirty bit. A payload outliving its drain would be
+        # ingested against a cursor a later fetch had already advanced.
+        assert sup._pending == {}
+
+    @pytest.mark.asyncio
+    async def test_a_failed_payload_ingest_retries_as_a_fetch(self, config):
+        """The conservative half of the retry.
+
+        The results block is one transaction, so a raise rolled the cursor back
+        with it and a fetch from that cursor reads everything the batch held
+        plus anything the relay did not carry. Replaying the batch would retry
+        exactly the input that just failed and would still not see the rest.
+        """
+        sup = await self._armed(self._config(config, payload_direct=True))
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 11}])
+
+        with patch(
+            "istota.transport.talk.supervisor.ingest_relayed_comments",
+            new=AsyncMock(side_effect=RuntimeError("results transaction failed")),
+        ):
+            await sup._drain_once()
+
+        assert sup.stats()["fetch_failures"] == 1
+        assert "grp" in sup._dirty
+        assert "grp" in sup._force_fetch
+        assert sup._pending == {}
+
+        with patch(
+            "istota.transport.talk.supervisor.ingest_relayed_comments",
+            new=AsyncMock(return_value=[]),
+        ) as direct, patch(
+            "istota.transport.talk.supervisor.poll_one_conversation",
+            new=AsyncMock(return_value=[]),
+        ) as fetch:
+            await sup._drain_once()
+
+        assert direct.await_count == 0
+        assert fetch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_departed_room_drops_its_queued_payload(self, config):
+        sup = await self._armed(self._config(config, payload_direct=True))
+        sup.mark_dirty("grp", watcher_token="grp", comments=[{"id": 11}])
+
+        sup._watchable = set()
+        await sup._stop_departed()
+
+        assert sup._pending == {}
+        assert sup._force_fetch == set()

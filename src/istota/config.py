@@ -109,8 +109,13 @@ class TalkSignalingConfig:
     # exercised routinely rather than only on a fault.
     reconnect_backoff_max: int = 60
     # Consume the relayed `chat.comments` payload directly instead of
-    # refetching the room. Off until the relayed comment has been diffed field
-    # by field against the OCS one it is meant to be identical to.
+    # refetching the room. The diff this was gated on is done: measured
+    # field-for-field identical on Nextcloud 34 / Talk 24.0.4, across four
+    # message shapes, each read both as the bot and as the human. Still off by
+    # default, because it is the only part of this design that can be wrong
+    # about message *content* rather than about timing, and Talk relays a
+    # comment at all only from about Talk 21 — below that every event is a bare
+    # refresh, so switching this on changes nothing.
     payload_direct: bool = False
 
 

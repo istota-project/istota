@@ -94,6 +94,7 @@ from . import signaling as sig
 from .inbound import (
     RoomContext,
     catch_up_conversation,
+    ingest_relayed_comments,
     poll_one_conversation,
     reconcile_talk_rooms,
 )
@@ -424,10 +425,17 @@ class RoomWatcher:
             self._sup.count(
                 "refresh_events" if event.refresh_only else "comment_events",
             )
-            # Trigger mode: the payload is not read. A relayed comment and a
-            # bare refresh are the same instruction — fetch this room — which
-            # is what makes this path unable to be wrong about message content.
-            self._sup.mark_dirty(event.room_token, watcher_token=self.token)
+            # In trigger mode the payload is not read, and a relayed comment
+            # and a bare refresh are the same instruction — fetch this room —
+            # which is what makes that path unable to be wrong about message
+            # content. Under `payload_direct` the comments are *offered*; the
+            # supervisor still decides, because whether they can be used
+            # depends on what else landed in the same burst.
+            self._sup.mark_dirty(
+                event.room_token,
+                watcher_token=self.token,
+                comments=event.comments or None,
+            )
 
 
 class SignalingSupervisor:
@@ -459,6 +467,13 @@ class SignalingSupervisor:
         # the age below means "how long this room has been owed a fetch".
         self._dirty: dict[str, float] = {}
         self._inflight: set[str] = set()
+        # token -> relayed comments queued for the next drain, in arrival
+        # order. Only ever non-empty under `payload_direct`.
+        self._pending: dict[str, list] = {}
+        # Rooms whose next drain must be a *fetch* whatever is queued. See
+        # `mark_dirty`: this is what stops a refresh being swallowed by a
+        # payload batch it arrived beside.
+        self._force_fetch: set[str] = set()
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
 
@@ -761,14 +776,37 @@ class SignalingSupervisor:
     def _may_watch(self, token) -> bool:
         return isinstance(token, str) and bool(token) and token in self._live
 
-    def mark_dirty(self, token, *, watcher_token: str | None = None) -> None:
-        """Queue one room for a fetch. At most one in flight per room.
+    def mark_dirty(
+        self, token, *,
+        watcher_token: str | None = None,
+        comments: list | None = None,
+    ) -> None:
+        """Queue one room. At most one drain in flight per room.
 
         The token is the one the *server* named in the event. It is checked
         against the live set rather than trusted, and a watcher naming a room
         other than its own is refused outright: one session holds one room, so
         that combination means either a server bug or a frame nobody should be
         acting on.
+
+        **`comments` is an offer, not an instruction, and the refusal is where
+        payload-direct's whole safety argument lives.** An event carrying no
+        payload — a bare refresh, which Talk sends for a message with no
+        visible rendering and for a system message outside the relay set —
+        means there is a message only a fetch can see. If such an event
+        coalesced into a batch that was then ingested from payloads alone, the
+        cursor would advance past that message and nothing would ever read it:
+        the reconciliation `behind` comparison is a safety net measured in
+        minutes, not a substitute. So any payload-less event in a burst forces
+        the whole room's next drain to fetch, which is correct for every
+        message in the burst and costs one request.
+
+        Queued rather than ingested here. Going straight to the ingest path
+        from a watcher would bypass the in-flight flag, and that flag is what
+        `catch_up` defers to — so a reconnect's catch-up and a payload ingest
+        would run the non-idempotent half of the results block over the same
+        messages concurrently. The drain is the one serializer, and it stays
+        the one serializer.
         """
         if watcher_token is not None and token != watcher_token:
             self.count("foreign_room_events")
@@ -783,6 +821,10 @@ class SignalingSupervisor:
         # The *first* stamp wins, so the age of a dirty bit is how long the
         # room has been owed a fetch rather than how long since the last event.
         self._dirty.setdefault(token, time.monotonic())
+        if comments and self.config.talk.signaling.payload_direct:
+            self._pending.setdefault(token, []).extend(comments)
+        else:
+            self._force_fetch.add(token)
         self._wake.set()
 
     async def _drain_loop(self) -> None:
@@ -811,6 +853,13 @@ class SignalingSupervisor:
                 return
             attempted.add(token)
             marked_at = self._dirty.pop(token)
+            # Taken with the dirty bit, never left behind: a payload that
+            # outlived its drain would be ingested against a cursor a later
+            # fetch had already advanced, which is the double-processing this
+            # queue exists to avoid.
+            pending = self._pending.pop(token, [])
+            forced = token in self._force_fetch
+            self._force_fetch.discard(token)
             context = self._context.get(token)
             if context is None:
                 # A drain that cannot find context does not guess: the results
@@ -821,13 +870,22 @@ class SignalingSupervisor:
 
             self._inflight.add(token)
             try:
-                created = await poll_one_conversation(
-                    self.config, token,
-                    conv_type=context.conv_type,
-                    display_name=context.display_name,
-                    client=self._client(),
-                )
-                self.count("fetches")
+                if pending and not forced:
+                    created = await ingest_relayed_comments(
+                        self.config, token, pending,
+                        conv_type=context.conv_type,
+                        display_name=context.display_name,
+                        client=self._client(),
+                    )
+                    self.count("payload_ingests")
+                else:
+                    created = await poll_one_conversation(
+                        self.config, token,
+                        conv_type=context.conv_type,
+                        display_name=context.display_name,
+                        client=self._client(),
+                    )
+                    self.count("fetches")
                 if created:
                     logger.info(
                         "Talk signaling queued %d task(s) in %s",
@@ -838,6 +896,7 @@ class SignalingSupervisor:
                 # owed one and the supervisor is going away, so the bit is put
                 # back for whatever runs next.
                 self._dirty.setdefault(token, marked_at)
+                self._force_fetch.add(token)
                 raise
             except Exception as e:  # noqa: BLE001 — never raises into the loop
                 self.count("fetch_failures")
@@ -847,6 +906,14 @@ class SignalingSupervisor:
                 )
                 # Preserved, not re-woken. See the module docstring.
                 self._dirty.setdefault(token, marked_at)
+                # **The dropped payload is deliberate, and it is the
+                # conservative half of the retry.** The results block is one
+                # transaction, so a raise rolled the cursor back with it and a
+                # fetch from that cursor reads everything this batch held plus
+                # anything the relay did not carry. Replaying the batch instead
+                # would retry exactly the input that just failed and would
+                # still not see the rest.
+                self._force_fetch.add(token)
             finally:
                 # In a `finally` rather than on the success path: clearing it
                 # only when the fetch worked strands the room for the life of
@@ -935,6 +1002,10 @@ class SignalingSupervisor:
         for token in list(self._never_connected):
             if token not in self._watchable:
                 self._never_connected.pop(token, None)
+        for token in list(self._pending):
+            if token not in self._watchable:
+                self._pending.pop(token, None)
+        self._force_fetch.intersection_update(self._watchable)
 
     async def _restart_never_connected(self) -> None:
         """Cancel a watcher that is alive and has never once connected.

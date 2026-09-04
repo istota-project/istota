@@ -292,3 +292,198 @@ class TestTheTwoPathsProduceTheSameTask:
         # `channel_name` is what names the room in the registry, so that is
         # where a context field dropped on the trigger path shows up.
         assert triggered_room.name == polled_room.name == "team"
+
+
+class TestPayloadDirectIngestion:
+    """Stage 5: the relayed comment goes in without a fetch.
+
+    The claim this has to earn is that ingestion is byte-for-byte the fetch
+    path's — `ingest_relayed_comments` hands the comments to the same
+    `_process_poll_results`, so the filter chain, the confirmation handling,
+    the cursor advance and the atomicity guarantee are not reimplemented. What
+    it adds is the two things a fetch got for free: the cursor as a filter, and
+    ordering.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_ingested_row_matches_the_one_a_fetch_produces(
+        self, make_config, tmp_path,
+    ):
+        """The spec's stated verification for this stage.
+
+        Same comment, two paths, two databases — compared on the task row and
+        on the cursor, which is everything the results block writes.
+        """
+        from istota.transport.talk.inbound import ingest_relayed_comments
+
+        comment = _mention_msg(msg_id=102)
+
+        def _run_path(db_name, coro_factory):
+            config = make_config()
+            config.db_path = tmp_path / db_name
+            db.init_db(config.db_path)
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "group1", 50)
+            return config, coro_factory(config)
+
+        fetched_config, fetch_coro = _run_path(
+            "fetched.db",
+            lambda c: poll_one_conversation(
+                c, "group1", conv_type=2, display_name="team",
+            ),
+        )
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client",
+            return_value=_client([comment]),
+        ):
+            fetched = await fetch_coro
+
+        direct_config, direct_coro = _run_path(
+            "direct.db",
+            lambda c: ingest_relayed_comments(
+                c, "group1", [comment], conv_type=2, display_name="team",
+            ),
+        )
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client",
+            return_value=_client([comment]),
+        ):
+            direct = await direct_coro
+
+        assert len(fetched) == 1 and len(direct) == 1
+
+        def _row(config, task_id):
+            with db.get_db(config.db_path) as conn:
+                row = dict(conn.execute(
+                    "SELECT * FROM tasks WHERE id = ?", (task_id,),
+                ).fetchone())
+            # Identity and wall-clock columns differ between any two runs and
+            # say nothing about the path that produced them.
+            for column in ("id", "created_at", "updated_at"):
+                row.pop(column, None)
+            return row
+
+        assert _row(direct_config, direct[0]) == _row(fetched_config, fetched[0])
+
+        with db.get_db(direct_config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "group1") == 102
+        with db.get_db(fetched_config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "group1") == 102
+
+    @pytest.mark.asyncio
+    async def test_a_comment_at_or_below_the_cursor_is_dropped(
+        self, make_config,
+    ):
+        """The reconnect race, which the fetch path cannot have.
+
+        A fetch passes the cursor to the *server*, so a message already
+        processed never comes back. A relayed comment arrived unasked, and one
+        queued moments before a reconnect has already been ingested by
+        `catch_up_conversation` reading forward from the same cursor.
+        `ingest_message` dedups on the Talk id, but `dispatch_command`,
+        `handle_confirmation_reply` with its ack post and
+        `confirmations.cancel_for_conversation` do not.
+        """
+        from istota.transport.talk.inbound import ingest_relayed_comments
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "group1", 102)
+
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client",
+            return_value=_client([_mention_msg(msg_id=102)]),
+        ):
+            created = await ingest_relayed_comments(
+                config, "group1", [_mention_msg(msg_id=102)],
+                conv_type=2, display_name="team",
+            )
+
+        assert created == []
+        with db.get_db(config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "group1") == 102
+
+    @pytest.mark.asyncio
+    async def test_a_batch_is_ingested_oldest_first(self, make_config):
+        """A batch is accumulated across events, so nothing else orders it.
+
+        **The cursor is not what this is about, and asserting on it is how the
+        first version of this test came back green with the sort deleted.**
+        `set_talk_poll_state` is MAX-guarded, so an out-of-order walk still
+        leaves the highest id behind and every count still adds up. What
+        reverses is the *tasks*: `_process_poll_results` creates one per
+        message in the order it walks them, so the model is handed a
+        conversation running backwards. That is what the assertion has to name.
+        """
+        from istota.transport.talk.inbound import ingest_relayed_comments
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "group1", 50)
+
+        older = _mention_msg(msg_id=101)
+        older["message"] = "{mention-user0} first thing"
+        newer = _mention_msg(msg_id=103)
+        newer["message"] = "{mention-user0} second thing"
+
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client",
+            return_value=_client([_mention_msg(msg_id=103)]),
+        ):
+            created = await ingest_relayed_comments(
+                config, "group1", [newer, older],
+                conv_type=2, display_name="team",
+            )
+
+        assert len(created) == 2
+        with db.get_db(config.db_path) as conn:
+            prompts = [
+                conn.execute(
+                    "SELECT prompt FROM tasks WHERE id = ?", (task_id,),
+                ).fetchone()[0]
+                for task_id in created
+            ]
+            assert db.get_talk_poll_state(conn, "group1") == 103
+
+        assert "first thing" in prompts[0], prompts
+        assert "second thing" in prompts[1], prompts
+
+    @pytest.mark.asyncio
+    async def test_the_mention_gate_still_applies(self, make_config):
+        """The whole point of reusing `_process_poll_results`.
+
+        A payload path that skipped the gate would ingest every message in
+        every group room the bot sits in — the same hole this file's first test
+        is about, reopened one layer up.
+        """
+        from istota.transport.talk.inbound import ingest_relayed_comments
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "group1", 50)
+
+        with patch(
+            "istota.transport.talk.inbound.get_talk_client",
+            return_value=_client([_msg(msg_id=101)]),
+        ):
+            created = await ingest_relayed_comments(
+                config, "group1", [_msg(msg_id=101)],
+                conv_type=2, display_name="team",
+            )
+
+        assert created == []
+        # Read and dropped by a filter, exactly as the fetch path does it.
+        with db.get_db(config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "group1") == 101
+
+    def test_the_room_context_has_no_default_here_either(self):
+        """The third door onto `_process_poll_results`, held to the same rule."""
+        import inspect
+
+        from istota.transport.talk.inbound import ingest_relayed_comments
+
+        sig = inspect.signature(ingest_relayed_comments)
+        for name in ("conv_type", "display_name"):
+            param = sig.parameters[name]
+            assert param.kind is inspect.Parameter.KEYWORD_ONLY, name
+            assert param.default is inspect.Parameter.empty, name
