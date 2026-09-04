@@ -121,6 +121,62 @@ def room_selectable_kinds(brain_config) -> frozenset[str]:
     )
 
 
+def reachable_brain_kinds(brain_config) -> frozenset[str]:
+    """Every brain kind a task on this deployment could run under.
+
+    The base ``kind``, the ``[brain.source_type_overrides]`` targets and
+    ``room_selectable``, plus the failover target of each kind that still has
+    one. Config only: it reads no database, which is what lets the checks built
+    on it stay pure functions of the loaded config. Asking the rooms table
+    instead would make them database-dependent and would still answer wrongly
+    for a room nobody has used yet; the operator's allowlist is what makes the
+    answer knowable before any room exists. The cost is stated rather than
+    hidden: allowlisting a kind gets that kind's checks even where no room has
+    selected it, which is the safe direction.
+
+    The failover fold runs **per kind** rather than once against
+    ``brain_config``, because ``effective_fallback_kind`` reads a *resolved*
+    config — it drops a target equal to the kind being resolved, so the answer
+    can differ between the base kind and a routed one. As the two functions
+    stand today the folded set comes out the same either way, since the only
+    value the fold can yield is the single configured ``fallback`` and it is
+    dropped exactly for the kind that already contributes itself. The per-kind
+    shape is what keeps that an arithmetic coincidence rather than a dependency:
+    a fallback rule that branches on kind again would break a single evaluation
+    silently and leave a check SKIPped, with the operator learning about a
+    missing binary from a failed task.
+
+    ``room_selectable`` is deliberately outside the fold. An admitted room
+    override clears ``fallback``, so a pinned room contributes its own kind and
+    no failover target.
+
+    Never raises. A malformed config still yields the base kind, which is the
+    safe direction here — a check that runs where it need not is noise, one that
+    skips where it was needed is a missing dependency nothing reports.
+    """
+    kind = str(getattr(brain_config, "kind", "") or "").strip()
+    kinds = {kind} if kind else set()
+
+    overrides = getattr(brain_config, "source_type_overrides", None) or {}
+    try:
+        targets = [str(value).strip() for value in overrides.values()]
+    except (AttributeError, TypeError):
+        targets = []
+    kinds |= {target for target in targets if target in KNOWN_BRAIN_KINDS}
+
+    failover: set[str] = set()
+    for one in kinds:
+        try:
+            routed = dataclasses.replace(brain_config, kind=one)
+        except (TypeError, ValueError):
+            continue
+        target = effective_fallback_kind(routed)
+        if target in KNOWN_BRAIN_KINDS:
+            failover.add(target)
+
+    return frozenset(kinds | failover | room_selectable_kinds(brain_config))
+
+
 def resolve_brain_kind(source_type, brain_config, override: str | None = None):
     """Return the BrainConfig to use for a task with the given source_type.
 
@@ -234,6 +290,7 @@ __all__ = [
     "make_brain",
     "make_stream_parser",
     "parse_stream_line",
+    "reachable_brain_kinds",
     "resolve_brain_kind",
     "room_selectable_kinds",
     "set_alias_overrides",

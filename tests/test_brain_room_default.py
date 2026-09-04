@@ -34,6 +34,7 @@ from istota.brain import (
     KNOWN_BRAIN_KINDS,
     effective_fallback_kind,
     make_brain,
+    reachable_brain_kinds,
     resolve_brain_kind,
     room_selectable_kinds,
 )
@@ -359,6 +360,101 @@ class TestRoomSelectableKinds:
     def test_every_offered_kind_is_buildable(self):
         base = _brain("claude_code", selectable=sorted(KNOWN_BRAIN_KINDS))
         assert room_selectable_kinds(base) == frozenset(KNOWN_BRAIN_KINDS)
+
+
+# =============================================================================
+# reachable_brain_kinds
+# =============================================================================
+
+class TestReachableBrainKinds:
+    """The set `doctor` asks instead of `brain.kind`.
+
+    Three sources contribute directly — the base kind, the
+    `source_type_overrides` targets and `room_selectable` — and the configured
+    fallback is folded over the first two only, since an admitted room override
+    clears `fallback`.
+    """
+
+    def test_a_default_config_reaches_only_its_own_kind(self):
+        assert reachable_brain_kinds(_brain("claude_code")) == frozenset({"claude_code"})
+
+    def test_a_source_type_override_target_is_reachable(self):
+        """The case the spec's test strategy names, with the value the code
+        actually yields.
+
+        The spec asked for this pair on the grounds that `claude_code` would
+        arrive "by way of the tmux back-compat default" and that a single fold
+        over the base config would therefore miss it. ISSUE-362 deleted that
+        default, so `claude_code` is in this set as the base kind and for no
+        other reason, and with `fallback` unset the fold contributes nothing at
+        all. The pair is kept because it is still the plainest statement that a
+        routing target is reachable; the fold's own shape is pinned below,
+        where it can actually fail.
+        """
+        base = _brain("claude_code", overrides={"scheduled": "tmux_claude"})
+        assert reachable_brain_kinds(base) == frozenset({"claude_code", "tmux_claude"})
+
+    def test_an_unknown_override_target_is_not_reachable(self):
+        """`resolve_brain_kind` logs and ignores it, so no task runs it."""
+        base = _brain("claude_code", overrides={"scheduled": "bogus"})
+        assert reachable_brain_kinds(base) == frozenset({"claude_code"})
+
+    def test_a_configured_fallback_is_reachable(self):
+        base = _brain("claude_code", fallback="native")
+        assert reachable_brain_kinds(base) == frozenset({"claude_code", "native"})
+
+    def test_a_self_fallback_contributes_nothing(self):
+        base = _brain("native", fallback="native")
+        assert reachable_brain_kinds(base) == frozenset({"native"})
+
+    def test_room_selectable_kinds_are_reachable(self):
+        base = _brain("native", selectable=["claude_code"])
+        assert reachable_brain_kinds(base) == frozenset({"native", "claude_code"})
+
+    def test_an_unbuildable_room_selectable_entry_is_not_reachable(self):
+        base = _brain("native", selectable=["bogus"])
+        assert reachable_brain_kinds(base) == frozenset({"native"})
+
+    def test_the_fallback_fold_runs_per_kind_and_skips_room_selectable(self):
+        """Which kinds the fold is applied to, asserted directly.
+
+        Deliberately white-box, because the two properties the stage names are
+        both unobservable through the return value as the code stands. There is
+        one configured `fallback` string, and `effective_fallback_kind` drops it
+        exactly for the kind it equals — the kind that is already contributing
+        itself — so a single evaluation against the base config and a per-kind
+        fold produce the identical set for every possible config, and so does
+        folding `room_selectable` in or leaving it out. That is arithmetic
+        rather than design: a fallback rule that branches on kind again (the one
+        ISSUE-362 removed did) breaks a single evaluation silently and leaves a
+        `doctor` check SKIPped on a deployment that needed it. So the guard is
+        on the call, which is the thing that would be rewritten.
+        """
+        import istota.brain as brain_pkg
+
+        seen = []
+
+        def _recording(brain_config):
+            seen.append(getattr(brain_config, "kind", None))
+            return None
+
+        base = _brain(
+            "claude_code",
+            overrides={"scheduled": "native"},
+            selectable=["tmux_claude"],
+            fallback="native",
+        )
+        with patch.object(brain_pkg, "effective_fallback_kind", _recording):
+            reachable_brain_kinds(base)
+        assert sorted(seen) == ["claude_code", "native"]
+        assert "tmux_claude" not in seen
+
+    def test_it_never_raises_on_a_malformed_config(self):
+        assert reachable_brain_kinds(None) == frozenset()
+
+        base = _brain("claude_code")
+        base.source_type_overrides = "scheduled=native"  # not a dict
+        assert reachable_brain_kinds(base) == frozenset({"claude_code"})
 
 
 # =============================================================================

@@ -130,6 +130,19 @@ features = []
 #                                     # own retries are exhausted. Set false to opt out.
 # fallback_cooldown_seconds = 900     # skip an unavailable primary this long; 0 disables stickiness
 #
+# Which brain kinds a room may pin for itself. Empty (the default) means none
+# may, so the feature is inert until you name kinds here. A gate rather than a
+# preference: brain kind selects an isolation posture (the two CLI brains run
+# the whole agent inside bubblewrap; native runs the agent loop in the daemon
+# process), so it is not something an upgrade should switch on. Setting a room's
+# brain is admin-only on top of this. A room that pins a brain runs that brain
+# or fails saying why — the fallback above does not apply to it, which is what
+# makes the pin mean what it says. A name here that is not a buildable kind is
+# dropped with a warning and never offered. Listing a kind also widens the
+# doctor checks for it (`claude` on PATH, tmux, a native API key), whether or
+# not any room has selected it.
+# room_selectable = []                # e.g. ["claude_code", "native"]
+#
 # Native-brain settings (only used when kind = "native", or via a routing
 # override below). The API key stays out of this file — set it via the
 # ISTOTA_BRAIN_NATIVE_API_KEY env override.
