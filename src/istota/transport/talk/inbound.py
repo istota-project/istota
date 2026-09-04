@@ -1068,6 +1068,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 effort_override: str | None = None
                 from ...brain import make_brain
                 from ...commands import (
+                    brain_for_room,
                     dispatch as dispatch_command,
                     resolve_model_prefix,
                 )
@@ -1076,7 +1077,23 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 # shared cross-surface helper. Empty remainder is only an error
                 # when there's nothing to do at all; with attachments present
                 # "!model opus" is a valid "process this attachment" intent.
-                brain = make_brain(config.brain)
+                #
+                # The alias namespace belongs to the brain this *room* runs, not
+                # to the deployment default, so a room pinned to another
+                # namespace can never be handed an id it cannot resolve — nor
+                # offered one in the unknown-alias usage line, which
+                # `resolve_model_prefix` builds from the same instance.
+                # `conversation_token` here is the Talk-native ref (canonical
+                # resolution happens later, inside `record_inbound`), so it is
+                # mapped first; `conn` is the poll batch's transaction and spans
+                # this point.
+                brain = make_brain(brain_for_room(
+                    config,
+                    conn,
+                    db.resolve_room_token(conn, "talk", conversation_token)
+                    or conversation_token,
+                    "talk",
+                ))
                 prefix = resolve_model_prefix(
                     content, brain, has_attachments=bool(attachments),
                 )

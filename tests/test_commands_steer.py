@@ -263,3 +263,70 @@ class TestHiddenAlias:
             out = await cmd_help(_ctx(config, conn))
         assert "!steer" in out
         assert "!inject" not in out
+
+
+class TestSteerabilityFollowsTheTasksOwnBrain:
+    """The gate reads `tasks.brain`, so its refusal names the brain the room
+    actually runs rather than the deployment default.
+
+    Both directions, and that pairing is the point: a gate reading only
+    `config.brain.kind` passes the first of these by accident, since the
+    deployment it runs on is `native` either way.
+    """
+
+    def _brain_config(self, kind, *selectable):
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        return BrainConfig(
+            kind=kind,
+            native=NativeBrainConfig(),
+            room_selectable=list(selectable),
+        )
+
+    async def test_a_room_pinned_to_claude_code_refuses_on_a_native_deployment(
+        self, make_config,
+    ):
+        config = make_config()  # kind="native"
+        config.brain = self._brain_config("native", "claude_code")
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="p", user_id="alice", source_type="talk",
+                conversation_token="room1", brain="claude_code",
+            )
+            db.update_task_status(conn, tid, "running")
+            out = await cmd_steer(_ctx(config, conn, args="focus on auth"))
+            assert "headless" in out.lower()
+            assert db.count_pending_steers(conn, tid) == 0
+
+    async def test_a_room_pinned_to_native_accepts_on_a_claude_code_deployment(
+        self, make_config,
+    ):
+        config = make_config(brain_kind="claude_code")
+        config.brain = self._brain_config("claude_code", "native")
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="p", user_id="alice", source_type="talk",
+                conversation_token="room1", brain="native",
+            )
+            db.update_task_status(conn, tid, "running")
+            out = await cmd_steer(_ctx(config, conn, args="focus on auth"))
+            assert "Steering" in out
+            assert db.count_pending_steers(conn, tid) == 1
+
+    async def test_a_pin_the_operator_no_longer_allows_is_ignored_by_the_gate(
+        self, make_config,
+    ):
+        """`resolve_brain_kind` refuses an unallowlisted override, and the gate
+        has to follow it rather than the column — otherwise it accepts a note
+        for a brain the task is demonstrably not running."""
+        config = make_config(brain_kind="claude_code")
+        config.brain = self._brain_config("claude_code")  # native no longer listed
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="p", user_id="alice", source_type="talk",
+                conversation_token="room1", brain="native",
+            )
+            db.update_task_status(conn, tid, "running")
+            out = await cmd_steer(_ctx(config, conn, args="focus on auth"))
+            assert "headless" in out.lower()
+            assert db.count_pending_steers(conn, tid) == 0

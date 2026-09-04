@@ -3659,3 +3659,430 @@ class TestCmdUsage:
             )
         assert result.handled
         assert "**Claude Code subscription**" in (result.text or "")
+
+
+# =============================================================================
+# Per-room brain selection — `!brain`, and every model writer it binds
+# =============================================================================
+
+
+def _brain_config(*selectable, kind="claude_code", fallback=""):
+    """A BrainConfig whose `room_selectable` names the kinds a test needs.
+
+    `istota.config.BrainConfig`, not the protocol-side stub this module already
+    imports under the same name for the alias parsers.
+    """
+    from istota.config import BrainConfig as RealBrainConfig
+
+    return RealBrainConfig(
+        kind=kind, fallback=fallback, room_selectable=list(selectable),
+    )
+
+
+def _room(conn, token="room1", user_id="alice", surface="talk"):
+    db.register_room(conn, token, user_id, origin="web")
+    db.add_room_binding(conn, token, surface, token)
+
+
+class TestRoomModelWriterFollowsTheRoomsBrain:
+    """D5 Rule 2, the row the spec calls the worst of the five.
+
+    `!room model` writes the *standing* default, so an id resolved in the wrong
+    namespace is not one bad turn — it is every turn in the room until somebody
+    notices. The assertion is deliberately against the stored `rooms.model`
+    value rather than the reply text: a handler that says the right thing and
+    writes the wrong value is exactly the failure being guarded, and a reply
+    assertion passes against it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_native_room_never_stores_an_anthropic_id(self, make_config, db_path):
+        from istota.commands import cmd_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            await cmd_room(_ctx(config, conn, args="model sonnet"))
+            room = db.get_room(conn, "room1")
+        # `sonnet` is an anthropic shortcut; the native brain resolves no such
+        # alias, so the only correct outcomes are "unchanged" or an
+        # openai_compat id. What must never be here is `claude-sonnet-5`.
+        assert room.model != SONNET
+        assert room.model is None
+
+    @pytest.mark.asyncio
+    async def test_an_unpinned_room_still_resolves_in_the_deployment_namespace(
+        self, make_config, db_path,
+    ):
+        """The converse, so the test above cannot pass against a writer that
+        simply stopped resolving anything."""
+        from istota.commands import cmd_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            await cmd_room(_ctx(config, conn, args="model sonnet"))
+            room = db.get_room(conn, "room1")
+        assert room.model == SONNET
+
+
+@pytest.mark.asyncio
+class TestCmdBrain:
+    """`!brain` — show, set, and clear a room's standing brain.
+
+    Every assertion about a *write* reads the stored row rather than the reply:
+    the reply is what the handler says it did, and the two are exactly what can
+    disagree.
+    """
+
+    async def test_show_is_not_gated(self, make_config, db_path):
+        """Reading is allowed to anyone. A room is shared, and every member is
+        entitled to know which brain their turns run under — only writing
+        chooses an isolation posture for somebody else."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.admin_users = {"someone-else"}
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, user_id="alice"))
+        assert "claude_code" in out
+        assert "admin" not in out.lower()
+
+    async def test_show_names_the_lane_rule_it_would_otherwise_take(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        config.brain.source_type_overrides = {"talk": "native"}
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn))
+        assert "native" in out
+
+    async def test_set_writes_the_column(self, make_config, db_path):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+            assert db.get_room(conn, "room1").brain == "native"
+        assert "native" in out
+
+    async def test_default_clears_the_column(self, make_config, db_path):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            out = await cmd_brain(_ctx(config, conn, args="default"))
+            assert db.get_room(conn, "room1").brain is None
+        assert "claude_code" in out
+
+    async def test_unknown_kind_is_refused_and_writes_nothing(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="gpt5"))
+            assert db.get_room(conn, "room1").brain is None
+        assert "gpt5" in out
+
+    async def test_a_buildable_kind_the_operator_did_not_list_is_refused(
+        self, make_config, db_path,
+    ):
+        """A separate branch from the unknown one: `tmux_claude` is a kind
+        `make_brain` builds, so only the allowlist stands between it and the
+        room."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")  # tmux deliberately absent
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="tmux_claude"))
+            assert db.get_room(conn, "room1").brain is None
+        assert "native" in out  # names what *is* on offer
+
+    async def test_the_feature_is_off_until_the_operator_names_a_kind(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config()  # room_selectable = []
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+            assert db.get_room(conn, "room1").brain is None
+        assert "room_selectable" in out
+        # Names no kinds: with the list empty there is nothing to offer, and a
+        # message listing the buildable kinds would read as a menu.
+        assert "`native`" not in out
+
+    async def test_a_non_admin_cannot_set_or_clear(self, make_config, db_path):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.admin_users = {"alice"}
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            set_out = await cmd_brain(
+                _ctx(config, conn, user_id="bob", args="claude_code")
+            )
+            clear_out = await cmd_brain(
+                _ctx(config, conn, user_id="bob", args="default")
+            )
+            assert db.get_room(conn, "room1").brain == "native"
+        assert "admin" in set_out.lower()
+        assert "admin" in clear_out.lower()
+
+    async def test_an_unregistered_room_is_told_to_send_a_message_first(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+        assert "registered" in out.lower()
+
+    async def test_show_names_a_pin_the_operator_has_since_dropped(
+        self, make_config, db_path,
+    ):
+        """The column keeps its value when `room_selectable` shortens — the
+        operator may restore the list — so the show form has to say the room is
+        running something other than what it is set to."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config()  # nothing selectable any more
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            out = await cmd_brain(_ctx(config, conn))
+        assert "native" in out
+        assert "claude_code" in out
+        assert "ignor" in out.lower()
+
+
+@pytest.mark.asyncio
+class TestBrainPinTurnsFailoverOff:
+    """D12, as it reaches the user. The behaviour itself is
+    `resolve_brain_kind`'s (stage 1); what is asserted here is that both
+    `!brain` forms say so, because the cost is only acceptable while it is
+    visible at the moment of choosing."""
+
+    async def test_the_set_reply_names_the_consequence(self, make_config, db_path):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native", fallback="claude_code")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+        assert "ailover" in out
+        assert "!brain default" in out
+
+    async def test_an_unpinned_room_is_told_what_it_falls_back_to(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native", fallback="native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn))
+        assert "Failover: `native`" in out
+
+    async def test_a_pin_the_operator_dropped_keeps_its_failover(
+        self, make_config, db_path,
+    ):
+        """The converse that stops the failover line tracking the *column*
+        rather than the admission. A room pinned to the deployment's own kind
+        runs that kind either way, so nothing but the allowlist distinguishes
+        the two states."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config(fallback="native")  # nothing selectable
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "claude_code")
+            out = await cmd_brain(_ctx(config, conn))
+        assert "Failover: `native`" in out
+
+
+@pytest.mark.asyncio
+class TestBrainChangeClearsACrossNamespacePin:
+    """D5 Rule 1, both halves.
+
+    The clearing half alone is vacuous: it passes against a handler that always
+    clears. The preserving half is what makes it an assertion about namespaces.
+    """
+
+    async def test_a_namespace_change_drops_the_model_pin(self, make_config, db_path):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("claude_code", "native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_model_effort(conn, "room1", OPUS, "high")
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+            room = db.get_room(conn, "room1")
+        assert room.brain == "native"
+        assert room.model is None
+        assert room.effort is None
+        assert OPUS in out  # says what it dropped
+
+    async def test_a_move_inside_one_namespace_keeps_the_pin(
+        self, make_config, db_path,
+    ):
+        """`claude_code` and `tmux_claude` share `model_namespace ==
+        "anthropic"`, so the same id runs under both and there is nothing to
+        clear."""
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("claude_code", "tmux_claude")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "claude_code")
+            db.set_room_model_effort(conn, "room1", OPUS, "high")
+            out = await cmd_brain(_ctx(config, conn, args="tmux_claude"))
+            room = db.get_room(conn, "room1")
+        assert room.brain == "tmux_claude"
+        assert room.model == OPUS
+        assert room.effort == "high"
+        assert OPUS not in out
+
+    async def test_clearing_the_pin_back_to_the_inherited_brain_also_drops_it(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            db.set_room_model_effort(conn, "room1", "some-openai-compat-slug", None)
+            await cmd_brain(_ctx(config, conn, args="default"))
+            room = db.get_room(conn, "room1")
+        assert room.brain is None
+        assert room.model is None
+
+    async def test_a_room_with_no_pin_reports_nothing_cleared(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            out = await cmd_brain(_ctx(config, conn, args="native"))
+        assert "cleared" not in out.lower()
+
+
+@pytest.mark.asyncio
+class TestModelSurfacesFollowTheRoomsBrain:
+    """The rest of D5 Rule 2: everything that *offers* a model name, and the
+    end-to-end path through `!brain` that the writer test above reaches by
+    setting the column directly."""
+
+    async def test_brain_then_room_model_never_leaves_an_anthropic_id(
+        self, make_config, db_path,
+    ):
+        from istota.commands import cmd_brain, cmd_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            await cmd_brain(_ctx(config, conn, args="native"))
+            await cmd_room(_ctx(config, conn, args="model sonnet"))
+            room = db.get_room(conn, "room1")
+        assert room.model != SONNET
+        assert room.model is None
+
+    async def test_models_lists_the_rooms_namespace(self, make_config, db_path):
+        from istota.commands import cmd_models
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        config.brain.native.model = "some-endpoint/model-a"
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            pinned = await cmd_models(_ctx(config, conn))
+            db.set_room_brain(conn, "room1", None)
+            inherited = await cmd_models(_ctx(config, conn))
+        assert "some-endpoint/model-a" in pinned
+        assert OPUS not in pinned
+        # The converse, so the assertion is about the room rather than about
+        # `cmd_models` having stopped listing anything.
+        assert OPUS in inherited
+
+    async def test_room_show_names_the_brain(self, make_config, db_path):
+        from istota.commands import cmd_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            db.set_room_brain(conn, "room1", "native")
+            out = await cmd_room(_ctx(config, conn))
+        assert "Brain: `native`" in out
+
+
+class TestBrainForRoom:
+    def test_an_unreadable_room_falls_through_to_the_source_type_layer(
+        self, make_config,
+    ):
+        """The pre-feature answer, which is the whole never-raise contract: this
+        runs inside the Talk poll's inner loop and on the web send path."""
+        from istota.commands import brain_for_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        config.brain.source_type_overrides = {"talk": "native"}
+
+        class _Exploding:
+            def execute(self, *a, **kw):
+                raise sqlite3.OperationalError("no such table: rooms")
+
+        resolved = brain_for_room(config, _Exploding(), "room1", "talk")
+        assert resolved.kind == "native"
+
+    def test_a_room_with_no_pin_returns_the_config_object_itself(
+        self, make_config, db_path,
+    ):
+        """`resolve_brain_kind` returns the same object when nothing applies,
+        which is what the executor's cheap no-routing check reads."""
+        from istota.commands import brain_for_room
+
+        config = make_config()
+        config.brain = _brain_config("native")
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            assert brain_for_room(config, conn, "room1", "talk") is config.brain

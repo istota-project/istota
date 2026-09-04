@@ -3914,12 +3914,47 @@ def _room_to_dict(room) -> dict:
     }
 
 
-def _known_room_models() -> set[str]:
+def _brain_for_room_token(room_token: str, source_type: str):
+    """The `BrainConfig` a new task in this room would run under.
+
+    Blocking (it opens a connection), so async callers reach it through
+    `asyncio.to_thread` like their neighbours. `commands.brain_for_room` is the
+    rule itself and never raises; this is only the connection around it, and it
+    degrades to the source-type answer — the pre-feature behaviour — if even
+    that fails.
+    """
+    from . import db
+
+    try:
+        from . import commands
+
+        with db.get_db(_config.db_path) as conn:
+            return commands.brain_for_room(
+                _config, conn, room_token, source_type,
+            )
+    except Exception:  # noqa: BLE001 — a model-namespace read must not fail a send
+        logger.warning("brain_for_room: falling back to config", exc_info=True)
+        from .brain import resolve_brain_kind
+
+        return resolve_brain_kind(source_type, _config.brain)
+
+
+def _known_room_models(brain_config=None) -> set[str]:
     """Canonical model ids a room default may be set to — the distinct targets
-    the active brain exposes via its alias table. Used to validate the PATCH."""
+    the brain exposes via its alias table. Used to validate the PATCH.
+
+    `brain_config` is the room's own resolved brain (`_brain_for_room_token`).
+    Omitting it falls back to the deployment default, which is only right for a
+    caller that has no room in hand: a room pinned to another model namespace
+    would otherwise have an id from the wrong namespace accepted into its
+    standing default, which is the same defect `!room model` had.
+    """
     try:
         return {
-            model for _alias, model, _effort in make_brain(_config.brain).list_aliases()
+            model
+            for _alias, model, _effort in make_brain(
+                brain_config if brain_config is not None else _config.brain
+            ).list_aliases()
             if model
         }
     except Exception:  # noqa: BLE001 — validation degrades to "reject all" safely
@@ -6317,8 +6352,21 @@ async def chat_update_room(
     model = _UNSET
     if "model" in data:
         model = str(data["model"] or "").strip() or None
-        if model is not None and model not in _known_room_models():
-            return JSONResponse({"error": "unknown model"}, status_code=400)
+        if model is not None:
+            # Validated against the *room's* brain, not the deployment default:
+            # this endpoint is a writer of `rooms.model`, so a room pinned to
+            # another model namespace must not have an id from the wrong one
+            # accepted into its standing default.
+            room = await asyncio.to_thread(
+                _chat_owned_room, user["username"], room_id,
+            )
+            if room is None:
+                return JSONResponse({"error": "room not found"}, status_code=404)
+            room_brain = await asyncio.to_thread(
+                _brain_for_room_token, room.token, "web",
+            )
+            if model not in _known_room_models(room_brain):
+                return JSONResponse({"error": "unknown model"}, status_code=400)
     effort = _UNSET
     if "effort" in data:
         from .commands import _EFFORT_LEVELS
@@ -6958,7 +7006,15 @@ async def chat_send_message(
         from .brain import make_brain
         from .transport import make_registry
 
-        brain = make_brain(_config.brain)
+        # The alias namespace is the one this *room* runs in, not the
+        # deployment default — the same rule the Talk inbound path applies, so
+        # a room pinned to another namespace is never handed (or offered) an id
+        # it cannot resolve. `chat_send_message` is async and holds no
+        # connection, so the read is threaded like its neighbours; `room.token`
+        # is already canonical.
+        brain = make_brain(await asyncio.to_thread(
+            _brain_for_room_token, room.token, "web",
+        ))
         prefix = commands.resolve_model_prefix(
             text, brain, has_attachments=bool(attachments),
         )
