@@ -292,6 +292,93 @@ class TestTheLoopNeverHoldsTwoWriteTransactionsAtOnce:
             assert 0 < record["busy_timeout_ms"] <= 5000
 
 
+def _real_drain_scenario(config):
+    """The same shape with the **real** drain as the second writer.
+
+    `_scenario` stands the drain in with a bare `talk_db` write, which was the
+    honest instrument while the drain did not exist. It does now, and its write
+    path is longer than that stand-in: `poll_one_conversation` opens a
+    connection to read the cursor, closes it, fetches, and then opens the
+    results transaction — three scopes rather than one, any of which could have
+    been left outside the lock.
+    """
+
+    async def run():
+        inside_the_results_txn = asyncio.Event()
+        drained = asyncio.Event()
+
+        async def _participants(_token):
+            inside_the_results_txn.set()
+            await asyncio.sleep(0.2)
+            return [
+                {"actorId": "alice", "actorType": "users"},
+                {"actorId": "bob", "actorType": "users"},
+                {"actorId": "istota", "actorType": "users"},
+            ]
+
+        client = AsyncMock()
+        client.list_conversations = AsyncMock(return_value=[{
+            "token": "grp", "type": 2, "name": "team", "displayName": "team",
+            "lastMessage": {"id": 100},
+        }])
+        client.poll_messages = AsyncMock(return_value=[_msg()])
+        client.send_message = AsyncMock()
+        client.get_participants = _participants
+        client.fetch_chat_history = AsyncMock(return_value=[])
+        client.get_latest_message_id = AsyncMock(return_value=100)
+
+        async def poll_side():
+            with patch(
+                "istota.transport.talk.inbound.get_talk_client",
+                return_value=client,
+            ):
+                return await poll_talk_conversations(config)
+
+        async def drain_side():
+            await asyncio.wait_for(inside_the_results_txn.wait(), timeout=10)
+            drain_client = AsyncMock()
+            drain_client.poll_messages = AsyncMock(
+                return_value=[_msg(msg_id=200, message="second room")],
+            )
+            drain_client.get_participants = AsyncMock(return_value=[])
+            drain_client.send_message = AsyncMock()
+            await poller.poll_one_conversation(
+                config, "drain_room", conv_type=1, display_name="dm",
+                client=drain_client,
+            )
+            drained.set()
+
+        await asyncio.gather(poll_side(), drain_side())
+        assert drained.is_set()
+
+    return run
+
+
+class TestTheRealDrainDoesNotOverlapThePoll:
+    """The second writer this lock was added for, driven end to end."""
+
+    def test_the_drain_and_the_poll_never_hold_a_connection_together(
+        self, config, monkeypatch,
+    ):
+        opens = _Opens()
+        opens.install(monkeypatch)
+
+        _run_with_deadline(_real_drain_scenario(config))
+
+        # Four at least: the poll's room pass and results block, plus the
+        # drain's cursor read and its own results block.
+        assert len(opens.records) >= 4, opens.records
+        assert not opens.overlaps(), (
+            "the signaling drain held a database connection while the poll's "
+            "results transaction was open — the drain can only resume on the "
+            "thread the poll is blocking"
+        )
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_talk_poll_state(conn, "drain_room") == 200
+            assert db.get_talk_poll_state(conn, "grp") == 100
+
+
 class TestTheLockIsPerLoopAndAsync:
     async def test_a_second_loop_gets_its_own_lock(self, config):
         """`asyncio.Lock` binds to the first loop that contends on it and
