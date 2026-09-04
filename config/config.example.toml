@@ -134,9 +134,10 @@ features = []
 # may, so the feature is inert until you name kinds here. A gate rather than a
 # preference: brain kind decides which process holds the agent loop, what tool
 # set it registers and which sandbox profile is built, so it is not something an
-# upgrade should switch on. On an Ansible deployment set
-# `istota_brain_room_selectable` rather than editing the rendered file, which
-# the next play overwrites. Setting a room's
+# upgrade should switch on. Both deployment shapes rewrite this file from
+# scratch, so set it through the deployment rather than by editing the rendered
+# copy: `istota_brain_room_selectable` on Ansible,
+# `ISTOTA_BRAIN_ROOM_SELECTABLE` (comma-separated) on Docker. Setting a room's
 # brain is admin-only on top of this. A room that pins a brain runs that brain
 # or fails saying why — the fallback above does not apply to it, which is what
 # makes the pin mean what it says. A name here that is not a buildable kind is

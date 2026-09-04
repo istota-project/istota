@@ -453,19 +453,27 @@ only when a room actually pins one, which for an unbuildable name is never. Two
 consequences beyond the room itself: an admitted pin clears `fallback` for that
 task, and `brain.reachable_brain_kinds` folds this list in, so allowlisting a
 kind widens the `doctor` checks for it whether or not a room has selected it.
-**There is no env var, deliberately** — this is deployment policy rather than a
-credential or a per-container toggle. Ansible sets it through
-`istota_brain_room_selectable` (`deploy/ansible/defaults/main.yml`), which
-`templates/config.toml.j2` renders inside `[brain]` **only when the list is
-non-empty**: an empty list and an absent key load identically, and rendering a
-key at its own default invites editing the generated file, which the next play
-overwrites. The default and the template line are one change, not two — a
-default with no template line is inert, and a template line with no default
-fails the render under `StrictUndefined`, which is what
-`tests/test_ansible_config_template.py::TestTheRoomSelectableAllowlist` asserts
-from both ends. Docker still cannot set it; doing so means both
+**Both deployment shapes can set it, and neither renders the key at its own
+default.** Ansible uses `istota_brain_room_selectable`
+(`deploy/ansible/defaults/main.yml` + `templates/config.toml.j2`); Docker uses
+`ISTOTA_BRAIN_ROOM_SELECTABLE`, comma-separated, in both
 `docker/istota/render-config.sh` and `docker/docker-compose.yml`, per the
-testbed two-file rule. See `.claude/rules/brain.md` "Per-room brain
+testbed two-file rule. An empty list and an absent key load identically, and
+both files rewrite `config.toml` from scratch — the play on every run, the
+Docker generator on every boot since ISSUE-368 — so a key printed at its own
+default invites an edit that cannot survive. Two halves on each shape, and
+neither works alone: on Ansible a default with no template line is inert and a
+template line with no default fails the render under `StrictUndefined`; on
+Docker a variable compose does not pass through never reaches the generator,
+which `test_render_config.py::TestTheEntrypointStillOwnsWhatItKept::test_every_var_the_render_reads_is_passed_by_compose`
+catches as a blanket scan. The Docker side renders each name through
+`toml_escape` rather than judging it: a `"` would otherwise leave a
+`config.toml` that does not parse, which on that shape is a container that will
+not boot, while whether a name is a real brain kind is already
+`_validate_room_selectable`'s answer and a second opinion in a shell script
+would go stale at the fourth kind. `TestTheRoomSelectableAllowlist` in both
+`tests/test_render_config.py` and `tests/test_ansible_config_template.py`
+asserts each shape from both ends. See `.claude/rules/brain.md` "Per-room brain
 selection".
 
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),

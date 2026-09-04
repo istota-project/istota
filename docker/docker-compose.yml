@@ -190,6 +190,11 @@ services:
       # read straight from the environment at load time (never written to disk).
       # Runbook: docs/configuration/native-brain.md
       ISTOTA_BRAIN_KIND: ${ISTOTA_BRAIN_KIND:-claude_code}
+      # Which brain kinds a room may pin for itself, comma-separated (e.g.
+      # "claude_code,native"). Empty means none may, so per-room brain
+      # selection is off until you name kinds. Admin-only on top of this, and a
+      # pinned room does not fail over.
+      ISTOTA_BRAIN_ROOM_SELECTABLE: ${ISTOTA_BRAIN_ROOM_SELECTABLE:-}
       # Brain fallback (availability failover). "" = none, for every brain kind
       # — except that leaving it unset on a tmux_claude primary writes
       # claude_code in at first boot, which is the failover that kind used to

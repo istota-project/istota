@@ -1122,6 +1122,106 @@ class TestTheContainerCliFindsTheSameConfig:
         assert 'os.environ.get("ISTOTA_CONFIG_PATH")' in source
 
 
+class TestTheRoomSelectableAllowlist:
+    """The key that decides whether per-room brain selection exists here at all.
+
+    `render-config.sh` is the single writer of `config.toml` and runs on every
+    boot, so a key it does not emit cannot be set on this shape: a hand edit to
+    the rendered file survives until the next restart. The feature shipped with
+    no variable and no line here, which made it unreachable on Docker rather
+    than merely off — and Docker is the shape the smoke stack runs.
+    """
+
+    def test_the_default_renders_no_key_at_all(self, tmp_path):
+        """Unset must not render `room_selectable = []`.
+
+        An empty list and an absent key load identically, so this is about the
+        file an operator reads: a key printed at its own default in a file that
+        is rewritten every boot invites an edit that cannot survive.
+        """
+        rendered = render(tmp_path, **REQUIRED).read_text()
+
+        assert "room_selectable" not in rendered
+        assert load_config(render(tmp_path, **REQUIRED)).brain.room_selectable == []
+
+    def test_a_comma_separated_list_reaches_the_loaded_config(self, tmp_path):
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_BRAIN_ROOM_SELECTABLE="claude_code,native",
+            )
+        )
+
+        assert config.brain.room_selectable == ["claude_code", "native"]
+
+    def test_the_rendered_list_is_offered_to_a_room(self, tmp_path):
+        """The loaded value has to survive `room_selectable_kinds`.
+
+        `load_config` accepting the key is not the property that matters — the
+        picker reads the allowlist intersected with the kinds `make_brain` can
+        build, so a render that survives TOML and dies there would leave the
+        feature just as unreachable as no line at all.
+        """
+        from istota.brain import room_selectable_kinds
+
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_BRAIN_ROOM_SELECTABLE="claude_code,native",
+            )
+        )
+
+        assert room_selectable_kinds(config.brain) == {"claude_code", "native"}
+
+    def test_whitespace_and_empty_entries_are_dropped(self, tmp_path):
+        """`a, b,` is what an operator's `.env` actually looks like."""
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_BRAIN_ROOM_SELECTABLE=" claude_code , native ,",
+            )
+        )
+
+        assert config.brain.room_selectable == ["claude_code", "native"]
+
+    def test_a_quote_in_a_name_survives_as_a_value_rather_than_breaking_the_file(
+        self, tmp_path
+    ):
+        """A quote must not produce an unparseable config.toml.
+
+        On this shape that is a container that will not boot, from a typo in an
+        operator's `.env`. It goes through `toml_escape` like every other
+        operator-typed value, so the file parses and the bad name arrives as a
+        string. Judging it is not this script's job: `_validate_room_selectable`
+        warns at load about a name `make_brain` cannot build, and
+        `room_selectable_kinds` never offers it — so the operator gets a reason,
+        and the names either side of it keep working.
+        """
+        from istota.brain import room_selectable_kinds
+
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_BRAIN_ROOM_SELECTABLE='claude_code,na"tive,tmux_claude',
+            )
+        )
+
+        assert config.brain.room_selectable == ["claude_code", 'na"tive', "tmux_claude"]
+        assert room_selectable_kinds(config.brain) == {"claude_code", "tmux_claude"}
+
+    def test_a_value_of_only_separators_renders_no_key(self, tmp_path):
+        """Not `room_selectable = []`, and not a stray `= [ ]` either."""
+        rendered = render(
+            tmp_path, **REQUIRED, ISTOTA_BRAIN_ROOM_SELECTABLE=" , ,"
+        ).read_text()
+
+        assert "room_selectable" not in rendered
+
+
 class TestTheModelAliasTable:
     """The per-role model map has to land under the key the loader reads.
 

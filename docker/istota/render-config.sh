@@ -181,6 +181,44 @@ kind = "${ISTOTA_BRAIN_KIND:-claude_code}"
 fallback_on_transient = ${ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT:-false}
 fallback_cooldown_seconds = ${ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS:-900}
 TOML
+    # Which brain kinds a room may pin for itself. Comma-separated, empty by
+    # default, so per-room brain selection is off until an operator names kinds.
+    # Rendered only when at least one name survives: an empty list and an absent
+    # key load identically, and this file is rewritten on every boot, so a key
+    # printed at its own default invites editing a generated file.
+    #
+    # Each name goes through `toml_escape`, for the reason every operator-typed
+    # value here does -- a `"` would otherwise close the string early and leave a
+    # config.toml that does not parse, which on this shape is a container that
+    # will not boot. Nothing here judges whether a name is a real brain kind:
+    # `config._validate_room_selectable` warns once at load about a name
+    # `make_brain` cannot build, and a second opinion in a shell script would
+    # only go out of date when a fourth kind ships.
+    #
+    # Every branch is an explicit `if`. `set -e` is in force, and the idiomatic
+    # `[ -z "$x" ] && continue` exits the whole render whenever the test is
+    # false -- which is the ordinary case, so it would fail every boot that set
+    # this variable.
+    if [ -n "${ISTOTA_BRAIN_ROOM_SELECTABLE:-}" ]; then
+        _room_selectable=""
+        _IFS_SAVED="$IFS"
+        IFS=','
+        for _kind in $ISTOTA_BRAIN_ROOM_SELECTABLE; do
+            _kind="$(echo "$_kind" | tr -d '[:space:]')"
+            if [ -z "$_kind" ]; then
+                continue
+            fi
+            if [ -n "$_room_selectable" ]; then
+                _room_selectable="${_room_selectable}, "
+            fi
+            _room_selectable="${_room_selectable}\"$(toml_escape "$_kind")\""
+        done
+        IFS="$_IFS_SAVED"
+        if [ -n "$_room_selectable" ]; then
+            echo "room_selectable = [${_room_selectable}]" >> "$CONFIG_FILE"
+        fi
+    fi
+
     # A tmux_claude primary with nothing set gets claude_code written in, which
     # is the failover it had implicitly before ISSUE-362 — same default the
     # Ansible role applies, so the two deployment shapes agree. Setting
