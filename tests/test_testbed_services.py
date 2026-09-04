@@ -407,6 +407,28 @@ class TestConfigEnvNamesOnlyShippedVariables:
         # reach the model for no stated reason.
         assert "host.docker.internal" in rendered["ISTOTA_BRAIN_NATIVE_BASE_URL"]
 
+    def test_the_signaling_image_tag_matches_both_shipped_compose_defaults(self):
+        """One version, written in three places and held equal by nothing else.
+
+        The harness passes `ISTOTA_TALK_SIGNALING_IMAGE_TAG` explicitly, so a
+        compose default is only what an *operator* gets — and a bump in one
+        place would leave the tier exercising a version the shipped file does
+        not run. The drift is silent in exactly the direction that matters:
+        `chat-relay` landed in 2.1.0 and a server without it connects fine and
+        only ever sends a bare refresh.
+        """
+        pattern = re.compile(
+            r"strukturag/nextcloud-spreed-signaling:\$\{ISTOTA_TALK_SIGNALING_IMAGE_TAG"
+            r":-([0-9][^}]*)\}"
+        )
+        for path in (FULL_COMPOSE, REPO / "docker" / "docker-compose.test.yml"):
+            found = pattern.findall(path.read_text())
+            assert found == [signaling.IMAGE_TAG], (
+                f"{path.name} defaults the signaling image to {found}, and "
+                f"testbed.services.signaling.IMAGE_TAG is "
+                f"{signaling.IMAGE_TAG!r}"
+            )
+
     def test_the_forge_points_the_developer_skill_at_its_own_container_url(
         self, services
     ):

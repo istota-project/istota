@@ -131,6 +131,20 @@ RECONCILE_WINDOW = ROOM_SYNC_INTERVAL * 2 + 60
 #: daemon's address (`occ security:bruteforce:attempts` reports zero). None of
 #: them reproduces it outside a pytest session.
 #:
+#: **The leading hypothesis, from the review, with the check that settles it.**
+#: `TalkClient._ensure_open` builds `httpx.AsyncClient(timeout=...)` with no
+#: `cookies=`, so the singleton every watcher, the reconciler and the drain
+#: share keeps one cookie jar — and therefore one PHP session with Nextcloud,
+#: which serializes concurrent requests on a session file lock.
+#: `participants/active` is among the most expensive Talk writes, so latency
+#: would grow with the number of concurrent daemon requests, exceed the 15s
+#: timeout, and be sustained by the retry that follows, while the reconciler's
+#: cheaper calls still get through. That predicts every observed detail
+#: including why nothing outside a pytest session reproduces it: only a session
+#: accumulates concurrent watchers. Unverified — reading
+#: `get_talk_client()`'s `client.cookies.jar` after a few watchers would settle
+#: it, and a Nextcloud on a non-locking session handler would refute it.
+#:
 #: **Where it belongs.** The supervisor, its reconnect budget and its shared
 #: settings fetch are Stage 3's, and the spec's own concurrency section is about
 #: exactly this class of hazard — a coroutine that blocks the runtime loop makes
@@ -284,10 +298,16 @@ class TestTheEventStreamIsWhatDelivers:
         which separates "the event path was absent for this room" from "the
         daemon fell over".
 
-        The timing is made deterministic rather than hoped for: waiting for a
-        *different* room's watcher is waiting for a reconciliation to finish, so
-        the next one is a full interval away and the unwatched room's window is
-        the whole of it.
+        The timing is *biased* rather than deterministic, and the difference
+        matters: waiting for a different room's watcher usually means a
+        reconciliation has just finished, so the next one is close to a full
+        interval away — but a watcher that established only after a backoff
+        round returns at an arbitrary phase, and the unwatched room's window can
+        then be a second rather than thirty. That case is detected instead of
+        hoped away: if the bot has picked up a session in the unwatched room by
+        the end of the window, the window overlapped a reconciliation and the
+        negative arm says nothing, so the scenario skips rather than reporting a
+        discrimination failure it did not observe.
         """
         nextcloud = stack.service("nextcloud")
         watched = nextcloud.create_room(
@@ -304,6 +324,12 @@ class TestTheEventStreamIsWhatDelivers:
         early = stack.probe.rows_above(
             "tasks", stack.mark, conversation_token=unwatched
         )
+        if _bot_row(nextcloud, unwatched).get("sessionIds"):
+            pytest.skip(
+                "a reconciliation landed inside the window and gave the room a "
+                "watcher, so the event path was not in fact absent and the "
+                "negative arm below would be asserting about a phase accident"
+            )
         assert not early, (
             "a task appeared within the event window for a room no watcher had "
             "joined yet, so the window does not discriminate between the two "
@@ -399,7 +425,18 @@ class TestTheAuthorizationBoundary:
 
     def test_a_room_the_bot_is_in_is_joinable(self, stack):
         """The positive control. Without it the two refusals below are equally
-        true of a stack where nothing can join anything."""
+        true of a stack where nothing can join anything.
+
+        As the **bot**, because the bot's identity is the one whose
+        authorization is in question, and with `force` because that is what the
+        watcher itself sends. The cost is named rather than hidden: `force`
+        supersedes the bot's own previous session in this room, so if the
+        daemon has already given the room a watcher this terminates its Talk
+        session while its socket stays up. The room is created here and this
+        does not wait for a watcher, so the collision is possible; the daemon
+        repairs it at its next reconnect and no assertion in this file reads
+        this room again.
+        """
         nextcloud = stack.service("nextcloud")
         token = nextcloud.create_room(
             name=_room_name(), participants=[nextcloud.bot_user]
@@ -545,12 +582,19 @@ class TestTheRelayedPayload:
                 deadline = time.monotonic() + 45
                 refresh_only_seen = False
                 while time.monotonic() < deadline:
-                    frame = json.loads(
-                        await asyncio.wait_for(
+                    try:
+                        raw = await asyncio.wait_for(
                             connection.recv(), timeout=deadline - time.monotonic()
                         )
-                    )
-                    event = sig.parse_event(frame)
+                    except asyncio.TimeoutError:
+                        # **The deadline is a result, not a fault.** On a Talk
+                        # that relays no comment this loop consumes refreshes
+                        # until the clock runs out, and letting the timeout
+                        # propagate would error the test at the exact moment the
+                        # class docstring says it should skip — making the
+                        # documented Talk-20 path unreachable.
+                        break
+                    event = sig.parse_event(json.loads(raw))
                     if event is None:
                         continue
                     if event.refresh_only:

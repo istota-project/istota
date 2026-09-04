@@ -520,8 +520,16 @@ class NextcloudService:
         """`POST …/participants/active`, and the Talk session id it mints.
 
         This is what puts a client in the room's participant list and what the
-        signaling server's ping loop then keeps warm. `force` is what the
-        reference client sends and what supersedes a previous live session.
+        signaling server's ping loop then keeps warm.
+
+        **`force` supersedes the caller's own previous session in that room, and
+        the caller is the bot by default** — which on a stack with the signaling
+        supervisor running means this call can terminate the daemon's watcher
+        session while its WebSocket stays up. That is the silent-loss state
+        `lastPing` exists to detect, so a scenario calling this as the bot in a
+        room the daemon watches is inducing it deliberately or by accident. The
+        daemon repairs it at its next reconnect; a scenario that cannot wait
+        should pass `user=` a human instead.
 
         `tolerate` is how the authorization-boundary case reads a refusal: for a
         room the caller is not a participant of, Talk raises `Unauthorized` and

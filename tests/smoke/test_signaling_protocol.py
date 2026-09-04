@@ -88,7 +88,20 @@ async def _hello(service, websockets, *, features=("chat-relay",)):
     consults exactly that and nothing else when deciding whether to hand over a
     relayed comment or strip it to a bare refresh.
     """
-    connection = await websockets.connect(service.ws_url, open_timeout=20)
+    # Retried on a refused connection only. Nothing orders the signaling
+    # container ahead of the readiness wait — that waits on the istota
+    # container — and `open_timeout` does not cover an immediate `ECONNREFUSED`,
+    # so the first scenario of the profile can land in the window before the Go
+    # binary has bound. Every later failure is raised as it comes.
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            connection = await websockets.connect(service.ws_url, open_timeout=20)
+            break
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+            await asyncio.sleep(0.5)
     welcome = json.loads(await asyncio.wait_for(connection.recv(), timeout=20))
     server_features = sig.parse_welcome(welcome)
 
@@ -339,7 +352,16 @@ class TestReconnect:
 
     def test_the_room_is_rejoinable_after_the_restart(self, stack):
         """The other half of the recovery, and the one that says the server came
-        back rather than merely refusing things."""
+        back rather than merely refusing things.
+
+        It restarts the server itself rather than relying on the test above
+        having done it. Sharing that side effect by source order made this pass
+        against a server that was never restarted whenever it was selected
+        alone or the previous test failed early — the tier's own
+        "indistinguishable from a no-op" rule, against a scenario whose whole
+        claim is about recovery.
+        """
+        stack.restart("signaling")
         service = stack.service("signaling")
         websockets = sig.require_websockets()
 
@@ -362,7 +384,7 @@ class TestReconnect:
 # -- the control-ping requirement, and its negative control ------------------
 
 
-def _raw_handshake(host: str, port: int, path: str) -> socket.socket:
+def _raw_handshake(host: str, port: int, path: str) -> tuple[socket.socket, bytes]:
     """A WebSocket connection with no library behind it, for one purpose.
 
     The library requirement this file's last test exists for is that the client
@@ -389,9 +411,76 @@ def _raw_handshake(host: str, port: int, path: str) -> socket.socket:
         if not chunk:
             raise AssertionError("the server closed during the WebSocket handshake")
         buffered += chunk
-    if b" 101 " not in buffered.split(b"\r\n", 1)[0]:
-        raise AssertionError(f"the server refused the upgrade: {buffered[:120]!r}")
-    return connection
+    header, leftover = buffered.split(b"\r\n\r\n", 1)
+    if b" 101 " not in header.split(b"\r\n", 1)[0]:
+        raise AssertionError(f"the server refused the upgrade: {header[:120]!r}")
+    # **The leftover is returned, not discarded**, and that is the whole reason
+    # this returns a pair. The server writes its `welcome` immediately, so it
+    # routinely arrives in the same TCP segment as the 101 response — and a
+    # reader that started from the socket would begin one frame downstream,
+    # block until the server's 2-second hello deadline expired, and read the
+    # `bye` as though it were the first frame. Measured: the first text frame
+    # arriving after 2.57 seconds and being `{"type": "bye", "reason":
+    # "hello_timeout"}`.
+    return connection, leftover
+
+
+class _RawFrames:
+    """A buffered reader for server text frames on a hand-rolled socket.
+
+    Buffered rather than one `recv` per frame, because the server's `welcome`
+    and its `hello` answer routinely arrive in one TCP read — so a reader that
+    threw away whatever came with the frame it wanted would silently discard the
+    answer the control below has to assert on.
+
+    Server-to-client frames are unmasked by the protocol, so there is no
+    unmasking here; anything but an unfragmented text frame is a server this
+    helper does not model and is reported rather than skipped.
+    """
+
+    def __init__(self, connection: socket.socket, buffered: bytes = b"") -> None:
+        self._connection = connection
+        self._buffer = buffered
+
+    def _need(self, count: int) -> bytes:
+        while len(self._buffer) < count:
+            chunk = self._connection.recv(65536)
+            if not chunk:
+                raise AssertionError("the server closed while a frame was expected")
+            self._buffer += chunk
+        head, self._buffer = self._buffer[:count], self._buffer[count:]
+        return head
+
+    def text(self) -> dict:
+        """The next text frame, skipping control frames without answering them.
+
+        Skipping is not tidiness: the server sends a **ping immediately on
+        connect** to measure round-trip time (it logs "Client from … has RTT of
+        0 ms"), so the very first frame after the handshake is opcode 0x9 rather
+        than the `welcome`. Not answering it is the entire point of this
+        socket — a pong here would make the control a second well-behaved
+        client and it would survive the wait like the library one.
+        """
+        while True:
+            first, second = self._need(2)
+            opcode = first & 0x0F
+            if second & 0x80:
+                raise AssertionError("the server masked a frame, which it must not")
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(self._need(2), "big")
+            elif length == 127:
+                length = int.from_bytes(self._need(8), "big")
+            body = self._need(length)
+            if opcode == 0x8:
+                raise AssertionError(f"the server closed the connection: {body!r}")
+            if opcode in (0x9, 0xA):
+                continue
+            if first != 0x81:
+                raise AssertionError(
+                    f"expected an unfragmented text frame, got {first:#x}"
+                )
+            return json.loads(body.decode())
 
 
 def _masked_text_frame(payload: str) -> bytes:
@@ -399,6 +488,14 @@ def _masked_text_frame(payload: str) -> bytes:
     protocol violation the server closes on, which would make the control fail
     for a reason unrelated to pings."""
     body = payload.encode()
+    if len(body) > 0xFFFF:
+        # Refused rather than encoded wrongly: the 127 branch is not written,
+        # and truncating the length into two bytes produces a frame the server
+        # rejects as a protocol error, which reads as a server fault.
+        raise ValueError(
+            f"{len(body)} bytes needs the 64-bit length branch, which this "
+            "helper does not implement"
+        )
     mask = os.urandom(4)
     masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(body))
     if len(body) < 126:
@@ -428,16 +525,30 @@ class TestAnIdleConnectionOutlivesTheServersReadDeadline:
         websockets = sig.require_websockets()
         port = service.host_port
 
-        silent = _raw_handshake("127.0.0.1", port, "/spreed")
-        silent.settimeout(1.0)
-        try:
-            silent.recv(65536)  # the welcome frame, discarded
-        except OSError:  # pragma: no cover - the server always sends one
-            pass
+        silent, buffered = _raw_handshake("127.0.0.1", port, "/spreed")
+        silent.settimeout(20.0)
+        frames = _RawFrames(silent, buffered)
+        welcome = frames.text()
+        assert welcome.get("type") == "welcome", welcome
+
         # The server disconnects a client that has not said hello within two
         # seconds (`hub.go:113`), so the control has to establish a session or
         # it would die of the wrong thing.
         silent.sendall(_masked_text_frame(json.dumps(service.internal_hello("9"))))
+
+        # **Read the answer, and assert on it.** Without this the control passes
+        # for the wrong reason and the positive half proves nothing with it: a
+        # wrong length branch, a bad mask, an unmasked frame or a rejected
+        # secret each makes the server close *immediately*, and seventy-five
+        # seconds later `closed` is True through a mechanism that has nothing to
+        # do with a read deadline. A session id in hand is what separates the
+        # two.
+        answered = frames.text()
+        assert answered.get("type") == "hello", (
+            "the hand-rolled client's hello was refused, so anything the "
+            f"control observes afterwards is about that instead: {answered}"
+        )
+        assert answered["hello"].get("sessionid"), answered
 
         async def run():
             connection, _, _ = await _hello(service, websockets)
@@ -482,6 +593,9 @@ class TestAnIdleConnectionOutlivesTheServersReadDeadline:
                 except OSError:
                     closed = True
                     break
+            # Anything still buffered in `frames` is irrelevant here: the
+            # question is whether the *socket* ended, and an empty read is the
+            # only thing that answers it.
             assert closed, (
                 "the server kept a client that answered no control ping for 75 "
                 "seconds, so the read deadline this test's positive half "

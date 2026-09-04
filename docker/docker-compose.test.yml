@@ -207,14 +207,17 @@ services:
     # The same wrapper the shipped file carries, for the same reason: three of
     # the placeholders in upstream's `server.conf.in` are published constants,
     # and `[clients] internalsecret` is the door an internal client joins any
-    # room through. A random value per container where the caller named none.
+    # room through. A random value per container where the caller named none —
+    # including the backend secret, which is not one of the three but is the
+    # door the harness publishes chat events through and would otherwise be
+    # left empty.
     entrypoint:
       - /bin/bash
       - -c
       - |
-        for var in INTERNAL_SHARED_SECRET_KEY HASH_KEY BLOCK_KEY; do
+        for var in INTERNAL_SHARED_SECRET_KEY HASH_KEY BLOCK_KEY BACKEND_NEXTCLOUD_SHARED_SECRET; do
           if [ -z "$${!var}" ]; then
-            export "$$var=$$(head -c 24 /dev/urandom | base64 | tr -d '=')"
+            export "$$var=$$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
             echo "[signaling] $$var was not set; generated a random one for this container."
           fi
         done

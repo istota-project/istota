@@ -93,6 +93,34 @@ class SignalingService:
 
     _stack: object | None = None
 
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic
+        """Redacted, for the reason `FullCredentials.__repr__` is.
+
+        pytest's assertion rewriting renders the repr of whatever a failing
+        comparison touched, and every scenario holds this object. A generated
+        secret in a failure report on a public repository is a secret in a
+        terminal scrollback that gets pasted into an issue — and the dataclass
+        default prints all four.
+        """
+        return f"SignalingService(<4 redacted>, name={self.name})"
+
+    @property
+    def credentials(self) -> dict[str, str]:
+        """Every secret this service holds, for `Stack._scrub`.
+
+        Plural rather than the singular `credential` the stubs expose, because
+        none of these is "the" credential: they are the *server's* keys, and
+        they are the values a container log or a transcript could quote. On the
+        lean shape they are in no other source `_scrub` reads — `Stack.env` is
+        empty there — so without this they would render whole.
+        """
+        return {
+            "internal secret": self.internal_secret,
+            "backend secret": self.backend_secret,
+            "hash key": self.hash_key,
+            "block key": self.block_key,
+        }
+
     # -- the Service protocol ------------------------------------------------
 
     @property

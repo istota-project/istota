@@ -673,11 +673,9 @@ services:
       - "${ISTOTA_TALK_SIGNALING_BIND:-127.0.0.1}:${ISTOTA_TALK_SIGNALING_PORT:-8081}:8080"
     environment:
       HTTP_LISTEN: 0.0.0.0:8080
-      # Talk's credential for this server, and the reason the two variables are
-      # one value: `occ talk:signaling:add` on the Nextcloud side and the
-      # backend secret here have to match or every hello is refused.
       BACKENDS: nextcloud
-      # **Two URLs, and both are needed.** The server matches an incoming
+      # **Two URLs, and both are needed.**  (This comment describes the key
+      # below it, `BACKEND_NEXTCLOUD_URLS`.) The server matches an incoming
       # request against this list twice over, from opposite directions: Talk
       # stamps every backend request with the URL a *browser* reaches it on
       # (`overwrite.cli.url`), while the daemon's hello names the URL *it*
@@ -687,6 +685,12 @@ services:
       # bruteforce attempt, so after a handful of them Talk gets `429 Too Many
       # Requests` and every room creation fails with a 500 that names nothing.
       BACKEND_NEXTCLOUD_URLS: ${ISTOTA_TALK_SIGNALING_BACKEND_URLS:-http://nextcloud,${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}}
+      # Talk's credential for this server, and the reason the two variables are
+      # one value: `occ talk:signaling:add` on the Nextcloud side and the
+      # backend secret here have to match or every backend request is refused.
+      # Left empty it is generated at random by the entrypoint below, which
+      # makes the mismatch loud rather than leaving the server accepting a
+      # backend request signed with an empty key.
       BACKEND_NEXTCLOUD_SHARED_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
       # Session checksum and encryption keys. Distinct from the backend secret
       # and from each other; the block key must be 16, 24 or 32 bytes.
@@ -713,14 +717,33 @@ services:
     # ISTOTA_TALK_SIGNALING_INTERNAL_SECRET and configures both ends.
     #
     # The two session keys get the same treatment for the same reason: with the
-    # published defaults, anyone can forge a session checksum.
+    # published defaults, anyone can forge a session checksum. So does the
+    # backend secret, which is the door `publish_chat` in the testbed uses to
+    # write arbitrary chat events into any room — an operator who starts the
+    # profile without setting it gets a server Talk cannot reach rather than one
+    # anybody can.
+    #
+    # `tr '+/' '-_'` because these values are substituted into the config by the
+    # image's own `sed`, and an alphabet without the delimiter characters costs
+    # nothing and removes the question. `exec /entrypoint.sh` with no arguments
+    # is correct: the image declares no CMD (`docker image inspect … .Config.Cmd`
+    # is null), so there is nothing being discarded.
+    #
+    # **Nothing orders the istota container after this one**, and that is a
+    # limitation rather than an oversight: compose auto-enables the profile of
+    # any service a running service depends on, so a `depends_on` here would
+    # start the signaling server on every deployment. The daemon's watchers
+    # retry on their own backoff, so a late start costs nothing on that side —
+    # but Talk's own message path is coupled to the backend, and a chat POST
+    # made while the server is unreachable was measured answering HTTP 400. A
+    # stack whose provisioning posts during that window fails that post.
     entrypoint:
       - /bin/bash
       - -c
       - |
-        for var in INTERNAL_SHARED_SECRET_KEY HASH_KEY BLOCK_KEY; do
+        for var in INTERNAL_SHARED_SECRET_KEY HASH_KEY BLOCK_KEY BACKEND_NEXTCLOUD_SHARED_SECRET; do
           if [ -z "$${!var}" ]; then
-            export "$$var=$$(head -c 24 /dev/urandom | base64 | tr -d '=')"
+            export "$$var=$$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
             echo "[signaling] $$var was not set; generated a random one for this container."
           fi
         done

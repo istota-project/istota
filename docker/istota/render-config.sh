@@ -41,6 +41,16 @@
 #   MONARCH_EMAIL, MONARCH_PASSWORD
 #   ISTOTA_*                        see docker/docker-compose.yml
 #
+# **No backticks inside a heredoc in this file.** Every heredoc here is
+# unquoted so that ${...} expands, which is the point, and a backtick pair is
+# therefore a command substitution rather than the prose markup a reader writing
+# a comment intends: the shell runs the words between them, says "command not
+# found" on stderr, substitutes the empty string, and the script exits 0 with
+# the words gone from its own output. Measured on the [talk.signaling] block,
+# whose comment named two files that way and rendered with both names missing.
+# `tests/test_render_config.py::TestNoHeredocRunsACommand` refuses one, and the
+# render helper there requires empty stderr for the same class of defect.
+#
 # `tests/test_render_config.py` holds entrypoint.sh's `export` list to this
 # contract, so a name added here without being exported fails a test rather than
 # rendering as empty on a real boot.
@@ -285,14 +295,6 @@ bot_username = "${BOT_USER:-istota}"
 # backend"). Off unless the operator runs one: docker-compose.yml ships the
 # container behind the signaling compose profile, and a deployment without it
 # keeps the poll loop, which is the capability floor rather than a fallback.
-#
-# No backticks in this comment, and none in any heredoc in this file, for a
-# reason that is invisible until it bites: every heredoc here is unquoted so
-# that variable references expand, which means a backtick pair is a command
-# substitution. Written with them, this block silently ran "docker-compose.yml"
-# and "signaling" as commands and rendered the words out of its own text.
-# A dollar-brace sequence in prose is the same trap one step along: it is a bad
-# substitution, and that one at least fails loudly.
 #
 # There is no credential here, and the absence is the design. istota
 # authenticates to the signaling server as its own Nextcloud user, so the HPB
