@@ -607,6 +607,26 @@ class FakeTalkClient:
             raise failure
         return list(self.messages.get(conversation_token, []))[-limit:]
 
+    async def fetch_messages_since(
+        self, conversation_token: str, since_id: int, batch_size: int = 200,
+    ) -> list[dict]:
+        """The signaling catch-up, oldest-first and strictly newer than `since_id`.
+
+        Deliberately *not* `poll_messages` with a cursor: the real one sends
+        `lookIntoFuture=1&timeout=0` and paginates, where `poll_messages` holds a
+        Nextcloud worker for `scheduler.talk_poll_timeout` and truncates at
+        `limit`. A double that returned the same rows for both would let a
+        regression from one to the other pass, which is the distinction the
+        catch-up path exists to make.
+        """
+        self._check("fetch_messages_since", conversation_token, {
+            "since_id": since_id, "batch_size": batch_size,
+        })
+        seeded = self.messages.get(conversation_token) or []
+        newer = [m for m in seeded if (m.get("id") or 0) > since_id]
+        newer.sort(key=lambda m: m.get("id") or 0)
+        return newer[:batch_size]
+
     async def get_latest_message_id(self, conversation_token: str) -> int | None:
         self._check("get_latest_message_id", conversation_token, {})
         seeded = self.messages.get(conversation_token) or []
