@@ -27,6 +27,7 @@ FILES = [
     "tests/test_executor_allowed_tools.py",
     "tests/test_security.py",
     "tests/test_web_chat.py",
+    "tests/test_web_chat_commands.py",
     "tests/test_room_model_default.py",
     "tests/test_brain_room_default.py",
     "tests/test_prompt_golden.py",
@@ -126,6 +127,94 @@ CONTROLS: list[tuple[str, str, str, str]] = [
         "src/istota/web_app.py",
         "            if model not in _known_room_models(room_brain):",
         "            if model not in _known_room_models(_config.brain):",
+    ),
+    # ---- Stage 4, the web surface ----
+    (
+        "PATCH admin gate removed",
+        "src/istota/web_app.py",
+        '        if not _config.is_admin(user["username"]):\n'
+        "            return JSONResponse(",
+        "        if False:\n"
+        "            return JSONResponse(",
+    ),
+    (
+        "PATCH allowlist check removed",
+        "src/istota/web_app.py",
+        "            if brain not in room_selectable_kinds(_config.brain):",
+        "            if False:",
+    ),
+    (
+        "PATCH clears the pin before applying the model, not after",
+        "src/istota/web_app.py",
+        "            if model is not _UNSET or effort is not _UNSET:",
+        "            if brain is not _UNSET:\n"
+        "                _reg = db.get_room(conn, updated.token)\n"
+        "                if _reg is not None:\n"
+        "                    from .commands import _clear_pin_across_namespaces\n"
+        "                    model_cleared = bool(_clear_pin_across_namespaces(\n"
+        "                        _config, conn, updated.token, _reg,\n"
+        '                        source_type="web",\n'
+        '                        outgoing=(_reg.brain or "").strip(),\n'
+        "                        incoming=brain,\n"
+        "                    ))\n"
+        "                db.set_room_brain(conn, updated.token, brain)\n"
+        "                brain = _UNSET\n"
+        "            if model is not _UNSET or effort is not _UNSET:",
+    ),
+    (
+        "PATCH response drops the brain",
+        "src/istota/web_app.py",
+        '        d["brain"] = reg.brain if reg else None',
+        "        pass",
+    ),
+    (
+        "the room listing drops the brain",
+        "src/istota/web_app.py",
+        '            d["brain"] = r.brain\n',
+        "",
+    ),
+    (
+        "the stream snapshot drops the brain",
+        "src/istota/web_app.py",
+        '                "brain": r.brain,\n',
+        "",
+    ),
+    (
+        "the promote response drops the brain",
+        "src/istota/web_app.py",
+        '        d["brain"] = reg.brain\n',
+        "",
+    ),
+    (
+        "selectable_brains ignores the admin gate",
+        "src/istota/web_app.py",
+        "        if not _config.is_admin(username):\n            return []",
+        "        if False:\n            return []",
+    ),
+    (
+        # Both filters at once, deliberately. Dropping only the allowlist one
+        # turns nothing red — the per-kind `except` below catches an unbuildable
+        # name anyway — so a control naming one site alone reports a test that
+        # cannot fail when what it has actually found is two mechanisms
+        # covering one case.
+        "selectable_brains offers a kind that cannot be built",
+        "src/istota/web_app.py",
+        "        for kind in sorted(room_selectable_kinds(_config.brain)):",
+        "        for kind in sorted(_config.brain.room_selectable):",
+    ),
+    (
+        "selectable_brains has no per-kind guard",
+        "src/istota/web_app.py",
+        "            except Exception:  # noqa: BLE001 — one bad kind is not the whole list",
+        "            except ZeroDivisionError:",
+    ),
+    (
+        "/chat/commands ignores room_id",
+        "src/istota/web_app.py",
+        "    if room_id is not None:\n"
+        '        room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)',
+        "    if False:\n"
+        '        room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)',
     ),
 ]
 
