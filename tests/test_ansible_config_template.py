@@ -514,6 +514,50 @@ class TestTheBrainFallbackDefault:
         assert config.brain.fallback == "native"
 
 
+class TestTheRoomSelectableAllowlist:
+    """The key that decides whether per-room brain selection exists at all.
+
+    It shipped with no Ansible variable and no template line, so on the
+    canonical deployment shape a hand edit to the rendered ``config.toml`` was
+    overwritten by the next play and the feature was unreachable rather than
+    merely off. Both halves are asserted here because either one alone renders
+    nothing: a default with no template line is inert, and a template line with
+    no default is a ``StrictUndefined`` render failure.
+    """
+
+    def test_the_default_renders_no_key_at_all(self, rendered, parsed):
+        """Empty must not render ``room_selectable = []``.
+
+        An empty list and an absent key load identically today, so this is about
+        the file an operator reads: a key rendered at its own default invites
+        editing the generated file, which the next play overwrites.
+        """
+        assert "room_selectable" not in rendered
+        assert "room_selectable" not in parsed["brain"]
+        assert load_config_from(rendered).brain.room_selectable == []
+
+    def test_a_configured_list_reaches_the_loaded_config(self):
+        config = load_config_from(
+            render(istota_brain_room_selectable=["claude_code", "native"])
+        )
+        assert config.brain.room_selectable == ["claude_code", "native"]
+
+    def test_the_rendered_list_is_offered_to_a_room(self):
+        """The loaded value has to survive `room_selectable_kinds`.
+
+        `load_config` accepting the key is not the property that matters — the
+        picker reads the allowlist intersected with the kinds `make_brain` can
+        build, so a template rendering a shape that survives TOML and dies there
+        would still leave the feature unreachable.
+        """
+        from istota.brain import room_selectable_kinds
+
+        config = load_config_from(
+            render(istota_brain_room_selectable=["claude_code", "native"])
+        )
+        assert room_selectable_kinds(config.brain) == {"claude_code", "native"}
+
+
 class TestThePackageCacheRoot:
     """ISSUE-305, ISSUE-317, ISSUE-319 — the root, the sweep keys, the bind order.
 

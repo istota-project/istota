@@ -61,6 +61,13 @@ features = {{ istota_experimental_features | to_json }}
 #                           (needs tmux on the host).
 # Operator runbook: docs/configuration/native-brain.md.
 kind = "{{ istota_brain_kind | default('claude_code', true) }}"
+{% if istota_brain_room_selectable %}
+# Brain kinds a room may pin for itself, with `!brain` or the web room settings.
+# Empty (the default) means none may. Writing a room's brain is admin-only on
+# top of this, and a pinned room does not fail over: it runs the brain it names
+# or fails saying why. Listing a kind also widens the doctor checks for it.
+room_selectable = {{ istota_brain_room_selectable | to_json }}
+{% endif %}
 {% if istota_brain_fallback %}
 # Availability failover: when the primary brain above is unavailable (subscription
 # usage limit / missing binary / tmux launch failure), run the task on this brain

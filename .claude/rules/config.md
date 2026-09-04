@@ -453,17 +453,19 @@ only when a room actually pins one, which for an unbuildable name is never. Two
 consequences beyond the room itself: an admitted pin clears `fallback` for that
 task, and `brain.reachable_brain_kinds` folds this list in, so allowlisting a
 kind widens the `doctor` checks for it whether or not a room has selected it.
-**Neither deployment path can set it, which is a gap rather than a decision
-about env vars.** There is no env var, deliberately — this is deployment policy
-rather than a credential or a per-container toggle — but the Ansible role has no
-variable for it either, and `templates/config.toml.j2` renders `[brain]` without
-it, so a hand edit to the rendered `config.toml` is overwritten by the next
-play. Setting it on the canonical deployment means adding the field to
-`deploy/ansible/defaults/main.yml` and that template, per the rule in
-`.claude/rules/deployment.md`; on Docker it means both
+**There is no env var, deliberately** — this is deployment policy rather than a
+credential or a per-container toggle. Ansible sets it through
+`istota_brain_room_selectable` (`deploy/ansible/defaults/main.yml`), which
+`templates/config.toml.j2` renders inside `[brain]` **only when the list is
+non-empty**: an empty list and an absent key load identically, and rendering a
+key at its own default invites editing the generated file, which the next play
+overwrites. The default and the template line are one change, not two — a
+default with no template line is inert, and a template line with no default
+fails the render under `StrictUndefined`, which is what
+`tests/test_ansible_config_template.py::TestTheRoomSelectableAllowlist` asserts
+from both ends. Docker still cannot set it; doing so means both
 `docker/istota/render-config.sh` and `docker/docker-compose.yml`, per the
-testbed two-file rule. Until one of those lands, the feature is reachable only
-on an install whose `config.toml` nothing regenerates. See `.claude/rules/brain.md` "Per-room brain
+testbed two-file rule. See `.claude/rules/brain.md` "Per-room brain
 selection".
 
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),

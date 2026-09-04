@@ -56,7 +56,7 @@ All variables with defaults are documented in `defaults/main.yml`. Key groups:
 - **Users**: `istota_users` (dict), `istota_admin_users` (list)
 - **Scheduler**: `istota_scheduler_*` (poll intervals, worker limits, timeouts)
 - **Logging**: `istota_logging_*`
-- **Brain backend**: `istota_brain_kind` (`claude_code` default, or `native`), `istota_brain_native_*`, `istota_brain_source_type_overrides`. See [docs/configuration/native-brain.md](../../docs/configuration/native-brain.md) for the native-brain runbook.
+- **Brain backend**: `istota_brain_kind` (`claude_code` default, or `native`), `istota_brain_native_*`, `istota_brain_source_type_overrides`, `istota_brain_room_selectable` (which kinds a room may pin for itself; empty by default, so per-room brain selection is off until you name kinds). See [docs/configuration/native-brain.md](../../docs/configuration/native-brain.md) for the native-brain runbook.
 
 ## Feature flags
 

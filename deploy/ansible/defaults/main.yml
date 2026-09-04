@@ -88,6 +88,18 @@ istota_custom_system_prompt: true
 # All coexist behind the Brain protocol (src/istota/brain/). Runbook: docs/configuration/native-brain.md.
 istota_brain_kind: "claude_code"
 
+# Which brain kinds a room may pin for itself ([brain] room_selectable), with
+# `!brain` in the room or the web room settings. Empty means none may, so the
+# feature is inert until you name kinds here. A gate rather than a preference:
+# brain kind decides which process holds the agent loop, what tool set it
+# registers and which SandboxProfile is built, so it is not something an upgrade
+# should switch on. Writing a room's brain is admin-only on top of this, and a
+# pinned room does not fail over — it runs the brain it names or fails saying
+# why. Listing a kind also widens the doctor checks for it (`claude` on PATH,
+# tmux, a native API key), whether or not any room has selected it.
+# Values: a list drawn from "claude_code", "native", "tmux_claude".
+istota_brain_room_selectable: []
+
 # Brain fallback ([brain] fallback_*). When the primary brain is unavailable
 # (usage limit, missing binary, tmux launch failure) the task runs on the
 # fallback with its own settings. Portable role tiers cross the provider
