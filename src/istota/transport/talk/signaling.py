@@ -800,6 +800,15 @@ def read_stats() -> dict | None:
                        state is permanent for a room nobody has spoken in, and
                        a diagnostic with a permanent false positive is worse
                        than none
+    ``never_connected`` list[str] — Talk tokens whose watcher the supervisor
+                       cancelled for never once having connected, and for which
+                       none has connected since. **Not a subset of
+                       ``disconnected``** and not comparable to it: that one is
+                       a moment, which a healthy watcher joins for a second
+                       between reconnects, while this is a room nothing has
+                       ever delivered for. It reads identically to a healthy
+                       room on every other key here, which is the whole reason
+                       it is a key
     ``stale_dirty``    int — rooms owed a triggered fetch for longer than one
                        ``room_sync_interval``. A fetch that raises preserves
                        the room's dirty bit rather than retrying into a

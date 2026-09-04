@@ -42,10 +42,12 @@ closed-over-`list_conversations` rule is dropped.
 gated on. See `TestTheRelayedPayload`, which carries the measured answer and the
 Talk-version caveat that turned out to matter more than the diff.
 
-**Three of the eight are skipped**, on a defect this tier found rather than on
-anything about the tier. Read `NEEDS_A_LATE_WATCHER` below before either
-deleting them or unskipping them; it carries what was measured and the six
-things that were ruled out.
+**Three of the eight were skipped** through Stage 3 and Stage 4, on a defect
+this tier found rather than on anything about the tier. ISSUE-414 fixed it and
+they are assertions again. The note below the constants carries what was
+measured, why it stayed invisible for three investigations, and which hypothesis
+it refuted — they are the regression test for it, so read it before touching
+them.
 """
 
 from __future__ import annotations
@@ -104,68 +106,57 @@ WATCHER_WINDOW = ROOM_SYNC_INTERVAL * 5
 RECONCILE_WINDOW = ROOM_SYNC_INTERVAL * 2 + 60
 
 
-#: Three scenarios below are skipped, and the reason is a live defect this tier
-#: found rather than a limitation of the tier.
+#: The three scenarios that need a watcher for a *late* room were skipped here
+#: through Stage 3 and Stage 4, on a defect this tier found. It is fixed
+#: (ISSUE-414) and they are assertions again; the finding is kept because it is
+#: what they are a regression test for.
 #:
-#: **What was measured, twice, on a clean stack.** From roughly the fourth
-#: scenario in a session onward, a room created by a test never gets a watcher.
-#: The reconciler carries on — it backfills the room and archives departed ones
-#: on schedule — but the watcher for the new room logs
+#: **What was measured.** From roughly the fourth scenario in a session onward,
+#: a room created by a test never got a watcher. The reconciler carried on —
+#: backfilling the room and archiving departed ones on schedule — while the
+#: watcher for the new room logged
 #:
 #:     Talk signaling watcher for <token> disconnected: ReadTimeout:
 #:
-#: on every attempt, at the reconnect backoff, indefinitely. `ReadTimeout` is
-#: httpx, so it is an OCS call rather than the WebSocket, and the only OCS calls
-#: on the connect path are the shared settings fetch and `participants/active`;
-#: `TalkClient.DEFAULT_TIMEOUT` is 15 seconds, which matches the observed
-#: cadence. Raising the wait from 75 seconds to 150 changed nothing, so it is
-#: not a slow start: once a room is in this state it stays there.
+#: on every attempt, at the reconnect backoff, indefinitely.
 #:
-#: **What it is not.** Each of these was checked against a live stack and ruled
-#: out: room deletion churn (create and delete six rooms, then time three new
-#: watchers — 27 to 32 seconds each), running tasks (four rounds of create,
-#: watch, post, wait — 7 to 12 seconds each), twenty accumulated rooms (28
-#: seconds), the harness polling participants once a second (0.42s per call, no
-#: effect), a harness-owned bot session from `participants/active` with force, a
-#: refused join, a listable room, and Nextcloud bruteforce throttling of the
-#: daemon's address (`occ security:bruteforce:attempts` reports zero). None of
-#: them reproduces it outside a pytest session.
+#: **What it was.** Nextcloud's bruteforce throttler, sleeping the request
+#: before the controller runs, fed by an unbounded 404 retry loop in the
+#: watcher. `participants/active` answers 404 for a room deleted between
+#: reconciliation passes; `raise_for_status` raised, `RoomWatcher.run`'s generic
+#: `except Exception` caught it, and it retried for ever. Every retry was
+#: another throttler attempt against the `talkRoomToken` action — which
+#: `SignalingController::getSettings` declares too, and the throttler keys on
+#: (IP, action) — so 404s on one dead room bought a pre-controller sleep on the
+#: settings fetch for *every* room. Paired curl, same credentials, same second,
+#: no client timeout: the unannotated `/room` listing 200 in 0.31s, the
+#: annotated settings call 200 in 25.31s (`sleepDelayOrThrowOnMax`'s cap), the
+#: 404 itself in 50.32s (two sleeps — the 404's own `throttle()` fires after
+#: the middleware already slept). Later the server stopped sleeping and said it
+#: aloud: 429.
 #:
-#: **The leading hypothesis, from the review, with the check that settles it.**
-#: `TalkClient._ensure_open` builds `httpx.AsyncClient(timeout=...)` with no
-#: `cookies=`, so the singleton every watcher, the reconciler and the drain
-#: share keeps one cookie jar — and therefore one PHP session with Nextcloud,
-#: which serializes concurrent requests on a session file lock.
-#: `participants/active` is among the most expensive Talk writes, so latency
-#: would grow with the number of concurrent daemon requests, exceed the 15s
-#: timeout, and be sustained by the retry that follows, while the reconciler's
-#: cheaper calls still get through. That predicts every observed detail
-#: including why nothing outside a pytest session reproduces it: only a session
-#: accumulates concurrent watchers. Unverified — reading
-#: `get_talk_client()`'s `client.cookies.jar` after a few watchers would settle
-#: it, and a Nextcloud on a non-locking session handler would refute it.
+#: **Why the reconciler stayed healthy** is the detail that looked most likely
+#: to falsify a tidy answer and turned out to be the answer: its four calls
+#: carry no annotation, and were measured at 0.31s while the delay was 25000ms.
+#: The asymmetry is the endpoint annotation, not concurrency.
 #:
-#: **Where it belongs.** The supervisor, its reconnect budget and its shared
-#: settings fetch are Stage 3's, and the spec's own concurrency section is about
-#: exactly this class of hazard — a coroutine that blocks the runtime loop makes
-#: every in-flight read on that loop time out, which is what a `ReadTimeout`
-#: storm with a healthy reconciler looks like from outside. Diagnosing it is not
-#: this stage's work and guessing at a fix would be worse than naming it.
+#: **Why it survived three investigations.** `TalkClient.DEFAULT_TIMEOUT` is 15s
+#: and Nextcloud's worst-case pre-controller sleep is 25s, so the daemon could
+#: never read the 200 or the 429 that would explain it — the server was saying
+#: "Too Many Requests" and the client could only render a bare `ReadTimeout:`
+#: with an empty message. The zero-attempts probe recorded in an earlier
+#: revision of this note was blind by construction too: Nextcloud 29+ selects
+#: `MemoryCacheBackend` over `DatabaseBackend` when a distributed cache is
+#: configured, so `oc_bruteforce_attempts` is empty *by design* and
+#: `occ security:bruteforce:attempts` always reads zero. Against redis:
+#: `attempts: 11, delay: 25000`.
 #:
-#: The five scenarios that do not need a watcher for a *late* room are unmarked
-#: and pass, including the whole delivery chain and its control. Deleting these
-#: three would lose the only assertions anybody has for `lastPing`, for the
-#: half of the authorization boundary that is ours rather than Nextcloud's, and
-#: for the payload diff — so they are kept, skipped, with the finding attached.
-NEEDS_A_LATE_WATCHER = pytest.mark.skip(
-    reason=(
-        "blocked on a supervisor defect this tier found: from about the fourth "
-        "scenario in a session, a watcher for a newly-created room retries "
-        "`participants/active` on a 15s ReadTimeout forever while the "
-        "reconciler stays healthy. See the comment above this marker for what "
-        "was measured and what was ruled out."
-    )
-)
+#: The hypothesis this note used to carry — one shared PHP session serializing
+#: on a file lock — is **refuted**, and the per-watcher cookie jar it proposed
+#: would have been a regression at every N: measured with the product's own
+#: client, 41 watchers took 0.19s shared against 2.94s per-watcher, and 128 took
+#: 0.66s against 10.64s. A warm session skips a bcrypt login, so the lock is
+#: held about 4ms.
 
 def _room_name() -> str:
     return f"signaling-{uuid.uuid4().hex[:8]}"
@@ -379,7 +370,6 @@ class TestThePresenceThisDesignAcceptsIsReal:
         )
         assert int(row.get("lastPing") or 0) > 0, row
 
-    @NEEDS_A_LATE_WATCHER
     def test_last_ping_advances_across_a_window_the_bot_does_nothing_in(self, stack):
         """The only direct evidence the HPB's ping loop is running.
 
@@ -465,7 +455,6 @@ class TestTheAuthorizationBoundary:
             f"the join was refused, but not the way Talk refuses one: {refused.value}"
         )
 
-    @NEEDS_A_LATE_WATCHER
     def test_the_daemon_never_enrols_itself_in_a_room_it_was_not_invited_to(
         self, stack
     ):
@@ -609,7 +598,6 @@ class TestTheRelayedPayload:
 
         return asyncio.run(run())
 
-    @NEEDS_A_LATE_WATCHER
     def test_the_relayed_comment_matches_the_one_the_fetch_path_reads(self, stack):
         nextcloud = stack.service("nextcloud")
         token = nextcloud.create_room(

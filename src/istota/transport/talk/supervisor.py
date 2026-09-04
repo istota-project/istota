@@ -87,6 +87,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+import httpx
+
 from ...config import Config
 from . import signaling as sig
 from .inbound import (
@@ -104,6 +106,27 @@ logger = logging.getLogger("istota.transport.talk.supervisor")
 # watchers coming back from the hourly ingress drop make **one** settings call
 # between them rather than N. The token is per user, not per room.
 _SETTINGS_TTL_SECONDS = 30.0
+
+# How long a *failed* settings fetch is shared, the way a successful one is
+# (ISSUE-416). The lock was held across the fetch but `_settings_at` was
+# stamped only on success, so every waiter released into a failed cache issued
+# its own serial fetch — N watchers, N sequential 15s timeouts — which is the
+# opposite of what the lock is there for, on the path where it matters most.
+# It is much shorter than the positive TTL because it delays a genuine
+# recovery: a watcher refused inside the window backs off (1-2s at the first
+# attempt) and tries again, so the window only has to be wide enough to
+# collapse one burst.
+_SETTINGS_FAILURE_TTL_SECONDS = 5.0
+
+# How long a watcher may go without ever once connecting before the supervisor
+# treats it as stuck rather than as reconnecting (ISSUE-416). Generous against
+# a healthy start — a settings fetch, a `participants/active` POST, a connect,
+# a hello, a join and a catch-up, plus a couple of backoff attempts if any of
+# them flaps — because the cost of being wrong is cancelling a watcher that was
+# about to work. There is no equivalent question for a watcher that *has*
+# connected: that one has proved the whole chain works and its reconnect loop
+# is the right thing to leave alone.
+_NEVER_CONNECTED_SECONDS = 300.0
 
 # A handshake frame that never arrives must not hold a watcher for ever. The
 # server's own deadline runs the other way (2s to send `hello` after
@@ -177,6 +200,15 @@ class RoomWatcher:
         self._sup = supervisor
         self.token = token
         self.connected = False
+        # **A different question from `connected`, and the one nothing could
+        # ask** (ISSUE-416). `connected` is "right now"; this is "ever, since
+        # this watcher was constructed". Without it a watcher wedged before it
+        # ever reached a socket is indistinguishable from one that connected an
+        # hour ago and is briefly reconnecting — for ever, in both
+        # `_start_missing` and `doctor` — which is why ISSUE-414 was invisible
+        # from outside while one room sat dark.
+        self.ever_connected = False
+        self.started_at = time.monotonic()
         # Set when `run` returns because the watcher will not fix itself. The
         # supervisor reads it rather than inferring from `task.done()`, which
         # cannot tell a fatal stop from any other kind of ending.
@@ -269,6 +301,7 @@ class RoomWatcher:
             await self._join(ws)
 
             self.connected = True
+            self.ever_connected = True
             self._connected_at = time.monotonic()
             self._state.recoveries.clear()
 
@@ -436,7 +469,20 @@ class SignalingSupervisor:
         self._counters: dict[str, int] = {}
         self._settings = None
         self._settings_at = 0.0
+        # The negative half of the same cache: the last settings failure and
+        # when it happened, so a burst of waiters shares one failure instead of
+        # each paying for its own. Deliberately *not* folded into
+        # `_settings_at`, which means "when `_settings` was fetched" — stamping
+        # that on a failure would make a stale successful payload look fresh,
+        # and the token it carries lives about two minutes.
+        self._settings_error: BaseException | None = None
+        self._settings_error_at = 0.0
         self._settings_lock = asyncio.Lock()
+        # token -> how many times a watcher for it has been cancelled for never
+        # having connected. Cleared when a watcher for that token connects and
+        # when the room leaves the listing, so it reads as "stuck now" rather
+        # than as a lifetime tally.
+        self._never_connected: dict[str, int] = {}
         self._warned_no_chat_relay = False
 
     # -- small helpers -----------------------------------------------------
@@ -511,6 +557,15 @@ class SignalingSupervisor:
         watcher may have re-fetched while this one waited for the lock, and
         comparing identity is what tells "mine is stale" from "someone already
         replaced it".
+
+        **A failure is shared too, and that half was missing** (ISSUE-416). The
+        lock was held across the fetch while `_settings_at` was stamped only on
+        success, so the docstring's claim that N watchers make one call between
+        them held only on the happy path — the path where it matters least. On
+        the failure path each waiter released into an unstamped cache and made
+        its own call, turning one throttled endpoint into N serial 15s waits on
+        it. `_settings_error` is a short negative window over exactly the same
+        lock, so the shape of a failed burst matches the shape of a good one.
         """
         now = time.monotonic()
         cached = self._settings
@@ -530,20 +585,68 @@ class SignalingSupervisor:
                 ):
                     return current
 
-            payload = await self._client().get_signaling_settings()
-            settings = sig.parse_settings(
-                payload, nextcloud_url=self.config.nextcloud.url,
-            )
-            reason = sig.hpb_unavailable_reason(settings)
-            if reason is not None:
-                # Not a `SignalingUnavailable`: that is the startup refusal's
-                # exception and refuses to boot. Here the deployment booted and
-                # Talk has changed its mind, which is a watcher-level fault.
-                raise RuntimeError(f"Talk signaling settings unusable: {reason}")
+            # Checked inside the lock rather than beside the positive fast path
+            # above, because the waiters this exists for are the ones already
+            # blocked on it: by the time they are woken the fetch they would
+            # otherwise repeat has already happened and failed.
+            self._raise_if_recently_failed()
+
+            try:
+                payload = await self._client().get_signaling_settings()
+                settings = sig.parse_settings(
+                    payload, nextcloud_url=self.config.nextcloud.url,
+                )
+                reason = sig.hpb_unavailable_reason(settings)
+                if reason is not None:
+                    # Not a `SignalingUnavailable`: that is the startup
+                    # refusal's exception and refuses to boot. Here the
+                    # deployment booted and Talk has changed its mind, which is
+                    # a watcher-level fault.
+                    raise RuntimeError(
+                        f"Talk signaling settings unusable: {reason}"
+                    )
+            except asyncio.CancelledError:
+                # Never cached. A cancelled fetch says nothing about the
+                # server, and holding it as a shared failure would refuse
+                # every other watcher over a shutdown that has nothing to do
+                # with them.
+                raise
+            except BaseException as e:
+                self._settings_error = e
+                self._settings_error_at = time.monotonic()
+                self.count("settings_failures")
+                raise
+
             self._settings = settings
             self._settings_at = time.monotonic()
+            self._settings_error = None
             self.count("settings_fetches")
             return settings
+
+    def _raise_if_recently_failed(self) -> None:
+        """Re-raise the shared settings failure, if one is still inside its window.
+
+        A *fresh* exception carrying the original as `__cause__`, never the
+        stored object itself: re-raising one instance from several coroutines
+        accumulates their tracebacks onto it, and the log line a watcher prints
+        is `type(e).__name__: e`, which would then name whichever coroutine got
+        there first. Nothing branches on the type of a settings failure — it
+        reaches `run`'s generic arm — so a `RuntimeError` here costs no
+        handling and says out loud that the caller is being refused rather than
+        having made a request.
+        """
+        error = self._settings_error
+        if error is None:
+            return
+        age = time.monotonic() - self._settings_error_at
+        if age >= _SETTINGS_FAILURE_TTL_SECONDS:
+            self._settings_error = None
+            return
+        self.count("settings_failures_shared")
+        raise RuntimeError(
+            f"Talk signaling settings fetch failed {age:.1f}s ago and is not "
+            f"being retried yet: {type(error).__name__}: {error}"
+        ) from error
 
     async def join_room_session(self, token: str) -> str:
         """`POST …/participants/active`, refused for a token we do not watch.
@@ -553,6 +656,31 @@ class SignalingSupervisor:
         point a watcher starts; this is checked at the point the POST is made,
         because those are different moments and a room can leave the listing in
         between.
+
+        **A 404 is fatal, and that is a throttler decision rather than a
+        tidiness one** (ISSUE-414). Nextcloud answers 404 for a room deleted
+        between reconciliation passes; `raise_for_status` raises, and before
+        this the exception fell into `RoomWatcher.run`'s generic
+        `except Exception` and reconnected on the backoff for ever. Every
+        attempt is another bruteforce-throttler attempt: `RoomController::
+        joinRoom` carries `#[BruteForceProtection(action: 'talkRoomToken')]`
+        and `SignalingController::getSettings` declares **the same action**,
+        and the throttler keys on (IP, action) — so 404s on one dead room buy
+        a pre-controller sleep on the settings fetch for *every* room. The
+        ladder climbs to `sleepDelayOrThrowOnMax`'s 25s cap and never comes
+        back down, because `joinRoom` resets the delay only on a *successful*
+        join, which a deleted room can never produce. Measured on a live
+        stack, same credentials, same second: the unannotated `/room` listing
+        200 in 0.31s, the annotated settings call 200 in 25.31s, this 404 in
+        50.32s — two sleeps, since the 404's own `throttle()` fires after the
+        middleware already slept. Later the server said it aloud: 429.
+
+        Only 404. Anything else is left retryable, because a 502 from the
+        ingress or a Nextcloud restart is exactly the transient case the
+        backoff exists for, and parking those for the `_FATAL_RETRY_SECONDS`
+        hold-off would be the churn traded for an outage. Stopping is not
+        losing the room: `reconcile` owns watcher lifecycle and starts a fresh
+        watcher once the token is back in the listing.
         """
         if not self._may_watch(token):
             self.count("refused_joins")
@@ -560,7 +688,15 @@ class SignalingSupervisor:
                 f"refusing to join {token}: it is not in the bot's current "
                 "conversation listing"
             )
-        return await self._client().join_room_session(token)
+        try:
+            return await self._client().join_room_session(token)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+            self.count("departed_rooms")
+            raise WatcherFatal(
+                f"{token} is gone: participants/active answered 404"
+            ) from e
 
     async def catch_up(self, token: str) -> None:
         """Read one room forward from its cursor, behind the room's in-flight flag.
@@ -779,6 +915,7 @@ class SignalingSupervisor:
         self._rooms_behind = len(room_pass.behind_cursor)
 
         await self._stop_departed()
+        await self._restart_never_connected()
         for token in behind:
             self.mark_dirty(token)
         self._start_missing()
@@ -795,6 +932,57 @@ class SignalingSupervisor:
         for token in list(self._fatal_until):
             if token not in self._watchable:
                 self._fatal_until.pop(token, None)
+        for token in list(self._never_connected):
+            if token not in self._watchable:
+                self._never_connected.pop(token, None)
+
+    async def _restart_never_connected(self) -> None:
+        """Cancel a watcher that is alive and has never once connected.
+
+        **The escalation `_start_missing` structurally cannot make** (ISSUE-416).
+        That loop skips any token whose task is not `done()`, which is right for
+        a watcher between reconnects and wrong for one that has never reached a
+        socket — and before `ever_connected` there was nothing to tell those
+        apart. A wedged watcher therefore looked exactly like a flapping one,
+        for ever: the supervisor reported it present, the reconciler was
+        healthy, `doctor` saw a socket count that added up, and one room was
+        simply dark. That is why ISSUE-414 was invisible from outside.
+
+        A restart is a real repair for one shape and only a report for the
+        other, and both are worth having. A watcher stuck on an await that never
+        returns cannot recover on its own — its backoff loop is *inside* the
+        task — so cancelling is the only thing that reaches it. A watcher whose
+        every attempt fails fast is not repaired by a fresh task, but the
+        cancellation is what puts the token in `never_connected` and in front of
+        an operator.
+
+        Bounded by the reconciliation cadence, which is the same argument the
+        fatal hold-off makes: one settings fetch, one `participants/active` POST
+        and one connect per stuck room per pass, never a loop of its own.
+        """
+        for token, watcher in list(self._watchers.items()):
+            if watcher.ever_connected:
+                # Proof the whole chain works for this room. Anything after
+                # this is the reconnect loop, which is not this method's
+                # business.
+                self._never_connected.pop(token, None)
+                continue
+            task = self._tasks.get(token)
+            if task is None or task.done():
+                # `_start_missing` owns an ended task, including deciding
+                # whether it ended fatally. Reaching in here would race it.
+                continue
+            if time.monotonic() - watcher.started_at < _NEVER_CONNECTED_SECONDS:
+                continue
+            logger.warning(
+                "Talk signaling watcher for %s has never connected in %.0fs; "
+                "restarting it", token, _NEVER_CONNECTED_SECONDS,
+            )
+            await self._stop_watcher(token)
+            # After `_stop_watcher`, which pops the token out of every other
+            # mapping it touches.
+            self._never_connected[token] = self._never_connected.get(token, 0) + 1
+            self.count("watchers_never_connected")
 
     def _start_missing(self) -> None:
         now = time.monotonic()
@@ -953,6 +1141,7 @@ class SignalingSupervisor:
         # C-level call under the GIL and cannot be interrupted part-way.
         watchers = list(self._watchers.items())
         marks = list(self._dirty.values())
+        stuck = list(self._never_connected)
         # The counters go in first, so a diagnostic that happens to be named
         # like one of the four contract keys can never displace it.
         stats = dict(self._counters)
@@ -963,6 +1152,11 @@ class SignalingSupervisor:
                 token for token, w in watchers if not w.connected
             ),
             "rooms_behind": self._rooms_behind,
+            # Distinct from `disconnected`, which a watcher joins for a second
+            # between reconnects. These are rooms nothing has ever delivered
+            # for, which reads the same as a healthy one on every other number
+            # here.
+            "never_connected": sorted(stuck),
             "dirty": len(marks),
             "in_flight": len(self._inflight),
             "stale_dirty": sum(1 for marked in marks if now - marked > interval),

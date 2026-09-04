@@ -23,6 +23,7 @@ import contextlib
 import json
 import time
 
+import httpx
 import pytest
 from unittest.mock import AsyncMock
 
@@ -896,6 +897,345 @@ class TestDoctorReadsTheStrandedCount:
             result = doctor.check_signaling_watchers(config, probe=False)
             assert result.status == doctor.WARN
             assert "waiting on a triggered fetch" in result.detail
+        finally:
+            sig.clear_stats_source()
+            await sup._stop_watcher("grp")
+
+
+def _http_error(status: int) -> "httpx.HTTPStatusError":
+    """What `raise_for_status()` raises, built the way httpx builds it."""
+    request = httpx.Request(
+        "POST", "https://nc.test/ocs/v2.php/apps/spreed/api/v4/room"
+                "/grp/participants/active",
+    )
+    return httpx.HTTPStatusError(
+        f"{status}", request=request,
+        response=httpx.Response(status, request=request),
+    )
+
+
+class TestADepartedRoomStopsItsWatcher:
+    """ISSUE-414: a 404 from `participants/active` used to retry for ever.
+
+    Nextcloud answers 404 for a room deleted between reconciliation passes.
+    `raise_for_status()` raises `HTTPStatusError`, which fell into `run`'s
+    generic `except Exception` and reconnected on the backoff indefinitely —
+    and every attempt was another bruteforce-throttler attempt against the
+    `talkRoomToken` action, which `SignalingController::getSettings` declares
+    too. So one dead room bought a pre-controller sleep on the settings fetch
+    for *every* room, climbing to the 25s cap and never recovering, because
+    `joinRoom` resets the delay only on a successful join. Measured: a 200 on
+    the unannotated `/room` listing at 0.31s while the annotated settings call
+    took 25.31s and the 404 itself took 50.32s.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_404_join_is_fatal_rather_than_a_disconnect(self, config):
+        from istota.transport.talk.supervisor import RoomWatcher, WatcherFatal
+
+        client = _client()
+        client.join_room_session = AsyncMock(side_effect=_http_error(404))
+        sup, ws = await _armed_supervisor(
+            config, client, [_WELCOME, _HELLO_OK, _ROOM_OK],
+        )
+        watcher = RoomWatcher(sup, "grp")
+
+        with pytest.raises(WatcherFatal):
+            await watcher._session()
+
+        assert client.join_room_session.await_count == 1
+        assert sup.stats()["departed_rooms"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_watcher_stops_instead_of_climbing_the_ladder(
+        self, config,
+    ):
+        """The property the issue is actually about, driven through `run`.
+
+        `_session` raising is not enough on its own: the unbounded loop was in
+        `run`, so this is the assertion that distinguishes one attempt from a
+        ladder. Bounded rather than spun — a first reconnect waits 1-2s, so a
+        watcher still retrying cannot return inside this timeout.
+        """
+        from istota.transport.talk.supervisor import RoomWatcher
+
+        client = _client()
+        client.join_room_session = AsyncMock(side_effect=_http_error(404))
+        sup, ws = await _armed_supervisor(
+            config, client, [_WELCOME, _HELLO_OK, _ROOM_OK],
+        )
+        watcher = RoomWatcher(sup, "grp")
+
+        await asyncio.wait_for(watcher.run(), timeout=1.0)
+
+        assert watcher.fatal is True
+        assert client.join_room_session.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_500_is_still_a_retryable_disconnect(self, config):
+        """The arm is scoped to 404, and this is what says so.
+
+        A blanket "any HTTP error is fatal" would park a watcher for the whole
+        `_FATAL_RETRY_SECONDS` hold-off on a Nextcloud restart or a 502 from
+        the ingress, which is exactly the transient case the backoff exists
+        for. 404 is the only status that cannot fix itself, because it is what
+        a room that is gone answers.
+        """
+        from istota.transport.talk.supervisor import RoomWatcher
+
+        client = _client()
+        client.join_room_session = AsyncMock(side_effect=_http_error(500))
+        sup, ws = await _armed_supervisor(
+            config, client, [_WELCOME, _HELLO_OK, _ROOM_OK],
+        )
+        watcher = RoomWatcher(sup, "grp")
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await watcher._session()
+        assert sup.stats().get("departed_rooms", 0) == 0
+
+
+class TestAFailedSettingsFetchIsSharedTheWayAGoodOneIs:
+    """ISSUE-416, defect 1: the lock collapsed a burst only on the happy path.
+
+    `settings()` held `_settings_lock` across the fetch but stamped
+    `_settings_at` only on success, so every waiter released into a failed
+    cache issued its own serial fetch — N watchers, N sequential 15s timeouts
+    against an endpoint that was already refusing. That is the opposite of what
+    the lock is there for, on the path where it matters most: it was the
+    amplifier that turned ISSUE-414's one throttled endpoint into N serial
+    waits on it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_twenty_waiters_on_a_failing_fetch_make_one_call(
+        self, config,
+    ):
+        client = _client()
+        client.get_signaling_settings = AsyncMock(
+            side_effect=_http_error(429),
+        )
+        sup = _supervisor(config, client)
+
+        results = await asyncio.gather(
+            *[sup.settings() for _ in range(20)], return_exceptions=True,
+        )
+
+        assert client.get_signaling_settings.await_count == 1
+        assert all(isinstance(r, Exception) for r in results)
+        assert sup.stats()["settings_failures"] == 1
+        assert sup.stats()["settings_failures_shared"] == 19
+
+    @pytest.mark.asyncio
+    async def test_a_shared_refusal_carries_the_original_as_its_cause(
+        self, config,
+    ):
+        """A fresh exception, never the stored instance.
+
+        Re-raising one object from several coroutines accumulates their
+        tracebacks onto it, and the line a watcher logs is
+        `type(e).__name__: e` — which would then name whichever coroutine got
+        there first rather than the failure.
+        """
+        client = _client()
+        original = _http_error(429)
+        client.get_signaling_settings = AsyncMock(side_effect=original)
+        sup = _supervisor(config, client)
+
+        with pytest.raises(Exception):
+            await sup.settings()
+        with pytest.raises(RuntimeError) as caught:
+            await sup.settings()
+
+        assert caught.value is not original
+        assert caught.value.__cause__ is original
+        assert "not being retried yet" in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_the_window_expires_so_a_recovery_is_not_held_back(
+        self, config,
+    ):
+        """The negative window collapses a burst; it must not delay a fix."""
+        from istota.transport.talk import supervisor as sup_mod
+
+        client = _client()
+        client.get_signaling_settings = AsyncMock(
+            side_effect=_http_error(429),
+        )
+        sup = _supervisor(config, client)
+        with pytest.raises(Exception):
+            await sup.settings()
+
+        sup._settings_error_at = (
+            time.monotonic() - sup_mod._SETTINGS_FAILURE_TTL_SECONDS - 1
+        )
+        client.get_signaling_settings = AsyncMock(return_value={
+            "server": "https://hpb.test/standalone-signaling",
+            "signalingMode": "external",
+            "helloAuthParams": {"2.0": {"token": "jwt"}},
+        })
+
+        settings = await sup.settings()
+        assert settings.server == "https://hpb.test/standalone-signaling"
+        # …and a later failure is not answered out of the cleared cache.
+        assert sup._settings_error is None
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_fetch_is_not_cached_as_a_shared_failure(
+        self, config,
+    ):
+        """Shutdown says nothing about the server.
+
+        Caching a `CancelledError` would refuse every other watcher over an
+        event that has nothing to do with them, and `AsyncRuntime.stop` cancels
+        in-flight work by design.
+        """
+        client = _client()
+        client.get_signaling_settings = AsyncMock(
+            side_effect=asyncio.CancelledError(),
+        )
+        sup = _supervisor(config, client)
+
+        with pytest.raises(asyncio.CancelledError):
+            await sup.settings()
+
+        assert sup._settings_error is None
+        assert sup.stats().get("settings_failures", 0) == 0
+
+
+class TestAWatcherThatNeverConnectsEscalates:
+    """ISSUE-416, defect 2: wedged and flapping were the same state.
+
+    `_start_missing` skips any token whose task is not `done()`, which is right
+    for a watcher between reconnects and wrong for one that has never reached a
+    socket — and nothing distinguished them. That is why ISSUE-414 was
+    invisible from outside: the supervisor reported watchers present, the
+    reconciler was healthy, `doctor` saw a socket count that added up, and one
+    room was simply dark.
+    """
+
+    async def _one_watched_room(self, config, client):
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+        await sup.reconcile()
+        return sup
+
+    @pytest.mark.asyncio
+    async def test_a_young_watcher_that_has_not_connected_is_left_alone(
+        self, config,
+    ):
+        """The cost of being wrong here is cancelling one that was about to
+        work, so the threshold is generous and this is what holds it."""
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = await self._one_watched_room(config, client)
+        task = sup._tasks["grp"]
+
+        await sup.reconcile()
+
+        assert sup._tasks["grp"] is task
+        assert sup.stats().get("watchers_never_connected", 0) == 0
+        assert sup.stats()["never_connected"] == []
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_a_watcher_past_the_deadline_is_cancelled_and_replaced(
+        self, config,
+    ):
+        from istota.transport.talk import supervisor as sup_mod
+
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = await self._one_watched_room(config, client)
+        first = sup._tasks["grp"]
+        sup._watchers["grp"].started_at = (
+            time.monotonic() - sup_mod._NEVER_CONNECTED_SECONDS - 1
+        )
+
+        await sup.reconcile()
+
+        # Cancelled, awaited, and replaced by a fresh watcher in the same pass:
+        # a watcher stuck on an await that never returns cannot recover on its
+        # own, because its backoff loop is inside the task.
+        assert first.done()
+        assert sup._tasks["grp"] is not first
+        assert sup.stats()["watchers_never_connected"] == 1
+        assert sup.stats()["never_connected"] == ["grp"]
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_a_watcher_that_has_connected_once_is_never_swept(
+        self, config,
+    ):
+        """`ever_connected`, not `connected`.
+
+        A watcher mid-reconnect has `connected == False` and an arbitrarily old
+        `started_at`, so a sweep reading the moment rather than the history
+        would cancel healthy watchers on every pass — trading a blind spot for
+        churn.
+        """
+        from istota.transport.talk import supervisor as sup_mod
+
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = await self._one_watched_room(config, client)
+        task = sup._tasks["grp"]
+        watcher = sup._watchers["grp"]
+        watcher.ever_connected = True
+        watcher.connected = False
+        watcher.started_at = (
+            time.monotonic() - sup_mod._NEVER_CONNECTED_SECONDS - 1
+        )
+
+        await sup.reconcile()
+
+        assert sup._tasks["grp"] is task
+        assert sup.stats().get("watchers_never_connected", 0) == 0
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_a_room_that_connects_later_clears_its_mark(self, config):
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = await self._one_watched_room(config, client)
+        sup._never_connected["grp"] = 2
+
+        sup._watchers["grp"].ever_connected = True
+        await sup.reconcile()
+
+        assert sup.stats()["never_connected"] == []
+
+        await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_doctor_reports_it_apart_from_a_reconnecting_watcher(
+        self, config,
+    ):
+        """The distinguishing assertion: `disconnected` is a moment and this is
+        a history, so a check that folded them would say the same thing about a
+        healthy watcher between reconnects."""
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 10}},
+        ])
+        sup = await self._one_watched_room(config, client)
+        for watcher in sup._watchers.values():
+            watcher.connected = True
+        sup._never_connected["grp"] = 1
+
+        sig.set_stats_source(sup.stats)
+        try:
+            result = doctor.check_signaling_watchers(config, probe=False)
+            assert result.status == doctor.WARN
+            assert "never connected" in result.detail
+            assert "disconnected:" not in result.detail
         finally:
             sig.clear_stats_source()
             await sup._stop_watcher("grp")

@@ -6072,6 +6072,11 @@ def _as_count(value) -> int:
 def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
     """Every live room has a connected watcher, and no room is behind.
 
+    **Four independent faults, deliberately not collapsed into a census.** A
+    watcher can be down right now, never have been up at all, be up and
+    relaying nothing, or be owed a fetch nobody is making — and only the first
+    is visible from a socket count.
+
     **The rooms-behind count is the half that cannot be inferred from the
     others**, and it is why this check is not simply a watcher census. The
     reconciliation pass compares each room's ``lastMessage.id`` against its
@@ -6117,6 +6122,12 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
         (raw_disconnected if isinstance(raw_disconnected, (list, tuple)) else [])
         if isinstance(token, str) and token
     ]
+    raw_stuck = stats.get("never_connected")
+    never_connected = [
+        token for token in
+        (raw_stuck if isinstance(raw_stuck, (list, tuple)) else [])
+        if isinstance(token, str) and token
+    ]
 
     findings = []
     # The count comparison stands on its own rather than behind the token
@@ -6130,6 +6141,17 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
     if disconnected:
         findings.append(
             "disconnected: " + _overlay_list(disconnected)
+        )
+    # **Reported apart from `disconnected` rather than inside it** (ISSUE-416).
+    # A watcher between reconnects is on that list for a second at a time and
+    # is not a fault; one that has never once connected is a room nothing has
+    # ever delivered for, and it reads identically to a healthy room on every
+    # other number here. Collapsing the two is what made ISSUE-414 invisible
+    # from outside for three investigations: the supervisor reported watchers
+    # present, the reconciler was healthy, and one room was simply dark.
+    if never_connected:
+        findings.append(
+            "never connected: " + _overlay_list(never_connected)
         )
     if behind:
         findings.append(
@@ -6157,7 +6179,10 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
                 "Check talk.signaling_reachable and the daemon log for "
                 "reconnect and error lines. A rooms-behind count that stays "
                 "non-zero while every watcher reports connected means the "
-                "server accepted the join and is relaying nothing."
+                "server accepted the join and is relaying nothing. A room "
+                "listed as never connected has been restarted and still could "
+                "not reach a session, so look for what is refusing the join "
+                "rather than for the socket."
             ),
             scope=DEPLOYMENT,
         )
