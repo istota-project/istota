@@ -188,8 +188,26 @@ CONTROLS: list[tuple[str, str, str, str]] = [
     (
         "selectable_brains ignores the admin gate",
         "src/istota/web_app.py",
-        "        if not _config.is_admin(username):\n            return []",
-        "        if False:\n            return []",
+        "        if not _config.is_admin(username):\n            return empty",
+        "        if False:\n            return empty",
+    ),
+    (
+        "the inherited brain ignores the lane rule",
+        "src/istota/web_app.py",
+        '        inherited_kind = resolve_brain_kind("web", _config.brain).kind',
+        "        inherited_kind = _config.brain.kind",
+    ),
+    (
+        "brain_namespaces narrowed to the offered kinds",
+        "src/istota/web_app.py",
+        "            for kind in sorted(KNOWN_BRAIN_KINDS)",
+        "            for kind in sorted(room_selectable_kinds(_config.brain))",
+    ),
+    (
+        "the crossing clear reports nothing about the effort",
+        "src/istota/web_app.py",
+        '                        cleared = ["model"] + (["effort"] if reg.effort else [])',
+        '                        cleared = ["model"]',
     ),
     (
         # Both filters at once, deliberately. Dropping only the allowlist one
@@ -199,8 +217,8 @@ CONTROLS: list[tuple[str, str, str, str]] = [
         # covering one case.
         "selectable_brains offers a kind that cannot be built",
         "src/istota/web_app.py",
-        "        for kind in sorted(room_selectable_kinds(_config.brain)):",
-        "        for kind in sorted(_config.brain.room_selectable):",
+        "            for kind in sorted(room_selectable_kinds(_config.brain))",
+        "            for kind in sorted(_config.brain.room_selectable)",
     ),
     (
         "selectable_brains has no per-kind guard",
