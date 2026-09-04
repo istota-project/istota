@@ -127,6 +127,21 @@ executor substituted the top-level value into every request, which is the defect
 than a refusal: a failed config load takes the whole daemon down, and native may
 be only the fallback there.
 
+`brain.model_namespace_for_kind(kind)` answers "what namespace does this kind
+read aliases in" as a **lookup** rather than a construction (ISSUE-417).
+`model_namespace` is a class attribute, and building a brain to read one is not
+free: `TmuxClaudeBrain.__init__` shells out to the installed `claude` and warns
+on a version mismatch, so `web_app._brain_catalogue` — which asked once per
+known kind on every catalogue fetch — put a `tmux_brain cli_version_mismatch`
+WARNING in the operator's log every time a room-settings modal opened. Three
+sites collapse onto it: that catalogue's `brain_namespaces`,
+`commands._model_namespace` and the executor's fallback crossing rule. It
+returns `None` for an unbuildable kind, and every caller must read that as **not
+established** rather than as "the same namespace". The separate question — can
+this deployment *build* the kind — is still a construction, and
+`_brain_catalogue` asks it only for the kinds on the operator's allowlist, since
+offering an unbuildable one gives a room that fails every turn.
+
 `brain.configured_default_model_effort(brain_config)` is the same answer as a
 **lookup rather than a construction**, for the callers that only report the
 default — the scheduler's log-channel line and the admin dashboard. Building a

@@ -131,6 +131,39 @@ def configured_default_model_effort(brain_config) -> tuple[str, str]:
     return (model, effort)
 
 
+def model_namespace_for_kind(kind) -> str | None:
+    """The model namespace a brain kind resolves alias names in.
+
+    A **lookup, not a construction** (ISSUE-417). `model_namespace` is a class
+    attribute, so answering this needs no instance — and building one to ask is
+    not free: `TmuxClaudeBrain.__init__` runs `_warn_cli_version_once`, which
+    shells out to the installed `claude` and emits a
+    `tmux_brain cli_version_mismatch` WARNING, so a pure question about a
+    constant produced operator-facing noise. `web_app._brain_catalogue` asked it
+    once per known kind on every catalogue fetch.
+
+    Structured as `make_brain`'s ladder rather than a dict, so a fourth kind is
+    added in two adjacent places and a class that has moved cannot leave a stale
+    literal behind. `tmux_claude` is imported lazily for the reason `make_brain`
+    imports it lazily.
+
+    ``None`` for anything unbuildable, and every caller must read that as **not
+    established** rather than as "the same namespace" — the safe direction for
+    the crossing rule is to drop a pin whose portability could not be settled.
+    Takes ``object``: callers pass a value off a database row or an argparse
+    namespace, and this never raises.
+    """
+    if kind == "claude_code":
+        return ClaudeCodeBrain.model_namespace
+    if kind == "native":
+        return NativeBrain.model_namespace
+    if kind == "tmux_claude":
+        from .tmux_claude import TmuxClaudeBrain
+
+        return TmuxClaudeBrain.model_namespace
+    return None
+
+
 def make_brain(brain_config: BrainConfig) -> Brain:
     """Construct a brain instance from config.
 
@@ -359,7 +392,9 @@ __all__ = [
     "get_alias_overrides",
     "get_availability_breaker",
     "get_portable_alias_names",
+    "configured_default_model_effort",
     "make_brain",
+    "model_namespace_for_kind",
     "make_stream_parser",
     "parse_stream_line",
     "reachable_brain_kinds",

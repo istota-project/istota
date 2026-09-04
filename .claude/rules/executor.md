@@ -313,12 +313,23 @@ so a writerless stream has buffered nothing to settle.
   `(BrainResult | None, dropped_pin)`. Builds the fallback brain
   (`dataclasses.replace(brain_config, kind=fallback_kind)`, overlaying the
   per-user native key when `native`), resolves model/effort via
-  `_resolve_fallback_model_effort`, and reruns `dataclasses.replace(req,
+  `_resolve_crossing_model_effort`, and reruns `dataclasses.replace(req,
   model=…, effort=…)`, passing the result through `_mark_if_exhausted`. A construction failure returns `None` (keep the primary
   result); an unexpected `execute` exception becomes a failed `BrainResult`.
-- `_resolve_fallback_model_effort(task, config, fallback_brain, effort)` →
+- `_resolve_crossing_model_effort(task, config, target_brain, effort, *, origin_namespace)` →
   `(model, effort, dropped_pin)`. Empty requested model → fallback's own default
-  (no note). `is_portable_alias(raw, config_alias_portable_names(config))` → re-resolve the
+  (no note). **A move within one namespace is not a crossing**: where
+  `origin_namespace` matches the target brain's, the pin is used exactly as it
+  arrived and nothing is reported (ISSUE-417). This function used to cross
+  unconditionally, so a `claude_code -> tmux_claude` fallback — the same
+  `claude` binary, the same `anthropic` namespace — dropped a valid
+  `claude-opus-5` *and* put a "your pin was dropped" note in front of the user.
+  `origin_namespace` is where the name was *written*, which on this path is the
+  primary brain's, and it comes from `brain.model_namespace_for_kind` rather
+  than a construction. `None` is "not established" and never compares equal, so
+  an unresolvable origin drops the pin — the direction
+  `commands._clear_pin_across_namespaces` already takes. Otherwise,
+  `is_portable_alias(raw, config_alias_portable_names(config))` → re-resolve the
   intent in the fallback namespace **via `fallback_brain.resolve_alias(raw)`**, so
   both the model *and its effort* are the fallback namespace's own (a customized
   `smart` falling back claude_code→native lands on a valid openai_compat slug +

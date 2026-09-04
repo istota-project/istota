@@ -1202,3 +1202,168 @@ class TestOneNoticePerTurn:
         assert len(notices[1]) == 1
         assert len(notices[2]) == 1
         assert notices[2][0]["payload"]["reason"] == "cooldown"
+
+
+class TestTheCrossingRuleAtTheRealSeam:
+    """The wiring, not the rule (ISSUE-417).
+
+    `tests/test_brain_namespace_crossing.py` exercises the pure function with
+    `origin_namespace` handed in, so the whole behaviour change was revertable
+    with every test green — replacing the call site's
+    `origin_namespace=model_namespace_for_kind(brain_config.kind)` with `None`
+    restores the pre-fix "cross unconditionally" behaviour and turned nothing
+    red. These go through `execute_task`, so they fail if the origin is not
+    wired, and the second fails if it is read from the wrong config.
+    """
+
+    def test_a_same_namespace_fallback_keeps_the_pin(self, tmp_path):
+        """claude_code -> tmux_claude: same binary, same namespace, valid id."""
+        _results, _primary, fb, _alerts = _run(
+            tmp_path,
+            primary_kind="claude_code",
+            fallback="tmux_claude",
+            task_model="claude-opus-5",
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+        )
+        assert fb.received_reqs[0].model == "claude-opus-5"
+
+    def test_a_same_namespace_fallback_reports_no_dropped_pin(self, tmp_path):
+        """The user was being told about a drop that did not need to happen."""
+        results, _primary, _fb, _alerts = _run(
+            tmp_path,
+            primary_kind="claude_code",
+            fallback="tmux_claude",
+            task_model="claude-opus-5",
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+        )
+        assert "claude-opus-5" not in results[0][1]
+
+    def test_a_cross_namespace_fallback_still_drops(self, tmp_path):
+        """The half that was already right, at the same seam."""
+        _results, _primary, fb, _alerts = _run(
+            tmp_path,
+            primary_kind="claude_code",
+            fallback="native",
+            task_model="claude-opus-5",
+            primary_result=BrainResult(
+                False, "usage limit reached", stop_reason="usage_limit"
+            ),
+        )
+        assert fb.received_reqs[0].model == ""
+
+    def test_the_origin_is_the_routed_primary_not_the_configured_kind(
+        self, tmp_path,
+    ):
+        """The distinction the call site's comment says is load-bearing.
+
+        `[brain] kind` is `native` while `source_type_overrides` routes this
+        task's lane to `claude_code`, so the *primary that ran* is anthropic and
+        the tmux fallback is the same namespace — the pin must survive. Read the
+        origin off `config.brain.kind` instead and it is openai_compat, the move
+        reads as a crossing, and the pin is dropped.
+        """
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(
+            kind="native",
+            fallback="tmux_claude",
+            source_type_overrides={"cli": "claude_code"},
+        )
+        config.security.sandbox_enabled = False
+
+        primary = _FakeBrain(
+            "claude_code",
+            BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        fb = _FakeBrain(
+            "tmux_claude",
+            BrainResult(True, "ok", stop_reason="completed", model_used="fb"),
+        )
+
+        def fake_make_brain(bc):
+            return primary if getattr(bc, "kind", "") == "claude_code" else fb
+
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain", side_effect=fake_make_brain),
+            patch(
+                "istota.executor._native_with_user_key",
+                side_effect=lambda nc, *a, **k: nc,
+            ),
+            patch("istota.notifications.send_notification"),
+        ]
+        with contextmanager_chain(patches):
+            task = _make_task(source_type="cli", model="claude-opus-5")
+            execute_task(task, config, [])
+
+        assert fb.received_reqs, "the fallback never ran"
+        assert fb.received_reqs[0].model == "claude-opus-5"
+
+
+class TestTheCrossingRuleAtTheRequestBuild:
+    """A pin can meet another namespace before any fallback (ISSUE-417).
+
+    ISSUE-418 removed the deployment *default* from the request, not the pin.
+    A `[[jobs]] model` on a lane that `source_type_overrides` routes elsewhere
+    is the reported-but-unreported row of the issue's own table: the anthropic
+    id went to the openai_compat wire verbatim.
+    """
+
+    def _run_primary(self, tmp_path, *, brain_config, task_model, task_brain=None):
+        config = _make_config(tmp_path)
+        config.brain = brain_config
+        config.security.sandbox_enabled = False
+        kind = brain_config.source_type_overrides.get("cli", brain_config.kind)
+        brain = _FakeBrain(
+            kind, BrainResult(True, "ok", stop_reason="completed", model_used="m"),
+        )
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain", return_value=brain),
+            patch(
+                "istota.executor._native_with_user_key",
+                side_effect=lambda nc, *a, **k: nc,
+            ),
+        ]
+        with contextmanager_chain(patches):
+            task = _make_task(source_type="cli", model=task_model)
+            task.brain = task_brain
+            execute_task(task, config, [])
+        assert brain.received_reqs
+        return brain.received_reqs[0]
+
+    def test_a_routed_lane_drops_a_pin_it_cannot_carry(self, tmp_path):
+        req = self._run_primary(
+            tmp_path,
+            brain_config=BrainConfig(
+                kind="claude_code", source_type_overrides={"cli": "native"},
+            ),
+            task_model="claude-opus-5",
+        )
+        assert req.model == "", "an anthropic id reached the openai_compat wire"
+
+    def test_an_unrouted_pin_is_unchanged(self, tmp_path):
+        """The ordinary path must stay byte-identical to `resolve_model_name`."""
+        req = self._run_primary(
+            tmp_path,
+            brain_config=BrainConfig(kind="claude_code"),
+            task_model="claude-opus-5",
+        )
+        assert req.model == "claude-opus-5"
+
+    def test_a_room_pin_is_read_as_its_own_namespace(self, tmp_path):
+        """`tasks.brain` says where the pin was written, not where it runs.
+
+        A room pinned to a kind the operator has since dropped from
+        `room_selectable` falls through to another kind, while `rooms.model`
+        still holds the dropped kind's id. The column is what still names the
+        namespace the pin belongs to.
+        """
+        req = self._run_primary(
+            tmp_path,
+            brain_config=BrainConfig(kind="claude_code"),
+            task_model="vendor/some-model",
+            task_brain="native",
+        )
+        assert req.model == "", "a native id survived into an anthropic brain"

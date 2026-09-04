@@ -61,6 +61,12 @@ class _RecordingBrain:
     def resolve_model_name(self, name):
         return name
 
+    def resolve_alias(self, alias):
+        # On the Brain protocol, and the crossing rule calls it (ISSUE-417).
+        # `None` is "unknown name", which sends the caller to
+        # `resolve_model_name` above — the passthrough this double models.
+        return None
+
     def validate_alias_override(self, name, target):
         return []
 

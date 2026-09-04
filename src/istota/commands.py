@@ -21,6 +21,7 @@ from .brain import (
     KNOWN_BRAIN_KINDS,
     effective_fallback_kind,
     make_brain,
+    model_namespace_for_kind,
     resolve_brain_kind,
     room_selectable_kinds,
 )
@@ -312,12 +313,20 @@ def brain_for_room(config: Config, conn, room_token: str, source_type: str):
 def _model_namespace(brain_config) -> str | None:
     """The model namespace a resolved ``BrainConfig`` reads aliases in.
 
-    ``None`` when the brain cannot be built at all, which callers read as "not
+    ``None`` when the kind is not one that builds, which callers read as "not
     known" rather than as "the same namespace" — the safe direction for D5's
     clearing rule is to drop a pin whose portability could not be established.
+
+    A **lookup** since ISSUE-417: `model_namespace` is a class attribute, and
+    constructing a brain to read one is not free — `TmuxClaudeBrain.__init__`
+    shells out to the installed `claude` and warns on a version mismatch, so
+    running `!brain` on a tmux deployment emitted operator-facing noise about a
+    question that never needed an instance. The `try` stays because this is
+    reached from the Talk poll loop, but `model_namespace_for_kind` does not
+    raise; it is a belt for a caller passing something odd.
     """
     try:
-        return make_brain(brain_config).model_namespace
+        return model_namespace_for_kind(getattr(brain_config, "kind", None))
     except Exception:  # noqa: BLE001 — an unbuildable kind is an unknown namespace
         logger.debug("model namespace lookup failed", exc_info=True)
         return None
@@ -915,8 +924,14 @@ def _outgoing_namespace(config: Config, source_type: str, outgoing: str) -> str 
     nothing. The refusal is the right answer to "what is this room running";
     it is the wrong answer to "which namespace produced this pin".
 
-    A kind this deployment cannot build yields None, which the caller reads as
-    "not established" and therefore clears.
+    Only an *unknown* kind yields None, which the caller reads as "not
+    established" and therefore clears. Since ISSUE-417 this is a lookup, so a
+    known kind that this host cannot currently *build* — a misconfigured
+    `[brain.native]`, a missing `claude` — still answers with its namespace and
+    a same-namespace pin is kept where it used to be cleared. That narrowing is
+    deliberate: a namespace is a property of the kind rather than of this host's
+    ability to construct it, and clearing a pin that is still valid costs the
+    user their setting for a reason that has nothing to do with portability.
     """
     kind = (outgoing or "").strip()
     if not kind:

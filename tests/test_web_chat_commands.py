@@ -350,7 +350,18 @@ class TestSelectableBrains:
         self, chat_client, monkeypatch,
     ):
         """Same contract `model_aliases` has: the catalogue's primary product
-        is the command list, and neither optional half may take it down."""
+        is the command list, and neither optional half may take it down.
+
+        Since ISSUE-417 the two halves fail independently, which is the point
+        of separating them. `selectable_brains` asks whether a kind can be
+        *built* and empties when nothing can. `brain_namespaces` asks what
+        namespace a kind reads in — a class attribute, true whether or not this
+        host can construct the brain — so it survives, and `inherited_brain`
+        with it. That is the better answer rather than a tolerated one: the
+        modal compares namespaces to predict the server's own clearing rule,
+        and answering "unknown" there drops a model edit the server would have
+        kept.
+        """
         import istota.web_app as mod
         mod._config.brain = _brain_config(
             kind="claude_code", room_selectable=["native"],
@@ -366,8 +377,8 @@ class TestSelectableBrains:
         body = resp.json()
         assert body["commands"]
         assert body["selectable_brains"] == []
-        assert body["brain_namespaces"] == {}
-        assert body["inherited_brain"] is None
+        assert body["brain_namespaces"]["claude_code"] == "anthropic"
+        assert body["inherited_brain"]["kind"] == "claude_code"
 
 
 @_needs_web_deps

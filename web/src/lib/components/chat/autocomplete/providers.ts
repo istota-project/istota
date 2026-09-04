@@ -144,21 +144,26 @@ export async function getModelAliases() {
  *  room whose brain changed on another device is re-read on the next session
  *  rather than for the life of the tab. Degrades to the unscoped catalogue,
  *  which is the answer this surface gave before rooms could pin a brain. */
-const roomCatalogues = new Map<number, Promise<ChatCommands>>();
+// Keyed `<roomId>` for the room's own brain and `<roomId>:<kind>` for a brain
+// the caller is considering (ISSUE-417), so a pending selection's models are
+// cached beside the room's rather than replacing them — the settings modal
+// switches back and forth as the user tries brains.
+const roomCatalogues = new Map<string, Promise<ChatCommands>>();
 
-function loadRoomCatalogue(roomId: number): Promise<ChatCommands> {
-  let p = roomCatalogues.get(roomId);
+function loadRoomCatalogue(roomId: number, brain?: string): Promise<ChatCommands> {
+  const key = brain ? `${roomId}:${brain}` : String(roomId);
+  let p = roomCatalogues.get(key);
   if (!p) {
-    p = fetchChatCommands(roomId).catch((e) => {
+    p = fetchChatCommands(roomId, brain).catch((e) => {
       console.warn('room model catalogue fetch failed', e);
       // Drop the entry before answering, or one blip pins the deployment
       // default to this room for the whole session — which for a room on
       // another brain means every id the picker offers is one the save
       // refuses. The fallback is for this call; the next one retries.
-      roomCatalogues.delete(roomId);
+      roomCatalogues.delete(key);
       return loadCatalogue();
     });
-    roomCatalogues.set(roomId, p);
+    roomCatalogues.set(key, p);
   }
   return p;
 }
@@ -172,7 +177,13 @@ function loadRoomCatalogue(roomId: number): Promise<ChatCommands> {
  *  back to a list the save then rejects with a 400. Deterministic rather than
  *  a race; the caption is what walks into it. */
 export function dropRoomCatalogue(roomId: number): void {
-  roomCatalogues.delete(roomId);
+  // Every key for this room, not just its unscoped one: a brain the user tried
+  // in the modal left a `<roomId>:<kind>` entry behind, and those were resolved
+  // through the brain the room had at fetch time exactly as the plain one was.
+  const prefix = `${roomId}:`;
+  for (const key of [...roomCatalogues.keys()]) {
+    if (key === String(roomId) || key.startsWith(prefix)) roomCatalogues.delete(key);
+  }
 }
 
 /** Brain kinds this user may pin to a room. Empty where the operator has listed
@@ -226,11 +237,17 @@ export async function getInheritedBrain(): Promise<SelectableBrain | null> {
  *
  *  `roomId` scopes the list to that room's own brain (D5 Rule 2: a surface that
  *  offers a model name lists the aliases of the brain that would have to run
- *  it). Omit it for the deployment default. */
+ *  it). Omit it for the deployment default.
+ *
+ *  `brain` overrides that with a kind the caller is *considering* — the room
+ *  still holds its old brain until the save lands, so the settings modal passes
+ *  its pending selection and offers that brain's models (ISSUE-417). */
 export async function getBaseModelChoices(
   roomId?: number,
+  brain?: string,
 ): Promise<{ value: string; label: string }[]> {
-  const catalogue = roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId);
+  const catalogue =
+    roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId, brain);
   const labelByTarget = new Map<string, string>();
   for (const a of catalogue.model_aliases ?? []) {
     if (!a.target || a.effort !== null) continue;
