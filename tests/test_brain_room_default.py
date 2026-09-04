@@ -25,6 +25,7 @@ yet — the column is set by SQL here, which is what these tests do.
 
 import io
 import logging
+from unittest.mock import patch
 
 import pytest
 
@@ -46,7 +47,33 @@ from istota.config import (
     TalkConfig,
     UserConfig,
 )
+from istota.brain._types import BrainRequest, BrainResult
 from istota.transport.ingest import record_inbound
+
+
+class _RecordingBrain:
+    """Stands in for whatever `make_brain` would have returned.
+
+    Same shape as the double in `tests/test_executor_brain_identity.py`: the
+    executor only needs a brain that resolves names and answers, and building a
+    real one would drag a provider into a routing test.
+    """
+
+    model_namespace = "anthropic"
+    supports_steering = False
+
+    def __init__(self):
+        self.requests: list[BrainRequest] = []
+
+    def resolve_model_name(self, name):
+        return name
+
+    def validate_alias_override(self, name, target):
+        return []
+
+    def execute(self, req: BrainRequest) -> BrainResult:
+        self.requests.append(req)
+        return BrainResult(success=True, result_text="ok", stop_reason="completed")
 
 
 def _brain(kind="claude_code", overrides=None, selectable=None, fallback=""):
@@ -355,6 +382,97 @@ class TestExecutorCallSites:
         assert config.brain.kind == "claude_code"
         assert _native_web_fetch_enabled(self._task(), config) is False
         assert _native_web_fetch_enabled(self._task(brain="native"), config) is True
+
+    def test_execute_task_builds_the_pinned_brain_with_no_failover(self, tmp_path):
+        """The third call site, and the one that decides which brain actually
+        runs. Nothing else asserts on it: the two probes above are read-only
+        helpers, and `dry_run` returns before this resolution happens.
+
+        `make_brain` is patched to record the config it was handed, so the
+        assertion is on the routing rather than on the brain object.
+        """
+        from istota.config import SecurityConfig
+
+        cfg = Config(
+            db_path=tmp_path / "exec.db",
+            skills_dir=tmp_path / "cfg" / "skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            model="claude-sonnet-4-6",
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+        cfg.skills_dir.mkdir(parents=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        db.init_db(cfg.db_path)
+        # A deployment that does have failover, so clearing it is observable.
+        cfg.brain = _brain(
+            "claude_code", selectable=["native"], fallback="tmux_claude",
+        )
+
+        handed: list = []
+
+        def _record(brain_config):
+            handed.append(brain_config)
+            return _RecordingBrain()
+
+        with db.get_db(cfg.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="do the thing", user_id="alice",
+                source_type="talk", conversation_token="a1b2c3d4",
+                brain="native",
+            )
+            task = db.get_task(conn, task_id)
+            with patch("istota.executor.make_brain", side_effect=_record):
+                from istota.executor import execute_task
+
+                execute_task(task, cfg, [], conn=conn)
+
+        assert handed, "make_brain was never called"
+        routed = handed[-1]
+        assert routed.kind == "native"
+        # D12: the pin took the deployment's failover with it.
+        assert routed.fallback == ""
+        assert effective_fallback_kind(routed) is None
+
+    def test_execute_task_keeps_failover_for_an_unpinned_task(self, tmp_path):
+        """The converse, on the same harness: without a pin the deployment's
+        configured fallback survives to the executor."""
+        from istota.config import SecurityConfig
+
+        cfg = Config(
+            db_path=tmp_path / "exec.db",
+            skills_dir=tmp_path / "cfg" / "skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            model="claude-sonnet-4-6",
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+        cfg.skills_dir.mkdir(parents=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        db.init_db(cfg.db_path)
+        cfg.brain = _brain(
+            "claude_code", selectable=["native"], fallback="tmux_claude",
+        )
+
+        handed: list = []
+
+        def _record(brain_config):
+            handed.append(brain_config)
+            return _RecordingBrain()
+
+        with db.get_db(cfg.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="do the thing", user_id="alice",
+                source_type="talk", conversation_token="a1b2c3d4",
+            )
+            task = db.get_task(conn, task_id)
+            with patch("istota.executor.make_brain", side_effect=_record):
+                from istota.executor import execute_task
+
+                execute_task(task, cfg, [], conn=conn)
+
+        assert handed, "make_brain was never called"
+        assert effective_fallback_kind(handed[-1]) == "tmux_claude"
 
     def test_a_claude_code_pin_turns_it_off_over_a_native_lane_rule(self, config):
         from istota.executor import _native_web_fetch_enabled

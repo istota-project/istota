@@ -161,10 +161,13 @@ def record_inbound(
     model: str | None = None,
     effort: str | None = None,
     # An explicit per-message brain pick, or None to take the room's standing
-    # default. `apply_room_default` deliberately does not gate it: that flag
-    # exists for `!model default`, which has to escape the room's model pin
-    # while resolving to no override of its own, and there is no `!brain`
-    # message prefix for it to be the counterpart of.
+    # default; "" escapes the room default without naming a kind. This is the
+    # one place `apply_room_default` deliberately does *not* apply: that flag
+    # exists so `!model default` can escape the room's model pin while
+    # resolving to no override of its own, and with no `!brain` message prefix
+    # there is nothing for it to be the counterpart of. Folding this fill into
+    # the condition above would therefore look like tidying and would silently
+    # let a `!model default` turn drop the room's brain too.
     brain: str | None = None,
     apply_room_default: bool = True,
     priority: int = 5,

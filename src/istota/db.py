@@ -753,9 +753,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived)")
-        # Backfill the per-room model/effort columns on an existing rooms table
-        # (created by an earlier build without them). Placed here, after the
-        # CREATE, so the table exists before the ALTER.
+        # Backfill the per-room model / effort / brain columns on an existing
+        # rooms table (created by an earlier build without them). Placed here,
+        # after the CREATE, so the table exists before the ALTER.
         for _room_col in ("model", "effort", "brain"):
             try:
                 conn.execute(f"ALTER TABLE rooms ADD COLUMN {_room_col} TEXT")
