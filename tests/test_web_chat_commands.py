@@ -245,6 +245,61 @@ class TestSelectableBrains:
         offered = {b["kind"] for b in resp.json()["selectable_brains"]}
         assert offered == room_selectable_kinds(mod._config.brain)
 
+    async def test_it_names_every_buildable_kind_and_the_inherited_one(
+        self, chat_client,
+    ):
+        """The modal decides whether a pending change crosses a namespace, and
+        neither brain it compares is necessarily on the menu: the outgoing one
+        is the inherited brain when the room pins none, or a kind the operator
+        has since dropped from the allowlist. Answering "unknown" for either
+        makes the client over-lock its model select and drop an edit the server
+        would have kept."""
+        import istota.web_app as mod
+        mod._config.brain = _brain_config(
+            kind="claude_code", room_selectable=["native"],
+        )
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
+        body = resp.json()
+        # `tmux_claude` is on neither the menu nor the deployment's own kind,
+        # and is exactly the shape a dropped-from-the-allowlist pin takes.
+        assert body["brain_namespaces"]["tmux_claude"] == "anthropic"
+        assert body["brain_namespaces"]["native"] == "openai_compat"
+        assert [b["kind"] for b in body["selectable_brains"]] == ["native"]
+        assert body["inherited_brain"]["kind"] == "claude_code"
+        assert body["inherited_brain"]["model_namespace"] == "anthropic"
+
+    async def test_the_inherited_brain_follows_the_lane_rule(self, chat_client):
+        """`resolve_brain_kind("web", …)`, not the bare `[brain] kind`: a
+        `source_type_overrides` entry for the web lane is what an unpinned room
+        there actually runs, and it is what the clearing rule compares against."""
+        import istota.web_app as mod
+        mod._config.brain = _brain_config(
+            kind="claude_code",
+            source_type_overrides={"web": "native"},
+            room_selectable=["native", "claude_code"],
+        )
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
+        assert resp.json()["inherited_brain"]["kind"] == "native"
+
+    async def test_a_non_admin_gets_none_of_the_three(self, chat_client):
+        import istota.web_app as mod
+        mod._config.brain = _brain_config(
+            kind="claude_code", room_selectable=["native"],
+        )
+        cookies = await _login(chat_client, "alice")
+        try:
+            mod._config.admin_users = {"carol"}
+            body = (await chat_client.get(
+                "/istota/api/chat/commands", cookies=cookies,
+            )).json()
+            assert body["selectable_brains"] == []
+            assert body["brain_namespaces"] == {}
+            assert body["inherited_brain"] is None
+        finally:
+            mod._config.admin_users = set()
+
     async def test_a_listed_kind_that_fails_to_construct_costs_only_itself(
         self, chat_client, monkeypatch,
     ):
@@ -308,8 +363,11 @@ class TestSelectableBrains:
         monkeypatch.setattr(mod, "make_brain", _boom)
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
         assert resp.status_code == 200
-        assert resp.json()["commands"]
-        assert resp.json()["selectable_brains"] == []
+        body = resp.json()
+        assert body["commands"]
+        assert body["selectable_brains"] == []
+        assert body["brain_namespaces"] == {}
+        assert body["inherited_brain"] is None
 
 
 @_needs_web_deps
@@ -333,6 +391,11 @@ class TestModelAliasesFollowTheRoom:
             f"/istota/api/chat/commands?room_id={room['id']}", cookies=cookies,
         )
         targets = {a["target"] for a in resp.json()["model_aliases"]}
+        # Both halves: the endpoint degrades `model_aliases` to `[]` on any
+        # brain failure, so an absence assertion alone is satisfied by the
+        # aliases having gone missing entirely — indistinguishable from the
+        # scoping having worked.
+        assert "endpoint/m" in targets
         assert "claude-opus-5" not in targets
 
     async def test_the_same_room_unpinned_gets_the_deployments(self, chat_client):

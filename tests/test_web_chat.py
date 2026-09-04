@@ -2325,7 +2325,7 @@ class TestBrainAndModelInOneBody:
         body = resp.json()
         assert body["brain"] == "native"
         assert body["model"] is None
-        assert body["model_cleared"] is True
+        assert body["cleared"] == ["model"]
         with db.get_db(config.db_path) as conn:
             stored = db.get_room(conn, room["token"])
         assert stored.brain == "native"
@@ -2350,7 +2350,7 @@ class TestBrainAndModelInOneBody:
         body = resp.json()
         assert body["brain"] == "tmux_claude"
         assert body["model"] == "claude-opus-5"
-        assert "model_cleared" not in body
+        assert "cleared" not in body
         with db.get_db(config.db_path) as conn:
             assert db.get_room(conn, room["token"]).model == "claude-opus-5"
 
@@ -2370,7 +2370,9 @@ class TestBrainAndModelInOneBody:
             cookies=cookies, headers=self.HDRS,
         )
         assert resp.status_code == 200
-        assert resp.json()["model_cleared"] is True
+        # Both, because the rule moves the pair it was set as — and naming the
+        # effort is what stops the caller finding it silently gone.
+        assert resp.json()["cleared"] == ["model", "effort"]
         with db.get_db(config.db_path) as conn:
             stored = db.get_room(conn, room["token"])
         assert stored.model is None
@@ -2386,7 +2388,46 @@ class TestBrainAndModelInOneBody:
             f"/istota/api/chat/rooms/{room['id']}", json={"brain": "native"},
             cookies=cookies, headers=self.HDRS,
         )
-        assert "model_cleared" not in resp.json()
+        assert "cleared" not in resp.json()
+
+    async def test_an_effort_in_the_body_goes_with_the_model_and_is_named(
+        self, client_and_config,
+    ):
+        """The brain change wins over anything else in the body. The effort is
+        written by the model block and then taken out again with the model,
+        because the pair was set as a pair — so the response has to say so
+        rather than leave the caller to notice their explicit value gone."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_model_effort(conn, room["token"], "claude-opus-5", "low")
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "native", "effort": "high"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == ["model", "effort"]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).effort is None
+
+    async def test_a_bare_effort_survives_a_brain_change(self, client_and_config):
+        """The converse, and the command layer's own rule: with no model pin
+        there is nothing namespaced to lose, so an effort level — a semantic
+        rung every brain reads — is kept."""
+        client, config = client_and_config
+        cookies = await _login(client, "alice")
+        room = await self._room(client, cookies)
+        resp = await client.patch(
+            f"/istota/api/chat/rooms/{room['id']}",
+            json={"brain": "native", "effort": "high"},
+            cookies=cookies, headers=self.HDRS,
+        )
+        assert resp.status_code == 200
+        assert "cleared" not in resp.json()
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, room["token"]).effort == "high"
 
     async def test_the_model_is_validated_against_the_outgoing_brain(
         self, client_and_config,

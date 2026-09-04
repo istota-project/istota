@@ -4227,7 +4227,10 @@ def _chat_update_room(
     then have to special-case it. The clearing rule itself is
     `commands._clear_pin_across_namespaces` — the same function `!brain` calls,
     not a second copy of it — and the response reports what it dropped through
-    `model_cleared`.
+    `cleared`, which names the effort too: that rule moves model and effort as
+    a pair, so an effort in the same body is written and taken back out along
+    with the model. A bare effort on a room with no model pin survives, because
+    the rule returns early with nothing to lose.
     """
     from . import db
     with db.get_db(_config.db_path) as conn:
@@ -4237,7 +4240,7 @@ def _chat_update_room(
         updated = db.update_web_chat_room(
             conn, room_id, name=name, archived=archived,
         )
-        model_cleared = False
+        cleared: list[str] = []
         # Keep the unified room registry in sync (the cross-surface room list /
         # future sidebar reads it, not web_chat_rooms).
         if updated is not None:
@@ -4256,7 +4259,7 @@ def _chat_update_room(
                 reg = db.get_room(conn, updated.token)
                 if reg is not None:
                     from .commands import _clear_pin_across_namespaces
-                    model_cleared = bool(_clear_pin_across_namespaces(
+                    dropped = _clear_pin_across_namespaces(
                         _config, conn, updated.token, reg,
                         source_type="web",
                         # `str()` because `rooms.brain` is TEXT with no CHECK
@@ -4267,7 +4270,17 @@ def _chat_update_room(
                         # clears the pin, which is the safe direction.
                         outgoing=str(reg.brain or "").strip(),
                         incoming=brain,
-                    ))
+                    )
+                    if dropped:
+                        # `reg` was re-read above, so `reg.effort` is what this
+                        # request just wrote — which is the point of naming it:
+                        # `{"brain": <crossing>, "effort": "high"}` writes the
+                        # effort and the rule then takes it out again with the
+                        # model, since the pair was set as a pair. The brain
+                        # change wins over anything else in the body, and this
+                        # is what says so rather than leaving the caller to
+                        # notice their explicit value is gone.
+                        cleared = ["model"] + (["effort"] if reg.effort else [])
                 db.set_room_brain(conn, updated.token, brain)
             if name is not None:
                 db.rename_room(conn, updated.token, updated.name)
@@ -4309,13 +4322,13 @@ def _chat_update_room(
         d["model"] = reg.model if reg else None
         d["effort"] = reg.effort if reg else None
         d["brain"] = reg.brain if reg else None
-        if model_cleared:
+        if cleared:
             # Not room state: a report of what this request did, so a client
-            # that PATCHed a brain and a model together can say the model was
-            # dropped rather than silently showing it gone. Present only when
-            # something was cleared, and the store strips it before merging the
-            # response into its room record.
-            d["model_cleared"] = True
+            # that PATCHed a brain alongside a model or an effort can say what
+            # was dropped rather than showing it silently gone. Present only
+            # when something was cleared, and the store strips it before
+            # merging the response into its room record.
+            d["cleared"] = cleared
         # The client merges this response into its room record, so it has to
         # carry the same identity keys the listing does — a key the listing
         # sends and this omits reads as absent to any consumer that replaces
@@ -6349,12 +6362,15 @@ async def chat_commands(
     caller got before rooms could pin a brain. An unknown or unowned room falls
     back to the deployment default rather than 404ing: this endpoint's primary
     product is the command list, and a bad room id must not take that with it.
+    A *malformed* one is a different matter and is FastAPI's 422 as usual —
+    the fallback is about a room this user cannot see, not about a client
+    sending something that is not an integer.
 
-    **`selectable_brains` is published to admins only**, which is what lets the
-    settings modal decide by emptiness alone. Writing the pin is admin-gated
-    (D8), so a list of kinds a non-admin cannot select is not information they
-    need, and a client that had to combine "is the list empty" with "am I an
-    admin" is one place for the two to disagree.
+    The three brain fields are `_brain_catalogue`'s, published to admins only,
+    which is what lets the settings modal decide by emptiness alone. Writing
+    the pin is admin-gated (D8), so kinds a non-admin cannot select are not
+    information they need, and a client that had to combine "is the list
+    empty" with "am I an admin" is one place for the two to disagree.
     """
     from . import commands
 
@@ -6397,51 +6413,98 @@ async def chat_commands(
         "commands": cmds,
         "command_aliases": cmd_aliases,
         "model_aliases": aliases,
-        "selectable_brains": _selectable_brains(user["username"]),
+        **_brain_catalogue(user["username"]),
     }
 
 
-def _selectable_brains(username: str) -> list[dict]:
-    """The brain kinds this user may pin to a room, for the settings picker.
+def _brain_catalogue(username: str) -> dict:
+    """Everything the room-settings brain control needs, or nothing at all.
 
-    Empty for a non-admin and empty where the operator has listed none — the
-    two states the modal treats alike, since neither leaves anything to offer.
+    Three fields rather than one, because D5 Rule 1 asks a question the
+    picker's own options cannot answer. The modal decides whether a pending
+    change crosses a model namespace, and neither brain it compares is
+    necessarily on the menu: the *outgoing* one is whatever the room runs now,
+    which is the deployment's inherited brain when the room pins none, or a
+    kind the operator has since dropped from the allowlist. Answering "unknown"
+    for either over-locks the model select and drops a model edit the server
+    would have kept — the client disagreeing with
+    `commands._clear_pin_across_namespaces` about its own rule, which is worse
+    than not predicting it at all.
 
-    `model_namespace` rides along because the modal needs it: a brain change
-    that crosses namespaces clears the room's model pin (D5 Rule 1), and the
-    control disables the model select while such a change is pending so the
-    user sees the consequence before saving rather than in the response. Read
-    off the built brain rather than from a table here, so it cannot drift from
-    what `_clear_pin_across_namespaces` will actually compare.
+    So `brain_namespaces` covers every kind that builds rather than only the
+    offered ones, and `inherited_brain` names what a room with no pin runs on
+    the web surface. That is `resolve_brain_kind("web", …)` with no override —
+    the same call `brain_for_room` makes for an unpinned room, so the lane rule
+    in `[brain.source_type_overrides]` is included, exactly as the clearing
+    rule sees it. `selectable_brains` keeps its own `model_namespace` because
+    an option carrying its namespace is what the picker was specified to
+    publish; both come off the one `make_brain` per kind below, so there is one
+    computation and no second source to drift.
 
-    Never raises: a kind that fails to build is dropped, and the whole list
-    degrades to empty. An empty list renders no control, which is the same
-    answer this endpoint gave before the field existed.
+    Admin-only in its entirety, and every field empty for a non-admin: writing
+    the pin is admin-gated (D8), so the modal decides by emptiness alone rather
+    than combining two conditions that could disagree.
+
+    Never raises: a kind that fails to build is dropped, and the whole payload
+    degrades to the empty shape, which renders no control — the answer this
+    endpoint gave before the fields existed.
     """
+    empty: dict = {
+        "selectable_brains": [],
+        "brain_namespaces": {},
+        "inherited_brain": None,
+    }
     try:
         if not _config.is_admin(username):
-            return []
-        from .brain import BRAIN_KIND_LABELS, room_selectable_kinds
-        out: list[dict] = []
-        for kind in sorted(room_selectable_kinds(_config.brain)):
+            return empty
+        from .brain import (
+            BRAIN_KIND_LABELS,
+            KNOWN_BRAIN_KINDS,
+            resolve_brain_kind,
+            room_selectable_kinds,
+        )
+
+        def _namespace(kind: str) -> str | None:
             try:
-                namespace = make_brain(
+                return make_brain(
                     _dc_replace(_config.brain, kind=kind),
                 ).model_namespace
             except Exception:  # noqa: BLE001 — one bad kind is not the whole list
                 logger.warning(
                     "chat_commands: brain %r could not be built", kind, exc_info=True,
                 )
-                continue
-            out.append({
+                return None
+
+        namespaces = {
+            kind: ns
+            for kind in sorted(KNOWN_BRAIN_KINDS)
+            if (ns := _namespace(kind)) is not None
+        }
+        selectable = [
+            {
                 "kind": kind,
                 "label": BRAIN_KIND_LABELS.get(kind, kind),
-                "model_namespace": namespace,
-            })
-        return out
+                "model_namespace": namespaces[kind],
+            }
+            for kind in sorted(room_selectable_kinds(_config.brain))
+            if kind in namespaces
+        ]
+        inherited_kind = resolve_brain_kind("web", _config.brain).kind
+        inherited = None
+        if inherited_kind in namespaces:
+            inherited = {
+                "kind": inherited_kind,
+                "label": BRAIN_KIND_LABELS.get(inherited_kind, inherited_kind),
+                "model_namespace": namespaces[inherited_kind],
+            }
+        return {
+            "selectable_brains": selectable,
+            "brain_namespaces": namespaces,
+            "inherited_brain": inherited,
+        }
     except Exception:  # noqa: BLE001 — the command list must survive this
-        logger.warning("chat_commands: selectable brains unavailable", exc_info=True)
-        return []
+        logger.warning("chat_commands: brain catalogue unavailable", exc_info=True)
+        return empty
 
 
 @api_router.get("/chat/rooms")
