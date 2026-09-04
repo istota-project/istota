@@ -105,6 +105,7 @@ import pytest
 
 from istota import db, executor
 from istota.config import (
+    BrainConfig,
     Config,
     ConversationConfig,
     NextcloudConfig,
@@ -341,6 +342,15 @@ class Case:
     #: covers three, and non-admin-unmasked is asserted directly instead, by
     #: `test_every_database_rule_is_reachable_and_distinct`.
     sandboxed: bool = True
+    #: `tasks.brain` — the kind the room this task came from pinned. NULL for
+    #: every other case, which is what every existing room stores. It reaches
+    #: the prompt through one route only: `_native_web_fetch_enabled` folds
+    #: `untrusted_input` into the eager set for an admin's native task with the
+    #: daemon-side WebFetch tool on, so a routed case moves that skill out of
+    #: the on-demand menu and into a body section. Setting it also seeds
+    #: `[brain] room_selectable`, without which `resolve_brain_kind` refuses the
+    #: pin and the case silently reproduces its sibling.
+    brain: str | None = None
 
 
 CASES: tuple[Case, ...] = (
@@ -395,6 +405,18 @@ CASES: tuple[Case, ...] = (
     # relative to the body, what the label and precedence line say, and the
     # `## ` demotion.
     Case("skill_overlay", overlay=True),
+    # A room pinned to `native` on a `claude_code` deployment. Against
+    # `source_talk`, which it differs from in nothing but `tasks.brain`, so the
+    # diff between the two goldens is exactly what the routing buys: the
+    # `untrusted_input` guardrails arrive eagerly because the native brain
+    # carries a daemon-side WebFetch tool the CLI brains do not. An identical
+    # pair would mean the pin was refused rather than admitted.
+    Case(
+        "room_brain_native",
+        source_type="talk",
+        conversation_token="room-token",
+        brain="native",
+    ),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -452,6 +474,12 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         # golden. See the module docstring.
         sleep_cycle=SleepCycleConfig(auto_load_dated_days=0),
         security=SecurityConfig(sandbox_enabled=case.sandboxed),
+        # `kind` stays the shipped default: the point of the routed case is
+        # that a room reaches a brain the deployment does not run by default.
+        # `room_selectable` is the operator gate `resolve_brain_kind` checks,
+        # so a case that pins a brain has to name it here or the pin is refused
+        # and the golden quietly becomes a copy of its sibling.
+        brain=BrainConfig(room_selectable=[case.brain] if case.brain else []),
         emissaries_enabled=case.emissaries,
         admin_users=set() if case.admin else {OTHER_USER},
         users={
@@ -472,6 +500,7 @@ def _build_task(case: Case) -> db.Task:
         source_type=case.source_type,
         prompt="Summarize what changed in my notes this week.",
         conversation_token=case.conversation_token,
+        brain=case.brain,
     )
     if case.confirmed:
         fields["confirmed_at"] = "2026-01-01T00:00:00Z"
@@ -915,6 +944,36 @@ def test_the_two_rules_blocks_differ_only_where_privilege_requires(tmp_path, mon
     # The rule ISSUE-345 added, named rather than left to the set comparison:
     # it is the one whose absence from a copy started all of this.
     assert "goes in the deliverable" in user["3c."]
+
+
+def test_a_room_pinned_to_native_assembles_a_different_prompt(tmp_path, monkeypatch):
+    """The routed golden is not a copy of its `claude_code` sibling.
+
+    `room_brain_native` and `source_talk` differ in `tasks.brain` and in
+    nothing else, so an equal pair says the pin was refused rather than
+    admitted — and a golden regenerated from a refusal records the refusal and
+    goes green for ever after. Two ways to get there, neither of which any
+    other assertion in this module can see: `resolve_brain_kind` dropping the
+    override, and `[brain] room_selectable` losing the name the fixture seeds,
+    which is a refusal that looks exactly like a deployment that never opted
+    in.
+
+    Asserted on a fresh assembly rather than on the two files, because the
+    files agree with each other again the moment somebody regenerates them.
+    The specific move is named rather than left to `!=`: the eager set is the
+    only route the brain kind has into the prompt (`_native_web_fetch_enabled`
+    folds `untrusted_input` in for an admin's native task), so a difference
+    anywhere else would be some other change wearing this test's label.
+    """
+    routed = assemble(CASES_BY_NAME["room_brain_native"], tmp_path / "routed", monkeypatch)
+    inherited = assemble(CASES_BY_NAME["source_talk"], tmp_path / "inherited", monkeypatch)
+
+    assert routed != inherited
+
+    menu_line = "  - untrusted_input: the untrusted_input skill"
+    body = "### Untrusted Input"
+    assert menu_line in inherited and body not in inherited
+    assert body in routed and menu_line not in routed
 
 
 def test_every_golden_file_belongs_to_a_case():
