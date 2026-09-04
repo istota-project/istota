@@ -2,10 +2,10 @@
 // commandProvider drives the bare `!command` trigger; modelAliasProvider drives
 // the `!model <alias>` prefix. Both are fed by one cached GET /chat/commands.
 
-import { fetchChatCommands, type ChatCommands } from '$lib/api';
+import { fetchChatCommands, type ChatCommands, type SelectableBrain } from '$lib/api';
 import type { CompletionProvider, Suggestion } from './types';
 
-const EMPTY: ChatCommands = { commands: [], model_aliases: [] };
+const EMPTY: ChatCommands = { commands: [], model_aliases: [], selectable_brains: [] };
 
 let cataloguePromise: Promise<ChatCommands> | null = null;
 
@@ -85,6 +85,7 @@ function loadCatalogue(): Promise<ChatCommands> {
 /** Drop the cached catalogue (call on session init/teardown to refetch). */
 export function resetCommandCatalogue(): void {
   cataloguePromise = null;
+  roomCatalogues.clear();
   commandNames = new Set();
   catalogueGeneration++;
 }
@@ -132,16 +133,62 @@ export async function getModelAliases() {
   return (await loadCatalogue()).model_aliases;
 }
 
+/** Model aliases scoped to one room's own brain.
+ *
+ *  Its own small cache rather than a room key on `loadCatalogue`'s: that promise
+ *  publishes `commandNames`, which the send path reads synchronously and which
+ *  does not vary by room, so keying it would make the routing set depend on
+ *  which room happened to fetch last. Nothing here touches those names.
+ *
+ *  Cleared by `resetCommandCatalogue` alongside the session catalogue, so a
+ *  room whose brain changed on another device is re-read on the next session
+ *  rather than for the life of the tab. Degrades to the unscoped catalogue,
+ *  which is the answer this surface gave before rooms could pin a brain. */
+const roomCatalogues = new Map<number, Promise<ChatCommands>>();
+
+function loadRoomCatalogue(roomId: number): Promise<ChatCommands> {
+  let p = roomCatalogues.get(roomId);
+  if (!p) {
+    p = fetchChatCommands(roomId).catch((e) => {
+      console.warn('room model catalogue fetch failed', e);
+      return loadCatalogue();
+    });
+    roomCatalogues.set(roomId, p);
+  }
+  return p;
+}
+
+/** Brain kinds this user may pin to a room. Empty where the operator has listed
+ *  none and empty for a non-admin — the server collapses the two deliberately,
+ *  so the modal decides by emptiness alone. Shares the session catalogue with
+ *  the autocomplete, and does not vary by room. */
+export async function getSelectableBrains(): Promise<SelectableBrain[]> {
+  const brains = (await loadCatalogue()).selectable_brains;
+  // Defensive about the shape rather than trusting the type, for the reason
+  // `commandNamesOf` is: an older server omits the field entirely.
+  if (!Array.isArray(brains)) return [];
+  return brains.filter(
+    (b) => typeof b?.kind === 'string' && typeof b?.model_namespace === 'string',
+  );
+}
+
 /** Base model choices for the room-default picker: one `{value: canonical id,
  *  label: alias}` per distinct model, effort-suffixed aliases excluded (effort
  *  is a separate control). When several aliases map to one model, a provider
  *  alias (its name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`)
  *  is preferred over a role alias like `smart`, so the label reads naturally.
  *  The room header badge and the settings dropdown both consume this, so they
- *  never disagree on how a model is named. Insertion order = first-seen. */
-export async function getBaseModelChoices(): Promise<{ value: string; label: string }[]> {
+ *  never disagree on how a model is named. Insertion order = first-seen.
+ *
+ *  `roomId` scopes the list to that room's own brain (D5 Rule 2: a surface that
+ *  offers a model name lists the aliases of the brain that would have to run
+ *  it). Omit it for the deployment default. */
+export async function getBaseModelChoices(
+  roomId?: number,
+): Promise<{ value: string; label: string }[]> {
+  const catalogue = roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId);
   const labelByTarget = new Map<string, string>();
-  for (const a of await getModelAliases()) {
+  for (const a of catalogue.model_aliases ?? []) {
     if (!a.target || a.effort !== null) continue;
     const cur = labelByTarget.get(a.target);
     if (cur === undefined) labelByTarget.set(a.target, a.alias);

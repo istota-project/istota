@@ -888,6 +888,53 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  // The brain rides the metadata frame beside model and effort, so a `!brain`
+  // typed on Talk — or the settings modal on another device — reaches this
+  // client without a room refetch. Both directions in one test: a bare
+  // `expect(...).toBe('native')` would pass against a store that adopted the
+  // frame wholesale and never cleared anything.
+  it('applies a room brain frame, and clears it again', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), brain: null }] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const frame = (brain: string | null) => ({
+      action: 'upsert',
+      room: {
+        id: 1,
+        token: 't1',
+        name: 'Room 1',
+        origin: 'web',
+        model: null,
+        effort: null,
+        brain,
+      },
+    });
+    es.current!.emit('room', frame('native'));
+    expect(get(s.rooms)[0].brain).toBe('native');
+    es.current!.emit('room', frame(null));
+    expect(get(s.rooms)[0].brain).toBeNull();
+    s.teardown();
+  });
+
+  // The 30s rooms poll is the reconciler behind the stream, so it carries the
+  // brain for the same reason it carries the model: a change made elsewhere
+  // must not sit stale until reload if a frame was missed.
+  it('carries the brain through the 30s reconciler', async () => {
+    vi.useFakeTimers();
+    installFakeEventSource();
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...room(1), brain: null }] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    expect(get(s.rooms)[0].brain).toBeNull();
+    api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), brain: 'native' }] });
+    await vi.advanceTimersByTimeAsync(31000);
+    expect(get(s.rooms)[0].brain).toBe('native');
+    s.teardown();
+  });
+
   /** A fresh notification store bound to the session just created.
    *
    * `freshSession` resets the module registry, so this has to be imported

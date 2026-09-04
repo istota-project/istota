@@ -41,6 +41,7 @@ import {
   type ChatAttachment,
   type ChatConfig,
   type ChatRoom,
+  type RoomPatch,
   type ChatHistory,
   type ChatView,
   type ExternalTurnDisplay,
@@ -329,10 +330,7 @@ export interface ChatSession {
   scrollTarget: Writable<{ cid: number; nonce: number } | null>;
   newRoom: (name: string) => Promise<void>;
   renameRoom: (id: number, name: string) => Promise<void>;
-  updateRoomSettings: (
-    id: number,
-    patch: { name?: string; model?: string | null; effort?: string | null },
-  ) => Promise<void>;
+  updateRoomSettings: (id: number, patch: RoomPatch) => Promise<void>;
   promoteRoom: (id: number) => Promise<void>;
   archiveRoom: (id: number) => Promise<void>;
   deleteRoom: (id: number) => Promise<void>;
@@ -1568,10 +1566,12 @@ function createSession(): ChatSession {
           name: fresh.name,
           origin: fresh.origin,
           talk_token: fresh.talk_token,
-          // model/effort ride along so the header's model badge can't go stale
-          // until reload when the default is changed on another device.
+          // model/effort/brain ride along so the header's model badge and the
+          // settings modal can't go stale until reload when a default is
+          // changed on another device.
           model: fresh.model,
           effort: fresh.effort,
+          brain: fresh.brain,
           unread_count: unreadFor(fresh),
           // Whichever stamp is newer. This response was built before it was
           // awaited, so a frame that landed in between is ahead of it — taking
@@ -2106,6 +2106,7 @@ function createSession(): ChatSession {
         talk_token: fresh.talk_token ?? next[idx].talk_token,
         model: fresh.model ?? null,
         effort: fresh.effort ?? null,
+        brain: fresh.brain ?? null,
       };
       return next;
     });
@@ -3297,11 +3298,11 @@ function createSession(): ChatSession {
     rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
   }
 
-  async function updateRoomSettings(
-    id: number,
-    patch: { name?: string; model?: string | null; effort?: string | null },
-  ) {
-    const updated = await updateChatRoom(id, patch);
+  async function updateRoomSettings(id: number, patch: RoomPatch) {
+    // `model_cleared` is a report about this request, not room state, so it is
+    // taken off before the merge — spread onto the record it would stay there
+    // for the life of the session and read as a standing property of the room.
+    const { model_cleared: _cleared, ...updated } = await updateChatRoom(id, patch);
     rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
   }
 

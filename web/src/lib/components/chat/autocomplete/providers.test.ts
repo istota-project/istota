@@ -9,6 +9,7 @@ import { fetchChatCommands } from '$lib/api';
 import {
   commandProvider,
   getBaseModelChoices,
+  getSelectableBrains,
   isKnownCommand,
   loadCommandNames,
   modelAliasProvider,
@@ -156,6 +157,67 @@ describe('getBaseModelChoices', () => {
       { value: 'claude-sonnet-5', label: 'sonnet' },
       { value: 'claude-haiku-4-5', label: 'haiku' },
     ]);
+    expect(fetchChatCommands).toHaveBeenCalledWith();
+  });
+
+  it('asks for one room at a time and caches per room', async () => {
+    // D5 Rule 2: the picker offers the aliases of the brain that would have to
+    // run them, and the catalogue has no room of its own.
+    const native = {
+      ...CATALOGUE,
+      model_aliases: [{ alias: 'fast', target: 'endpoint/m', effort: null }],
+    };
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) =>
+      roomId === 7 ? native : CATALOGUE,
+    );
+    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+    // The control: a different room on the same session gets its own answer,
+    // so the cache is keyed rather than shared.
+    expect((await getBaseModelChoices(8)).map((c) => c.value)).toContain('claude-opus-4-8');
+    const before = (fetchChatCommands as ReturnType<typeof vi.fn>).mock.calls.length;
+    await getBaseModelChoices(7);
+    expect((fetchChatCommands as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
+  });
+
+  it('degrades a failed room fetch to the session catalogue', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) => {
+      if (roomId !== undefined) throw new Error('boom');
+      return CATALOGUE;
+    });
+    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+  });
+});
+
+describe('getSelectableBrains', () => {
+  it('publishes what the server offered', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      selectable_brains: [{ kind: 'native', label: 'Native', model_namespace: 'openai_compat' }],
+    });
+    expect(await getSelectableBrains()).toEqual([
+      { kind: 'native', label: 'Native', model_namespace: 'openai_compat' },
+    ]);
+  });
+
+  it('reads an older server, which sends no such field, as no kinds', async () => {
+    expect(await getSelectableBrains()).toEqual([]);
+  });
+
+  it('drops a misshapen entry rather than handing the modal a kindless option', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      selectable_brains: [
+        { kind: 'native', label: 'Native', model_namespace: 'openai_compat' },
+        { label: 'Broken' },
+        { kind: 'no_namespace', label: 'No namespace' },
+      ],
+    });
+    expect((await getSelectableBrains()).map((b) => b.kind)).toEqual(['native']);
+  });
+
+  it('degrades to no kinds when the catalogue fetch fails', async () => {
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom'));
+    expect(await getSelectableBrains()).toEqual([]);
   });
 });
 

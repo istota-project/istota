@@ -545,6 +545,17 @@
             </dl>
           </div>
         {/if}
+
+        {#if m.room_selectable && m.room_selectable.length > 0}
+          <div class="overrides">
+            <div class="cell-label">Rooms may select</div>
+            <div class="room-selectable">
+              {#each m.room_selectable as kind (kind)}
+                <span class="effort-chip">{brainLabel(kind)}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </section>
     {/if}
 
@@ -1705,6 +1716,12 @@
     border-radius: var(--radius-pill);
     background: var(--status-info-bg);
     color: var(--status-info-fg);
+  }
+
+  .room-selectable {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
   }
 
   .overrides {
