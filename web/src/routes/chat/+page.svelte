@@ -33,6 +33,7 @@
   import { isImeComposing } from '$lib/platform/input';
   import type { ChatAttachment, ChatRoom, ChatView } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
+  import { getSelectableBrains } from '$lib/components/chat/autocomplete/providers';
 
   const session = getChatSession();
   const {
@@ -274,6 +275,55 @@
     let label = model ?? 'default model';
     if (effort) label += ` · ${effort}`;
     return label;
+  });
+
+  // Display names for the brain kinds, so the badge below reads `Native`
+  // rather than `claude_code`. Shares the session catalogue the composer
+  // autocomplete already loads, so this costs no extra request.
+  //
+  // It can legitimately come back without the room's own kind in it: the list
+  // is the operator's `room_selectable` allowlist and a room can be pinned to
+  // a kind since dropped from it, and it is empty outright for a non-admin,
+  // who can be in a pinned room without being able to write one. So the badge
+  // falls back to the raw kind rather than hiding — the point is to say which
+  // brain the room is on, and an unlabelled name still says it. A second copy
+  // of the server's label map here would be the thing that drifts.
+  //
+  // `brainCatalogueLoaded` gates the badge rather than only the label: without
+  // it the first paint renders the raw kind and then flips to the label a
+  // microtask later, and the empty map is also indistinguishable from "this
+  // user may not edit the pin", which the title below depends on telling apart.
+  // The `.catch` is not decoration — `loadCatalogue` caches its promise for the
+  // life of the session, so one rejection is permanent, and this is a bare
+  // `void` where an unhandled rejection has nowhere to go.
+  let brainLabels = $state<Record<string, string>>({});
+  let brainCatalogueLoaded = $state(false);
+  onMount(() => {
+    void getSelectableBrains()
+      .then((brains) => {
+        brainLabels = Object.fromEntries(brains.map((b) => [b.kind, b.label]));
+      })
+      .catch(() => {})
+      .finally(() => (brainCatalogueLoaded = true));
+  });
+
+  // Whether this user can actually change the pin. The server collapses "the
+  // operator listed no kinds" and "you may not write one" into one empty list,
+  // and `RoomSettings` gates its whole brain control on the same emptiness — so
+  // an empty catalogue means the modal has no brain field, and a badge saying
+  // `click to change` would promise an edit that is not there.
+  const canEditBrain = $derived(Object.keys(brainLabels).length > 0);
+
+  // The room's standing brain pin as a header badge, beside the model one. A
+  // room with no pin shows nothing: it runs the deployment's own brain, which
+  // is not an override and is the same answer in every unpinned room.
+  const brainBadge = $derived.by(() => {
+    if (inViewMode || !activeRoom || !brainCatalogueLoaded) return null;
+    // Off the room row, which is server JSON rather than anything validated
+    // here, and it is rendered as text on the fallback path.
+    const kind = activeRoom.brain;
+    if (!kind || typeof kind !== 'string') return null;
+    return brainLabels[kind] ?? kind;
   });
 
   // Discord/Slack-style grouping: a message continues the previous author's
@@ -783,6 +833,22 @@
         />
       {/snippet}
       {#snippet nav()}
+        {#if brainBadge}
+          {#if canEditBrain}
+            <button
+              class="model-badge brain-badge"
+              type="button"
+              title="Room brain — click to change"
+              onclick={() => activeRoom && (settingsRoom = activeRoom)}
+            >
+              {brainBadge}
+            </button>
+          {:else}
+            <span class="model-badge brain-badge brain-badge-static" title="Room brain">
+              {brainBadge}
+            </span>
+          {/if}
+        {/if}
         {#if modelBadge}
           <button
             class="model-badge"
@@ -1174,6 +1240,29 @@
   .model-badge:hover {
     color: var(--text-primary);
     border-color: var(--border-hover);
+  }
+
+  /* The brain pin, in the interactive blue rather than the model badge's
+	   muted gray — two overrides sitting side by side have to be tellable
+	   apart at a glance, and they are set in the same modal, so shape is not
+	   available to separate them. Blue rather than a status color on purpose:
+	   a pinned brain is a choice someone made, not a severity. */
+  .brain-badge {
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+  }
+  .brain-badge:hover {
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    background: var(--surface-raised);
+  }
+  /* Read-only where the user cannot change the pin: same colour, because it
+	   still says which brain the room is on, minus the affordance. */
+  .brain-badge-static {
+    cursor: default;
+  }
+  .brain-badge-static:hover {
+    background: var(--surface-base);
   }
 
   .chat-pane {
