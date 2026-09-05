@@ -118,6 +118,54 @@ generate_hex_secret() {
     fi
 }
 
+# Escape a value for interpolation into a TOML basic string.
+#
+# Every operator-typed value in this file lands between `"` in a heredoc, which
+# does no escaping of its own. A `"` in the value closes the string early and a
+# trailing `\` escapes the closing quote; either corrupts settings.toml while
+# the wizard still exits 0 and reports success. One variant is worse than a
+# parse error because it is silent: `https://host" # rest` parses cleanly as a
+# *truncated* value, so the deployment comes up pointed somewhere else with
+# nothing to read.
+#
+# `docker/istota/render-config.sh:104` is the same helper for the Docker shape,
+# and the reason this one is applied to the pre-existing values too rather than
+# only to the settings added alongside it: a helper some of its callers do not
+# use is a fix that has not landed.
+#
+# Backslash first — escaping it after the quote would double the backslash the
+# quote-escape just introduced.
+toml_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+# Render a comma-separated operator value as a TOML array of strings.
+# Prints nothing when every element is empty, so a caller's own `-n` test is
+# not the only thing deciding whether the key gets written.
+toml_string_list() {
+    local rest="$1" item out=""
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *,*) item="${rest%%,*}"; rest="${rest#*,}" ;;
+            *)   item="$rest"; rest="" ;;
+        esac
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [ -n "$item" ] || continue
+        [ -n "$out" ] && out="$out, "
+        out="$out\"$(toml_escape "$item")\""
+    done
+    # `if` rather than a trailing `&&`: this is the function's last command, so
+    # under `set -e` an empty list would make `x="$(...)"` abort the wizard
+    # rather than assign the empty string.
+    if [ -n "$out" ]; then
+        printf '%s' "$out"
+    fi
+}
+
 # ============================================================
 # Input helpers
 # ============================================================
@@ -338,13 +386,17 @@ wiz_users() {
         prompt_value utz "Timezone" "UTC"
         prompt_value uemail "Email address (optional)" ""
 
+        # Escaped as the block is built, since wiz_write_settings escapes
+        # scalars and this is already-assembled TOML by the time it gets there.
+        # The user id is a bare key as well as a value; a `"` or a `.` in one
+        # would forge a table header, so it goes through the same helper.
         _WIZ_USERS_BLOCK+="
-[users.$uid]
-display_name = \"$uname\"
-timezone = \"$utz\"
+[users.\"$(toml_escape "$uid")\"]
+display_name = \"$(toml_escape "$uname")\"
+timezone = \"$(toml_escape "$utz")\"
 "
         if [ -n "$uemail" ]; then
-            _WIZ_USERS_BLOCK+="email_addresses = [\"$uemail\"]
+            _WIZ_USERS_BLOCK+="email_addresses = [\"$(toml_escape "$uemail")\"]
 "
         fi
 
@@ -367,10 +419,10 @@ timezone = \"$utz\"
         dim "Leave blank to make all users admins."
         local admin_line
         prompt_value admin_line "Admin user IDs (comma-separated)" ""
-        _WIZ_ADMIN_BLOCK="admin_users = []"
-        if [ -n "$admin_line" ]; then
-            _WIZ_ADMIN_BLOCK="admin_users = [$(echo "$admin_line" | sed 's/[[:space:]]*,[[:space:]]*/", "/g; s/^/"/; s/$/"/' )]"
-        fi
+        # Through toml_string_list rather than the sed pipeline this replaces,
+        # which quoted by substitution: a `"` in an id closed the string early,
+        # and a trailing comma produced an empty element that reads as a user.
+        _WIZ_ADMIN_BLOCK="admin_users = [$(toml_string_list "$admin_line")]"
     fi
 }
 
@@ -435,49 +487,7 @@ wiz_features() {
         prompt_value _WIZ_WEBHOOKS_PORT "Webhook receiver port" "8765"
     fi
 
-    # Developer skill
-    echo
-    dim "The developer skill clones repositories and opens merge/pull requests"
-    dim "on a forge. It needs a GitLab or GitHub token to do anything at all,"
-    dim "and the deploy asserts one is set — so this asks for both together."
-    dim "Use a dedicated bot account with the narrowest scopes that work."
-    prompt_bool _WIZ_DEVELOPER_ENABLED "Enable the developer skill?" "n"
-    if [ "$_WIZ_DEVELOPER_ENABLED" = "true" ]; then
-        while true; do
-            echo
-            dim "Clones and worktrees live under this directory, one subtree per"
-            dim "user. It should be on the same filesystem as the install."
-            prompt_value _WIZ_DEVELOPER_REPOS_DIR "Repos directory" \
-                "${_WIZ_DEVELOPER_REPOS_DIR:-$ISTOTA_HOME/repos}"
-            echo
-            dim "GitLab (blank username and token to skip this forge):"
-            prompt_value _WIZ_DEVELOPER_GITLAB_URL "GitLab URL" "$_WIZ_DEVELOPER_GITLAB_URL"
-            prompt_value _WIZ_DEVELOPER_GITLAB_USERNAME "GitLab username" "$_WIZ_DEVELOPER_GITLAB_USERNAME"
-            prompt_secret _WIZ_DEVELOPER_GITLAB_TOKEN "GitLab token (api + write_repository)"
-            echo
-            dim "GitHub (blank username and token to skip this forge):"
-            prompt_value _WIZ_DEVELOPER_GITHUB_USERNAME "GitHub username" "$_WIZ_DEVELOPER_GITHUB_USERNAME"
-            prompt_secret _WIZ_DEVELOPER_GITHUB_TOKEN "GitHub token (repo scope)"
-
-            # The role asserts at least one token when the skill is on, and
-            # fails the play if it has neither. Settle that here rather than
-            # writing settings that cannot deploy.
-            if [ -n "$_WIZ_DEVELOPER_GITLAB_TOKEN" ] || [ -n "$_WIZ_DEVELOPER_GITHUB_TOKEN" ]; then
-                break
-            fi
-            echo
-            warn "No token given for either forge. The deploy refuses this"
-            warn "  combination, so the skill has to be left off without one."
-            local retry_token
-            prompt_bool retry_token "Enter a token now?" "y"
-            if [ "$retry_token" = "false" ]; then
-                _WIZ_DEVELOPER_ENABLED=false
-                warn "Developer skill left off. Add a token to $SETTINGS_FILE"
-                warn "  and set developer.enabled = true to turn it on later."
-                break
-            fi
-        done
-    fi
+    wiz_developer
 
     # Talk signaling
     echo
@@ -529,6 +539,56 @@ wiz_features() {
                 fi
                 ;;
         esac
+    fi
+}
+
+# The developer skill's own prompts, a function rather than inline in
+# wiz_features so the give-up branch below can be driven by a test. That branch
+# is the reason this section exists: tasks/main.yml asserts a forge token when
+# the skill is on, so a settings file with `enabled = true` and no token is one
+# the play refuses.
+wiz_developer() {
+    echo
+    dim "The developer skill clones repositories and opens merge/pull requests"
+    dim "on a forge. It needs a GitLab or GitHub token to do anything at all,"
+    dim "and the deploy asserts one is set — so this asks for both together."
+    dim "Use a dedicated bot account with the narrowest scopes that work."
+    prompt_bool _WIZ_DEVELOPER_ENABLED "Enable the developer skill?" "n"
+    if [ "$_WIZ_DEVELOPER_ENABLED" = "true" ]; then
+        while true; do
+            echo
+            dim "Clones and worktrees live under this directory, one subtree per"
+            dim "user. It should be on the same filesystem as the install."
+            prompt_value _WIZ_DEVELOPER_REPOS_DIR "Repos directory" \
+                "${_WIZ_DEVELOPER_REPOS_DIR:-$ISTOTA_HOME/repos}"
+            echo
+            dim "GitLab (blank username and token to skip this forge):"
+            prompt_value _WIZ_DEVELOPER_GITLAB_URL "GitLab URL" "$_WIZ_DEVELOPER_GITLAB_URL"
+            prompt_value _WIZ_DEVELOPER_GITLAB_USERNAME "GitLab username" "$_WIZ_DEVELOPER_GITLAB_USERNAME"
+            prompt_secret _WIZ_DEVELOPER_GITLAB_TOKEN "GitLab token (api + write_repository)"
+            echo
+            dim "GitHub (blank username and token to skip this forge):"
+            prompt_value _WIZ_DEVELOPER_GITHUB_USERNAME "GitHub username" "$_WIZ_DEVELOPER_GITHUB_USERNAME"
+            prompt_secret _WIZ_DEVELOPER_GITHUB_TOKEN "GitHub token (repo scope)"
+
+            # The role asserts at least one token when the skill is on, and
+            # fails the play if it has neither. Settle that here rather than
+            # writing settings that cannot deploy.
+            if [ -n "$_WIZ_DEVELOPER_GITLAB_TOKEN" ] || [ -n "$_WIZ_DEVELOPER_GITHUB_TOKEN" ]; then
+                break
+            fi
+            echo
+            warn "No token given for either forge. The deploy refuses this"
+            warn "  combination, so the skill has to be left off without one."
+            local retry_token
+            prompt_bool retry_token "Enter a token now?" "y"
+            if [ "$retry_token" = "false" ]; then
+                _WIZ_DEVELOPER_ENABLED=false
+                warn "Developer skill left off. Add a token to $SETTINGS_FILE"
+                warn "  and set developer.enabled = true to turn it on later."
+                break
+            fi
+        done
     fi
 }
 
@@ -700,25 +760,13 @@ wiz_brain_policy() {
     local selectable_line
     prompt_value selectable_line \
         "Brain kinds a room or job may pin (comma-separated, blank for none)" ""
-    _WIZ_BRAIN_ROOM_SELECTABLE=""
-    if [ -n "$selectable_line" ]; then
-        local kind cleaned="" _wiz_kinds=()
-        # A bad name here is not a failed deploy — an unlisted or unknown pin is
-        # a warning and a fallthrough at run time — but it is a permission the
-        # operator asked for and did not get, silently. So drop it loudly.
-        IFS=',' read -ra _wiz_kinds <<< "$selectable_line"
-        for kind in "${_wiz_kinds[@]}"; do
-            kind="$(echo "$kind" | tr -d '[:space:]')"
-            [ -z "$kind" ] && continue
-            case "$kind" in
-                claude_code|native|tmux_claude)
-                    cleaned+="${cleaned:+, }\"$kind\"" ;;
-                *)
-                    warn "Ignoring unknown brain kind '$kind' (expected claude_code, native or tmux_claude)" ;;
-            esac
-        done
-        _WIZ_BRAIN_ROOM_SELECTABLE="$cleaned"
-    fi
+    # Nothing here judges whether a name is a real brain kind, which is the same
+    # call render-config.sh makes for this same setting: `config` warns once at
+    # load about a name `make_brain` cannot build, and a second opinion in a
+    # shell script would only go out of date when a fourth kind ships. The first
+    # draft of this did validate, and dropped anything it did not recognise —
+    # so an operator would have asked for a permission and silently not got it.
+    _WIZ_BRAIN_ROOM_SELECTABLE="$(toml_string_list "$selectable_line")"
 
     echo
     dim "Availability failover: when the brain above cannot run a task (usage"
@@ -728,14 +776,14 @@ wiz_brain_policy() {
     echo
     dim "Leave this at 'derive' unless you have a reason. The role works the"
     dim "answer out from the brain kind, and any answer here overrides that."
-    while true; do
-        prompt_value _WIZ_BRAIN_FALLBACK \
-            "Fallback brain (derive | none | claude_code | native | tmux_claude)" "derive"
-        case "$_WIZ_BRAIN_FALLBACK" in
-            derive|none|claude_code|native|tmux_claude) break ;;
-            *) warn "Unknown answer '$_WIZ_BRAIN_FALLBACK'. Pick one of the five." ;;
-        esac
-    done
+    dim "'none' and 'derive' differ only when the brain above is tmux_claude,"
+    dim "which is the one kind the derivation gives a failover to."
+    # Same reasoning as the allowlist above: `derive` and `none` are this
+    # wizard's own sentinels and are read here, but a brain kind is passed
+    # through for config to validate rather than checked against a list that
+    # goes stale.
+    prompt_value _WIZ_BRAIN_FALLBACK \
+        "Fallback brain (derive | none | claude_code | native | tmux_claude)" "derive"
 }
 
 wiz_claude_auth() {
@@ -848,6 +896,37 @@ wiz_write_settings() {
     local settings_dir
     settings_dir="$(dirname "$SETTINGS_FILE")"
     mkdir -p "$settings_dir"
+
+    # Escape every operator-typed scalar before it reaches the heredoc below.
+    # In place rather than into copies: wiz_write_settings is the last thing
+    # main() runs, and nothing reads these afterwards. Values generated by this
+    # script (the hex secrets) go through it too — they cannot contain either
+    # character, and listing them costs nothing next to remembering which is
+    # which. _WIZ_BRAIN_ROOM_SELECTABLE, _WIZ_USERS_BLOCK and _WIZ_ADMIN_BLOCK
+    # are deliberately absent: each is already assembled TOML, escaped as it
+    # was built, and escaping it again would quote its own delimiters.
+    local _tv
+    for _tv in \
+        ISTOTA_HOME ISTOTA_NAMESPACE REPO_URL REPO_BRANCH \
+        _WIZ_BOT_NAME _WIZ_NC_URL _WIZ_NC_USERNAME _WIZ_NC_APP_PASSWORD \
+        _WIZ_MOUNT_PATH _WIZ_RCLONE_PASS_OBSCURED \
+        _WIZ_CLAUDE_TOKEN _WIZ_SECRET_KEY _WIZ_HOSTNAME \
+        _WIZ_WEB_OAUTH2_CLIENT_ID _WIZ_WEB_OAUTH2_CLIENT_SECRET _WIZ_WEB_SECRET_KEY \
+        _WIZ_WEB_MAP_PROVIDER _WIZ_WEB_MAP_API_KEY _WIZ_WEB_MAP_DARK_STYLE \
+        _WIZ_WEB_MAP_LIGHT_STYLE _WIZ_WEB_MAP_ATTRIBUTION \
+        _WIZ_EMAIL_IMAP_HOST _WIZ_EMAIL_IMAP_USER _WIZ_EMAIL_IMAP_PASSWORD \
+        _WIZ_EMAIL_SMTP_HOST _WIZ_EMAIL_BOT_ADDRESS \
+        _WIZ_BROWSER_VNC_BIND_ADDRESS _WIZ_BROWSER_VNC_PASSWORD _WIZ_WHISPER_MODEL \
+        _WIZ_DEVELOPER_REPOS_DIR _WIZ_DEVELOPER_GITLAB_URL \
+        _WIZ_DEVELOPER_GITLAB_USERNAME _WIZ_DEVELOPER_GITLAB_TOKEN \
+        _WIZ_DEVELOPER_GITHUB_USERNAME _WIZ_DEVELOPER_GITHUB_TOKEN \
+        _WIZ_TALK_SIGNALING_URL \
+        _WIZ_BRAIN_KIND _WIZ_BRAIN_NATIVE_PROVIDER _WIZ_BRAIN_NATIVE_MODEL \
+        _WIZ_BRAIN_NATIVE_BASE_URL _WIZ_BRAIN_NATIVE_API_KEY _WIZ_BRAIN_FALLBACK \
+        _WIZ_BRAIN_ROLE_FAST _WIZ_BRAIN_ROLE_GENERAL _WIZ_BRAIN_ROLE_SMART
+    do
+        printf -v "$_tv" '%s' "$(toml_escape "${!_tv}")"
+    done
 
     # Brain block — always emit [brain].kind; the [brain.native] sub-block
     # only when native is selected (mirrors the Ansible config.toml template).

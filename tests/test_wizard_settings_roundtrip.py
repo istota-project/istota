@@ -24,6 +24,7 @@ wrong in the fourth fails here.
 
 import importlib.util
 import re
+import shlex
 import shutil
 import subprocess
 import tomllib
@@ -92,6 +93,13 @@ class TestASettingsAnswerReachesTheRenderedConfig:
         """The other half of the same answer, and the one the assert depends on:
         `enabled = false` has to reach the role, or a settings file written with
         no token still trips the play."""
+        # The render assertion alone witnesses the Ansible default rather than
+        # this answer — `istota_developer_enabled` is already false in
+        # defaults/main.yml, so an empty settings dict renders identically.
+        # Assert the converter carried the answer, then the render.
+        assert stv.convert({"developer": {"enabled": False}})[
+            "istota_developer_enabled"
+        ] is False
         config = _render_from_settings(stv, {"developer": {"enabled": False}})
         assert "developer" not in config
 
@@ -157,17 +165,24 @@ class TestTheChainWouldNoticeABrokenLink:
     """A rendering test passes for two reasons — the chain works, or the value
     was going to be there anyway. These separate them."""
 
-    @pytest.mark.parametrize("provider", ["osm", "openfreemap"])
+    @pytest.mark.parametrize("provider", ["osm", "carto", "custom"])
     def test_the_provider_is_not_simply_the_default(self, stv, provider):
+        """`openfreemap` is deliberately not in this list: it is the value in
+        defaults/main.yml, so that case passes with the mapping deleted."""
         assert _render_from_settings(
             stv, {"web": {"map": {"provider": provider}}}
         )["web"]["map"]["provider"] == provider
 
-    def test_an_unmapped_settings_key_does_not_reach_the_config(self, stv):
-        """The control for every assertion above: a key the converter does not
-        map renders nothing, so the passes are not free."""
-        config = _render_from_settings(stv, {"web": {"map": {"nonesuch": "x"}}})
-        assert "nonesuch" not in config["web"]["map"]
+    def test_a_key_only_reaches_the_config_when_the_settings_name_it(self, stv):
+        """The control for every assertion above, as a pair rather than as a
+        single negative: the same render with and without the settings key, so
+        it is the key that makes the difference and not the template."""
+        without = _render_from_settings(stv, {"web": {"map": {"provider": "carto"}}})
+        with_key = _render_from_settings(
+            stv, {"web": {"map": {"provider": "carto", "api_key": "placeholder-key"}}}
+        )
+        assert "api_key" not in without["web"]["map"]
+        assert with_key["web"]["map"]["api_key"] == "placeholder-key"
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +257,17 @@ REPO_BRANCH="main"
 eval "$(grep -E '^_WIZ_[A-Z0-9_]+=' "$WIZ")"
 _WIZ_USER_IDS=()
 eval "$(awk '/^prompt_value\(\) \{/,/^\}/' "$WIZ")"
+eval "$(awk '/^prompt_bool\(\) \{/,/^\}/' "$WIZ")"
+eval "$(awk '/^prompt_secret\(\) \{/,/^\}/' "$WIZ")"
+eval "$(awk '/^toml_escape\(\) \{/,/^\}/' "$WIZ")"
+eval "$(awk '/^toml_string_list\(\) \{/,/^\}/' "$WIZ")"
 eval "$(awk '/^wiz_brain_policy\(\) \{/,/^\}/' "$WIZ")"
+eval "$(awk '/^wiz_developer\(\) \{/,/^\}/' "$WIZ")"
 eval "$(awk '/^wiz_write_settings\(\) \{/,/^\}/' "$WIZ")"
 eval "${EXTRA:-}"
+if [ -n "${DEV_ANSWERS:-}" ]; then
+    wiz_developer >/dev/null <<< "$DEV_ANSWERS"
+fi
 if [ -n "${ANSWERS:-}" ]; then
     wiz_brain_policy >/dev/null <<< "$ANSWERS"
 fi
@@ -275,7 +298,9 @@ _WIZ_WEB_MAP_API_KEY="placeholder-key"
 _BRAIN_ANSWERS = "native, claude_code\nclaude_code\n"
 
 
-def _run_wizard_write(tmp_path: Path, extra: str = "", answers: str = "") -> dict:
+def _run_wizard_write(
+    tmp_path: Path, extra: str = "", answers: str = "", dev_answers: str = ""
+) -> dict:
     if shutil.which("bash") is None:
         pytest.skip("bash not available")
     out = tmp_path / "settings.toml"
@@ -286,6 +311,7 @@ def _run_wizard_write(tmp_path: Path, extra: str = "", answers: str = "") -> dic
             "OUT": str(out),
             "EXTRA": extra,
             "ANSWERS": answers,
+            "DEV_ANSWERS": dev_answers,
             "PATH": "/usr/bin:/bin",
         },
         capture_output=True,
@@ -293,6 +319,144 @@ def _run_wizard_write(tmp_path: Path, extra: str = "", answers: str = "") -> dic
     )
     assert proc.returncode == 0, f"wiz_write_settings failed: {proc.stderr}"
     return tomllib.loads(out.read_text())
+
+
+# The developer section, answered prompt by prompt. Eight reads: the enable,
+# the repos dir, the GitLab URL / username / token, the GitHub username /
+# token, and — only when both tokens came back empty — the retry question.
+_DEV_ANSWERS_WITH_TOKEN = "\n".join([
+    "y", "/srv/app/istota/repos", "https://forge.example.com",
+    "bot-account", "glpat-placeholder", "bot-account", "ghp-placeholder",
+]) + "\n"
+_DEV_ANSWERS_NO_TOKEN = "\n".join(["y", "", "", "", "", "", "", "n"]) + "\n"
+
+
+class TestTheDeveloperSkillCannotBeLeftUndeployable:
+    """`tasks/main.yml:23` asserts a forge token when `istota_developer_enabled`
+    is true and fails the play otherwise, so "yes" with no token has to resolve
+    inside the wizard. This is the branch the whole section exists for, and
+    until `wiz_developer` was split out of `wiz_features` nothing could run it.
+    """
+
+    def test_answering_yes_with_a_token_enables_the_skill(self, tmp_path):
+        settings = _run_wizard_write(tmp_path, dev_answers=_DEV_ANSWERS_WITH_TOKEN)
+        assert settings["developer"]["enabled"] is True
+        assert settings["developer"]["gitlab_token"] == "glpat-placeholder"
+        assert settings["developer"]["github_token"] == "ghp-placeholder"
+
+    def test_answering_yes_with_no_token_leaves_the_skill_off(self, tmp_path):
+        """The give-up path. Anything else here writes a settings file the
+        play refuses, after the operator has answered every other question."""
+        settings = _run_wizard_write(tmp_path, dev_answers=_DEV_ANSWERS_NO_TOKEN)
+        assert settings["developer"]["enabled"] is False
+
+    def test_on_the_shape_the_wizard_writes_the_token_travels_by_env_file(
+        self, tmp_path, stv
+    ):
+        """The other developer assertions in this file force
+        `use_environment_file = False`, and that is a shape `wizard.sh` never
+        writes — it hardcodes `true`. Under `true`, `config.toml.j2` emits no
+        `gitlab_token` at all and the credential reaches the daemon through
+        `templates/secrets.env.j2`, which reads the same variable. Without this
+        case the deployment the operator actually gets is asserted by nothing.
+        """
+        settings = _run_wizard_write(tmp_path, dev_answers=_DEV_ANSWERS_WITH_TOKEN)
+        assert settings["use_environment_file"] is True
+
+        variables = stv.convert(settings)
+        # What secrets.env.j2 interpolates.
+        assert variables["istota_developer_gitlab_token"] == "glpat-placeholder"
+
+        config = tomllib.loads(render(**variables))
+        assert config["developer"]["enabled"] is True
+        assert config["developer"]["repos_dir"] == "/srv/app/istota/repos"
+        # Deliberately absent here, and present in the sibling test that flips
+        # the flag — which is what says the flag is what moves it.
+        assert "gitlab_token" not in config["developer"]
+        assert "github_token" not in config["developer"]
+
+    def test_the_role_assert_would_pass_on_what_the_wizard_writes(self, tmp_path, stv):
+        """Stated as the role states it, so the two cannot drift apart: the
+        assert is `enabled implies at least one token`."""
+        for answers in (_DEV_ANSWERS_WITH_TOKEN, _DEV_ANSWERS_NO_TOKEN):
+            variables = stv.convert(_run_wizard_write(tmp_path, dev_answers=answers))
+            if variables.get("istota_developer_enabled"):
+                assert (
+                    variables.get("istota_developer_gitlab_token")
+                    or variables.get("istota_developer_github_token")
+                ), "wizard produced vars that fail tasks/main.yml:23"
+
+
+class TestQuotingSurvivesTheWizard:
+    """A generated TOML file is a quoting problem wearing a config's clothes.
+
+    Every operator-typed value lands between `"` in a heredoc, so the two
+    characters that matter are `"` and `\\`. Both were interpolated raw until
+    review caught it, and the same defect was fixed for the Docker shape in
+    `render-config.sh` — `tests/test_render_config.py::TestQuotingSurvivesTheRender`
+    is the sibling of this class, and its docstring records that testing a
+    *single* quote proves nothing because the first draft did exactly that.
+
+    Two failure modes, and the second is the reason a parse check alone is not
+    enough: `"` mid-value is a loud TOML error, while `value" # rest` parses
+    cleanly as a silently truncated value. So every case here asserts the value
+    round-trips byte for byte, not merely that the file loads.
+    """
+
+    # Attribution is prompted as HTML, so a `"` is the ordinary case rather
+    # than an adversarial one: every MapLibre attribution string is an <a> tag.
+    _HOSTILE = [
+        '<a href="https://example.com">Example</a>',
+        'trailing-backslash\\',
+        'inner"quote',
+        'https://tiles.example.com" # rest',
+        'both"and\\',
+    ]
+
+    @pytest.mark.parametrize("value", _HOSTILE)
+    def test_a_custom_attribution_round_trips(self, tmp_path, value):
+        settings = _run_wizard_write(tmp_path, (
+            '_WIZ_WEB_MAP_PROVIDER="custom"\n'
+            f"_WIZ_WEB_MAP_ATTRIBUTION={shlex.quote(value)}\n"
+        ))
+        assert settings["web"]["map"]["attribution"] == value
+
+    @pytest.mark.parametrize("value", _HOSTILE)
+    def test_a_signaling_url_round_trips(self, tmp_path, value):
+        """The silent case has its home here: this value is a URL, and a
+        truncated one leaves the daemon pointed somewhere else with no error."""
+        settings = _run_wizard_write(tmp_path, (
+            "_WIZ_TALK_SIGNALING_ENABLED=true\n"
+            f"_WIZ_TALK_SIGNALING_URL={shlex.quote(value)}\n"
+        ))
+        assert settings["talk"]["signaling"]["url"] == value
+
+    @pytest.mark.parametrize("value", _HOSTILE)
+    def test_a_forge_token_round_trips(self, tmp_path, value):
+        settings = _run_wizard_write(tmp_path, (
+            "_WIZ_DEVELOPER_ENABLED=true\n"
+            f"_WIZ_DEVELOPER_GITLAB_TOKEN={shlex.quote(value)}\n"
+        ))
+        assert settings["developer"]["gitlab_token"] == value
+
+    @pytest.mark.parametrize("value", _HOSTILE)
+    def test_a_pre_existing_value_round_trips_too(self, tmp_path, value):
+        """The Nextcloud app password predates this change and is interpolated
+        the same way. It is covered because a helper only some of its callers
+        use is the shape `7e7baf47` called a fix that has not landed."""
+        settings = _run_wizard_write(
+            tmp_path, f"_WIZ_NC_APP_PASSWORD={shlex.quote(value)}\n"
+        )
+        assert settings["nextcloud_app_password"] == value
+
+    def test_a_user_id_cannot_forge_a_table_header(self, tmp_path):
+        """`[users.$uid]` puts an operator string in key position, where a `"`
+        or a `.` changes which table the following keys belong to."""
+        settings = _run_wizard_write(tmp_path, (
+            '_WIZ_USERS_BLOCK="$(printf \'\\n[users.\\"%s\\"]\\n'
+            'display_name = \\"x\\"\\n\' "$(toml_escape \'a"b\')")"\n'
+        ))
+        assert 'a"b' in settings["users"]
 
 
 class TestTheWizardWritesAFileTheInstallerCanRead:
@@ -395,6 +559,12 @@ def _wizard_keys(section: str) -> set[str]:
         # this names what has to be in there.
         ("developer", {"enabled", "repos_dir", "gitlab_token", "github_token"}),
         ("brain", {"kind", "room_selectable", "fallback"}),
+        # These two are written contiguously today, so the scan reaches them
+        # without the append handling — but `assert written` alone is satisfied
+        # by one key, so a refactor that truncated the scan would leave the
+        # mapping test passing on a blind spot.
+        ("talk.signaling", {"enabled", "url"}),
+        ("web.map", {"provider", "api_key", "attribution"}),
     ],
 )
 def test_the_scanner_reaches_the_conditionally_written_keys(section, expected):
