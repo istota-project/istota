@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A scheduled job can now name the brain it runs on, with `brain = "native"` in its `[[jobs]]` table in CRON.md — a nightly summary on one brain and a repo-touching job on another, without moving the deployment default. Only an admin can set one, and only to a kind the operator has listed under `[brain] room_selectable`, the same allowlist a chat room's `!brain` uses and empty by default; anything else is ignored and the job runs as before. A job that names its brain runs that brain or fails saying why, rather than being answered by the deployment's backup, and `!cron` shows the pin beside the job's model and effort.
 
+- Health has a Documents tab, listing every uploaded document with its filename, date, size, type and the visits, conditions and vaccinations it is attached to. Until now a document was only reachable through the record it happened to be filed under, so finding one meant already knowing which visit or condition that was — and a document whose links were never made, or were removed, appeared on no page at all while still sitting on disk. From the table you can attach a document to another record, detach it from one, move it between records by doing both, and delete it. A counter at the top filters to the documents nothing points at.
+
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
 
 ### Changed
