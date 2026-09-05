@@ -184,6 +184,10 @@ class ScheduledJob:
     once: bool = False
     model: str | None = None  # Per-job model override; empty/None = use config default
     effort: str | None = None  # Per-job effort override; empty/None = use config default
+    #: Per-job brain kind pin (cron-per-job-brain-override spec). None/empty
+    #: = resolve from config. Written from CRON.md only for an admin; see
+    #: ``cron_loader.fj_brain_or_none``.
+    brain: str | None = None
     # Phase 1.3 — skill-task dispatch (mirrors ``Task.skill`` / ``skill_args``).
     skill: str | None = None
     skill_args: str | None = None
@@ -356,6 +360,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("model", "TEXT"),
         ("effort", "TEXT"),
+        # cron-per-job-brain-override spec: per-job brain kind pin. No
+        # backfill — NULL reads as "resolve from config", which is what
+        # every existing row already means.
+        ("brain", "TEXT"),
         # Phase 1.3 — skill-task dispatch
         ("skill", "TEXT"),
         ("skill_args", "TEXT"),
@@ -7855,7 +7863,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, skill, skill_args,
+               once, model, effort, brain, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE enabled = 1 AND auto_disabled_at IS NULL
@@ -7873,7 +7881,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, skill, skill_args,
+               once, model, effort, brain, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE user_id = ?
@@ -7908,6 +7916,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         once=bool(row["once"]) if "once" in row.keys() else False,
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
+        brain=row["brain"] if "brain" in row.keys() else None,
         skill=row["skill"] if "skill" in row.keys() else None,
         skill_args=row["skill_args"] if "skill_args" in row.keys() else None,
         publish_shared_kv=(
@@ -8023,7 +8032,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, skill, skill_args,
+               once, model, effort, brain, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE id = ?
@@ -8079,7 +8088,7 @@ def get_scheduled_job_by_name(
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, skill, skill_args,
+               once, model, effort, brain, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?

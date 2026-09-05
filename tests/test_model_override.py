@@ -4,6 +4,7 @@ Covers the full chain so a user can pin one cron job to e.g. claude-sonnet-4-6
 while everything else uses the default.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -578,6 +579,64 @@ class TestCmdCronShowsEffort:
                 config=config, conn=conn, user_id="alice",
                 conversation_token="room1", args=""))
         assert "low" in result
+
+
+# ---------------------------------------------------------------------------
+# Per-job brain pin: CRON.md -> scheduled_jobs.brain, admin-gated
+# ---------------------------------------------------------------------------
+
+
+class TestSyncBrainToDb:
+    """The authorization gate, asserted on the stored row.
+
+    ``sync_cron_jobs_to_db`` returns nothing, so the only observable is the
+    column. Both legs keep the job — a brain pin is one field of a job that is
+    otherwise fine, unlike a non-admin ``command:``, which costs the whole job.
+    """
+
+    def test_admin_sync_writes_the_column(self, db_path):
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [CronJob(name="j", cron="0 9 * * *", prompt="t", brain="native")],
+                is_admin=True,
+            )
+            job = db.get_scheduled_job_by_name(conn, "alice", "j")
+        assert job is not None, "the job survives an admin sync"
+        assert job.brain == "native"
+
+    def test_non_admin_sync_drops_the_pin_and_warns(self, db_path, caplog):
+        """`is_admin=False` explicitly: the kwarg defaults to True, so relying
+        on the default would test the wrong thing.
+        """
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            with db.get_db(db_path) as conn:
+                sync_cron_jobs_to_db(
+                    conn, "alice",
+                    [CronJob(name="j", cron="0 9 * * *", prompt="t", brain="native")],
+                    is_admin=False,
+                )
+                job = db.get_scheduled_job_by_name(conn, "alice", "j")
+
+        assert job is not None, "the job survives; only the field is dropped"
+        assert job.brain is None
+        assert any(
+            "brain" in r.message and "admin-only" in r.message
+            for r in caplog.records
+        ), f"expected a dropped-pin warning, got {[r.message for r in caplog.records]}"
+
+    def test_a_non_admin_update_clears_a_pin_already_on_the_row(self, db_path):
+        """The gate is not insert-only. The sync rewrites every file-owned
+        column on both paths, so a row carrying a pin from an earlier admin
+        sync loses it once the author is no longer an admin.
+        """
+        file_jobs = [CronJob(name="j", cron="0 9 * * *", prompt="t", brain="native")]
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=True)
+            assert db.get_scheduled_job_by_name(conn, "alice", "j").brain == "native"
+            sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
+            job = db.get_scheduled_job_by_name(conn, "alice", "j")
+        assert job.brain is None
 
 
 # ---------------------------------------------------------------------------

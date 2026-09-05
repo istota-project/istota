@@ -106,6 +106,27 @@ def fj_is_disallowed_command(job: "CronJob", is_admin: bool) -> bool:
     return not is_admin
 
 
+def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
+    """A CRON.md job's brain pin, or None where the author may not set one.
+
+    CRON.md is a user file on the mount *and* is written by the model through
+    the `schedules` skill, so unlike `rooms.brain` — which only an admin may
+    write, through a gated surface — this field is model-writable. A brain kind
+    decides which process holds the agent loop, which credentials it carries and
+    which `SandboxProfile` is built, so it must not become the one enforcement-
+    shaped setting a task can choose for its own next run.
+
+    The field is dropped rather than the job refused: `fj_is_disallowed_command`
+    refuses a whole job because the command *is* the job, while a brain pin is
+    one field of a job that is otherwise fine.
+    """
+    if not job.brain:
+        return None
+    if not is_admin:
+        return None
+    return job.brain
+
+
 def _validate_model(name: str, user_id: str, model: str) -> None:
     """Warn on suspicious model names; never reject.
 
@@ -227,6 +248,10 @@ class CronJob:
     once: bool = False
     model: str = ""  # Per-job Claude model override; empty = use config default
     effort: str = ""  # Per-job effort override (low/medium/high/xhigh/max); empty = use config default
+    # Per-job brain kind pin (claude_code / native / tmux_claude); empty =
+    # resolve from config. Admin-only: `fj_brain_or_none` drops it at sync
+    # time for a non-admin author.
+    brain: str = ""
     # admin-shared-briefing-blocks: publish this job's result text into shared_kv
     # on success. "<ns>/<key>" or bare "<key>" (→ briefing_shared_blocks). Empty =
     # no publish. Gated on is_shared_kv_writer at write time (admin-only).
@@ -886,6 +911,7 @@ FILE_OWNED_COLUMNS = frozenset({
     "once",
     "model",
     "effort",
+    "brain",
     "publish_shared_kv",
     "publish_shared_kv_trusted",
 })
@@ -943,6 +969,7 @@ def _file_owned_values(
     cmd_val: str | None,
     skill_val: str | None,
     skill_args_val: str | None,
+    brain_val: str | None,
 ) -> dict[str, object]:
     """What the file now says, for every column CRON.md authors.
 
@@ -952,6 +979,10 @@ def _file_owned_values(
     missing here is a ``KeyError`` rather than a column silently written as
     NULL. That is a test-time guarantee, not a runtime one — at runtime the
     scheduler's per-user ``except`` would swallow it into one log line.
+
+    ``brain_val`` is a parameter rather than a read of ``fj.brain`` for the
+    reason ``cmd_val`` / ``skill_val`` are: the value depends on ``is_admin``,
+    which this function does not receive.
     """
     return {
         "cron_expression": fj.cron,
@@ -969,6 +1000,10 @@ def _file_owned_values(
         "once": 1 if fj.once else 0,
         "model": fj.model or None,
         "effort": fj.effort or None,
+        # Already gated by `fj_brain_or_none` at the call site — a non-admin's
+        # pin arrives here as None and is written as NULL like any other
+        # cleared field, rather than surviving by omission.
+        "brain": brain_val,
         "publish_shared_kv": fj.publish_shared_kv or None,
         "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
     }
@@ -1020,10 +1055,19 @@ def sync_cron_jobs_to_db(
             )
             continue
         cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(fj)
+        brain_val = fj_brain_or_none(fj, is_admin)
+        if fj.brain and brain_val is None:
+            logger.warning(
+                "Dropping brain pin %r on CRON.md job '%s' for %s: pinning a "
+                "brain is admin-only; the job will run the configured brain",
+                fj.brain, fj.name, user_id,
+            )
         # The definition, as the file now states it. Both paths below write
         # exactly the file-owned columns and name no other, which is what
         # leaves the daemon's state columns alone.
-        file_values = _file_owned_values(fj, cmd_val, skill_val, skill_args_val)
+        file_values = _file_owned_values(
+            fj, cmd_val, skill_val, skill_args_val, brain_val,
+        )
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state

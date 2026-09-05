@@ -744,13 +744,17 @@ class TestColumnOwnership:
         assert job.disabled_at is None
 
     def test_the_file_owned_value_map_names_no_daemon_column(self):
-        values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
+        values = _file_owned_values(
+            CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None, None,
+        )
         assert set(values) & DAEMON_OWNED_COLUMNS == set()
         assert set(values) & IDENTITY_COLUMNS == set()
 
     def test_every_file_owned_column_has_a_value(self):
         """The set is the declaration; the value map has to keep up with it."""
-        values = _file_owned_values(CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None)
+        values = _file_owned_values(
+            CronJob(name="j1", cron="0 9 * * *", prompt="p"), None, None, None, None,
+        )
         assert set(values) == FILE_OWNED_COLUMNS
 
     _DISPATCH_RESET = {"auto_disabled_at", "consecutive_failures", "last_error"}
@@ -876,6 +880,7 @@ class TestColumnOwnership:
             once=True,
             model="opus",
             effort="high",
+            brain="native",
             publish_shared_kv="ns/key",
             publish_shared_kv_trusted=True,
         )
@@ -890,6 +895,10 @@ class TestColumnOwnership:
             "once": 1,
             "model": "opus",
             "effort": "high",
+            # The sync's `is_admin` defaults to True, so the pin survives here.
+            # `TestSyncBrainToDb` in tests/test_model_override.py is what covers
+            # the non-admin leg, where this column is written NULL.
+            "brain": "native",
             "publish_shared_kv": "ns/key",
             "publish_shared_kv_trusted": 1,
             **expected_dispatch,

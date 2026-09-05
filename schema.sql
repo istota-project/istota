@@ -319,6 +319,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
     model TEXT,                             -- Per-job model override; empty = use config default
     effort TEXT,                            -- Per-job effort override; empty = use config default
+    brain TEXT,                             -- Per-job brain kind override; empty = resolve from config
     -- Skill-task dispatch (Phase 1.3). Mutually exclusive with command.
     skill TEXT,
     skill_args TEXT,
