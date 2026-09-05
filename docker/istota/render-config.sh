@@ -108,6 +108,42 @@ toml_escape() {
     printf '%s' "$value"
 }
 
+# Render a comma-separated operator value as a TOML array of strings.
+#
+# `sed 's/[^,]*/"&"/g'` did this and got three things wrong, each of which
+# reaches the daemon as a fact rather than as an error. A `"` in a value closed
+# the string early and produced a config that does not parse — on a first boot
+# there is no config.toml.prev to fall back to, so that is a crash loop. A space
+# after a comma stayed part of the name, so ` briefings` matched no module and
+# silently did nothing. A trailing comma produced an empty element.
+#
+# Split with `case` rather than by IFS word-splitting, which would also glob:
+# the value is operator-written, but it is not this function's job to decide
+# whether a `*` in it was meant.
+#
+# Prints nothing when every element is empty, so a caller's `-n` test on the
+# raw value is not the only thing deciding whether the key gets written.
+toml_string_list() {
+    local rest="$1" item out=""
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *,*) item="${rest%%,*}"; rest="${rest#*,}" ;;
+            *)   item="$rest"; rest="" ;;
+        esac
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [ -n "$item" ] || continue
+        [ -n "$out" ] && out="$out, "
+        out="$out\"$(toml_escape "$item")\""
+    done
+    # `if` rather than a trailing `&&`: this is the function's last command, so
+    # under the script's `set -e` an empty list would make `x="$(...)"` abort
+    # the whole render rather than assign the empty string.
+    if [ -n "$out" ]; then
+        printf '[%s]' "$out"
+    fi
+}
+
 # The five that can carry a metacharacter: four an operator types by hand into
 # docker/.env, plus the mount point, which compose supplies but an operator may
 # override and which is free text on the Nextcloud side (a display name, not a
@@ -689,8 +725,9 @@ TOML
     if [ -n "${USER_MAX_BACKGROUND_WORKERS:-}" ]; then
         echo "max_background_workers = ${USER_MAX_BACKGROUND_WORKERS}" >> "$CONFIG_FILE"
     fi
-    if [ -n "${USER_DISABLED_SKILLS:-}" ]; then
-        echo "disabled_skills = [$(echo "$USER_DISABLED_SKILLS" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
+    _skills_list="$(toml_string_list "${USER_DISABLED_SKILLS:-}")"
+    if [ -n "$_skills_list" ]; then
+        echo "disabled_skills = $_skills_list" >> "$CONFIG_FILE"
     fi
     # Modules the user has switched off. Separate axis from the module
     # *_ENABLED variables above: those decide whether the deployment carries
@@ -698,8 +735,9 @@ TOML
     # block is written); this one is the per-user opt-out `modules.py` reads,
     # and it is the only route to health and briefings, which have no
     # deployment-level toggle.
-    if [ -n "${USER_DISABLED_MODULES:-}" ]; then
-        echo "disabled_modules = [$(echo "$USER_DISABLED_MODULES" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
+    _modules_list="$(toml_string_list "${USER_DISABLED_MODULES:-}")"
+    if [ -n "$_modules_list" ]; then
+        echo "disabled_modules = $_modules_list" >> "$CONFIG_FILE"
     fi
 
     # --- Module resources ---

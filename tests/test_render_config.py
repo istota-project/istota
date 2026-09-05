@@ -663,6 +663,64 @@ class TestThePerUserModuleOptOut:
         assert not config.is_module_enabled("testuser", "health")
         assert config.is_module_enabled("testuser", "briefings")
 
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("health, briefings", ["health", "briefings"]),
+            ("health,", ["health"]),
+            (",,health,,", ["health"]),
+            ("  health  ", ["health"]),
+            (",", None),
+            ("   ", None),
+        ],
+        ids=["space-after-comma", "trailing", "empty-elements", "padded", "only-separators", "blank"],
+    )
+    def test_the_list_survives_what_an_operator_types(self, tmp_path, raw, expected):
+        """``sed 's/[^,]*/"&"/g'`` got each of these wrong.
+
+        A space after a comma stayed part of the name, so the element matched
+        no module and did nothing; a trailing comma or a doubled one produced
+        an empty element. A value of only separators wrote an empty array
+        rather than no key.
+        """
+        rendered = tomllib.loads(
+            render(tmp_path, **REQUIRED, USER_DISABLED_MODULES=raw).read_text()
+        )
+        user = rendered["users"]["testuser"]
+
+        if expected is None:
+            assert "disabled_modules" not in user
+        else:
+            assert user["disabled_modules"] == expected
+
+    def test_a_quote_renders_a_value_rather_than_breaking_the_file(self, tmp_path):
+        """The one that was not merely inert.
+
+        A ``"`` closed the TOML string early, so the render exited 0 having
+        written a config nothing can parse. On a first boot there is no
+        ``config.toml.prev`` to fall back to, which under
+        ``restart: unless-stopped`` is a crash loop.
+        """
+        rendered = render(tmp_path, **REQUIRED, USER_DISABLED_MODULES='he"alth')
+
+        # Parses at all, which is the assertion; the value is nonsense either
+        # way, and a name that matches no module is inert by design.
+        assert tomllib.loads(rendered.read_text())["users"]["testuser"][
+            "disabled_modules"
+        ] == ['he"alth']
+
+    def test_the_skills_list_gets_the_same_treatment(self, tmp_path):
+        """One helper, not two — the defect above was copied from that line."""
+        rendered = tomllib.loads(
+            render(
+                tmp_path, **REQUIRED, USER_DISABLED_SKILLS='browse, whi"sper,'
+            ).read_text()
+        )
+
+        assert rendered["users"]["testuser"]["disabled_skills"] == [
+            "browse", 'whi"sper',
+        ]
+
     def test_the_deployment_toggle_and_the_opt_out_are_separate_axes(self, tmp_path):
         """``ISTOTA_FEEDS_ENABLED`` writes the resource; this hides the module.
 
