@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The web service can now authenticate to the model on a Docker install. It calls one on three request paths of its own — reading a lab panel, encounter or immunization document, explaining a biomarker, and running a shared briefing block on demand — and the stack passed it only the native brain's key, so on the default Claude CLI shape all three failed with no credential. Both Claude credentials now reach it.
+
 - A local install now generates the key its encrypted credential store needs. `istota setup` wrote none, so storing a Garmin, Monarch, ntfy or Google Workspace credential failed on every local install and nothing said why. Re-running setup with `--force` keeps whatever key is already there rather than making a new one, since replacing it would leave every credential stored under it permanently unreadable, and the secrets file is now created private instead of being made private a moment after it is written.
 
 - Shared briefing blocks can be written on a local install again. Writing shared content requires a named admin, and a local install had no admins file for anyone to be named in, so nothing could be written and the failure looked like a missing feature. Setup now writes one naming the local user; an install made before this change is covered by an exception for the single-user shape, which stays narrow — a deployment with Nextcloud storage and its web login switched off is not that shape and gains nothing.

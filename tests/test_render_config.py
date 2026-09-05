@@ -1080,6 +1080,81 @@ class TestTheCredentialCheckKnowsWhichBrainIsRunning:
             assert re.search(rf"^\s*{name}:", compose, re.M), name
 
 
+def _compose_service_env(service: str) -> dict:
+    """The `environment:` mapping of one compose service, as YAML sees it.
+
+    Parsed rather than regexed because the question is per-service and the
+    same variable name appears under several of them. The file uses YAML
+    anchors, which ``safe_load`` resolves.
+    """
+    import yaml
+
+    document = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
+    return document["services"][service].get("environment") or {}
+
+
+class TestTheWebServiceCanReachTheModel:
+    """The web process executes a model on three request-scope paths.
+
+    ``web`` used to get only ``ISTOTA_BRAIN_NATIVE_API_KEY``, on the assumption
+    that the only model call it makes is the web chat surface driving the
+    native brain. It is not: the health OCR extractors, the biomarker explainer
+    and shared-block run-now all build a ``BrainRequest`` of their own inside a
+    request handler, and every one of them takes its environment from
+    ``executor.build_model_cli_env``, which copies the credential names below
+    out of *the calling process's* environment. In the ``web`` container none
+    of them existed, so on the default ``claude_code`` shape all three
+    authenticated with nothing.
+
+    The names come from the product rather than from a list here, so a fourth
+    credential is covered by adding it to compose's ``istota`` block and to the
+    set the model-call env builder reads — not by editing this test. The
+    intersection with what ``istota`` is passed is what keeps it honest in the
+    other direction: a name the daemon itself is not given is not a credential
+    this stack has to route anywhere.
+    """
+
+    def _model_credential_names(self) -> set[str]:
+        # Imported inside the test: this module otherwise pulls in only
+        # `istota.config`, and `executor` carries a much larger graph.
+        from istota import executor
+        from istota.claude_runtime_env import CLAUDE_RUNTIME_ENV_VARS
+
+        return set(executor._MODEL_CLI_ENDPOINT_VARS) | set(CLAUDE_RUNTIME_ENV_VARS)
+
+    def test_every_model_credential_the_daemon_gets_reaches_the_web_service(self):
+        names = self._model_credential_names()
+        istota_env = _compose_service_env("istota")
+        web_env = _compose_service_env("web")
+
+        passed_to_daemon = names & set(istota_env)
+        assert passed_to_daemon, (
+            "compose passes the istota service none of the credential names "
+            f"{sorted(names)} that build_model_cli_env reads; the scan has rotted"
+        )
+
+        missing = sorted(passed_to_daemon - set(web_env))
+        assert not missing, (
+            f"docker-compose.yml passes {missing} to the istota service and not "
+            "to web. The web process calls a model on three request-scope paths "
+            "(health OCR, the biomarker explainer, shared-block run-now) and "
+            "build_model_cli_env reads these out of its own environment, so each "
+            "of those authenticates with nothing."
+        )
+
+    def test_the_web_service_reads_them_the_same_way_the_daemon_does(self):
+        """Same interpolation shape, so one ``.env`` entry serves both."""
+        istota_env = _compose_service_env("istota")
+        web_env = _compose_service_env("web")
+
+        for name in sorted(self._model_credential_names() & set(istota_env)):
+            assert web_env[name] == istota_env[name], (
+                f"{name} reaches web through {web_env[name]!r} and istota "
+                f"through {istota_env[name]!r}. An operator setting it once in "
+                ".env has to reach both processes."
+            )
+
+
 class TestTheContainerCliFindsTheSameConfig:
     """`docker compose exec istota istota <verb>` has to reach the daemon's config.
 
