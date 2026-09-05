@@ -978,6 +978,111 @@ class TestTheEntrypointStillOwnsWhatItKept:
             "not meant to be set."
         )
 
+    #: Names whose three layers state different defaults on purpose.
+    #:
+    #: Every entry is a module toggle, and they share one reason: the render
+    #: fails closed so a render invoked outside compose — the testbed's lean
+    #: shape, the image tier, the tests in this file — enables nothing it was
+    #: not asked for, while the shipped stack turns the batteries on. The
+    #: divergence is only reachable outside compose, because compose always
+    #: supplies a value.
+    #:
+    #: An eighth toggle is a line here and a decision, which is the point. A
+    #: non-boolean divergence is a bug rather than a posture: the value the
+    #: render substitutes is the one the daemon runs on, and an operator
+    #: commenting the ``.env`` line out gets it without being told.
+    DEFAULT_DIVERGES: dict[str, str] = {
+        "ISTOTA_BROWSER_ENABLED": "module toggle: render fails closed, stack ships on",
+        "ISTOTA_DEVELOPER_ENABLED": "module toggle: render fails closed, stack ships on",
+        "ISTOTA_EMAIL_ENABLED": "module toggle: render fails closed, stack ships on",
+        "ISTOTA_FEEDS_ENABLED": "module toggle: render fails closed, stack ships on",
+        "ISTOTA_LOCATION_ENABLED": "module toggle: render fails closed, stack ships on",
+        "ISTOTA_MEMORY_SEARCH_ENABLED": "module toggle: render fails closed, stack ships on",
+        "ISTOTA_MONEY_ENABLED": "module toggle: render fails closed, stack ships on",
+    }
+
+    def test_the_three_layers_agree_on_every_default_they_state(self):
+        """The values half of the hand-off, which nothing checked.
+
+        The two guards above are about *names*: every name the render reads is
+        passed, and every name compose lets the operator set is documented.
+        Both were green while ``ISTOTA_BROWSER_API_URL`` said
+        ``http://istota-browser:9223`` in ``.env.example`` and
+        ``http://localhost:9223`` in the other two — the istota container's own
+        loopback, where nothing listens. Comment that one line out of a
+        working ``.env`` and ``browse`` stops, with no error naming a cause.
+
+        Three layers state a default and all three have to agree:
+
+        - the render's own ``${NAME:-value}`` fallback
+        - compose's ``NAME: ${NAME:-value}``, where it interpolates that name
+        - the uncommented ``NAME=value`` line in ``docker/.env.example``
+
+        **An empty value is not a default, it is a pass-through**, and that is
+        a property of the mechanism rather than a convenience here: ``:-``
+        substitutes on unset *or empty* at every layer, so ``NAME=`` in
+        ``.env`` reaches compose's default, and compose's ``${NAME:-}`` reaches
+        the render's. Only one non-empty value can ever be in force, so only
+        the non-empty statements are compared. The one direction that hides is
+        a render whose own fallback is empty where compose supplies one, which
+        would render empty outside compose; there are none today.
+
+        A compose **literal** is deliberately outside the scan, on the same
+        split ``test_every_settable_compose_var_is_documented_in_env_example``
+        draws: a literal is pinned by the stack rather than being a default an
+        operator competes with, so there is no three-way to reconcile. It does
+        mean the two pinned ``ISTOTA_NEXTCLOUD_*`` values disagree with the
+        render's own defaults unseen by this test, which is why
+        ``docker/.env.example`` says so in prose.
+        """
+        render = "\n".join(
+            line
+            for line in RENDER_CONFIG.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        stated: dict[str, set[str]] = {}
+
+        def state(name: str, value: str) -> None:
+            if value:
+                stated.setdefault(name, set()).add(value)
+
+        for match in re.finditer(r"\$\{(ISTOTA_[A-Z0-9_]*):-([^{}]*)\}", render):
+            state(*match.groups())
+        read = set(stated)
+        assert len(read) > 100, "the scan found almost no fallbacks; the regex has rotted"
+
+        compose = "\n".join(
+            line
+            for line in (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        for match in re.finditer(
+            r"^\s*(ISTOTA_[A-Z0-9_]*):\s*\$\{\1:-([^{}]*)\}\s*$", compose, re.M
+        ):
+            state(*match.groups())
+
+        env_example = (REPO / "docker" / ".env.example").read_text()
+        for match in re.finditer(r"^(ISTOTA_[A-Z0-9_]*)=(.*)$", env_example, re.M):
+            state(match.group(1), match.group(2).strip())
+
+        disagree = {n for n, values in stated.items() if len(values) > 1}
+
+        stale = sorted(set(self.DEFAULT_DIVERGES) - disagree)
+        assert not stale, (
+            f"DEFAULT_DIVERGES names {stale}, whose layers now agree. Drop the "
+            "entry rather than leaving a hole open."
+        )
+
+        offenders = sorted(disagree - set(self.DEFAULT_DIVERGES))
+        assert not offenders, (
+            "these variables are given different non-empty defaults by "
+            "render-config.sh, docker-compose.yml and docker/.env.example:\n"
+            + "\n".join(f"  {n}: {sorted(stated[n])}" for n in offenders)
+            + "\nWhichever layer the operator does not edit wins, silently. "
+            "Make them agree, or record the divergence in DEFAULT_DIVERGES "
+            "with the reason it is deliberate."
+        )
+
     # The backfill passes this class used to hold in place are gone (ISSUE-368).
     # They were the repair path for a config the render would never rewrite, and
     # the render now runs on every boot, so all three would be a second writer of

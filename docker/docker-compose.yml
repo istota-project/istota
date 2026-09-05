@@ -401,7 +401,12 @@ services:
       # (no operator-shared block).
       # Browser (optional)
       ISTOTA_BROWSER_ENABLED: ${ISTOTA_BROWSER_ENABLED:-true}
-      ISTOTA_BROWSER_API_URL: ${ISTOTA_BROWSER_API_URL:-http://localhost:9223}
+      # The browser service's container_name, not localhost: the reader is the
+      # daemon inside the istota container, where loopback is its own and
+      # nothing listens on 9223. (src/istota/config.py keeps localhost as the
+      # dataclass default — that one is right for a standalone install, where
+      # the browser does run on the host's loopback.)
+      ISTOTA_BROWSER_API_URL: ${ISTOTA_BROWSER_API_URL:-http://istota-browser:9223}
       ISTOTA_BROWSER_VNC_URL: ${ISTOTA_BROWSER_VNC_URL:-}
       # Location tracking (optional). LOCATION_INGEST_TOKEN auto-generates
       # if blank; the entrypoint persists the chosen token to the API

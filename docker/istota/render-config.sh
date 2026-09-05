@@ -556,7 +556,7 @@ TOML
 
 [browser]
 enabled = true
-api_url = "${ISTOTA_BROWSER_API_URL:-http://localhost:9223}"
+api_url = "${ISTOTA_BROWSER_API_URL:-http://istota-browser:9223}"
 vnc_url = "${ISTOTA_BROWSER_VNC_URL:-}"
 TOML
     fi
