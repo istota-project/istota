@@ -173,6 +173,33 @@ block_hosts = {{ istota_brain_native_web_fetch_block_hosts | to_json }}
 {% if istota_brain_native_web_fetch_extra_blocked_cidrs %}
 extra_blocked_cidrs = {{ istota_brain_native_web_fetch_extra_blocked_cidrs | to_json }}
 {% endif %}
+
+[brain.native.session_log]
+# One append-only JSONL transcript per native task attempt: the assembled
+# prompt, every assistant turn, every tool call and every tool result. Every
+# field defaults, so this block is somewhere to change one rather than a
+# requirement.
+#
+# `dir` blank resolves to the directory holding db_path, plus /logs — local
+# disk, and behind the sandbox's database mask. A value set here is used AS
+# GIVEN, and the retention sweep unlinks *.jsonl under whatever it resolves to,
+# so write an absolute path naming a directory istota owns.
+#
+# The two limits are independent and either can evict: retention_days for
+# privacy, max_total_gb for the disk, summed across every user.
+#
+# Every value below is a plain reference rather than `| default(x, true)`:
+# that filter substitutes on *falsy* as well as undefined, so it would render
+# `enabled = true` for an operator who set false, and 14 for one who set the
+# documented `retention_days = 0`. The defaults live in defaults/main.yml,
+# where they belong, and a missing one fails the render instead.
+enabled = {{ istota_brain_native_session_log_enabled | lower }}
+dir = "{{ istota_brain_native_session_log_dir }}"
+retention_days = {{ istota_brain_native_session_log_retention_days }}
+max_total_gb = {{ istota_brain_native_session_log_max_total_gb }}
+max_content_chars = {{ istota_brain_native_session_log_max_content_chars }}
+max_args_chars = {{ istota_brain_native_session_log_max_args_chars }}
+include_thinking = {{ istota_brain_native_session_log_include_thinking | lower }}
 {% endif %}
 {% set _tmux_routed = istota_brain_source_type_overrides.values() | select('equalto', 'tmux_claude') | list | length > 0 %}
 {% if istota_brain_kind == 'tmux_claude' or istota_brain_fallback == 'tmux_claude' or _tmux_routed %}
@@ -251,6 +278,22 @@ username = "{{ istota_nextcloud_username }}"
 app_password = "{{ istota_nextcloud_app_password }}"
 {% endif %}
 share_default_expire_days = {{ istota_nextcloud_share_default_expire_days }}
+{% if istota_caldav_url %}
+
+{# Explicit CalDAV server, overriding the [nextcloud] derivation Config.caldav_*
+   otherwise uses. For a deployment whose calendar lives somewhere other than the
+   Nextcloud it authenticates against. Rendered only when a URL is set: a block
+   with a blank url reads to the loader exactly like no block, and to an operator
+   like an override that failed. The password follows istota_email_imap_password
+   — the EnvironmentFile on the shape the role deploys, inline only when the
+   operator turned that file off. #}
+[caldav]
+url = "{{ istota_caldav_url }}"
+username = "{{ istota_caldav_username }}"
+{% if not istota_use_environment_file %}
+password = "{{ istota_caldav_password }}"
+{% endif %}
+{% endif %}
 
 [talk]
 enabled = {{ istota_talk_enabled | lower }}

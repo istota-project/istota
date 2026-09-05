@@ -1237,3 +1237,168 @@ class TestThePerBrainModelDefaults:
             text=True,
         )
         assert proc.returncode == 0, proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# The two sections the template did not render
+# ---------------------------------------------------------------------------
+
+SECRETS_TEMPLATE = ANSIBLE / "templates" / "secrets.env.j2"
+
+
+def render_secrets(**overrides) -> str:
+    """`secrets.env.j2` against the same defaults, for the one credential here."""
+    env = _environment()
+    variables = _resolve(
+        {
+            **yaml.safe_load(DEFAULTS_FILE.read_text()),
+            "ansible_facts": FACTS,
+            **overrides,
+        },
+        env,
+    )
+    return env.from_string(SECRETS_TEMPLATE.read_text()).render(**variables)
+
+
+CALDAV_VARS = {
+    "istota_caldav_url": "https://dav.example.com",
+    "istota_caldav_username": "bot@example.com",
+    "istota_caldav_password": "caldav-placeholder",
+}
+
+
+class TestTheCaldavOverride:
+    """`[caldav]` was rendered by no generator at all.
+
+    It overrides the `[nextcloud]` derivation `Config.caldav_*` otherwise uses,
+    so a deployment whose calendar lives somewhere other than the Nextcloud it
+    authenticates against had no way to say so from the role.
+    """
+
+    def test_the_default_render_emits_no_block(self, parsed):
+        """Absent, not blank. A `[caldav]` block with an empty `url` reads the
+        same to the loader, but an operator seeing it in the rendered file
+        cannot tell the override off from the override half-configured."""
+        assert "caldav" not in parsed
+
+    def test_a_configured_server_reaches_the_loaded_config(self):
+        config = load_config_from(render(**CALDAV_VARS))
+
+        assert config.caldav.url == "https://dav.example.com"
+        assert config.caldav.username == "bot@example.com"
+        assert config.caldav_url == "https://dav.example.com"
+        assert config.caldav_username == "bot@example.com"
+
+    def test_the_password_travels_by_environment_file(self):
+        """The shape the role actually deploys (`use_environment_file: true`).
+
+        Same rule as `istota_email_imap_password`: `config.toml.j2` emits no
+        password and `secrets.env.j2` carries it, which is what
+        `_env_secret_overrides` reads back onto `caldav.password`. Asserted
+        together with its absence from the config, because either half alone is
+        equally true of a credential that reaches the daemon by no route.
+        """
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        assert defaults["istota_use_environment_file"] is True
+
+        config = tomllib.loads(render(**CALDAV_VARS))
+        assert "password" not in config["caldav"]
+
+        secrets = render_secrets(**CALDAV_VARS)
+        assert "ISTOTA_CALDAV_PASSWORD=caldav-placeholder" in secrets
+
+    def test_the_inline_shape_carries_it_instead(self):
+        """`use_environment_file = false` is the other supported shape, and the
+        flag being what moves the value is the claim. The role renders
+        `config.toml` 0600, which is what makes that shape safe at all."""
+        config = tomllib.loads(
+            render(**CALDAV_VARS, istota_use_environment_file=False)
+        )
+
+        assert config["caldav"]["password"] == "caldav-placeholder"
+
+    def test_no_password_line_when_nothing_is_configured(self):
+        assert "ISTOTA_CALDAV_PASSWORD" not in render_secrets()
+
+    def test_the_block_passes_the_play_validator(self):
+        import subprocess
+        import sys
+
+        rendered = render(**CALDAV_VARS)
+        path = _write_temp(rendered)
+        config = load_config_from(rendered)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ANSIBLE / "files" / "validate_config.py"),
+                path,
+                "istota",
+                str(config.db_path),
+                str(config.temp_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+
+class TestTheNativeSessionLogBlock:
+    """`[brain.native.session_log]` shipped with no way to set it from the role.
+
+    Every field defaults, so its absence cost nothing until an operator wanted
+    a different retention window or a different directory — and the directory
+    is the one that matters, since the sweep deletes under whatever it
+    resolves to.
+    """
+
+    def test_it_renders_on_a_native_deployment(self):
+        parsed = tomllib.loads(render(istota_brain_kind="native"))
+
+        assert "session_log" in parsed["brain"]["native"]
+
+    def test_the_defaults_match_the_dataclass(self):
+        """A default restated in a third place is a default that drifts. The
+        role's is checked against the dataclass rather than against a literal,
+        so a change in code fails here instead of on a host.
+
+        The presence assertion is what stops this being vacuous: an omitted
+        block loads as the dataclass defaults too, so the comparison alone
+        would have passed before the block existed.
+        """
+        from istota.config import SessionLogConfig
+
+        text = render(istota_brain_kind="native")
+        assert "session_log" in tomllib.loads(text)["brain"]["native"]
+
+        rendered = load_config_from(text)
+        shipped = SessionLogConfig()
+
+        for field in fields(SessionLogConfig):
+            assert getattr(rendered.brain.native.session_log, field.name) == getattr(
+                shipped, field.name
+            ), f"session_log.{field.name} drifted from the dataclass default"
+
+    def test_an_operator_value_reaches_the_loaded_config(self):
+        config = load_config_from(
+            render(
+                istota_brain_kind="native",
+                istota_brain_native_session_log_enabled=False,
+                istota_brain_native_session_log_dir="/srv/app/istota/session-logs",
+                istota_brain_native_session_log_retention_days=3,
+                istota_brain_native_session_log_max_total_gb=0.5,
+                istota_brain_native_session_log_include_thinking=False,
+            )
+        )
+
+        log = config.brain.native.session_log
+        assert log.enabled is False
+        assert log.dir == "/srv/app/istota/session-logs"
+        assert log.retention_days == 3
+        assert log.max_total_gb == 0.5
+        assert log.include_thinking is False
+
+    def test_a_claude_code_deployment_renders_no_native_block_at_all(self, parsed):
+        """The section sits inside the `[brain.native]` guard, so it follows
+        that block rather than appearing on a deployment with no native brain
+        anywhere in its routing."""
+        assert "native" not in parsed.get("brain", {})
