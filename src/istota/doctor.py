@@ -4048,6 +4048,145 @@ def check_web_static(config: "Config", probe: bool) -> CheckResult:
     return CheckResult("web.static", OK, f"{index} is present ({index.stat().st_size} bytes)", scope=IMAGE)
 
 
+_SHA_LENGTHS = (40, 64)
+
+
+def _repo_root() -> Path:
+    """The checkout this package was imported from, if it is one.
+
+    The same derivation :func:`static_dir.resolve_static_dir` uses for its
+    repo-relative candidate, so the two agree about which tree is in play.
+
+    Two levels above the package directory. Under the Ansible deployment that
+    is the checkout at ``istota_repo_dir``, since ``uv sync`` installs the
+    project editable and ``__file__`` resolves into ``{repo}/src/istota/``. On
+    a wheel install it is a directory inside the venv rather than
+    site-packages, and either way it holds no ``.git`` — which is what makes
+    the check below skip there instead of guessing.
+    """
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _is_sha(value: str) -> bool:
+    return len(value) in _SHA_LENGTHS and all(c in "0123456789abcdef" for c in value.lower())
+
+
+def check_web_build_current(config: "Config", probe: bool) -> CheckResult:
+    """The served bundle is current for the ``web/`` tree this checkout has.
+
+    ``web.static`` asks only whether ``index.html`` exists and is non-empty,
+    and both stay true across a stale bundle — which is the condition ISSUE-428
+    reported: the auto-update cron shipped a frontend-only commit, restarted
+    every unit, and the browser kept running old code with nothing on the host
+    saying so. SvelteKit already emits ``_app/version.json`` for its own
+    updated-build polling, and ``web/svelte.config.js`` stamps
+    ``ISTOTA_BUILD_SHA`` into it, so the artifact names the commit it came from.
+
+    **The question is whether ``web/`` moved, not whether HEAD did**, and the
+    difference is the whole check. The cron rebuilds only when a commit touches
+    ``web/``, by design, so on a busy branch the stamp trails HEAD almost all
+    the time while the bundle is byte-for-byte the one this checkout would
+    produce. Comparing the two shas for equality therefore reports a warning on
+    an ordinary Python-only deploy — permanently, on a host whose cron fires
+    every two minutes — and, worse, makes the genuinely stale bundle
+    indistinguishable from the benign case the check exists to separate.
+
+    That question needs git, so it is **probe-gated** and answers ``SKIP``
+    without one. `probe` is True on every surface that matters — the boot run,
+    the hourly sweep, ``istota doctor``, ``!check``, the admin pane — and False
+    only on ``config.CONFIG_LOAD_CHECKS``, which this is not in.
+
+    A mismatch is a **WARN**, and every state this cannot settle is a ``SKIP``.
+    Three shipped shapes legitimately do not stamp a commit — a Docker image, a
+    wheel install, a developer's own ``npm run build`` — and a check that cannot
+    tell those from a stale deploy must not claim either. WARN rather than FAIL
+    for the reason the severity exists: the next auto-update tick clears it, and
+    a warning that pages someone is a failure wearing the wrong label.
+    """
+    if not getattr(config.web, "enabled", False):
+        return CheckResult("web.build_current", SKIP, "[web] enabled = false")
+    # Function-local like every other package import in this module: nothing
+    # here may land on the config-load path's import graph.
+    from .git_hardening import GIT_HARDENING
+    from .static_dir import resolve_static_dir
+
+    version_file = Path(resolve_static_dir()) / "_app" / "version.json"
+    try:
+        payload = json.loads(version_file.read_text(encoding="utf-8", errors="replace"))
+        stamped = str(payload["version"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return CheckResult(
+            "web.build_current",
+            SKIP,
+            f"{version_file} is missing or unreadable",
+        )
+    if not _is_sha(stamped):
+        return CheckResult(
+            "web.build_current",
+            SKIP,
+            "the bundle is not stamped with a commit (an image, a wheel install "
+            "or a local build)",
+        )
+    if not probe:
+        return CheckResult(
+            "web.build_current",
+            SKIP,
+            f"the bundle names {stamped[:12]}; comparing it to the checkout needs "
+            "git, which was not executed",
+        )
+    root = _repo_root()
+    if not (root / ".git").exists():
+        return CheckResult(
+            "web.build_current",
+            SKIP,
+            f"{root} is not a git checkout, so there is nothing to compare against",
+        )
+    # `stamped` is hex by `_is_sha` and this is an argv rather than a shell
+    # string, so it can name no option and start no command. GIT_HARDENING for
+    # the reason it always goes on a `git` call here: `diff.external` runs a
+    # program named by the repository's own config.
+    proc = _run(
+        [
+            "git",
+            "-C",
+            str(root),
+            *GIT_HARDENING,
+            "diff",
+            "--quiet",
+            stamped,
+            "HEAD",
+            "--",
+            "web/",
+        ]
+    )
+    if proc is None or proc.returncode not in (0, 1):
+        # An unknown object is the ordinary case here, not a fault: the bundle
+        # can outlive a re-clone or a history rewrite. Unanswerable, not stale.
+        return CheckResult(
+            "web.build_current",
+            SKIP,
+            f"git could not compare the bundle's commit {stamped[:12]} against the checkout",
+        )
+    if proc.returncode == 0:
+        return CheckResult(
+            "web.build_current",
+            OK,
+            f"the bundle was built from {stamped[:12]} and web/ has not changed since",
+        )
+    return CheckResult(
+        "web.build_current",
+        WARN,
+        f"web/ has changed since the bundle was built from {stamped[:12]}",
+        remedy=(
+            "Re-run the Ansible play, which rebuilds the frontend unconditionally. "
+            "The auto-update cron also builds when a commit touches web/, so a bundle "
+            "left behind means that run failed — see the update log. Deleting the "
+            "deployed-revision marker does not force a rebuild; it is re-seeded from "
+            "HEAD on the next tick."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # sandbox.* (deep)
 # ---------------------------------------------------------------------------
@@ -6705,6 +6844,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("talk.signaling_auth", check_signaling_auth),
     ("talk.signaling_watchers", check_signaling_watchers),
     ("web.static", check_web_static),
+    ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
     ("config.skill_overlays", check_skill_overlays),
@@ -6803,6 +6943,9 @@ CHECK_SCOPES: dict[str, str] = {
     "talk.signaling_auth": DEPLOYMENT,
     "talk.signaling_watchers": DEPLOYMENT,
     "web.static": IMAGE,
+    # Deployment, not image: it compares the bundle against the checkout it
+    # was built from, and a bare `docker run` has no checkout.
+    "web.build_current": DEPLOYMENT,
     # Deployment, not image: it reads the rendered config and reaches the
     # network. A bare `docker run` can answer neither.
     "web.basemap": DEPLOYMENT,
