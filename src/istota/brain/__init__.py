@@ -281,6 +281,102 @@ def reachable_brain_kinds(brain_config) -> frozenset[str]:
     return frozenset(kinds | failover | room_selectable_kinds(brain_config))
 
 
+# Routing refusals already logged this process, so a static misconfiguration
+# says so once instead of at caller rate (ISSUE-422). Every refusal below
+# depends on a stored pin and the operator's config, neither of which changes
+# between calls, so an undeduped line repeats for as long as the condition
+# lasts: about 1440 a day for a `* * * * *` cron job with a refused pin, times
+# however many times one task resolves its brain.
+#
+# The sentinel for "the cap notice has been logged" lives in the same set so
+# one `clear()` resets the whole latch. It cannot collide with a real key,
+# because `arm` is always one of the non-empty literals below.
+_WARNED_REFUSALS: set[tuple[str, str, str]] = set()
+_CAP_NOTICE_KEY = ("", "", "")
+
+# `pinned` comes off `scheduled_jobs.brain`, a plain string field CRON.md can
+# write, so both bounds are needed and neither implies the other: the count
+# stops one durable entry per attacker-chosen value, and the per-axis width
+# stops a bounded number of unbounded entries. The width also bounds the
+# *pinned kind* as it is logged, since 256 unbounded lines fill a disk as
+# surely as 1440 short ones — deliberately only that axis, because it is the
+# model-writable one. `source_type` is framework-set from a small vocabulary
+# and stays raw in the message; it is truncated in the key alone, which is
+# what stops a long one from minting keys. Two values sharing a truncated
+# prefix collapse to one key and one line, the deliberate cost of that bound.
+#
+# The count is one budget across all three arms rather than three. A flood on
+# one arm therefore silences a condition first seen on another until restart —
+# accepted, because reaching it takes 256 distinct admin-authored values while
+# the legitimate ceiling is three kinds by eleven source types, and because
+# the refusal itself is unaffected either way: only the log line goes.
+_WARNED_REFUSAL_CAP = 256
+_REFUSAL_SHOWN_CHARS = 80
+
+
+def _as_text(value: object) -> str:
+    """``value`` as a string, never raising.
+
+    Takes ``object`` and coerces, for the reason ``reachable_brain_kinds``
+    guards its own read of the same mapping: ``source_type_overrides`` is
+    stringified by the config hook only on the ``load_config`` path, so a
+    ``BrainConfig`` built any other way carries whatever TOML can spell.
+    ``str(value)`` runs whatever ``__str__`` came with the value, which is
+    what the guard is for — an exception here would leave ``resolve_brain_kind``
+    raising over a log line, which is the failure mode it exists to prevent.
+    """
+    if isinstance(value, str):
+        return value
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001 — a routing read must not raise into a task
+        return f"<unprintable {type(value).__name__}>"
+
+
+def _shown(value: object) -> str:
+    """``_as_text`` bounded, marked where it was cut.
+
+    For a dedup key and for a log line, never for a *lookup* key: truncating
+    one would let an over-long ``source_type`` match an override it does not
+    name.
+    """
+    text = _as_text(value)
+    if len(text) <= _REFUSAL_SHOWN_CHARS:
+        return text
+    return text[: _REFUSAL_SHOWN_CHARS - 3] + "..."
+
+
+def _refusal_is_unreported(arm: str, kind, source_type) -> bool:
+    """Whether this refusal has not been logged yet in this process.
+
+    ``arm`` is which refusal fired, and it is part of the key rather than
+    decoration: a refused pin falls through to the source-type layer, so one
+    call can refuse the same name twice for two different reasons with two
+    different remedies, and keying on the name alone would silence the second.
+
+    No lock. The scheduler resolves brains on worker threads, and the two
+    outcomes of a race are one duplicate line or a cap overshot by a few —
+    both cheaper than a lock on a resolution path, and the same trade
+    ``scheduler._warn_once`` already makes.
+    """
+    key = (arm, _shown(kind), _shown(source_type if source_type else ""))
+    if key in _WARNED_REFUSALS:
+        return False
+    if len(_WARNED_REFUSALS) >= _WARNED_REFUSAL_CAP:
+        # Going quiet with no explanation would read as the refusals having
+        # stopped, which is the opposite of what has happened.
+        if _CAP_NOTICE_KEY not in _WARNED_REFUSALS:
+            _WARNED_REFUSALS.add(_CAP_NOTICE_KEY)
+            logger.warning(
+                "brain routing: %d distinct refusals warned about this process; "
+                "suppressing further routing refusal warnings until restart",
+                _WARNED_REFUSAL_CAP,
+            )
+        return False
+    _WARNED_REFUSALS.add(key)
+    return True
+
+
 def resolve_brain_kind(source_type, brain_config, override: str | None = None):
     """Return the BrainConfig to use for a task with the given source_type.
 
@@ -314,6 +410,20 @@ def resolve_brain_kind(source_type, brain_config, override: str | None = None):
     to rewrite stored rows. Neither ever wedges a task, which is the same
     contract an unknown ``source_type_overrides`` target already has.
 
+    All three WARNINGs — those two and the unknown override target below — are
+    logged **once per process per distinct condition** (``_refusal_is_unreported``).
+    Each condition is a static fact about a stored row and the operator's
+    config, so the line said nothing new on its second appearance and repeated
+    for as long as the misconfiguration lasted.
+
+    "Never wedges a task" is now true of the *types* as well, which it was not:
+    a non-string ``source_type`` raised ``AttributeError`` on ``.strip()`` and
+    an unhashable override target raised ``TypeError`` from the membership
+    test. ``load_config``'s hook stringifies that mapping on both sides, so
+    neither is reachable through it — but ``execute_task`` calls this
+    unguarded, and ``reachable_brain_kinds`` already concedes the same values
+    are untrusted. Both reads go through ``_as_text`` now.
+
     **An admitted override also turns availability failover off**, by returning
     a config with ``fallback`` cleared. The room, or the job, named *this*
     brain, so a task that cannot run on it fails with the primary's own reason
@@ -333,30 +443,49 @@ def resolve_brain_kind(source_type, brain_config, override: str | None = None):
     pinned = (override or "").strip()
     if pinned:
         if pinned not in KNOWN_BRAIN_KINDS:
-            logger.warning(
-                "brain routing: unknown kind %r pinned for source_type %r; "
-                "ignoring it and resolving from config",
-                pinned, source_type,
-            )
+            if _refusal_is_unreported("unknown-pin", pinned, source_type):
+                logger.warning(
+                    "brain routing: unknown kind %r pinned for source_type %r; "
+                    "ignoring it and resolving from config",
+                    _shown(pinned), source_type,
+                )
         elif pinned not in room_selectable_kinds(brain_config):
-            logger.warning(
-                "brain routing: kind %r pinned for source_type %r is not in "
-                "[brain] room_selectable; ignoring it and resolving from config",
-                pinned, source_type,
-            )
+            if _refusal_is_unreported("unlisted-pin", pinned, source_type):
+                logger.warning(
+                    "brain routing: kind %r pinned for source_type %r is not in "
+                    "[brain] room_selectable; ignoring it and resolving from "
+                    "config",
+                    _shown(pinned), source_type,
+                )
         else:
             return dataclasses.replace(brain_config, kind=pinned, fallback="")
 
     overrides = getattr(brain_config, "source_type_overrides", None) or {}
-    target = overrides.get((source_type or "").strip())
+    # Both reads are coerced, because neither value's type is this function's
+    # to assume and both used to raise out of it. `load_config`'s hook
+    # stringifies this mapping on both sides, so a `BrainConfig` that came
+    # through it is unaffected — but one built any other way carries whatever
+    # TOML can spell, and `execute_task` calls this unguarded. A non-string
+    # `source_type` raised `AttributeError` on `.strip()`, and an *unhashable*
+    # target raised `TypeError` from the membership test below, both out of a
+    # function whose stated contract is that a routing typo never wedges a
+    # task. `reachable_brain_kinds` reads the same mapping behind the same
+    # concession, with a `try` instead. Coerced *after* the falsy test, so an
+    # empty list still means "no override" rather than becoming `"[]"`.
+    # `_as_text`, not `_shown`: truncating a lookup key would let an
+    # over-long `source_type` match an override it does not name.
+    target = overrides.get(_as_text(source_type if source_type else "").strip())
     if not target or target == brain_config.kind:
         return brain_config
+    if not isinstance(target, str):
+        target = _shown(target)
     if target not in KNOWN_BRAIN_KINDS:
-        logger.warning(
-            "brain routing: unknown kind %r mapped for source_type %r; "
-            "falling back to %r",
-            target, source_type, brain_config.kind,
-        )
+        if _refusal_is_unreported("unknown-override", target, source_type):
+            logger.warning(
+                "brain routing: unknown kind %r mapped for source_type %r; "
+                "falling back to %r",
+                _shown(target), source_type, brain_config.kind,
+            )
         return brain_config
     return dataclasses.replace(brain_config, kind=target)
 

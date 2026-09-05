@@ -743,6 +743,51 @@ keeps its value, the operator may restore the list, and `!brain` says the room
 is set to a kind that is no longer offered and names what it is running
 instead.
 
+**Each refusal is logged once per process, not once per call** (ISSUE-422).
+Both branches above and the unknown-`source_type_overrides`-target branch go
+through `_refusal_is_unreported(arm, kind, source_type)`, because every one of
+them is a static fact about a stored row and the operator's config: nothing
+changes between calls, so the second line said nothing the first had not and
+the sequence ran for as long as the misconfiguration lasted — about 1440 lines
+a day for a `* * * * *` cron job with a refused pin, times however many times
+one task resolves its brain. `arm` is in the key rather than being decoration:
+a refused pin falls *through* to the source-type layer, so one call can refuse
+the same name twice for two different reasons with two different remedies, and
+keying on the name alone silences the second. Two bounds sit on the key set,
+and neither implies the other — `pinned` comes off `scheduled_jobs.brain`, a
+plain string field CRON.md can write, so the entry count is capped
+(`_WARNED_REFUSAL_CAP`) against one durable entry per attacker-chosen value and
+each axis is truncated (`_REFUSAL_SHOWN_CHARS`) against a bounded number of
+unbounded ones. The same truncation bounds the value as it is *logged*, since
+256 unbounded lines fill a disk as surely as 1440 short ones. Reaching the cap
+logs one line saying further refusals are suppressed, rather than going quiet in
+a way that reads as the refusals having stopped; with three buildable kinds and
+eleven shipped source types the legitimate ceiling is far below it. That budget
+is **shared across the three arms**, so a flood on one silences a condition
+first seen on another — accepted, since the refusal itself is unaffected and
+only the line goes. The latch is also process-lifetime and keyed on nothing
+about the config, so it **outlives a SIGHUP reload**: a kind added to
+`room_selectable`, reloaded, and removed again refuses silently for the rest of
+that process. Same shape as `config._RO_PATH_CONTROL_TREE_WARNED`, which is
+likewise never cleared across `load_config` calls. No lock: the
+scheduler resolves brains on worker threads and the two outcomes of a race are
+one duplicate line or a cap overshot by a few, which is the trade
+`scheduler._warn_once` already makes. `tests/conftest.py` clears the set between
+tests, since a process-global latch otherwise decides whether a test asserting
+on one of these warnings passes by who ran first.
+
+The same change made "never wedges a task" true of the argument *types*, which
+it was not. A non-string `source_type` raised `AttributeError` on `.strip()`
+and an unhashable `source_type_overrides` target raised `TypeError` from the
+membership test, both out of a function `execute_task` calls unguarded.
+Neither is reachable through `load_config`, whose hook stringifies that mapping
+on both sides — which is why it went unnoticed — but `reachable_brain_kinds`
+already reads the same mapping behind a `try` for exactly this reason. Both
+reads go through `_as_text` now. That is a different helper from `_shown` on
+purpose: `_shown` bounds the value, and a bounded string is right for a dedup
+key and a log line and wrong for the override *lookup*, where it would let an
+over-long `source_type` match a lane it does not name.
+
 **The allowlist is empty by default and is a gate rather than a preference.**
 Brain kind decides which process holds the agent loop, which credentials that
 process carries, which `SandboxProfile` is built and what tool set is
