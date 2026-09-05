@@ -1364,31 +1364,35 @@ class TestTheCrossingRuleAtTheRequestBuild:
         )
         assert req.model == "qwen3-testbed-max"
 
-    def test_a_lane_whose_producer_still_resolves_in_the_base_kind_carries_it(
+    def test_the_repl_lane_keeps_a_pin_its_producer_wrote_in_that_lane(
         self, tmp_path,
     ):
-        """A known residue of ISSUE-419's Stage 4, pinned so it is not lost.
+        """The second half of the same reversal, on the second routed producer.
 
-        This is **not** the desired outcome. `cli`/`repl` pins are written by
-        `repl/session`, which resolves through `make_brain(config.brain)` — the
-        base kind — so on a routed `cli` lane the stored id really is anthropic
-        and really cannot run on native. Before Stage 4 the origin rule answered
-        `anthropic`, saw a crossing and dropped it; it now answers with the lane
-        and lets it through to a wire that will reject it.
+        This used to record a residue of ISSUE-419's Stage 4 and assert it on
+        the `cli` lane, which was wrong about the lane as well as the outcome:
+        `repl/session` writes `source_type="repl"`, and no producer pins a model
+        on `cli` at all. It also resolved through `make_brain(config.brain)`, so
+        on a routed lane the stored id really was anthropic and really could not
+        run on native.
 
-        The fix belongs at the producer, not here: `repl/session` should resolve
-        through `resolve_brain_kind("repl", …)` the way the scheduler now does.
-        Until it does, this records what the deployment actually does, and it is
-        the test to invert when that lands.
+        It resolves through `resolve_brain_kind("repl", …)` now (ISSUE-421), so
+        the stored id is the routed brain's and the pin must survive.
+        `z-ai/glm-5` is what that producer writes on this deployment, which is
+        why the case is keyed on that shape of name rather than on an anthropic
+        id no producer for this lane emits — the standard
+        `test_a_routed_lane_keeps_a_pin_written_in_its_own_namespace` sets for
+        the `scheduled` lane.
         """
         req = self._run_primary(
             tmp_path,
             brain_config=BrainConfig(
-                kind="claude_code", source_type_overrides={"cli": "native"},
+                kind="claude_code", source_type_overrides={"repl": "native"},
             ),
-            task_model="claude-opus-5",
+            task_model="z-ai/glm-5",
+            source_type="repl",
         )
-        assert req.model == "claude-opus-5"
+        assert req.model == "z-ai/glm-5"
 
     def test_an_unrouted_lane_on_a_routed_deployment_still_drops(self, tmp_path):
         """The half that must not move, and it needs a routing map to say so.
