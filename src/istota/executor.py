@@ -63,6 +63,7 @@ from .brain import (
     is_portable_alias,
     make_brain,
     model_namespace_for_kind,
+    resolve_brain_kind,
 )
 from .brain._roles import PORTABLE_KEY
 from .brain._fallback import (
@@ -1292,15 +1293,39 @@ def _pin_origin_namespace(task, config) -> str | None:
       since dropped from ``room_selectable`` is refused and falls through, and
       the stored pin is still the dropped kind's. That is one of the two routes
       this function exists for.
-    - Otherwise the pin is operator- or API-written (``[[jobs]] model``), whose
-      vocabulary is the deployment default's — the brain a name written in
-      config would have been written against.
+    - Otherwise the pin was written against the brain this task's *lane*
+      resolves to, which is ``resolve_brain_kind`` with no override — not
+      ``[brain] kind`` (ISSUE-419). Both producers of an unpinned pin ask
+      exactly that question before they write: ``check_scheduled_jobs``
+      resolves a ``[[jobs]] model`` through the job's own resolved brain, and a
+      ``!model`` prefix in a room that pinned no brain goes through
+      ``commands.brain_for_room``, which is the same call. Reading the base
+      kind made every ``[brain.source_type_overrides]`` deployment answer with
+      a namespace nothing had written in, so a cron ``model = "smart"`` routed
+      to native was resolved as native's model, compared against anthropic,
+      read as a crossing and dropped — the operator's pin silently replaced by
+      the brain's own default, at INFO. This is also the origin ``_run_fallback``
+      already passes on the fallback path (``brain_config.kind``, the routed
+      kind), so the two ends of one rule now agree.
+
+    The routing read is guarded for the reason ``commands.brain_for_room`` and
+    ``_native_web_fetch_enabled`` guard the identical call: ``source_type`` is a
+    ``TEXT`` column with no ``CHECK``, SQLite is dynamically typed, and
+    ``resolve_brain_kind`` opens by calling ``.strip()`` on it. The residue is
+    the base kind, which is the answer this returned before routing was
+    consulted at all.
 
     ``None`` where the kind does not resolve, which the crossing rule reads as
     "not established" and therefore treats as a crossing.
     """
     pinned = (getattr(task, "brain", None) or "").strip()
-    return model_namespace_for_kind(pinned or config.brain.kind)
+    if pinned:
+        return model_namespace_for_kind(pinned)
+    try:
+        routed = resolve_brain_kind(getattr(task, "source_type", ""), config.brain)
+    except Exception:  # noqa: BLE001 — a routing read must not raise into a request build
+        routed = config.brain
+    return model_namespace_for_kind(getattr(routed, "kind", None))
 
 
 def _request_model(task, config, brain) -> str:
@@ -7107,13 +7132,15 @@ def execute_task(
             # Resolved through the crossing rule rather than by
             # `resolve_model_name` alone, because a *pin* can still meet a brain
             # of another namespace here (ISSUE-417) — ISSUE-418 removed the
-            # deployment default, not the pin. Two live routes: a
-            # `[[jobs]] model` on a cron job that `source_type_overrides` sends
-            # to native, which put an Anthropic id on an openai_compat wire; and
-            # a room whose `brain` the operator has since dropped from
-            # `room_selectable`, where `resolve_brain_kind` warns and falls
-            # through while `rooms.model` still holds the previous namespace's
-            # id. Within one namespace the rule resolves exactly as
+            # deployment default, not the pin. The live route is a room whose
+            # `brain` the operator has since dropped from `room_selectable`,
+            # where `resolve_brain_kind` warns and falls through while
+            # `rooms.model` still holds the previous namespace's id. A
+            # `[[jobs]] model` routed to native by `source_type_overrides` was
+            # the second one and is closed (ISSUE-419): the job's model is now
+            # resolved against the brain the lane runs, and
+            # `_pin_origin_namespace` reads that same lane, so nothing crosses.
+            # Within one namespace the rule resolves exactly as
             # `resolve_model_name` did, so the ordinary path is unchanged.
             model=_request_model(task, config, brain),
             effort=_resolve_effort(task, config),

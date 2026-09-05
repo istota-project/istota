@@ -1333,7 +1333,33 @@ class TestTheCrossingRuleAtTheRequestBuild:
         assert brain.received_reqs
         return brain.received_reqs[0]
 
-    def test_a_routed_lane_drops_a_pin_it_cannot_carry(self, tmp_path):
+    def test_a_routed_lane_keeps_a_pin_written_in_its_own_namespace(self, tmp_path):
+        """Reversed by ISSUE-419's Stage 4, deliberately.
+
+        This used to assert the drop, on the premise that an unpinned task's
+        model was written against `[brain] kind`. It is not: the producers of
+        `tasks.model` resolve the name through the brain the *lane* runs —
+        `check_scheduled_jobs` through `resolve_brain_kind("scheduled", …)`, and
+        a room's `!model` through `commands.brain_for_room`, which fills
+        `rooms.model` and `rooms.brain` from the same row inside the same guard.
+        So on a routed lane the stored id is already the routed brain's, and the
+        drop was discarding the operator's pin at INFO for a crossing that had
+        not happened.
+
+        `native.resolve_model_name` passes an id it does not know through
+        unchanged, so the assertion is that the pin survives rather than that it
+        is translated — there is no translation between namespaces and none is
+        claimed.
+
+        Two residues, neither introduced here and neither guarded: an
+        *inherited* pin, where `scheduler_deferred` copies a parent's `model`
+        onto a `subtask` row and a deployment routing the two lanes to different
+        namespaces hands the child a name from the parent's; and `repl/session`,
+        which still resolves its own `!model` through `make_brain(config.brain)`
+        — the base kind — the same expression Stage 3 removed from the scheduler.
+        Both are the "wrong brain resolves the alias" defect at a producer this
+        spec does not touch.
+        """
         req = self._run_primary(
             tmp_path,
             brain_config=BrainConfig(
@@ -1341,7 +1367,24 @@ class TestTheCrossingRuleAtTheRequestBuild:
             ),
             task_model="claude-opus-5",
         )
-        assert req.model == "", "an anthropic id reached the openai_compat wire"
+        assert req.model == "claude-opus-5"
+
+    def test_an_unrouted_lane_on_a_routed_deployment_still_drops(self, tmp_path):
+        """The half that must not move.
+
+        `cli` carries no routing entry here, so the lane runs `claude_code`, the
+        pin really was written in the anthropic namespace, and a fallback into
+        native really is a crossing. Without this the class would assert only
+        that pins survive, which every broken origin rule also satisfies.
+        """
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code")
+        from istota.executor import _pin_origin_namespace, _request_model
+
+        task = _make_task(source_type="cli", model="claude-opus-5")
+        task.brain = None
+        assert _pin_origin_namespace(task, config) == "anthropic"
+        assert _request_model(task, config, _FakeBrain("native", None)) == ""
 
     def test_an_unrouted_pin_is_unchanged(self, tmp_path):
         """The ordinary path must stay byte-identical to `resolve_model_name`."""

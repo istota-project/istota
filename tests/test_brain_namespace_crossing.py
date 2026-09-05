@@ -33,15 +33,21 @@ from istota.brain import (
     model_namespace_for_kind,
 )
 from istota.config import BrainConfig, Config
-from istota.executor import _resolve_crossing_model_effort
+from istota.executor import (
+    _pin_origin_namespace,
+    _request_model,
+    _resolve_crossing_model_effort,
+)
 
 
 class _Task:
-    """Only the two fields the resolver reads."""
+    """Only the fields the resolver and the origin rule read."""
 
-    def __init__(self, model="", effort=""):
+    def __init__(self, model="", effort="", brain=None, source_type=""):
         self.model = model
         self.effort = effort
+        self.brain = brain
+        self.source_type = source_type
 
 
 def _brain(kind):
@@ -264,3 +270,162 @@ class TestTheClearingRuleAnswersOnTheKind:
         from istota.config import BrainConfig
 
         assert cmd._model_namespace(BrainConfig(kind="nope")) is None
+
+
+# A native model unmistakably not an anthropic id: an assertion below that
+# happened to hold under both namespaces would say nothing.
+NATIVE_MODEL = "qwen3-testbed-max"
+
+
+def _routed_config(**brain_kwargs):
+    """`claude_code` by default, with two lanes routed to native."""
+    return Config(
+        brain=BrainConfig(
+            kind="claude_code",
+            source_type_overrides={"scheduled": "native", "email": "native"},
+            **brain_kwargs,
+        )
+    )
+
+
+class TestTheOriginOfAnUnpinnedTask:
+    """The unpinned branch asks the router, not `[brain] kind` (ISSUE-419).
+
+    Both producers of a pin on a task with no `tasks.brain` resolve the name
+    against the *lane's* brain before writing it: `check_scheduled_jobs` goes
+    through `resolve_brain_kind("scheduled", ...)`, and a `!model` prefix in a
+    room that pinned no brain goes through `commands.brain_for_room`, which is
+    the same call. Reading `config.brain.kind` here answered with a namespace
+    nothing had written in, so every pin on a routed lane read as a crossing.
+    """
+
+    def test_a_routed_lane_answers_with_the_routed_namespace(self):
+        assert (
+            _pin_origin_namespace(_Task("m", source_type="scheduled"), _routed_config())
+            == "openai_compat"
+        )
+
+    def test_the_rule_is_the_lane_and_not_the_cron_lane(self):
+        """Deliberately not `scheduled`.
+
+        The branch is the one taken whenever `tasks.brain` is NULL, so this
+        reaches email, briefing, heartbeat, subtask and web alike. That is the
+        correct answer for all of them and is the point of the change rather
+        than a surprise from it, which is what this case is here to say.
+        """
+        assert (
+            _pin_origin_namespace(_Task("m", source_type="email"), _routed_config())
+            == "openai_compat"
+        )
+
+    def test_an_unrouted_lane_on_a_routed_deployment_reads_the_base_kind(self):
+        """The routing is per lane, so a lane with no entry is unchanged."""
+        assert (
+            _pin_origin_namespace(_Task("m", source_type="talk"), _routed_config())
+            == "anthropic"
+        )
+
+    def test_a_deployment_with_no_routing_at_all_is_unchanged(self):
+        assert (
+            _pin_origin_namespace(
+                _Task("m", source_type="scheduled"),
+                Config(brain=BrainConfig(kind="claude_code")),
+            )
+            == "anthropic"
+        )
+
+    def test_a_non_string_source_type_does_not_raise(self):
+        """`tasks.source_type` is TEXT with no CHECK and SQLite is dynamically
+        typed, so `resolve_brain_kind`'s opening `.strip()` is reachable with a
+        number on the row. The residue is the base kind — the answer this
+        returned before routing was consulted — and never an exception into a
+        request build.
+        """
+        task = _Task("m")
+        task.source_type = 7
+        assert _pin_origin_namespace(task, _routed_config()) == "anthropic"
+
+
+class TestAPinnedTaskStillReadsTheColumn:
+    """Unchanged by Stage 4, and the second case is a deferred question.
+
+    A room's pin is written into `tasks.brain` at creation and `rooms.model` was
+    resolved against that kind, so the column is the origin even where the
+    routing would say otherwise.
+    """
+
+    def test_the_pin_outranks_the_lanes_routing(self):
+        assert (
+            _pin_origin_namespace(
+                _Task("m", brain="native", source_type="talk"),
+                _routed_config(room_selectable=["native"]),
+            )
+            == "openai_compat"
+        )
+
+    def test_a_pin_the_allowlist_now_refuses_still_reads_as_its_own_namespace(self):
+        """Pinned behaviour, deliberately left alone by this stage.
+
+        With `native` dropped from `room_selectable`, `resolve_brain_kind`
+        refuses the pin and the task runs `claude_code`, while this answers
+        `openai_compat` and the crossing rule drops the pin. That is the
+        documented ISSUE-417 intent for a `rooms.model` written *while* the pin
+        was still admitted, and the wrong answer for one written after the
+        operator shortened the list. Which of the two writing times should win
+        is a separate decision about a different producer, so this pins today's
+        behaviour rather than changing it.
+        """
+        assert (
+            _pin_origin_namespace(
+                _Task("m", brain="native", source_type="talk"),
+                _routed_config(room_selectable=[]),
+            )
+            == "openai_compat"
+        )
+
+
+class TestARoutedLanesPinIsNoLongerDroppedAsACrossing:
+    """The outcome the origin rule exists for, asserted through `_request_model`.
+
+    A cron job's `model` is resolved by the brain the lane runs, so on a
+    `source_type_overrides` deployment the stored id is native's. Reading the
+    base kind's namespace as the origin made that a crossing, found the id
+    non-portable and dropped it — the operator's pin replaced by native's own
+    default, logged at INFO and surfaced nowhere.
+    """
+
+    def test_a_routed_cron_pin_reaches_the_request(self):
+        model = _request_model(
+            _Task(NATIVE_MODEL, source_type="scheduled"),
+            _routed_config(),
+            _brain("native"),
+        )
+        assert model == NATIVE_MODEL
+
+    def test_the_same_holds_on_a_routed_lane_that_is_not_cron(self):
+        model = _request_model(
+            _Task(NATIVE_MODEL, source_type="email"),
+            _routed_config(),
+            _brain("native"),
+        )
+        assert model == NATIVE_MODEL
+
+    def test_nothing_is_logged_as_dropped(self, caplog):
+        with caplog.at_level(logging.INFO):
+            _request_model(
+                _Task(NATIVE_MODEL, source_type="scheduled"),
+                _routed_config(),
+                _brain("native"),
+            )
+        assert not [r for r in caplog.records if "non-portable" in r.getMessage()]
+
+    def test_an_unrouted_lane_on_the_same_deployment_still_drops(self):
+        """The half that must not move: `talk` is not routed, so the pin really
+        was written in the anthropic namespace and really cannot carry.
+        """
+        model = _request_model(
+            _Task("claude-opus-5", source_type="talk"),
+            _routed_config(),
+            _brain("native"),
+        )
+        assert model == ""
