@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     model_used TEXT,
     -- Per-task brain override (a kind: claude_code / native / tmux_claude);
     -- NULL = no override, resolve from config. Frozen at task creation from
-    -- `rooms.brain` so a room edited mid-flight does not change a running task,
+    -- `rooms.brain`, or from `scheduled_jobs.brain` for a scheduled job, so a
+    -- room or a CRON.md edit mid-flight does not change a running task,
     -- and copied by retries and subtasks. Outranks
     -- `[brain.source_type_overrides]`; see `brain.resolve_brain_kind`.
     brain TEXT,

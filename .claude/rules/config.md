@@ -444,8 +444,12 @@ with `brain` in CRON.md (ISSUE-419). The key's name is narrower than the
 setting: it bounds every pin written outside this file, since
 `resolve_brain_kind` applies it to any `override` it is handed without knowing
 the provenance. A second `job_selectable` was rejected for that reason, and the
-rename was rejected as a follow-up rather than done here. Empty is the default, so the feature ships
-inert and an operator opts in by naming kinds — a gate rather than a preference,
+rename left as a follow-up rather than done here. The job pin carries one gate
+this key does not, at sync time: CRON.md is model-writable, so
+`cron_loader.fj_brain_or_none` drops the field for a non-admin — which on a
+deployment with an empty admins file is nobody. Empty is the default, so the
+feature ships inert and an operator opts in by naming kinds — a gate rather
+than a preference,
 because a brain kind decides which process holds the agent loop, what tool set
 it registers and which sandbox profile is built, and a change to an enforcement
 posture should not arrive switched on by an upgrade (`.claude/rules/brain.md` is

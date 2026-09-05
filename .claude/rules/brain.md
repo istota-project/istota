@@ -727,8 +727,11 @@ across ten source files plus the Ansible template and `render-config.sh`.
 The job pin's own gate is a different one and sits earlier: CRON.md is
 model-writable through the `schedules` skill, so `cron_loader.fj_brain_or_none`
 drops the field at sync for a non-admin and keeps the rest of the job. Gating
-at sync rather than at dispatch is what makes the stored row and the `!cron`
-listing honest about what will run.
+at sync rather than at dispatch is what keeps the row and the `!cron` listing
+from showing a pin the author was not allowed to write. It answers *who* may
+pin and deliberately not *what*, so an admin's unlisted kind is stored here and
+falls through at dispatch, and the listing shows it — read that line as the
+sync gate's answer rather than as a statement about which brain will run.
 
 An override is admitted only when it names a buildable kind **and** one the
 operator listed in `[brain] room_selectable`. Those are two separate refusal

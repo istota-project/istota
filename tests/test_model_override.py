@@ -928,9 +928,10 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
 class TestCmdCronShowsBrain:
     """`!cron` renders the pin, on `TestCmdCronShowsModel`'s pattern.
 
-    The listing is what makes a sync-time gate honest: a value dropped for a
-    non-admin leaves the column NULL, so this line shows what will run rather
-    than what the file says.
+    The listing shows the sync gate's answer: a value dropped for a non-admin
+    leaves the column NULL and renders nothing. It is not a statement about
+    which brain will run — an admin's unlisted kind is stored, rendered here,
+    and refused at dispatch by `resolve_brain_kind`.
     """
 
     @pytest.mark.asyncio
@@ -967,6 +968,9 @@ class TestCmdCronShowsBrain:
                 config=config, conn=conn, user_id="alice",
                 conversation_token="room1", args=""))
 
+        # Anchored: `cmd_cron` answers "No scheduled jobs configured." on an
+        # empty listing, which satisfies the negative assertion on its own.
+        assert "default-job" in result
         assert "brain" not in result
 
 
