@@ -602,8 +602,21 @@ class TestSyncBrainToDb:
                 is_admin=True,
             )
             job = db.get_scheduled_job_by_name(conn, "alice", "j")
+            # Every reader, not just the one this class is written around.
+            # `_row_to_scheduled_job` reads the column defensively
+            # (`"brain" in row.keys()`), so a SELECT list that omits it yields
+            # `brain=None` silently rather than raising — and
+            # `get_enabled_scheduled_jobs` is the one `check_scheduled_jobs`
+            # dispatches from, where a dropped column would make every pin a
+            # no-op with the suite green.
+            enabled = db.get_enabled_scheduled_jobs(conn)
+            by_user = db.get_user_scheduled_jobs(conn, "alice")
+            by_id = db.get_scheduled_job(conn, job.id)
         assert job is not None, "the job survives an admin sync"
         assert job.brain == "native"
+        assert [j.brain for j in enabled] == ["native"]
+        assert [j.brain for j in by_user] == ["native"]
+        assert by_id.brain == "native"
 
     def test_non_admin_sync_drops_the_pin_and_warns(self, db_path, caplog):
         """`is_admin=False` explicitly: the kwarg defaults to True, so relying

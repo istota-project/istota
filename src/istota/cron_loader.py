@@ -119,6 +119,21 @@ def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
     The field is dropped rather than the job refused: `fj_is_disallowed_command`
     refuses a whole job because the command *is* the job, while a brain pin is
     one field of a job that is otherwise fine.
+
+    This gate answers *who* may pin, and deliberately not *what* they may pin.
+    The value is bounded a second time at dispatch, where `resolve_brain_kind`
+    refuses a kind absent from `[brain] room_selectable` — the same allowlist
+    the room pin is held to, and the reason an operator can shorten that list
+    without anything having to rewrite CRON.md. So an admin naming an
+    unlisted kind is stored here and falls through there.
+
+    And the claim above is bounded by the deployment: `Config.is_admin` reads
+    an empty admins file as "everyone is an admin", which is the standalone
+    install's shape, so there this drops nothing and the model writes CRON.md
+    too. That is the `fj_is_disallowed_command` precedent rather than something
+    new — an arbitrary shell command is already admin-gated the same way — but
+    it means the enforcement here is the multi-user deployment's, not a
+    universal one.
     """
     if not job.brain:
         return None
@@ -955,6 +970,14 @@ IDENTITY_COLUMNS = frozenset({"id", "user_id", "name", "created_at"})
 #: :func:`sync_cron_jobs_to_db`. Each name is both a column and the
 #: ``ScheduledJob`` attribute holding it, which is how the comparison there
 #: reads them off the existing row.
+#:
+#: ``brain`` is outside it by decision, not by omission. The counter-argument
+#: is real — a job suspended because its pinned brain is unavailable is the
+#: case where changing the pin *is* the remedy — but ``model`` and ``effort``
+#: are already outside for the same reason, and "what the job runs" is a rule
+#: a reader can hold where "what the job runs, plus brain, but not model" is
+#: not. ``!cron enable`` remains the documented remedy and the inbox already
+#: raises the suspension.
 _SUSPENSION_CLEARING_COLUMNS = (
     "cron_expression",
     "prompt",
@@ -980,9 +1003,10 @@ def _file_owned_values(
     NULL. That is a test-time guarantee, not a runtime one — at runtime the
     scheduler's per-user ``except`` would swallow it into one log line.
 
-    ``brain_val`` is a parameter rather than a read of ``fj.brain`` for the
-    reason ``cmd_val`` / ``skill_val`` are: the value depends on ``is_admin``,
-    which this function does not receive.
+    ``brain_val`` takes the same *shape* as ``cmd_val`` / ``skill_val`` — a
+    parameter rather than a read off ``fj`` — for a different reason. Those
+    three come from a shared resolver; this one depends on ``is_admin``, which
+    this function does not receive.
     """
     return {
         "cron_expression": fj.cron,
@@ -1091,9 +1115,10 @@ def sync_cron_jobs_to_db(
             # would be a chat verb they may not know exists.
             #
             # These five fields and no others. Changing `target`, `room`,
-            # `model`, `effort` or a flag is not plausibly a fix for a job
-            # that is failing, and a rule keyed on the dispatch fields is one
-            # a reader can hold without consulting the frozenset.
+            # `model`, `effort`, `brain` or a flag is not plausibly a fix for a
+            # job that is failing, and a rule keyed on the dispatch fields is
+            # one a reader can hold without consulting the frozenset. See the
+            # note on `brain` at the frozenset for the one arguable case.
             #
             # Ungated on the row's current state, deliberately, because the
             # edit is visible for exactly one tick: this same UPDATE writes the
