@@ -4,6 +4,7 @@ Covers the full chain so a user can pin one cron job to e.g. claude-sonnet-4-6
 while everything else uses the default.
 """
 
+import dataclasses
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -199,34 +200,17 @@ class TestTaskModelColumn:
 class TestSchedulerPropagatesModel:
     @patch("istota.scheduler._sync_cron_files")
     def test_job_model_flows_to_task(self, mock_sync, db_path):
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        user = UserConfig(timezone="UTC")
-        config = Config(
-            db_path=db_path, users={"alice": user},
-            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        """The unchanged half of the rewritten resolution line: a canonical id
+        reaches the row untouched. Was written as `0 0 * * *` behind an
+        `if now.hour > 0`, which asserted nothing between midnight and 01:00
+        UTC — moved onto `_fire_one_job` so it can fail at any hour.
+        """
+        config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
+        task = _fire_one_job(
+            db_path, config, name="feed-digest", prompt="Run feed digest",
+            model="claude-sonnet-4-6",
         )
-
-        yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
-        with db.get_db(db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs
-                   (user_id, name, cron_expression, prompt, enabled,
-                    last_run_at, created_at, model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("alice", "feed-digest", "0 0 * * *", "Run feed digest", 1,
-                 yesterday, yesterday, "claude-sonnet-4-6"),
-            )
-
-        # Fire only if we're past midnight; otherwise the cron won't trigger
-        if datetime.now(ZoneInfo("UTC")).hour > 0:
-            with db.get_db(db_path) as conn:
-                created = check_scheduled_jobs(conn, config)
-            assert len(created) == 1
-            with db.get_db(db_path) as conn:
-                task = db.get_task(conn, created[0])
-            assert task.model == "claude-sonnet-4-6"
+        assert task.model == "claude-sonnet-4-6"
 
 
 # ---------------------------------------------------------------------------
@@ -446,32 +430,13 @@ class TestTaskEffortColumn:
 class TestSchedulerPropagatesEffort:
     @patch("istota.scheduler._sync_cron_files")
     def test_job_effort_flows_to_task(self, mock_sync, db_path):
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        user = UserConfig(timezone="UTC")
-        config = Config(
-            db_path=db_path, users={"alice": user},
-            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        """Same rewrite as the model case above, and for the same reason."""
+        config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
+        task = _fire_one_job(
+            db_path, config, model="claude-sonnet-4-6", effort="low",
         )
-        yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
-        with db.get_db(db_path) as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs
-                   (user_id, name, cron_expression, prompt, enabled,
-                    last_run_at, created_at, model, effort)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("alice", "j", "0 0 * * *", "t", 1,
-                 yesterday, yesterday, "claude-sonnet-4-6", "low"),
-            )
-        if datetime.now(ZoneInfo("UTC")).hour > 0:
-            with db.get_db(db_path) as conn:
-                created = check_scheduled_jobs(conn, config)
-            assert len(created) == 1
-            with db.get_db(db_path) as conn:
-                task = db.get_task(conn, created[0])
-            assert task.model == "claude-sonnet-4-6"
-            assert task.effort == "low"
+        assert task.model == "claude-sonnet-4-6"
+        assert task.effort == "low"
 
 
 class TestExecutorEffortArg:
@@ -732,6 +697,14 @@ class TestSchedulerPropagatesBrain:
         records what the job asked for, which is what `!cron` and the log
         channel read, and what makes shortening the allowlist take effect
         without anything having to rewrite stored rows.
+
+        A refused pin leaves the row saying one kind while the model beside it
+        was resolved in another's namespace, which `executor._pin_origin_namespace`
+        reads as a crossing and drops. That is the same shape a room with a
+        since-dropped pin already has — `commands.brain_for_room` also hands the
+        raw pin to `resolve_brain_kind` and returns the resolved config — and the
+        function that reconciles them is Stage 4's. Recorded here so the next
+        reader meets it at the row rather than in production.
         """
         config = _dispatch_config(db_path, BrainConfig(
             kind="claude_code",
@@ -795,8 +768,14 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
 
         `[brain.source_type_overrides] scheduled = "native"` routes the lane, so
         the job runs native and its `smart` must mean native's model. The old
-        line stored an anthropic canonical id, which the executor then dropped
-        as a crossing at INFO with nothing said to anyone.
+        line stored an anthropic canonical id for a task that would run native.
+
+        What this asserts is the *stored* value, and only that. Until Stage 4
+        teaches `_pin_origin_namespace` about `source_type_overrides` the
+        executor still reads the base kind's namespace off a NULL `tasks.brain`,
+        sees a crossing and drops the pin — so on this lane the commit changes
+        which name is dropped rather than that one is. The spec says so under
+        Behaviour, and it is not a fix to read into this assertion.
         """
         config = _dispatch_config(db_path, BrainConfig(
             kind="claude_code",
@@ -826,11 +805,124 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
     def test_the_jobs_own_effort_wins_over_the_alias(self, _sync, db_path):
         """`with_defaults`' precedence rule with the job row standing in for
         the block: the job wrote both, so it keeps both.
+
+        The corollary the review asked to have stated: an operator writing
+        `haiku:high` now gets `high` on the row where it used to be discarded
+        with the rest of the pair. That is the intended direction —
+        `_resolve_effort` protects against an effort *inherited* from a default
+        chosen for another model, not against one written on this line — and it
+        is what makes cron agree with `!room model`.
         """
         config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
         task = _fire_one_job(db_path, config, model="opus:high", effort="low")
         assert task.model == "claude-opus-5"
         assert task.effort == "low"
+
+    def test_an_alias_that_resolves_only_an_effort_still_carries_it(
+        self, _sync, db_path
+    ):
+        """`resolve_alias` can answer `(None, "high")`.
+
+        A built-in role on a native brain with no configured model returns the
+        pair with a falsy model and a live effort (`NativeBrain.resolve_alias`),
+        so reading the effort inside the model branch loses the modifier in
+        exactly the case the operator wrote one. `resolve_model_name` then
+        collapses the role to the empty configured model, which is the
+        documented "brain default" — the effort is the only half left to keep.
+        """
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=""),
+            room_selectable=["native"],
+        ))
+        task = _fire_one_job(db_path, config, brain="native", model="general:high")
+        assert task.model is None, "an unset native model means brain default"
+        assert task.effort == "high"
+
+    def test_a_name_no_brain_resolves_is_used_as_written_and_warns(
+        self, _sync, db_path, caplog
+    ):
+        """The third thing this stage's spec asks the call site for.
+
+        Not an error — a brain that does no aliasing passes an explicit id
+        through by design — so the row keeps the name and the line says what
+        will happen. The `:effort` half is dropped here, matching
+        `_resolve_crossing_model_effort`'s fallback, and saying so is the whole
+        reason it warns.
+        """
+        from istota import scheduler
+
+        scheduler._warned_keys.clear()
+        config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            task = _fire_one_job(db_path, config, model="gpt-5-turbo:high")
+        assert task.model == "gpt-5-turbo"
+        assert task.effort is None, "the modifier is dropped on this path"
+        assert any(
+            "gpt-5-turbo:high" in r.message and "dropping" in r.message
+            for r in caplog.records
+        ), f"expected one warning, got {[r.message for r in caplog.records]}"
+
+    def test_a_brain_that_cannot_be_constructed_costs_only_its_own_resolution(
+        self, _sync, db_path, caplog
+    ):
+        """`make_brain` is not confined to `ValueError`.
+
+        A malformed `[brain.native] base_url` reaches `httpx.InvalidURL`, which
+        derives from `Exception` directly, so the enclosing `except ValueError`
+        around `create_task` would not catch it — and `get_db` skips its commit
+        on an exception, so one such row would roll back every job already
+        queued in the tick. The job still runs, with the name passed through for
+        the executor to resolve again.
+        """
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            # An unclosed IPv6 bracket: `httpx.AsyncClient.__init__` raises
+            # `InvalidURL` on it eagerly. Most malformed URLs do not — they are
+            # accepted here and fail at request time — so this is the shape that
+            # actually reaches the constructor.
+            native=NativeBrainConfig(model="x", base_url="http://[::1"),
+            room_selectable=["native"],
+        ))
+        with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
+            task = _fire_one_job(db_path, config, brain="native", model="smart")
+        assert task.model == "smart", "passed through unresolved, not dropped"
+        assert task.brain == "native"
+        assert any("could not resolve model" in r.message for r in caplog.records)
+
+    def test_a_non_string_pin_does_not_take_the_tick_down(self, _sync, db_path):
+        """`resolve_brain_kind` opens with `(override or "").strip()`.
+
+        That raises `AttributeError` on a non-string, from a call that looks
+        total — outside the `except ValueError` around `create_task`, so it
+        would cost every job after it in the same tick rather than its own row.
+        `commands.brain_for_room` coerces the sibling column for the same
+        reason, and its docstring records the same hazard.
+
+        The value is injected on the row object rather than through the column,
+        because it cannot be reached through the column: `scheduled_jobs.brain`
+        has TEXT affinity, which converts an integer or a float to a string on
+        the way in, and the one type that survives unconverted — a BLOB — has
+        `.strip()`. So this pins the guard at the boundary the function actually
+        has, which is the dataclass any other writer of it could fill.
+        """
+        config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
+        with db.get_db(db_path) as conn:
+            _insert_scheduled_job(conn, name="a", model="opus")
+            _insert_scheduled_job(conn, name="b", model="opus")
+            rows = db.get_enabled_scheduled_jobs(conn)
+        bad = [
+            r if r.name != "a" else dataclasses.replace(r, brain=5)
+            for r in rows
+        ]
+        with patch("istota.scheduler.db.get_enabled_scheduled_jobs", return_value=bad):
+            with db.get_db(db_path) as conn:
+                created = check_scheduled_jobs(conn, config)
+        assert len(created) == 2, "the sibling job is not collateral"
+        with db.get_db(db_path) as conn:
+            tasks = [db.get_task(conn, t) for t in created]
+        assert sorted(t.model for t in tasks) == ["claude-opus-5", "claude-opus-5"]
+        assert sorted((t.brain or "") for t in tasks) == ["", "5"]
 
 
 # ---------------------------------------------------------------------------
