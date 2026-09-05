@@ -3544,6 +3544,227 @@ class TestWebStatic:
         assert r.status == OK
 
 
+class TestWebBuildCurrent:
+    """ISSUE-428: whether the served bundle is current for this checkout's `web/`.
+
+    `web.static` asks only whether `index.html` exists and is non-empty, and
+    both stay true across a stale bundle — which is the condition the issue
+    reported: a frontend-only commit landed, every unit restarted, and the
+    browser kept running old code with nothing on the host saying so.
+
+    The predicate is **"has `web/` changed since the build"**, not "is the
+    stamp HEAD". The cron rebuilds only when a commit touches `web/`, so on a
+    branch taking mostly Python commits the stamp trails HEAD nearly always
+    while the bundle is exactly the one this checkout would produce. Equality
+    would warn on every ordinary deploy and make the stale case indetectable
+    among the noise; `test_head_moving_without_web_is_not_stale` is that arm.
+
+    These drive a real git repository rather than hand-written `.git` files,
+    because the check now shells out to `git diff` and a fixture that only
+    looks like a repository would answer nothing.
+    """
+
+    @staticmethod
+    def _repo(root: Path):
+        """A checkout with one `web/` file and one Python file."""
+
+        def git(*args: str) -> str:
+            env = dict(os.environ)
+            env.update(
+                {
+                    "GIT_AUTHOR_NAME": "t",
+                    "GIT_AUTHOR_EMAIL": "t@example.com",
+                    "GIT_COMMITTER_NAME": "t",
+                    "GIT_COMMITTER_EMAIL": "t@example.com",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_SYSTEM": "/dev/null",
+                }
+            )
+            out = subprocess.run(
+                ["git", *args], cwd=root, env=env, capture_output=True, text=True, check=True
+            )
+            return out.stdout.strip()
+
+        root.mkdir(parents=True, exist_ok=True)
+        git("init", "--initial-branch=main", ".")
+        (root / "web").mkdir()
+        (root / "web" / "app.svelte").write_text("<p>a</p>\n")
+        (root / "app.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-m", "a")
+        return git
+
+    @staticmethod
+    def _bundle(tmp_path, monkeypatch, version: str | None):
+        build = tmp_path / "build"
+        (build / "_app").mkdir(parents=True)
+        (build / "index.html").write_text("<!doctype html>")
+        if version is not None:
+            (build / "_app" / "version.json").write_text('{"version":"%s"}' % version)
+        monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(build))
+        return build
+
+    def _config(self, make_config):
+        from istota.config import WebConfig
+
+        return make_config(web=WebConfig(enabled=True))
+
+    def _run(self, make_config, **kwargs):
+        return run_checks(self._config(make_config), only=("web.build_current",), **kwargs)[0]
+
+    # -- the arms that need no repository ---------------------------------
+
+    def test_skips_when_no_web_surface(self, make_config):
+        r = run_checks(make_config(), only=("web.build_current",))[0]
+        assert r.status == SKIP
+
+    def test_skips_when_the_bundle_carries_no_version(self, make_config, tmp_path, monkeypatch):
+        self._bundle(tmp_path, monkeypatch, None)
+        assert self._run(make_config).status == SKIP
+
+    def test_skips_when_the_bundle_was_not_stamped_with_a_commit(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """SvelteKit's default version is a build timestamp.
+
+        A container image and a developer's own build both produce one, and
+        neither is evidence of anything about a deployment.
+        """
+        self._bundle(tmp_path, monkeypatch, "1788110322364")
+        r = self._run(make_config)
+        assert r.status == SKIP
+        assert "not stamped" in r.detail
+
+    def test_a_malformed_version_file_skips(self, make_config, tmp_path, monkeypatch):
+        """Never raises: one caller is the daemon's boot sequence."""
+        build = self._bundle(tmp_path, monkeypatch, "a" * 40)
+        (build / "_app" / "version.json").write_text("{not json")
+        assert self._run(make_config).status == SKIP
+
+    def test_skips_when_there_is_no_checkout(self, make_config, tmp_path, monkeypatch):
+        """A wheel install has the bundle and no repository to compare it to."""
+        self._bundle(tmp_path, monkeypatch, "a" * 40)
+        monkeypatch.setattr(doctor, "_repo_root", lambda: tmp_path / "nowhere")
+        assert self._run(make_config).status == SKIP
+
+    def test_skips_under_probe_false_rather_than_guessing(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """The comparison needs git, and `probe=False` forbids spawning.
+
+        It must not fall back to comparing the two shas for equality, which is
+        the wrong question — see `test_head_moving_without_web_is_not_stale`.
+
+        The repository is **real** here on purpose: against a path that does
+        not exist the no-checkout arm returns SKIP before reaching the spawn,
+        so removing the probe gate left this passing. `run_checks` turns a
+        raising check into a FAIL rather than propagating, which is what makes
+        the spy assertion visible in the result at all.
+        """
+        repo = tmp_path / "repo"
+        git = self._repo(repo)
+        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+
+        def _fail(*args, **kwargs):
+            raise AssertionError("spawned under probe=False")
+
+        monkeypatch.setattr(subprocess, "run", _fail)
+        r = self._run(make_config, probe=False)
+        assert r.status == SKIP, r.detail
+        assert "not executed" in r.detail
+
+    def test_skips_when_the_stamped_commit_is_unknown(self, make_config, tmp_path, monkeypatch):
+        """A bundle can outlive a re-clone. Unanswerable, not stale."""
+        self._bundle(tmp_path, monkeypatch, "a" * 40)
+        repo = tmp_path / "repo"
+        self._repo(repo)
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        r = self._run(make_config)
+        assert r.status == SKIP
+        assert "could not compare" in r.detail
+
+    # -- the two that are the point ---------------------------------------
+
+    def test_head_moving_without_web_is_not_stale(self, make_config, tmp_path, monkeypatch):
+        """The false positive this check must not have.
+
+        The cron rebuilds only on a `web/` change, so after any Python-only
+        commit the stamp trails HEAD while the bundle is byte-correct. On a
+        host whose cron fires every two minutes that is nearly always, and a
+        permanently amber check hides the one it exists to report.
+        """
+        repo = tmp_path / "repo"
+        git = self._repo(repo)
+        built_at = git("rev-parse", "HEAD")
+        (repo / "app.py").write_text("x = 2\n")
+        git("add", "-A")
+        git("commit", "-m", "python only")
+        assert git("rev-parse", "HEAD") != built_at
+
+        self._bundle(tmp_path, monkeypatch, built_at)
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        r = self._run(make_config)
+        assert r.status == OK, r.detail
+
+    def test_a_web_change_since_the_build_warns(self, make_config, tmp_path, monkeypatch):
+        """The reported condition, and the whole reason this check exists."""
+        repo = tmp_path / "repo"
+        git = self._repo(repo)
+        built_at = git("rev-parse", "HEAD")
+        (repo / "web" / "app.svelte").write_text("<p>b</p>\n")
+        git("add", "-A")
+        git("commit", "-m", "frontend")
+
+        self._bundle(tmp_path, monkeypatch, built_at)
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        r = self._run(make_config)
+        assert r.status == WARN, r.detail
+        assert r.remedy
+        # A WARN must not page anyone: the next auto-update tick clears it.
+        assert doctor.verdict([r])[0] is True
+
+    def test_a_bundle_built_from_head_is_ok(self, make_config, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        git = self._repo(repo)
+        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+        assert self._run(make_config).status == OK
+
+    def test_the_git_call_carries_the_hardening_overrides(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """Asserted on the argv, because behaviourally it cannot be observed.
+
+        A repository's own config can name a program for `git` to run, and
+        under a deployment that config is written by whoever can write the
+        checkout. It happens that `git diff --quiet` generates no diff and so
+        runs no `diff.external` — measured, by setting one on a real
+        repository and watching the canary never appear, with and without
+        these overrides. So this guards the argv against a future change (a
+        dropped `--quiet`, a different subcommand) rather than a live hole,
+        and it is written against the argv precisely because a behavioural
+        version of it passes whatever the code does.
+        """
+        from istota.git_hardening import GIT_HARDENING
+
+        repo = tmp_path / "repo"
+        git = self._repo(repo)
+        self._bundle(tmp_path, monkeypatch, git("rev-parse", "HEAD"))
+        monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+
+        seen = []
+        real = doctor._run
+        monkeypatch.setattr(doctor, "_run", lambda argv, **kw: seen.append(argv) or real(argv, **kw))
+        self._run(make_config)
+
+        assert seen, "the check never ran git"
+        argv = seen[0]
+        assert argv[0] == "git"
+        for flag in GIT_HARDENING:
+            assert flag in argv, f"{flag} missing from {argv}"
+
+
 class TestSandboxMasks:
     def test_skips_when_bwrap_is_unavailable(self, make_config, monkeypatch):
         monkeypatch.setattr(doctor, "_bwrap_usable", lambda: False)
