@@ -61,6 +61,27 @@ _WIZ_BRAIN_NATIVE_PROMPT_CACHING=true
 _WIZ_BRAIN_ROLE_FAST=""
 _WIZ_BRAIN_ROLE_GENERAL=""
 _WIZ_BRAIN_ROLE_SMART=""
+_WIZ_BRAIN_ROOM_SELECTABLE=""
+# "derive" rather than "" — the two are different instructions. The Ansible
+# default for istota_brain_fallback is an expression, not a literal: it works
+# out `claude_code` for a tmux_claude deployment and "" for every other, and a
+# settings key of any value at all outranks it. So an unanswered prompt must
+# emit no key, and only an explicit answer writes one.
+_WIZ_BRAIN_FALLBACK="derive"
+_WIZ_TALK_SIGNALING_ENABLED=false
+_WIZ_TALK_SIGNALING_URL=""
+_WIZ_DEVELOPER_ENABLED=false
+_WIZ_DEVELOPER_REPOS_DIR=""
+_WIZ_DEVELOPER_GITLAB_URL="https://gitlab.com"
+_WIZ_DEVELOPER_GITLAB_USERNAME=""
+_WIZ_DEVELOPER_GITLAB_TOKEN=""
+_WIZ_DEVELOPER_GITHUB_USERNAME=""
+_WIZ_DEVELOPER_GITHUB_TOKEN=""
+_WIZ_WEB_MAP_PROVIDER="openfreemap"
+_WIZ_WEB_MAP_API_KEY=""
+_WIZ_WEB_MAP_DARK_STYLE=""
+_WIZ_WEB_MAP_LIGHT_STYLE=""
+_WIZ_WEB_MAP_ATTRIBUTION=""
 
 # ============================================================
 # Output helpers
@@ -414,6 +435,71 @@ wiz_features() {
         prompt_value _WIZ_WEBHOOKS_PORT "Webhook receiver port" "8765"
     fi
 
+    # Developer skill
+    echo
+    dim "The developer skill clones repositories and opens merge/pull requests"
+    dim "on a forge. It needs a GitLab or GitHub token to do anything at all,"
+    dim "and the deploy asserts one is set — so this asks for both together."
+    dim "Use a dedicated bot account with the narrowest scopes that work."
+    prompt_bool _WIZ_DEVELOPER_ENABLED "Enable the developer skill?" "n"
+    if [ "$_WIZ_DEVELOPER_ENABLED" = "true" ]; then
+        while true; do
+            echo
+            dim "Clones and worktrees live under this directory, one subtree per"
+            dim "user. It should be on the same filesystem as the install."
+            prompt_value _WIZ_DEVELOPER_REPOS_DIR "Repos directory" \
+                "${_WIZ_DEVELOPER_REPOS_DIR:-$ISTOTA_HOME/repos}"
+            echo
+            dim "GitLab (blank username and token to skip this forge):"
+            prompt_value _WIZ_DEVELOPER_GITLAB_URL "GitLab URL" "$_WIZ_DEVELOPER_GITLAB_URL"
+            prompt_value _WIZ_DEVELOPER_GITLAB_USERNAME "GitLab username" "$_WIZ_DEVELOPER_GITLAB_USERNAME"
+            prompt_secret _WIZ_DEVELOPER_GITLAB_TOKEN "GitLab token (api + write_repository)"
+            echo
+            dim "GitHub (blank username and token to skip this forge):"
+            prompt_value _WIZ_DEVELOPER_GITHUB_USERNAME "GitHub username" "$_WIZ_DEVELOPER_GITHUB_USERNAME"
+            prompt_secret _WIZ_DEVELOPER_GITHUB_TOKEN "GitHub token (repo scope)"
+
+            # The role asserts at least one token when the skill is on, and
+            # fails the play if it has neither. Settle that here rather than
+            # writing settings that cannot deploy.
+            if [ -n "$_WIZ_DEVELOPER_GITLAB_TOKEN" ] || [ -n "$_WIZ_DEVELOPER_GITHUB_TOKEN" ]; then
+                break
+            fi
+            echo
+            warn "No token given for either forge. The deploy refuses this"
+            warn "  combination, so the skill has to be left off without one."
+            local retry_token
+            prompt_bool retry_token "Enter a token now?" "y"
+            if [ "$retry_token" = "false" ]; then
+                _WIZ_DEVELOPER_ENABLED=false
+                warn "Developer skill left off. Add a token to $SETTINGS_FILE"
+                warn "  and set developer.enabled = true to turn it on later."
+                break
+            fi
+        done
+    fi
+
+    # Talk signaling
+    echo
+    dim "Talk signaling turns inbound Talk from a poll into a push, which is a"
+    dim "large drop in load on Nextcloud. There is no credential here: istota"
+    dim "authenticates as its own Nextcloud user and Talk mints the rest."
+    echo
+    dim "It needs a standalone signaling server already registered with your"
+    dim "Nextcloud. This role installs no such server — check for one with:"
+    dim "  occ talk:signaling:list"
+    echo
+    dim "Switching this on without a registered server, istota refuses to"
+    dim "start rather than polling quietly while you believe push is live."
+    prompt_bool _WIZ_TALK_SIGNALING_ENABLED "Receive Talk over a signaling server?" "n"
+    if [ "$_WIZ_TALK_SIGNALING_ENABLED" = "true" ]; then
+        echo
+        dim "Leave the URL blank for the normal case — istota then reads the"
+        dim "server address out of Talk's own settings. Set one only where this"
+        dim "host must reach the server by a different route than browsers do."
+        prompt_value _WIZ_TALK_SIGNALING_URL "Signaling URL override (blank = use Talk's)" ""
+    fi
+
     # Backups
     echo
     dim "Automated backups of the database and Nextcloud files with rotation."
@@ -506,6 +592,41 @@ wiz_web_ui() {
     # operator type a 64-char hex string.
     _WIZ_WEB_SECRET_KEY="$(generate_hex_secret)"
     ok "Generated session signing key"
+
+    echo
+    dim "Map background tiles, used by the location views. The default needs no"
+    dim "key and no account. 'carto' needs a free key — without one every tile"
+    dim "comes back watermarked, with a 200 status, so nothing detects it for"
+    dim "you. 'custom' takes your own MapLibre style URLs."
+    echo
+    while true; do
+        prompt_value _WIZ_WEB_MAP_PROVIDER \
+            "Basemap provider (openfreemap | carto | osm | custom)" "openfreemap"
+        case "$_WIZ_WEB_MAP_PROVIDER" in
+            openfreemap|carto|osm|custom) break ;;
+            *) warn "Unknown provider '$_WIZ_WEB_MAP_PROVIDER'. Pick one of the four." ;;
+        esac
+    done
+    if [ "$_WIZ_WEB_MAP_PROVIDER" = "carto" ]; then
+        echo
+        dim "Get one at https://carto.com/basemaps/apikey/"
+        # Read in the clear on purpose. MapLibre puts this key in the tile URL,
+        # so it ships to every browser that loads a map — it is public, not a
+        # secret, and prompt_secret here would tell the operator otherwise.
+        prompt_value _WIZ_WEB_MAP_API_KEY "CARTO API key" ""
+        if [ -z "$_WIZ_WEB_MAP_API_KEY" ]; then
+            warn "No key given — the map falls back to openfreemap at runtime."
+        fi
+    elif [ "$_WIZ_WEB_MAP_PROVIDER" = "custom" ]; then
+        echo
+        dim "MapLibre style URLs. Give at least one; the other reuses it."
+        prompt_value _WIZ_WEB_MAP_DARK_STYLE "Dark style URL" ""
+        prompt_value _WIZ_WEB_MAP_LIGHT_STYLE "Light style URL" ""
+        prompt_value _WIZ_WEB_MAP_ATTRIBUTION "Attribution (HTML)" ""
+        if [ -z "$_WIZ_WEB_MAP_DARK_STYLE" ] && [ -z "$_WIZ_WEB_MAP_LIGHT_STYLE" ]; then
+            warn "No style URL given — the map falls back to openfreemap at runtime."
+        fi
+    fi
 }
 
 wiz_secrets_store() {
@@ -564,6 +685,59 @@ wiz_brain() {
     fi
 }
 
+# Still section 8, and a separate function because wiz_brain returns early on
+# the claude_code path — these two questions apply whichever kind was picked.
+wiz_brain_policy() {
+    echo
+    dim "A room can pin the brain it runs on, with !brain or the web room"
+    dim "settings, and a scheduled job can pin one in CRON.md. Which kinds may"
+    dim "be pinned is an allowlist, and it is empty by default: brain kind"
+    dim "decides which credentials a task carries and which sandbox is built"
+    dim "around it, so a kind is listed only where you mean to permit it."
+    dim "Writing a pin is admin-only on top of this. Listing a kind also widens"
+    dim "the doctor checks for it, whether or not anything pins it."
+    echo
+    local selectable_line
+    prompt_value selectable_line \
+        "Brain kinds a room or job may pin (comma-separated, blank for none)" ""
+    _WIZ_BRAIN_ROOM_SELECTABLE=""
+    if [ -n "$selectable_line" ]; then
+        local kind cleaned="" _wiz_kinds=()
+        # A bad name here is not a failed deploy — an unlisted or unknown pin is
+        # a warning and a fallthrough at run time — but it is a permission the
+        # operator asked for and did not get, silently. So drop it loudly.
+        IFS=',' read -ra _wiz_kinds <<< "$selectable_line"
+        for kind in "${_wiz_kinds[@]}"; do
+            kind="$(echo "$kind" | tr -d '[:space:]')"
+            [ -z "$kind" ] && continue
+            case "$kind" in
+                claude_code|native|tmux_claude)
+                    cleaned+="${cleaned:+, }\"$kind\"" ;;
+                *)
+                    warn "Ignoring unknown brain kind '$kind' (expected claude_code, native or tmux_claude)" ;;
+            esac
+        done
+        _WIZ_BRAIN_ROOM_SELECTABLE="$cleaned"
+    fi
+
+    echo
+    dim "Availability failover: when the brain above cannot run a task (usage"
+    dim "limit, missing binary, tmux launch failure), the task runs on another"
+    dim "kind instead. A pinned room or job never fails over — it runs what it"
+    dim "names or fails saying why."
+    echo
+    dim "Leave this at 'derive' unless you have a reason. The role works the"
+    dim "answer out from the brain kind, and any answer here overrides that."
+    while true; do
+        prompt_value _WIZ_BRAIN_FALLBACK \
+            "Fallback brain (derive | none | claude_code | native | tmux_claude)" "derive"
+        case "$_WIZ_BRAIN_FALLBACK" in
+            derive|none|claude_code|native|tmux_claude) break ;;
+            *) warn "Unknown answer '$_WIZ_BRAIN_FALLBACK'. Pick one of the five." ;;
+        esac
+    done
+}
+
 wiz_claude_auth() {
     section "9. Claude Authentication"
 
@@ -618,6 +792,15 @@ wiz_review() {
     echo -e "  ${_BOLD}Location:${_RESET}          $_WIZ_LOCATION_ENABLED$([ "$_WIZ_LOCATION_ENABLED" = "true" ] && echo " (port: $_WIZ_WEBHOOKS_PORT)")"
     echo -e "  ${_BOLD}Backups:${_RESET}           $_WIZ_BACKUP_ENABLED"
     echo -e "  ${_BOLD}Browser:${_RESET}           $_WIZ_BROWSER_ENABLED"
+    echo -e "  ${_BOLD}Developer skill:${_RESET}   $_WIZ_DEVELOPER_ENABLED"
+    if [ "$_WIZ_DEVELOPER_ENABLED" = "true" ]; then
+        local forges=""
+        [ -n "$_WIZ_DEVELOPER_GITLAB_TOKEN" ] && forges="gitlab"
+        [ -n "$_WIZ_DEVELOPER_GITHUB_TOKEN" ] && forges="${forges:+$forges, }github"
+        echo -e "  ${_BOLD}Forge tokens:${_RESET}      $forges"
+        echo -e "  ${_BOLD}Repos dir:${_RESET}         $_WIZ_DEVELOPER_REPOS_DIR"
+    fi
+    echo -e "  ${_BOLD}Talk signaling:${_RESET}    $_WIZ_TALK_SIGNALING_ENABLED"
     echo
     echo -e "  ${_BOLD}Hostname:${_RESET}          $_WIZ_HOSTNAME"
     echo -e "  ${_BOLD}Web UI:${_RESET}            $_WIZ_WEB_ENABLED"
@@ -629,6 +812,7 @@ wiz_review() {
             oauth_status="${_YELLOW}set later in $SETTINGS_FILE${_RESET}"
         fi
         echo -e "  ${_BOLD}OAuth2:${_RESET}            $oauth_status"
+        echo -e "  ${_BOLD}Basemap:${_RESET}           $_WIZ_WEB_MAP_PROVIDER$([ "$_WIZ_WEB_MAP_PROVIDER" = "carto" ] && { [ -n "$_WIZ_WEB_MAP_API_KEY" ] && echo " (key set)" || echo " ${_YELLOW}(no key — falls back to openfreemap)${_RESET}"; })"
     fi
     echo -e "  ${_BOLD}Secrets master key:${_RESET} auto-generated (stored in $SETTINGS_FILE)"
     echo -e "  ${_BOLD}Brain:${_RESET}             $_WIZ_BRAIN_KIND$([ "$_WIZ_BRAIN_KIND" = "native" ] && echo " (model: ${_WIZ_BRAIN_NATIVE_MODEL:-unset}, $_WIZ_BRAIN_NATIVE_BASE_URL)")"
@@ -637,7 +821,19 @@ wiz_review() {
     else
         echo -e "  ${_BOLD}Claude token:${_RESET}      $([ -n "$_WIZ_CLAUDE_TOKEN" ] && echo "provided" || echo "authenticate later")"
     fi
+    echo -e "  ${_BOLD}Room-pinnable:${_RESET}     ${_WIZ_BRAIN_ROOM_SELECTABLE:-(none)}"
+    echo -e "  ${_BOLD}Brain fallback:${_RESET}    $_WIZ_BRAIN_FALLBACK$([ "$_WIZ_BRAIN_FALLBACK" = "derive" ] && echo " (worked out from the brain kind)")"
     echo
+
+    # Repeated here because it is the one answer above that stops the daemon
+    # starting rather than degrading, and the review screen is the last place
+    # to change it.
+    if [ "$_WIZ_TALK_SIGNALING_ENABLED" = "true" ]; then
+        warn "Talk signaling is on. If no signaling server is registered with"
+        warn "  your Nextcloud (occ talk:signaling:list), istota will refuse to"
+        warn "  start. Register one, or answer no to that question."
+        echo
+    fi
 
     local confirm
     prompt_bool confirm "Proceed with installation?" "y"
@@ -658,7 +854,21 @@ wiz_write_settings() {
     local brain_block="
 [brain]
 kind = \"$_WIZ_BRAIN_KIND\"
+room_selectable = [$_WIZ_BRAIN_ROOM_SELECTABLE]
 "
+    # Only an explicit answer writes the key. "derive" leaves it out so the
+    # role's own expression decides — writing fallback = "" instead would look
+    # like the same thing and is not: it pins "no fallback" onto a deployment
+    # the expression would have given one.
+    if [ "$_WIZ_BRAIN_FALLBACK" != "derive" ]; then
+        if [ "$_WIZ_BRAIN_FALLBACK" = "none" ]; then
+            brain_block+="fallback = \"\"
+"
+        else
+            brain_block+="fallback = \"$_WIZ_BRAIN_FALLBACK\"
+"
+        fi
+    fi
     if [ "$_WIZ_BRAIN_KIND" = "native" ]; then
         brain_block+="
 [brain.native]
@@ -683,6 +893,32 @@ smart = \"$_role_smart\"
 "
         fi
     fi
+
+    # Developer block. Only `enabled` when the skill is off: every other key
+    # here would be written empty, and two of them (gitlab_url, github_url)
+    # have non-empty Ansible defaults an empty settings value would blank.
+    local developer_block="
+[developer]
+enabled = $_WIZ_DEVELOPER_ENABLED
+"
+    if [ "$_WIZ_DEVELOPER_ENABLED" = "true" ]; then
+        developer_block+="repos_dir = \"$_WIZ_DEVELOPER_REPOS_DIR\"
+gitlab_url = \"$_WIZ_DEVELOPER_GITLAB_URL\"
+gitlab_username = \"$_WIZ_DEVELOPER_GITLAB_USERNAME\"
+gitlab_token = \"$_WIZ_DEVELOPER_GITLAB_TOKEN\"
+github_username = \"$_WIZ_DEVELOPER_GITHUB_USERNAME\"
+github_token = \"$_WIZ_DEVELOPER_GITHUB_TOKEN\"
+"
+    fi
+
+    # [talk.signaling] without a [talk] header above it: the wizard asks none
+    # of [talk]'s own keys, and writing them empty would override the role's
+    # defaults for enabled and bot_username.
+    local talk_signaling_block="
+[talk.signaling]
+enabled = $_WIZ_TALK_SIGNALING_ENABLED
+url = \"$_WIZ_TALK_SIGNALING_URL\"
+"
 
     cat > "$SETTINGS_FILE" <<TOML
 # Istota settings - generated by setup wizard
@@ -722,6 +958,21 @@ oauth2_client_id = "$_WIZ_WEB_OAUTH2_CLIENT_ID"
 oauth2_client_secret = "$_WIZ_WEB_OAUTH2_CLIENT_SECRET"
 secret_key = "$_WIZ_WEB_SECRET_KEY"
 
+[web.map]
+# Background tiles for the location views.
+#   openfreemap (default) needs no key and no account
+#   carto        needs api_key, else every tile is watermarked
+#   osm          needs neither
+#   custom       needs dark_style and/or light_style
+# api_key is not a secret: MapLibre puts it in the tile URL, so it ships to
+# every browser that loads a map. Each user can override it in their own
+# location settings.
+provider = "$_WIZ_WEB_MAP_PROVIDER"
+api_key = "$_WIZ_WEB_MAP_API_KEY"
+dark_style = "$_WIZ_WEB_MAP_DARK_STYLE"
+light_style = "$_WIZ_WEB_MAP_LIGHT_STYLE"
+attribution = "$_WIZ_WEB_MAP_ATTRIBUTION"
+
 [security]
 sandbox_enabled = true
 
@@ -757,7 +1008,7 @@ webhooks_port = $_WIZ_WEBHOOKS_PORT
 
 [backup]
 enabled = $_WIZ_BACKUP_ENABLED
-$brain_block
+$developer_block$talk_signaling_block$brain_block
 $_WIZ_USERS_BLOCK
 TOML
 
@@ -801,6 +1052,7 @@ EOF
     wiz_web_ui
     wiz_secrets_store
     wiz_brain
+    wiz_brain_policy
     wiz_claude_auth
     wiz_review
     wiz_write_settings
