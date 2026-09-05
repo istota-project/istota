@@ -689,22 +689,22 @@ class TestSchedulerPropagatesBrain:
         task = _fire_one_job(db_path, config, brain="native")
         assert task.brain == "native"
 
-    def test_the_column_records_a_pin_the_allowlist_refuses(self, _sync, db_path):
-        """Writing the column is not the same as admitting the pin.
+    def test_a_pin_the_allowlist_refuses_does_not_reach_the_column(
+        self, _sync, db_path
+    ):
+        """`tasks.brain` records a pin that is *in effect*, not one that was asked for.
 
-        `room_selectable = []` means `resolve_brain_kind` refuses `native` at
-        dispatch and the task runs the configured brain — but the row still
-        records what the job asked for, which is what `!cron` and the log
-        channel read, and what makes shortening the allowlist take effect
-        without anything having to rewrite stored rows.
+        The spec originally wanted the raw pin here, so `!cron` and the log
+        channel could show what the file said. Neither needs it: `!cron` renders
+        `scheduled_jobs.brain`, the file's own value, and the log-channel line
+        passes `task.brain` through `resolve_brain_kind`, so it shows the
+        effective kind either way. What the raw pin did cost is in
+        `test_a_refused_pin_does_not_cost_the_job_its_model` — the row named a
+        namespace the model beside it had not been resolved in.
 
-        A refused pin leaves the row saying one kind while the model beside it
-        was resolved in another's namespace, which `executor._pin_origin_namespace`
-        reads as a crossing and drops. That is the same shape a room with a
-        since-dropped pin already has — `commands.brain_for_room` also hands the
-        raw pin to `resolve_brain_kind` and returns the resolved config — and the
-        function that reconciles them is Stage 4's. Recorded here so the next
-        reader meets it at the row rather than in production.
+        NULL rather than the fallthrough kind: writing that would have
+        `resolve_brain_kind` admit a pin nobody asked for and clear `fallback`,
+        taking failover off a job whose pin was refused.
         """
         config = _dispatch_config(db_path, BrainConfig(
             kind="claude_code",
@@ -712,9 +712,40 @@ class TestSchedulerPropagatesBrain:
             room_selectable=[],
         ))
         task = _fire_one_job(db_path, config, brain="native")
-        assert task.brain == "native", (
-            "the column records the pin even though resolve_brain_kind refuses "
-            "it at dispatch"
+        assert task.brain is None, (
+            "a refused pin is not in effect, so it must not be recorded as one"
+        )
+
+    def test_a_refused_pin_does_not_cost_the_job_its_model(self, _sync, db_path):
+        """The row must not claim a namespace the model was not resolved in.
+
+        `_resolve_job_model_effort` resolves against the kind
+        `resolve_brain_kind` *admits*, so with `room_selectable = []` a
+        `smart` on a `native`-pinned job is an anthropic id. Writing the raw
+        pin beside it made `executor._pin_origin_namespace` answer
+        `openai_compat`, `_request_model` read a crossing, and the operator's
+        model be dropped at INFO on every fire — the silent-drop class
+        ISSUE-419 exists to remove, reached through the feature's own default
+        configuration.
+
+        Asserted at the seam rather than on the column, because the column is
+        the mechanism and this is the property: the namespace the row claims
+        for its model must be the namespace the brain that runs it reads.
+        """
+        from istota import executor
+        from istota.brain import model_namespace_for_kind, resolve_brain_kind
+
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=NATIVE_MODEL),
+            room_selectable=[],
+        ))
+        task = _fire_one_job(db_path, config, brain="native", model="smart")
+        run = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
+        origin = executor._pin_origin_namespace(task, config)
+        assert origin == model_namespace_for_kind(run.kind), (
+            "the origin namespace must match the brain that runs, or the "
+            "model pin is dropped as a crossing"
         )
 
     def test_the_model_resolves_against_the_brain_that_runs_not_the_pin(
@@ -922,7 +953,11 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         with db.get_db(db_path) as conn:
             tasks = [db.get_task(conn, t) for t in created]
         assert sorted(t.model for t in tasks) == ["claude-opus-5", "claude-opus-5"]
-        assert sorted((t.brain or "") for t in tasks) == ["", "5"]
+        # Neither row carries a pin: `5` coerces to `"5"`, which names no known
+        # kind and so is never admitted. The guard being pinned here is that the
+        # coercion happens at all — without it the `.strip()` raises and the
+        # sibling job above is lost with it.
+        assert [t.brain for t in tasks] == [None, None]
 
 
 class TestCmdCronShowsBrain:

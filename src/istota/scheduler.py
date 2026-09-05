@@ -93,7 +93,12 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from . import avatars, confirmations, db
-from .brain import make_brain, resolve_brain_kind, split_effort
+from .brain import (
+    make_brain,
+    resolve_brain_kind,
+    room_selectable_kinds,
+    split_effort,
+)
 from .build_info import build_description
 from .consumers import (
     LogChannelSubscriber,
@@ -7647,6 +7652,37 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     job_model, job_effort = _resolve_job_model_effort(
                         job, app_config, pinned_brain, job_effort,
                     )
+                # Only an *admitted* pin reaches the column, and the reason is
+                # the model beside it. This job's model was resolved against
+                # the kind `resolve_brain_kind` admits, so a refused pin left
+                # the row naming one namespace while `tasks.model` held a name
+                # from another — which `executor._pin_origin_namespace` reads
+                # as a crossing and `_request_model` then drops, at INFO, on
+                # every fire. `room_selectable` ships as `[]`, so that was the
+                # *default* outcome of the feature: the operator's `model`
+                # silently replaced by the running brain's own default while
+                # the only log line said their `brain` had been ignored.
+                #
+                # NULL rather than the fallthrough kind, because the two differ
+                # where the fallthrough kind is itself allowlisted: writing it
+                # would have `resolve_brain_kind` admit a pin nobody asked for
+                # and clear `fallback`, taking availability failover off a job
+                # whose pin was refused. NULL is what the row means — no pin is
+                # in effect — and it puts the origin read on the unpinned
+                # branch, which resolves the same lane this resolution used.
+                #
+                # `room_selectable_kinds` is the predicate `resolve_brain_kind`
+                # itself applies (it already intersects `KNOWN_BRAIN_KINDS`), so
+                # this reuses the one enforcement point rather than restating
+                # it. A room keeps the opposite rule deliberately: `rooms.model`
+                # was written when its pin *was* admitted, so the dropped kind's
+                # namespace is the true origin there. A job re-resolves every
+                # fire, so its row records the kind it just resolved against.
+                admitted_brain = (
+                    pinned_brain
+                    if pinned_brain in room_selectable_kinds(app_config.brain)
+                    else ""
+                )
                 # As in `check_briefings`: one unusable `job.user_id` costs its
                 # own row, not every job after it in the same transaction
                 # (ISSUE-402). `job.user_id` comes off the `scheduled_jobs`
@@ -7670,7 +7706,7 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         queue="background",
                         model=job_model or None,
                         effort=job_effort or None,
-                        brain=pinned_brain or None,
+                        brain=admitted_brain or None,
                     )
                 except ValueError as e:
                     logger.error(
