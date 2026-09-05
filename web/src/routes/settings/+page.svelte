@@ -21,10 +21,10 @@
     AppShell,
     ShellHeader,
     Avatar,
+    AvatarPicker,
     Button,
     ConfirmDialog,
     Field,
-    FileDropZone,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
@@ -100,8 +100,6 @@
      `profileDirty`. It commits on pick through its own multipart call, so
      letting it into the JSON patch would light the header Save button for a
      change that has already landed and then PUT an empty patch. */
-  let avatarFile: File | null = $state(null);
-  let avatarBusy = $state(false);
   /* What is happening, while it is. A phone photograph takes seconds to go up,
      and with the zone back on its prompt and the preview still on the old
      picture there was nothing on screen saying anything had been picked — which
@@ -119,22 +117,17 @@
   const avatarVersion = $derived(
     uploadedHash === undefined ? (identity.user.avatars?.user ?? null) : uploadedHash,
   );
-
-  /* The dropzone is a picker here rather than a staging area — there is no Save
-     step for this control — so a picked file is taken and the upload runs.
-     `avatarBusy` is read, not merely checked: a file picked while one is going
-     up stays in the zone, and this effect re-runs and sends it when the first
-     upload settles. Two concurrent PUTs would resolve in either order, leaving
-     the preview on one hash and the stored row on the other. */
-  $effect(() => {
-    if (avatarBusy || !avatarFile) return;
-    const picked = avatarFile;
-    avatarFile = null;
-    void uploadPicture(picked);
-  });
+  /* Read here rather than inside the preview snippet: a snippet body is its own
+     scope, so the `{#if profile}` guard around the card does not narrow through
+     it and each field would otherwise need a non-null assertion. `$derived.by`
+     rather than `$derived` for the same reason in the other direction — inside
+     a closure `profile` is its declared type again, where at this point in the
+     module body it is still narrowed to the `null` it was initialised with. */
+  const avatarIdentity = $derived.by(() =>
+    profile ? { userId: profile.user_id, label: profile.display_name || profile.user_id } : null,
+  );
 
   async function uploadPicture(file: File) {
-    avatarBusy = true;
     avatarBusyLabel = 'Saving your picture…';
     avatarError = '';
     avatarNote = '';
@@ -159,13 +152,11 @@
       if (e instanceof AuthError) identity.expireSession();
       else avatarError = (e as Error).message || 'Could not save that picture.';
     } finally {
-      avatarBusy = false;
       avatarBusyLabel = '';
     }
   }
 
   async function removePicture() {
-    avatarBusy = true;
     avatarBusyLabel = 'Removing your picture…';
     avatarError = '';
     avatarNote = '';
@@ -192,7 +183,6 @@
       if (e instanceof AuthError) identity.expireSession();
       else avatarError = (e as Error).message || 'Could not remove that picture.';
     } finally {
-      avatarBusy = false;
       avatarBusyLabel = '';
     }
   }
@@ -517,48 +507,29 @@
           error={avatarError}
           warning={avatarNote}
         >
-          <div class="picture">
-            <span class="picture-preview">
+          <AvatarPicker
+            pickLabel="Choose a profile picture"
+            prompt="Click the picture to choose a file, or drop or paste one here."
+            accept={AVATAR_ACCEPT}
+            busyLabel={avatarBusyLabel}
+            removable={!!avatarVersion}
+            onPick={(file) => void uploadPicture(file)}
+            onRemove={removePicture}
+          >
+            {#snippet preview()}
               <!-- Named rather than decorative, unlike the chat gutter: there
                    the author's name is on the row beside it, while here the
                    picture *is* the state being edited and the only other signal
                    is whether Remove exists. -->
               <Avatar
                 kind="user"
-                userId={profile.user_id}
+                userId={avatarIdentity?.userId}
                 version={avatarVersion}
-                label={profile.display_name || profile.user_id}
+                label={avatarIdentity?.label ?? ''}
                 alt="Your profile picture"
               />
-            </span>
-            <div class="picture-pick">
-              <!-- The busy line *replaces* the picker rather than sitting beside
-                   it, and that is load-bearing twice over. It says something is
-                   happening, which nothing else on the card does — the zone is
-                   back on its prompt and the preview still shows the old
-                   picture, so a slow upload otherwise reads as a control that
-                   did nothing. And unmounting the zone is what resets the
-                   native input inside it: `FileDropZone` clears that only from
-                   its own Clear button, which this control never renders, and a
-                   browser fires no `change` for a file the input is already
-                   holding — so re-picking the photo whose upload just failed
-                   would do nothing and say nothing. Replacing this with a
-                   `disabled` state or an overlay has to restore the reset some
-                   other way. -->
-              {#if avatarBusyLabel}
-                <p class="hint busy" aria-live="polite">{avatarBusyLabel}</p>
-              {:else}
-                <FileDropZone bind:file={avatarFile} accept={AVATAR_ACCEPT}>
-                  <span>Drop a picture here, paste one, or choose a file.</span>
-                </FileDropZone>
-              {/if}
-              {#if avatarVersion}
-                <Button variant="secondary" size="sm" disabled={avatarBusy} onclick={removePicture}>
-                  Remove
-                </Button>
-              {/if}
-            </div>
-          </div>
+            {/snippet}
+          </AvatarPicker>
           <p class="hint">
             Removing an uploaded picture falls back to the one imported from Nextcloud, if there is
             one. Changing it here does not change the picture Nextcloud shows.
@@ -850,47 +821,6 @@
   /* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
 	   web/src/lib/styles/settings.css (imported by app.css). Only page-specific
 	   layout (module toggles, connected-service rows) stays here. */
-
-  /* The profile picture: the preview beside the picker, dropping to a column
-     on a narrow pane where the dropzone has no room to sit beside anything. */
-  .picture {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-4);
-  }
-
-  /* The size goes on the wrapper rather than on the primitive, which reads it
-     and holds no opinion about how big an identity is. */
-  .picture-preview {
-    flex: 0 0 auto;
-    --avatar-size: 4rem;
-  }
-
-  .picture-pick {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-2);
-  }
-
-  /* Stands in for the dropzone while a picture is going up or coming down, so
-     the column keeps roughly its height instead of collapsing and pulling the
-     Remove button up under the cursor that just left it. */
-  .picture-pick .busy {
-    margin: 0;
-    padding: var(--space-4) 0;
-  }
-
-  @media (max-width: 640px) {
-    .picture {
-      flex-direction: column;
-    }
-    .picture-pick {
-      align-self: stretch;
-    }
-  }
 
   /* The Nextcloud card's Disconnect row. */
   .oauth-actions {
