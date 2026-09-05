@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A Docker install can now switch a module off for its user. Health and briefings had no Docker setting at all, so neither could be turned off from the stack; both now go through `USER_DISABLED_MODULES`, the per-user opt-out that already existed for skills, which the setup wizard asks about alongside feeds and money. It seeds the user's profile on first boot, after which the web settings are where a module is switched.
 
+- The Docker setup wizard now asks about the Talk signaling server, and asks it early because that answer has a single window: Nextcloud registers the server during its own installation and never revisits it, so both settings have to be in `.env` before the first `docker compose up`. Answering yes generates the shared secret, adds the `signaling` profile, and points the daemon at the server over the container network, which is a different address from the one Talk hands to browsers. The prompt and the closing summary both say what the alternative is — `occ talk:signaling:add` by hand inside the Nextcloud container — and that registering a server changes call signaling for every Talk user on that Nextcloud, not only for the bot.
+
+- The Docker setup wizard now offers a model for the Claude CLI brain. It asked only on the native branch, so a default install had no way to set one from setup and fell through to the deprecated top-level `ISTOTA_MODEL`.
+
+- `docker/.env.example` now has a `COMPOSE_PROFILES=` line, in the header that documents the profiles, so a `.env` copied by hand behaves like one the wizard wrote. That header also named only browser and location; signaling is a third profile and is listed now.
+
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
 
 ### Changed
@@ -36,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The web service can now authenticate to the model on a Docker install. It calls one on three request paths of its own — reading a lab panel, encounter or immunization document, explaining a biomarker, and running a shared briefing block on demand — and the stack passed it only the native brain's key, so on the default Claude CLI shape all three failed with no credential. Both Claude credentials now reach it.
 
 - `browse` now works on a Docker install whose `.env` does not name the browser container. The example file gave the right address while the compose and render fallbacks behind it gave the istota container's own loopback, where nothing listens, so commenting out that one line broke browsing with nothing pointing at a cause. A new test holds all three files to one value for every setting that states a default.
+
+- The Docker setup wizard now writes down a "no". Answering no to GPS location tracking, or declining developer credentials, left the example file's `true` in place — so the module was on and its tab present, with no container behind it.
 
 - A local install now generates the key its encrypted credential store needs. `istota setup` wrote none, so storing a Garmin, Monarch, ntfy or Google Workspace credential failed on every local install and nothing said why. Re-running setup with `--force` keeps whatever key is already there rather than making a new one, since replacing it would leave every credential stored under it permanently unreadable, and the secrets file is now created private instead of being made private a moment after it is written.
 

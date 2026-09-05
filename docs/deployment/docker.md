@@ -101,11 +101,15 @@ Having no failover is a valid choice now, which is why the INFO line exists; on 
 
 ## Optional profiles
 
+There are three: `browser`, `location` and `signaling`.
+
 ```bash
 docker compose --profile browser up -d              # Web browsing
 docker compose --profile location up -d             # GPS tracking
 docker compose --profile browser --profile location up -d  # Combine as needed
 ```
+
+Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `docker/init.sh` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
 
 The browser container requires x86-64 (Chrome has no ARM packages).
 
@@ -122,6 +126,8 @@ This replaces polling Nextcloud for Talk messages with a WebSocket that Nextclou
 1. Talk has to have the server registered. `provision-nc.sh` does that in the post-installation hook, so `ISTOTA_TALK_SIGNALING_SERVER` and `ISTOTA_TALK_SIGNALING_SECRET` have to be set **before the first install**. Setting them later means running `occ talk:signaling:add` by hand.
 2. `ISTOTA_TALK_SIGNALING_ENABLED=true`, which is what tells the daemon to use it.
 3. The `websockets` library, which comes with the `signaling` extra and is already in the image.
+
+`docker/init.sh` asks about this, and it asks early for the reason above: answering yes there puts both variables in `.env` before the first `docker compose up`, which is the only moment the automatic registration can happen. It also writes `ISTOTA_TALK_SIGNALING_URL=http://signaling:8080` — the daemon sits on the container network beside the server, while the URL Talk advertises is the one a *browser* uses, and on this stack those are never the same. With `DOMAIN` set there is nothing to derive for the browser-facing URL: the server is published on `127.0.0.1:8081` and nginx does not proxy it, so front it with TLS yourself and give the wizard that public URL.
 
 If the daemon is told to use it and cannot — Talk still in `internal` signaling mode, or the library missing — **it refuses to boot**. That is deliberate: a daemon quietly polling while you believe push is live is worse than one that did not start. `istota doctor --only talk.signaling_reachable` says which of the three is missing.
 
