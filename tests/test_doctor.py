@@ -2541,6 +2541,66 @@ class TestSecretKey:
         assert result.status == FAIL
         assert "istota.env" in result.remedy
 
+    def _standalone(self, make_config, tmp_path):
+        from istota.config import WebConfig
+
+        config_path = tmp_path / "cfg" / "config.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("")
+        return make_config(web=WebConfig(auth="none"), config_path=config_path)
+
+    def test_a_key_only_in_the_env_file_is_ok(
+        self, make_config, monkeypatch, tmp_path
+    ):
+        """`cmd_serve` is the only thing in the tree that sources istota.env,
+        so `istota doctor` in an operator's shell is a process that carries
+        none of the markers *and* has never read the file. Taking its own
+        environment as the answer failed a correctly configured install and
+        told the operator to add a line already in the file."""
+        self._clear(monkeypatch)
+        config = self._standalone(make_config, tmp_path)
+        env_file = Path(config.config_path).parent / "istota.env"
+        env_file.write_text("ISTOTA_SECRET_KEY=" + "h" * 64 + "\n")
+        result = self._run(config)
+        assert result.status == OK
+        assert "istota.env" in result.detail
+        assert "h" * 8 not in result.detail
+
+    def test_a_short_key_in_the_env_file_fails(
+        self, make_config, monkeypatch, tmp_path
+    ):
+        self._clear(monkeypatch)
+        config = self._standalone(make_config, tmp_path)
+        env_file = Path(config.config_path).parent / "istota.env"
+        env_file.write_text("ISTOTA_SECRET_KEY=tooshort\n")
+        result = self._run(config)
+        assert result.status == FAIL
+        assert str(secrets_store._MIN_KEY_LEN) in result.detail
+        assert "tooshort" not in result.detail
+
+    def test_an_env_file_without_the_key_still_fails(
+        self, make_config, monkeypatch, tmp_path
+    ):
+        """The positive control for the arm above: the fallback must not turn
+        a genuinely missing key into a pass just because a file is there."""
+        self._clear(monkeypatch)
+        config = self._standalone(make_config, tmp_path)
+        env_file = Path(config.config_path).parent / "istota.env"
+        env_file.write_text("ISTOTA_WEB_INSECURE_COOKIES=1\n")
+        assert self._run(config).status == FAIL
+
+    def test_the_remedy_names_the_configs_own_env_file(
+        self, make_config, monkeypatch, tmp_path
+    ):
+        """`istota setup -c` puts the env file beside whatever config it was
+        given, so a hardcoded default sends the operator to a path that does
+        not exist on their install."""
+        self._clear(monkeypatch)
+        config = self._standalone(make_config, tmp_path)
+        result = self._run(config)
+        assert result.status == FAIL
+        assert str(Path(config.config_path).parent / "istota.env") in result.remedy
+
     def test_the_floor_is_read_from_the_secrets_store(
         self, make_config, monkeypatch
     ):

@@ -471,6 +471,108 @@ class TestSecretKey:
         env_path = tmp_path / "cfg" / "istota.env"
         assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
+    def test_an_existing_wide_env_file_is_narrowed_before_the_secrets_land(
+        self, tmp_path, monkeypatch
+    ):
+        """`O_CREAT`'s mode applies only to a file this call creates, so on the
+        `--force` re-run — the one path where it pre-exists — the mode argument
+        is ignored and the key would be written at 0644 and narrowed after.
+        That is the same window, on the only shape that has it."""
+        import stat
+
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        env_path = cfg_dir / "istota.env"
+        prior = "b" * 64
+        env_path.write_text(f"ISTOTA_SECRET_KEY={prior}\n")
+        env_path.chmod(0o644)
+
+        events: list[tuple] = []
+        real_fchmod, real_fdopen = os.fchmod, os.fdopen
+
+        def recording_fchmod(fd, mode):
+            events.append(("fchmod", mode))
+            return real_fchmod(fd, mode)
+
+        def recording_fdopen(fd, *a, **kw):
+            events.append(("fdopen",))
+            return real_fdopen(fd, *a, **kw)
+
+        monkeypatch.setattr(os, "fchmod", recording_fchmod)
+        monkeypatch.setattr(os, "fdopen", recording_fdopen)
+        args = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+
+        # The narrowing precedes the handle every byte is written through.
+        assert events[:2] == [("fchmod", 0o600), ("fdopen",)]
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+        assert _env_values(env_path)["ISTOTA_SECRET_KEY"] == prior
+
+
+class TestSecretPreservationPrecedence:
+    """Which of several candidate values is the one to keep.
+
+    Getting this wrong is not a cosmetic bug: it writes a key the daemon is
+    not using into the file, and orphans everything encrypted under the one
+    it is.
+    """
+
+    def _seed(self, tmp_path, body):
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        (cfg_dir / "istota.env").write_text(body)
+        (cfg_dir / "config.toml").write_text("")
+        return cfg_dir / "istota.env"
+
+    def test_the_first_of_two_lines_wins(self, tmp_path):
+        """`serve.load_env_file` skips a name already in `os.environ`, so the
+        *first* line is the one the daemon uses and later ones are dead. A
+        last-wins parse here would keep the wrong one — and that file shape is
+        exactly what following the doctor remedy against a file that already
+        had the line produces."""
+        used, dead = "c" * 64, "d" * 64
+        env_path = self._seed(
+            tmp_path, f"ISTOTA_SECRET_KEY={used}\nISTOTA_SECRET_KEY={dead}\n"
+        )
+        args = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert _env_values(env_path)["ISTOTA_SECRET_KEY"] == used
+
+    def test_an_exported_key_outranks_the_file(self, tmp_path, monkeypatch):
+        """`load_env_file` is non-clobbering, so an exported value is the key
+        actually in use. Preserving the file's instead would write a value the
+        daemon ignores, and the install would switch keys silently the day the
+        export went away."""
+        exported, in_file = "e" * 64, "f" * 64
+        env_path = self._seed(tmp_path, f"ISTOTA_SECRET_KEY={in_file}\n")
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", exported)
+        args = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="alice")
+        _, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert _env_values(env_path)["ISTOTA_SECRET_KEY"] == exported
+        # The losing value is about to be deleted, so the operator is told.
+        assert any("ISTOTA_SECRET_KEY differs" in line for line in out)
+        # Names only, never values.
+        assert not any(exported in line or in_file in line for line in out)
+
+    def test_the_web_token_key_is_carried_forward(self, tmp_path):
+        """A second Fernet key with identical loss semantics: `web_tokens.py`
+        derives its own from it for the `web_user_tokens` rows. The wizard has
+        never written it, so the wholesale rewrite would delete it."""
+        token_key = "g" * 64
+        env_path = self._seed(tmp_path, f"ISTOTA_WEB_TOKEN_KEY={token_key}\n")
+        args = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert _env_values(env_path)["ISTOTA_WEB_TOKEN_KEY"] == token_key
+
+    def test_no_web_token_key_is_invented(self, tmp_path):
+        """Carried forward, never generated: encrypted token storage is opt-in
+        and standalone does not use it."""
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert "ISTOTA_WEB_TOKEN_KEY" not in _env_values(
+            tmp_path / "cfg" / "istota.env"
+        )
+
 
 class TestAdminsFile:
     """The wizard writes a real authorization artifact.
@@ -521,15 +623,28 @@ class TestAdminsFile:
         env = _env_values(cfg_dir / "istota.env")
         assert env["ISTOTA_ADMINS_FILE"] == str(cfg_dir / "admins")
 
-    def test_an_existing_admins_file_gains_the_user(self, tmp_path):
+    def test_an_existing_admins_file_is_never_widened(self, tmp_path):
+        """Appending would be a silent authorization widening, and the path is
+        derived from `config_path.parent` with nothing asserting the standalone
+        shape — so `istota setup -c /etc/istota/config.toml --force` would add
+        the wizard's user to the server's own production allowlist, which is
+        exactly where `load_admin_users` looks by default."""
         cfg_dir = tmp_path / "cfg"
         cfg_dir.mkdir()
-        (cfg_dir / "admins").write_text("# hand-edited\nbob\n")
+        existing = "# hand-edited\nbob\n"
+        (cfg_dir / "admins").write_text(existing)
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
-        _run(args, tmp_path, which_result="/usr/bin/claude")
-        names = [
-            line.strip()
-            for line in (cfg_dir / "admins").read_text().splitlines()
-            if line.strip() and not line.startswith("#")
-        ]
-        assert names == ["bob", "alice"]
+        _, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert (cfg_dir / "admins").read_text() == existing
+        # Refusing silently would lock the user out with no way to know why.
+        assert any("does not name 'alice'" in line for line in out)
+
+    def test_the_membership_test_is_load_admin_users(self, tmp_path):
+        """The writer and the reader of this file must not drift on what a
+        line means, so the check asks the reader rather than re-parsing."""
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        (cfg_dir / "admins").write_text("# owner\n\n  alice  \n")
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert not any("does not name" in line for line in out)

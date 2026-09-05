@@ -2615,6 +2615,17 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     back — so reading it there as the daemon's answer would fail a working
     deployment.
 
+    **There is a fourth arm between those two, and it is the one the marker
+    list cannot reach.** On standalone the key lives in ``istota.env``, and
+    ``cmd_serve`` is the only thing in the tree that sources it — so ``istota
+    doctor`` in an operator's shell is a process that carries none of the three
+    markers *and* has never read the file, and taking its own environment as
+    the answer meant a FAIL and an exit 1 about an install whose key was
+    exactly where it belonged, with a remedy telling the operator to add a line
+    already in the file. So an absent variable falls back to reading the
+    sibling env file the daemon does source, and only a key missing from both
+    is absence. The length is all that is ever read out of that file.
+
     Spawns nothing, so it is safe under ``probe=False``. Never reports the
     value or any prefix of it: a ``CheckResult`` is rendered into the boot log
     and the admin dashboard.
@@ -2623,6 +2634,7 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
 
     name = "security.secret_key"
     var = "ISTOTA_SECRET_KEY"
+    floor = secrets_store._MIN_KEY_LEN
     raw = os.environ.get(var, "").strip()
 
     if secrets_store.secret_key_available():
@@ -2634,9 +2646,33 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(
             name,
             FAIL,
-            f"{var} is {len(raw)} characters; the floor is "
-            f"{secrets_store._MIN_KEY_LEN}, so every encrypt and decrypt of a "
-            f"stored credential raises",
+            f"{var} is {len(raw)} characters; the floor is {floor}, so every "
+            f"encrypt and decrypt of a stored credential raises",
+            remedy=_secret_key_remedy(config),
+        )
+
+    # Not in this process's environment — which on the standalone shape says
+    # nothing, because only `cmd_serve` sources `istota.env` and `istota
+    # doctor` is a separate process that does not. Reading absence as the
+    # answer there reported FAIL, and exited 1, about an install whose key was
+    # sitting in the file the daemon reads at start-up: the same mistake
+    # `check_skill_model_credential` records making, in a shape its marker list
+    # cannot see, since an operator's shell carries none of the three.
+    env_file, file_key = _secret_key_from_env_file(config, var)
+    if file_key:
+        if len(file_key) >= floor:
+            return CheckResult(
+                name,
+                OK,
+                f"{var} is not in this process's environment, but a usable one "
+                f"is set in {env_file}, which the daemon sources at start-up",
+            )
+        return CheckResult(
+            name,
+            FAIL,
+            f"{var} in {env_file} is {len(file_key)} characters; the floor is "
+            f"{floor}, so every encrypt and decrypt of a stored credential "
+            f"raises",
             remedy=_secret_key_remedy(config),
         )
 
@@ -2665,6 +2701,37 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def _secret_key_env_file(config: "Config") -> Path | None:
+    """The secrets env file a standalone daemon sources, if one is derivable.
+
+    Mirrors ``cli._default_env_file``: a sibling of the config that was
+    actually loaded. Restated rather than imported because ``doctor`` sits
+    below ``cli`` — ``cli`` imports it — and one dotted name is a cheaper
+    duplicate than the cycle.
+    """
+    if not config.config_path:
+        return None
+    return Path(config.config_path).expanduser().parent / "istota.env"
+
+
+def _secret_key_from_env_file(config: "Config", var: str) -> tuple[Path | None, str]:
+    """Read ``var`` out of that file, returning the path and the raw value.
+
+    Only the *length* of what comes back is ever reported. Never raises: the
+    file is optional, may be unreadable by this process, and one caller is the
+    daemon's boot sequence.
+    """
+    env_file = _secret_key_env_file(config)
+    if env_file is None:
+        return None, ""
+    try:
+        from .setup_wizard import _read_env_values  # noqa: PLC0415
+
+        return env_file, _read_env_values(env_file).get(var, "").strip()
+    except Exception:  # pragma: no cover - defensive; a check never raises
+        return env_file, ""
+
+
 def _secret_key_remedy(config: "Config") -> str:
     """Where the key belongs on the shape this config describes."""
     generate = (
@@ -2672,11 +2739,17 @@ def _secret_key_remedy(config: "Config") -> str:
         'print(secrets.token_hex(32))"`'
     )
     if config.is_standalone:
+        # The real path, not the default one: `istota setup -c` puts the env
+        # file beside whatever config it was given, and an operator told to
+        # edit a file that does not exist has been sent the wrong way.
+        env_file = _secret_key_env_file(config) or Path(
+            "~/.config/istota/istota.env"
+        )
         return (
-            f"Add an ISTOTA_SECRET_KEY line to ~/.config/istota/istota.env "
-            f"beside the session secret ({generate}); `istota setup` writes "
-            f"one for a fresh install. Existing stored credentials, if any, "
-            f"were encrypted under a key that is gone and will not come back."
+            f"Add an ISTOTA_SECRET_KEY line to {env_file} beside the session "
+            f"secret ({generate}); `istota setup` writes one for a fresh "
+            f"install. Existing stored credentials, if any, were encrypted "
+            f"under a key that is gone and will not come back."
         )
     return (
         f"Set ISTOTA_SECRET_KEY in the daemon's environment ({generate}). "

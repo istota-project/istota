@@ -2228,22 +2228,44 @@ class Config:
         Returns True iff ``admin_users`` is non-empty and ``user_id`` is in it.
         Do not collapse this into ``is_admin``.
 
-        One exception, mirroring the one ``web_app._user_is_web_admin``
+        One exception, in the spirit of the one ``web_app._user_is_web_admin``
         carries: on the standalone shape the single local user is a shared
-        writer whether or not an admins file names them. Without it a
-        standalone install could not write a shared briefing block at all,
-        since the wizard wrote no admins file to be named in. The wizard now
-        writes one, so on a fresh install this never fires — it is the backstop
-        for an install made before that.
+        writer even though no admins file names them. Without it a standalone
+        install could not write a shared briefing block at all, since the
+        wizard wrote no admins file to be named in. The wizard writes one now,
+        so on a fresh install this never fires — it is strictly the backstop
+        for an install made before that, and the three conditions are what
+        keep it that way rather than making it the primary route.
 
-        The exception is keyed on :attr:`is_standalone` — blank ``[nextcloud]
-        url`` **and** ``[web] auth == "none"`` — rather than on the ``[web]
-        auth`` axis alone the way ``_user_is_web_admin``'s is. That is
-        deliberate and narrower: a deployment with Nextcloud storage and auth
-        switched off is not the single-user shape, it has other users' content
-        in it, and it must not silently gain a shared-content writer.
+        ``not self.admin_users`` is the first, and it is what makes the
+        sentence above true: an install with a real admins file is decided by
+        that file, so a standalone operator who edits themselves *out* of it is
+        refused rather than silently overridden. Without this clause the
+        exemption answers first on every fresh install and the allowlist is
+        never consulted for the local user — the opposite of a backstop.
+
+        ``len(self.users) <= 1`` is the second. :attr:`local_user_id` falls
+        back to ``sorted(self.users)[0]`` when several are configured, and its
+        own docstring says it is "only meaningful in no-auth mode where there
+        is exactly one user by construction" — so on a two-user local
+        deployment the exemption would hand shared-write authority to whichever
+        id sorts first. Non-web surfaces (email, cron, skill CLIs) reach this
+        gate without passing through no-auth web login, so "everyone is the
+        local user anyway" does not cover it.
+
+        :attr:`is_standalone` is the third — blank ``[nextcloud] url`` **and**
+        ``[web] auth == "none"`` — rather than the ``[web] auth`` axis alone
+        the way ``_user_is_web_admin``'s is. That is deliberate and narrower: a
+        deployment with Nextcloud storage and auth switched off is not the
+        single-user shape, it has other users' content in it, and it must not
+        silently gain a shared-content writer.
         """
-        if self.is_standalone and user_id == self.local_user_id:
+        if (
+            not self.admin_users
+            and len(self.users) <= 1
+            and self.is_standalone
+            and user_id == self.local_user_id
+        ):
             return True
         return bool(self.admin_users) and user_id in self.admin_users
 

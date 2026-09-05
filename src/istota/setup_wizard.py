@@ -51,6 +51,12 @@ class Answers:
     #: The secrets store's master Fernet key. Generated here and *preserved*
     #: across a ``--force`` re-run; see ``_carry_forward_secrets``.
     secret_key: str = ""
+    #: ``web_tokens.py``'s separate Fernet key, for the ``web_user_tokens``
+    #: rows under ``[web] token_storage = "encrypted"``. The wizard never
+    #: *generates* one — that shape is opt-in and standalone does not use it —
+    #: but it is carried forward when an existing env file has one, since the
+    #: rewrite would otherwise delete a key with no recovery.
+    web_token_key: str = ""
     #: Absolute path of the admins file, filled in by ``run_setup`` once the
     #: config directory is known. Named in the env file as ISTOTA_ADMINS_FILE.
     admins_file: str = ""
@@ -178,6 +184,14 @@ def render_env_file(a: Answers) -> str:
         "ISTOTA_WEB_INSECURE_COOKIES=1",
         f"ISTOTA_WEB_SESSION_SECRET_KEY={a.session_secret}",
     ]
+    if a.web_token_key:
+        # Never generated here — only carried forward from an existing file, so
+        # a re-run cannot delete a key the web token store depends on.
+        lines += [
+            "",
+            "# Separate key for encrypted web user tokens ([web] token_storage).",
+            f"ISTOTA_WEB_TOKEN_KEY={a.web_token_key}",
+        ]
     if a.admins_file:
         lines += [
             "",
@@ -481,13 +495,22 @@ def _read_env_values(path: Path) -> dict[str, str]:
 
     Mirrors ``serve.load_env_file``'s grammar (``export`` prefix, ``#``
     comments, optional quoting) so a file written by hand and sourced at boot
-    is read the same way here. Best-effort: an unreadable file is no values,
-    since the caller's fallback is to generate a fresh key.
+    is read the same way here. Best-effort: an unreadable or non-UTF-8 file is
+    no values, since the caller's fallback is to generate a fresh key.
+
+    **First occurrence wins, and that is load-bearing rather than arbitrary.**
+    ``load_env_file`` skips a name already in ``os.environ``, so the first line
+    for a name is the one the daemon ends up using and every later line is
+    dead. A last-wins parse here would read a duplicated ``ISTOTA_SECRET_KEY``
+    — the exact shape an operator produces by appending the line a remedy told
+    them to add to a file that already had one — as the *other* key, and the
+    caller would then rewrite the file with it, orphaning everything encrypted
+    under the one the daemon was actually using.
     """
     values: dict[str, str] = {}
     try:
-        text = path.read_text()
-    except OSError:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return values
     for raw in text.splitlines():
         line = raw.strip()
@@ -500,36 +523,65 @@ def _read_env_values(path: Path) -> dict[str, str]:
             continue
         key = key.strip()
         if key:
-            values[key] = value.strip().strip('"').strip("'")
+            values.setdefault(key, value.strip().strip('"').strip("'"))
     return values
 
 
-def _carry_forward_secrets(a: Answers, env_path: Path) -> None:
-    """Keep the generated secrets an existing ``istota.env`` already holds.
+def _carry_forward_secrets(a: Answers, env_path: Path, out=print) -> None:
+    """Keep the generated secrets an existing install already holds.
 
-    ``--force`` rewrites the whole file, and for ``ISTOTA_SECRET_KEY`` that is
-    a destructive operation rather than a regeneration: every credential in the
-    secrets table is Fernet-encrypted under it, so a new key orphans the lot
-    with no way back. Docker draws the same line — ``entrypoint.sh`` generates
-    once into ``/data/.secret_key`` and never overwrites.
+    ``--force`` rewrites the whole file, and for a Fernet key that is a
+    destructive operation rather than a regeneration: everything encrypted
+    under the old one is orphaned with no way back. Docker draws the same line
+    — ``entrypoint.sh`` generates once into ``/data/.secret_key`` and never
+    overwrites.
 
-    ``ISTOTA_WEB_SESSION_SECRET_KEY`` is carried forward too. Losing it only
-    invalidates cookies, a far smaller harm, but the rule is the same either
-    way: a re-run is a config rewrite, not a key rotation. An operator who
-    wants a new one deletes the line and re-runs.
+    Three names, and the first two are keys with no recovery.
+    ``ISTOTA_SECRET_KEY`` is the secrets store's master key (Garmin, Monarch,
+    ntfy, the Google Workspace tokens). ``ISTOTA_WEB_TOKEN_KEY`` is a
+    *separate* key with identical semantics — ``web_tokens.py`` derives its own
+    Fernet from it for the ``web_user_tokens`` rows under ``[web]
+    token_storage = "encrypted"`` — and the wizard has never written it, so it
+    is only ever here because an operator added it and would be deleted by the
+    rewrite. ``ISTOTA_WEB_SESSION_SECRET_KEY`` is carried for consistency
+    rather than for harm: losing it only invalidates cookies. The rule is the
+    same for all three — a re-run is a config rewrite, not a key rotation.
+
+    **The environment outranks the file, because that is the order the daemon
+    resolves them in.** ``serve.load_env_file`` is non-clobbering, so an
+    exported value wins over the file's and is the key actually in use;
+    preserving the file's instead would write a value the daemon ignores, and
+    the install would silently switch keys the day the export went away.
 
     Only a *usable* value is preserved. A blank or truncated line is the broken
-    state this stage exists to fix, and pinning it would make the guard the
-    bug. The floor is the secrets store's own, never a second copy of it.
+    state this fixes, and pinning it would make the guard the bug — safe to
+    discard, since nothing below the floor can have encrypted anything. The
+    floor is the secrets store's own, never a second copy of it.
+
+    What it deliberately does **not** do is preserve arbitrary unrecognised
+    lines. ``render_env_file`` is a pure function of ``Answers``, and carrying
+    unknown names through would resurrect variables the wizard has stopped
+    writing; the file's own comment says only that these are preserved.
     """
     from .secrets_store import _MIN_KEY_LEN
 
     existing = _read_env_values(env_path)
     for field_name, var in (
         ("secret_key", "ISTOTA_SECRET_KEY"),
+        ("web_token_key", "ISTOTA_WEB_TOKEN_KEY"),
         ("session_secret", "ISTOTA_WEB_SESSION_SECRET_KEY"),
     ):
-        prior = existing.get(var, "").strip()
+        from_env = os.environ.get(var, "").strip()
+        from_file = existing.get(var, "").strip()
+        if from_env and from_file and from_env != from_file:
+            # Not a failure — the daemon has an unambiguous answer — but the
+            # operator is about to have the losing value deleted, so say which
+            # one survived. Names only, never values.
+            out(
+                f"  {var} differs between your environment and {env_path};"
+                f" keeping the environment's, which is the one the daemon uses."
+            )
+        prior = from_env or from_file
         if len(prior) >= _MIN_KEY_LEN:
             setattr(a, field_name, prior)
 
@@ -539,11 +591,27 @@ def _write_private(path: Path, text: str) -> None:
 
     ``write_text`` then ``chmod`` leaves the file world-readable with secrets
     in it for the interval between, which is a window on a multi-user host.
-    ``O_CREAT``'s mode does not apply to a file that already exists, so the
-    chmod stays for the re-run case.
+
+    Two narrowing steps, because ``O_CREAT``'s mode applies **only** to a file
+    this call creates. On the ``--force`` re-run — the one path where the file
+    pre-exists, and the path this change adds — the mode argument is ignored
+    entirely, so an ``istota.env`` sitting at 0644 (hand-made, or written by a
+    wizard older than this) would be truncated and refilled with the master key
+    at its original mode and only narrowed afterwards: the same window, on the
+    only shape that has it. ``fchmod`` on the open descriptor closes it before
+    any byte is written. The ``path.chmod`` after is the fallback for a
+    platform without ``fchmod``.
+
+    UTF-8 explicitly: the rendered text carries an em dash, and ``os.fdopen``
+    would otherwise encode with the locale's codec and raise under ``LC_ALL=C``
+    *after* ``O_TRUNC`` had already emptied the file.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
+    try:
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError):  # pragma: no cover - platform dependent
+        pass
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
     try:
         path.chmod(0o600)
@@ -551,33 +619,44 @@ def _write_private(path: Path, text: str) -> None:
         pass
 
 
-def _ensure_admins_file(path: Path, user_id: str) -> None:
-    """Make sure ``path`` names ``user_id``, without clobbering what is there.
+def _ensure_admins_file(path: Path, user_id: str, out=print) -> None:
+    """Create ``path`` naming ``user_id``, and never modify one that exists.
 
-    ``load_admin_users`` reads one id per line with ``#`` comments. An empty
-    allowlist is read as "everyone is admin" by ``Config.is_admin`` and as
-    "nobody" by ``is_shared_kv_writer`` and the web admin gate, so a standalone
-    install with no file at all could not write a shared briefing block. This
-    gives it a real, editable authorization artifact instead of relying on the
-    exemption in ``is_shared_kv_writer``.
+    An empty allowlist is read as "everyone is admin" by ``Config.is_admin``
+    and as "nobody" by ``is_shared_kv_writer`` and the web admin gate, so a
+    standalone install with no file at all could not write a shared briefing
+    block. This gives it a real, editable authorization artifact instead of
+    leaning on the exemption in ``is_shared_kv_writer``.
+
+    **It only ever creates.** An existing file is left byte for byte alone,
+    even when it does not name the user — appending would be a silent
+    authorization widening, and the path is derived from ``config_path.parent``
+    with nothing asserting the standalone shape, so ``istota setup -c
+    /etc/istota/config.toml --force`` would append the wizard's user to the
+    *server's* production allowlist (``load_admin_users`` defaults to exactly
+    ``/etc/istota/admins``). That widening would survive the operator restoring
+    ``config.toml`` from Ansible, since the play manages the two files
+    separately. Refusing costs a standalone user nothing they cannot fix in one
+    edit, and the line printed here tells them what to add.
+
+    Membership is asked of ``load_admin_users`` rather than re-parsed, so the
+    writer and the reader of this file cannot drift on what a line means.
     """
     if path.exists():
-        text = path.read_text()
-        names = {
-            line.strip()
-            for line in text.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        }
-        if user_id in names:
-            return
-        sep = "" if (text == "" or text.endswith("\n")) else "\n"
-        with path.open("a") as fh:
-            fh.write(f"{sep}{user_id}\n")
+        from .config import load_admin_users  # noqa: PLC0415
+
+        if user_id not in load_admin_users(str(path)):
+            out(
+                f"  {path} exists and does not name '{user_id}'; leaving it "
+                f"untouched. Add that line yourself to allow shared-content "
+                f"writes and the admin dashboard."
+            )
         return
     path.write_text(
-        "# Istota admin user ids — one per line, # comments.\n"
+        "# Istota admin user ids - one per line, # comments.\n"
         "# Written by `istota setup`; edit freely.\n"
-        f"{user_id}\n"
+        f"{user_id}\n",
+        encoding="utf-8",
     )
 
 
@@ -632,7 +711,7 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None
     a.admins_file = str(admins_path)
     # A re-run must not replace the master key: every stored credential is
     # encrypted under it. Read before anything is written.
-    _carry_forward_secrets(a, env_path)
+    _carry_forward_secrets(a, env_path, out=out)
 
     # Create workspace + config dirs.
     a.workspace.mkdir(parents=True, exist_ok=True)
@@ -640,9 +719,9 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None
 
     # Write config + env. The env file is created 0600 rather than chmod'd
     # afterwards, so it is never on disk world-readable holding secrets.
-    config_path.write_text(render_config_toml(a))
+    config_path.write_text(render_config_toml(a), encoding="utf-8")
     _write_private(env_path, render_env_file(a))
-    _ensure_admins_file(admins_path, a.user_id)
+    _ensure_admins_file(admins_path, a.user_id, out=out)
 
     # Bootstrap: DB, user profile row, workspace directories + memory.
     _bootstrap(a, config_path)

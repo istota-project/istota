@@ -74,3 +74,35 @@ class TestStandaloneExemption:
         # shows the allowlist is still doing the deciding.
         assert config.is_shared_kv_writer("alice") is True
         assert config.is_shared_kv_writer("mallory") is False
+
+    def test_an_admins_file_excluding_the_local_user_refuses(self, make_user_config):
+        """The exemption is a backstop, not an override. Once a real admins
+        file exists — which the wizard now writes on every fresh install — it
+        decides, so a standalone operator who edits themselves out of it is
+        refused rather than silently overridden."""
+        from istota.config import WebConfig
+
+        config = Config(
+            web=WebConfig(auth="none"),
+            users={"alice": make_user_config()},
+            admin_users={"bob"},
+        )
+        assert config.is_standalone is True
+        assert config.local_user_id == "alice"
+        assert config.is_shared_kv_writer("alice") is False
+
+    def test_a_second_local_user_disables_the_exemption(self, make_user_config):
+        """`local_user_id` falls back to `sorted(users)[0]` when several are
+        configured, and says in its own docstring that it is only meaningful
+        where there is exactly one. Without the count clause the exemption
+        would hand shared-write authority to whichever id sorts first."""
+        from istota.config import WebConfig
+
+        config = Config(
+            web=WebConfig(auth="none"),
+            users={"alice": make_user_config(), "bob": make_user_config()},
+        )
+        assert config.is_standalone is True
+        assert config.local_user_id == "alice"
+        assert config.is_shared_kv_writer("alice") is False
+        assert config.is_shared_kv_writer("bob") is False
