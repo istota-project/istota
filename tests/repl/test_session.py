@@ -15,6 +15,7 @@ import pytest
 
 from istota import db
 from istota.config import (
+    BrainConfig,
     Config,
     NextcloudConfig,
     SchedulerConfig,
@@ -145,6 +146,56 @@ class TestRunSession:
         # The deferred-op drain ran inside run_task_inline and persisted the kv set.
         assert val is not None
         assert val["value"] in (1, "1")
+
+
+class TestTheModelPinIsResolvedInTheReplLane:
+    """`/model` resolves through the brain the `repl` lane routes to (ISSUE-421).
+
+    The session stores an already-resolved id in `tasks.model`, and
+    `executor._pin_origin_namespace` reads an unpinned row's namespace off the
+    task's own lane. So the producer has to resolve in that same lane or the
+    executor reads a name in a namespace nothing wrote it in and hands it
+    straight to the wire. This used to be `make_brain(config.brain)` — the base
+    kind — which is literally the expression ISSUE-419 removed from
+    `check_scheduled_jobs` for the same reason.
+    """
+
+    def _model_after(self, cfg, monkeypatch, alias):
+        monkeypatch.setattr("istota.scheduler.execute_task", _fake_execute("hi"))
+        run_session(
+            cfg, user_id="alice",
+            input_fn=_input_seq([f"/model {alias}", "hello"]),
+            stream=io.StringIO(),
+        )
+        with db.get_db(cfg.db_path) as conn:
+            tasks = db.list_tasks(conn, user_id="alice")
+        assert len(tasks) == 1
+        return tasks[0].model
+
+    def test_a_routed_repl_lane_resolves_in_the_routed_brains_namespace(
+        self, cfg, monkeypatch,
+    ):
+        """`smart` is an anthropic alias and native has no answer for it.
+
+        The deployment routes `repl` to native, so the stored pin must be
+        native's answer — nothing, here — and not `claude-opus-5`, which is
+        what the base kind resolves and what native's wire would reject.
+        """
+        cfg.brain = BrainConfig(
+            kind="claude_code", source_type_overrides={"repl": "native"},
+        )
+        assert self._model_after(cfg, monkeypatch, "smart") is None
+
+    def test_an_unrouted_deployment_still_resolves_in_the_base_kind(
+        self, cfg, monkeypatch,
+    ):
+        """The control: with no routing the lane *is* the base kind.
+
+        Without this the assertion above is equally satisfied by a session that
+        stopped resolving aliases at all.
+        """
+        cfg.brain = BrainConfig(kind="claude_code")
+        assert self._model_after(cfg, monkeypatch, "smart") == "claude-opus-5"
 
 
 class TestRunTaskInline:

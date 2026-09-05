@@ -41,13 +41,21 @@ from istota.executor import (
 
 
 class _Task:
-    """Only the fields the resolver and the origin rule read."""
+    """Only the fields the resolver and the origin rule read.
 
-    def __init__(self, model="", effort="", brain=None, source_type=""):
+    ``model_namespace`` defaults to None — "not recorded" — so every case in
+    this file goes on exercising the inference it was written for. The recorded
+    path is ISSUE-420's and is covered in
+    `tests/test_brain_pin_origin_recorded.py`.
+    """
+
+    def __init__(self, model="", effort="", brain=None, source_type="",
+                 model_namespace=None):
         self.model = model
         self.effort = effort
         self.brain = brain
         self.source_type = source_type
+        self.model_namespace = model_namespace
 
 
 def _brain(kind):
@@ -364,8 +372,14 @@ class TestAPinnedTaskStillReadsTheColumn:
         )
 
     def test_a_pin_the_allowlist_now_refuses_still_reads_as_its_own_namespace(self):
-        """Pinned behaviour, deliberately left alone by this stage — and the
-        one place it is now provably wrong for a cron job.
+        """The inference, which is what a row with no recorded namespace gets.
+
+        ISSUE-420 fixed the live defect by recording the namespace beside the
+        pin rather than by changing this branch, so what is asserted here is the
+        fallback for a row written before that column existed — a real
+        population on any upgraded deployment, and one whose answer deliberately
+        did not move. A row that *does* carry a namespace never reaches this
+        line; see `tests/test_brain_pin_origin_recorded.py`.
 
         With `native` dropped from `room_selectable`, `resolve_brain_kind`
         refuses the pin and the task runs `claude_code`, while this answers
@@ -381,12 +395,12 @@ class TestAPinnedTaskStillReadsTheColumn:
         beside a `native` pin, every fire, and has it dropped here, every fire.
         The job runs the deployment default model and nothing says so.
 
-        Fixing it means reading the *admitted* pin rather than the column, which
-        collapses this function to the target brain's own namespace and makes
-        the primary-path crossing rule inert for pinned tasks too. That is a
-        decision about whether the rule should exist on this path at all, not a
-        predicate tweak, so it is deferred with its own issue and this records
-        what ships today.
+        Reading the *admitted* pin instead was rejected: it collapses this
+        function to the target brain's own namespace and makes the primary-path
+        crossing rule inert for pinned tasks too. Recording the namespace at the
+        producer keeps both cases — a pin written while the kind was admitted
+        and one written after — without this branch having to tell them apart,
+        which it cannot, because they leave identical rows.
         """
         assert (
             _pin_origin_namespace(
@@ -445,14 +459,26 @@ class TestARoutedLanesPinIsNoLongerDroppedAsACrossing:
 
 
 class TestTheProducersThatDoNotMeetThePremise:
-    """Residues of the lane rule, recorded rather than guarded.
+    """The residue of the lane rule, recorded rather than guarded.
 
     The unpinned branch assumes a name in `tasks.model` was resolved through the
-    lane's own brain. Three producers do not do that, and each ends with a
-    foreign id handed to a brain that passes an unknown name straight through.
-    None is introduced by the lane rule — each was previously dropped, which was
-    the right outcome from a rule that was wrong about why — and each is fixed at
-    the producer rather than here.
+    lane's own brain. ISSUE-421 found three producers that did not, each ending
+    with a foreign id handed to a brain that passes an unknown name straight
+    through. None was introduced by the lane rule — each was previously dropped,
+    which was the right outcome from a rule that was wrong about why — and each
+    is fixed at the producer rather than here.
+
+    Two of the three now are. `repl/session` resolves `/model` through
+    `resolve_brain_kind("repl", …)`, and `scheduler_deferred` drops a parent's
+    `model` rather than copying it onto a `subtask` row the child would read in
+    another namespace. Their coverage moved to the producers with the fix:
+    `tests/repl/test_session.py::TestTheModelPinIsResolvedInTheReplLane` and
+    `tests/test_scheduler_deferred.py::TestSubtaskModelInheritanceAcrossNamespaces`.
+
+    What is left is `rooms.model`, which is not fixable at the producer: one
+    column is shared by every surface bound to a room, so there is no single
+    lane to resolve it in. It needs the namespace recorded beside the pin
+    (ISSUE-420).
     """
 
     def test_a_room_model_written_from_one_surface_is_read_on_another(self):
@@ -460,14 +486,19 @@ class TestTheProducersThatDoNotMeetThePremise:
 
         It is written against the writing surface's lane
         (`commands.brain_for_room(..., ctx.surface)`,
-        `web_app._brain_for_room_token(token, "web")`) and read here against the
-        inbound one. A room whose model was set from the web UI and whose next
-        message arrives over Talk therefore disagrees with itself wherever those
-        two lanes route to different kinds.
+        `web_app._brain_for_room_token(token, "web")`) and was read here against
+        the inbound one, so a room whose model was set from the web UI and whose
+        next message arrived over Talk disagreed with itself wherever those two
+        lanes route to different kinds.
 
-        The value was resolved in `anthropic` (web is unrouted, so it ran the
-        base kind) and this answers `openai_compat`, so the id reaches native's
-        wire unchallenged. Recorded, not asserted as correct.
+        **Fixed by ISSUE-420's recorded namespace**, which is why this producer
+        is no longer in the same state as the two below it: the writing surface
+        stores the namespace it resolved in and `record_inbound` freezes it onto
+        the task, so the inbound surface reads a fact. What is still asserted
+        here is the residue for a row written *before* that column — the value
+        was resolved in `anthropic` (web is unrouted, so it ran the base kind)
+        and this answers `openai_compat`, so the id reaches native's wire
+        unchallenged. Recorded, not asserted as correct.
         """
         config = Config(
             brain=BrainConfig(
@@ -478,10 +509,27 @@ class TestTheProducersThatDoNotMeetThePremise:
         assert _pin_origin_namespace(talk_task, config) == "openai_compat"
         assert _request_model(talk_task, config, _brain("native")) == "claude-opus-5"
 
-    def test_a_subtask_inherits_a_model_resolved_in_the_parents_lane(self):
-        """`scheduler_deferred` copies the parent's `model` onto a `subtask` row
-        with `brain=task.brain`, which is NULL when the parent was unpinned. The
-        child then reads its own lane, which is not where the name was written.
+        # The same room once its namespace has been recorded: the fact wins, no
+        # crossing is read, and the id the user chose survives.
+        recorded = _Task(
+            "claude-opus-5", source_type="talk", model_namespace="anthropic",
+        )
+        assert _pin_origin_namespace(recorded, config) == "anthropic"
+
+    def test_the_executor_still_carries_such_a_row_so_the_producer_is_the_guard(
+        self,
+    ):
+        """Nothing here changed when the two producers were fixed (ISSUE-421).
+
+        The rule reads the child's own lane and lets an anthropic id through to
+        native's wire, exactly as before — which is what makes the producer the
+        only place the fix could go, and what this asserts.
+
+        A row of this shape is now unreachable *by inheritance*, and the test
+        that says so lives beside that producer. It is still reachable from the
+        deferred JSON's own `model`, which `_process_deferred_subtasks` writes
+        through untouched — that name is raw rather than resolved in some other
+        lane, so the child resolving it against its own brain is already right.
         """
         config = Config(
             brain=BrainConfig(
@@ -490,3 +538,4 @@ class TestTheProducersThatDoNotMeetThePremise:
         )
         child = _Task("claude-opus-5", source_type="subtask")
         assert _pin_origin_namespace(child, config) == "openai_compat"
+        assert _request_model(child, config, _brain("native")) == "claude-opus-5"

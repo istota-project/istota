@@ -133,9 +133,11 @@ read aliases in" as a **lookup** rather than a construction (ISSUE-417).
 free: `TmuxClaudeBrain.__init__` shells out to the installed `claude` and warns
 on a version mismatch, so `web_app._brain_catalogue` — which asked once per
 known kind on every catalogue fetch — put a `tmux_brain cli_version_mismatch`
-WARNING in the operator's log every time a room-settings modal opened. Three
+WARNING in the operator's log every time a room-settings modal opened. Four
 sites collapse onto it: that catalogue's `brain_namespaces`,
-`commands._model_namespace` and the executor's fallback crossing rule. It
+`commands._model_namespace`, the executor's fallback crossing rule, and
+`scheduler_deferred._inherited_model`, which asks whether a parent's model pin
+can travel onto a `subtask` row (ISSUE-421). It
 returns `None` for an unbuildable kind, and every caller must read that as **not
 established** rather than as "the same namespace". The separate question — can
 this deployment *build* the kind — is still a construction, and
@@ -688,6 +690,24 @@ and under the same `room_surface` guard — so Talk and web, and deliberately no
 email, which joins a room's transcript without being a room surface
 (`.claude/rules/transport.md`).
 
+**A model pin carries the namespace it was written in, and that is a recorded
+fact rather than an inference** (ISSUE-420). `rooms.model_namespace` is written
+by whichever producer set `rooms.model`, from the brain it actually resolved the
+alias against, and `record_inbound` freezes it onto `tasks.model_namespace`
+beside the model; `executor._pin_origin_namespace` prefers it to every
+inference. Nothing on the row could replace it, which is the point: reading the
+origin off `tasks.brain` is right for a pin written *while* that kind was
+admitted (ISSUE-417's case) and wrong for one written after the operator dropped
+the kind from `room_selectable`, because `brain_for_room` then refuses the pin
+and resolves the alias in the lane's namespace instead. The two writes leave
+identical rows and want opposite answers. Reading it off the *lane* is wrong for
+a third case, ISSUE-421(c): `rooms.model` is one column shared by every bound
+surface, written against the writing surface's lane and read against the inbound
+one. Recording it settles all three. NULL means "not recorded" — every row
+written before the column — and the old inference answers those, so the upgrade
+moved nothing. Only the model's own writers touch it: `!room effort` leaves it
+alone, and clearing the model clears it.
+
 A task column as well as a room column, for the reason `model` and `effort`
 have both: every site that resolves the brain already holds the task row, so
 the resolution stays a pure function of that row rather than a second read of
@@ -696,6 +716,14 @@ already running; and retry and subtask inheritance then come free
 (`_create_retry_task` and the deferred subtask writer copy the column). A `source_type` of `subtask` would otherwise
 take `source_type_overrides["subtask"]` and could silently differ from its
 parent.
+
+The `model` half is not free in the same way, because a stored name is
+namespaced by the lane it was written in rather than by the row. With `brain`
+set the column carries the namespace down with it and the name travels; with it
+NULL the child would read its own lane for a name the parent's lane produced, so
+the subtask writer carries the pin only where the two lanes read the same
+vocabulary and drops it otherwise, leaving the child on the routed brain's own
+default (ISSUE-421, `scheduler_deferred._inherited_model`).
 
 **Resolution order**, highest first:
 

@@ -134,6 +134,43 @@ def workspace_attachment_paths(
     return out if any(out) else None
 
 
+def _live_pin_namespace(config, conn, room_token: str, source_type: str) -> str | None:
+    """The namespace an inline `!model` on this message was resolved in.
+
+    The surfaces that accept a `!model` prefix resolve the alias through
+    ``make_brain(brain_for_room(...))`` before calling in, so this repeats their
+    call rather than guessing: same room, same source type, same transaction, so
+    the two agree by construction. Reading ``rooms.brain`` instead would get it
+    wrong in precisely the case the column exists for — ``brain_for_room``
+    refuses a kind the operator has dropped from ``[brain] room_selectable``,
+    and the alias then resolves in the lane's namespace (ISSUE-420).
+
+    Imported at function scope, matching ``transport/talk/inbound.py``, which
+    reaches ``brain_for_room`` the same way. **Not** because of a cycle —
+    measured, ``commands`` imports no ``transport`` module and hoisting both
+    imports to module scope imports cleanly in every order — but because this
+    module is on the Talk poll's import path and ``commands`` pulls in the whole
+    command registry behind it for a call that only a message carrying an inline
+    ``!model`` ever makes.
+
+    Never raises. ``None`` means "not established", which the executor's crossing
+    rule already handles as "infer" — the answer it gave before this column.
+    """
+    try:
+        from ..brain import model_namespace_for_kind
+        from ..commands import brain_for_room
+
+        return model_namespace_for_kind(
+            brain_for_room(config, conn, room_token, source_type).kind,
+        )
+    except Exception:  # noqa: BLE001 — a namespace read must not fail an inbound
+        logger.debug(
+            "record_inbound: could not establish the inline pin's namespace",
+            exc_info=True,
+        )
+        return None
+
+
 def record_inbound(
     conn,
     config: "Config",
@@ -278,6 +315,12 @@ def record_inbound(
         not room_surface and not mirror_to_room and bool(transcript_token)
     )
 
+    # The namespace `model` was resolved in, frozen onto the task beside it
+    # (ISSUE-420). Two sources, and they are not interchangeable — see the two
+    # branches below. Stays None for every non-room surface, which have no room
+    # pin to inherit and no room brain to have resolved an inline one against.
+    model_namespace: str | None = None
+
     if room_surface:
         # Lazy room registration on first sight (a Talk room the bot joined, a
         # web room created elsewhere). First writer wins on origin + name.
@@ -341,6 +384,24 @@ def record_inbound(
             model = existing.model
             if effort is None:
                 effort = existing.effort
+            # The *stored* namespace, never a fresh derivation: this id was
+            # written at some earlier point and the allowlist may have moved
+            # since, which is exactly the case ISSUE-420 is about. A row written
+            # before the column existed carries None, and the executor's own
+            # inference answers it as it did before.
+            model_namespace = existing.model_namespace
+        elif model:
+            # An inline `!model` on this message. The caller resolved the alias
+            # against the brain this room *admits*
+            # (`talk/inbound.py` builds `make_brain(brain_for_room(...))`), so
+            # the live derivation is the same answer by construction — and it
+            # has to be live rather than stored, because nothing wrote this id
+            # to the room. Same defect as the stored case one step earlier: a
+            # refused room pin puts the id in the lane's namespace while
+            # `tasks.brain` below still records the refused kind.
+            model_namespace = _live_pin_namespace(
+                config, conn, room_token, source_type,
+            )
 
         # The room's standing brain, on the same terms and inside the same
         # guard: Talk and web, never email, matching what `model` and `effort`
@@ -412,6 +473,7 @@ def record_inbound(
         model=model,
         effort=effort,
         brain=brain,
+        model_namespace=model_namespace,
         priority=priority,
         queue=queue,
     )
