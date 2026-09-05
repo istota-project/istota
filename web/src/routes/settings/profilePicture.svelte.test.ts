@@ -79,17 +79,20 @@ const person = (avatars?: { user: string | null; bot: string | null }): User => 
   },
 });
 
-const dropzone = () => document.querySelector('.picture .dropzone') as HTMLElement;
-const preview = () => document.querySelector('.picture-preview') as HTMLElement;
+/* The picture is the picker: the whole control takes the drop and the paste,
+   and the preview inside it takes the click. */
+const picker = () => document.querySelector('.avatar-picker') as HTMLElement;
+const preview = () => document.querySelector('.avatar-picker .target') as HTMLElement;
+const fileInput = () => picker().querySelector('input[type="file"]') as HTMLInputElement;
 
 /** Drop a file on the picker, which is how a pick reaches the page. */
 async function drop(file: File) {
-  await fireEvent.drop(dropzone(), { dataTransfer: { files: [file] } });
+  await fireEvent.drop(picker(), { dataTransfer: { files: [file] } });
 }
 
 /** Choose a file through the native input, which is the path that can wedge. */
 async function choose(file: File) {
-  const input = dropzone().querySelector('input[type="file"]') as HTMLInputElement;
+  const input = fileInput();
   Object.defineProperty(input, 'files', { value: [file], configurable: true });
   await fireEvent.change(input);
 }
@@ -135,9 +138,9 @@ describe('the profile-picture control', () => {
     // too — all refused server-side, and the user would find out only after
     // choosing one.
     renderPage(person());
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
 
-    const input = dropzone().querySelector('input[type="file"]') as HTMLInputElement;
+    const input = fileInput();
     expect(input.getAttribute('accept')).toBe(api.AVATAR_ACCEPT);
     expect(input.getAttribute('accept')).not.toContain('image/*');
   });
@@ -148,7 +151,7 @@ describe('the profile-picture control', () => {
     // the old `?v` URL as `immutable`, so the preview would keep painting the
     // old face until a new hash reaches the `src`.
     renderPage(person({ user: 'old11', bot: null }));
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
     expect(preview().querySelector('img')?.getAttribute('src')).toBe(
       '/api/avatars/user/alice?v=old11',
     );
@@ -180,19 +183,19 @@ describe('the profile-picture control', () => {
        mechanism, and it is the thing that can actually be observed here. */
     api.uploadAvatar.mockRejectedValueOnce(new Error('the server was unreachable'));
     renderPage(person());
-    await waitFor(() => expect(dropzone()).not.toBeNull());
-    const before = dropzone().querySelector('input[type="file"]');
+    await waitFor(() => expect(picker()).not.toBeNull());
+    const before = fileInput();
 
     await choose(picture);
     await waitFor(() => expect(screen.getByText(/unreachable/)).toBeInTheDocument());
 
-    expect(dropzone().querySelector('input[type="file"]')).not.toBe(before);
+    expect(fileInput()).not.toBe(before);
   });
 
   it("shows the server's own refusal, and leaves the picture alone", async () => {
     api.uploadAvatar.mockRejectedValue(new Error('that file is larger than 4096 KB'));
     renderPage(person({ user: 'old11', bot: null }));
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
 
     await drop(picture);
 
@@ -205,7 +208,7 @@ describe('the profile-picture control', () => {
   it('hands an expired upload session back to the root identity flow', async () => {
     api.uploadAvatar.mockRejectedValue(new api.AuthError());
     renderPage(person());
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
 
     await drop(picture);
 
@@ -215,12 +218,12 @@ describe('the profile-picture control', () => {
 
   it('offers Remove only while a picture is showing', async () => {
     const { unmount } = renderPage(person());
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
     expect(screen.queryByRole('button', { name: /^Remove$/ })).toBeNull();
     unmount();
 
     renderPage(person({ user: 'old11', bot: null }));
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
     await fireEvent.click(await screen.findByRole('button', { name: /^Remove$/ }));
 
     expect(api.deleteAvatar).toHaveBeenCalledOnce();
@@ -233,7 +236,7 @@ describe('the profile-picture control', () => {
     // called: nothing here presses Save, so that assertion would hold against
     // an implementation where the picture *did* enter the form.
     renderPage(person());
-    await waitFor(() => expect(dropzone()).not.toBeNull());
+    await waitFor(() => expect(picker()).not.toBeNull());
     const save = screen.getByRole('button', { name: /Save changes/ });
     expect(save).toBeDisabled();
 
