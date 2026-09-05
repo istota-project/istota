@@ -512,3 +512,63 @@ class TestTheWebProducerRecordsIt:
             reg = db.get_room(conn, room.token)
         assert reg.model is None
         assert reg.model_namespace is None
+
+
+class TestTheSubtaskInheritanceReadsTheFactToo:
+    """Where ISSUE-420's column and ISSUE-421(b)'s producer fix meet.
+
+    `_inherited_model` drops a parent's model when the parent's lane and the
+    `subtask` lane resolve to different namespaces. It inferred the parent's
+    from `tasks.source_type`, which is a third reader of the inference this
+    column replaces — so a room turn whose namespace *was* recorded lost its pin
+    on a lane-routed deployment even though the recorded fact proves parent and
+    child agree. Neither change produces this on its own; it appears only once
+    both are in the tree, which is why it is pinned here.
+    """
+
+    def _config_routed(self, db_path, tmp_path):
+        return _config(
+            db_path, tmp_path, kind="claude_code",
+            source_type_overrides={"talk": "native"},
+        )
+
+    def test_a_recorded_namespace_that_matches_the_child_keeps_the_model(
+        self, db_path, tmp_path,
+    ):
+        """Parent is a `talk` turn routed to native, but its model was recorded
+        as `anthropic` — the room's pin was refused, so the alias resolved in
+        the lane. The child's `subtask` lane is unrouted, so also `anthropic`.
+        They agree on the recorded fact and the model must carry."""
+        from istota.scheduler_deferred import _inherited_model
+        config = self._config_routed(db_path, tmp_path)
+        parent = _Task(
+            "claude-opus-5", source_type="talk", model_namespace="anthropic",
+        )
+        model, dropped = _inherited_model(parent, config)
+        assert model == "claude-opus-5"
+        assert dropped is None
+
+    def test_a_recorded_namespace_that_differs_still_drops(
+        self, db_path, tmp_path,
+    ):
+        """The fact is an origin, not an exemption."""
+        from istota.scheduler_deferred import _inherited_model
+        config = self._config_routed(db_path, tmp_path)
+        parent = _Task(
+            "z-ai/glm-5.3-flash", source_type="web",
+            model_namespace="openai_compat",
+        )
+        model, dropped = _inherited_model(parent, config)
+        assert model is None
+        assert dropped is not None
+
+    def test_an_unrecorded_parent_still_infers_from_the_lane(
+        self, db_path, tmp_path,
+    ):
+        """The pre-column population keeps ISSUE-421(b)'s answer."""
+        from istota.scheduler_deferred import _inherited_model
+        config = self._config_routed(db_path, tmp_path)
+        parent = _Task("claude-opus-5", source_type="talk")
+        model, dropped = _inherited_model(parent, config)
+        assert model is None
+        assert dropped is not None

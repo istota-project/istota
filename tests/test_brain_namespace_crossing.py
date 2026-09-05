@@ -459,14 +459,26 @@ class TestARoutedLanesPinIsNoLongerDroppedAsACrossing:
 
 
 class TestTheProducersThatDoNotMeetThePremise:
-    """Residues of the lane rule, recorded rather than guarded.
+    """The residue of the lane rule, recorded rather than guarded.
 
     The unpinned branch assumes a name in `tasks.model` was resolved through the
-    lane's own brain. Three producers do not do that, and each ends with a
-    foreign id handed to a brain that passes an unknown name straight through.
-    None is introduced by the lane rule — each was previously dropped, which was
-    the right outcome from a rule that was wrong about why — and each is fixed at
-    the producer rather than here.
+    lane's own brain. ISSUE-421 found three producers that did not, each ending
+    with a foreign id handed to a brain that passes an unknown name straight
+    through. None was introduced by the lane rule — each was previously dropped,
+    which was the right outcome from a rule that was wrong about why — and each
+    is fixed at the producer rather than here.
+
+    Two of the three now are. `repl/session` resolves `/model` through
+    `resolve_brain_kind("repl", …)`, and `scheduler_deferred` drops a parent's
+    `model` rather than copying it onto a `subtask` row the child would read in
+    another namespace. Their coverage moved to the producers with the fix:
+    `tests/repl/test_session.py::TestTheModelPinIsResolvedInTheReplLane` and
+    `tests/test_scheduler_deferred.py::TestSubtaskModelInheritanceAcrossNamespaces`.
+
+    What is left is `rooms.model`, which is not fixable at the producer: one
+    column is shared by every surface bound to a room, so there is no single
+    lane to resolve it in. It needs the namespace recorded beside the pin
+    (ISSUE-420).
     """
 
     def test_a_room_model_written_from_one_surface_is_read_on_another(self):
@@ -504,10 +516,20 @@ class TestTheProducersThatDoNotMeetThePremise:
         )
         assert _pin_origin_namespace(recorded, config) == "anthropic"
 
-    def test_a_subtask_inherits_a_model_resolved_in_the_parents_lane(self):
-        """`scheduler_deferred` copies the parent's `model` onto a `subtask` row
-        with `brain=task.brain`, which is NULL when the parent was unpinned. The
-        child then reads its own lane, which is not where the name was written.
+    def test_the_executor_still_carries_such_a_row_so_the_producer_is_the_guard(
+        self,
+    ):
+        """Nothing here changed when the two producers were fixed (ISSUE-421).
+
+        The rule reads the child's own lane and lets an anthropic id through to
+        native's wire, exactly as before — which is what makes the producer the
+        only place the fix could go, and what this asserts.
+
+        A row of this shape is now unreachable *by inheritance*, and the test
+        that says so lives beside that producer. It is still reachable from the
+        deferred JSON's own `model`, which `_process_deferred_subtasks` writes
+        through untouched — that name is raw rather than resolved in some other
+        lane, so the child resolving it against its own brain is already right.
         """
         config = Config(
             brain=BrainConfig(
@@ -516,3 +538,4 @@ class TestTheProducersThatDoNotMeetThePremise:
         )
         child = _Task("claude-opus-5", source_type="subtask")
         assert _pin_origin_namespace(child, config) == "openai_compat"
+        assert _request_model(child, config, _brain("native")) == "claude-opus-5"

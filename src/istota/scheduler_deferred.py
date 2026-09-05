@@ -26,6 +26,7 @@ from typing import Any
 
 from . import db
 from .config import Config
+from .brain import model_namespace_for_kind, resolve_brain_kind
 from .kv_namespaces import is_reserved_namespace
 from .notification_store import deliver_pending
 from .user_scope import is_scopable_user_id
@@ -107,6 +108,80 @@ def _load_deferred_json(
     return path, data
 
 
+def _inherited_model(
+    task: db.Task, config: Config,
+) -> tuple[str | None, tuple[str, str | None, str | None] | None]:
+    """The parent's ``model`` for its subtasks, and what was dropped getting there.
+
+    A stored model name is a bare string and its namespace comes from where it
+    was written. ``executor._pin_origin_namespace`` reads an unpinned row's
+    namespace off that row's own ``source_type``, so copying a parent's name
+    onto a ``subtask`` row means the child resolves in the ``subtask`` lane a
+    name the parent's lane produced. On a deployment routing the two to kinds
+    with different namespaces the id then reaches a wire that never spoke it,
+    and ``resolve_model_name`` passes an unknown name straight through, so
+    nothing downstream catches it (ISSUE-421).
+
+    Dropping is the direction ``_resolve_crossing_model_effort`` and
+    ``commands._clear_pin_across_namespaces`` take for a pin whose portability
+    is not established, and it restores what happened before ISSUE-419 — the
+    child runs the routed brain's own default. It deliberately does **not**
+    mirror that rule's other arm, which re-resolves a *portable* intent in the
+    target namespace. The parent's ``model`` is normally a concrete id by the
+    time it is stored, so there is usually no intent left to carry; the
+    exception is an operator-declared portable alias that the writing brain's
+    table had no entry for, which is passed through by name and would be
+    re-resolvable here. Carrying it would mean reaching into the executor for
+    ``config_alias_portable_names``, and the outcome for the narrow case is the
+    child's own default either way, so the deviation is stated rather than
+    closed.
+
+    ``effort`` is not namespaced and is inherited unconditionally, matching the
+    crossing rule's drop path.
+
+    Two cases return the name unchanged. An empty pin has nothing to disagree
+    about, and a parent with ``tasks.brain`` set carries that column down to the
+    child, so both rows' namespace is read off the same pinned kind and no lane
+    is consulted on either side.
+
+    The second element is the dropped name and the two namespaces, for the
+    caller to log at the point a child actually takes the default. Logging here
+    would announce a consequence for a file the depth gate, a malformed entry or
+    a per-entry ``model`` override may mean never has one.
+
+    The routing read is guarded because this runs inside the scheduler's
+    deferred drain, which calls its handlers in sequence with no guard between
+    them, so a read that raised would cost every later handler for this task.
+    Its residue is a drop, not a carry: an origin that could not be established
+    is exactly what the crossing rule refuses to treat as a match.
+    """
+    if not (task.model or "").strip():
+        return task.model, None
+    if (task.brain or "").strip():
+        return task.model, None
+    try:
+        # The recorded fact first, and the lane only for a row that predates the
+        # column — the preference `executor._pin_origin_namespace` and
+        # `commands._clear_pin_across_namespaces` both apply (ISSUE-420). Without
+        # it this is a third reader of the same inference, and it drops a model
+        # the column has already established as safe to carry: a room turn whose
+        # namespace was recorded, spawning a subtask, would lose the pin here on
+        # a lane-routed deployment even though parent and child agree.
+        parent_ns = (task.model_namespace or "").strip() or model_namespace_for_kind(
+            resolve_brain_kind(task.source_type, config.brain).kind,
+        )
+        child_ns = model_namespace_for_kind(
+            resolve_brain_kind("subtask", config.brain).kind,
+        )
+    except Exception:  # noqa: BLE001 — a routing read must not break the drain
+        return None, (task.model, None, None)
+    # `None` is "not established" and must never compare equal, the same
+    # reading `_resolve_crossing_model_effort` gives it.
+    if parent_ns is not None and parent_ns == child_ns:
+        return task.model, None
+    return None, (task.model, parent_ns, child_ns)
+
+
 def _process_deferred_subtasks(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> int:
@@ -145,6 +220,11 @@ def _process_deferred_subtasks(
     max_subtasks = config.scheduler.max_subtasks_per_task
     max_depth = config.scheduler.max_subtask_depth
     max_chars = config.scheduler.max_subtask_prompt_chars
+    # Resolved once: it depends on the parent row and the config, not on the
+    # entry. The drop is reported from the loop instead, at the point a child
+    # actually takes the default, and only for the first such child.
+    inherited_model, dropped_model = _inherited_model(task, config)
+    drop_reported = False
     count = 0
     with db.get_db(config.db_path) as conn:
         # Depth gate: refuse to extend a chain that's already at or past the cap.
@@ -210,6 +290,15 @@ def _process_deferred_subtasks(
             output_target = entry.get("output_target")
             if not output_target and conv_token:
                 output_target = "talk"
+            if dropped_model and not entry.get("model") and not drop_reported:
+                dropped_name, parent_ns, child_ns = dropped_model
+                logger.info(
+                    "Task %d subtask: not inheriting model %r across a "
+                    "namespace change (%s -> %s); the child uses its own "
+                    "brain's default",
+                    task.id, dropped_name, parent_ns, child_ns,
+                )
+                drop_reported = True
             db.create_task(
                 conn,
                 prompt=prompt,
@@ -225,7 +314,11 @@ def _process_deferred_subtasks(
                 # Inherit parent's model / effort overrides — a task spawned
                 # via `!model opus-46-high` should run its children at the
                 # same level unless the deferred JSON explicitly overrides.
-                model=entry.get("model") or task.model,
+                # The model only travels where the child will read it in the
+                # namespace it was written in; see `_inherited_model`. The
+                # JSON's own `model` is a raw name nobody has resolved yet, so
+                # the child's own lane is already the right place for it.
+                model=entry.get("model") or inherited_model,
                 effort=entry.get("effort") or task.effort,
                 # And the parent's brain, which is not the deferred JSON's to
                 # choose. A subtask's source_type is "subtask", so without this
@@ -233,14 +326,19 @@ def _process_deferred_subtasks(
                 # could silently run a different brain from the parent that
                 # spawned it.
                 brain=task.brain,
-                # The recorded namespace travels with the model it describes,
-                # and only with it (ISSUE-420). A model the deferred JSON chose
-                # was written by the model inside the sandbox, in whatever
-                # vocabulary it saw, so the parent's namespace would be a guess
-                # about somebody else's string — None leaves it unrecorded and
-                # the executor infers, which is what this path did before.
+                # The recorded namespace travels with the model it describes
+                # and only with it (ISSUE-420), which after ISSUE-421(b) means
+                # keying on the name that actually lands rather than on the
+                # parent's. A model the deferred JSON chose was written by the
+                # model inside the sandbox in whatever vocabulary it saw, so the
+                # parent's namespace would be a guess about somebody else's
+                # string; and a parent pin `_inherited_model` *dropped* leaves
+                # no model here to describe. Both cases record nothing and let
+                # the executor infer, which is what this path did before.
                 model_namespace=(
-                    None if entry.get("model") else task.model_namespace
+                    task.model_namespace
+                    if not entry.get("model") and inherited_model
+                    else None
                 ),
             )
             count += 1

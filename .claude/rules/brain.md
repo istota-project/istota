@@ -133,9 +133,11 @@ read aliases in" as a **lookup** rather than a construction (ISSUE-417).
 free: `TmuxClaudeBrain.__init__` shells out to the installed `claude` and warns
 on a version mismatch, so `web_app._brain_catalogue` — which asked once per
 known kind on every catalogue fetch — put a `tmux_brain cli_version_mismatch`
-WARNING in the operator's log every time a room-settings modal opened. Three
+WARNING in the operator's log every time a room-settings modal opened. Four
 sites collapse onto it: that catalogue's `brain_namespaces`,
-`commands._model_namespace` and the executor's fallback crossing rule. It
+`commands._model_namespace`, the executor's fallback crossing rule, and
+`scheduler_deferred._inherited_model`, which asks whether a parent's model pin
+can travel onto a `subtask` row (ISSUE-421). It
 returns `None` for an unbuildable kind, and every caller must read that as **not
 established** rather than as "the same namespace". The separate question — can
 this deployment *build* the kind — is still a construction, and
@@ -714,6 +716,14 @@ already running; and retry and subtask inheritance then come free
 (`_create_retry_task` and the deferred subtask writer copy the column). A `source_type` of `subtask` would otherwise
 take `source_type_overrides["subtask"]` and could silently differ from its
 parent.
+
+The `model` half is not free in the same way, because a stored name is
+namespaced by the lane it was written in rather than by the row. With `brain`
+set the column carries the namespace down with it and the name travels; with it
+NULL the child would read its own lane for a name the parent's lane produced, so
+the subtask writer carries the pin only where the two lanes read the same
+vocabulary and drops it otherwise, leaving the child on the routed brain's own
+default (ISSUE-421, `scheduler_deferred._inherited_model`).
 
 **Resolution order**, highest first:
 

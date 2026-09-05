@@ -67,10 +67,20 @@ def run_session(
     """Drive the interactive loop until /exit or EOF.
 
     ``input_fn`` / ``stream`` are injectable for testing.
-    """
-    from ..brain import make_brain
 
-    brain = make_brain(config.brain)
+    The brain built here exists only to resolve ``/model``, and it is the one
+    the ``repl`` *lane* routes to rather than the base ``[brain] kind``. The
+    name it produces is stored on the task, and
+    ``executor._pin_origin_namespace`` reads an unpinned row's namespace off
+    that row's own lane — so resolving against anything else writes a name in a
+    namespace nothing will read it in, and the executor hands it to the wire
+    unchecked. The same expression ISSUE-419 removed from
+    ``check_scheduled_jobs``, for the same reason (ISSUE-421).
+    """
+    from ..brain import make_brain, resolve_brain_kind
+
+    # The `repl` lane's brain, not the base kind — see above (ISSUE-421).
+    brain = make_brain(resolve_brain_kind("repl", config.brain))
     sub = TerminalSubscriber(stream=stream)
     token = token or _mint_token(user_id)
     workspace_dir = _resolve_workspace(workspace)
