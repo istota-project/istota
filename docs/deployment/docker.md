@@ -99,6 +99,19 @@ fallback = "claude_code"
 
 Having no failover is a valid choice now, which is why the INFO line exists; on a `tmux_claude` primary, `ISTOTA_BRAIN_FALLBACK` has to name a different brain to change what gets written, since an unset value there is filled in with `claude_code`.
 
+### The repository-layout migration does not apply here
+
+The Ansible role runs `python -m istota.repos_relocate` on every deploy, to move developer clones from one shared tree into per-user subtrees. This stack does not, and does not need to: `ISTOTA_DEVELOPER_REPOS_DIR` ships empty at every layer — `docker/.env.example`, the compose default, and `render-config.sh`'s own fallback — and has never shipped with a value, so a Docker deployment has no clones in the old layout to move. With `repos_dir` empty, `[developer] enabled = true` still leaves the developer container backend off, which is the shipped shape.
+
+If you set that variable by hand on an install predating the per-user split, run the migration yourself once before the clones are used:
+
+```bash
+docker compose exec istota python -m istota.repos_relocate --dry-run
+docker compose exec istota python -m istota.repos_relocate
+```
+
+It refuses rather than guessing when it cannot tell whose clones are whose, and exits 0 with nothing to do on an install that never set the variable.
+
 ## Optional profiles
 
 There are three: `browser`, `location` and `signaling`.
