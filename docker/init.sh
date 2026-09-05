@@ -173,6 +173,7 @@ ISTOTA_DEVELOPER_GITHUB_TOKEN=""
 ISTOTA_DEVELOPER_GITHUB_USERNAME=""
 BROWSER_MEMORY_LIMIT=""
 BROWSER_SHM_SIZE=""
+ISTOTA_BROWSER_ENABLED="true"
 LOCATION_ENABLED=false  # internal flag — adds "location" to COMPOSE_PROFILES
 SIGNALING_ENABLED=false # internal flag — adds "signaling" to COMPOSE_PROFILES
 USER_DISABLED_MODULES=""   # assembled by module_off, written as-is
@@ -405,9 +406,24 @@ if [ "$MINIMAL" = false ]; then
     section "Developer (git, GitLab, GitHub)"
     dim "Lets the bot push commits, open MRs/PRs, and use 'gh'/GitLab APIs."
     dim "Tokens are optional and stored only in your local .env."
-    prompt_bool dev_enabled "Configure developer credentials now?" "n"
-    if [ "$dev_enabled" = "true" ]; then
+    # Two questions, because the skill and its forge tokens are different
+    # things: git, worktrees and the local half of the skill need no token at
+    # all, so one question reading "configure credentials?" cannot decide
+    # ISTOTA_DEVELOPER_ENABLED — which gates the whole [developer] block in
+    # render-config.sh, not just the token fields. Defaulting the first to "y"
+    # keeps the shipped default of the example file.
+    prompt_bool developer_enabled "Enable the developer skill?" "y"
+    if [ "$developer_enabled" = "true" ]; then
         ISTOTA_DEVELOPER_ENABLED="true"
+    else
+        ISTOTA_DEVELOPER_ENABLED="false"
+    fi
+    mark ISTOTA_DEVELOPER_ENABLED
+    dev_enabled=false
+    if [ "$developer_enabled" = "true" ]; then
+        prompt_bool dev_enabled "Configure forge credentials now? (optional)" "n"
+    fi
+    if [ "$dev_enabled" = "true" ]; then
         echo
         prompt_value  ISTOTA_DEVELOPER_GITLAB_USERNAME "GitLab username (empty to skip)" ""
         if [ -n "$ISTOTA_DEVELOPER_GITLAB_USERNAME" ]; then
@@ -421,10 +437,7 @@ if [ "$MINIMAL" = false ]; then
             mark ISTOTA_DEVELOPER_GITHUB_USERNAME
             mark ISTOTA_DEVELOPER_GITHUB_TOKEN
         fi
-    else
-        ISTOTA_DEVELOPER_ENABLED="false"
     fi
-    mark ISTOTA_DEVELOPER_ENABLED
 
     if [ -n "$USER_DISABLED_MODULES" ]; then
         mark USER_DISABLED_MODULES
@@ -465,6 +478,15 @@ case "$HOST_ARCH" in
         warn "Browser container disabled (host arch: $HOST_ARCH; Chrome has no ARM packages)."
         ;;
 esac
+# The same rule as location and developer: the answer this arrived at has to be
+# written down. .env.example ships ISTOTA_BROWSER_ENABLED=true, so a host that
+# gets no browser container would otherwise still be handed [browser] enabled,
+# pointed at a container name that resolves to nothing.
+case ",$COMPOSE_PROFILES," in
+    *,browser,*) ISTOTA_BROWSER_ENABLED="true" ;;
+    *)           ISTOTA_BROWSER_ENABLED="false" ;;
+esac
+mark ISTOTA_BROWSER_ENABLED
 if [ "$LOCATION_ENABLED" = true ]; then
     if [ -n "$COMPOSE_PROFILES" ]; then
         COMPOSE_PROFILES="$COMPOSE_PROFILES,location"
@@ -488,7 +510,10 @@ if [ "$MINIMAL" = false ]; then
     dim "This is the one setting that has to be decided now: Nextcloud registers"
     dim "the server during its own installation and never revisits it. Later,"
     dim "the alternative is to register it by hand:"
-    dim "  docker compose exec -u www-data nextcloud php occ talk:signaling:add <url> <secret>"
+    # One line, no continuation backslash: dim() appends ${_RESET}, and
+    # `echo -e` reads a trailing backslash together with it as an escaped
+    # backslash, printing the reset sequence as literal text.
+    dim "  docker compose exec -u www-data nextcloud php occ talk:signaling:add <url> <secret> --verify"
     echo
     dim "It also changes call signaling for every Talk user on this Nextcloud,"
     dim "not only for the bot. With no MCU configured media stays peer-to-peer"
@@ -496,23 +521,26 @@ if [ "$MINIMAL" = false ]; then
     prompt_bool signaling_wanted "Enable the Talk signaling server?" "n"
     if [ "$signaling_wanted" = "true" ]; then
         echo
-        # Talk hands this URL to every browser, so it is the browser's route to
-        # the server rather than the container's. The stack publishes the server
-        # on 127.0.0.1:8081 and nginx does not proxy it, so with a DOMAIN set
-        # there is no path to derive — a real deployment fronts it with TLS
-        # itself. Offering a default there would write a URL nothing can reach.
-        _sig_default=""
-        if [ -z "$DOMAIN" ]; then
-            _sig_default="http://localhost:8081"
-            dim "Localhost-only: the server is published on 127.0.0.1:8081, which a"
-            dim "browser on this host can reach directly."
-        else
-            dim "DOMAIN is set, so Talk will hand this URL to browsers elsewhere."
-            dim "The stack publishes the server on 127.0.0.1:8081 only and nginx"
-            dim "does not proxy it, so put your own TLS front end in front of that"
-            dim "port and give its public URL here. Leave empty to skip signaling."
-        fi
-        prompt_value ISTOTA_TALK_SIGNALING_SERVER "Signaling URL a browser reaches" "$_sig_default"
+        # No default is offered, and that is the finding rather than caution.
+        # Two different things use this one URL: a browser connects to it, and
+        # Nextcloud's own PHP posts room and chat events to it — that second leg
+        # is what makes inbound a push at all, and it runs inside the nextcloud
+        # container. So http://localhost:8081 is wrong even for a localhost-only
+        # evaluation: it is a host-side publish, and from PHP `localhost` is
+        # nextcloud's own loopback. The stack offers no address satisfying both,
+        # so there is nothing to derive and nothing is suggested.
+        dim "Talk needs one URL for the server, and two different things use it:"
+        dim "a browser connects to it, and Nextcloud's own PHP posts room and"
+        dim "chat events to it. That second leg is what makes inbound a push, and"
+        dim "it runs inside the nextcloud container — so the URL has to resolve"
+        dim "from a browser and from in there."
+        echo
+        dim "This stack provides no such address on its own: the server is"
+        dim "published on loopback only (ISTOTA_TALK_SIGNALING_PORT, 8081 by"
+        dim "default) and nginx does not proxy it. Put a TLS front end in front"
+        dim "of that port on a name both sides resolve, and give its URL here."
+        dim "Leave empty to skip signaling; nothing else in the stack changes."
+        prompt_value ISTOTA_TALK_SIGNALING_SERVER "Signaling URL (empty to skip)" ""
         if [ -n "$ISTOTA_TALK_SIGNALING_SERVER" ]; then
             ISTOTA_TALK_SIGNALING_ENABLED="true"
             ISTOTA_TALK_SIGNALING_SECRET="$(gen_pw)"
@@ -597,6 +625,7 @@ ISTOTA_DEVELOPER_GITHUB_TOKEN="$ISTOTA_DEVELOPER_GITHUB_TOKEN" \
 ISTOTA_DEVELOPER_GITHUB_USERNAME="$ISTOTA_DEVELOPER_GITHUB_USERNAME" \
 BROWSER_MEMORY_LIMIT="$BROWSER_MEMORY_LIMIT" \
 BROWSER_SHM_SIZE="$BROWSER_SHM_SIZE" \
+ISTOTA_BROWSER_ENABLED="$ISTOTA_BROWSER_ENABLED" \
 ISTOTA_DEVELOPER_ENABLED="$ISTOTA_DEVELOPER_ENABLED" \
 ISTOTA_LOCATION_ENABLED="$ISTOTA_LOCATION_ENABLED" \
 ISTOTA_FEEDS_ENABLED="$ISTOTA_FEEDS_ENABLED" \
@@ -674,8 +703,11 @@ if [ "$ISTOTA_TALK_SIGNALING_ENABLED" = "true" ]; then
     warn "  it has to be in place before the first 'docker compose up'. It is"
     warn "  in $ENV_FILE now, so starting the stack from here is enough."
     warn "  If you have already installed this Nextcloud, register it by hand:"
-    warn "    docker compose exec -u www-data nextcloud php occ talk:signaling:add \\"
-    warn "      '$ISTOTA_TALK_SIGNALING_SERVER' '<ISTOTA_TALK_SIGNALING_SECRET from .env>'"
+    warn "    docker compose exec -u www-data nextcloud php occ talk:signaling:add '$ISTOTA_TALK_SIGNALING_SERVER' '<ISTOTA_TALK_SIGNALING_SECRET from .env>' --verify"
+    warn "  Until Talk has it registered the daemon refuses to start, and"
+    warn "  'restart: unless-stopped' makes that a loop that takes web and"
+    warn "  webhooks down with it. Set ISTOTA_TALK_SIGNALING_ENABLED=false in"
+    warn "  $ENV_FILE to back out."
     warn "  It changes call signaling for every Talk user on this Nextcloud."
     echo
 fi

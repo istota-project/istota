@@ -530,8 +530,11 @@ services:
       # istota service) supplies brain.kind / model / base_url, but never a
       # credential. Passing only the native key left all three paths
       # authenticating with nothing on the default claude_code shape.
-      # Held by TestTheWebServiceCanReachTheModel in tests/test_render_config.py,
-      # which derives the set from the product rather than from this list.
+      # The env var is the whole mechanism: ClaudeCodeBrain authenticates from
+      # it, so unlike the istota service this one needs no ~/.claude/
+      # .credentials.json written for it. Held by
+      # TestTheWebServiceCanReachTheModel in tests/test_render_config.py, which
+      # derives the set from the product rather than from this list.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ISTOTA_BRAIN_NATIVE_API_KEY: ${ISTOTA_BRAIN_NATIVE_API_KEY:-}

@@ -1142,6 +1142,15 @@ class TestTheEntrypointStillOwnsWhatItKept:
         mean the two pinned ``ISTOTA_NEXTCLOUD_*`` values disagree with the
         render's own defaults unseen by this test, which is why
         ``docker/.env.example`` says so in prose.
+
+        A **nested** default is outside it too, and that one is a blind spot
+        rather than a decision: both patterns bound the value with ``[^{}]*``,
+        so ``${A:-${B:-x}}`` matches neither side and is skipped on both.
+        Three compose entries are of that shape today
+        (``ISTOTA_WEB_CALLBACK_URL``, ``_NC_EXTERNAL_URL``, ``_SITE_HOSTNAME``)
+        and so are their render counterparts, so nothing false-greens — but
+        those derive from different inputs on each side, which is a comparison
+        no widening of this pattern would make meaningful.
         """
         render = "\n".join(
             line
@@ -1325,6 +1334,13 @@ class TestTheWebServiceCanReachTheModel:
     intersection with what ``istota`` is passed is what keeps it honest in the
     other direction: a name the daemon itself is not given is not a credential
     this stack has to route anywhere.
+
+    What the intersection therefore cannot see is a name missing from *both*
+    services, and there are two today: ``ANTHROPIC_AUTH_TOKEN`` and
+    ``ANTHROPIC_BASE_URL`` reach neither, so a Docker operator behind a gateway
+    has no way to point the CLI brain at it. That is a gap in the stack rather
+    than in this test — add the pair to both services and to ``.env.example``
+    and these assertions cover them with no edit here.
     """
 
     def _model_credential_names(self) -> set[str]:
