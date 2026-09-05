@@ -190,6 +190,30 @@ def _validate_effort(name: str, user_id: str, effort: str) -> None:
         )
 
 
+def _validate_brain(name: str, user_id: str, brain: str) -> None:
+    """Warn on a brain kind nothing can build; never reject.
+
+    The operator's allowlist is not checked here — `cron_loader` has no
+    `Config`, and `resolve_brain_kind` refuses an unlisted kind at dispatch
+    anyway, which is what lets an operator shorten the list without anything
+    having to rewrite CRON.md. `_validate_model`'s docstring records the same
+    limitation for the same reason.
+
+    The value is kept either way. Storing a kind nothing recognises is what
+    lets `!cron` show the operator what their file actually says, and the
+    dispatch layer warns a second time and falls through to the configured
+    brain, so the job runs rather than failing.
+    """
+    from .brain import KNOWN_BRAIN_KINDS
+
+    if brain not in KNOWN_BRAIN_KINDS:
+        logger.warning(
+            "Job '%s' (user %s): brain %r is not a known brain kind (%s) — "
+            "it will be ignored and the job will run the configured brain",
+            name, user_id, brain, ", ".join(sorted(KNOWN_BRAIN_KINDS)),
+        )
+
+
 # Leaf surfaces a CRON.md `target` descriptor may name — the surfaces that have
 # a registered transport / delivery path today. Aliases (both/all/none) are
 # expanded away by parse_output_target before this check, so only real leaves
@@ -550,6 +574,16 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
             _validate_model(name, user_id, model)
         if effort:
             _validate_effort(name, user_id, effort)
+        # Through `_str_field` like `model` and `effort` beside it. Read as
+        # written, `brain = ["a"]` is a `TypeError` out of `_validate_brain`'s
+        # frozenset membership, and the `try/except` around the parse closes
+        # before this loop — so one job's typo costs every *other* job in the
+        # file, which is the failure `_str_field` exists for. A scalar is
+        # quieter and no better: it reaches a sqlite bind through
+        # `_file_owned_values` and `brain = 5` is stored as the string "5".
+        brain = _str_field(name, user_id, "brain", j.get("brain", ""))
+        if brain:
+            _validate_brain(name, user_id, brain)
         target = _str_field(name, user_id, "target", j.get("target", ""))
         if target:
             _validate_target(name, user_id, target)
@@ -573,6 +607,7 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
                 name, user_id, "once", j.get("once", False), False),
             model=model,
             effort=effort,
+            brain=brain,
             # Through `_str_field` like its neighbours rather than `str()`:
             # this one names a shared_kv namespace, so `publish_shared_kv = 5`
             # coerced to the namespace "5" is the one string field where a
@@ -714,6 +749,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
             lines.append(_toml_string("model", job.model))
         if job.effort:
             lines.append(_toml_string("effort", job.effort))
+        if job.brain:
+            lines.append(_toml_string("brain", job.brain))
         if job.publish_shared_kv:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
@@ -1272,6 +1309,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             once=j.once,
             model=j.model or "",
             effort=j.effort or "",
+            brain=j.brain or "",
             publish_shared_kv=j.publish_shared_kv or "",
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))

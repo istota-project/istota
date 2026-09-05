@@ -1,5 +1,6 @@
 """Configuration loading for istota.cron_loader module."""
 
+import logging
 import os
 
 import pytest
@@ -2158,6 +2159,284 @@ class TestValidateModel:
         with caplog.at_level("WARNING"):
             _validate_model("job", "alice", "claude opus")
         assert any("whitespace" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# TestBrainField
+# ---------------------------------------------------------------------------
+
+
+class TestBrainField:
+    """The CRON.md half of the per-job brain pin: parse, warn, render, migrate.
+
+    The gate deciding whether a parsed pin is *stored* is `fj_brain_or_none`,
+    covered by `TestSyncBrainToDb` in `tests/test_model_override.py`.
+    Everything here is about the file.
+    """
+
+    def _load(self, mount_path, make_config_with_mount, body):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", "```toml\n" + body + "```\n")
+        return load_cron_jobs(config, "alice")
+
+    def test_parse_brain_field(self, mount_path, make_config_with_mount, caplog):
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = "native"
+""")
+        assert len(jobs) == 1
+        assert jobs[0].brain == "native"
+        assert not caplog.records, "a known kind is parsed silently"
+
+    def test_brain_defaults_empty(self, mount_path, make_config_with_mount):
+        jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+""")
+        assert jobs[0].brain == ""
+
+    def test_an_unknown_kind_warns_and_keeps_both_the_job_and_the_value(
+        self, mount_path, make_config_with_mount, caplog
+    ):
+        """Warn-only, like `_validate_model`. The value is kept so `!cron` can
+        show the operator what their file says; `resolve_brain_kind` refuses it
+        again at dispatch and falls through to the configured brain, so the job
+        runs rather than failing.
+        """
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = "nonsense"
+""")
+        assert len(jobs) == 1, "the job survives an unknown kind"
+        assert jobs[0].brain == "nonsense"
+        assert any(
+            "not a known brain kind" in r.getMessage()
+            and "nonsense" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+
+    def test_an_unlisted_but_known_kind_parses_silently(
+        self, mount_path, make_config_with_mount, caplog
+    ):
+        """`cron_loader` has no `Config`, so the operator's
+        `[brain] room_selectable` allowlist is not a parse-time question —
+        which is what lets an operator shorten that list without anything
+        having to rewrite CRON.md.
+        """
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = "tmux_claude"
+""")
+        assert jobs[0].brain == "tmux_claude"
+        assert not caplog.records
+
+    # An array and a scalar fail differently without the coercion — the array
+    # raises out of the parse loop and takes the whole file, the scalar is
+    # bound and stored as "5" — so both shapes are worth pinning.
+    NON_STRING = ["5", '["a", "b"]']
+
+    @pytest.mark.parametrize("value", NON_STRING)
+    def test_a_non_string_brain_warns_and_is_dropped(
+        self, mount_path, make_config_with_mount, caplog, value
+    ):
+        """`brain` is read through `_str_field` like `model` beside it.
+
+        The coerced `""` is falsy at the same gate `model` uses, so
+        `_validate_brain` is not reached a second time — there is one warning,
+        and it is about the type.
+        """
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = """ + value + """
+""")
+        assert len(jobs) == 1, "the job survives; only the field is dropped"
+        assert jobs[0].brain == ""
+        assert any(
+            "brain must be a TOML string" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+
+    @pytest.mark.parametrize("value", NON_STRING)
+    def test_a_non_string_brain_does_not_reach_the_row(
+        self, db_path, mount_path, make_config_with_mount, value
+    ):
+        """The consequence the coercion exists for, asserted end to end."""
+        jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = """ + value + """
+""")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", jobs, is_admin=True)
+            row = db.get_scheduled_job_by_name(conn, "alice", "nightly")
+        assert row is not None
+        assert row.brain is None
+
+    def test_a_non_string_brain_does_not_cost_the_other_jobs_in_the_file(
+        self, mount_path, make_config_with_mount
+    ):
+        """The parse loop's `try/except` closes before the loop, so a value
+        `_validate_brain` cannot even test membership on used to raise past
+        every remaining job rather than costing its own field.
+        """
+        jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "typo"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = ["a", "b"]
+
+[[jobs]]
+name = "innocent"
+cron = "0 4 * * *"
+prompt = "Also summarize"
+""")
+        assert [j.name for j in jobs] == ["typo", "innocent"]
+
+    def test_an_empty_brain_is_indistinguishable_from_an_absent_one(
+        self, mount_path, make_config_with_mount, caplog
+    ):
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            jobs = self._load(mount_path, make_config_with_mount, """\
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = ""
+""")
+        assert jobs[0].brain == ""
+        assert not caplog.records
+
+    def test_render_emits_brain(self):
+        out = render_jobs_block(
+            [CronJob(name="j", cron="0 9 * * *", prompt="t", brain="native")])
+        assert 'brain = "native"' in out
+
+    def test_render_omits_an_empty_brain(self):
+        out = render_jobs_block([CronJob(name="j", cron="0 9 * * *", prompt="t")])
+        assert "brain" not in out
+
+    def test_round_trip_through_the_document(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        original = [CronJob(name="j", cron="0 9 * * *", prompt="t",
+                            model="opus", effort="high", brain="native")]
+        _write_cron_md(mount_path, "alice", generate_cron_md(original))
+        assert load_cron_jobs(config, "alice") == original
+
+    def test_a_disable_rewrite_preserves_the_pin_through_the_db_and_back(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        """file -> db -> file, because `!cron disable` regenerates the fence.
+
+        `update_job_enabled_in_cron_md` re-renders the whole TOML block from
+        the parsed jobs, so a field `render_jobs_block` does not emit is lost
+        the first time anyone disables the job — silently, and with the row
+        still carrying the pin until the next sync overwrites it from the
+        rewritten file. A render assertion alone does not reach that.
+        """
+        config = make_config_with_mount(db_path=db_path)
+        _write_cron_md(mount_path, "alice", """\
+# My jobs
+
+```toml
+[[jobs]]
+name = "nightly"
+cron = "0 3 * * *"
+prompt = "Summarize"
+brain = "native"
+```
+""")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(
+                conn, "alice", load_cron_jobs(config, "alice"), is_admin=True)
+            row = db.get_scheduled_job_by_name(conn, "alice", "nightly")
+            assert row.brain == "native"
+
+        assert update_job_enabled_in_cron_md(config, "alice", "nightly", False)
+
+        rewritten = load_cron_jobs(config, "alice")
+        assert len(rewritten) == 1
+        assert rewritten[0].enabled is False
+        assert rewritten[0].brain == "native", "the rewrite kept the pin"
+
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", rewritten, is_admin=True)
+            row = db.get_scheduled_job_by_name(conn, "alice", "nightly")
+        assert row.brain == "native", "and the re-sync did not clear it"
+
+    def test_migrate_db_job_with_brain_to_file(
+        self, db_path, mount_path, make_config_with_mount
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, brain)
+                   VALUES (?, ?, ?, ?, 1, ?)""",
+                ("alice", "nightly", "0 3 * * *", "Summarize", "native"),
+            )
+            assert migrate_db_jobs_to_file(conn, config, "alice")
+
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        assert 'brain = "native"' in cron_path.read_text()
+        assert load_cron_jobs(config, "alice")[0].brain == "native"
+
+    def test_a_module_row_keeps_a_null_brain_across_a_sync(self, db_path):
+        """The `_module.*` prefix is filtered out of both halves of the sync,
+        so a file job carrying a pin cannot reach a module-managed row.
+        """
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "_module.feeds.poll", "*/15 * * * *", "poll"),
+            )
+            sync_cron_jobs_to_db(
+                conn, "alice",
+                [
+                    CronJob(name="nightly", cron="0 3 * * *", prompt="t",
+                            brain="native"),
+                    CronJob(name="_module.feeds.poll", cron="0 0 * * *",
+                            prompt="t", brain="native"),
+                ],
+                is_admin=True,
+            )
+            module_row = db.get_scheduled_job_by_name(
+                conn, "alice", "_module.feeds.poll")
+            file_row = db.get_scheduled_job_by_name(conn, "alice", "nightly")
+
+        assert module_row is not None, "the module row survives the orphan sweep"
+        assert module_row.brain is None
+        assert module_row.cron_expression == "*/15 * * * *", (
+            "and the file did not overwrite it at all")
+        assert file_row.brain == "native", (
+            "the same sync did write the file job's pin, so this is not vacuous")
+
+
+# ---------------------------------------------------------------------------
+# TestMigrateRoundTripsSkillTask
+# ---------------------------------------------------------------------------
 
 
 class TestMigrateRoundTripsSkillTask:
