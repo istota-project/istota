@@ -2626,6 +2626,19 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     sibling env file the daemon does source, and only a key missing from both
     is absence. The length is all that is ever read out of that file.
 
+    **And absence itself is two verdicts rather than one**, because empty is a
+    posture on one shape and the defect on the others. ``istota_secret_key``
+    defaults to ``""``, ``secrets.env.j2`` renders the line only when it is
+    non-empty, and the defaults file documents empty as *disabling* the store —
+    so a hand-written Ansible inventory can be deliberately keyless, and a FAIL
+    there pages an operator at every boot, every scheduler interval, ``!check``
+    and the self-check heartbeat for a decision they made. ``verdict`` already
+    draws that line: a warning that pages someone is a failure wearing the
+    wrong label. So the ``secrets`` table settles it — rows present is the
+    original defect and stays FAIL, an observed empty table is WARN, and a
+    table that could not be read stays FAIL because it has established nothing.
+    Only the count is read; no row is decrypted and no ciphertext is selected.
+
     Spawns nothing, so it is safe under ``probe=False``. Never reports the
     value or any prefix of it: a ``CheckResult`` is rendered into the boot log
     and the admin dashboard.
@@ -2691,14 +2704,90 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
             ),
         )
 
+    # Absent, and what that costs is not one answer. `istota_secret_key`
+    # defaults to `""` and `secrets.env.j2` renders the line only when it is
+    # non-empty, with the defaults file documenting empty as *disabling* the
+    # store — so a bare-metal deployment can legitimately run without one, and
+    # paging that operator at every boot and every scheduler sweep is a warning
+    # wearing a failure's label (`verdict`'s own docstring draws that line).
+    # The same absence on a deployment that has stored something is the defect
+    # this check was written for.
+    #
+    # The `secrets` table is the discriminator, and the split is deliberately
+    # asymmetric: only an *observed* empty table softens the verdict. A table
+    # that could not be read has not established that nothing is stored, so it
+    # keeps the FAIL.
+    stored = _stored_secret_count(config)
+    if stored == 0:
+        return CheckResult(
+            name,
+            WARN,
+            f"{var} is not set and the secrets table is empty, so the "
+            f"encrypted store is off — nothing is unreachable yet, but every "
+            f"attempt to store a credential will raise",
+            remedy=_secret_key_remedy(config),
+        )
+    counted = (
+        f"{stored} stored credential{'s' if stored != 1 else ''} "
+        if stored > 0
+        else "any stored credential "
+    )
     return CheckResult(
         name,
         FAIL,
-        f"{var} is not set, so no stored credential can be encrypted or read "
+        f"{var} is not set, so {counted}can be neither encrypted nor read "
         f"back — the secrets table is unreachable and a connected service "
         f"reports as unconfigured rather than as broken",
         remedy=_secret_key_remedy(config),
     )
+
+
+def _stored_secret_count(config: "Config") -> int:
+    """How many rows the ``secrets`` table holds, or ``-1`` if unreadable.
+
+    Three values, not two, because the third is what keeps the softening above
+    honest: ``0`` is an *observed* empty store, ``-1`` is a question this could
+    not settle, and only the first is evidence that nothing is currently
+    unreachable.
+
+    Every row, not the rows of currently-configured users the way
+    :func:`_native_key_holders` scopes its count. The questions differ. That
+    one asks "does this user hold a native brain key", where a row left behind
+    by a removed user would report a credential nobody has; this asks "is
+    anything in here now undecryptable", and a stale row is exactly as
+    undecryptable as a live one. Counting all of them also avoids the trap that
+    scoping carries here: ``config.users`` can be empty on a shape whose rows
+    are real, and an empty scope would then read as an empty store and soften
+    the verdict on the deployment that most needs it.
+
+    ``mode=ro`` like every other database-touching check here, for the reason
+    :func:`_native_key_holders` states: a read-write open materializes the
+    ``-wal``/``-shm`` sidecars and, against a missing file, creates a zero-byte
+    database that later reads as corruption rather than as absence.
+
+    Never decrypts and never selects ``encrypted_value``, so no ciphertext
+    enters this process. Never raises — one caller is the daemon's boot
+    sequence — and an unreadable table is ``-1`` rather than nought, which is
+    the direction that reports a problem rather than hiding one.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    conn = None
+    try:
+        db_path = Path(getattr(config, "db_path", "") or "")
+        if not db_path.name or not db_path.exists():
+            return -1
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        row = conn.execute("SELECT COUNT(*) FROM secrets").fetchone()
+        return int(row[0]) if row else -1
+    except Exception:  # noqa: BLE001 - a check never raises
+        return -1
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001, S110 - nothing to do about it
+                pass
 
 
 def _secret_key_env_file(config: "Config") -> Path | None:

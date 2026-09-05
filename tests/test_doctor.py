@@ -2618,6 +2618,132 @@ class TestSecretKey:
         would report a missing key about nothing."""
         assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
 
+    # --- What an absent key actually costs, which is not one answer -------
+    #
+    # `[defaults] istota_secret_key` documents an empty value as *disabling*
+    # the secrets store, so a bare-metal deployment can legitimately run
+    # without one — and a check that pages that operator on every scheduler
+    # sweep is a warning wearing a failure's label. But the same absence on a
+    # deployment that has stored something is the original defect: those rows
+    # cannot be decrypted and every connected service built on them reports as
+    # unconfigured rather than as broken.
+    #
+    # So the discriminator is the `secrets` table itself, and the split is
+    # deliberately asymmetric: only an *observed* empty table softens the
+    # verdict. A table that could not be read has not established that nothing
+    # is stored, so it keeps the FAIL — the same "never pass on a question you
+    # could not settle" rule the sandbox and session-log checks follow.
+
+    def _db_with_secrets(self, config, rows: int):
+        """Create the framework DB and put `rows` rows in `secrets`."""
+        import sqlite3
+
+        db_path = Path(config.db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS secrets ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " user_id TEXT NOT NULL, service TEXT NOT NULL,"
+                " key TEXT NOT NULL, encrypted_value BLOB NOT NULL,"
+                " UNIQUE(user_id, service, key))"
+            )
+            for n in range(rows):
+                conn.execute(
+                    "INSERT INTO secrets (user_id, service, key, encrypted_value)"
+                    " VALUES (?, ?, ?, ?)",
+                    ("someone", "garmin", f"key{n}", b"ciphertext"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_absence_with_stored_credentials_fails_naming_the_count(
+        self, make_config, monkeypatch
+    ):
+        """The original defect, stated as a number. Two rows exist and neither
+        can be decrypted; `_native_key_holders` would report nought holders and
+        the deployment would read as one nobody had configured."""
+        self._clear(monkeypatch)
+        config = make_config()
+        self._db_with_secrets(config, 2)
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "2" in result.detail
+        assert result.remedy
+
+    def test_absence_with_an_observed_empty_store_warns(
+        self, make_config, monkeypatch
+    ):
+        """The documented opt-out. Nothing is stored, so nothing is currently
+        unreachable — but every future `istota secret ensure` will raise, so
+        this is reported rather than passed."""
+        self._clear(monkeypatch)
+        config = make_config()
+        self._db_with_secrets(config, 0)
+        result = self._run(config)
+        assert result.status == WARN
+        assert result.remedy
+
+    def test_an_empty_store_does_not_page(self, make_config, monkeypatch):
+        """The point of the WARN. `verdict` is False on any FAIL and unmoved by
+        a WARN, so this is what keeps a deliberate posture out of the daemon's
+        boot alert and off every scheduler sweep."""
+        self._clear(monkeypatch)
+        config = make_config()
+        self._db_with_secrets(config, 0)
+        healthy, _ = doctor.verdict([self._run(config)])
+        assert healthy is True
+
+    def test_a_populated_store_does_page(self, make_config, monkeypatch):
+        """The control for the test above: the softening must not reach the
+        case the check was written for."""
+        self._clear(monkeypatch)
+        config = make_config()
+        self._db_with_secrets(config, 1)
+        healthy, _ = doctor.verdict([self._run(config)])
+        assert healthy is False
+
+    def test_an_unreadable_database_keeps_the_failure(
+        self, make_config, monkeypatch
+    ):
+        """`make_config` names a database that does not exist. Absence of the
+        table is not evidence of an empty store, so the verdict stays FAIL —
+        softening on an unanswered question is how a check stops working."""
+        self._clear(monkeypatch)
+        config = make_config()
+        assert not Path(config.db_path).exists()
+        assert self._run(config).status == FAIL
+
+    def test_the_row_count_query_leaves_no_sidecars_and_no_database(
+        self, make_config, monkeypatch
+    ):
+        """Read-only, like every other database-touching check here. A
+        read-write open materializes `-wal`/`-shm` and, against a missing
+        file, creates a zero-byte database that later reads as corruption
+        rather than as absence — and a diagnostic run as root beside a stopped
+        daemon would leave all of it owned by the wrong user."""
+        self._clear(monkeypatch)
+        config = make_config()
+        self._run(config)
+        db_path = Path(config.db_path)
+        assert not db_path.exists()
+        assert not db_path.with_suffix(db_path.suffix + "-wal").exists()
+        assert not db_path.with_suffix(db_path.suffix + "-shm").exists()
+
+    def test_a_present_key_never_reads_the_database(
+        self, make_config, monkeypatch
+    ):
+        """Ordering: the store's rows only matter once the key is absent. A
+        deployment with a usable key is OK whatever is in the table, and the
+        check must not pay for a query to say so."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+        config = make_config()
+        self._db_with_secrets(config, 3)
+        assert self._run(config).status == OK
+
 
 class TestSandboxCredentials:
     """`security.sandbox_credentials` — ISSUE-396.
