@@ -1474,7 +1474,90 @@ class TestSelfCheck:
         assert rc == 0
         text = "\n".join(out)
         assert "no failures, 1 warning." in text
-        assert f"istota doctor -c {config_path}" in text
+        assert f"istota -c {config_path} doctor" in text
+
+    def test_every_command_the_self_check_prints_actually_parses(
+        self, tmp_path, monkeypatch,
+    ):
+        """The hint was `istota doctor -c PATH`, which argparse rejects.
+
+        `-c` is a *global* option on this CLI, declared on the top-level parser
+        before `add_subparsers`, so it has to precede the subcommand; after it,
+        argparse reports a usage error and exits 2. Every one of the three
+        places the self-check offers a follow-up printed it the wrong way
+        round, so an operator copying the line — which is the entire point of
+        printing it — got an error instead of a report.
+
+        Nothing caught it because the assertion above compared the string
+        against itself: the test was written from the same wrong line as the
+        code. So this runs the real CLI rather than matching text. The config
+        path does not exist on purpose, which makes it cheap — `config_visibility`
+        refuses at the gate and no check runs — while still proving the argv
+        parses, since an unparseable one never reaches the gate at all.
+        """
+        import re as _re
+        import shlex
+        import shutil
+        import subprocess
+
+        from istota import doctor
+        monkeypatch.setattr(
+            doctor, "run_checks",
+            lambda config, **kw: [
+                doctor.CheckResult("runtime.a", doctor.WARN, "something to know"),
+            ],
+        )
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+
+        # Every `istota …` line, then narrowed to the doctor hints. Both steps
+        # are load-bearing and each was learned the hard way.
+        #
+        # Anchoring the scan on `istota -c` instead would find nothing under
+        # the defect and fail on "printed no command" — which is equally what a
+        # self-check that stopped printing anything looks like, so the guard
+        # would be catching this by accident of its own pattern rather than by
+        # testing the argv.
+        #
+        # And the run is scoped to `doctor` because this executes what it
+        # scrapes: `_print_next_steps` also prints `istota serve`, and the
+        # first version of this test started a real server and sat there until
+        # the 120-second timeout. Only read-only diagnostics are ever run.
+        commands = {
+            match.group(1).strip(" .`")
+            for line in out
+            for match in [_re.search(r"(istota .*?)(?:$|`)", line)]
+            if match
+        }
+        printed = {c for c in commands if "doctor" in shlex.split(c)}
+        assert printed, (
+            f"the self-check printed no doctor command to check; saw {sorted(commands)}"
+        )
+
+        # The console script, not `python -m istota`: the package ships no
+        # `__main__.py`, so `-m` exits 1 with "cannot be directly executed"
+        # before argparse is reached — identically for a correct argv and a
+        # broken one. Written that way first, this test passed against the very
+        # defect it was added for.
+        binary = shutil.which("istota")
+        if binary is None:
+            pytest.skip("istota console script is not on PATH in this environment")
+
+        for command in printed:
+            argv = shlex.split(command)
+            assert argv[0] == "istota"
+            result = subprocess.run(
+                # `--only` bounds the work: the argv has to parse, and the 31
+                # checks behind it are covered by their own tests.
+                [binary, *argv[1:], "--only", "runtime.platform"],
+                capture_output=True, text=True, timeout=120,
+            )
+            # 2 is argparse's usage error. Any other status means the argv was
+            # understood, which is the whole property.
+            assert result.returncode != 2, (
+                f"`{command}` does not parse:\n{result.stderr[-600:]}"
+            )
 
     def test_the_failure_path_redacts(self, tmp_path, monkeypatch):
         """An exception out of a check can carry a config value in its message,

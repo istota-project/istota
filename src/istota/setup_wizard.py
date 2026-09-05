@@ -1184,7 +1184,7 @@ def _run_self_check(config, config_path: Path, out) -> None:
             tail = f", {warned} warning{'' if warned == 1 else 's'}" if warned else ""
             out(f"  no failures{tail}.")
             if warned:
-                out(f"  Full report: istota doctor -c {config_path}")
+                out(f"  Full report: istota -c {config_path} doctor")
             return
         out(doctor.render_text(failures, secrets=secrets))
         out("")
@@ -1192,7 +1192,7 @@ def _run_self_check(config, config_path: Path, out) -> None:
             "  Setup itself succeeded — the config, secrets and database are "
             "written. The checks above are what still needs a look."
         )
-        out(f"  Full report: istota doctor -c {config_path}")
+        out(f"  Full report: istota -c {config_path} doctor")
     except Exception as exc:  # noqa: BLE001 - a diagnostic must not fail the install
         logger.debug("setup self-check raised", exc_info=True)
         # Redacted for the same reason `render_text` demands `secrets`: an
@@ -1209,7 +1209,7 @@ def _run_self_check(config, config_path: Path, out) -> None:
         out("")
         out(
             f"Self-check could not run ({detail}); setup itself succeeded. "
-            f"Try `istota doctor -c {config_path}`."
+            f"Try `istota -c {config_path} doctor`."
         )
 
 

@@ -114,16 +114,16 @@ max_tokens = {{ istota_brain_native_max_tokens | default(16384, true) }}
 # When base_url is OpenRouter, fetch its public model list once/process for real
 # per-model window / capabilities / prices (self-updating, disk-cached, never
 # fatal). No effect for a non-OpenRouter endpoint — set context_window there.
-model_catalog_fetch = {{ istota_brain_native_model_catalog_fetch | default(true, true) | lower }}
+model_catalog_fetch = {{ istota_brain_native_model_catalog_fetch | default(true) | lower }}
 model_catalog_cache_ttl_hours = {{ istota_brain_native_model_catalog_cache_ttl_hours | default(24, true) }}
 # Spill full over-cap Bash output to a task-scoped temp file (named in the tool
 # result) instead of dropping the tail; default on.
-bash_spill_full_output = {{ istota_brain_native_bash_spill_full_output | default(true, true) | lower }}
+bash_spill_full_output = {{ istota_brain_native_bash_spill_full_output | default(true) | lower }}
 # Turn-budget awareness nudge: as a tool-bearing run approaches max_turns, inject
 # an environment notice so the model paces itself and delivers a partial answer
 # instead of getting capped mid-plan. Fires once at the early-percent mark, then
 # once each as absolute steps-remaining crosses each level. Default on.
-turn_budget_nudge = {{ istota_brain_native_turn_budget_nudge | default(true, true) | lower }}
+turn_budget_nudge = {{ istota_brain_native_turn_budget_nudge | default(true) | lower }}
 turn_budget_nudge_early_percent = {{ istota_brain_native_turn_budget_nudge_early_percent | default(50, true) }}
 turn_budget_nudge_remaining = {{ istota_brain_native_turn_budget_nudge_remaining | default([15, 5], true) | to_json }}
 # Soft wall-clock deadline: stop the loop a little before scheduler.task_timeout_
@@ -157,7 +157,7 @@ api_key = "{{ istota_brain_native_api_key }}"
 # credential-free and SSRF-hardened (private/reserved destinations refused on
 # every hop, connection pinned to the validated IP). Safe defaults; the whole
 # block is optional.
-enabled = {{ istota_brain_native_web_fetch_enabled | default(true, true) | lower }}
+enabled = {{ istota_brain_native_web_fetch_enabled | default(true) | lower }}
 allow_http = {{ istota_brain_native_web_fetch_allow_http | default(false, true) | lower }}
 timeout_seconds = {{ istota_brain_native_web_fetch_timeout_seconds | default(20, true) }}
 max_bytes = {{ istota_brain_native_web_fetch_max_bytes | default(5000000, true) }}

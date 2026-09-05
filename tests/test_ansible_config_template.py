@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import tomllib
 from dataclasses import fields, is_dataclass
 from pathlib import Path
@@ -1490,3 +1491,97 @@ class TestTheNativeSessionLogBlock:
         named = set(re.findall(r'"([a-z_]+)"', block))
 
         assert named == {f.name for f in fields(SessionLogConfig)}
+
+
+# ---------------------------------------------------------------------------
+# `| default(x, true)` on a boolean discards the operator's `false`.
+# ---------------------------------------------------------------------------
+
+
+class TestABooleanFalseSurvivesTheTemplate:
+    """Jinja's `default(x, true)` substitutes on *falsy*, not on undefined.
+
+    So `default(true, true)` returns `true` for a variable the operator
+    explicitly set to `false` — the setting is accepted by Ansible, written
+    into the inventory, and silently discarded at render. `default(false,
+    true)` is unharmed only by luck, since its substitute equals the value
+    being discarded.
+
+    The one that matters is `[brain.native.web_fetch] enabled`, whose own line
+    in `defaults/main.yml` reads `master switch; false omits the tool`. That
+    tool runs in the daemon's network namespace rather than behind the bwrap
+    CONNECT allowlist, so an operator turning it off is making a security
+    decision — and it did not take.
+
+    Parametrized over every boolean the template renders this way, because all
+    four are the same defect and a fix that repaired one would leave the
+    others reading as deliberate.
+    """
+
+    #: (variable, section path, key). Every `| default(true, true)` in the
+    #: template — derived below as well as listed, so the two must agree.
+    BOOLEANS = [
+        ("istota_brain_native_model_catalog_fetch",
+         ("brain", "native"), "model_catalog_fetch"),
+        ("istota_brain_native_bash_spill_full_output",
+         ("brain", "native"), "bash_spill_full_output"),
+        ("istota_brain_native_turn_budget_nudge",
+         ("brain", "native"), "turn_budget_nudge"),
+        ("istota_brain_native_web_fetch_enabled",
+         ("brain", "native", "web_fetch"), "enabled"),
+    ]
+
+    #: `[brain.native]` renders only when native is the kind, the fallback, or a
+    #: source_type_overrides target, so every case here needs that shape — the
+    #: default render has no `[brain.native]` table at all and a lookup into it
+    #: raises rather than reporting the value it meant to check.
+    NATIVE = {"istota_brain_kind": "native"}
+
+    @staticmethod
+    def _dig(parsed: dict, path, key):
+        node = parsed
+        for part in path:
+            node = node[part]
+        return node[key]
+
+    @pytest.mark.parametrize(("variable", "path", "key"), BOOLEANS)
+    def test_the_default_is_true_so_the_test_below_means_something(
+        self, variable, path, key
+    ):
+        """Control. Each of these renders `true` unset, which is why a
+        discarded `false` looks like a working deployment."""
+        parsed = tomllib.loads(render(**self.NATIVE))
+        assert self._dig(parsed, path, key) is True
+
+    @pytest.mark.parametrize(("variable", "path", "key"), BOOLEANS)
+    def test_an_explicit_false_reaches_the_rendered_config(
+        self, variable, path, key
+    ):
+        parsed = tomllib.loads(render(**self.NATIVE, **{variable: False}))
+        assert self._dig(parsed, path, key) is False, (
+            f"{variable}: false was discarded by the template. `default(x, "
+            "true)` substitutes on falsy, so the operator's answer never "
+            "reaches config.toml."
+        )
+
+    def test_the_template_has_no_falsy_discarding_boolean_default_left(self):
+        """The drift guard, and the reason the list above is not the whole
+        test: `default(true, true)` is a shape someone will reach for again,
+        and it is wrong every time on a boolean whose default is true.
+
+        Numeric defaults are deliberately not covered here. `default(20,
+        true)` discards a `0` the same way, but whether `0` is a meaningful
+        answer differs per key — for `max_redirects` it is, for a timeout it
+        is not — so that is a per-key audit rather than one rule, and it is
+        recorded as outstanding rather than swept in.
+        """
+        offenders = re.findall(
+            r"^(\S*?)\s*=.*\|\s*default\(\s*true\s*,\s*true\s*\)",
+            TEMPLATE.read_text(),
+            re.M,
+        )
+        assert not offenders, (
+            f"config.toml.j2 renders {offenders} with `default(true, true)`, "
+            "which returns true for an operator's explicit false. Use "
+            "`default(true)`, which substitutes only when undefined."
+        )
