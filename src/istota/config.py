@@ -3602,6 +3602,14 @@ def load_config(config_path: Path | None = None) -> Config:
     # for "where does this credential come from" across all deploy paths.
     _env_secret_overrides = [
         ("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nextcloud", "app_password"),
+        # `[caldav]` is the section written for the shape with no Nextcloud, so
+        # this is that shape's calendar credential — and it was the only one in
+        # the tree reachable by no route but the config file. The standalone
+        # wizard had to write it into `config.toml` under a generated header
+        # whose own second line says secrets live in the sibling `istota.env`
+        # and never here. Redaction needs no companion entry: `password` is
+        # caught by `admin_config_view.SECRET_NAME_PATTERNS` on its name.
+        ("ISTOTA_CALDAV_PASSWORD", "caldav", "password"),
         ("ISTOTA_EMAIL_IMAP_PASSWORD", "email", "imap_password"),
         ("ISTOTA_EMAIL_SMTP_PASSWORD", "email", "smtp_password"),
         ("ISTOTA_DEVELOPER_GITLAB_TOKEN", "developer", "gitlab_token"),

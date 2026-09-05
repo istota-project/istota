@@ -127,6 +127,53 @@ class TestRenderers:
 # ---------------------------------------------------------------------------
 
 
+class TestWebPortPrompt:
+    """A typo at the port prompt used to end the installer in a traceback.
+
+    `port = int(_ask(...))` with no guard, so `8766 ` with a stray character,
+    a pasted URL, or a mis-sequenced answer raised `ValueError` straight out
+    of `collect_answers` — before the config, the env file, the admins file or
+    the database existed, so nothing was half-written, but a first-run
+    installer that ends in a stack trace on a typo is a bad first impression
+    of the thing being installed. `_ask_yes_no` was fixed for the same class
+    of input a change earlier; this is the other prompt that parses.
+    """
+
+    def _collect(self, answers, out=None):
+        args = _args(workspace="/tmp/ws-unused", user="alice", brain="claude_code")
+        args.port = None
+        it = iter(answers)
+        return setup_wizard.collect_answers(
+            args,
+            input_fn=lambda prompt: next(it, ""),
+            which_fn=lambda _: "/usr/bin/claude",
+            out=out or (lambda *a: None),
+            getpass_fn=lambda *a, **k: "",
+        )
+
+    def test_a_non_integer_re_asks_rather_than_raising(self):
+        said = []
+        # display name, timezone, then the bad port, then a good one.
+        a = self._collect(["alice", "UTC", "me@fastmail.com", "9000"], out=said.append)
+        assert a.web_port == 9000
+        assert any("whole number" in line for line in said)
+
+    def test_a_blank_takes_the_default(self):
+        assert self._collect(["alice", "UTC", ""]).web_port == setup_wizard.DEFAULT_PORT
+
+    def test_a_port_outside_the_range_re_asks(self):
+        """0 and 70000 are not ports. `[web] port` reaches a bind, and the
+        failure would land at `istota serve` rather than here."""
+        a = self._collect(["alice", "UTC", "70000", "0", "8080"])
+        assert a.web_port == 8080
+
+    def test_it_gives_up_on_the_default_rather_than_looping(self):
+        """Bounded like `_ask_yes_no`, and for its reason: a non-interactive
+        `input_fn` returning the same value forever must not spin."""
+        a = self._collect(["alice", "UTC", "nope", "nope", "nope", "nope"])
+        assert a.web_port == setup_wizard.DEFAULT_PORT
+
+
 class TestTimezone:
     def test_is_valid_timezone(self):
         assert setup_wizard._is_valid_timezone("America/Los_Angeles")
@@ -905,9 +952,16 @@ class TestCaldavRenderer:
         assert "[caldav]" in toml
         assert 'url = "https://caldav.example.com/dav"' in toml
         assert 'username = "alice@example.com"' in toml
-        assert 'password = "hunter2"' in toml
+        # The password is a credential, so it goes to istota.env through
+        # `ISTOTA_CALDAV_PASSWORD` like every other one. The block names where.
+        assert "hunter2" not in toml
+        assert "ISTOTA_CALDAV_PASSWORD" in toml
 
-    def test_it_parses_back_into_the_caldav_properties(self, tmp_path):
+    def test_it_parses_back_into_the_caldav_properties(self, tmp_path, monkeypatch):
+        """The two halves rejoin at `load_config`: url and username off the
+        TOML, password off `ISTOTA_CALDAV_PASSWORD` through the
+        `_env_secret_overrides` table. `istota serve` sources istota.env, so
+        this is the state the daemon actually runs in."""
         a = Answers(
             workspace=tmp_path / "ws", user_id="alice",
             caldav_url="https://caldav.example.com/dav/",
@@ -916,6 +970,8 @@ class TestCaldavRenderer:
         )
         p = tmp_path / "config.toml"
         p.write_text(render_config_toml(a))
+        assert "ISTOTA_CALDAV_PASSWORD=hunter2" in render_env_file(a)
+        monkeypatch.setenv("ISTOTA_CALDAV_PASSWORD", "hunter2")
         from istota.config import load_config
         cfg = load_config(p)
         assert cfg.caldav.url == "https://caldav.example.com/dav/"
@@ -928,33 +984,46 @@ class TestCaldavRenderer:
         ["ab\x1bc", "pa\x7fss", "nul\x00here", "tab\there", "back\\slash", 'qu"ote'],
     )
     def test_a_pasted_control_character_still_parses(self, tmp_path, value):
-        """TOML forbids raw control characters in a basic string, and a pasted
-        password is the realistic carrier. An unparseable file here raises out
-        of `_bootstrap`'s `load_config` — after the config, env file, admins
-        file and database have all been written."""
+        """The config file must stay parseable whatever was pasted, and moving
+        the password out of it does not settle that on its own — the *username*
+        is the same paste and still lands in a TOML basic string, which forbids
+        a raw control character. An unparseable file here raises out of
+        `_bootstrap`'s `load_config`, after the config, env file, admins file
+        and database have all been written."""
         import tomllib
         a = Answers(
             workspace=tmp_path / "ws", user_id="alice",
             caldav_url="https://caldav.example.com/dav",
-            caldav_username="alice@example.com",
+            caldav_username=value,
             caldav_password=value,
         )
         parsed = tomllib.loads(render_config_toml(a))
-        assert parsed["caldav"]["password"] == value
+        assert parsed["caldav"]["username"] == value
+        # And the password reaches the env file whole, on the one line that
+        # carries it. A newline is the shape that would split it into a second
+        # KEY=VALUE line, so it is asserted rather than assumed.
+        rendered = render_env_file(a)
+        assert f"ISTOTA_CALDAV_PASSWORD={value}" in rendered.splitlines()
 
-    def test_the_header_stops_claiming_no_secrets_live_here(self, tmp_path):
-        """The file says where secrets live, so it has to stay right about the
-        one that lands in it."""
+    def test_the_header_keeps_claiming_no_secrets_live_here(self, tmp_path):
+        """The generated header says secrets live in istota.env and never in
+        this file. That was true of every credential except the CalDAV
+        password, which had no `_env_secret_overrides` row and so nowhere else
+        to go; adding the row is what makes the sentence unconditional again.
+
+        Asserted on both branches, because the earlier version of this weakened
+        the header when the block was present — and a header with an exception
+        in it is one a reader stops trusting."""
         without = render_config_toml(Answers(workspace=tmp_path / "ws"))
-        assert "never here" in without
-        with_key = render_config_toml(
+        with_block = render_config_toml(
             Answers(
                 workspace=tmp_path / "ws", caldav_url="https://caldav.example.com",
-                caldav_password="hunter2",
+                caldav_username="alice@example.com", caldav_password="hunter2",
             )
         )
-        assert "never here" not in with_key
-        assert "[caldav] password" in with_key
+        assert "never here" in without
+        assert "never here" in with_block
+        assert "hunter2" not in with_block
 
 
 class TestCaldavCollection:
@@ -976,7 +1045,7 @@ class TestCaldavCollection:
         cfg = load_config(config_path)
         assert cfg.caldav_url == "https://caldav.example.com/dav"
         assert cfg.caldav_username == "alice@example.com"
-        assert cfg.caldav_password == "hunter2"
+        assert _caldav_password_on_disk(config_path) == "hunter2"
 
     def test_the_password_is_read_without_echo(self, tmp_path):
         args = _args(workspace=str(tmp_path / "ws"), user="alice")
@@ -986,19 +1055,29 @@ class TestCaldavCollection:
         assert p.was_asked_secretly("CalDAV password")
         assert not p.was_asked("CalDAV password")
 
-    def test_the_config_file_is_private_when_it_carries_the_password(self, tmp_path):
-        """``Config.caldav_password`` reads the TOML field and ``load_config``
-        has no ``[caldav]`` entry in its env-override table, so the password has
-        nowhere else to go — which makes the file's mode the boundary."""
+    def test_the_password_goes_to_the_env_file_and_not_the_config(self, tmp_path):
+        """The placement, asserted from both ends.
+
+        This used to be the other way round — the password in `config.toml`,
+        with that file narrowed to 0600 to compensate — because
+        `Config.caldav_password` read only the TOML field. Adding the
+        `_env_secret_overrides` row moved it onto the same channel every other
+        credential uses, which is what let the config file go back to the umask
+        default and the mode exception disappear.
+
+        Both halves are asserted because either alone passes in a broken state:
+        absent from the TOML is equally true of a password that reached
+        nowhere, and present in istota.env is equally true of one written to
+        both."""
         import stat
         args = _args(workspace=str(tmp_path / "ws"), user="alice")
         rc, config_path, _ = _run_prompted(args, tmp_path, self._prompts())
         assert rc == 0
-        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
-        # And it is not duplicated into the env file, which has no reader for it.
+
+        assert "hunter2" not in config_path.read_text()
         env = (config_path.parent / "istota.env").read_text()
-        assert "hunter2" not in env
-        assert "CALDAV" not in env.upper()
+        assert "ISTOTA_CALDAV_PASSWORD=hunter2" in env.splitlines()
+        assert stat.S_IMODE((config_path.parent / "istota.env").stat().st_mode) == 0o600
 
     def test_a_config_with_no_caldav_password_is_not_narrowed(self, tmp_path):
         """The private write is scoped to the shape that needs it: a config
@@ -1045,6 +1124,19 @@ class TestCaldavCollection:
         assert any("No CalDAV password given" in line for line in out)
 
 
+def _caldav_password_on_disk(config_path):
+    """What the daemon would resolve, from the two files the wizard wrote.
+
+    `load_config` alone is not the answer any more: the url and username come
+    off `config.toml` while the password arrives through
+    `ISTOTA_CALDAV_PASSWORD`, which `istota serve` sources from the sibling
+    `istota.env`. A test asserting on `load_config(config_path)` in a process
+    that never sourced that file reads a blank password on a correct install.
+    """
+    values = setup_wizard._read_env_values(config_path.parent / "istota.env")
+    return values.get("ISTOTA_CALDAV_PASSWORD", "")
+
+
 class TestCaldavSurvivesARerun:
     """``--force`` rewrites config.toml wholesale, and it is the only home this
     password has — so a re-run that collects nothing must not delete it."""
@@ -1065,11 +1157,16 @@ class TestCaldavSurvivesARerun:
 
     def test_read_existing_caldav_reads_the_block_back(self, tmp_path):
         config_path = self._first_run(tmp_path)
-        assert setup_wizard.read_existing_caldav(config_path) == {
+        assert setup_wizard.read_existing_caldav(
+            config_path, config_path.parent / "istota.env"
+        ) == {
             "url": "https://caldav.example.com/dav",
             "username": "alice@example.com",
             "password": "hunter2",
         }
+        # Without the env file it recovers the server but not the credential,
+        # which is the state `_collect_caldav` must not write a block from.
+        assert setup_wizard.read_existing_caldav(config_path)["password"] == ""
 
     def test_read_existing_caldav_never_raises(self, tmp_path):
         assert setup_wizard.read_existing_caldav(tmp_path / "nope.toml") == {}
@@ -1089,9 +1186,8 @@ class TestCaldavSurvivesARerun:
         assert rc == 0
         assert config_path2 == config_path
         from istota.config import load_config
-        cfg = load_config(config_path)
-        assert cfg.caldav_url == "https://caldav.example.com/dav"
-        assert cfg.caldav_password == "hunter2"
+        assert load_config(config_path).caldav_url == "https://caldav.example.com/dav"
+        assert _caldav_password_on_disk(config_path) == "hunter2"
 
     def test_an_interactive_rerun_offers_to_keep_it(self, tmp_path):
         config_path = self._first_run(tmp_path)
@@ -1102,8 +1198,7 @@ class TestCaldavSurvivesARerun:
         assert p.was_asked("Keep the configured CalDAV server")
         # And it did not ask to set one up from scratch.
         assert not p.was_asked("Point calendar at an external")
-        from istota.config import load_config
-        assert load_config(config_path).caldav_password == "hunter2"
+        assert _caldav_password_on_disk(config_path) == "hunter2"
 
     def test_declining_the_keep_falls_through_to_a_fresh_setup(self, tmp_path):
         """Otherwise the block would be preserved but not editable."""
@@ -1121,9 +1216,8 @@ class TestCaldavSurvivesARerun:
         rc, _, _ = _run_prompted(args2, tmp_path, p)
         assert rc == 0
         from istota.config import load_config
-        cfg = load_config(config_path)
-        assert cfg.caldav_url == "https://dav2.example.com/dav"
-        assert cfg.caldav_password == "correcthorse"
+        assert load_config(config_path).caldav_url == "https://dav2.example.com/dav"
+        assert _caldav_password_on_disk(config_path) == "correcthorse"
 
     def test_declining_both_drops_it_and_says_so(self, tmp_path):
         config_path = self._first_run(tmp_path)
