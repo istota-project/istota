@@ -110,14 +110,17 @@ istota_custom_system_prompt: true
 istota_brain_kind: "claude_code"
 
 # Which brain kinds a room may pin for itself ([brain] room_selectable), with
-# `!brain` in the room or the web room settings. Empty means none may, so the
+# `!brain` in the room or the web room settings, and which a scheduled job may
+# pin with `brain` in CRON.md. The name is narrower than the setting: one list
+# bounds every pin written outside this play. Empty means none may, so the
 # feature is inert until you name kinds here. A gate rather than a preference:
 # brain kind decides which process holds the agent loop, what tool set it
 # registers and which SandboxProfile is built, so it is not something an upgrade
-# should switch on. Writing a room's brain is admin-only on top of this, and a
-# pinned room does not fail over — it runs the brain it names or fails saying
-# why. Listing a kind also widens the doctor checks for it (`claude` on PATH,
-# tmux, a native API key), whether or not any room has selected it.
+# should switch on. Writing a room's brain, or a job's, is admin-only on top of
+# this, and neither a pinned room nor a pinned job fails over — it runs the
+# brain it names or fails saying why. Listing a kind also widens the doctor
+# checks for it (`claude` on PATH, tmux, a native API key), whether or not
+# anything has selected it.
 # Values: a list drawn from "claude_code", "native", "tmux_claude".
 istota_brain_room_selectable: []
 

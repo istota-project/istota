@@ -288,13 +288,23 @@ def resolve_brain_kind(source_type, brain_config, override: str | None = None):
 
         override  >  [brain.source_type_overrides][source_type]  >  [brain] kind
 
-    ``override`` is the task's own pinned kind (``tasks.brain``, filled from
-    ``rooms.brain`` when the task was created). It wins outright when it names a
-    buildable kind that the operator listed in ``[brain] room_selectable``. It
-    sits above the source-type layer because the two answer different questions:
+    ``override`` is the task's own pinned kind (``tasks.brain``), and it has
+    **two** producers: ``rooms.brain``, filled when the task was created, and
+    ``scheduled_jobs.brain``, a CRON.md ``[[jobs]] brain`` field passed through
+    by ``check_scheduled_jobs`` (ISSUE-419). This function is the sole
+    enforcement point for both and deliberately learns nothing about which one
+    it is holding — which is why the allowlist it applies is
+    ``[brain] room_selectable`` for a job as much as for a room, and why there
+    is no second list. The job pin carries a gate this one does not, at sync
+    time: CRON.md is model-writable, so ``cron_loader.fj_brain_or_none`` drops
+    the field for a non-admin before it ever reaches a row.
+
+    An override wins outright when it names a buildable kind that the operator
+    listed in ``[brain] room_selectable``. It sits above the source-type layer
+    because the two answer different questions:
     ``source_type_overrides`` is an operator's gradual-rollout knob keyed on a
-    lane, while a room's brain is an explicit human choice about one
-    conversation, and an explicit pick a lane rule silently overrode would be
+    lane, while a pin is an explicit human choice about one conversation or one
+    job, and an explicit pick a lane rule silently overrode would be
     indistinguishable from a bug.
 
     Two refusals, each logged at WARNING and each falling through to the
@@ -305,8 +315,9 @@ def resolve_brain_kind(source_type, brain_config, override: str | None = None):
     contract an unknown ``source_type_overrides`` target already has.
 
     **An admitted override also turns availability failover off**, by returning
-    a config with ``fallback`` cleared. The room named *this* brain, so a task
-    that cannot run on it fails with the primary's own reason rather than
+    a config with ``fallback`` cleared. The room, or the job, named *this*
+    brain, so a task that cannot run on it fails with the primary's own reason
+    rather than
     quietly answering from a different model — and the two failover asymmetries
     a routed kind would otherwise inherit disappear with it. The decision is
     made here rather than in the executor because it cannot be inferred

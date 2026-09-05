@@ -710,6 +710,29 @@ knob keyed on a lane, a room's brain is an explicit human choice about one
 conversation, and an explicit pick a lane rule silently overrode would be
 indistinguishable from a bug.
 
+**Two producers write `tasks.brain`, and the allowlist bounds both.** A room's
+pin is one (`rooms.brain`, filled at `record_inbound` under the `room_surface`
+guard); a scheduled job's is the other (`scheduled_jobs.brain`, a CRON.md
+`[[jobs]] brain` field passed through by `check_scheduled_jobs`, ISSUE-419).
+`room_selectable` is therefore narrower as a name than as a setting: the
+question it answers is which kinds may be pinned from outside the operator's
+own config, and `resolve_brain_kind` applies it to any `override` it is handed
+without knowing where the value came from. That is why there is no
+`job_selectable` — a second list means either a second gate or teaching this
+function to branch on a provenance it has no reason to know, and an operator
+who sets one and forgets the other gets a silent no-op. The naming cost is
+recorded rather than paid; renaming the key touches about fifty occurrences
+across ten source files plus the Ansible template and `render-config.sh`.
+
+The job pin's own gate is a different one and sits earlier: CRON.md is
+model-writable through the `schedules` skill, so `cron_loader.fj_brain_or_none`
+drops the field at sync for a non-admin and keeps the rest of the job. Gating
+at sync rather than at dispatch is what keeps the row and the `!cron` listing
+from showing a pin the author was not allowed to write. It answers *who* may
+pin and deliberately not *what*, so an admin's unlisted kind is stored here and
+falls through at dispatch, and the listing shows it — read that line as the
+sync gate's answer rather than as a statement about which brain will run.
+
 An override is admitted only when it names a buildable kind **and** one the
 operator listed in `[brain] room_selectable`. Those are two separate refusal
 branches, each a WARNING and a fallthrough to the source-type layer, never a
@@ -764,6 +787,16 @@ a plain primary call. The room named *this* brain; a task that cannot run on it
 fails with the primary's own `stop_reason` rather than answering from a
 different model — and rather than `FALLBACK_EXHAUSTED_MARKER`'s "both brains
 are down" wording, which would be false, since only one was tried.
+
+**A pinned cron job takes the same rule, and it is a different trade rather
+than the same one.** Nobody is watching, so the argument for keeping it is
+stronger, not weaker: a job answering from a model nobody chose, unattended and
+on a schedule, is worse than one that fails where it can be seen. And it is
+seen — the task's retry ladder exhausts at 1, 4 and 16 minutes,
+`consecutive_failures` climbs, the job auto-disables at five and
+`notification_resolvers/cron_job.py` raises it in the inbox. `!cron enable` is
+the remedy. Kept rather than softened, and documented rather than assumed,
+because the reasoning above is about a person reading a room.
 
 One rule rather than three patches. Left alone, a routed kind inherits
 `fallback` and the asymmetries are arbitrary in both directions: a

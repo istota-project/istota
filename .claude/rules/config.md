@@ -417,7 +417,7 @@ native: NativeBrainConfig                       # [brain.native] block (native h
 tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
 claude_code: ClaudeCodeBrainConfig              # [brain.claude_code] block (subscription usage poll)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
-room_selectable: list[str] = []                 # [brain] room_selectable — kinds a room may pin; empty = none
+room_selectable: list[str] = []                 # [brain] room_selectable — kinds a room, or a CRON.md job, may pin; empty = none
 fallback: str = ""                              # brain kind to fall back to when primary unavailable
 fallback_on_transient: bool = True              # also reroute a persistent transient_api_error (ISSUE-212)
 fallback_cooldown_seconds: int = 900            # skip an unavailable primary this long; 0 disables stickiness
@@ -439,8 +439,17 @@ ISSUE-362 and an upgrade would otherwise drop failover silently. See
 `.claude/rules/brain.md` "Brain fallback" + `.claude/rules/executor.md`.
 
 `room_selectable` names the brain kinds a room may pin for itself through
-`!brain` or the web room settings. Empty is the default, so the feature ships
-inert and an operator opts in by naming kinds — a gate rather than a preference,
+`!brain` or the web room settings, **and** the kinds a scheduled job may pin
+with `brain` in CRON.md (ISSUE-419). The key's name is narrower than the
+setting: it bounds every pin written outside this file, since
+`resolve_brain_kind` applies it to any `override` it is handed without knowing
+the provenance. A second `job_selectable` was rejected for that reason, and the
+rename left as a follow-up rather than done here. The job pin carries one gate
+this key does not, at sync time: CRON.md is model-writable, so
+`cron_loader.fj_brain_or_none` drops the field for a non-admin — which on a
+deployment with an empty admins file is nobody. Empty is the default, so the
+feature ships inert and an operator opts in by naming kinds — a gate rather
+than a preference,
 because a brain kind decides which process holds the agent loop, what tool set
 it registers and which sandbox profile is built, and a change to an enforcement
 posture should not arrive switched on by an upgrade (`.claude/rules/brain.md` is

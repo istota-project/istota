@@ -106,6 +106,42 @@ def fj_is_disallowed_command(job: "CronJob", is_admin: bool) -> bool:
     return not is_admin
 
 
+def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
+    """A CRON.md job's brain pin, or None where the author may not set one.
+
+    CRON.md is a user file on the mount *and* is written by the model through
+    the `schedules` skill, so unlike `rooms.brain` — which only an admin may
+    write, through a gated surface — this field is model-writable. A brain kind
+    decides which process holds the agent loop, which credentials it carries and
+    which `SandboxProfile` is built, so it must not become the one enforcement-
+    shaped setting a task can choose for its own next run.
+
+    The field is dropped rather than the job refused: `fj_is_disallowed_command`
+    refuses a whole job because the command *is* the job, while a brain pin is
+    one field of a job that is otherwise fine.
+
+    This gate answers *who* may pin, and deliberately not *what* they may pin.
+    The value is bounded a second time at dispatch, where `resolve_brain_kind`
+    refuses a kind absent from `[brain] room_selectable` — the same allowlist
+    the room pin is held to, and the reason an operator can shorten that list
+    without anything having to rewrite CRON.md. So an admin naming an
+    unlisted kind is stored here and falls through there.
+
+    And the claim above is bounded by the deployment: `Config.is_admin` reads
+    an empty admins file as "everyone is an admin", which is the standalone
+    install's shape, so there this drops nothing and the model writes CRON.md
+    too. That is the `fj_is_disallowed_command` precedent rather than something
+    new — an arbitrary shell command is already admin-gated the same way — but
+    it means the enforcement here is the multi-user deployment's, not a
+    universal one.
+    """
+    if not job.brain:
+        return None
+    if not is_admin:
+        return None
+    return job.brain
+
+
 def _validate_model(name: str, user_id: str, model: str) -> None:
     """Warn on suspicious model names; never reject.
 
@@ -151,6 +187,30 @@ def _validate_effort(name: str, user_id: str, effort: str) -> None:
         logger.warning(
             "Job '%s' (user %s): effort %r not in known set %s",
             name, user_id, effort, sorted(_KNOWN_EFFORT_VALUES),
+        )
+
+
+def _validate_brain(name: str, user_id: str, brain: str) -> None:
+    """Warn on a brain kind nothing can build; never reject.
+
+    The operator's allowlist is not checked here — `cron_loader` has no
+    `Config`, and `resolve_brain_kind` refuses an unlisted kind at dispatch
+    anyway, which is what lets an operator shorten the list without anything
+    having to rewrite CRON.md. `_validate_model`'s docstring records the same
+    limitation for the same reason.
+
+    The value is kept either way. Storing a kind nothing recognises is what
+    lets `!cron` show the operator what their file actually says, and the
+    dispatch layer warns a second time and falls through to the configured
+    brain, so the job runs rather than failing.
+    """
+    from .brain import KNOWN_BRAIN_KINDS
+
+    if brain not in KNOWN_BRAIN_KINDS:
+        logger.warning(
+            "Job '%s' (user %s): brain %r is not a known brain kind (%s) — "
+            "it will be ignored and the job will run the configured brain",
+            name, user_id, brain, ", ".join(sorted(KNOWN_BRAIN_KINDS)),
         )
 
 
@@ -227,6 +287,10 @@ class CronJob:
     once: bool = False
     model: str = ""  # Per-job Claude model override; empty = use config default
     effort: str = ""  # Per-job effort override (low/medium/high/xhigh/max); empty = use config default
+    # Per-job brain kind pin (claude_code / native / tmux_claude); empty =
+    # resolve from config. Admin-only: `fj_brain_or_none` drops it at sync
+    # time for a non-admin author.
+    brain: str = ""
     # admin-shared-briefing-blocks: publish this job's result text into shared_kv
     # on success. "<ns>/<key>" or bare "<key>" (→ briefing_shared_blocks). Empty =
     # no publish. Gated on is_shared_kv_writer at write time (admin-only).
@@ -510,6 +574,16 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
             _validate_model(name, user_id, model)
         if effort:
             _validate_effort(name, user_id, effort)
+        # Through `_str_field` like `model` and `effort` beside it. Read as
+        # written, `brain = ["a"]` is a `TypeError` out of `_validate_brain`'s
+        # frozenset membership, and the `try/except` around the parse closes
+        # before this loop — so one job's typo costs every *other* job in the
+        # file, which is the failure `_str_field` exists for. A scalar is
+        # quieter and no better: it reaches a sqlite bind through
+        # `_file_owned_values` and `brain = 5` is stored as the string "5".
+        brain = _str_field(name, user_id, "brain", j.get("brain", ""))
+        if brain:
+            _validate_brain(name, user_id, brain)
         target = _str_field(name, user_id, "target", j.get("target", ""))
         if target:
             _validate_target(name, user_id, target)
@@ -533,6 +607,7 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
                 name, user_id, "once", j.get("once", False), False),
             model=model,
             effort=effort,
+            brain=brain,
             # Through `_str_field` like its neighbours rather than `str()`:
             # this one names a shared_kv namespace, so `publish_shared_kv = 5`
             # coerced to the namespace "5" is the one string field where a
@@ -674,6 +749,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
             lines.append(_toml_string("model", job.model))
         if job.effort:
             lines.append(_toml_string("effort", job.effort))
+        if job.brain:
+            lines.append(_toml_string("brain", job.brain))
         if job.publish_shared_kv:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
@@ -886,6 +963,7 @@ FILE_OWNED_COLUMNS = frozenset({
     "once",
     "model",
     "effort",
+    "brain",
     "publish_shared_kv",
     "publish_shared_kv_trusted",
 })
@@ -929,6 +1007,14 @@ IDENTITY_COLUMNS = frozenset({"id", "user_id", "name", "created_at"})
 #: :func:`sync_cron_jobs_to_db`. Each name is both a column and the
 #: ``ScheduledJob`` attribute holding it, which is how the comparison there
 #: reads them off the existing row.
+#:
+#: ``brain`` is outside it by decision, not by omission. The counter-argument
+#: is real — a job suspended because its pinned brain is unavailable is the
+#: case where changing the pin *is* the remedy — but ``model`` and ``effort``
+#: are already outside for the same reason, and "what the job runs" is a rule
+#: a reader can hold where "what the job runs, plus brain, but not model" is
+#: not. ``!cron enable`` remains the documented remedy and the inbox already
+#: raises the suspension.
 _SUSPENSION_CLEARING_COLUMNS = (
     "cron_expression",
     "prompt",
@@ -943,6 +1029,7 @@ def _file_owned_values(
     cmd_val: str | None,
     skill_val: str | None,
     skill_args_val: str | None,
+    brain_val: str | None,
 ) -> dict[str, object]:
     """What the file now says, for every column CRON.md authors.
 
@@ -952,6 +1039,11 @@ def _file_owned_values(
     missing here is a ``KeyError`` rather than a column silently written as
     NULL. That is a test-time guarantee, not a runtime one — at runtime the
     scheduler's per-user ``except`` would swallow it into one log line.
+
+    ``brain_val`` takes the same *shape* as ``cmd_val`` / ``skill_val`` — a
+    parameter rather than a read off ``fj`` — for a different reason. Those
+    three come from a shared resolver; this one depends on ``is_admin``, which
+    this function does not receive.
     """
     return {
         "cron_expression": fj.cron,
@@ -969,6 +1061,10 @@ def _file_owned_values(
         "once": 1 if fj.once else 0,
         "model": fj.model or None,
         "effort": fj.effort or None,
+        # Already gated by `fj_brain_or_none` at the call site — a non-admin's
+        # pin arrives here as None and is written as NULL like any other
+        # cleared field, rather than surviving by omission.
+        "brain": brain_val,
         "publish_shared_kv": fj.publish_shared_kv or None,
         "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
     }
@@ -1020,10 +1116,19 @@ def sync_cron_jobs_to_db(
             )
             continue
         cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(fj)
+        brain_val = fj_brain_or_none(fj, is_admin)
+        if fj.brain and brain_val is None:
+            logger.warning(
+                "Dropping brain pin %r on CRON.md job '%s' for %s: pinning a "
+                "brain is admin-only; the job will run the configured brain",
+                fj.brain, fj.name, user_id,
+            )
         # The definition, as the file now states it. Both paths below write
         # exactly the file-owned columns and name no other, which is what
         # leaves the daemon's state columns alone.
-        file_values = _file_owned_values(fj, cmd_val, skill_val, skill_args_val)
+        file_values = _file_owned_values(
+            fj, cmd_val, skill_val, skill_args_val, brain_val,
+        )
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state
@@ -1047,9 +1152,10 @@ def sync_cron_jobs_to_db(
             # would be a chat verb they may not know exists.
             #
             # These five fields and no others. Changing `target`, `room`,
-            # `model`, `effort` or a flag is not plausibly a fix for a job
-            # that is failing, and a rule keyed on the dispatch fields is one
-            # a reader can hold without consulting the frozenset.
+            # `model`, `effort`, `brain` or a flag is not plausibly a fix for a
+            # job that is failing, and a rule keyed on the dispatch fields is
+            # one a reader can hold without consulting the frozenset. See the
+            # note on `brain` at the frozenset for the one arguable case.
             #
             # Ungated on the row's current state, deliberately, because the
             # edit is visible for exactly one tick: this same UPDATE writes the
@@ -1203,6 +1309,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             once=j.once,
             model=j.model or "",
             effort=j.effort or "",
+            brain=j.brain or "",
             publish_shared_kv=j.publish_shared_kv or "",
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))

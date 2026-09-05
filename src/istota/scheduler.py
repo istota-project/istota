@@ -93,7 +93,12 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from . import avatars, confirmations, db
-from .brain import make_brain
+from .brain import (
+    make_brain,
+    resolve_brain_kind,
+    room_selectable_kinds,
+    split_effort,
+)
 from .build_info import build_description
 from .consumers import (
     LogChannelSubscriber,
@@ -7456,6 +7461,83 @@ def _sync_health_module_jobs(conn, app_config: Config) -> None:
     )
 
 
+def _resolve_job_model_effort(job, app_config, pinned_brain, job_effort):
+    """A scheduled job's ``(model, effort)``, resolved by the brain that runs it.
+
+    Two rules, both matching an established site. The brain is the one
+    ``resolve_brain_kind`` answers with, which is what the *executor* will
+    compute for this task — the rule ``commands.brain_for_room`` states for the
+    room path. The old line asked ``app_config.brain``, the base ``[brain]
+    kind``, which ignores both the job's pin and ``[brain.source_type_overrides]``,
+    so a portable ``smart`` on a routed deployment was resolved into a namespace
+    the task never ran in and ``_resolve_crossing_model_effort`` dropped it as a
+    crossing — at INFO, deliberately unsurfaced (ISSUE-419). The *resolved* kind
+    rather than the raw pin, so a job whose brain the operator has since dropped
+    from ``room_selectable`` keeps a model the brain that runs it can use.
+
+    And ``resolve_alias`` rather than ``resolve_model_name``, which returns
+    ``resolved[0]`` and discards the effort half, so ``model = "opus:high"`` ran
+    at default effort with nothing said. The effort is taken off the pair before
+    the model is, because ``resolve_alias`` may answer ``(None, "high")`` — a
+    built-in role on a native brain with no configured model — and reading it
+    only in the model branch loses the modifier in exactly the case the caller
+    wrote one. Precedence is the job's own ``effort`` field over the alias's,
+    which is ``with_defaults``' rule with the job row standing in for the block;
+    an explicit ``haiku:high`` therefore reaches the wire, since
+    ``_resolve_effort``'s protection is against an effort *inherited* from a
+    default chosen for another model, not against one the operator wrote on this
+    line.
+
+    Never raises. ``make_brain`` constructs a brain the deployment may never
+    otherwise build — a pinned kind's whole config block — and that is not
+    confined to ``ValueError``: a malformed ``[brain.native] base_url`` reaches
+    ``httpx.InvalidURL``, which derives from ``Exception`` directly. The
+    enclosing ``except ValueError`` around ``create_task`` would not catch it,
+    and ``get_db`` skips its commit on an exception, so one such row would roll
+    back every job already queued in the tick — and ``run_scheduler``, which has
+    no handler at all, would abandon the rest of its single pass. The raw values
+    are the fallback because the executor resolves again as defence in depth.
+    """
+    raw_base, raw_effort = split_effort(job.model)
+    try:
+        job_brain = make_brain(
+            resolve_brain_kind(
+                "scheduled", app_config.brain, override=(pinned_brain or None),
+            )
+        )
+        pair = job_brain.resolve_alias(job.model)
+        if pair:
+            job_effort = job_effort or (pair[1] or "")
+        if pair and pair[0]:
+            return pair[0], job_effort
+        job_model = job_brain.resolve_model_name(job.model)
+    except Exception as e:
+        logger.error(
+            "Scheduled job '%s' (user: %s): could not resolve model %r against "
+            "its own brain (%s); passing it through unresolved",
+            job.name, job.user_id, job.model, e,
+        )
+        return job.model, job_effort
+    if job_model == raw_base:
+        # Nothing in the alias table recognised the name, so the base passes
+        # through — legitimate for a brain that does no aliasing, which is why
+        # the wording says what will happen rather than calling it an error. A
+        # `:effort` modifier on such a name is dropped, matching
+        # `_resolve_crossing_model_effort`'s fallback, and saying so is the
+        # whole reason this warns. Keyed on the row id: `_warned_keys` is a
+        # process-global set with no eviction and `job.name` / `job.model` are
+        # both model-writable through the `schedules` skill, so keying on those
+        # is one durable entry per value anyone cares to write.
+        _warn_once(
+            f"cron_model:{job.id}",
+            f"Scheduled job '{job.name}' (user: {job.user_id}): model "
+            f"{job.model!r} resolved to nothing on this job's brain; using "
+            f"{job_model!r} as written"
+            + (f" and dropping the ':{raw_effort}' modifier" if raw_effort else ""),
+        )
+    return job_model, job_effort
+
+
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     """
     Check for scheduled jobs that should run and queue them as tasks.
@@ -7556,6 +7638,51 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         job.name, job.user_id, inflight,
                     )
                     continue
+                # `TEXT` in a dynamically typed store, so coerce once and use
+                # the same value for the resolution and the column:
+                # `resolve_brain_kind` opens with `(override or "").strip()`,
+                # which raises `AttributeError` on a non-string from a call that
+                # looks total. `commands.brain_for_room` guards the identical
+                # call for the identical reason.
+                pinned_brain = str(job.brain).strip() if job.brain else ""
+                # Aliases resolve at task-creation time so the DB stays
+                # canonical, matching the talk poller's `!model` prefix path.
+                job_model, job_effort = "", (job.effort or "")
+                if job.model:
+                    job_model, job_effort = _resolve_job_model_effort(
+                        job, app_config, pinned_brain, job_effort,
+                    )
+                # Only an *admitted* pin reaches the column, and the reason is
+                # the model beside it. This job's model was resolved against
+                # the kind `resolve_brain_kind` admits, so a refused pin left
+                # the row naming one namespace while `tasks.model` held a name
+                # from another — which `executor._pin_origin_namespace` reads
+                # as a crossing and `_request_model` then drops, at INFO, on
+                # every fire. `room_selectable` ships as `[]`, so that was the
+                # *default* outcome of the feature: the operator's `model`
+                # silently replaced by the running brain's own default while
+                # the only log line said their `brain` had been ignored.
+                #
+                # NULL rather than the fallthrough kind, because the two differ
+                # where the fallthrough kind is itself allowlisted: writing it
+                # would have `resolve_brain_kind` admit a pin nobody asked for
+                # and clear `fallback`, taking availability failover off a job
+                # whose pin was refused. NULL is what the row means — no pin is
+                # in effect — and it puts the origin read on the unpinned
+                # branch, which resolves the same lane this resolution used.
+                #
+                # `room_selectable_kinds` is the predicate `resolve_brain_kind`
+                # itself applies (it already intersects `KNOWN_BRAIN_KINDS`), so
+                # this reuses the one enforcement point rather than restating
+                # it. A room keeps the opposite rule deliberately: `rooms.model`
+                # was written when its pin *was* admitted, so the dropped kind's
+                # namespace is the true origin there. A job re-resolves every
+                # fire, so its row records the kind it just resolved against.
+                admitted_brain = (
+                    pinned_brain
+                    if pinned_brain in room_selectable_kinds(app_config.brain)
+                    else ""
+                )
                 # As in `check_briefings`: one unusable `job.user_id` costs its
                 # own row, not every job after it in the same transaction
                 # (ISSUE-402). `job.user_id` comes off the `scheduled_jobs`
@@ -7577,12 +7704,9 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         skill=job.skill,
                         skill_args=job.skill_args,
                         queue="background",
-                        # Resolve aliases (role / provider) to canonical IDs at
-                        # task-creation time so the DB stays canonical, matching
-                        # the talk-poller's !model prefix path. Executor also
-                        # resolves as defense-in-depth, so legacy rows still work.
-                        model=make_brain(app_config.brain).resolve_model_name(job.model) or None,
-                        effort=job.effort or None,
+                        model=job_model or None,
+                        effort=job_effort or None,
+                        brain=admitted_brain or None,
                     )
                 except ValueError as e:
                     logger.error(

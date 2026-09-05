@@ -326,7 +326,13 @@ so a writerless stream has buffered nothing to settle.
   `claude-opus-5` *and* put a "your pin was dropped" note in front of the user.
   `origin_namespace` is where the name was *written*, which on this path is the
   primary brain's, and it comes from `brain.model_namespace_for_kind` rather
-  than a construction. `None` is "not established" and never compares equal, so
+  than a construction. `_pin_origin_namespace` is what answers it for the
+  **primary** path, and since ISSUE-419 an unpinned task's answer is
+  `resolve_brain_kind`'s — the lane's own brain, not `[brain] kind` — which is
+  the namespace every producer resolves in. So on that path the rule is inert
+  by construction for an unpinned task and survives only for a pinned one; read
+  that function's docstring before changing either side, since it names the
+  three producers that do not meet the premise. `None` is "not established" and never compares equal, so
   an unresolvable origin drops the pin — the direction
   `commands._clear_pin_across_namespaces` already takes. Otherwise,
   `is_portable_alias(raw, config_alias_portable_names(config))` → re-resolve the

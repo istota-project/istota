@@ -61,6 +61,7 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `skip_log_channel`: When `true`, this job's run is not mirrored to the verbose execution log channel. Useful for noisy, frequent jobs
 - `model`: Per-job model override (canonical id, provider alias like `opus-high`, or a role alias like `fast`/`general`/`smart`). Empty = the instance default
 - `effort`: Per-job effort override (`low`/`medium`/`high`/`xhigh`/`max`). Empty = the model default
+- `brain`: Per-job brain kind (`claude_code`/`native`/`tmux_claude`). Empty = whatever the deployment routes this job to. **Admin-only**, and the operator has to have allowlisted the kind — for a non-admin the field is dropped on every sync and the job runs the configured brain, so do not write it unless the user is an admin and asked for it. A job that pins a brain gets no failover: if that brain is unavailable the run fails rather than being answered by another one
 - `publish_shared_kv`: Publish this job's result text into shared curated content that every user's briefings can read (see "Publishing shared briefing content" below). **Admin-only.**
 - `publish_shared_kv_trusted`: When `true`, the published content is marked trusted (rendered un-wrapped, not treated as untrusted web content). Only use for injection-safe content such as pure numeric tables — never for free-text/web-derived content. Default `false`
 

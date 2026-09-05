@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     model_used TEXT,
     -- Per-task brain override (a kind: claude_code / native / tmux_claude);
     -- NULL = no override, resolve from config. Frozen at task creation from
-    -- `rooms.brain` so a room edited mid-flight does not change a running task,
+    -- `rooms.brain`, or from `scheduled_jobs.brain` for a scheduled job, so a
+    -- room or a CRON.md edit mid-flight does not change a running task,
     -- and copied by retries and subtasks. Outranks
     -- `[brain.source_type_overrides]`; see `brain.resolve_brain_kind`.
     brain TEXT,
@@ -319,6 +320,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     skip_log_channel INTEGER DEFAULT 0,     -- Suppress log channel output for tasks from this job
     model TEXT,                             -- Per-job model override; empty = use config default
     effort TEXT,                            -- Per-job effort override; empty = use config default
+    brain TEXT,                             -- Per-job brain kind override; empty = resolve from config
     -- Skill-task dispatch (Phase 1.3). Mutually exclusive with command.
     skill TEXT,
     skill_args TEXT,
