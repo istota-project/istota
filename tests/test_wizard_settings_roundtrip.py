@@ -625,3 +625,129 @@ def test_the_new_mappings_target_real_ansible_vars(stv, mapping_name):
         f"{mapping_name} maps to {missing}, which defaults/main.yml does not "
         "define — the override would silently do nothing."
     )
+
+
+# ---------------------------------------------------------------------------
+# The escape list, held honest.
+# ---------------------------------------------------------------------------
+#
+# `wiz_write_settings` escapes its values by iterating a hand-written list of
+# ~40 variable names. That list is the whole protection, and it is the shape
+# this repo already guards elsewhere for the same reason `tests/test_lint_scope.py`
+# guards `[tool.ruff] extend-include`: a name added to the wizard later and not
+# added to the list is silently unescaped, and every other test still passes —
+# including the parametrized quoting tests, which name the variables they cover.
+#
+# The failure the list prevents is not cosmetic. A `"` or a trailing `\` in an
+# operator's answer produces a `settings.toml` the installer cannot parse while
+# the wizard exits 0, and `https://host" # rest` parses as a *truncated* value,
+# which is the silent half.
+
+
+def _escaped_variables() -> set[str]:
+    """The names `wiz_write_settings`'s escape loop actually covers."""
+    text = WIZARD.read_text()
+    match = re.search(r"for _tv in \\\n(.*?)\n\s*do\n", text, re.S)
+    assert match, (
+        "could not find the `for _tv in` escape loop in wizard.sh; the scanner "
+        "has rotted and every assertion below would pass on an empty set"
+    )
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", match.group(1)))
+
+
+def _interpolated_into_a_toml_string() -> set[str]:
+    """Every variable substituted inside a TOML basic string in wizard.sh.
+
+    Both spellings, because the wizard emits TOML two ways: a heredoc, where a
+    quote is a bare `"`, and shell strings it appends blocks to, where the same
+    quote is written `\\"`. A scan that knew only one would miss thirteen
+    names — every one this stage added — while reporting a healthy set.
+    """
+    found = set()
+    for line in WIZARD.read_text().splitlines():
+        # An appended block line starts `varname+="` mid-string; the existing
+        # `_wizard_keys` scanner strips the same prefix for the same reason,
+        # and without it `[brain] fallback` and `[developer] repos_dir` —
+        # both written that way — are invisible while the set still looks
+        # healthy.
+        stripped = re.sub(r'^\s*[a-z_]+\+?="', "", line)
+        match = re.match(
+            r'^[a-z_][a-z0-9_]* = \\?"\$\{?([A-Za-z_][A-Za-z0-9_]*)', stripped
+        )
+        if match:
+            found.add(match.group(1))
+    # The space-delimited `=` is what separates a TOML line from a shell
+    # assignment (`value="$rest"`), which has none. Without that the scan
+    # returns every local in the file and the guard fails on noise.
+    assert len(found) > 30, (
+        f"the scan found only {sorted(found)}; the regex has rotted"
+    )
+    return found
+
+
+#: Interpolated but deliberately not in the escape loop, each with its reason.
+#: Never add a name here to make the test pass — the question is whether the
+#: value can carry a `"` or a `\`, and an operator-typed one always can.
+_NOT_ESCAPED_DELIBERATELY = {
+    # Locals assigned from `_WIZ_BRAIN_ROLE_*`, which the loop escapes; escaping
+    # again would double every backslash.
+    "_role_fast": "derived from the already-escaped _WIZ_BRAIN_ROLE_FAST",
+    "_role_general": "derived from the already-escaped _WIZ_BRAIN_ROLE_GENERAL",
+    "_role_smart": "derived from the already-escaped _WIZ_BRAIN_ROLE_SMART",
+}
+
+
+def test_every_value_interpolated_into_toml_is_escaped_first():
+    """The drift guard on the escape list.
+
+    Without this, the list is a comment: the next `_WIZ_*` variable someone
+    adds is unescaped by default, and nothing anywhere goes red.
+    """
+    interpolated = _interpolated_into_a_toml_string()
+    escaped = _escaped_variables()
+    unguarded = sorted(interpolated - escaped - set(_NOT_ESCAPED_DELIBERATELY))
+    assert not unguarded, (
+        f"wizard.sh interpolates {unguarded} into a TOML string without passing "
+        "them through toml_escape first. A `\"` or a trailing `\\` in any of "
+        "them writes a settings.toml the installer cannot parse, with the "
+        "wizard exiting 0. Add each to the `for _tv in` loop, or to "
+        "_NOT_ESCAPED_DELIBERATELY with the reason it cannot need escaping."
+    )
+
+
+def test_the_exemptions_are_still_real():
+    """A stale exemption is a hole that looks like a decision."""
+    interpolated = _interpolated_into_a_toml_string()
+    stale = sorted(set(_NOT_ESCAPED_DELIBERATELY) - interpolated)
+    assert not stale, (
+        f"_NOT_ESCAPED_DELIBERATELY names {stale}, which wizard.sh no longer "
+        "interpolates into TOML. Drop the entry rather than leaving it open."
+    )
+
+
+def test_the_escape_loop_names_nothing_that_has_gone():
+    """The other direction: a name escaped but no longer used is dead weight,
+    and `printf -v` on an unset variable quietly writes an empty string."""
+    text = WIZARD.read_text()
+    gone = sorted(
+        name for name in _escaped_variables()
+        if len(re.findall(rf"\b{re.escape(name)}\b", text)) < 2
+    )
+    assert not gone, (
+        f"the escape loop names {gone}, which appear nowhere else in "
+        "wizard.sh. Drop them; the loop is the list of what needs escaping."
+    )
+
+
+def test_the_guard_can_fail():
+    """Positive control. The scan is a regex over a shell script, so its
+    healthy answer and its broken answer look alike from here — a rotted
+    pattern returns a small set that is trivially a subset of the escape list,
+    which is a pass. This plants the exact shape the guard exists to catch and
+    requires it to be caught."""
+    interpolated = _interpolated_into_a_toml_string()
+    escaped = _escaped_variables()
+    planted = interpolated | {"_WIZ_A_NEW_SETTING_NOBODY_ESCAPED"}
+    assert planted - escaped - set(_NOT_ESCAPED_DELIBERATELY) == {
+        "_WIZ_A_NEW_SETTING_NOBODY_ESCAPED"
+    }
