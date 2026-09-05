@@ -76,10 +76,23 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |
 | `model` | no | Claude model override for this job (e.g. `"claude-sonnet-4-6"`) |
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
+| `brain` | no | Brain kind this job runs on: `claude_code`, `native` or `tmux_claude`. Admin-only, and bounded by `[brain] room_selectable`. See below |
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
 The five flags — `enabled`, `once`, `silent_unless_action`, `skip_log_channel` and `publish_shared_kv_trusted` — take a bare TOML boolean, `true` or `false`. A quoted `"false"` is a string and a bare `1` is an integer; either one logs a warning and the field takes its default rather than being read for truthiness. `enabled = "false"` used to leave the job running, and `once = "false"` used to delete it after one run.
+
+## Choosing a brain per job
+
+`brain` pins one job to one brain kind — a nightly summary on `native`, a repo-touching job on `claude_code` — without moving the instance default. It is the same mechanism a chat room's `!brain` uses, bounded by the same operator allowlist, `[brain] room_selectable`. That list is empty by default, so nothing here works until an operator names kinds.
+
+Writing the field is admin-only. CRON.md is a file on the mount and is also written by the model through the `schedules` skill, and a brain kind decides which process holds the agent loop, which credentials it carries and which sandbox profile is built — so it must not be the one enforcement-shaped setting a task can choose for its own next run. A non-admin's `brain` is dropped at each sync, with a warning, and the rest of the job is kept and runs the configured brain. `!cron` shows the stored value, so what the listing says is what will run rather than what the file says.
+
+A kind that is not a real brain kind is warned about when the file is read; one the operator has not allowlisted is warned about when the job fires. Neither fails the job: it falls through to whatever the deployment would have run anyway.
+
+**A pinned job does not fail over.** If the pinned brain is unavailable — a usage limit, a missing binary, a tmux launch failure — the run fails with that brain's own reason instead of being answered by the deployment's backup brain, which for unattended work is the safer of the two. The failure is not silent: the task's retry ladder runs at 1, 4 and 16 minutes, `consecutive_failures` climbs, the job auto-disables at five and raises a notice in the inbox. `!cron enable <name>` restarts it once the brain is back.
+
+`model` is resolved by whichever brain the job will actually run. A portable name like `smart` therefore lands on that brain's own model rather than on the deployment default's, which is what makes a per-job brain and a per-job model usable together.
 
 ## Publishing to shared content
 
@@ -99,7 +112,9 @@ Three things lift a suspension:
 
 - a successful run;
 - `!cron enable <name>` in Talk, which lifts the suspension, clears the failure count and writes `enabled = true` back into CRON.md;
-- an edit in CRON.md to what the job dispatches — `cron`, `prompt`, `command`, `skill` or `skill_args`. Fixing the thing that was failing is how most people will expect to restart a job, so it counts. Changing `target`, `room`, `model`, `effort` or a flag does not.
+- an edit in CRON.md to what the job dispatches — `cron`, `prompt`, `command`, `skill` or `skill_args`. Fixing the thing that was failing is how most people will expect to restart a job, so it counts. Changing `target`, `room`, `model`, `effort`, `brain` or a flag does not.
+
+`brain` is outside that set for the same reason `model` and `effort` are: the set is what the job dispatches, and a rule a reader can hold is worth more than covering one more plausible repair. A job suspended because its pinned brain was down is restarted by `!cron enable` after the brain comes back, not by editing the field.
 
 ## Catch-up suppression after outages
 

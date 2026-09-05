@@ -185,8 +185,10 @@ kind = "${ISTOTA_BRAIN_KIND:-claude_code}"
 fallback_on_transient = ${ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT:-false}
 fallback_cooldown_seconds = ${ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS:-900}
 TOML
-    # Which brain kinds a room may pin for itself. Comma-separated, empty by
-    # default, so per-room brain selection is off until an operator names kinds.
+    # Which brain kinds a room may pin for itself, and which a scheduled job may
+    # pin with `brain` in CRON.md -- one list bounds every pin written outside
+    # this file, so the key's name is narrower than the setting. Comma-separated,
+    # empty by default, so both are off until an operator names kinds.
     # Rendered only when at least one name survives: an empty list and an absent
     # key load identically, and this file is rewritten on every boot, so a key
     # printed at its own default invites editing a generated file.

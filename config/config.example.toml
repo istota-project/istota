@@ -140,20 +140,24 @@ features = []
 #                                     # own retries are exhausted. Set false to opt out.
 # fallback_cooldown_seconds = 900     # skip an unavailable primary this long; 0 disables stickiness
 #
-# Which brain kinds a room may pin for itself. Empty (the default) means none
+# Which brain kinds a room may pin for itself, and which a scheduled job may
+# pin with `brain` in CRON.md. The name is narrower than the setting: one list
+# bounds every pin written outside this file. Empty (the default) means none
 # may, so the feature is inert until you name kinds here. A gate rather than a
 # preference: brain kind decides which process holds the agent loop, what tool
 # set it registers and which sandbox profile is built, so it is not something an
 # upgrade should switch on. Both deployment shapes rewrite this file from
 # scratch, so set it through the deployment rather than by editing the rendered
 # copy: `istota_brain_room_selectable` on Ansible,
-# `ISTOTA_BRAIN_ROOM_SELECTABLE` (comma-separated) on Docker. Setting a room's
-# brain is admin-only on top of this. A room that pins a brain runs that brain
-# or fails saying why — the fallback above does not apply to it, which is what
-# makes the pin mean what it says. A name here that is not a buildable kind is
-# dropped with a warning and never offered. Listing a kind also widens the
-# doctor checks for it (`claude` on PATH, tmux, a native API key), whether or
-# not any room has selected it.
+# `ISTOTA_BRAIN_ROOM_SELECTABLE` (comma-separated) on Docker. Writing a room's
+# brain, or a job's, is admin-only on top of this — CRON.md is model-writable
+# through the `schedules` skill, so a non-admin's `brain` is dropped at sync
+# with a warning and the job runs the configured answer. Whatever pins a brain
+# runs that brain or fails saying why — the fallback above does not apply to
+# it, which is what makes the pin mean what it says. A name here that is not a
+# buildable kind is dropped with a warning and never offered. Listing a kind
+# also widens the doctor checks for it (`claude` on PATH, tmux, a native API
+# key), whether or not anything has selected it.
 # room_selectable = []                # e.g. ["claude_code", "native"]
 #
 # Native-brain settings (only used when kind = "native", or via a routing
