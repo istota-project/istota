@@ -71,6 +71,14 @@ class Task:
     # a room edited while this task runs cannot change what it is, and copied by
     # retries and subtasks. Outranks `[brain.source_type_overrides]`.
     brain: str | None = None
+    # The namespace `model` was resolved in, frozen at creation beside it
+    # (ISSUE-420). `executor._pin_origin_namespace` prefers it to inferring one
+    # from `brain` or from the lane, because neither inference can tell a pin
+    # written while a room's brain was still admitted from one written after
+    # the operator dropped that kind from `[brain] room_selectable` — the two
+    # leave identical rows and want opposite answers. None = not recorded, and
+    # the inference answers as it did before.
+    model_namespace: str | None = None
     talk_delivery_token: str | None = None  # Real Talk room for this task's notifications; NULL falls back to conversation_token
     # Phase 1.3 (unified credential resolution refactor): skill-task
     # dispatch. Set when the task should run a single CLI skill (e.g.
@@ -319,6 +327,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # backfill: NULL is the right answer for every existing row and reads
         # as "resolve from config", which is what they all did.
         ("brain", "TEXT"),
+        # The namespace `model` was resolved in (ISSUE-420). No backfill, and
+        # for the same reason as `brain` but with more riding on it: NULL means
+        # "not recorded", which `executor._pin_origin_namespace` answers with
+        # the inference it used before this column, so no existing row's
+        # outcome moves. A backfill would have to guess between the two cases
+        # this column exists to tell apart, and they leave identical rows.
+        ("model_namespace", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -764,7 +779,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # Backfill the per-room model / effort / brain columns on an existing
         # rooms table (created by an earlier build without them). Placed here,
         # after the CREATE, so the table exists before the ALTER.
-        for _room_col in ("model", "effort", "brain"):
+        for _room_col in ("model", "effort", "brain", "model_namespace"):
             try:
                 conn.execute(f"ALTER TABLE rooms ADD COLUMN {_room_col} TEXT")
             except sqlite3.OperationalError:
@@ -1171,6 +1186,7 @@ def create_task(
     model: str | None = None,
     effort: str | None = None,
     brain: str | None = None,
+    model_namespace: str | None = None,
     talk_delivery_token: str | None = None,
     skill: str | None = None,
     skill_args: str | None = None,
@@ -1216,9 +1232,9 @@ def create_task(
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             reply_to_message_id, withheld_from_room,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
-            queue, model, effort, brain,
+            queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1246,6 +1262,7 @@ def create_task(
             model or None,
             effort or None,
             brain or None,
+            model_namespace or None,
             talk_delivery_token,
             skill,
             skill_args,
@@ -1271,7 +1288,7 @@ _TASK_COLUMNS = (
     "reply_to_content, reply_to_message_id, withheld_from_room, "
     "heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
-    "brain, talk_delivery_token, skill, skill_args"
+    "brain, model_namespace, talk_delivery_token, skill, skill_args"
 )
 
 
@@ -1322,6 +1339,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         effort=row["effort"],
         model_used=row["model_used"],
         brain=row["brain"],
+        model_namespace=row["model_namespace"],
         talk_delivery_token=row["talk_delivery_token"],
         skill=row["skill"],
         skill_args=row["skill_args"],
@@ -3659,6 +3677,12 @@ class Room:
     #: Standing brain default for this room (a kind), or None to inherit the
     #: instance default. Copied onto `tasks.brain` at `record_inbound`.
     brain: str | None = None
+    #: The model namespace `model` was resolved in, recorded when it was
+    #: written. Not derivable from `brain`: a kind the operator has dropped
+    #: from `[brain] room_selectable` is refused at resolution time, so a
+    #: `!room model` typed afterwards lands in the lane's namespace while
+    #: `brain` still names the refused kind (ISSUE-420). None = not recorded.
+    model_namespace: str | None = None
     # Newest row in the room's canonical transcript, falling back to the room's
     # own creation time when it has never been spoken in. Populated only by the
     # queries that compute it (`list_member_rooms`) — a room fetched by token
@@ -3713,6 +3737,9 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         model=row["model"] if "model" in keys else None,
         effort=row["effort"] if "effort" in keys else None,
         brain=row["brain"] if "brain" in keys else None,
+        model_namespace=(
+            row["model_namespace"] if "model_namespace" in keys else None
+        ),
         last_activity=row["last_activity"] if "last_activity" in keys else None,
     )
 
@@ -3989,13 +4016,32 @@ def set_room_model_effort(
     token: str,
     model: str | None,
     effort: str | None,
+    *,
+    namespace: str | None = None,
 ) -> None:
     """Set the room's standing model + effort as a pair (both canonical values,
     or None to clear). This is the `!room model <alias>` / room-settings write —
-    an alias resolves to a (model, effort) pair, so both columns move together."""
+    an alias resolves to a (model, effort) pair, so both columns move together.
+
+    ``namespace`` is the model namespace ``model`` was resolved in, and it moves
+    with the model rather than being a third knob (ISSUE-420): a caller clearing
+    the pin passes nothing and the column clears too, because a namespace left
+    behind by a model that is gone would be read as describing whatever is
+    written next. It defaults to ``None`` rather than being required so that the
+    clearing callers read as clears; a *setting* caller that omits it stores
+    "not recorded", which is the pre-column behaviour and not a new state.
+
+    **Keyword-only, and that is a guard rather than a style choice.** The
+    four-positional call was the whole API until this parameter existed, and it
+    now means "set a model and erase its recorded namespace" — the shape every
+    existing test call site still has, so a future producer written from one as
+    a template would inherit it with nothing going red. Requiring the keyword
+    makes the omission visible at the call site instead.
+    """
     conn.execute(
-        "UPDATE rooms SET model = ?, effort = ? WHERE token = ?",
-        (model, effort, token),
+        "UPDATE rooms SET model = ?, effort = ?, model_namespace = ? "
+        "WHERE token = ?",
+        (model, effort, namespace, token),
     )
 
 
@@ -4007,13 +4053,25 @@ def set_room_effort(conn: sqlite3.Connection, token: str, effort: str | None) ->
     )
 
 
-def set_room_model(conn: sqlite3.Connection, token: str, model: str | None) -> None:
+def set_room_model(
+    conn: sqlite3.Connection,
+    token: str,
+    model: str | None,
+    *,
+    namespace: str | None = None,
+) -> None:
     """Set only the room's model default (None clears it), leaving the effort
     level untouched — so `!room model <alias>` and `!room effort <level>` are
     orthogonal knobs. (An effort-bearing alias like `opus-high` still sets both
-    via set_room_model_effort — that's the caller's explicit both-pick.)"""
+    via set_room_model_effort — that's the caller's explicit both-pick.)
+
+    ``namespace`` moves with the model, as in `set_room_model_effort`. Effort is
+    the knob that stays put here; the namespace is a property of the model and
+    would be stale the moment the model changed without it.
+    """
     conn.execute(
-        "UPDATE rooms SET model = ? WHERE token = ?", (model, token)
+        "UPDATE rooms SET model = ?, model_namespace = ? WHERE token = ?",
+        (model, namespace, token),
     )
 
 

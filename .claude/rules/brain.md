@@ -688,6 +688,24 @@ and under the same `room_surface` guard — so Talk and web, and deliberately no
 email, which joins a room's transcript without being a room surface
 (`.claude/rules/transport.md`).
 
+**A model pin carries the namespace it was written in, and that is a recorded
+fact rather than an inference** (ISSUE-420). `rooms.model_namespace` is written
+by whichever producer set `rooms.model`, from the brain it actually resolved the
+alias against, and `record_inbound` freezes it onto `tasks.model_namespace`
+beside the model; `executor._pin_origin_namespace` prefers it to every
+inference. Nothing on the row could replace it, which is the point: reading the
+origin off `tasks.brain` is right for a pin written *while* that kind was
+admitted (ISSUE-417's case) and wrong for one written after the operator dropped
+the kind from `room_selectable`, because `brain_for_room` then refuses the pin
+and resolves the alias in the lane's namespace instead. The two writes leave
+identical rows and want opposite answers. Reading it off the *lane* is wrong for
+a third case, ISSUE-421(c): `rooms.model` is one column shared by every bound
+surface, written against the writing surface's lane and read against the inbound
+one. Recording it settles all three. NULL means "not recorded" — every row
+written before the column — and the old inference answers those, so the upgrade
+moved nothing. Only the model's own writers touch it: `!room effort` leaves it
+alone, and clearing the model clears it.
+
 A task column as well as a room column, for the reason `model` and `effort`
 have both: every site that resolves the brain already holds the task row, so
 the resolution stays a pure function of that row rather than a second read of

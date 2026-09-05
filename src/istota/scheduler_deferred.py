@@ -233,6 +233,15 @@ def _process_deferred_subtasks(
                 # could silently run a different brain from the parent that
                 # spawned it.
                 brain=task.brain,
+                # The recorded namespace travels with the model it describes,
+                # and only with it (ISSUE-420). A model the deferred JSON chose
+                # was written by the model inside the sandbox, in whatever
+                # vocabulary it saw, so the parent's namespace would be a guess
+                # about somebody else's string — None leaves it unrecorded and
+                # the executor infers, which is what this path did before.
+                model_namespace=(
+                    None if entry.get("model") else task.model_namespace
+                ),
             )
             count += 1
 

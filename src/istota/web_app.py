@@ -3955,6 +3955,33 @@ def _brain_for_room_token(room_token: str, source_type: str):
         return resolve_brain_kind(source_type, _config.brain)
 
 
+def _pin_namespace_for_room(conn, room_token: str) -> str | None:
+    """The namespace a model pin written into this room right now lands in.
+
+    Takes the caller's connection rather than opening one like
+    `_brain_for_room_token` does: the one caller is inside an open
+    `with db.get_db(...)` block, and a second connection there waits out the
+    busy timeout on the write lock it already holds.
+
+    Never raises, and `None` — "not established" — is the safe answer, since the
+    executor reads it as "infer" and falls back to the behaviour that predates
+    the column (ISSUE-420).
+    """
+    try:
+        from . import commands
+        from .brain import model_namespace_for_kind
+
+        return model_namespace_for_kind(
+            commands.brain_for_room(_config, conn, room_token, "web").kind,
+        )
+    except Exception:  # noqa: BLE001 — a namespace read must not fail a save
+        logger.warning(
+            "pin_namespace_for_room: leaving the namespace unrecorded",
+            exc_info=True,
+        )
+        return None
+
+
 def _known_room_models(brain_config) -> set[str]:
     """Canonical model ids a room default may be set to — the distinct targets
     the brain exposes via its alias table. Used to validate the PATCH.
@@ -4289,7 +4316,23 @@ def _chat_update_room(
                 reg = db.get_room(conn, updated.token)
                 new_model = model if model is not _UNSET else (reg.model if reg else None)
                 new_effort = effort if effort is not _UNSET else (reg.effort if reg else None)
-                db.set_room_model_effort(conn, updated.token, new_model, new_effort)
+                # The namespace recorded beside the model (ISSUE-420). Derived
+                # live only where this body actually supplied a model, since the
+                # route validated *that* value against the brain the room now
+                # holds — read after the `set_room_brain` above, so a brain and
+                # a model saved together record the incoming brain's namespace.
+                # Where the model is merely being carried through unchanged, the
+                # stored namespace is carried through with it: re-deriving would
+                # stamp today's lane onto an id written some time ago, which is
+                # the inference this column exists to replace.
+                if model is not _UNSET:
+                    new_namespace = _pin_namespace_for_room(conn, updated.token)
+                else:
+                    new_namespace = reg.model_namespace if reg else None
+                db.set_room_model_effort(
+                    conn, updated.token, new_model, new_effort,
+                    namespace=new_namespace if new_model else None,
+                )
                 # A value the caller supplied was replaced, not lost, so it does
                 # not belong in the report. Reported only where the rule dropped
                 # something the body did not put back.

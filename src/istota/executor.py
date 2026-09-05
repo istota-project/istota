@@ -1282,17 +1282,32 @@ def _pin_origin_namespace(task, config) -> str | None:
     """The namespace a task's own model pin was written in (ISSUE-417).
 
     Not where the task *runs* — where the name came from, which is the only
-    thing that says whether it can carry. Two producers, and the task row
-    distinguishes them:
+    thing that says whether it can carry.
+
+    **``tasks.model_namespace`` is the answer wherever it is set, and it is a
+    recorded fact rather than an inference** (ISSUE-420). The producer writes it
+    beside the model, from the brain it actually resolved the alias against, so
+    nothing here has to reconstruct it. The two branches below are what answers
+    a row that predates the column, and they are kept because that is a real
+    population rather than a migration nobody ran: NULL means "not recorded",
+    and the inference is exactly what this function did before, so no existing
+    row's outcome moved when the column arrived.
+
+    The inference cannot be made correct on its own, which is why the column
+    exists. Both branches read a *current* fact to describe a *past* write:
 
     - ``tasks.brain`` set means the pin came from the room, and every writer of
       ``rooms.model`` resolves through that room's own brain
       (``commands.brain_for_room``, ``web_app._brain_for_room_token``), so the
-      pin is in *that* kind's namespace. Read from the column rather than from
-      ``resolve_brain_kind``, which is the whole point: a kind the operator has
-      since dropped from ``room_selectable`` is refused and falls through, and
-      the stored pin is still the dropped kind's. That is one of the two routes
-      this function exists for.
+      pin is in *that* kind's namespace — **provided the pin was admitted when
+      the model was written**. `brain_for_room` hands the pin to
+      ``resolve_brain_kind``, which refuses a kind absent from
+      ``[brain] room_selectable`` and falls through to the lane, so a model
+      written after the operator shortened that list is in the lane's namespace
+      while the column still names the refused kind. The two cases leave
+      identical rows and want opposite answers, so no rule over this row can
+      separate them; that is ISSUE-420, and the recorded namespace above is what
+      settles it.
     - Otherwise the pin was written against the brain this task's *lane*
       resolves to, which is ``resolve_brain_kind`` with no override — not
       ``[brain] kind`` (ISSUE-419). The two largest producers ask exactly that
@@ -1315,24 +1330,33 @@ def _pin_origin_namespace(task, config) -> str | None:
     oversight: the premise is that nobody writes a name into ``tasks.model``
     except through the lane's own brain.
 
-    **Three producers do not meet that premise**, and each ends with a
-    foreign-namespace id passed to ``resolve_model_name``, which hands an
-    unknown id straight through. None is introduced here — before ISSUE-419
+    **Three producers do not meet that premise** (ISSUE-421), and each ends
+    with a foreign-namespace id passed to ``resolve_model_name``, which hands an
+    unknown id straight through. None was introduced here — before ISSUE-419
     each was dropped instead, which was the right outcome reached by a rule
-    that was wrong about why. They are recorded rather than guarded because
-    the fix belongs at the producer:
+    that was wrong about why. Only the third is fixed; the other two are
+    outstanding and belong at the producer:
 
     - ``repl/session`` resolves its own ``!model`` through
       ``make_brain(config.brain)`` — the base kind — the same expression
-      ISSUE-419 removed from the scheduler.
+      ISSUE-419 removed from the scheduler, and it writes no namespace, so a
+      ``[brain.source_type_overrides] repl`` deployment still infers the lane's
+      for a name resolved in the base kind's. Outstanding.
     - ``scheduler_deferred`` copies a parent's ``model`` onto a ``subtask``
       row, so a deployment routing the two lanes to different namespaces hands
-      the child a name resolved in the parent's.
+      the child a name resolved in the parent's. The recorded namespace is
+      carried across with it where the parent *has* one, which covers a subtask
+      of a room turn; a parent that bypassed ``record_inbound`` — cron, email,
+      briefing, heartbeat — records nothing, and the child still infers its own
+      lane. Partially covered, and the producer fix is still outstanding.
     - ``rooms.model`` is one column shared by every surface bound to a room,
       written against the *writing* surface's lane and read here against the
       *inbound* one, so a room whose model was set from web and whose next
-      message arrives over Talk disagrees wherever those two lanes route
-      differently.
+      message arrives over Talk disagreed wherever those two lanes route
+      differently. **Fixed by ``rooms.model_namespace``**: the writing surface
+      records the namespace it resolved in and ``record_inbound`` freezes it
+      onto the task, so the inbound surface reads the fact instead of guessing
+      from its own lane.
 
     The routing read is guarded because ``tasks.source_type`` is TEXT with no
     ``CHECK`` and SQLite is dynamically typed, so ``resolve_brain_kind``'s
@@ -1346,6 +1370,9 @@ def _pin_origin_namespace(task, config) -> str | None:
     ``None`` where the kind does not resolve, which the crossing rule reads as
     "not established" and therefore treats as a crossing.
     """
+    recorded = (getattr(task, "model_namespace", None) or "").strip()
+    if recorded:
+        return recorded
     pinned = (getattr(task, "brain", None) or "").strip()
     if pinned:
         return model_namespace_for_kind(pinned)

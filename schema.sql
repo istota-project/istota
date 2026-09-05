@@ -108,6 +108,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- and copied by retries and subtasks. Outranks
     -- `[brain.source_type_overrides]`; see `brain.resolve_brain_kind`.
     brain TEXT,
+    -- The model namespace `model` was resolved in, frozen from
+    -- `rooms.model_namespace` (or, for an inline `!model`, from the brain the
+    -- room actually admits) at task creation. Read by
+    -- `executor._pin_origin_namespace` in preference to inferring one from
+    -- `brain` or from the lane. NULL = not recorded, and the inference still
+    -- answers it — which is what keeps an upgrade from changing any existing
+    -- row's outcome (ISSUE-420).
+    model_namespace TEXT,
 
     -- Real Talk room for this task's notifications. Distinct from
     -- conversation_token, which doubles as an email-thread grouping key for
@@ -836,7 +844,17 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- for a room-member surface, and resolved
     -- `tasks.brain > [brain.source_type_overrides] > [brain] kind`. Admitted
     -- only for a kind the operator listed in `[brain] room_selectable`.
-    brain       TEXT
+    brain       TEXT,
+    -- The namespace `model` above was resolved in, recorded by whichever writer
+    -- set it (ISSUE-420). A stored fact rather than an inference from `brain`:
+    -- `commands.brain_for_room` refuses a kind the operator has since dropped
+    -- from `[brain] room_selectable` and resolves the alias against the lane
+    -- instead, so a write made after that point leaves `brain` naming one
+    -- namespace and `model` holding an id from another. Also settles the
+    -- cross-surface half of ISSUE-421: this row is shared by every surface
+    -- bound to the room, written against the writing surface's lane and read
+    -- against the inbound one. NULL = not recorded.
+    model_namespace TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 
