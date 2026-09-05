@@ -481,6 +481,22 @@ def _reset_expunge_warning_latch():
     email_skill._expunge_warned_hosts.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_brain_refusal_latch():
+    """Isolate ``brain._WARNED_REFUSALS``.
+
+    Same shape and same reason as the latch above: a process-global set of
+    routing refusals already warned about, so any test that resolves a refused
+    brain pin seeds it for the rest of that xdist worker and a test asserting
+    on the warning passes or fails on who ran first.
+    """
+    from istota import brain as brain_mod
+
+    brain_mod._WARNED_REFUSALS.clear()
+    yield
+    brain_mod._WARNED_REFUSALS.clear()
+
+
 def pytest_addoption(parser):
     """Options for the image and real-devbox tiers.
 
