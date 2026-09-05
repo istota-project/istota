@@ -41,13 +41,21 @@ from istota.executor import (
 
 
 class _Task:
-    """Only the fields the resolver and the origin rule read."""
+    """Only the fields the resolver and the origin rule read.
 
-    def __init__(self, model="", effort="", brain=None, source_type=""):
+    ``model_namespace`` defaults to None — "not recorded" — so every case in
+    this file goes on exercising the inference it was written for. The recorded
+    path is ISSUE-420's and is covered in
+    `tests/test_brain_pin_origin_recorded.py`.
+    """
+
+    def __init__(self, model="", effort="", brain=None, source_type="",
+                 model_namespace=None):
         self.model = model
         self.effort = effort
         self.brain = brain
         self.source_type = source_type
+        self.model_namespace = model_namespace
 
 
 def _brain(kind):
@@ -364,8 +372,14 @@ class TestAPinnedTaskStillReadsTheColumn:
         )
 
     def test_a_pin_the_allowlist_now_refuses_still_reads_as_its_own_namespace(self):
-        """Pinned behaviour, deliberately left alone by this stage — and the
-        one place it is now provably wrong for a cron job.
+        """The inference, which is what a row with no recorded namespace gets.
+
+        ISSUE-420 fixed the live defect by recording the namespace beside the
+        pin rather than by changing this branch, so what is asserted here is the
+        fallback for a row written before that column existed — a real
+        population on any upgraded deployment, and one whose answer deliberately
+        did not move. A row that *does* carry a namespace never reaches this
+        line; see `tests/test_brain_pin_origin_recorded.py`.
 
         With `native` dropped from `room_selectable`, `resolve_brain_kind`
         refuses the pin and the task runs `claude_code`, while this answers
@@ -381,12 +395,12 @@ class TestAPinnedTaskStillReadsTheColumn:
         beside a `native` pin, every fire, and has it dropped here, every fire.
         The job runs the deployment default model and nothing says so.
 
-        Fixing it means reading the *admitted* pin rather than the column, which
-        collapses this function to the target brain's own namespace and makes
-        the primary-path crossing rule inert for pinned tasks too. That is a
-        decision about whether the rule should exist on this path at all, not a
-        predicate tweak, so it is deferred with its own issue and this records
-        what ships today.
+        Reading the *admitted* pin instead was rejected: it collapses this
+        function to the target brain's own namespace and makes the primary-path
+        crossing rule inert for pinned tasks too. Recording the namespace at the
+        producer keeps both cases — a pin written while the kind was admitted
+        and one written after — without this branch having to tell them apart,
+        which it cannot, because they leave identical rows.
         """
         assert (
             _pin_origin_namespace(
@@ -472,14 +486,19 @@ class TestTheProducersThatDoNotMeetThePremise:
 
         It is written against the writing surface's lane
         (`commands.brain_for_room(..., ctx.surface)`,
-        `web_app._brain_for_room_token(token, "web")`) and read here against the
-        inbound one. A room whose model was set from the web UI and whose next
-        message arrives over Talk therefore disagrees with itself wherever those
-        two lanes route to different kinds.
+        `web_app._brain_for_room_token(token, "web")`) and was read here against
+        the inbound one, so a room whose model was set from the web UI and whose
+        next message arrived over Talk disagreed with itself wherever those two
+        lanes route to different kinds.
 
-        The value was resolved in `anthropic` (web is unrouted, so it ran the
-        base kind) and this answers `openai_compat`, so the id reaches native's
-        wire unchallenged. Recorded, not asserted as correct.
+        **Fixed by ISSUE-420's recorded namespace**, which is why this producer
+        is no longer in the same state as the two below it: the writing surface
+        stores the namespace it resolved in and `record_inbound` freezes it onto
+        the task, so the inbound surface reads a fact. What is still asserted
+        here is the residue for a row written *before* that column — the value
+        was resolved in `anthropic` (web is unrouted, so it ran the base kind)
+        and this answers `openai_compat`, so the id reaches native's wire
+        unchallenged. Recorded, not asserted as correct.
         """
         config = Config(
             brain=BrainConfig(
@@ -489,6 +508,13 @@ class TestTheProducersThatDoNotMeetThePremise:
         talk_task = _Task("claude-opus-5", source_type="talk")
         assert _pin_origin_namespace(talk_task, config) == "openai_compat"
         assert _request_model(talk_task, config, _brain("native")) == "claude-opus-5"
+
+        # The same room once its namespace has been recorded: the fact wins, no
+        # crossing is read, and the id the user chose survives.
+        recorded = _Task(
+            "claude-opus-5", source_type="talk", model_namespace="anthropic",
+        )
+        assert _pin_origin_namespace(recorded, config) == "anthropic"
 
     def test_the_executor_still_carries_such_a_row_so_the_producer_is_the_guard(
         self,

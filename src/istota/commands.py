@@ -913,16 +913,29 @@ def _describe_room_default(model: str | None, effort: str | None) -> str:
 
 
 def _outgoing_namespace(config: Config, source_type: str, outgoing: str) -> str | None:
-    """The model namespace `rooms.model` was resolved in, before this change.
+    """The namespace `rooms.model` was resolved in, inferred from the room's kind.
+
+    **The fallback, not the answer.** Since ISSUE-420 the namespace is recorded
+    beside the model when it is written, and `_clear_pin_across_namespaces`
+    prefers that fact; this runs only for a row written before that column
+    existed, where the kind is the only evidence there is.
 
     Deliberately **not** routed through `resolve_brain_kind`. That function
     refuses an override the operator has since dropped from the allowlist, so
     routing the outgoing kind through it answers with the namespace of the
-    *deployment default* — and a room pinned to `native`, then dropped from the
-    allowlist, then moved to `claude_code` would compare anthropic against
-    anthropic, keep an `openai_compat` id as its standing default, and say
-    nothing. The refusal is the right answer to "what is this room running";
-    it is the wrong answer to "which namespace produced this pin".
+    *deployment default*.
+
+    The worked example this docstring used to give for that — a room pinned to
+    `native`, dropped from the allowlist, then moved to `claude_code` — is no
+    longer a case this function decides, and it was the wrong way round. Where
+    the pin was refused, `brain_for_room` resolved the alias against the lane,
+    so the stored id is `anthropic` and keeping it is correct; inferring
+    `openai_compat` from the kind is what would have thrown it away. Recording
+    the namespace is what settles it, because the two writes — one made while
+    the kind was admitted, one after — leave identical rows. What this function
+    still answers correctly is the case it was really built for: a pin written
+    while the kind *was* admitted, which is genuinely in that kind's namespace
+    and which `resolve_brain_kind`'s refusal would misreport.
 
     Only an *unknown* kind yields None, which the caller reads as "not
     established" and therefore clears. Since ISSUE-417 this is a lookup, so a
@@ -1126,7 +1139,19 @@ def _clear_pin_across_namespaces(
         # change. This is the *only* case in which effort survives — below, it
         # goes with the model, because the two were set as a pair.
         return []
-    before = _outgoing_namespace(config, source_type, outgoing)
+    # The recorded fact first, and the inference only for a row that predates
+    # the column — the same preference `executor._pin_origin_namespace` applies,
+    # and it has to be applied here too or the two readers of one row disagree
+    # (ISSUE-420). `_outgoing_namespace` reads the *kind* the room named, which
+    # is the origin only where that kind was admitted when the model was
+    # written; where it was refused, `brain_for_room` resolved the alias in the
+    # lane's namespace and `model_namespace` says so. Getting this wrong clears
+    # a pin that is about to move within one namespace, and tells the user their
+    # id belonged to the outgoing brain when it never did.
+    before = (
+        (getattr(room, "model_namespace", None) or "").strip()
+        or _outgoing_namespace(config, source_type, outgoing)
+    )
     after = _model_namespace(
         resolve_brain_kind(source_type, config.brain, override=incoming or None)
     )
@@ -1181,6 +1206,13 @@ async def cmd_room(ctx: CommandContext):
         # its standing default — that is not one bad turn, it is every turn in
         # the room until somebody notices.
         room_brain = make_brain(brain_for_room(config, conn, token, ctx.surface))
+        # The namespace to record beside whatever this write stores. Taken from
+        # the brain the alias is *actually* resolved against, which is not the
+        # same as `room.brain`: `brain_for_room` refuses a kind the operator has
+        # dropped from `[brain] room_selectable` and falls through to the lane,
+        # so after such a change the id below belongs to the lane's namespace
+        # while the column still names the refused kind (ISSUE-420).
+        room_namespace = getattr(room_brain, "model_namespace", None)
         aliases = [a for a, _m, _e in room_brain.list_aliases()]
         if not alias:
             return (
@@ -1208,11 +1240,13 @@ async def cmd_room(ctx: CommandContext):
         if effort is not None:
             # An effort-bearing alias (e.g. `opus-high`) is an explicit
             # both-pick, so it sets effort too.
-            db.set_room_model_effort(conn, token, model, effort)
+            db.set_room_model_effort(
+                conn, token, model, effort, namespace=room_namespace,
+            )
         else:
             # A plain model alias leaves any separately-set `!room effort` intact
             # (the two knobs are orthogonal).
-            db.set_room_model(conn, token, model)
+            db.set_room_model(conn, token, model, namespace=room_namespace)
             effort = db.get_room(conn, token).effort
         return _describe_room_default(model, effort)
 
@@ -2479,6 +2513,7 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         model=original.model,
         effort=original.effort,
         brain=original.brain,
+        model_namespace=original.model_namespace,
         skill=original.skill,
         skill_args=original.skill_args,
         priority=original.priority,

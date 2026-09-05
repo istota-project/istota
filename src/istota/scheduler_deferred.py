@@ -160,7 +160,14 @@ def _inherited_model(
     if (task.brain or "").strip():
         return task.model, None
     try:
-        parent_ns = model_namespace_for_kind(
+        # The recorded fact first, and the lane only for a row that predates the
+        # column — the preference `executor._pin_origin_namespace` and
+        # `commands._clear_pin_across_namespaces` both apply (ISSUE-420). Without
+        # it this is a third reader of the same inference, and it drops a model
+        # the column has already established as safe to carry: a room turn whose
+        # namespace was recorded, spawning a subtask, would lose the pin here on
+        # a lane-routed deployment even though parent and child agree.
+        parent_ns = (task.model_namespace or "").strip() or model_namespace_for_kind(
             resolve_brain_kind(task.source_type, config.brain).kind,
         )
         child_ns = model_namespace_for_kind(
@@ -319,6 +326,20 @@ def _process_deferred_subtasks(
                 # could silently run a different brain from the parent that
                 # spawned it.
                 brain=task.brain,
+                # The recorded namespace travels with the model it describes
+                # and only with it (ISSUE-420), which after ISSUE-421(b) means
+                # keying on the name that actually lands rather than on the
+                # parent's. A model the deferred JSON chose was written by the
+                # model inside the sandbox in whatever vocabulary it saw, so the
+                # parent's namespace would be a guess about somebody else's
+                # string; and a parent pin `_inherited_model` *dropped* leaves
+                # no model here to describe. Both cases record nothing and let
+                # the executor infer, which is what this path did before.
+                model_namespace=(
+                    task.model_namespace
+                    if not entry.get("model") and inherited_model
+                    else None
+                ),
             )
             count += 1
 
