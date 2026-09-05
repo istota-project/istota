@@ -278,15 +278,26 @@ username = "{{ istota_nextcloud_username }}"
 app_password = "{{ istota_nextcloud_app_password }}"
 {% endif %}
 share_default_expire_days = {{ istota_nextcloud_share_default_expire_days }}
-{% if istota_caldav_url %}
+{% if istota_caldav_url and istota_caldav_password %}
 
 {# Explicit CalDAV server, overriding the [nextcloud] derivation Config.caldav_*
    otherwise uses. For a deployment whose calendar lives somewhere other than the
-   Nextcloud it authenticates against. Rendered only when a URL is set: a block
-   with a blank url reads to the loader exactly like no block, and to an operator
-   like an override that failed. The password follows istota_email_imap_password
-   — the EnvironmentFile on the shape the role deploys, inline only when the
-   operator turned that file off. #}
+   Nextcloud it authenticates against. The password follows
+   istota_email_imap_password — the EnvironmentFile on the shape the role
+   deploys, inline only when the operator turned that file off.
+
+   BOTH VARIABLES GATE THIS, and the pair is a credential boundary rather than
+   tidiness. `Config.caldav_url` / `_username` / `_password` fall back to
+   [nextcloud] INDEPENDENTLY, so a url with no password does not merely fail to
+   authenticate: it renders a foreign host and lets caldav_password fall through
+   to the Nextcloud app password, which the daemon then presents to that host.
+   The reverse half leaks nothing but breaks calendar just as silently — the
+   secrets file is gated on the same pair, since ISTOTA_CALDAV_PASSWORD reaches
+   the loader whether or not a block renders, and on its own it authenticates to
+   Nextcloud's own DAV endpoint with the wrong password.
+
+   setup_wizard._collect_caldav applies exactly this rule for the standalone
+   shape and says so out loud; a template cannot, so it fails closed. #}
 [caldav]
 url = "{{ istota_caldav_url }}"
 username = "{{ istota_caldav_username }}"

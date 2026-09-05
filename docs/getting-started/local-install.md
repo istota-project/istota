@@ -143,7 +143,9 @@ and the password goes in `istota.env` beside every other credential:
 ISTOTA_CALDAV_PASSWORD=app-specific-password
 ```
 
-Not in `config.toml`. That file's generated header says secrets live in the sibling env file and never there, and the environment override is what makes that true without an exception — which is why `config.toml` is left at the usual permissions and only `istota.env` is `0600`. Set both or neither: a URL with no password replaces a working derivation with something that cannot authenticate, which breaks calendar more thoroughly than leaving the section out.
+Not in `config.toml`. That file's generated header says secrets live in the sibling env file and never there, and the environment override is what makes that true without an exception — which is why `config.toml` is left at the usual permissions and only `istota.env` is `0600`.
+
+Set both or neither. The URL, the username and the password each fall back to `[nextcloud]` on their own rather than as a group, so half a block is a mixture rather than an override that is simply off. On this shape there is no Nextcloud to fall back to, so a URL with no password just leaves calendar unable to authenticate — `setup` refuses that pairing, which is why it can only arise from a hand edit. On a server deployment the same half-block is worse: it names a foreign host and then hands that host the Nextcloud app password.
 
 **Email.** Set `[email] enabled = true` with your IMAP host, user and SMTP host in `config.toml`, and the passwords in `istota.env` (`ISTOTA_EMAIL_IMAP_PASSWORD`, `ISTOTA_EMAIL_SMTP_PASSWORD`). `setup --email` collects these interactively; it asks for the SMTP host separately, defaulting to the IMAP one, and reads the password without echoing it.
 

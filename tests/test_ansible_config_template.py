@@ -1320,6 +1320,42 @@ class TestTheCaldavOverride:
     def test_no_password_line_when_nothing_is_configured(self):
         assert "ISTOTA_CALDAV_PASSWORD" not in render_secrets()
 
+    def test_a_url_with_no_password_renders_nothing(self):
+        """The half-shape that leaks, and the reason both variables gate.
+
+        `Config.caldav_url` / `_username` / `_password` fall back to
+        `[nextcloud]` independently, so a rendered `[caldav] url` with no
+        password anywhere does not fail to authenticate — it names a foreign
+        host and lets `caldav_password` fall through to the Nextcloud app
+        password, which the daemon then presents to that host. Asserted on the
+        loaded `Config` rather than on the rendered text, because the text is
+        one step short of the claim.
+        """
+        config = load_config_from(
+            render(
+                istota_caldav_url="https://dav.example.com",
+                istota_caldav_username="bot@example.com",
+                istota_nextcloud_url="https://nextcloud.example.com",
+                istota_nextcloud_app_password="nc-placeholder",
+            )
+        )
+
+        assert config.caldav.url == ""
+        assert config.caldav_url == "https://nextcloud.example.com/remote.php/dav"
+
+    def test_a_password_with_no_url_reaches_no_environment_file(self):
+        """The mirror half. It leaks nothing, and breaks calendar just as
+        quietly: the variable reaches the loader through
+        `_env_secret_overrides` whether or not a block rendered, and on its own
+        it authenticates to Nextcloud's own DAV endpoint with the wrong
+        secret."""
+        assert "ISTOTA_CALDAV_PASSWORD" not in render_secrets(
+            istota_caldav_password="caldav-placeholder"
+        )
+        assert "caldav" not in tomllib.loads(
+            render(istota_caldav_password="caldav-placeholder")
+        )
+
     def test_the_block_passes_the_play_validator(self):
         import subprocess
         import sys
@@ -1402,3 +1438,55 @@ class TestTheNativeSessionLogBlock:
         that block rather than appearing on a deployment with no native brain
         anywhere in its routing."""
         assert "native" not in parsed.get("brain", {})
+
+    def _validate(self, rendered: str):
+        import subprocess
+        import sys
+
+        path = _write_temp(rendered)
+        config = load_config_from(rendered)
+        return subprocess.run(
+            [
+                sys.executable,
+                str(ANSIBLE / "files" / "validate_config.py"),
+                path,
+                "istota",
+                str(config.db_path),
+                str(config.temp_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_the_rendered_block_passes_the_play_validator(self):
+        proc = self._validate(render(istota_brain_kind="native"))
+
+        assert proc.returncode == 0, proc.stderr
+
+    def test_a_typo_under_the_block_fails_the_play(self):
+        """`dir` is what the retention sweep unlinks beneath, and a misspelled
+        key templates cleanly and falls back to the default with nothing said.
+        The sibling `[brain.native.web_fetch]` allowlist exists for that reason
+        and this block now has one too - asserted by breaking it, since an
+        allowlist nothing tests is one that can go stale in silence."""
+        rendered = render(istota_brain_kind="native").replace(
+            "\nretention_days = ", "\nretention_dayz = ", 1
+        )
+        proc = self._validate(rendered)
+
+        assert proc.returncode == 1
+        assert "retention_dayz" in proc.stderr
+
+    def test_the_validator_allowlist_matches_the_dataclass(self):
+        """Two hand-written copies of one field list. The validator's is not
+        importable, so it is read out of the source rather than restated here
+        a third time."""
+        import re
+
+        from istota.config import SessionLogConfig
+
+        source = (ANSIBLE / "files" / "validate_config.py").read_text()
+        block = source.split("sl_allowlist = {", 1)[1].split("}", 1)[0]
+        named = set(re.findall(r'"([a-z_]+)"', block))
+
+        assert named == {f.name for f in fields(SessionLogConfig)}

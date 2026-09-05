@@ -447,9 +447,15 @@ istota_nextcloud_share_default_expire_days: 14
 # URL blank — the default — and no block is rendered at all.
 #
 # The password goes to the EnvironmentFile as ISTOTA_CALDAV_PASSWORD, like
-# istota_email_imap_password; vault it. A URL with no password would override
-# the working derivation with something that cannot authenticate, so set both
-# or neither.
+# istota_email_imap_password; vault it.
+#
+# SET BOTH OR NEITHER, and the template enforces it rather than trusting you to.
+# Config.caldav_url / _username / _password each fall back to [nextcloud] on
+# their own, so a url with no password is not an override that fails to
+# authenticate — it points the daemon at a foreign host and hands that host the
+# Nextcloud app password. A password with no url is the mirror image: it
+# authenticates to Nextcloud's own DAV endpoint with the wrong secret. Either
+# half alone renders nothing at all.
 istota_caldav_url: ""
 istota_caldav_username: ""
 istota_caldav_password: ""

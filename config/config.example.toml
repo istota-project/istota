@@ -503,10 +503,19 @@ auto_share_bot_dir = true
 # Fastmail or Google. On a Nextcloud deployment you want it only when the
 # calendar genuinely lives elsewhere.
 #
-# All three blank (the default) means no block at all and the derivation
-# stands. Do not set the URL without a password: it replaces a working
-# derivation with something that cannot authenticate, which breaks calendar
-# more thoroughly than leaving the section out.
+# SET ALL OF IT OR NONE OF IT. The three `Config.caldav_*` properties fall back
+# to [nextcloud] one field at a time, not as a group, so a half-set block does
+# not read as "override off" — it mixes. A url with no password names a foreign
+# host and then hands that host the Nextcloud app password. A password with no
+# url authenticates to Nextcloud's own DAV endpoint with the wrong secret.
+# `istota setup` refuses the first pairing outright and the Ansible template
+# renders nothing unless it has both; this file is the one place you can write
+# the broken shape by hand.
+#
+# DOCKER: there is no ISTOTA_CALDAV_* variable in
+# docker/istota/render-config.sh or docker/docker-compose.yml, and that shape
+# re-renders config.toml on every boot — so a block added here by hand is gone
+# at the next restart. On Docker the calendar is the bundled Nextcloud's.
 #
 # `istota setup` offers this and writes the url and username here, with the
 # password in the sibling istota.env. The password has an
