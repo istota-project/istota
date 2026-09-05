@@ -14,6 +14,7 @@ from istota.config import (
     BrainConfig,
     ClaudeCodeBrainConfig,
     Config,
+    NativeBrainConfig,
     SchedulerConfig,
     SecurityConfig,
     UserConfig,
@@ -650,6 +651,186 @@ class TestSyncBrainToDb:
             sync_cron_jobs_to_db(conn, "alice", file_jobs, is_admin=False)
             job = db.get_scheduled_job_by_name(conn, "alice", "j")
         assert job.brain is None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch: the pin reaches the task row, and the model resolves against the
+# brain that will run the job
+# ---------------------------------------------------------------------------
+
+
+def _insert_scheduled_job(conn, **columns):
+    """A job that is always due: `* * * * *` with `last_run_at` a day back.
+
+    Deliberately not the `0 0 * * *` + "only assert if the hour is past
+    midnight" shape used above — that makes the assertions vacuous for one hour
+    a day, which is exactly the failure mode this spec's controls exist to
+    catch.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+    row = {
+        "user_id": "alice",
+        "name": "j",
+        "cron_expression": "* * * * *",
+        "prompt": "t",
+        "enabled": 1,
+        "last_run_at": yesterday,
+        "created_at": yesterday,
+    }
+    row.update(columns)
+    conn.execute(
+        f"INSERT INTO scheduled_jobs ({', '.join(row)}) "
+        f"VALUES ({', '.join('?' * len(row))})",
+        tuple(row.values()),
+    )
+
+
+def _fire_one_job(db_path, config, **columns):
+    """Insert one due job, run a dispatch tick, return its task row."""
+    with db.get_db(db_path) as conn:
+        _insert_scheduled_job(conn, **columns)
+    with db.get_db(db_path) as conn:
+        created = check_scheduled_jobs(conn, config)
+    assert len(created) == 1, f"expected exactly one task, got {created}"
+    with db.get_db(db_path) as conn:
+        return db.get_task(conn, created[0])
+
+
+def _dispatch_config(db_path, brain):
+    return Config(
+        db_path=db_path,
+        users={"alice": UserConfig(timezone="UTC")},
+        scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        brain=brain,
+    )
+
+
+# Unmistakable on purpose: a native default that happened to equal the
+# anthropic answer would make every namespace assertion below vacuous.
+NATIVE_MODEL = "qwen3-testbed-max"
+
+
+@patch("istota.scheduler._sync_cron_files")
+class TestSchedulerPropagatesBrain:
+    def test_an_allowlisted_pin_reaches_the_task_row(self, _sync, db_path):
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=NATIVE_MODEL),
+            room_selectable=["native"],
+        ))
+        task = _fire_one_job(db_path, config, brain="native")
+        assert task.brain == "native"
+
+    def test_the_column_records_a_pin_the_allowlist_refuses(self, _sync, db_path):
+        """Writing the column is not the same as admitting the pin.
+
+        `room_selectable = []` means `resolve_brain_kind` refuses `native` at
+        dispatch and the task runs the configured brain — but the row still
+        records what the job asked for, which is what `!cron` and the log
+        channel read, and what makes shortening the allowlist take effect
+        without anything having to rewrite stored rows.
+        """
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=NATIVE_MODEL),
+            room_selectable=[],
+        ))
+        task = _fire_one_job(db_path, config, brain="native")
+        assert task.brain == "native", (
+            "the column records the pin even though resolve_brain_kind refuses "
+            "it at dispatch"
+        )
+
+    def test_the_model_resolves_against_the_brain_that_runs_not_the_pin(
+        self, _sync, db_path
+    ):
+        """A refused pin does not steer the alias resolution.
+
+        The raw pin and the resolved kind differ only here, and resolving
+        against the brain that will actually run is what leaves a job whose kind
+        the operator has since dropped from `room_selectable` with a model that
+        brain can use.
+        """
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=NATIVE_MODEL),
+            room_selectable=[],
+        ))
+        task = _fire_one_job(db_path, config, brain="native", model="smart")
+        assert task.model == "claude-opus-5"
+        assert task.model != NATIVE_MODEL
+
+
+@patch("istota.scheduler._sync_cron_files")
+class TestSchedulerResolvesTheModelThroughTheJobsBrain:
+    """ISSUE-419's two live defects, one per half.
+
+    Both are reachable without a per-job brain: the old line asked
+    `make_brain(app_config.brain)`, which is the base kind rather than the one
+    the task will run, and `resolve_model_name`, which discards the effort half
+    of the pair.
+    """
+
+    def test_a_pinned_brain_resolves_the_alias_in_its_own_namespace(
+        self, _sync, db_path
+    ):
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=NATIVE_MODEL),
+            room_selectable=["native"],
+        ))
+        task = _fire_one_job(db_path, config, brain="native", model="smart")
+        assert task.model == NATIVE_MODEL, (
+            "a portable tier must resolve in the pinned brain's namespace, not "
+            "the deployment default's"
+        )
+
+    def test_a_routed_source_type_resolves_the_alias_in_the_routed_namespace(
+        self, _sync, db_path
+    ):
+        """No per-job brain needed to reach the defect.
+
+        `[brain.source_type_overrides] scheduled = "native"` routes the lane, so
+        the job runs native and its `smart` must mean native's model. The old
+        line stored an anthropic canonical id, which the executor then dropped
+        as a crossing at INFO with nothing said to anyone.
+        """
+        config = _dispatch_config(db_path, BrainConfig(
+            kind="claude_code",
+            native=NativeBrainConfig(model=NATIVE_MODEL),
+            source_type_overrides={"scheduled": "native"},
+        ))
+        task = _fire_one_job(db_path, config, model="smart")
+        assert task.brain is None, "no per-job pin in this case"
+        assert task.model == NATIVE_MODEL
+
+    def test_an_effort_bearing_model_reference_carries_its_effort(
+        self, _sync, db_path
+    ):
+        """Not built on a bare tier: the shipped `DEFAULT_ALIASES` all carry
+        `None`, so `smart` would pass under either resolver and assert nothing.
+        `opus:high` is the `:effort` modifier `_validate_model`'s docstring
+        advertises and `docs/features/scheduling.md` lets an operator write.
+        """
+        config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
+        task = _fire_one_job(db_path, config, model="opus:high")
+        assert task.model == "claude-opus-5"
+        assert task.effort == "high", (
+            "resolve_model_name discards the effort half of the pair; "
+            "resolve_alias keeps it"
+        )
+
+    def test_the_jobs_own_effort_wins_over_the_alias(self, _sync, db_path):
+        """`with_defaults`' precedence rule with the job row standing in for
+        the block: the job wrote both, so it keeps both.
+        """
+        config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
+        task = _fire_one_job(db_path, config, model="opus:high", effort="low")
+        assert task.model == "claude-opus-5"
+        assert task.effort == "low"
 
 
 # ---------------------------------------------------------------------------

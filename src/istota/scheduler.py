@@ -93,7 +93,7 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from . import avatars, confirmations, db
-from .brain import make_brain
+from .brain import make_brain, resolve_brain_kind
 from .build_info import build_description
 from .consumers import (
     LogChannelSubscriber,
@@ -7562,6 +7562,63 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                 # table rather than from `config.users`, so a legacy row can
                 # carry one this guard refuses.
                 try:
+                    # Resolve aliases (role / provider) to canonical IDs at
+                    # task-creation time so the DB stays canonical, matching
+                    # the talk-poller's !model prefix path. Executor also
+                    # resolves as defense-in-depth, so legacy rows still work.
+                    #
+                    # Against the brain this job will actually *run* — the rule
+                    # `commands.brain_for_room` states for the room path. The
+                    # old line asked `app_config.brain`, which is the base
+                    # `[brain] kind` and ignores both the job's own pin and
+                    # `[brain.source_type_overrides]`, so on a routed
+                    # deployment a portable `smart` was resolved into the wrong
+                    # namespace and `_resolve_crossing_model_effort` later
+                    # dropped it as a crossing — at INFO, so nothing said so
+                    # (ISSUE-419). The *resolved* kind rather than the raw pin,
+                    # so a job whose brain the operator has since dropped from
+                    # `room_selectable` keeps a model the brain that runs it
+                    # can use.
+                    job_brain = make_brain(
+                        resolve_brain_kind(
+                            "scheduled",
+                            app_config.brain,
+                            override=(job.brain or None),
+                        )
+                    )
+                    job_model, job_effort = "", (job.effort or "")
+                    if job.model:
+                        # `resolve_alias` rather than `resolve_model_name`,
+                        # which returns `resolved[0]` and discards the effort
+                        # half — so `model = "opus:high"` ran at default effort
+                        # and nothing said so. Byte-for-byte the shape
+                        # `_resolve_crossing_model_effort` uses, for the same
+                        # reason. Effort precedence is the job's own field over
+                        # the alias's, which is `with_defaults`' stated rule
+                        # ("request > this block's own key > the alias's") with
+                        # the job row standing in for the block.
+                        pair = job_brain.resolve_alias(job.model)
+                        if pair and pair[0]:
+                            job_model = pair[0]
+                            job_effort = job_effort or (pair[1] or "")
+                        else:
+                            job_model = job_brain.resolve_model_name(job.model)
+                            if job_model == job.model:
+                                # Nothing recognised the name, so it goes to the
+                                # wire as written. Legitimate for a brain that
+                                # does no aliasing (native passes an explicit id
+                                # through by design), which is why the wording
+                                # says what will happen rather than calling it an
+                                # error — and why it is `_warn_once`, since a
+                                # job's model is a static fact about the file.
+                                _warn_once(
+                                    f"cron_model:{job.user_id}:{job.name}:{job.model}",
+                                    f"Scheduled job '{job.name}' (user: "
+                                    f"{job.user_id}): model "
+                                    f"{job.model!r} is not an alias "
+                                    f"{job_brain.__class__.__name__} resolves; "
+                                    f"it will be used as written",
+                                )
                     task_id = db.create_task(
                         conn,
                         prompt=job.prompt,
@@ -7577,12 +7634,9 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         skill=job.skill,
                         skill_args=job.skill_args,
                         queue="background",
-                        # Resolve aliases (role / provider) to canonical IDs at
-                        # task-creation time so the DB stays canonical, matching
-                        # the talk-poller's !model prefix path. Executor also
-                        # resolves as defense-in-depth, so legacy rows still work.
-                        model=make_brain(app_config.brain).resolve_model_name(job.model) or None,
-                        effort=job.effort or None,
+                        model=job_model or None,
+                        effort=job_effort or None,
+                        brain=job.brain or None,
                     )
                 except ValueError as e:
                     logger.error(
