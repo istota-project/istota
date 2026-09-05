@@ -40,7 +40,8 @@ def _args(**kw):
     base = dict(
         config=None, workspace=None, brain=None, native_base_url=None,
         native_model=None, native_api_key=None, user=None, display_name=None,
-        timezone=None, port=None, email=False, location=False, no_money=False,
+        timezone=None, port=None, email=False, location=False,
+        no_money=False, no_health=False, no_feeds=False, no_briefings=False,
         yes=False, force=False,
     )
     base.update(kw)
@@ -726,14 +727,47 @@ def _run_prompted(args, tmp_path, prompts, which_result="/usr/bin/claude"):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def _all_modules_available(monkeypatch):
+    """Pin every module available, so a prompt-count assertion is about the code.
+
+    ``_collect_modules`` skips a module whose install extra is missing, and
+    ``money`` is the one entry in ``MODULE_DEPENDENCIES``. Without this the
+    money prompt is present because `uv sync --extra test` happens to install
+    beancount, and the assertion goes red on the lean install shape
+    ``modules.module_available`` exists to support — for an environment reason
+    rather than a code one.
+    """
+    from istota import modules
+    monkeypatch.setattr(modules, "module_available", lambda _name: True)
+
+
 class TestModulePrompts:
-    def test_every_opt_out_module_is_offered(self, tmp_path):
+    def test_every_opt_out_module_is_offered(self, tmp_path, _all_modules_available):
         args = _args(workspace=str(tmp_path / "ws"), user="alice")
         p = _Prompts()
         rc, _, _ = _run_prompted(args, tmp_path, p)
         assert rc == 0
         for module in ("money", "health", "feeds", "briefings"):
             assert p.was_asked(module), f"no prompt mentioned {module}"
+
+    def test_the_prompt_list_covers_every_module_but_location(self):
+        """The drift this whole stage exists to fix: health, feeds and
+        briefings were in ``MODULE_NAMES`` and in no prompt. A sixth module
+        added later should fail here rather than repeat it."""
+        from istota import modules
+        asked = {module for _field, module, _q in setup_wizard._OPT_OUT_MODULES}
+        assert asked | {"location"} == set(modules.MODULE_NAMES)
+
+    def test_disabled_modules_is_derived_from_that_one_list(self):
+        """One source of truth for the set, so the prompts and the rendered
+        list cannot disagree."""
+        a = Answers()
+        for field_name, _module, _q in setup_wizard._OPT_OUT_MODULES:
+            setattr(a, field_name, False)
+        assert a.disabled_modules == sorted(
+            module for _f, module, _q in setup_wizard._OPT_OUT_MODULES
+        )
 
     def test_declining_three_reaches_both_the_toml_and_the_profile_row(self, tmp_path):
         """``disabled_modules`` has two homes and the DB row is the effective
@@ -774,6 +808,30 @@ class TestModulePrompts:
         rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
         assert rc == 0
         assert "disabled_modules" not in config_path.read_text()
+
+    def test_the_real_parser_produces_the_attributes_the_wizard_reads(self, monkeypatch):
+        """``_collect_modules`` reads ``getattr(args, f"no_{module}", False)``,
+        so a wrong or renamed argparse dest is a silent no-op rather than an
+        AttributeError — and ``_args``' SimpleNamespace would never notice,
+        since the test writes the attribute itself. Drive the real parser."""
+        import sys
+        from istota import cli, setup_wizard as wiz
+        captured: dict = {}
+
+        def fake_run_setup(args, **_kw):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(wiz, "run_setup", fake_run_setup)
+        monkeypatch.setattr(sys, "argv", [
+            "istota", "setup", "--yes",
+            "--no-money", "--no-health", "--no-feeds", "--no-briefings",
+        ])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        for module in ("money", "health", "feeds", "briefings"):
+            assert getattr(captured["args"], f"no_{module}") is True
 
     @pytest.mark.parametrize(
         "flag,module",
@@ -865,6 +923,25 @@ class TestCaldavRenderer:
         assert cfg.caldav_username == "alice@example.com"
         assert cfg.caldav_password == "hunter2"
 
+    @pytest.mark.parametrize(
+        "value",
+        ["ab\x1bc", "pa\x7fss", "nul\x00here", "tab\there", "back\\slash", 'qu"ote'],
+    )
+    def test_a_pasted_control_character_still_parses(self, tmp_path, value):
+        """TOML forbids raw control characters in a basic string, and a pasted
+        password is the realistic carrier. An unparseable file here raises out
+        of `_bootstrap`'s `load_config` — after the config, env file, admins
+        file and database have all been written."""
+        import tomllib
+        a = Answers(
+            workspace=tmp_path / "ws", user_id="alice",
+            caldav_url="https://caldav.example.com/dav",
+            caldav_username="alice@example.com",
+            caldav_password=value,
+        )
+        parsed = tomllib.loads(render_config_toml(a))
+        assert parsed["caldav"]["password"] == value
+
     def test_the_header_stops_claiming_no_secrets_live_here(self, tmp_path):
         """The file says where secrets live, so it has to stay right about the
         one that lands in it."""
@@ -953,6 +1030,113 @@ class TestCaldavCollection:
         rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
         assert rc == 0
         assert "[caldav]" not in config_path.read_text()
+
+    def test_a_url_with_no_password_is_not_written(self, tmp_path):
+        """It would override the [nextcloud] derivation with something that
+        cannot authenticate — worse than leaving the section out."""
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts(
+            {"external CalDAV": "y", "CalDAV URL": "https://caldav.example.com/dav"},
+            secrets={},  # the password prompt gives up empty
+        )
+        rc, config_path, out = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        assert "[caldav]" not in config_path.read_text()
+        assert any("No CalDAV password given" in line for line in out)
+
+
+class TestCaldavSurvivesARerun:
+    """``--force`` rewrites config.toml wholesale, and it is the only home this
+    password has — so a re-run that collects nothing must not delete it."""
+
+    def _first_run(self, tmp_path):
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts(
+            {
+                "external CalDAV": "y",
+                "CalDAV URL": "https://caldav.example.com/dav",
+                "CalDAV username": "alice@example.com",
+            },
+            secrets={"CalDAV password": "hunter2"},
+        )
+        rc, config_path, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        return config_path
+
+    def test_read_existing_caldav_reads_the_block_back(self, tmp_path):
+        config_path = self._first_run(tmp_path)
+        assert setup_wizard.read_existing_caldav(config_path) == {
+            "url": "https://caldav.example.com/dav",
+            "username": "alice@example.com",
+            "password": "hunter2",
+        }
+
+    def test_read_existing_caldav_never_raises(self, tmp_path):
+        assert setup_wizard.read_existing_caldav(tmp_path / "nope.toml") == {}
+        broken = tmp_path / "broken.toml"
+        broken.write_text("this is not = = toml")
+        assert setup_wizard.read_existing_caldav(broken) == {}
+        no_block = tmp_path / "plain.toml"
+        no_block.write_text('bot_name = "Istota"\n')
+        assert setup_wizard.read_existing_caldav(no_block) == {}
+
+    def test_a_non_interactive_force_rerun_keeps_it(self, tmp_path):
+        """`--yes` asks nothing and there is no flag to re-supply it, so the
+        alternative is deleting a credential with no copy anywhere."""
+        config_path = self._first_run(tmp_path)
+        args2 = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path2, _ = _run(args2, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert config_path2 == config_path
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        assert cfg.caldav_url == "https://caldav.example.com/dav"
+        assert cfg.caldav_password == "hunter2"
+
+    def test_an_interactive_rerun_offers_to_keep_it(self, tmp_path):
+        config_path = self._first_run(tmp_path)
+        args2 = _args(force=True, workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts()  # bare Enter everywhere; the keep prompt defaults to yes
+        rc, _, _ = _run_prompted(args2, tmp_path, p)
+        assert rc == 0
+        assert p.was_asked("Keep the configured CalDAV server")
+        # And it did not ask to set one up from scratch.
+        assert not p.was_asked("Point calendar at an external")
+        from istota.config import load_config
+        assert load_config(config_path).caldav_password == "hunter2"
+
+    def test_declining_the_keep_falls_through_to_a_fresh_setup(self, tmp_path):
+        """Otherwise the block would be preserved but not editable."""
+        config_path = self._first_run(tmp_path)
+        args2 = _args(force=True, workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts(
+            {
+                "Keep the configured CalDAV server": "n",
+                "external CalDAV": "y",
+                "CalDAV URL": "https://dav2.example.com/dav",
+                "CalDAV username": "bob@example.com",
+            },
+            secrets={"CalDAV password": "correcthorse"},
+        )
+        rc, _, _ = _run_prompted(args2, tmp_path, p)
+        assert rc == 0
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        assert cfg.caldav_url == "https://dav2.example.com/dav"
+        assert cfg.caldav_password == "correcthorse"
+
+    def test_declining_both_drops_it_and_says_so(self, tmp_path):
+        config_path = self._first_run(tmp_path)
+        args2 = _args(force=True, workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts({
+            "Keep the configured CalDAV server": "n",
+            "external CalDAV": "n",
+        })
+        rc, _, out = _run_prompted(args2, tmp_path, p)
+        assert rc == 0
+        assert "[caldav]" not in config_path.read_text()
+        # A silent deletion of a credential is the thing being avoided.
+        assert any("Dropping the existing [caldav] block" in line for line in out)
 
 
 # ---------------------------------------------------------------------------
@@ -1177,3 +1361,125 @@ class TestSelfCheck:
         check_at = next(i for i, ln in enumerate(out) if ln.startswith("Self-check ("))
         done_at = next(i for i, ln in enumerate(out) if ln == "Setup complete.")
         assert check_at < done_at
+
+    def test_a_warning_count_is_never_left_with_nothing_behind_it(
+        self, tmp_path, monkeypatch,
+    ):
+        """Only failures are printed, so a bare warn count in the summary is a
+        number the operator cannot act on."""
+        from istota import doctor
+        monkeypatch.setattr(
+            doctor, "run_checks",
+            lambda config, **kw: [
+                doctor.CheckResult("runtime.a", doctor.WARN, "something to know"),
+                doctor.CheckResult("runtime.b", doctor.OK, "fine"),
+            ],
+        )
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        text = "\n".join(out)
+        assert "no failures, 1 warning." in text
+        assert f"istota doctor -c {config_path}" in text
+
+    def test_the_failure_path_redacts(self, tmp_path, monkeypatch):
+        """An exception out of a check can carry a config value in its message,
+        and terminal output is where a pasted credential ends up in a report.
+
+        The value is over `doctor._MIN_SECRET_LEN`; below that `_redact`
+        deliberately leaves it, since a short string over-matches.
+        """
+        from istota import doctor
+        secret = "s3cret-app-password"
+
+        def boom(*a, **kw):
+            raise RuntimeError(f"connecting as https://alice:{secret}@dav.example.com")
+
+        # `load_config` runs its own narrowed registry pass, so this raises
+        # there first; that one is caught and logged by `_validate_forge_clis`,
+        # and the self-check's own call is the one under test.
+        monkeypatch.setattr(doctor, "run_checks", boom)
+        monkeypatch.setattr(doctor, "config_secrets", lambda _c: [secret])
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        text = "\n".join(out)
+        assert "Self-check could not run" in text
+        assert secret not in text
+        assert "dav.example.com" in text  # the rest of the message survives
+
+
+# ---------------------------------------------------------------------------
+# The prompt helpers themselves
+# ---------------------------------------------------------------------------
+
+
+class TestAskYesNo:
+    def test_empty_takes_the_default(self):
+        assert setup_wizard._ask_yes_no(lambda _p: "", "Q?", True) is True
+        assert setup_wizard._ask_yes_no(lambda _p: "", "Q?", False) is False
+
+    def test_an_unrecognised_answer_re_asks_rather_than_reading_as_no(self):
+        """It used to be `raw in ("y", "yes")`, so on a default-Yes prompt a
+        typo flipped *away* from the `[Y/n]` it had just printed and disabled a
+        module durably."""
+        answers = iter(["yeah", "1", "y"])
+        seen: list[str] = []
+        said: list[str] = []
+
+        def ask(prompt):
+            seen.append(prompt)
+            return next(answers)
+
+        assert setup_wizard._ask_yes_no(ask, "Q?", True, out=said.append) is True
+        assert len(seen) == 3
+        assert any("answer y or n" in line for line in said)
+
+    def test_it_is_bounded_and_falls_back_to_the_default(self):
+        """A non-interactive input_fn returning the same bad value forever must
+        not make the wizard unexitable."""
+        calls: list[str] = []
+
+        def ask(prompt):
+            calls.append(prompt)
+            return "maybe"
+
+        assert setup_wizard._ask_yes_no(ask, "Q?", True) is True
+        assert len(calls) == 3
+
+
+class TestReadSecret:
+    def test_ctrl_c_aborts_rather_than_returning_empty(self):
+        """It used to be swallowed, so the wizard carried on and wrote a whole
+        install around a blank credential. `cli.cmd_setup` catches this and
+        exits 1 with "Setup cancelled"."""
+        def interrupt(_prompt):
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            setup_wizard._read_secret(interrupt, "API key", lambda _l: None)
+
+    def test_eof_still_gives_up_quietly(self):
+        """A closed stdin is "there is no more input", which is the give-up
+        case the retry exists for — a different thing from Ctrl-C."""
+        def eof(_prompt):
+            raise EOFError
+
+        assert setup_wizard._read_secret(eof, "API key", lambda _l: None) == ""
+
+    def test_ctrl_c_at_the_imap_prompt_aborts_the_whole_wizard(self, tmp_path):
+        """The regression this guards: before the no-echo change the IMAP
+        password came from a plain `input()`, so Ctrl-C propagated."""
+        args = _args(workspace=str(tmp_path / "ws"), user="alice", email=True)
+        args.config = str(tmp_path / "cfg" / "config.toml")
+
+        def getpass_fn(prompt):
+            if "IMAP password" in prompt:
+                raise KeyboardInterrupt
+            return "x"
+
+        with pytest.raises(KeyboardInterrupt):
+            setup_wizard.run_setup(
+                args, input_fn=lambda _p: "", which_fn=lambda _n: "/usr/bin/claude",
+                out=lambda _l: None, getpass_fn=getpass_fn,
+            )

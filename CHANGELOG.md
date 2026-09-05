@@ -47,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The standalone setup wizard read the IMAP password with an ordinary prompt, so it was echoed to the terminal and left in shell history whenever the wizard was driven from a pipe. It is read without echo now, like the API key beside it. The wizard also asks for the SMTP host rather than forcing it equal to the IMAP host, defaulting to that host so the common case stays one keystroke.
 
+- A yes/no question in the standalone setup wizard now re-asks when the answer is neither, instead of reading anything it did not recognise as "no". On a question whose default is yes that took you the opposite way from the `[Y/n]` it had just printed, so typing `1` or `yeah` switched a module off and stored that.
+
 - The standalone setup wizard now creates the two directories it names in the config it writes. `db_backup_dir` and `temp_dir` were written as settings and made by nothing, so a fresh install had two configured paths that did not exist; both are created private, for the database snapshots and the per-task files they hold.
 
 - The web service can now authenticate to the model on a Docker install. It calls one on three request paths of its own — reading a lab panel, encounter or immunization document, explaining a biomarker, and running a shared briefing block on demand — and the stack passed it only the native brain's key, so on the default Claude CLI shape all three failed with no credential. Both Claude credentials now reach it.

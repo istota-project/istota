@@ -80,17 +80,16 @@ class Answers:
         by the module list, and putting it in both would give one answer two
         homes that can disagree.
 
-        Order is fixed rather than derived from the (unordered)
-        ``MODULE_NAMES`` frozenset, so two runs with the same answers render
-        the same line.
+        The set comes off ``_OPT_OUT_MODULES``, which is also what the prompts
+        walk, so the two cannot drift; sorted rather than left in prompt order
+        so two runs with the same answers render the same line, whatever order
+        the questions end up being asked in.
         """
-        enabled = {
-            "briefings": self.briefings_enabled,
-            "feeds": self.feeds_enabled,
-            "health": self.health_enabled,
-            "money": self.money_enabled,
-        }
-        return [name for name in ("briefings", "feeds", "health", "money") if not enabled[name]]
+        return sorted(
+            module
+            for field_name, module, _question in _OPT_OUT_MODULES
+            if not getattr(self, field_name)
+        )
 
     @property
     def db_path(self) -> Path:
@@ -113,8 +112,29 @@ class Answers:
 
 
 def _toml_str(value: str) -> str:
-    """Minimal TOML string escaping (backslash + double-quote)."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """TOML basic-string escaping: backslash, double-quote, control characters.
+
+    The control-character arm is not decoration. TOML 1.0 forbids raw
+    U+0000–U+0008, U+000A–U+001F and U+007F in a basic string, and every value
+    reaching here came off a terminal prompt — where a *pasted* credential is
+    the realistic carrier, since a line-oriented read cannot deliver a newline
+    but happily delivers an ESC or a DEL. Emitting one produces a
+    ``config.toml`` that will not parse, and the failure lands in
+    ``_bootstrap``'s ``load_config`` *after* the config, the env file, the
+    admins file and the database have all been written — as a bare
+    ``TOMLDecodeError``, which ``cli.cmd_setup`` does not catch.
+
+    Tab is left alone: TOML permits it raw, and escaping it would be a
+    gratuitous difference from what the user typed.
+    """
+    out = [
+        "\\\\" if ch == "\\"
+        else '\\"' if ch == '"'
+        else f"\\u{ord(ch):04x}" if (ch < " " or ch == "\x7f") and ch != "\t"
+        else ch
+        for ch in value
+    ]
+    return '"' + "".join(out) + '"'
 
 
 def render_config_toml(a: Answers) -> str:
@@ -267,12 +287,33 @@ def _ask(input_fn, prompt: str, default: str) -> str:
     return raw or default
 
 
-def _ask_yes_no(input_fn, prompt: str, default: bool) -> bool:
+def _ask_yes_no(input_fn, prompt: str, default: bool, *, out=None, attempts: int = 3) -> bool:
+    """A yes/no prompt. Empty takes the default; an unrecognised answer re-asks.
+
+    Re-asking rather than reading anything unrecognised as "no", which is what
+    this did. On a default-*No* prompt that reads as the default and so is
+    invisible; on a default-*Yes* one it flips **away** from the answer the
+    ``[Y/n]`` it just printed promised, so ``1``, ``true`` or ``yeah``
+    silently disabled a module and wrote it into both the TOML and the profile
+    row. The opt-out module prompts made that four questions rather than one.
+
+    Bounded, and the last attempt takes the default rather than looping: a
+    non-interactive ``input_fn`` that keeps returning the same value would
+    otherwise spin forever, and a wizard that cannot be exited is worse than
+    one that falls back to the answer it already printed.
+    """
     d = "Y/n" if default else "y/N"
-    raw = input_fn(f"{prompt} [{d}]: ").strip().lower()
-    if not raw:
-        return default
-    return raw in ("y", "yes")
+    for attempt in range(attempts):
+        raw = input_fn(f"{prompt} [{d}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("n", "no"):
+            return False
+        if out is not None and attempt < attempts - 1:
+            out(f"  Please answer y or n (Enter takes {'yes' if default else 'no'}).")
+    return default
 
 
 def _flush_terminal_input() -> None:
@@ -307,14 +348,23 @@ def _read_secret(
 
     Flushes buffered terminal input first so a stray newline can't silently
     accept an empty value, and reads via ``getpass_fn`` so the secret isn't
-    echoed. Returns "" only if the user gives up (empty every attempt / EOF);
-    the caller's validation then surfaces the clear "no API key" error.
+    echoed. Returns "" only if the user gives up (empty every attempt, or
+    EOF); the caller's validation then surfaces the clear "no API key" error.
+
+    **``KeyboardInterrupt`` propagates**, and is the difference between the
+    hint below being true and being a lie. Swallowing it returned "" and the
+    wizard carried on to write a complete install around a blank credential:
+    for the IMAP password that was a regression, since the plain ``input()``
+    this replaced let Ctrl-C out to ``cli.cmd_setup``, which catches it and
+    exits 1 with "Setup cancelled". EOF is still swallowed, because the two
+    mean different things — Ctrl-C is "stop", a closed stdin is "there is no
+    more input", which is the give-up case this function's retry is for.
     """
     _flush_terminal_input()
     for attempt in range(attempts):
         try:
             value = getpass_fn(f"{label}: ").strip()
-        except (EOFError, KeyboardInterrupt):  # pragma: no cover - interactive
+        except EOFError:
             return ""
         if value:
             return value
@@ -378,8 +428,12 @@ def _default_timezone() -> str:
     return "UTC"
 
 
-def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
-    """Build an ``Answers`` from flags + (unless ``--yes``) interactive prompts."""
+def collect_answers(args, *, input_fn, which_fn, out, getpass_fn, prior_caldav=None) -> Answers:
+    """Build an ``Answers`` from flags + (unless ``--yes``) interactive prompts.
+
+    ``prior_caldav`` is the ``[caldav]`` block already in the config this run
+    is about to overwrite, if any; see :func:`_collect_caldav`.
+    """
     interactive = not getattr(args, "yes", False)
     a = Answers()
 
@@ -437,7 +491,9 @@ def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
     if getattr(args, "location", False):
         a.location_enabled = True
     elif interactive:
-        a.location_enabled = _ask_yes_no(input_fn, "Enable GPS/location tracking?", False)
+        a.location_enabled = _ask_yes_no(
+            input_fn, "Enable GPS/location tracking?", False, out=out,
+        )
 
     # The rest of `modules.MODULE_NAMES`: each is installed and works out of the
     # box, so each is on by default and the prompt is an opt-out, matching the
@@ -449,7 +505,9 @@ def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
     if getattr(args, "email", False):
         a.email_enabled = True
     elif interactive:
-        a.email_enabled = _ask_yes_no(input_fn, "Enable email (IMAP/SMTP)?", False)
+        a.email_enabled = _ask_yes_no(
+            input_fn, "Enable email (IMAP/SMTP)?", False, out=out,
+        )
     if a.email_enabled:
         if interactive:
             a.imap_host = _ask(input_fn, "IMAP host", a.imap_host)
@@ -468,24 +526,10 @@ def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
         else:
             a.smtp_host = a.smtp_host or a.imap_host
 
-    # An external CalDAV server. The section exists for exactly this shape and
-    # no generator has ever offered it, so a standalone user has had to
-    # hand-add it. Opt-in: without it calendar derives from [nextcloud], which
-    # a standalone install does not have. `--yes` leaves it off — there is no
-    # flag for it, deliberately, since the password would then be on the
-    # command line and in shell history.
-    if interactive and _ask_yes_no(
-        input_fn, "Point calendar at an external CalDAV server?", False,
-    ):
-        a.caldav_url = _ask(input_fn, "CalDAV URL", "")
-        if a.caldav_url:
-            a.caldav_username = _ask(input_fn, "CalDAV username", "")
-            a.caldav_password = _read_secret(
-                getpass_fn, "CalDAV password", out,
-                hint="— please enter it, or Ctrl-C to abort.",
-            )
-        else:
-            out("  No CalDAV URL given; leaving [caldav] out of the config.")
+    _collect_caldav(
+        a, prior_caldav or {}, interactive=interactive, input_fn=input_fn,
+        getpass_fn=getpass_fn, out=out,
+    )
 
     # Stable session secret so restarts don't invalidate cookies (unused in
     # no-auth but written for cleanliness / any residual cookie use).
@@ -506,6 +550,95 @@ _OPT_OUT_MODULES: tuple[tuple[str, str, str], ...] = (
     ("feeds_enabled", "feeds", "Enable the feeds module (RSS/Atom/Tumblr reader)?"),
     ("briefings_enabled", "briefings", "Enable the briefings module (scheduled digests)?"),
 )
+
+
+def read_existing_caldav(config_path: Path) -> dict[str, str]:
+    """The ``[caldav]`` block already in ``config_path``, as three strings.
+
+    Best-effort: an absent, unreadable or unparseable file is no values, since
+    the caller's fallback is to ask. Non-string members are coerced, because
+    this is read from a file a person may have edited by hand.
+    """
+    import tomllib  # noqa: PLC0415 - only this path needs it
+
+    try:
+        with open(config_path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return {}
+    block = data.get("caldav")
+    if not isinstance(block, dict):
+        return {}
+    return {key: str(block.get(key) or "") for key in ("url", "username", "password")}
+
+
+def _collect_caldav(a: Answers, prior, *, interactive, input_fn, getpass_fn, out) -> None:
+    """Decide the ``[caldav]`` block: keep the existing one, set one up, or none.
+
+    The section exists for exactly this install shape and no generator has ever
+    offered it, so a standalone user has had to add it by hand. Opt-in, since
+    without it calendar derives from ``[nextcloud]``, which a standalone
+    install does not have.
+
+    **A re-run over an install that already has one asks a different question,
+    and that is a data-loss fix rather than a nicety.** ``--force`` rewrites
+    ``config.toml`` wholesale and ``render_config_toml`` is a pure function of
+    ``Answers``, so a run that collected nothing emits no block — and because
+    the password's only home is that file (there is no ``[caldav]`` entry in
+    ``load_config``'s ``_env_secret_overrides`` table), dropping the block
+    destroys a credential with no copy anywhere else. ``_carry_forward_secrets``
+    exists for precisely this hazard on the env file; this is the same rule for
+    the one secret that does not live there. So the question becomes "keep the
+    one you have", defaulting to yes, and declining it falls through to setting
+    up a different server — which is what makes the block editable rather than
+    merely preserved.
+
+    Non-interactively there is nothing to ask and no flag to answer with, so an
+    existing block is carried forward unconditionally. ``--yes`` resetting a
+    *preference* to its default is what ``--yes`` means; silently deleting a
+    credential is not.
+
+    A URL with no password is not written at all. It would override the
+    ``[nextcloud]`` derivation with something that cannot authenticate, which
+    breaks calendar more thoroughly than leaving the section out.
+    """
+    prior_url = (prior or {}).get("url", "")
+    keep = bool(prior_url)
+    if keep and interactive:
+        keep = _ask_yes_no(
+            input_fn, f"Keep the configured CalDAV server ({prior_url})?", True, out=out,
+        )
+    if keep:
+        a.caldav_url = prior_url
+        a.caldav_username = prior.get("username", "")
+        a.caldav_password = prior.get("password", "")
+        return
+
+    asked = interactive and _ask_yes_no(
+        input_fn, "Point calendar at an external CalDAV server?", False, out=out,
+    )
+    if asked:
+        a.caldav_url = _ask(input_fn, "CalDAV URL", "")
+        if a.caldav_url:
+            a.caldav_username = _ask(input_fn, "CalDAV username", "")
+            a.caldav_password = _read_secret(
+                getpass_fn, "CalDAV password", out,
+                hint="— please enter it, or Ctrl-C to abort.",
+            )
+            if not a.caldav_password:
+                out(
+                    "  No CalDAV password given; leaving [caldav] out rather "
+                    "than writing one that cannot authenticate."
+                )
+                a.caldav_url = ""
+                a.caldav_username = ""
+        else:
+            out("  No CalDAV URL given; leaving [caldav] out of the config.")
+    if prior_url and not a.caldav_url:
+        out(
+            f"  Dropping the existing [caldav] block ({prior_url}); the stored "
+            f"password goes with it."
+        )
 
 
 def _collect_modules(a: Answers, args, *, interactive, input_fn, out) -> None:
@@ -536,7 +669,7 @@ def _collect_modules(a: Answers, args, *, interactive, input_fn, out) -> None:
             )
             continue
         if interactive:
-            setattr(a, field_name, _ask_yes_no(input_fn, question, True))
+            setattr(a, field_name, _ask_yes_no(input_fn, question, True, out=out))
 
 
 def _collect_brain(a: Answers, args, *, interactive, input_fn, which_fn, out, getpass_fn) -> None:
@@ -826,8 +959,11 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None
             out("Setup aborted; existing config left untouched.")
             return 1
 
+    # Read before the rewrite: `config.toml` is the only home the [caldav]
+    # password has, so the file this run is about to replace is the only copy.
     a = collect_answers(
         args, input_fn=input_fn, which_fn=which_fn, out=out, getpass_fn=getpass_fn,
+        prior_caldav=read_existing_caldav(config_path),
     )
     _validate(a)
 
@@ -892,9 +1028,16 @@ def _bootstrap(a: Answers, config_path: Path):
     # every task's prepared attachment renditions. `db_backup_dir` holds whole
     # database snapshots, and `db_backup` writes 0700/0600 for that reason.
     # `mkdir(mode=...)` is masked by the umask and ignored outright when the
-    # directory exists, so the mode is set explicitly afterwards.
+    # directory exists, so the mode is set explicitly afterwards — but never
+    # through a symlink. `mkdir(exist_ok=True)` succeeds on one pointing at a
+    # directory and `Path.chmod` follows it, so a re-run over an install where
+    # the operator symlinked `db-backups` at a shared volume would silently
+    # narrow that volume instead. The surrounding code is careful about this
+    # in the same way (`_write_private`'s fchmod, `execute_task`'s O_NOFOLLOW).
     for directory in (a.temp_dir, a.db_backup_dir):
         directory.mkdir(parents=True, exist_ok=True)
+        if directory.is_symlink():
+            continue
         try:
             directory.chmod(0o700)
         except OSError:  # pragma: no cover - platform / ownership dependent
@@ -961,12 +1104,22 @@ def _run_self_check(config, config_path: Path, out) -> None:
         results = [gate] if gate is not None else doctor.run_checks(config, probe=False)
         _, summary = doctor.verdict(results)
         failures = doctor.failing(results)
+        secrets = doctor.config_secrets(config)
         out("")
         out(f"Self-check ({summary}):")
         if not failures:
-            out("  no failures.")
+            # Only failures are printed, so a warning count with nothing under
+            # it would be a number the operator cannot act on. Name where the
+            # rest is instead of either hiding the count or printing warnings
+            # that are expected on this shape — a closing check that always
+            # has something in it teaches the operator to skip the block.
+            warned = doctor.summarize(results).get(doctor.WARN, 0)
+            tail = f", {warned} warning{'' if warned == 1 else 's'}" if warned else ""
+            out(f"  no failures{tail}.")
+            if warned:
+                out(f"  Full report: istota doctor -c {config_path}")
             return
-        out(doctor.render_text(failures, secrets=doctor.config_secrets(config)))
+        out(doctor.render_text(failures, secrets=secrets))
         out("")
         out(
             "  Setup itself succeeded — the config, secrets and database are "
@@ -975,10 +1128,21 @@ def _run_self_check(config, config_path: Path, out) -> None:
         out(f"  Full report: istota doctor -c {config_path}")
     except Exception as exc:  # noqa: BLE001 - a diagnostic must not fail the install
         logger.debug("setup self-check raised", exc_info=True)
+        # Redacted for the same reason `render_text` demands `secrets`: an
+        # exception out of a check can carry a config value in its message (a
+        # URL with userinfo, a path), and terminal output is where a pasted
+        # credential ends up in a bug report. Best-effort — this is already the
+        # failure path, so a redaction that itself raises must not replace one
+        # unhelpful line with a traceback.
+        detail = f"{type(exc).__name__}: {exc}"
+        try:
+            detail = doctor._redact(detail, doctor.config_secrets(config))
+        except Exception:  # noqa: BLE001 - see above
+            detail = type(exc).__name__
         out("")
         out(
-            f"Self-check could not run ({type(exc).__name__}: {exc}); setup "
-            f"itself succeeded. Try `istota doctor -c {config_path}`."
+            f"Self-check could not run ({detail}); setup itself succeeded. "
+            f"Try `istota doctor -c {config_path}`."
         )
 
 
