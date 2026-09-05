@@ -2127,7 +2127,11 @@ class TestTheExampleDocumentsEveryLiveSection:
     Shaped after `test_config_native_session_log.py`'s own guard, which is
     where this idea already worked: walk the dataclass, require a commented
     assignment per field inside the block. Field-level and per section — the
-    section-level "rendered, documented or exempted" walk is a separate guard.
+    section-level "rendered, documented or exempted" walk is a separate guard,
+    and it lives in `tests/test_config_section_coverage.py`. Keeping the two
+    apart is deliberate: this one holds six hand-picked blocks to the field, and
+    that one holds the whole tree to the section, because field level over the
+    whole tree does not reach yet (14 leaf fields appear in neither artifact).
     """
 
     EXAMPLE = Path(__file__).resolve().parent.parent / "config" / "config.example.toml"
