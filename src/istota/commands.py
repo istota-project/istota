@@ -1926,6 +1926,8 @@ async def cmd_cron(ctx: CommandContext):
             line += f" `model: {job.model}`"
         if job.effort:
             line += f" `effort: {job.effort}`"
+        if job.brain:
+            line += f" `brain: {job.brain}`"
         if job.last_run_at:
             line += f" (last: {job.last_run_at[:16]})"
         if job.consecutive_failures > 0:

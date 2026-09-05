@@ -925,6 +925,51 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         assert sorted((t.brain or "") for t in tasks) == ["", "5"]
 
 
+class TestCmdCronShowsBrain:
+    """`!cron` renders the pin, on `TestCmdCronShowsModel`'s pattern.
+
+    The listing is what makes a sync-time gate honest: a value dropped for a
+    non-admin leaves the column NULL, so this line shows what will run rather
+    than what the file says.
+    """
+
+    @pytest.mark.asyncio
+    async def test_lists_brain_when_set(self, db_path, make_config):
+        from istota.commands import CommandContext, cmd_cron
+
+        config = make_config(db_path=db_path)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled, brain)
+                   VALUES (?, ?, ?, ?, 1, ?)""",
+                ("alice", "nightly", "0 9 * * *", "t", "native"),
+            )
+            result = await cmd_cron(CommandContext(
+                config=config, conn=conn, user_id="alice",
+                conversation_token="room1", args=""))
+
+        assert "brain: native" in result
+
+    @pytest.mark.asyncio
+    async def test_omits_brain_when_unset(self, db_path, make_config):
+        from istota.commands import CommandContext, cmd_cron
+
+        config = make_config(db_path=db_path)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                ("alice", "default-job", "0 9 * * *", "t"),
+            )
+            result = await cmd_cron(CommandContext(
+                config=config, conn=conn, user_id="alice",
+                conversation_token="room1", args=""))
+
+        assert "brain" not in result
+
+
 # ---------------------------------------------------------------------------
 # Validation warnings on CRON.md load
 # ---------------------------------------------------------------------------
