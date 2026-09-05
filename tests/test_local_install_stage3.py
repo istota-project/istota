@@ -6,6 +6,7 @@ fields, the DB + workspace bootstrap, and the clobber guard.
 """
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -222,7 +223,11 @@ class TestWizardBranches:
             "8766",                 # port
             "n",                    # location
             "y",                    # money
+            "y",                    # health
+            "y",                    # feeds
+            "y",                    # briefings
             "n",                    # email
+            "n",                    # caldav
         ]
         rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude", inputs=inputs)
         assert rc == 0
@@ -263,7 +268,11 @@ class TestWizardBranches:
             "8766",                 # port
             "n",                    # location
             "y",                    # money
+            "y",                    # health
+            "y",                    # feeds
+            "y",                    # briefings
             "n",                    # email
+            "n",                    # caldav
         ]
         rc, config_path, out = _run(
             args, tmp_path, which_result="/usr/bin/claude", inputs=inputs,
@@ -284,7 +293,11 @@ class TestWizardBranches:
         answers = iter([
             "n", "https://api.x/v1", "my-model",  # brain
             "SECRET-KEY",                           # getpass reads this
-            "alice", "UTC", "8766", "n", "y", "n",
+            "alice", "UTC", "8766",                 # display name, tz, port
+            "n",                                    # location
+            "y", "y", "y", "y",                     # money, health, feeds, briefings
+            "n",                                    # email
+            "n",                                    # caldav
         ])
 
         def fake_input(prompt):
@@ -648,3 +661,519 @@ class TestAdminsFile:
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
         _, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
         assert not any("does not name" in line for line in out)
+
+
+# ---------------------------------------------------------------------------
+# Prompt-keyed driver, for everything below
+# ---------------------------------------------------------------------------
+
+
+class _Prompts:
+    """Answer prompts by matching their text, and record what was asked.
+
+    ``_run``'s positional list is fine for the branches it was written for and
+    is the wrong instrument here: a question added anywhere earlier shifts it,
+    and one question (money) is skipped outright on an install without
+    ``beancount``, so position is not stable across environments either. Two
+    channels, deliberately kept apart — ``input`` and ``getpass`` — so a test
+    can assert which one a secret was read through.
+
+    Needles are matched in insertion order, so a more specific one goes first.
+    An unmatched prompt gets "", which is the same "take the default" a bare
+    Enter gives.
+    """
+
+    def __init__(self, answers=None, secrets=None):
+        self.answers = dict(answers or {})
+        self.secrets = dict(secrets or {})
+        self.asked: list[str] = []
+        self.asked_secretly: list[str] = []
+
+    def _pick(self, table, prompt):
+        for needle, value in table.items():
+            if needle in prompt:
+                return value
+        return ""
+
+    def input(self, prompt):
+        self.asked.append(prompt)
+        return self._pick(self.answers, prompt)
+
+    def getpass(self, prompt):
+        self.asked_secretly.append(prompt)
+        return self._pick(self.secrets, prompt)
+
+    def was_asked(self, needle: str) -> bool:
+        return any(needle in p for p in self.asked)
+
+    def was_asked_secretly(self, needle: str) -> bool:
+        return any(needle in p for p in self.asked_secretly)
+
+
+def _run_prompted(args, tmp_path, prompts, which_result="/usr/bin/claude"):
+    config_path = tmp_path / "cfg" / "config.toml"
+    args.config = str(config_path)
+    out_lines: list[str] = []
+    rc = setup_wizard.run_setup(
+        args, input_fn=prompts.input, which_fn=lambda _n: which_result,
+        out=out_lines.append, getpass_fn=prompts.getpass,
+    )
+    return rc, config_path, out_lines
+
+
+# ---------------------------------------------------------------------------
+# Module prompts: health, feeds and briefings had none at all
+# ---------------------------------------------------------------------------
+
+
+class TestModulePrompts:
+    def test_every_opt_out_module_is_offered(self, tmp_path):
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts()
+        rc, _, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        for module in ("money", "health", "feeds", "briefings"):
+            assert p.was_asked(module), f"no prompt mentioned {module}"
+
+    def test_declining_three_reaches_both_the_toml_and_the_profile_row(self, tmp_path):
+        """``disabled_modules`` has two homes and the DB row is the effective
+        one, so a prompt that only reaches the TOML changes nothing at runtime."""
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts({
+            "health module": "n",
+            "feeds module": "n",
+            "briefings module": "n",
+            "money module": "y",
+        })
+        rc, config_path, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+
+        toml = config_path.read_text()
+        assert 'disabled_modules = ["briefings", "feeds", "health"]' in toml
+
+        from istota import user_profiles
+        from istota.config import load_config
+        db_path = tmp_path / "ws" / "istota.db"
+        prof = user_profiles.get_profile(db_path, "alice")
+        assert sorted(prof.disabled_modules) == ["briefings", "feeds", "health"]
+
+        cfg = load_config(config_path)
+        for module in ("briefings", "feeds", "health"):
+            assert cfg.is_module_enabled("alice", module) is False
+        assert cfg.is_module_enabled("alice", "money") is True
+
+    def test_the_default_answer_leaves_every_module_on(self, tmp_path):
+        # Bare Enter at each prompt — the opt-out shape.
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run_prompted(args, tmp_path, _Prompts())
+        assert rc == 0
+        assert "disabled_modules" not in config_path.read_text()
+
+    def test_the_non_interactive_path_has_an_answer_for_each(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert "disabled_modules" not in config_path.read_text()
+
+    @pytest.mark.parametrize(
+        "flag,module",
+        [("no_health", "health"), ("no_feeds", "feeds"), ("no_briefings", "briefings")],
+    )
+    def test_each_flag_disables_without_a_prompt(self, tmp_path, flag, module):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice", **{flag: True})
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert f'disabled_modules = ["{module}"]' in config_path.read_text()
+        from istota import user_profiles
+        prof = user_profiles.get_profile(tmp_path / "ws" / "istota.db", "alice")
+        assert prof.disabled_modules == [module]
+
+    def test_an_unavailable_module_is_neither_asked_about_nor_recorded(
+        self, tmp_path, monkeypatch,
+    ):
+        """``module_available()`` already hides it, so the prompt has no good
+        answer — and recording it in ``disabled_modules`` would turn a missing
+        install extra into a stored decision that outlives installing it."""
+        from istota import modules
+        monkeypatch.setattr(modules, "module_available", lambda name: name != "money")
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts()
+        rc, config_path, out = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        assert not p.was_asked("money module")
+        assert p.was_asked("health module")
+        assert "disabled_modules" not in config_path.read_text()
+        assert any("money module's optional dependencies" in line for line in out)
+
+    def test_an_explicit_flag_still_wins_over_unavailability(self, tmp_path, monkeypatch):
+        """A flag is a decision the operator made; unavailability is one derived
+        from the environment, so the flag is honoured either way."""
+        from istota import modules
+        monkeypatch.setattr(modules, "module_available", lambda name: name != "money")
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice", no_money=True)
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert 'disabled_modules = ["money"]' in config_path.read_text()
+
+    def test_location_stays_out_of_disabled_modules(self, tmp_path):
+        """It is gated by ``[location] enabled``; two homes for one answer can
+        disagree."""
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run_prompted(args, tmp_path, _Prompts({"location": "n"}))
+        assert rc == 0
+        toml = config_path.read_text()
+        assert "[location]\nenabled = false" in toml
+        assert "disabled_modules" not in toml
+
+
+# ---------------------------------------------------------------------------
+# [caldav] — the section written for this shape that no generator emitted
+# ---------------------------------------------------------------------------
+
+
+class TestCaldavRenderer:
+    def test_absent_by_default(self, tmp_path):
+        a = Answers(workspace=tmp_path / "ws", user_id="alice")
+        assert "[caldav]" not in render_config_toml(a)
+
+    def test_rendered_when_a_url_is_given(self, tmp_path):
+        a = Answers(
+            workspace=tmp_path / "ws", user_id="alice",
+            caldav_url="https://caldav.example.com/dav",
+            caldav_username="alice@example.com",
+            caldav_password="hunter2",
+        )
+        toml = render_config_toml(a)
+        assert "[caldav]" in toml
+        assert 'url = "https://caldav.example.com/dav"' in toml
+        assert 'username = "alice@example.com"' in toml
+        assert 'password = "hunter2"' in toml
+
+    def test_it_parses_back_into_the_caldav_properties(self, tmp_path):
+        a = Answers(
+            workspace=tmp_path / "ws", user_id="alice",
+            caldav_url="https://caldav.example.com/dav/",
+            caldav_username="alice@example.com",
+            caldav_password="hunter2",
+        )
+        p = tmp_path / "config.toml"
+        p.write_text(render_config_toml(a))
+        from istota.config import load_config
+        cfg = load_config(p)
+        assert cfg.caldav.url == "https://caldav.example.com/dav/"
+        assert cfg.caldav_url == "https://caldav.example.com/dav"
+        assert cfg.caldav_username == "alice@example.com"
+        assert cfg.caldav_password == "hunter2"
+
+    def test_the_header_stops_claiming_no_secrets_live_here(self, tmp_path):
+        """The file says where secrets live, so it has to stay right about the
+        one that lands in it."""
+        without = render_config_toml(Answers(workspace=tmp_path / "ws"))
+        assert "never here" in without
+        with_key = render_config_toml(
+            Answers(
+                workspace=tmp_path / "ws", caldav_url="https://caldav.example.com",
+                caldav_password="hunter2",
+            )
+        )
+        assert "never here" not in with_key
+        assert "[caldav] password" in with_key
+
+
+class TestCaldavCollection:
+    def _prompts(self):
+        return _Prompts(
+            {
+                "external CalDAV": "y",
+                "CalDAV URL": "https://caldav.example.com/dav",
+                "CalDAV username": "alice@example.com",
+            },
+            secrets={"CalDAV password": "hunter2"},
+        )
+
+    def test_end_to_end(self, tmp_path):
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run_prompted(args, tmp_path, self._prompts())
+        assert rc == 0
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        assert cfg.caldav_url == "https://caldav.example.com/dav"
+        assert cfg.caldav_username == "alice@example.com"
+        assert cfg.caldav_password == "hunter2"
+
+    def test_the_password_is_read_without_echo(self, tmp_path):
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = self._prompts()
+        rc, _, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        assert p.was_asked_secretly("CalDAV password")
+        assert not p.was_asked("CalDAV password")
+
+    def test_the_config_file_is_private_when_it_carries_the_password(self, tmp_path):
+        """``Config.caldav_password`` reads the TOML field and ``load_config``
+        has no ``[caldav]`` entry in its env-override table, so the password has
+        nowhere else to go — which makes the file's mode the boundary."""
+        import stat
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run_prompted(args, tmp_path, self._prompts())
+        assert rc == 0
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+        # And it is not duplicated into the env file, which has no reader for it.
+        env = (config_path.parent / "istota.env").read_text()
+        assert "hunter2" not in env
+        assert "CALDAV" not in env.upper()
+
+    def test_a_config_with_no_caldav_password_is_not_narrowed(self, tmp_path):
+        """The private write is scoped to the shape that needs it: a config
+        holding no secret keeps the umask default, so an operator can still
+        read it as they always could. Compared against a control file rather
+        than against 0644, since the umask is the host's to choose."""
+        import stat
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        control = tmp_path / "control.txt"
+        control.write_text("x")
+        assert (
+            stat.S_IMODE(config_path.stat().st_mode)
+            == stat.S_IMODE(control.stat().st_mode)
+        )
+
+    def test_a_blank_url_leaves_the_block_out_and_asks_for_nothing_more(self, tmp_path):
+        args = _args(workspace=str(tmp_path / "ws"), user="alice")
+        p = _Prompts({"external CalDAV": "y", "CalDAV URL": ""})
+        rc, config_path, out = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        assert "[caldav]" not in config_path.read_text()
+        assert not p.was_asked_secretly("CalDAV password")
+        assert any("No CalDAV URL given" in line for line in out)
+
+    def test_declined_by_default_and_absent_non_interactively(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert "[caldav]" not in config_path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Email: no-echo password, and a real smtp_host question
+# ---------------------------------------------------------------------------
+
+
+class TestEmailPrompts:
+    def _args_and_prompts(self, tmp_path, smtp="smtp.example.com"):
+        args = _args(workspace=str(tmp_path / "ws"), user="alice", email=True)
+        p = _Prompts(
+            {
+                "IMAP host": "imap.example.com",
+                "IMAP user": "alice@example.com",
+                "SMTP host": smtp,
+            },
+            secrets={"IMAP password": "hunter2"},
+        )
+        return args, p
+
+    def test_smtp_host_can_differ_from_the_imap_host(self, tmp_path):
+        args, p = self._args_and_prompts(tmp_path)
+        rc, config_path, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        assert cfg.email.imap_host == "imap.example.com"
+        assert cfg.email.smtp_host == "smtp.example.com"
+
+    def test_it_defaults_to_the_imap_host(self, tmp_path):
+        # Bare Enter at the SMTP prompt — the common case stays one keystroke.
+        args, p = self._args_and_prompts(tmp_path, smtp="")
+        rc, config_path, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        assert cfg.email.smtp_host == "imap.example.com"
+
+    def test_the_password_goes_through_the_no_echo_path(self, tmp_path):
+        """It used to be read with ``input_fn``: echoed to the terminal, and
+        left in shell history when the wizard is driven from a pipe."""
+        args, p = self._args_and_prompts(tmp_path)
+        rc, config_path, _ = _run_prompted(args, tmp_path, p)
+        assert rc == 0
+        assert p.was_asked_secretly("IMAP password")
+        assert not p.was_asked("IMAP password")
+        env = (config_path.parent / "istota.env").read_text()
+        assert "ISTOTA_EMAIL_IMAP_PASSWORD=hunter2" in env
+        assert "ISTOTA_EMAIL_SMTP_PASSWORD=hunter2" in env
+        assert "hunter2" not in config_path.read_text()
+
+    def test_the_non_interactive_path_still_fills_smtp_host(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice", email=True)
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        assert cfg.email.smtp_host == cfg.email.imap_host
+
+
+# ---------------------------------------------------------------------------
+# The two directories config.toml names and nothing created
+# ---------------------------------------------------------------------------
+
+
+class TestDirectories:
+    def test_both_exist_after_a_run(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        from istota.config import load_config
+        cfg = load_config(config_path)
+        # Read the paths back off the config rather than recomputing them, so a
+        # directory made somewhere other than where the file points fails here.
+        assert Path(cfg.temp_dir).is_dir()
+        assert Path(cfg.scheduler.db_backup_dir).is_dir()
+
+    def test_they_are_private(self, tmp_path):
+        """``temp_dir`` is the parent of every task's ``.control`` tree and
+        holds prepared attachments; ``db_backup_dir`` holds whole database
+        snapshots."""
+        import stat
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, _, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        for name in ("tmp", "db-backups"):
+            mode = stat.S_IMODE((tmp_path / "ws" / name).stat().st_mode)
+            assert mode == 0o700, f"{name} is {oct(mode)}"
+
+    def test_a_rerun_is_idempotent(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        args2 = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice", force=True)
+        rc, _, _ = _run(args2, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert (tmp_path / "ws" / "db-backups").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# The closing self-check
+# ---------------------------------------------------------------------------
+
+
+class TestSelfCheck:
+    def test_it_runs_and_reports(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert any(line.startswith("Self-check (") for line in out)
+
+    def test_it_names_the_config_it_just_wrote(self, tmp_path, monkeypatch):
+        """``config_visibility`` is the gate that stops a run with no config
+        resolved from reporting on a default ``Config`` while reading exactly
+        like a run about this deployment, so the path has to be explicit."""
+        from istota import doctor
+        seen: dict = {}
+        real_gate = doctor.config_visibility
+
+        def spy_gate(config, requested=None, scope=""):
+            seen["requested"] = requested
+            seen["config_path"] = config.config_path
+            return real_gate(config, requested=requested, scope=scope)
+
+        monkeypatch.setattr(doctor, "config_visibility", spy_gate)
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert seen["requested"] == config_path
+        # And the config really did load, so the gate opened rather than firing.
+        assert Path(seen["config_path"]) == config_path
+
+    def test_it_does_not_spawn(self, tmp_path, monkeypatch):
+        """A wizard that hangs ten seconds per binary probe, with the operator
+        sitting at a prompt, is worse than one that checked less."""
+        from istota import doctor
+        calls: list[dict] = []
+        real = doctor.run_checks
+
+        def spy(config, **kw):
+            calls.append(kw)
+            return real(config, **kw)
+
+        monkeypatch.setattr(doctor, "run_checks", spy)
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        # `load_config` runs a narrowed registry pass of its own on every load,
+        # so select the full-registry run rather than reading the last call.
+        full = [kw for kw in calls if not kw.get("only")]
+        assert len(full) == 1
+        assert full[0]["probe"] is False
+        assert full[0].get("deep", False) is False
+        assert full[0].get("live", False) is False
+
+    def test_a_failing_check_is_printed_and_does_not_fail_the_install(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota import doctor
+        monkeypatch.setattr(
+            doctor, "run_checks",
+            lambda config, **kw: [
+                doctor.CheckResult(
+                    "runtime.invented", doctor.FAIL, "a contrived failure",
+                    remedy="do the thing",
+                ),
+                doctor.CheckResult("runtime.fine", doctor.OK, "all good"),
+            ],
+        )
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, config_path, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        # Setup succeeded: the files are written and the DB is initialized.
+        assert rc == 0
+        assert config_path.exists()
+        text = "\n".join(out)
+        assert "runtime.invented" in text
+        assert "a contrived failure" in text
+        assert "do the thing" in text
+        assert "Setup itself succeeded" in text
+        # Only the failures are printed; a passing check is not news here.
+        assert "runtime.fine" not in text
+
+    def test_the_gate_short_circuits_the_registry(self, tmp_path, monkeypatch):
+        from istota import doctor
+        gate = doctor.CheckResult(
+            "config.visibility", doctor.FAIL, "nothing resolved", remedy="pass -c",
+        )
+        calls: list[dict] = []
+
+        def spy(config, **kw):
+            calls.append(kw)
+            return []
+
+        monkeypatch.setattr(doctor, "config_visibility", lambda *a, **kw: gate)
+        monkeypatch.setattr(doctor, "run_checks", spy)
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        # `load_config`'s own narrowed pass still runs; a full-registry one
+        # would mean the gate was ignored.
+        assert [kw for kw in calls if not kw.get("only")] == []
+        assert "nothing resolved" in "\n".join(out)
+
+    def test_a_raising_check_run_does_not_break_setup(self, tmp_path, monkeypatch):
+        from istota import doctor
+
+        def boom(*a, **kw):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(doctor, "run_checks", boom)
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        text = "\n".join(out)
+        assert "Self-check could not run" in text
+        assert "kaboom" in text
+
+    def test_it_runs_before_the_next_steps_block(self, tmp_path):
+        """Order matters in a terminal: the thing needing action must not
+        scroll off above the thing telling you how to start."""
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        rc, _, out = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        check_at = next(i for i, ln in enumerate(out) if ln.startswith("Self-check ("))
+        done_at = next(i for i, ln in enumerate(out) if ln == "Setup complete.")
+        assert check_at < done_at

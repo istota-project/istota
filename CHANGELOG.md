@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
 
+- The standalone setup wizard now asks about every module it can switch on. Health, feeds and briefings had no prompt at all, so a local install got all three with no way to say otherwise during setup; each is now an opt-out question beside money, with `--no-health`, `--no-feeds` and `--no-briefings` for a scripted run. A module whose optional dependencies are not installed is skipped rather than asked about, since answering that question would store a decision that outlives installing them.
+
+- The standalone setup wizard now offers an external CalDAV server. `[caldav]` exists so a local install can point calendar at Radicale, Fastmail or Google without a Nextcloud, and no installer had ever written it — the documentation told you to add the section by hand. Answering yes collects the URL, username and password; the password is read without echo, and the config file is written private when it carries one, because that is the one credential with nowhere else to go.
+
+- The standalone setup wizard now runs `istota doctor` before it prints the next steps, and prints anything that failed. Setup used to end at "wrote some files" and now says whether they work. A red check never fails the install — the config, secrets and database are written either way — and the run spawns no subprocesses, so it costs a fraction of a second rather than a probe timeout per binary.
+
 ### Changed
 
 - **Upgrade note:** the web-fetch tool is now offered to admins only. On a deployment running the native brain a standard user genuinely loses it — it reaches the internet from the assistant's own process rather than through the per-task network allowlist, so they had wider access there than the same person had under either Claude brain, and a shared room applies one brain to every member's turns. On a Claude-brain deployment nothing is taken away; what changes is that a standard user is no longer told about the tool, since the two must agree or the instructions name something that is not there. Either way, web search is unaffected, and where a browser service is configured that stays the way to read a page — but a deployment with neither now leaves standard users with no page-reading tool named at all.
@@ -38,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Setting a profile picture is now one control rather than three. The picture itself is the target — click it to choose a file, or drop or paste one onto it — so the dashed upload box and the Choose file button inside it are gone, and Remove is the only button left. The bot icon on the admin dashboard carried its own copy of the old arrangement and changes the same way.
 
 ### Fixed
+
+- The standalone setup wizard read the IMAP password with an ordinary prompt, so it was echoed to the terminal and left in shell history whenever the wizard was driven from a pipe. It is read without echo now, like the API key beside it. The wizard also asks for the SMTP host rather than forcing it equal to the IMAP host, defaulting to that host so the common case stays one keystroke.
+
+- The standalone setup wizard now creates the two directories it names in the config it writes. `db_backup_dir` and `temp_dir` were written as settings and made by nothing, so a fresh install had two configured paths that did not exist; both are created private, for the database snapshots and the per-task files they hold.
 
 - The web service can now authenticate to the model on a Docker install. It calls one on three request paths of its own — reading a lab panel, encounter or immunization document, explaining a biomarker, and running a shared briefing block on demand — and the stack passed it only the native brain's key, so on the default Claude CLI shape all three failed with no credential. Both Claude credentials now reach it.
 
