@@ -164,17 +164,16 @@ class TestTheColumnCarriesTheOrigin:
 class TestTheRoomRecordsItAsItWrites:
     """`!room model` stores the namespace of the brain it resolved against."""
 
-    def test_a_room_write_records_the_namespace(self, db_path, tmp_path):
+    async def test_a_room_write_records_the_namespace(self, db_path, tmp_path):
         config = _config(db_path, tmp_path, room_selectable=["native"])
-        import asyncio
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
-            asyncio.run(cmd_room(_ctx(config, conn, "model smart")))
+            await cmd_room(_ctx(config, conn, "model smart"))
             room = db.get_room(conn, "room1")
         assert room.model is not None
         assert room.model_namespace == model_namespace_for_kind("claude_code")
 
-    def test_a_refused_pin_records_the_lane_it_actually_resolved_in(
+    async def test_a_refused_pin_records_the_lane_it_actually_resolved_in(
         self, db_path, tmp_path,
     ):
         """The ISSUE-420 repro, at the producer.
@@ -185,37 +184,34 @@ class TestTheRoomRecordsItAsItWrites:
         not the one the column names.
         """
         config = _config(db_path, tmp_path, room_selectable=[])
-        import asyncio
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
             db.set_room_brain(conn, "room1", "native")
-            asyncio.run(cmd_room(_ctx(config, conn, "model smart")))
+            await cmd_room(_ctx(config, conn, "model smart"))
             room = db.get_room(conn, "room1")
         assert room.brain == "native"
         assert room.model_namespace == "anthropic"
 
-    def test_clearing_the_model_clears_the_namespace(self, db_path, tmp_path):
+    async def test_clearing_the_model_clears_the_namespace(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
-        import asyncio
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
-            asyncio.run(cmd_room(_ctx(config, conn, "model smart")))
-            asyncio.run(cmd_room(_ctx(config, conn, "model default")))
+            await cmd_room(_ctx(config, conn, "model smart"))
+            await cmd_room(_ctx(config, conn, "model default"))
             room = db.get_room(conn, "room1")
         assert room.model is None
         assert room.model_namespace is None
 
-    def test_setting_effort_alone_leaves_the_namespace_alone(
+    async def test_setting_effort_alone_leaves_the_namespace_alone(
         self, db_path, tmp_path,
     ):
         """`!room effort` moves one knob. The namespace belongs to the model."""
         config = _config(db_path, tmp_path)
-        import asyncio
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
-            asyncio.run(cmd_room(_ctx(config, conn, "model smart")))
+            await cmd_room(_ctx(config, conn, "model smart"))
             before = db.get_room(conn, "room1").model_namespace
-            asyncio.run(cmd_room(_ctx(config, conn, "effort high")))
+            await cmd_room(_ctx(config, conn, "effort high"))
             room = db.get_room(conn, "room1")
         assert before == "anthropic"
         assert room.model_namespace == before
@@ -242,19 +238,18 @@ class TestTheTaskCarriesItFromTheRoom:
         assert task.model == "claude-opus-5"
         assert task.model_namespace == "anthropic"
 
-    def test_the_whole_chain_keeps_the_users_model(self, db_path, tmp_path):
+    async def test_the_whole_chain_keeps_the_users_model(self, db_path, tmp_path):
         """End to end: the ISSUE-420 room, one turn, model intact.
 
         Before the fix this task ran the brain's own default and said so only at
         INFO.
         """
         config = _config(db_path, tmp_path, room_selectable=[])
-        import asyncio
         from istota.brain import make_brain
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
             db.set_room_brain(conn, "room1", "native")
-            asyncio.run(cmd_room(_ctx(config, conn, "model smart")))
+            await cmd_room(_ctx(config, conn, "model smart"))
             chosen = db.get_room(conn, "room1").model
             _token, task_id = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
@@ -369,14 +364,13 @@ class TestTheClearingRuleReadsTheSameFact:
     brain's namespace, which the recorded fact contradicts.
     """
 
-    def _room(self, conn, config, *, pin, args="model smart"):
-        import asyncio
+    async def _room(self, conn, config, *, pin, args="model smart"):
         db.register_room(conn, "room1", "alice", origin="talk")
         db.set_room_brain(conn, "room1", pin)
-        asyncio.run(cmd_room(_ctx(config, conn, args)))
+        await cmd_room(_ctx(config, conn, args))
         return db.get_room(conn, "room1")
 
-    def test_a_refused_pin_moving_within_its_real_namespace_is_kept(
+    async def test_a_refused_pin_moving_within_its_real_namespace_is_kept(
         self, db_path, tmp_path,
     ):
         """The ISSUE-420 room, then `!brain claude_code`.
@@ -389,7 +383,7 @@ class TestTheClearingRuleReadsTheSameFact:
         from istota.commands import _clear_pin_across_namespaces
         config = _config(db_path, tmp_path, room_selectable=[])
         with db.get_db(db_path) as conn:
-            room = self._room(conn, config, pin="native")
+            room = await self._room(conn, config, pin="native")
             assert room.model_namespace == "anthropic"
             cleared = _clear_pin_across_namespaces(
                 config, conn, "room1", room,
@@ -457,18 +451,22 @@ class TestTheWebProducerRecordsIt:
     model set from web chat, read on Talk — so its three namespace branches are
     covered here rather than left to the room command's."""
 
-    def _web(self, db_path, tmp_path, **kw):
+    def _web(self, monkeypatch, db_path, tmp_path, **kw):
+        """`web_app._config` is a module global, so it is restored rather than
+        assigned — a test that leaves it pointing at its own tmp_path config
+        changes what every later test in the same xdist worker reads."""
         from istota import web_app
-        web_app._config = _config(db_path, tmp_path, **kw)
+        monkeypatch.setattr(web_app, "_config", _config(db_path, tmp_path, **kw))
         return web_app
 
     def test_a_brain_and_a_model_in_one_body_record_the_incoming_brain(
-        self, db_path, tmp_path,
+        self, monkeypatch, db_path, tmp_path,
     ):
         """The namespace is derived after `set_room_brain`, so it describes the
         brain the route validated the model against — not the outgoing one."""
         web_app = self._web(
-            db_path, tmp_path, kind="claude_code", room_selectable=["native"],
+            monkeypatch, db_path, tmp_path,
+            kind="claude_code", room_selectable=["native"],
         )
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "general")
@@ -483,11 +481,11 @@ class TestTheWebProducerRecordsIt:
         assert reg.model_namespace == "openai_compat"
 
     def test_an_effort_only_save_carries_the_stored_namespace_through(
-        self, db_path, tmp_path,
+        self, monkeypatch, db_path, tmp_path,
     ):
         """The branch that must NOT re-derive: the model is unchanged, so
         stamping today's lane onto it is the inference this column replaces."""
-        web_app = self._web(db_path, tmp_path)
+        web_app = self._web(monkeypatch, db_path, tmp_path)
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "general")
             db.set_room_model_effort(
@@ -500,8 +498,10 @@ class TestTheWebProducerRecordsIt:
         assert reg.effort == "high"
         assert reg.model_namespace == "openai_compat"
 
-    def test_clearing_the_model_clears_the_namespace(self, db_path, tmp_path):
-        web_app = self._web(db_path, tmp_path)
+    def test_clearing_the_model_clears_the_namespace(
+        self, monkeypatch, db_path, tmp_path,
+    ):
+        web_app = self._web(monkeypatch, db_path, tmp_path)
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "alice", "general")
             db.set_room_model_effort(
