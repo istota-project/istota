@@ -1311,11 +1311,14 @@ class TestTheCrossingRuleAtTheRequestBuild:
     id went to the openai_compat wire verbatim.
     """
 
-    def _run_primary(self, tmp_path, *, brain_config, task_model, task_brain=None):
+    def _run_primary(
+        self, tmp_path, *, brain_config, task_model, task_brain=None,
+        source_type="cli",
+    ):
         config = _make_config(tmp_path)
         config.brain = brain_config
         config.security.sandbox_enabled = False
-        kind = brain_config.source_type_overrides.get("cli", brain_config.kind)
+        kind = brain_config.source_type_overrides.get(source_type, brain_config.kind)
         brain = _FakeBrain(
             kind, BrainResult(True, "ok", stop_reason="completed", model_used="m"),
         )
@@ -1327,7 +1330,7 @@ class TestTheCrossingRuleAtTheRequestBuild:
             ),
         ]
         with contextmanager_chain(patches):
-            task = _make_task(source_type="cli", model=task_model)
+            task = _make_task(source_type=source_type, model=task_model)
             task.brain = task_brain
             execute_task(task, config, [])
         assert brain.received_reqs
@@ -1337,28 +1340,46 @@ class TestTheCrossingRuleAtTheRequestBuild:
         """Reversed by ISSUE-419's Stage 4, deliberately.
 
         This used to assert the drop, on the premise that an unpinned task's
-        model was written against `[brain] kind`. It is not: the producers of
-        `tasks.model` resolve the name through the brain the *lane* runs —
-        `check_scheduled_jobs` through `resolve_brain_kind("scheduled", …)`, and
-        a room's `!model` through `commands.brain_for_room`, which fills
-        `rooms.model` and `rooms.brain` from the same row inside the same guard.
-        So on a routed lane the stored id is already the routed brain's, and the
-        drop was discarding the operator's pin at INFO for a crossing that had
-        not happened.
+        model was written against `[brain] kind`. On the `scheduled` lane it is
+        not: `check_scheduled_jobs` resolves a `[[jobs]] model` through
+        `resolve_brain_kind("scheduled", …)`, so the stored id is already the
+        routed brain's and the drop was discarding the operator's pin at INFO
+        for a crossing that had not happened. `qwen3-testbed-max` is what that
+        producer would have written on this deployment, which is why the case is
+        keyed on that lane and that shape of name rather than on an anthropic id
+        no producer for this lane emits.
 
         `native.resolve_model_name` passes an id it does not know through
         unchanged, so the assertion is that the pin survives rather than that it
         is translated — there is no translation between namespaces and none is
         claimed.
+        """
+        req = self._run_primary(
+            tmp_path,
+            brain_config=BrainConfig(
+                kind="claude_code", source_type_overrides={"scheduled": "native"},
+            ),
+            task_model="qwen3-testbed-max",
+            source_type="scheduled",
+        )
+        assert req.model == "qwen3-testbed-max"
 
-        Two residues, neither introduced here and neither guarded: an
-        *inherited* pin, where `scheduler_deferred` copies a parent's `model`
-        onto a `subtask` row and a deployment routing the two lanes to different
-        namespaces hands the child a name from the parent's; and `repl/session`,
-        which still resolves its own `!model` through `make_brain(config.brain)`
-        — the base kind — the same expression Stage 3 removed from the scheduler.
-        Both are the "wrong brain resolves the alias" defect at a producer this
-        spec does not touch.
+    def test_a_lane_whose_producer_still_resolves_in_the_base_kind_carries_it(
+        self, tmp_path,
+    ):
+        """A known residue of ISSUE-419's Stage 4, pinned so it is not lost.
+
+        This is **not** the desired outcome. `cli`/`repl` pins are written by
+        `repl/session`, which resolves through `make_brain(config.brain)` — the
+        base kind — so on a routed `cli` lane the stored id really is anthropic
+        and really cannot run on native. Before Stage 4 the origin rule answered
+        `anthropic`, saw a crossing and dropped it; it now answers with the lane
+        and lets it through to a wire that will reject it.
+
+        The fix belongs at the producer, not here: `repl/session` should resolve
+        through `resolve_brain_kind("repl", …)` the way the scheduler now does.
+        Until it does, this records what the deployment actually does, and it is
+        the test to invert when that lands.
         """
         req = self._run_primary(
             tmp_path,
@@ -1370,15 +1391,19 @@ class TestTheCrossingRuleAtTheRequestBuild:
         assert req.model == "claude-opus-5"
 
     def test_an_unrouted_lane_on_a_routed_deployment_still_drops(self, tmp_path):
-        """The half that must not move.
+        """The half that must not move, and it needs a routing map to say so.
 
-        `cli` carries no routing entry here, so the lane runs `claude_code`, the
-        pin really was written in the anthropic namespace, and a fallback into
-        native really is a crossing. Without this the class would assert only
-        that pins survive, which every broken origin rule also satisfies.
+        The deployment routes `scheduled` and leaves `cli` alone, so this asks
+        whether the rule reads the *task's* lane rather than merely noticing
+        that routing exists. Built without `source_type_overrides` it would be
+        the same state as "no routing at all" and would pass against a rule that
+        ignored routing entirely — the class's own standard, that an assertion
+        every broken origin rule also satisfies is not a control.
         """
         config = _make_config(tmp_path)
-        config.brain = BrainConfig(kind="claude_code")
+        config.brain = BrainConfig(
+            kind="claude_code", source_type_overrides={"scheduled": "native"},
+        )
         from istota.executor import _pin_origin_namespace, _request_model
 
         task = _make_task(source_type="cli", model="claude-opus-5")

@@ -1295,25 +1295,53 @@ def _pin_origin_namespace(task, config) -> str | None:
       this function exists for.
     - Otherwise the pin was written against the brain this task's *lane*
       resolves to, which is ``resolve_brain_kind`` with no override — not
-      ``[brain] kind`` (ISSUE-419). Both producers of an unpinned pin ask
-      exactly that question before they write: ``check_scheduled_jobs``
-      resolves a ``[[jobs]] model`` through the job's own resolved brain, and a
-      ``!model`` prefix in a room that pinned no brain goes through
-      ``commands.brain_for_room``, which is the same call. Reading the base
-      kind made every ``[brain.source_type_overrides]`` deployment answer with
-      a namespace nothing had written in, so a cron ``model = "smart"`` routed
-      to native was resolved as native's model, compared against anthropic,
-      read as a crossing and dropped — the operator's pin silently replaced by
-      the brain's own default, at INFO. This is also the origin ``_run_fallback``
-      already passes on the fallback path (``brain_config.kind``, the routed
-      kind), so the two ends of one rule now agree.
+      ``[brain] kind`` (ISSUE-419). The two largest producers ask exactly that
+      question before they write: ``check_scheduled_jobs`` resolves a
+      ``[[jobs]] model`` through ``resolve_brain_kind("scheduled", …)``, and a
+      room's ``!model`` goes through ``commands.brain_for_room``. Reading the
+      base kind made every ``[brain.source_type_overrides]`` deployment answer
+      with a namespace nothing had written in, so a cron ``model = "smart"``
+      routed to native was resolved as native's model, compared against
+      anthropic, read as a crossing and dropped — the operator's pin silently
+      replaced by the brain's own default, at INFO.
 
-    The routing read is guarded for the reason ``commands.brain_for_room`` and
-    ``_native_web_fetch_enabled`` guard the identical call: ``source_type`` is a
-    ``TEXT`` column with no ``CHECK``, SQLite is dynamically typed, and
-    ``resolve_brain_kind`` opens by calling ``.strip()`` on it. The residue is
-    the base kind, which is the answer this returned before routing was
-    consulted at all.
+    **Read what that second bullet does to this function's one caller before
+    changing anything here.** ``_request_model`` passes the routed brain as the
+    target, and for an unpinned task this now returns that brain's own
+    namespace by construction, so the crossing rule can never fire on the
+    primary path for such a task. The check survives there only for a *pinned*
+    task, and on the fallback path, where ``_run_fallback`` compares against a
+    different brain than the one that ran. That is the intended shape and not an
+    oversight: the premise is that nobody writes a name into ``tasks.model``
+    except through the lane's own brain.
+
+    **Three producers do not meet that premise**, and each ends with a
+    foreign-namespace id passed to ``resolve_model_name``, which hands an
+    unknown id straight through. None is introduced here — before ISSUE-419
+    each was dropped instead, which was the right outcome reached by a rule
+    that was wrong about why. They are recorded rather than guarded because
+    the fix belongs at the producer:
+
+    - ``repl/session`` resolves its own ``!model`` through
+      ``make_brain(config.brain)`` — the base kind — the same expression
+      ISSUE-419 removed from the scheduler.
+    - ``scheduler_deferred`` copies a parent's ``model`` onto a ``subtask``
+      row, so a deployment routing the two lanes to different namespaces hands
+      the child a name resolved in the parent's.
+    - ``rooms.model`` is one column shared by every surface bound to a room,
+      written against the *writing* surface's lane and read here against the
+      *inbound* one, so a room whose model was set from web and whose next
+      message arrives over Talk disagrees wherever those two lanes route
+      differently.
+
+    The routing read is guarded because ``tasks.source_type`` is TEXT with no
+    ``CHECK`` and SQLite is dynamically typed, so ``resolve_brain_kind``'s
+    ``(source_type or "").strip()`` is reachable with a number on the row. It is
+    a guard for direct callers and tests rather than for ``execute_task``, which
+    calls ``resolve_brain_kind`` on the same value unguarded long before the
+    request is built — so a task that would trip this has already failed. The
+    residue is the base kind, the answer this returned before routing was
+    consulted.
 
     ``None`` where the kind does not resolve, which the crossing rule reads as
     "not established" and therefore treats as a crossing.
@@ -7132,16 +7160,17 @@ def execute_task(
             # Resolved through the crossing rule rather than by
             # `resolve_model_name` alone, because a *pin* can still meet a brain
             # of another namespace here (ISSUE-417) — ISSUE-418 removed the
-            # deployment default, not the pin. The live route is a room whose
-            # `brain` the operator has since dropped from `room_selectable`,
-            # where `resolve_brain_kind` warns and falls through while
-            # `rooms.model` still holds the previous namespace's id. A
-            # `[[jobs]] model` routed to native by `source_type_overrides` was
-            # the second one and is closed (ISSUE-419): the job's model is now
-            # resolved against the brain the lane runs, and
-            # `_pin_origin_namespace` reads that same lane, so nothing crosses.
-            # Within one namespace the rule resolves exactly as
-            # `resolve_model_name` did, so the ordinary path is unchanged.
+            # deployment default, not the pin. The route that still reaches it
+            # here is a *pinned* task — a room, or a cron job, whose `brain` the
+            # operator has since dropped from `room_selectable`, where
+            # `resolve_brain_kind` warns and falls through while the stored
+            # model belongs to another namespace. For an *unpinned* task this is
+            # now inert by construction: `_pin_origin_namespace` answers with
+            # the lane's own brain, which is the brain being passed in, so
+            # nothing crosses. See that function for the three producers that do
+            # not meet the premise behind it. Within one namespace the rule
+            # resolves exactly as `resolve_model_name` did, so the ordinary path
+            # is unchanged.
             model=_request_model(task, config, brain),
             effort=_resolve_effort(task, config),
             # Anthropic-namespace brains only — the advisor tool has no wire

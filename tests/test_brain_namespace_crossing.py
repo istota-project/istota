@@ -364,16 +364,29 @@ class TestAPinnedTaskStillReadsTheColumn:
         )
 
     def test_a_pin_the_allowlist_now_refuses_still_reads_as_its_own_namespace(self):
-        """Pinned behaviour, deliberately left alone by this stage.
+        """Pinned behaviour, deliberately left alone by this stage — and the
+        one place it is now provably wrong for a cron job.
 
         With `native` dropped from `room_selectable`, `resolve_brain_kind`
         refuses the pin and the task runs `claude_code`, while this answers
-        `openai_compat` and the crossing rule drops the pin. That is the
-        documented ISSUE-417 intent for a `rooms.model` written *while* the pin
-        was still admitted, and the wrong answer for one written after the
-        operator shortened the list. Which of the two writing times should win
-        is a separate decision about a different producer, so this pins today's
-        behaviour rather than changing it.
+        `openai_compat` and the crossing rule drops the model. For a
+        `rooms.model` written *while* the pin was still admitted that is the
+        documented ISSUE-417 intent and the right answer.
+
+        For a **cron job it is never right**, because `check_scheduled_jobs`
+        re-resolves the model on every fire against the *resolved* kind while
+        writing the *raw* pin into `tasks.brain`. So `[[jobs]] brain = "native"`
+        plus `model = "smart"` on a deployment that has not allowlisted native —
+        and `room_selectable` is empty by default — stores an anthropic id
+        beside a `native` pin, every fire, and has it dropped here, every fire.
+        The job runs the deployment default model and nothing says so.
+
+        Fixing it means reading the *admitted* pin rather than the column, which
+        collapses this function to the target brain's own namespace and makes
+        the primary-path crossing rule inert for pinned tasks too. That is a
+        decision about whether the rule should exist on this path at all, not a
+        predicate tweak, so it is deferred with its own issue and this records
+        what ships today.
         """
         assert (
             _pin_origin_namespace(
@@ -429,3 +442,51 @@ class TestARoutedLanesPinIsNoLongerDroppedAsACrossing:
             _brain("native"),
         )
         assert model == ""
+
+
+class TestTheProducersThatDoNotMeetThePremise:
+    """Residues of the lane rule, recorded rather than guarded.
+
+    The unpinned branch assumes a name in `tasks.model` was resolved through the
+    lane's own brain. Three producers do not do that, and each ends with a
+    foreign id handed to a brain that passes an unknown name straight through.
+    None is introduced by the lane rule — each was previously dropped, which was
+    the right outcome from a rule that was wrong about why — and each is fixed at
+    the producer rather than here.
+    """
+
+    def test_a_room_model_written_from_one_surface_is_read_on_another(self):
+        """`rooms.model` is one column shared by every surface bound to a room.
+
+        It is written against the writing surface's lane
+        (`commands.brain_for_room(..., ctx.surface)`,
+        `web_app._brain_for_room_token(token, "web")`) and read here against the
+        inbound one. A room whose model was set from the web UI and whose next
+        message arrives over Talk therefore disagrees with itself wherever those
+        two lanes route to different kinds.
+
+        The value was resolved in `anthropic` (web is unrouted, so it ran the
+        base kind) and this answers `openai_compat`, so the id reaches native's
+        wire unchallenged. Recorded, not asserted as correct.
+        """
+        config = Config(
+            brain=BrainConfig(
+                kind="claude_code", source_type_overrides={"talk": "native"},
+            )
+        )
+        talk_task = _Task("claude-opus-5", source_type="talk")
+        assert _pin_origin_namespace(talk_task, config) == "openai_compat"
+        assert _request_model(talk_task, config, _brain("native")) == "claude-opus-5"
+
+    def test_a_subtask_inherits_a_model_resolved_in_the_parents_lane(self):
+        """`scheduler_deferred` copies the parent's `model` onto a `subtask` row
+        with `brain=task.brain`, which is NULL when the parent was unpinned. The
+        child then reads its own lane, which is not where the name was written.
+        """
+        config = Config(
+            brain=BrainConfig(
+                kind="claude_code", source_type_overrides={"subtask": "native"},
+            )
+        )
+        child = _Task("claude-opus-5", source_type="subtask")
+        assert _pin_origin_namespace(child, config) == "openai_compat"
