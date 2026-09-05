@@ -451,6 +451,7 @@ services:
       USER_MAX_FOREGROUND_WORKERS: ${USER_MAX_FOREGROUND_WORKERS:-}
       USER_MAX_BACKGROUND_WORKERS: ${USER_MAX_BACKGROUND_WORKERS:-}
       USER_DISABLED_SKILLS: ${USER_DISABLED_SKILLS:-}
+      USER_DISABLED_MODULES: ${USER_DISABLED_MODULES:-}
       # Web UI provisioning. Defaults assume nginx fronts the stack on
       # ${DOMAIN:-localhost}:${NC_PORT:-8080}. Set DOMAIN for a real hostname,
       # ISTOTA_PUBLIC_PROTO=https when terminating TLS upstream. Override

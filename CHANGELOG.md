@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `istota doctor` now reports whether the key that unlocks the encrypted credential store is set and long enough. Without it nothing can be stored or read back, and the old symptom was a count of zero configured credentials rather than an error, so a broken install looked like an empty one. It reports presence and never a value, and where it is run from somewhere the key is stripped on purpose — inside a task — it says so and skips instead of reporting a failure.
 
+- A Docker install can now switch a module off for its user. Health and briefings had no Docker setting at all, so neither could be turned off from the stack; both now go through `USER_DISABLED_MODULES`, the per-user opt-out that already existed for skills, which the setup wizard asks about alongside feeds and money. It seeds the user's profile on first boot, after which the web settings are where a module is switched.
+
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
 
 ### Changed

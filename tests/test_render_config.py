@@ -631,6 +631,56 @@ class TestChannelsAndResources:
         assert _resource(with_token, "overland")["ingest_token"] == "ingest-token"
 
 
+class TestThePerUserModuleOptOut:
+    """``USER_DISABLED_MODULES``, the parallel of ``USER_DISABLED_SKILLS``.
+
+    Modules are default-on and the per-user opt-out is ``disabled_modules`` on
+    the ``[users.X]`` block, which the Docker render had no way to write. The
+    two deployment-level toggles it did have, ``ISTOTA_FEEDS_ENABLED`` and
+    ``ISTOTA_MONEY_ENABLED``, are a different axis: they decide whether the
+    ``[[users.X.resources]]`` block is written at all. Health and briefings had
+    neither, so nothing in the Docker shape could switch either off.
+    """
+
+    def test_nothing_is_disabled_by_default(self, tmp_path):
+        config = load_config(render(tmp_path, **REQUIRED))
+
+        assert config.users["testuser"].disabled_modules == []
+
+    def test_a_comma_separated_list_reaches_the_loaded_config(self, tmp_path):
+        config = load_config(
+            render(tmp_path, **REQUIRED, USER_DISABLED_MODULES="health,briefings")
+        )
+
+        assert config.users["testuser"].disabled_modules == ["health", "briefings"]
+
+    def test_a_disabled_module_is_off_for_that_user(self, tmp_path):
+        """Through the predicate the product reads, not just the field."""
+        config = load_config(
+            render(tmp_path, **REQUIRED, USER_DISABLED_MODULES="health")
+        )
+
+        assert not config.is_module_enabled("testuser", "health")
+        assert config.is_module_enabled("testuser", "briefings")
+
+    def test_the_deployment_toggle_and_the_opt_out_are_separate_axes(self, tmp_path):
+        """``ISTOTA_FEEDS_ENABLED`` writes the resource; this hides the module.
+
+        Both are meaningful at once, which is why one does not stand in for
+        the other: the resource block can exist while the user has the module
+        switched off.
+        """
+        rendered = render(
+            tmp_path,
+            **REQUIRED,
+            ISTOTA_FEEDS_ENABLED="true",
+            USER_DISABLED_MODULES="feeds",
+        )
+
+        assert _resource(tomllib.loads(rendered.read_text()), "feeds")
+        assert not load_config(rendered).is_module_enabled("testuser", "feeds")
+
+
 class TestTheWebBlock:
     def test_oauth_needs_both_halves_of_the_client_credential(self, tmp_path):
         # A client id with no secret is a half-provisioned Nextcloud, and the
