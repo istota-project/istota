@@ -187,9 +187,12 @@ TOML
     # its .env stops warning at every boot. The generator is what a generated
     # config is for.
 
-    # Disabled skills (optional)
-    if [ -n "${ISTOTA_DISABLED_SKILLS:-}" ]; then
-        echo "disabled_skills = [$(echo "$ISTOTA_DISABLED_SKILLS" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
+    # Disabled skills (optional). Through `toml_string_list` like every other
+    # comma-separated value here: this one is deployment-wide, so a `"` in it
+    # breaks the whole config rather than one user's key.
+    _disabled_skills_list="$(toml_string_list "${ISTOTA_DISABLED_SKILLS:-}")"
+    if [ -n "$_disabled_skills_list" ]; then
+        echo "disabled_skills = $_disabled_skills_list" >> "$CONFIG_FILE"
     fi
 
     # Experimental features (operator opt-in for rough, off-by-default work).
@@ -198,8 +201,9 @@ TOML
 
 [experimental]
 TOML
-    if [ -n "${ISTOTA_EXPERIMENTAL_FEATURES:-}" ]; then
-        echo "features = [$(echo "$ISTOTA_EXPERIMENTAL_FEATURES" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
+    _experimental_list="$(toml_string_list "${ISTOTA_EXPERIMENTAL_FEATURES:-}")"
+    if [ -n "$_experimental_list" ]; then
+        echo "features = $_experimental_list" >> "$CONFIG_FILE"
     else
         echo "features = []" >> "$CONFIG_FILE"
     fi

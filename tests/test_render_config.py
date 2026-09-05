@@ -738,6 +738,39 @@ class TestThePerUserModuleOptOut:
         assert _resource(tomllib.loads(rendered.read_text()), "feeds")
         assert not load_config(rendered).is_module_enabled("testuser", "feeds")
 
+    @pytest.mark.parametrize(
+        "var, section, key",
+        [
+            ("ISTOTA_DISABLED_SKILLS", None, "disabled_skills"),
+            ("ISTOTA_EXPERIMENTAL_FEATURES", "experimental", "features"),
+        ],
+    )
+    def test_every_comma_list_the_render_writes_uses_the_one_helper(
+        self, tmp_path, var, section, key
+    ):
+        """The deployment-wide lists, which kept the defect after the per-user
+        ones were fixed.
+
+        Four places rendered a comma-separated value with the same
+        ``sed 's/[^,]*/"&"/g'`` expression and two were repaired; a helper that
+        two of its four callers do not use is a fix that has not landed. Both
+        of these are operator-typed in ``docker/.env`` exactly as the per-user
+        pair is, and both are *global* — a quote in either writes a
+        ``config.toml`` nothing can parse, which on a first boot has no
+        ``config.toml.prev`` to fall back to and under
+        ``restart: unless-stopped`` is a crash loop for the whole stack rather
+        than for one user's setting.
+
+        Asserted through ``tomllib`` rather than on the rendered text: parsing
+        at all is the property, and the value is nonsense either way.
+        """
+        rendered = tomllib.loads(
+            render(tmp_path, **REQUIRED, **{var: 'alpha, br"avo,'}).read_text()
+        )
+        holder = rendered[section] if section else rendered
+
+        assert holder[key] == ["alpha", 'br"avo']
+
 
 class TestTheWebBlock:
     def test_oauth_needs_both_halves_of_the_client_credential(self, tmp_path):
