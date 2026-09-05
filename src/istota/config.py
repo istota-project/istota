@@ -2227,7 +2227,24 @@ class Config:
         file must not silently make every user a shared-content writer.
         Returns True iff ``admin_users`` is non-empty and ``user_id`` is in it.
         Do not collapse this into ``is_admin``.
+
+        One exception, mirroring the one ``web_app._user_is_web_admin``
+        carries: on the standalone shape the single local user is a shared
+        writer whether or not an admins file names them. Without it a
+        standalone install could not write a shared briefing block at all,
+        since the wizard wrote no admins file to be named in. The wizard now
+        writes one, so on a fresh install this never fires — it is the backstop
+        for an install made before that.
+
+        The exception is keyed on :attr:`is_standalone` — blank ``[nextcloud]
+        url`` **and** ``[web] auth == "none"`` — rather than on the ``[web]
+        auth`` axis alone the way ``_user_is_web_admin``'s is. That is
+        deliberate and narrower: a deployment with Nextcloud storage and auth
+        switched off is not the single-user shape, it has other users' content
+        in it, and it must not silently gain a shared-content writer.
         """
+        if self.is_standalone and user_id == self.local_user_id:
+            return True
         return bool(self.admin_users) and user_id in self.admin_users
 
 

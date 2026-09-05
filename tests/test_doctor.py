@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import doctor, subscription_usage
+from istota import doctor, secrets_store, subscription_usage
 from istota import executor as doctor_executor
 from istota.doctor import (
     CHECKS,
@@ -2431,6 +2431,132 @@ class TestSkillModelCredential:
         results = self._run(config)
         assert results["security.skill_model_credential.wiring"].status == SKIP
         assert "security.skill_model_credential.value" not in results
+
+
+class TestSecretKey:
+    """`security.secret_key` — the master Fernet key for the secrets store.
+
+    The gap this closes was silent in the worst way: with no
+    ``ISTOTA_SECRET_KEY`` every stored credential is unreachable, and
+    `_native_key_holders` reports *0 holders* rather than an error, so the
+    absence read as "nobody has configured a credential". The standalone
+    wizard generated none at all for seven weeks and nothing anywhere said so.
+    """
+
+    NAME = "security.secret_key"
+
+    def _run(self, config):
+        return _by_name(run_checks(config, only=(self.NAME,)))[self.NAME]
+
+    def _clear(self, monkeypatch):
+        for name in ("ISTOTA_SECRET_KEY", "ISTOTA_TASK_ID", "ISTOTA_SANDBOXED",
+                     "PRECOMMIT_SCANS_REQUIRED"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_absent_fails(self, make_config, monkeypatch):
+        """The positive control for the whole check. The markers are deleted
+        explicitly rather than left to the suite's scrub: this is the one case
+        that must reach FAIL, and every skip below is a way for it to stop
+        doing so quietly."""
+        self._clear(monkeypatch)
+        result = self._run(make_config())
+        assert result.status == FAIL
+        assert result.remedy
+        # The consequence, not just the absence: it is the thing that made the
+        # gap invisible.
+        assert "credential" in result.detail.lower()
+
+    def test_too_short_fails_naming_the_floor_and_the_length(
+        self, make_config, monkeypatch
+    ):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "changeme")
+        result = self._run(make_config())
+        assert result.status == FAIL
+        assert str(secrets_store._MIN_KEY_LEN) in result.detail
+        # The length is not the value.
+        assert "8" in result.detail
+        assert "changeme" not in result.detail
+        assert "changeme" not in result.remedy
+
+    def test_present_is_ok_and_never_reports_the_value(
+        self, make_config, monkeypatch
+    ):
+        self._clear(monkeypatch)
+        key = "0" * 31 + "sentinelkeymaterial" + "1" * 20
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", key)
+        result = self._run(make_config())
+        assert result.status == OK
+        # Never the value, and never a prefix of it: a CheckResult is rendered
+        # into the boot log and the admin dashboard.
+        assert "sentinelkeymaterial" not in result.detail
+        assert "sentinelkeymaterial" not in result.remedy
+        assert key[:8] not in result.detail
+
+    @pytest.mark.parametrize(
+        "marker",
+        ["ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"],
+    )
+    def test_absence_in_a_non_daemon_env_skips(
+        self, make_config, monkeypatch, marker
+    ):
+        """`build_clean_env` strips this name from every task env by design and
+        `_PROXY_LOOKUP_BLOCKED` blocks it from the proxy, so absence inside a
+        task is guaranteed and says nothing about the daemon."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv(marker, "1")
+        result = self._run(make_config())
+        assert result.status == SKIP
+        assert marker in result.detail
+
+    def test_presence_still_answers_from_a_non_daemon_env(
+        self, make_config, monkeypatch
+    ):
+        """Ordering control: only absence is the unanswerable direction, so a
+        key that is right there must not be swallowed by the skip."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ISTOTA_SANDBOXED", "1")
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+        assert self._run(make_config()).status == OK
+
+    def test_an_unrelated_istota_variable_is_not_a_marker(
+        self, make_config, monkeypatch
+    ):
+        """Negative control for the marker set: the daemon's own environment
+        carries `ISTOTA_*` variables, so a namespace test would skip
+        everywhere and the check could never fail."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", "/etc/istota/config.toml")
+        assert self._run(make_config()).status == FAIL
+
+    def test_the_standalone_remedy_names_the_env_file(
+        self, make_config, monkeypatch
+    ):
+        from istota.config import WebConfig
+
+        self._clear(monkeypatch)
+        config = make_config(web=WebConfig(auth="none"))
+        assert config.is_standalone is True
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "istota.env" in result.remedy
+
+    def test_the_floor_is_read_from_the_secrets_store(
+        self, make_config, monkeypatch
+    ):
+        """The drift guard. A second copy of the floor is exactly what this
+        check exists to catch, so a raised floor must move the verdict here
+        without any edit to doctor."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 40)
+        assert self._run(make_config()).status == OK
+        monkeypatch.setattr(secrets_store, "_MIN_KEY_LEN", 64)
+        assert self._run(make_config()).status == FAIL
+
+    def test_scope_is_deployment(self):
+        """A key is a property of an install; a bare `docker run` has none and
+        would report a missing key about nothing."""
+        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
 
 
 class TestSandboxCredentials:

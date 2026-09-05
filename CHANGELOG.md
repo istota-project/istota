@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A scheduled job can now name the brain it runs on, with `brain = "native"` in its `[[jobs]]` table in CRON.md — a nightly summary on one brain and a repo-touching job on another, without moving the deployment default. Only an admin can set one, and only to a kind the operator has listed under `[brain] room_selectable`, the same allowlist a chat room's `!brain` uses and empty by default; anything else is ignored and the job runs as before. A job that names its brain runs that brain or fails saying why, rather than being answered by the deployment's backup, and `!cron` shows the pin beside the job's model and effort.
 
+- `istota doctor` now reports whether the key that unlocks the encrypted credential store is set and long enough. Without it nothing can be stored or read back, and the old symptom was a count of zero configured credentials rather than an error, so a broken install looked like an empty one. It reports presence and never a value, and where it is run from somewhere the key is stripped on purpose — inside a task — it says so and skips instead of reporting a failure.
+
 - A task can now read and set the Monarch category mapping, with `istota-skill money monarch-category-map list` and `set`. It reaches the money config the way the other money verbs do, scoped to the task's own user, so asking in chat for a category to be filed somewhere else no longer needs the web UI or a shell on the host. Removing a mapping stays an operator command.
 
 ### Changed
@@ -28,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Setting a profile picture is now one control rather than three. The picture itself is the target — click it to choose a file, or drop or paste one onto it — so the dashed upload box and the Choose file button inside it are gone, and Remove is the only button left. The bot icon on the admin dashboard carried its own copy of the old arrangement and changes the same way.
 
 ### Fixed
+
+- A local install now generates the key its encrypted credential store needs. `istota setup` wrote none, so storing a Garmin, Monarch, ntfy or Google Workspace credential failed on every local install and nothing said why. Re-running setup with `--force` keeps whatever key is already there rather than making a new one, since replacing it would leave every credential stored under it permanently unreadable, and the secrets file is now created private instead of being made private a moment after it is written.
+
+- Shared briefing blocks can be written on a local install again. Writing shared content requires a named admin, and a local install had no admins file for anyone to be named in, so nothing could be written and the failure looked like a missing feature. Setup now writes one naming the local user; an install made before this change is covered by an exception for the single-user shape, which stays narrow — a deployment with Nextcloud storage and its web login switched off is not that shape and gains nothing.
 
 - The warning about an ignored brain pin is no longer repeated on every run. A room or scheduled job naming a brain the operator has not allowed is still reported the first time, which is what tells an operator their pin is being ignored, but nothing about that changes between runs — so a job on a one-minute schedule wrote the same line around 1440 times a day, pushing the rest of the log out of the admin Logs pane and filling disk. It is now said once per distinct problem for as long as the daemon runs, and the same applies to a brain kind nothing can build, whether it came from a pin or from `[brain.source_type_overrides]`.
 

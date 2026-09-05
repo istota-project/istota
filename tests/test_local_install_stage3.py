@@ -364,3 +364,172 @@ class TestClobberGuard:
         rc, _, out = _run(args2, tmp_path, which_result="/usr/bin/claude", inputs=["n"])
         assert rc == 1
         assert any("aborted" in line.lower() for line in out)
+
+
+def _env_values(path):
+    """Parse the wizard's ``istota.env`` the way ``serve.load_env_file`` does."""
+    values = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+class TestSecretKey:
+    """The master Fernet key the standalone wizard never generated.
+
+    Without ``ISTOTA_SECRET_KEY`` every stored credential is unreachable —
+    `istota secret`, the per-user ntfy service, Garmin, Monarch and the Google
+    Workspace tokens all raise `SecretKeyMissingError`. Regenerating it on a
+    ``--force`` re-run is worse than not having one: it makes every already
+    stored credential permanently undecryptable.
+    """
+
+    def test_the_env_file_carries_a_usable_key(self, tmp_path):
+        from istota.secrets_store import _MIN_KEY_LEN
+
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        env = _env_values(tmp_path / "cfg" / "istota.env")
+        assert "ISTOTA_SECRET_KEY" in env
+        assert len(env["ISTOTA_SECRET_KEY"]) >= _MIN_KEY_LEN
+
+    def test_the_renderer_emits_whatever_key_it_is_given(self):
+        a = Answers(secret_key="k" * 64, session_secret="s" * 64)
+        assert "ISTOTA_SECRET_KEY=" + "k" * 64 in render_env_file(a)
+
+    def test_force_rerun_preserves_the_exact_prior_key(self, tmp_path):
+        """The boundary. `--force` rewrites `istota.env` wholesale, and a new
+        key there orphans every credential already in the secrets table."""
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        env_path = tmp_path / "cfg" / "istota.env"
+        first = _env_values(env_path)["ISTOTA_SECRET_KEY"]
+
+        args2 = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="bob")
+        rc, _, _ = _run(args2, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        assert _env_values(env_path)["ISTOTA_SECRET_KEY"] == first
+
+    def test_force_rerun_preserves_the_session_secret_too(self, tmp_path):
+        """Smaller harm (invalidated cookies, not lost credentials), same rule:
+        a re-run is a config rewrite, not a key rotation."""
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        env_path = tmp_path / "cfg" / "istota.env"
+        first = _env_values(env_path)["ISTOTA_WEB_SESSION_SECRET_KEY"]
+
+        args2 = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="bob")
+        _run(args2, tmp_path, which_result="/usr/bin/claude")
+        assert _env_values(env_path)["ISTOTA_WEB_SESSION_SECRET_KEY"] == first
+
+    def test_a_blank_or_short_prior_key_is_replaced(self, tmp_path):
+        """Preservation is for a usable key. An empty or truncated line must
+        not be carried forward, or the guard would pin the broken state."""
+        from istota.secrets_store import _MIN_KEY_LEN
+
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        env_path = tmp_path / "cfg" / "istota.env"
+        env_path.write_text("ISTOTA_SECRET_KEY=\nISTOTA_WEB_SESSION_SECRET_KEY=short\n")
+
+        args2 = _args(yes=True, force=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args2, tmp_path, which_result="/usr/bin/claude")
+        env = _env_values(env_path)
+        assert len(env["ISTOTA_SECRET_KEY"]) >= _MIN_KEY_LEN
+        assert len(env["ISTOTA_WEB_SESSION_SECRET_KEY"]) >= _MIN_KEY_LEN
+
+    def test_the_env_file_is_created_private_rather_than_chmodded_after(
+        self, tmp_path, monkeypatch
+    ):
+        """`write_text` then `chmod` leaves the file world-readable with
+        secrets in it for the interval between. Asserting on the final mode
+        passes against that bug, so this asserts on the mode the file was
+        *created* with."""
+        import stat
+
+        real_open = os.open
+        seen: dict[str, int] = {}
+
+        def recording_open(path, flags, mode=0o777, *a, **kw):
+            if str(path).endswith("istota.env"):
+                seen["mode"] = mode
+                seen["flags"] = flags
+            return real_open(path, flags, mode, *a, **kw)
+
+        monkeypatch.setattr(os, "open", recording_open)
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+
+        assert seen.get("mode") == 0o600, (
+            "istota.env was not created through os.open with mode 0600"
+        )
+        assert seen["flags"] & os.O_CREAT
+        env_path = tmp_path / "cfg" / "istota.env"
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
+class TestAdminsFile:
+    """The wizard writes a real authorization artifact.
+
+    Without one `admin_users` is empty, and `is_shared_kv_writer` fails closed,
+    so shared briefing blocks could not be written on a standalone install.
+    """
+
+    def test_written_and_named_in_the_env_file(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        admins = tmp_path / "cfg" / "admins"
+        assert admins.is_file()
+        assert "alice" in admins.read_text().split()
+        env = _env_values(tmp_path / "cfg" / "istota.env")
+        assert env["ISTOTA_ADMINS_FILE"] == str(admins)
+
+    def test_the_admins_route_authorizes_on_its_own(self, tmp_path, monkeypatch):
+        """The admins file is the primary route, so it must authorize with the
+        standalone exemption unable to account for it: the same `admin_users`
+        on a config that is *not* standalone still writes shared content."""
+        from istota.config import NextcloudConfig, load_config
+
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        env = _env_values(tmp_path / "cfg" / "istota.env")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", env["ISTOTA_ADMINS_FILE"])
+
+        cfg = load_config(tmp_path / "cfg" / "config.toml")
+        assert cfg.admin_users == {"alice"}
+        assert cfg.is_shared_kv_writer("alice") is True
+        assert cfg.is_shared_kv_writer("mallory") is False
+
+        # Not standalone, so only the allowlist can be answering.
+        cfg.nextcloud = NextcloudConfig(url="https://nextcloud.example.com")
+        assert cfg.is_standalone is False
+        assert cfg.is_shared_kv_writer("alice") is True
+
+    def test_an_existing_admins_file_naming_the_user_is_left_alone(self, tmp_path):
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        existing = "# hand-edited\nalice\nbob\n"
+        (cfg_dir / "admins").write_text(existing)
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert (cfg_dir / "admins").read_text() == existing
+        # Not a vacuous pass: the env file has to point at it either way.
+        env = _env_values(cfg_dir / "istota.env")
+        assert env["ISTOTA_ADMINS_FILE"] == str(cfg_dir / "admins")
+
+    def test_an_existing_admins_file_gains_the_user(self, tmp_path):
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        (cfg_dir / "admins").write_text("# hand-edited\nbob\n")
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _run(args, tmp_path, which_result="/usr/bin/claude")
+        names = [
+            line.strip()
+            for line in (cfg_dir / "admins").read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        assert names == ["bob", "alice"]

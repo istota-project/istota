@@ -2587,6 +2587,104 @@ def check_skill_model_credential(
     return results
 
 
+def check_secret_key(config: "Config", probe: bool) -> CheckResult:
+    """Whether the encrypted secrets store has a master key to work with.
+
+    ``secrets_store`` derives one Fernet key from ``$ISTOTA_SECRET_KEY`` and
+    raises on every encrypt and decrypt without it, so a deployment missing it
+    can store no credential and read none back: `istota secret`, the per-user
+    ntfy service, Garmin, Monarch and the Google Workspace tokens all fail.
+
+    Nothing said so. The failure is silent in the direction that reads as
+    normal — ``_native_key_holders`` calls ``secret_key_available()`` and
+    reports *0 holders* rather than an error, so "credentials cannot work
+    here" rendered as "nobody has configured a credential". The standalone
+    wizard generated no key at all for seven weeks and no surface anywhere
+    reported it.
+
+    The floor and the presence test are the secrets store's own. A second copy
+    of ``_MIN_KEY_LEN`` here is precisely the drift this check exists to catch,
+    so it is imported rather than restated.
+
+    Ordering follows ``check_skill_model_credential``'s rule, and for the same
+    reason: presence answers the question wherever it is read, so the OK arm
+    and the too-short arm both come *before* the non-daemon skip and only
+    absence is the unanswerable direction. Absence inside a task is guaranteed
+    rather than informative — ``build_clean_env`` strips this name from every
+    task env by design and ``_PROXY_LOOKUP_BLOCKED`` stops the proxy handing it
+    back — so reading it there as the daemon's answer would fail a working
+    deployment.
+
+    Spawns nothing, so it is safe under ``probe=False``. Never reports the
+    value or any prefix of it: a ``CheckResult`` is rendered into the boot log
+    and the admin dashboard.
+    """
+    from . import secrets_store  # noqa: PLC0415
+
+    name = "security.secret_key"
+    var = "ISTOTA_SECRET_KEY"
+    raw = os.environ.get(var, "").strip()
+
+    if secrets_store.secret_key_available():
+        return CheckResult(
+            name, OK, f"{var} is set and meets the length floor",
+        )
+
+    if raw:
+        return CheckResult(
+            name,
+            FAIL,
+            f"{var} is {len(raw)} characters; the floor is "
+            f"{secrets_store._MIN_KEY_LEN}, so every encrypt and decrypt of a "
+            f"stored credential raises",
+            remedy=_secret_key_remedy(config),
+        )
+
+    if markers := _non_daemon_env_markers():
+        return CheckResult(
+            name,
+            SKIP,
+            f"this process carries {', '.join(markers)}, so its environment is "
+            f"not the daemon's — {var} is stripped from a task env by design "
+            f"and its absence here says nothing about the deployment",
+            remedy=(
+                "Run the check as the daemon's user with the daemon's "
+                "environment loaded (the `<namespace>-run doctor` wrapper on a "
+                "server install), or read it from the admin dashboard's Health "
+                "pane."
+            ),
+        )
+
+    return CheckResult(
+        name,
+        FAIL,
+        f"{var} is not set, so no stored credential can be encrypted or read "
+        f"back — the secrets table is unreachable and a connected service "
+        f"reports as unconfigured rather than as broken",
+        remedy=_secret_key_remedy(config),
+    )
+
+
+def _secret_key_remedy(config: "Config") -> str:
+    """Where the key belongs on the shape this config describes."""
+    generate = (
+        'generate one with `python3 -c "import secrets; '
+        'print(secrets.token_hex(32))"`'
+    )
+    if config.is_standalone:
+        return (
+            f"Add an ISTOTA_SECRET_KEY line to ~/.config/istota/istota.env "
+            f"beside the session secret ({generate}); `istota setup` writes "
+            f"one for a fresh install. Existing stored credentials, if any, "
+            f"were encrypted under a key that is gone and will not come back."
+        )
+    return (
+        f"Set ISTOTA_SECRET_KEY in the daemon's environment ({generate}). "
+        f"Docker persists one to /data/.secret_key on first boot; Ansible "
+        f"passes it as the `istota_secret_key` variable."
+    )
+
+
 def check_skill_proxy(config: "Config", probe: bool) -> list[CheckResult]:
     """The skill proxy's two independent facts.
 
@@ -6430,6 +6528,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.skill_model_credential", check_skill_model_credential),
+    ("security.secret_key", check_secret_key),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -6517,6 +6616,10 @@ CHECK_SCOPES: dict[str, str] = {
     # and must not go red for a deployment's own decision.
     "security.sandbox_credentials": DEPLOYMENT,
     "security.skill_model_credential": DEPLOYMENT,
+    # Deployment, not image: a master key is a property of an install, and the
+    # thing it unlocks is that install's own secrets table. A bare `docker run`
+    # has neither and would report a missing key about nothing.
+    "security.secret_key": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,
