@@ -240,6 +240,51 @@ class TestConnectReadOnly:
             sqlite_util.connect_read_only(db).execute("SELECT 1")
         assert not db.exists()
 
+    @pytest.mark.parametrize("name", [
+        "q?mark.db",   # `?` starts the URI query — the path ends at it
+        "h#ash.db",    # `#` starts the fragment
+        "pct%41.db",   # `%41` is decoded to `A`, naming a file that is not there
+    ])
+    def test_a_uri_metacharacter_in_the_path_is_not_read_as_a_uri(
+        self, tmp_path, name,
+    ):
+        """The path is percent-encoded, so these name the file rather than parse.
+
+        Unencoded, `?` and `#` truncate the path *and* take ``mode=ro`` with
+        them, so the open lands read-write on a file the caller never named —
+        see the sibling test below, which is the half of ISSUE-461 the entry did
+        not report.
+        """
+        db = tmp_path / name
+        with sqlite_util.open_db(db, commit=True) as conn:
+            conn.execute("CREATE TABLE t(a)")
+            conn.execute("INSERT INTO t VALUES (42)")
+
+        conn = sqlite_util.connect_read_only(db)
+        try:
+            assert conn.execute("SELECT a FROM t").fetchone()[0] == 42
+            with pytest.raises(sqlite3.OperationalError):
+                conn.execute("INSERT INTO t VALUES (1)")
+        finally:
+            conn.close()
+
+    def test_a_truncating_path_no_longer_opens_a_second_database(self, tmp_path):
+        """`?` used to drop ``mode=ro``, so the open created a writable file.
+
+        `file:/dir/q?mark.db?mode=ro` parses as the path `/dir/q` with a query
+        SQLite does not recognise as ``mode``, so the connection was read-write
+        and materialized `/dir/q`. Under `sudo istota doctor` — the only caller
+        — that is a root-owned stray beside the database, which is the outcome
+        every one of those five call sites says the URI form exists to avoid.
+        """
+        db = tmp_path / "q?mark.db"
+        with sqlite_util.open_db(db, commit=True) as conn:
+            conn.execute("CREATE TABLE t(a)")
+
+        conn = sqlite_util.connect_read_only(db)
+        conn.close()
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["q?mark.db"]
+
 
 # ---------------------------------------------------------------------------
 # The read-back matrix, one row per converted caller.

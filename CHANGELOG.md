@@ -117,6 +117,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- `istota doctor` now handles a database whose path contains a `?`, `#` or `%`. It built that path into a URL-shaped string without escaping those characters: a `?` or `#` cut the path short, so the check opened a second database at the shortened name, for writing, and created that file — under `sudo`, owned by root — while a `%` made it look for a name it had decoded and fail to open anything. Nothing changes for an ordinary path.
+
 - The admin dashboard's feeds row no longer gives up after five seconds when the feeds poll happens to hold the database. It opened that read by hand rather than the way the feeds module opens one, so it waited a fifth as long for a busy database and held each connection open past the read that needed it. It goes through the module now, and it no longer creates an empty database file for a user who has feeds switched on but has never polled one.
 
 - Extracting a lab panel from a scan no longer drops the draw date, the lab name and the panel type without saying so. Where the model wrapped its answer in prose, or stopped writing partway through it, the last-resort match could pick out the list of biomarkers on its own, and that list was taken as the whole answer — a panel that looked extracted and had quietly lost its heading. The upload screen now reports that the response could not be read and offers manual entry, and the same guard covers the immunization and medical-history imports, which read model output the same way.
