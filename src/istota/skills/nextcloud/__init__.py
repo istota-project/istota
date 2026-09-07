@@ -41,6 +41,7 @@ from istota.nextcloud_client import (
     ocs_list_shares,
     ocs_search_sharees,
 )
+from istota.ocs import is_ocs_envelope, ocs_body_data
 from istota.skills._cli import error_envelope, run_skill_cli
 
 _SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
@@ -605,10 +606,12 @@ def _ocs_data(result):
     web_app) unwrap it themselves. Reading ``id`` off the envelope silently
     yields None, which is how ``talk send`` came to report no message id at all.
     """
-    if isinstance(result, dict) and "ocs" in result:
-        inner = (result.get("ocs") or {}).get("data")
-        return inner if isinstance(inner, dict) else {}
-    return result if isinstance(result, dict) else {}
+    if not isinstance(result, dict):
+        return {}
+    if not is_ocs_envelope(result):
+        return result
+    inner = ocs_body_data(result, "talk send", default={})
+    return inner if isinstance(inner, dict) else {}
 
 
 def cmd_talk_send(args):

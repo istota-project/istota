@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ...async_runtime import get_talk_client
+from ...ocs import OcsError, ocs_body_data
 from ...talk import split_message
 from .._types import IncomingMessage, TransportCapabilities
 from .inbound import get_dm_token, poll_talk_conversations
@@ -399,7 +400,22 @@ class TalkTransport:
                 response = await client.send_message(
                     token, part, reply_to=reply_to, reference_id=reference_id,
                 )
-                return response.get("ocs", {}).get("data", {}).get("id")
+                try:
+                    data = ocs_body_data(
+                        response, f"Talk post to {token}", default={},
+                    )
+                except OcsError as e:
+                    # A best-effort daemon path: the post returned 2xx, so the
+                    # message is very likely in the room and a retry would
+                    # double it. Answer None as this always has — but say what
+                    # came back, instead of an unrecognised envelope reading as
+                    # a post that produced no id.
+                    logger.warning(
+                        "Talk post to %s for task %s landed but its id could "
+                        "not be read: %s", token, task_id, e,
+                    )
+                    return None
+                return data.get("id")
             except Exception as e:
                 last_exc = e
                 if attempt == _POST_ATTEMPTS - 1 or not _is_transient(e):

@@ -63,6 +63,7 @@ from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
 from .image_sniff import SNIFF_BYTES, sniff_raster
+from .ocs import OcsError, ocs_body_data, ocs_data
 from .usage import SYSTEM_USER_ID
 from .location_logic import (
     _location_discover_places,
@@ -544,6 +545,10 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
 
     The endpoint returns `{ocs: {data: {id, displayname, email, ...}}}`.
     Token is not stored — it lives only in this function's stack frame.
+
+    An answer that is not that shape raises `OcsError` rather than reducing to
+    an empty identity: the caller turned that into "Access denied: user not
+    configured", which names the wrong fault. It catches and answers 502.
     """
     access_token = token.get("access_token")
     if not access_token:
@@ -562,8 +567,7 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
             },
         )
         resp.raise_for_status()
-        body = resp.json()
-    inner = body.get("ocs", {}).get("data") or {}
+        inner = ocs_data(resp, "OCS userinfo", default={})
     if not isinstance(inner, dict):
         raise ValueError("unexpected OCS userinfo shape")
     return inner
@@ -4801,7 +4805,15 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
                     room_id, token, existing.surface_ref,
                 )
 
-        room = await client.create_conversation(name)
+        try:
+            room = await client.create_conversation(name)
+        except OcsError as e:
+            # `failed` is the route's 502 "Nextcloud created no conversation",
+            # which is what an unreadable create answer has always produced —
+            # keep it, and put the status and body snippet in the log, where
+            # an unhandled raise would have made it a bare 500.
+            logger.warning("promote: create_conversation for %s: %s", token, e)
+            return "failed", None
         talk_token = room.get("token")
         if not talk_token:
             return "failed", None
@@ -6218,7 +6230,19 @@ async def _post_as_user(
                 talk_ref, text, reply_to=reply_to_talk_id,
                 reference_id=reference_id,
             )
-            posted = resp.get("ocs", {}).get("data", {}).get("id")
+            try:
+                data = ocs_body_data(resp, "post-as-user Talk post", default={})
+            except OcsError as e:
+                # Best-effort mirror: the post itself returned 2xx, so the
+                # message may well be in the room — only the id is unreadable.
+                # Answer None as this always has, but say why instead of
+                # letting an unrecognised envelope look like a post with no id.
+                logger.warning(
+                    "post-as-user Talk post landed but its id could not be "
+                    "read user=%s room=%s: %s", username, talk_ref, e,
+                )
+                return None
+            posted = data.get("id")
             return int(posted) if posted else None
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
