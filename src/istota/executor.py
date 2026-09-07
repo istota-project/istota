@@ -4036,7 +4036,7 @@ def mask_shadowed_by(candidate: Path, protected: Iterable[Path]) -> list[Path]:
     directory sat outside every mask, which is the ``map_basemap`` two-consumers
     failure exactly.
     """
-    return [p for p in protected if p == candidate or p.is_relative_to(candidate)]
+    return [p for p in protected if is_within(p, candidate)]
 
 
 def sandbox_cache_is_derived(config: Config, user_id: str) -> bool:
@@ -4294,21 +4294,29 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         # workspace already uses. Same posture: an operator-named RW bind.
         _validate_workspace_dir(config, resolved_root)
 
-        # The containment assertion. Two checks, because neither catches the
-        # other's cases — the same pair `get_user_repos_dir` runs, for the same
-        # reason. The lexical one refuses a leaf that never became a child (an
-        # empty `user_id` collapses `root / ""` to the root itself, which is
-        # the shared cache the per-user split exists to prevent, and which the
-        # old code produced silently); the resolved one refuses a symlink,
-        # which is a child by name and somewhere else on disk.
+        # The containment assertion, which is `scoped_user_dir` — the same call
+        # `get_user_repos_dir` makes, and the comment here used to say so while
+        # writing the pair out again. Two checks, because neither catches the
+        # other's cases: the lexical one refuses a leaf that never became a
+        # child (an empty `user_id` collapses `root / ""` to the root itself,
+        # which is the shared cache the per-user split exists to prevent, and
+        # which the old code produced silently); the resolved one refuses a
+        # symlink, which is a child by name and somewhere else on disk.
         #
         # This is the invariant the whole layout rests on. On the derived
         # branch the parent is bound read-write into this very task's sandbox,
         # so a task can plant `.package-caches` as a symlink into another
         # user's subtree — and without this the daemon would `mkdir` through
         # it, `chmod 0700` its target and bind that target RW on the next task.
+        #
+        # `resolved_root` is `root.resolve()`, so delegating compares against
+        # the same two values this wrote out. The one thing it adds is the
+        # shared lexical rule, which on the configured branch (`leaf` is the
+        # user id) refuses a padded or NUL-bearing id that used to name a
+        # cache. That costs a disk-backed cache and nothing else — the refusal
+        # keeps package caches on the sandbox's root tmpfs.
         cache_dir = root / leaf
-        if cache_dir.parent != root or cache_dir.resolve() != resolved_root / leaf:
+        if scoped_user_dir(root, leaf) is None:
             _refuse(
                 f"sandbox cache {cache_dir} does not resolve to the directory named "
                 f"by {leaf!r} inside {resolved_root}; not binding it. A symlink there "

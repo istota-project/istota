@@ -656,11 +656,19 @@ def _is_within(path: Path, root: Path) -> bool:
     ``{root}/..`` is a child by spelling and the root's parent on disk, so
     asking the shared predicate about the unresolved path would answer about
     the wrong directory.
+
+    ``RuntimeError`` is caught beside ``OSError`` for the reason
+    ``user_scope.scoped_user_dir`` catches it: ``Path.resolve`` raises it on a
+    symlink cycle through Python 3.12, it is not an ``OSError``, and
+    ``pyproject.toml`` floors at 3.11. A ``worktree add`` takes any path and
+    the records are model-writable, so a cycle is an input this reaches; on
+    3.13 the interpreter hands the path back instead and this arm is dead.
+    Refusing either way is the answer a sweep that deletes wants.
     """
     try:
         resolved = path.resolve()
         base = root.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
     return is_within(resolved, base)
 

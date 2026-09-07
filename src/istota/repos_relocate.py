@@ -294,10 +294,20 @@ def _real(path: Path) -> Path:
     the two disagree about paths that are in fact the same. ``realpath``
     resolves the components that exist and keeps the rest, which is what lets
     it be asked about a clone that has already been renamed away.
+
+    **Both failures return the path as given rather than raising.** ``realpath``
+    does stat — an earlier version of this comment said it does not — so it
+    raises ``OSError``, and it raises ``ValueError`` on an embedded NUL. The
+    second one is reachable: ``_links_back`` builds its argument out of a
+    ``.git`` file's bytes, under a root bound read-write into the developer
+    sandbox, and neither ``splitlines`` nor ``strip`` removes a NUL. Answering
+    "not under" for such a record costs one skipped worktree and a note;
+    raising costs the whole relocation, which ``main`` would then report as a
+    failure the operator cannot act on.
     """
     try:
         return Path(os.path.realpath(path))
-    except OSError:  # pragma: no cover - realpath does not stat
+    except (OSError, ValueError):
         return path
 
 
@@ -311,9 +321,11 @@ def _contained(root: Path, name: str) -> bool:
     the root outright), and the entries here were model-writable on every
     deployment running the old shared bind.
 
-    Kept as a named predicate rather than inlined at its four call sites: this
-    module asks the question about a *clone directory name* read back from the
-    tree, not about a user id, and the name is what its callers read.
+    Kept as a named predicate rather than inlined at its five call sites, which
+    ask it about two different kinds of name: a clone directory read back from
+    the tree, and a user id from the profile list. Both are one component under
+    one root and the rule is the same for each; the wrapper is what lets the
+    call sites read as the question they are asking.
     """
     return scoped_user_dir(root, name) is not None
 

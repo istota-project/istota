@@ -317,6 +317,17 @@ def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
     the resolved path to carry the same name closes both that and the
     target-outside-the-root case in one comparison.
 
+    **A padded entry name is refused rather than swept**, and the reason
+    ``_candidates_for_users`` gives for the same tightening does not transfer:
+    the name here comes from the tree, not from the daemon's user list. It is
+    still the right answer, and for this function's own reason — the name
+    read back is what the busy check is then asked about, and ``" alice"`` is
+    not a user id any producer in the tree emits, so the busy check would be
+    asked about a user that has no tasks and would always pass. The cost is a
+    cache that is reported and never reclaimed on a deployment that somehow
+    grew such a directory; the alternative is a reclaim verb run against a
+    directory whose owner cannot be established.
+
     **The user id still comes from the tree here, and that is now the narrower
     of the two shapes.** It is sound because this root is an operator-named
     directory that is not inside ``developer.repos_dir`` — the derived layout
@@ -345,10 +356,10 @@ def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
             # remove one; it needs no outcome row.
             if not entry.is_dir():
                 continue
-            if scoped_user_dir(resolved_root, entry.name) is None:
+            resolved = scoped_user_dir(resolved_root, entry.name)
+            if resolved is None:
                 yield entry.name, entry, False
                 continue
-            resolved = entry.resolve()
         except OSError:
             continue
         # The *resolved* path is what goes on, never the entry as read. The
@@ -358,6 +369,12 @@ def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
         # path and handing a different one to `uv cache clean` would leave the
         # containment rule describing a check nothing acted on. A resolved path
         # contains no symlink component, so there is nothing left to swap.
+        #
+        # `resolved` is `scoped_user_dir`'s own return value rather than a
+        # second `entry.resolve()`, and that is the point: the object validated
+        # and the object yielded are one object. Two calls naming the same
+        # directory are two syscalls with a window between them, which is the
+        # window this comment is about.
         yield entry.name, resolved, True
 
 
@@ -411,6 +428,15 @@ def _candidates_for_users(
     check, in the position the single equality held, so a user with no cache
     directory is still skipped in silence rather than reported.
 
+    Two further differences came with the shared rule and neither is stated by
+    the composition claim above. ``scoped_user_dir`` swallows its own
+    ``OSError``, so a resolution failure now yields a reported ``False`` row
+    where the old handler skipped it in silence; and it catches
+    ``RuntimeError``, which the old tuple did not, so a symlink cycle at
+    ``{root}/{user_id}`` no longer escapes the generator past
+    :func:`sweep_caches`' never-raise promise on Python 3.12 and earlier. Both
+    are in the safe direction.
+
     One tightening came with the shared lexical half: an id with surrounding
     whitespace, or an embedded NUL, is now refused where the old
     one-component rule admitted it. Both directions of that refusal are safe
@@ -458,7 +484,8 @@ def _candidates_for_users(
             if not candidate.is_dir():
                 continue
             scoped = scoped_user_dir(resolved_root, user_id)
-            if scoped is None or scoped_user_dir(scoped, CACHE_ROOT_NAME) is None:
+            cache = scoped_user_dir(scoped, CACHE_ROOT_NAME) if scoped else None
+            if cache is None:
                 yield user_id, candidate, False
                 continue
         except (OSError, ValueError, TypeError):
@@ -468,9 +495,12 @@ def _candidates_for_users(
             # promises never to raise — a generator's exception surfaces at the
             # caller's `for`, which is outside its per-user `try`.
             continue
-        # Resolved, for the reason `_candidates_in_root` gives: the check and
-        # the use are separated by a tree walk and up to four subprocesses.
-        yield user_id, candidate.resolve(), True
+        # `cache` is the path the two checks above validated, not a second
+        # derivation of it — see `_candidates_in_root`. Both levels were proved
+        # to resolve to themselves, so it carries no symlink component and
+        # needs no further `resolve()`; re-deriving one here would reopen the
+        # window between the check and the use that this yields to close.
+        yield user_id, cache, True
 
 
 def _identity(path: Path) -> tuple[int, int] | None:

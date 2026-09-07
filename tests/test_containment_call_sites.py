@@ -297,6 +297,96 @@ class TestTheRelocateCloneName:
         assert not repos_relocate._under(_elsewhere(tmp_path), real)
 
 
+class TestTheEmbeddedNulNeverEscapes:
+    """The exception the consolidation lost twice, and review put back.
+
+    ``Path.resolve`` and ``os.path.realpath`` both raise ``ValueError`` on an
+    embedded NUL, and that raise happens *before* ``is_within`` is entered, so
+    the leaf's own catch cannot help. Two call sites had wrapped the resolve in
+    a handler that also caught ``ValueError``; converting them to resolve
+    first and then ask narrowed both to ``OSError``.
+
+    Reachable at one of the two: ``repos_relocate._links_back`` builds its
+    argument from a ``.git`` file's bytes under a root bound read-write into
+    the developer sandbox, and neither ``splitlines`` nor ``strip`` removes a
+    NUL. The cost of raising is not a widened boundary -- it is the whole
+    relocation aborting on a file the model chose to write.
+    """
+
+    def test_the_relocate_realpath_answers_rather_than_raising(self, tmp_path):
+        assert repos_relocate._real(Path("a\0b")) == Path("a\0b")
+
+    def test_the_relocate_containment_answers_rather_than_raising(self, tmp_path):
+        assert repos_relocate._under(Path("a\0b"), tmp_path) is False
+        assert repos_relocate._under(tmp_path, Path("a\0b")) is False
+
+    def test_the_scrub_writability_answers_rather_than_raising(self, tmp_path):
+        assert git_remote_scrub._writable(Path("a\0b"), tmp_path) is False
+
+
+class TestTheSweeperYieldsTheValidatedPath:
+    """The object checked and the object used are one object.
+
+    Both scans validate a path and then hand it to a reclaim verb across a
+    full tree walk and up to four subprocesses. Resolving twice -- once to
+    check, once to yield -- names the same directory only until something
+    swaps a component between the two syscalls, which is the window the
+    module's own docstrings say the resolved yield closes.
+    """
+
+    def _count_resolves(self, monkeypatch):
+        """Every path ``Path.resolve`` is called on, in order.
+
+        Asserted on the *mechanism* rather than on the value, and that is the
+        whole point of these two tests: in a static tree both resolutions
+        return the same path, so a value assertion passes against the two-call
+        shape and proves nothing. What changed is how many times the kernel is
+        asked, and therefore whether there is a moment between the answer that
+        was checked and the answer that is used.
+        """
+        seen = []
+        real = Path.resolve
+
+        def counting(self, *a, **kw):
+            seen.append(Path(self))
+            return real(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", counting)
+        return seen
+
+    def test_the_enumerated_scan_resolves_an_accepted_entry_once(
+        self, tmp_path, monkeypatch,
+    ):
+        root = tmp_path / "caches"
+        (root / "alice").mkdir(parents=True)
+        seen = self._count_resolves(monkeypatch)
+
+        found = {n: p for n, p, ok in sweeper._candidates_in_root(root) if ok}
+
+        assert seen.count(root / "alice") == 1, (
+            f"the accepted entry was resolved {seen.count(root / 'alice')} times; "
+            "the path validated is then not the path yielded"
+        )
+        assert found["alice"] == root / "alice"
+
+    def test_the_derived_scan_resolves_an_accepted_cache_once(
+        self, tmp_path, monkeypatch,
+    ):
+        root = tmp_path / "repos"
+        cache = root / "alice" / sweeper.CACHE_ROOT_NAME
+        cache.mkdir(parents=True)
+        seen = self._count_resolves(monkeypatch)
+
+        found = {
+            u: p for u, p, ok in sweeper._candidates_for_users(root, ["alice"]) if ok
+        }
+
+        assert seen.count(cache) == 1, (
+            f"the accepted cache was resolved {seen.count(cache)} times"
+        )
+        assert found["alice"] == cache
+
+
 class TestTheWorktreeRecordRoot:
     """`worktree_reaper._is_within`, which gates a delete."""
 

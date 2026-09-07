@@ -136,16 +136,24 @@ def scoped_user_dir(root: Path | str | None, user_id: object) -> Path | None:
 def is_within(child: Path, root: Path) -> bool:
     """``child`` is ``root`` itself, or sits beneath it.
 
-    **Lexical, and the caller resolves first.** ``{root}/..`` is "within"
-    ``root`` by this test and names the root's parent on disk, so a caller that
-    hands over an unresolved path has asked a question about spelling rather
-    than about containment. Every caller here resolves both sides before
-    asking, each with the resolution discipline its own boundary needs —
+    **Lexical, and resolution is the caller's.** ``{root}/..`` is "within"
+    ``root`` by this test and names the root's parent on disk, so a caller
+    asking about containment has to resolve first, and the ones that decide a
+    boundary do — each with the discipline its own boundary needs:
     ``Path.resolve()`` where the paths exist, ``os.path.realpath`` where one of
     them is a rename target that does not yet. Taking a ``resolve=`` keyword
     instead would put that choice in the hands of whoever writes the next call
     site, and the wrong default is a widened boundary rather than a wrong
     answer.
+
+    **Not every caller resolves, and that is deliberate at two of them.**
+    ``doctor`` asks about both spellings of a path in turn — as written and
+    resolved — because under a symlinked deployment root a mask lands at one
+    and not the other, so resolving inside here would collapse the pair it
+    exists to compare. ``executor``'s cache-root checks pass one resolved side
+    and one config-derived path. Stating this rather than claiming a universal
+    discipline: a docstring that overstates its callers is the failure this
+    module was consolidated to remove.
 
     **The root itself counts as within it.** ``Path.is_relative_to`` already
     answers ``True`` for two equal paths, which is why the ``a == b or
@@ -154,10 +162,17 @@ def is_within(child: Path, root: Path) -> bool:
     add the term back on the assumption that it does something.
 
     Never raises, for anything: a ``None``, a non-path, an embedded NUL. The
-    callers are ``worktree_reaper``, ``repos_relocate``, ``doctor`` and
-    ``sandbox_cache_sweeper``, each of which promises never to raise out of its
-    own entry point, and a containment predicate that raises fails *open* at
-    every one of them that wraps it in a truthiness test.
+    callers are ``worktree_reaper``, ``repos_relocate``, ``git_remote_scrub``,
+    ``skill_host_paths``, ``doctor``, ``executor``, ``image_attachments`` and
+    ``session/tools/env``. The first four promise never to raise out of their
+    own entry points, and a containment predicate that raises fails *open* at
+    any caller that wraps it in a truthiness test.
+
+    Catching cannot help with an exception raised *before* the call, which is
+    the trap this leaf invites: ``Path.resolve`` and ``os.path.realpath`` both
+    raise ``ValueError`` on an embedded NUL, and a caller that resolves in its
+    own ``try`` has to catch it there. Two callers had that handler and lost it
+    to this consolidation before review put it back.
     """
     try:
         return Path(child).is_relative_to(Path(root))
@@ -174,7 +189,10 @@ def paths_overlap(a: Path, b: Path) -> bool:
     task's. A single-direction test answers one of those and reads as though it
     answered both.
 
-    Lexical and never-raising, for :func:`is_within`'s reasons; both callers
-    resolve first.
+    Lexical and never-raising, for :func:`is_within`'s reasons. Its callers are
+    ``config``'s read-only-path warning, ``doctor``'s mirror of it, and
+    ``executor``'s workspace blocklist, which asks the same question about the
+    source tree and the secret-key directory rather than about the control
+    tree. All three resolve before asking.
     """
     return is_within(a, b) or is_within(b, a)

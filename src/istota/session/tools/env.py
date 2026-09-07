@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from istota.user_scope import is_within
+
 
 class ToolPathError(Exception):
     """A tool path escaped the confinement roots.
@@ -232,10 +234,7 @@ class ToolEnv:
 
     def _in_denied(self, path: Path) -> bool:
         real = _realpath(path)
-        return any(
-            real == denied or real.is_relative_to(denied)
-            for denied in self._write_denied_real
-        )
+        return any(is_within(real, denied) for denied in self._write_denied_real)
 
     def _contains(self, path: Path, *, write: bool) -> bool:
         roots = self._write_real if write else self._read_real
@@ -245,6 +244,6 @@ class ToolEnv:
         if write and self._in_denied(real):
             return False
         for root in roots or ():
-            if real == root or real.is_relative_to(root):
+            if is_within(real, root):
                 return True
         return False

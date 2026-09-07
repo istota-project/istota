@@ -594,10 +594,17 @@ def _writable(origin: Path, root: Path) -> bool:
     :func:`~istota.user_scope.is_within`, which is lexical: an origin naming
     ``{root}/../etc/gitconfig`` is under the root by spelling and outside it on
     disk, and that is the whole input class this predicate exists for.
+
+    ``ValueError`` is caught beside ``OSError`` on the resolve because
+    ``Path.resolve`` raises it on an embedded NUL, and ``scrub_config``'s
+    contract is that it never raises. Today's origins come from ``git config
+    --show-origin -z``, where NUL is the record separator and so cannot survive
+    into one — but that is an argument about a delimiter, and the contract
+    should hold by construction.
     """
     try:
         resolved = origin.resolve()
-    except OSError:
+    except (OSError, ValueError):
         return False
     return is_within(resolved, root)
 

@@ -75,6 +75,34 @@ def _find_overlap_copies(tree) -> list[int]:
     return hits
 
 
+def _find_single_direction_copies(tree) -> list[int]:
+    """``a == b or a.is_relative_to(b)`` -- the at-or-under test spelled inline.
+
+    A separate matcher from the overlap one, which requires *both* directions
+    and so was blind to every site this stage actually converted. The redundant
+    equality term is the tell and is what keeps this narrow: a bare
+    ``x.is_relative_to(y)`` inside a larger expression is ordinary pathlib and
+    is not matched, because writing the equality out beside it is what someone
+    does when they mean "at or under" and have not noticed that
+    ``is_relative_to`` already says so.
+    """
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.Or):
+            continue
+        pairs = [p for p in (_relative_to_pair(v) for v in node.values) if p]
+        equalities = [
+            (ast.unparse(v.left), ast.unparse(v.comparators[0]))
+            for v in node.values
+            if isinstance(v, ast.Compare)
+            and len(v.ops) == 1
+            and isinstance(v.ops[0], ast.Eq)
+        ]
+        if any((x, y) in equalities or (y, x) in equalities for (x, y) in pairs):
+            hits.append(node.lineno)
+    return hits
+
+
 def _find_is_within_copies(tree) -> list[int]:
     """A function whose entire body is ``try: p.relative_to(q) / except: False``.
 
@@ -85,7 +113,7 @@ def _find_is_within_copies(tree) -> list[int]:
     """
     hits = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = [s for s in node.body if not _is_docstring(s)]
         if len(body) != 1 or not isinstance(body[0], ast.Try):
@@ -113,6 +141,13 @@ def _find_scoped_user_dir_copies(tree) -> list[str]:
     ``.resolve()``, joined into a single value. Every hand-rolled copy the
     audit found is this, whether written as one ``and``, as a tuple of
     conditions or split over two ``if``\\ s in one function body.
+
+    ``!=`` counts as well as ``==``. Both of the cache sweeper's copies were
+    written negated -- ``candidate.parent != subtree``, ``candidate.resolve()
+    != resolved_root / user_id / CACHE_ROOT_NAME`` -- so a matcher keyed on
+    ``ast.Eq`` alone missed the two sites this guard's own docstring names as
+    its motivating examples, and a re-copy written the same way would report
+    green. Found by review, not by reading.
     """
     hits = []
     for node in ast.walk(tree):
@@ -120,7 +155,9 @@ def _find_scoped_user_dir_copies(tree) -> list[str]:
             continue
         parent_cmp = resolve_cmp = False
         for inner in ast.walk(node):
-            if not isinstance(inner, ast.Compare) or not isinstance(inner.ops[0], ast.Eq):
+            if not isinstance(inner, ast.Compare):
+                continue
+            if not isinstance(inner.ops[0], (ast.Eq, ast.NotEq)):
                 continue
             left = ast.unparse(inner.left)
             if left.endswith(".parent"):
@@ -165,6 +202,12 @@ class TestOneStatementOfEachIdiom:
             "call user_scope.paths_overlap"
         )
 
+    def test_the_at_or_under_test_is_not_spelled_inline_anywhere(self):
+        assert _offenders(_find_single_direction_copies) == [], (
+            "`x == y or x.is_relative_to(y)` written inline; the equality term "
+            "is redundant and the whole expression is user_scope.is_within"
+        )
+
     def test_the_at_or_under_predicate_is_not_written_out_anywhere(self):
         assert _offenders(_find_is_within_copies) == [], (
             "a local try/relative_to/except predicate; call user_scope.is_within"
@@ -199,6 +242,45 @@ class TestTheGuardCanFail:
     def test_one_direction_alone_is_not_an_overlap(self):
         tree = ast.parse("def f(a, b):\n    return a.is_relative_to(b)\n")
         assert not _find_overlap_copies(tree)
+
+    def test_the_single_direction_shape_is_recognised(self):
+        tree = ast.parse("def f(a, b):\n    return a == b or a.is_relative_to(b)\n")
+        assert _find_single_direction_copies(tree)
+
+    def test_the_single_direction_shape_is_recognised_reversed(self):
+        tree = ast.parse("def f(a, b):\n    return b.is_relative_to(a) or a == b\n")
+        assert _find_single_direction_copies(tree)
+
+    def test_a_bare_is_relative_to_is_not_matched(self):
+        """Ordinary pathlib, used all over the tree for things that are not a
+        containment decision."""
+        tree = ast.parse("def f(a, b, c):\n    return a.is_relative_to(b) or c\n")
+        assert not _find_single_direction_copies(tree)
+
+    def test_the_negated_scoping_equality_is_recognised(self):
+        """The cache sweeper's own pre-change spelling, which the first version
+        of this matcher missed entirely."""
+        tree = ast.parse(
+            "def f(root, user_id, cache):\n"
+            "    c = root / user_id / cache\n"
+            "    if c.parent != root / user_id:\n"
+            "        return None\n"
+            "    if c.resolve() != root.resolve() / user_id / cache:\n"
+            "        return None\n"
+            "    return c\n"
+        )
+        assert _find_scoped_user_dir_copies(tree) == ["f"]
+
+    def test_an_async_predicate_copy_is_recognised(self):
+        tree = ast.parse(
+            "async def f(p, q):\n"
+            "    try:\n"
+            "        p.relative_to(q)\n"
+            "        return True\n"
+            "    except ValueError:\n"
+            "        return False\n"
+        )
+        assert _find_is_within_copies(tree)
 
     def test_the_predicate_shape_is_recognised(self):
         tree = ast.parse(
