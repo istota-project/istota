@@ -1010,9 +1010,22 @@ class TestDispatch:
         return paths
 
     def test_the_table_covers_every_command_the_parser_declares(self):
-        from istota.skills.money import COMMANDS, build_parser
+        from istota.skills.money import build_parser, commands
 
-        assert self._command_paths(build_parser()) == set(COMMANDS)
+        assert self._command_paths(build_parser()) == set(commands())
+
+    def test_the_table_resolves_its_handlers_when_it_is_built(self):
+        """Not a style point about the constant this used to be: every skill
+        CLI's table is read at dispatch, which is what lets a test swap a
+        handler for a recorder. Frozen at import, four host-path refusal
+        tests silently ran the real command instead.
+        """
+        from unittest.mock import patch as _patch
+
+        from istota.skills.money import commands
+
+        with _patch("istota.skills.money.cmd_list", "sentinel"):
+            assert commands()["list"] == "sentinel"
 
     def test_every_group_names_the_dest_its_subparser_stores(self):
         from istota.skills.money import GROUP_ACTION_DEST, build_parser

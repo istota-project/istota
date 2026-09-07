@@ -1074,55 +1074,65 @@ def build_parser():
     return parser
 
 
-#: Every verb, flattened, keyed the way the argv reads: a group's sub-command
-#: is `"<group> <action>"`. Module-level rather than built inside `main` as the
-#: other skill CLIs build theirs, because this is the only one whose table is
-#: forty entries deep across five groups — `tests/test_skill_money.py` asserts
-#: it covers every command `build_parser` declares, which a table living inside
-#: `main` cannot be asked.
-COMMANDS = {
-    "list": cmd_list,
-    "check": cmd_check,
-    "balances": cmd_balances,
-    "query": cmd_query,
-    "report": cmd_report,
-    "lots": cmd_lots,
-    "wash-sales": cmd_wash_sales,
-    "backfill-ids": cmd_backfill_ids,
-    "add-transaction": cmd_add_transaction,
-    "edit-transaction": cmd_edit_transaction,
-    "sync-monarch": cmd_sync_monarch,
-    "debug-monarch": cmd_debug_monarch,
-    "import-csv": cmd_import_csv,
-    "run-scheduled": cmd_run_scheduled,
-    "transaction-rules list": cmd_transaction_rules_list,
-    "transaction-rules set": cmd_transaction_rules_set,
-    "transaction-rules test": cmd_transaction_rules_test,
-    "monarch-category-map list": cmd_monarch_category_map_list,
-    "monarch-category-map set": cmd_monarch_category_map_set,
-    "invoice generate": cmd_invoice_generate,
-    "invoice list": cmd_invoice_list,
-    "invoice paid": cmd_invoice_paid,
-    "invoice create": cmd_invoice_create,
-    "invoice unpaid": cmd_invoice_unpaid,
-    "invoice void": cmd_invoice_void,
-    "work list": cmd_work_list,
-    "work add": cmd_work_add,
-    "work update": cmd_work_update,
-    "work remove": cmd_work_remove,
-    "portfolio import": cmd_portfolio_import,
-    "portfolio snapshots": cmd_portfolio_snapshots,
-    "portfolio summary": cmd_portfolio_summary,
-    "portfolio history": cmd_portfolio_history,
-    "portfolio diff": cmd_portfolio_diff,
-    "portfolio symbol": cmd_portfolio_symbol,
-    "portfolio delete-snapshot": cmd_portfolio_delete_snapshot,
-    "portfolio accounts": cmd_portfolio_accounts,
-    "portfolio classifications": cmd_portfolio_classifications,
-    "portfolio classify": cmd_portfolio_classify,
-    "portfolio unclassify": cmd_portfolio_unclassify,
-    "portfolio autoclass": cmd_portfolio_autoclass,
-}
+def commands() -> dict:
+    """Every verb, flattened, keyed the way the argv reads: a group's
+    sub-command is ``"<group> <action>"``.
+
+    A function rather than a module-level constant, and that is not a style
+    choice. The other skill CLIs build their table as a dict literal inside
+    ``main``, so each handler name is resolved against module globals when
+    ``main`` runs — which is what lets a test replace one with
+    ``monkeypatch.setattr(module, "cmd_x", recorder)`` and have dispatch see
+    it. A constant built at import freezes the original function objects and
+    the patch is silently ignored: the host-path refusal tests drive every
+    stamped argument that way, and four of them ran the real command instead.
+    Evaluating the body per call restores that while still being something
+    ``tests/test_skill_money.py`` can ask for whole and compare against the
+    parser, which a table living inside ``main`` cannot be.
+    """
+    return {
+        "list": cmd_list,
+        "check": cmd_check,
+        "balances": cmd_balances,
+        "query": cmd_query,
+        "report": cmd_report,
+        "lots": cmd_lots,
+        "wash-sales": cmd_wash_sales,
+        "backfill-ids": cmd_backfill_ids,
+        "add-transaction": cmd_add_transaction,
+        "edit-transaction": cmd_edit_transaction,
+        "sync-monarch": cmd_sync_monarch,
+        "debug-monarch": cmd_debug_monarch,
+        "import-csv": cmd_import_csv,
+        "run-scheduled": cmd_run_scheduled,
+        "transaction-rules list": cmd_transaction_rules_list,
+        "transaction-rules set": cmd_transaction_rules_set,
+        "transaction-rules test": cmd_transaction_rules_test,
+        "monarch-category-map list": cmd_monarch_category_map_list,
+        "monarch-category-map set": cmd_monarch_category_map_set,
+        "invoice generate": cmd_invoice_generate,
+        "invoice list": cmd_invoice_list,
+        "invoice paid": cmd_invoice_paid,
+        "invoice create": cmd_invoice_create,
+        "invoice unpaid": cmd_invoice_unpaid,
+        "invoice void": cmd_invoice_void,
+        "work list": cmd_work_list,
+        "work add": cmd_work_add,
+        "work update": cmd_work_update,
+        "work remove": cmd_work_remove,
+        "portfolio import": cmd_portfolio_import,
+        "portfolio snapshots": cmd_portfolio_snapshots,
+        "portfolio summary": cmd_portfolio_summary,
+        "portfolio history": cmd_portfolio_history,
+        "portfolio diff": cmd_portfolio_diff,
+        "portfolio symbol": cmd_portfolio_symbol,
+        "portfolio delete-snapshot": cmd_portfolio_delete_snapshot,
+        "portfolio accounts": cmd_portfolio_accounts,
+        "portfolio classifications": cmd_portfolio_classifications,
+        "portfolio classify": cmd_portfolio_classify,
+        "portfolio unclassify": cmd_portfolio_unclassify,
+        "portfolio autoclass": cmd_portfolio_autoclass,
+    }
 
 #: Each group, and the argparse dest its own subparser stores the action in.
 GROUP_ACTION_DEST = {
@@ -1148,14 +1158,15 @@ def main(argv=None):
             parser.parse_args([command, "--help"])
         command = f"{command} {action}"
 
-    if command not in COMMANDS:
+    table = commands()
+    if command not in table:
         parser.print_help()
         sys.exit(1)
 
     # Every handler prints its own envelope through `_output` and returns
     # nothing, so the epilogue's job here is the facade's rule that a raised
     # exception comes back as one JSON line and exit 1 rather than a traceback.
-    run_skill_cli(COMMANDS, args, command=command, handlers_print=True)
+    run_skill_cli(table, args, command=command, handlers_print=True)
 
 
 if __name__ == "__main__":
