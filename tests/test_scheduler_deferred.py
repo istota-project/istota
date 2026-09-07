@@ -15,6 +15,7 @@ wherever the two lanes route to different kinds.
 """
 
 import json
+import logging
 
 import pytest
 
@@ -253,3 +254,134 @@ class TestSubtaskModelInheritanceAcrossNamespaces:
             entries=[{"prompt": "follow up", "model": "z-ai/glm-5"}],
         )
         assert child.model == "z-ai/glm-5"
+
+
+CSV = (
+    ",,MORPHOLOGY,,\n"
+    "Date,Lab,WBC (th/mm3),Hgb (g/dL)\n"
+    ",,4.8-10.5,12.7-16.7\n"
+    '2026-07-27,"Example Lab",6.4,14.5\n'
+)
+
+
+class TestDeferredImportCsvSourcePath:
+    """`import_csv` replays a path written from inside the sandbox.
+
+    The daemon doing the replay is never sandboxed, so an unscoped
+    `source_path` files any host file the daemon can read into the user's
+    health database — from where it comes back through the health UI and the
+    health skill. Its two neighbours (`register_upload`, `attach_document`)
+    already resolve through `_resolved_source_path`; this arm did not.
+    """
+
+    def _ctx(self, tmp_path):
+        """Production's shape: the bot workspace sits inside the user's dir."""
+        from istota.health._migrate import ensure_initialised
+        from istota.health.workspace import synthesize_health_context
+
+        ctx = synthesize_health_context(
+            "alice", tmp_path / "Users" / "alice" / "istota",
+        )
+        ensure_initialised(ctx)
+        return ctx
+
+    def _replay(self, ctx, deferred, ops, *, task_id=99):
+        from istota import db as core_db
+        from istota.scheduler_deferred import _process_deferred_health_ops
+
+        (deferred / f"task_{task_id}_health_ops.json").write_text(
+            json.dumps(ops), encoding="utf-8",
+        )
+
+        import istota.health as _health
+
+        class _FakeConfig:
+            # Mirrors Config.workspace_root(user_id) -> {mount}/Users/{uid}.
+            @staticmethod
+            def workspace_root(user_id=None):
+                return ctx.workspace_root.parent
+
+        original = _health.resolve_for_user
+        try:
+            _health.resolve_for_user = lambda uid, cfg: ctx
+            task = core_db.Task(
+                id=task_id, status="completed", source_type="cli",
+                user_id="alice", prompt="",
+            )
+            return _process_deferred_health_ops(_FakeConfig(), task, deferred)
+        finally:
+            _health.resolve_for_user = original
+
+    def _panel_ids(self, ctx):
+        from istota.health import db as health_db
+
+        with health_db.connect(ctx.db_path) as conn:
+            panels = health_db.list_panels(conn, include_drafts=True)
+        return {p.id for p in panels}
+
+    def _write(self, path, text=CSV):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_workspace_source_is_imported(self, tmp_path):
+        """The acceptance half: without it, every refusal below is vacuous."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = self._write(ctx.workspace_root.parent / "inbox" / "labs.csv")
+
+        count = self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(src)},
+        ])
+
+        assert count == 1
+        assert len(self._panel_ids(ctx)) == 1
+
+    def test_a_source_outside_the_workspace_is_skipped(self, tmp_path, caplog):
+        """Watermark plus a discriminating column: no *new* panel appears."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+
+        inside = self._write(ctx.workspace_root.parent / "inbox" / "labs.csv")
+        assert self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(inside)},
+        ], task_id=1) == 1
+        mark = self._panel_ids(ctx)
+        assert mark
+
+        outside = self._write(
+            tmp_path / "elsewhere" / "stolen.csv",
+            ",,MORPHOLOGY,,\n"
+            "Date,Lab,WBC (th/mm3),Hgb (g/dL)\n"
+            ",,4.8-10.5,12.7-16.7\n"
+            '2026-08-01,"Other Lab",7.7,13.3\n',
+        )
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler_deferred"):
+            count = self._replay(ctx, deferred, [
+                {"op": "import_csv", "source_path": str(outside)},
+            ], task_id=2)
+
+        assert count == 0
+        assert self._panel_ids(ctx) == mark
+        assert any("import_csv skipped" in r.getMessage() for r in caplog.records)
+
+    def test_a_symlink_out_of_the_workspace_is_skipped(self, tmp_path):
+        """Resolution comes first, so a link inside the roots is caught too."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+
+        outside = self._write(tmp_path / "elsewhere" / "stolen.csv")
+        link = ctx.workspace_root.parent / "inbox" / "labs.csv"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside)
+
+        count = self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(link)},
+        ])
+
+        assert count == 0
+        assert self._panel_ids(ctx) == set()

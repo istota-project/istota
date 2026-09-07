@@ -1243,11 +1243,20 @@ def _process_deferred_health_ops(
                 elif op == "import_csv":
                     from .health import csv_io as _csv_io
 
-                    src = Path(entry["source_path"])
-                    if not src.is_file():
+                    # Same untrusted-path rule as its two neighbours: the op
+                    # file is written inside the sandbox and the daemon
+                    # replaying it is not, so an unscoped path files any host
+                    # file the daemon can read into the user's health records.
+                    # Read the *resolved* path the guard approved.
+                    src = _resolved_source_path(
+                        Path(entry["source_path"]), user_temp_dir, config,
+                        task.user_id, ctx,
+                    )
+                    if src is None:
                         logger.warning(
-                            "import_csv skipped for task %d: source missing %s",
-                            task.id, src,
+                            "import_csv skipped for task %d: source missing "
+                            "or outside the user's workspace: %s",
+                            task.id, entry.get("source_path"),
                         )
                         continue
                     csv_text = src.read_text(encoding="utf-8-sig", errors="replace")

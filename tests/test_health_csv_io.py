@@ -262,7 +262,10 @@ class TestExportCsv:
         from istota import health as health_pkg
         from istota import scheduler_deferred
 
-        src = tmp_path / "bw.csv"
+        # Beside the bot dir, in the user's own workspace: the shape an
+        # email attachment arrives in, and the only one the replay's
+        # source-path guard admits.
+        src = ctx.workspace_root.parent / "bw.csv"
         src.write_text(SAMPLE_CSV)
 
         # Per-task deferred-ops file as the CLI would have written it.
@@ -280,7 +283,16 @@ class TestExportCsv:
         health_pkg.resolve_for_user = fake_resolve
         try:
             fake_task = MagicMock(id=task_id, user_id="alice")
-            fake_config = MagicMock()
+
+            class _FakeConfig:
+                # Mirrors Config.workspace_root(user_id) -> {mount}/Users/{uid}.
+                # A MagicMock here answers with its own __fspath__ (""), which
+                # resolves to the cwd and puts every real path out of roots.
+                @staticmethod
+                def workspace_root(user_id=None):
+                    return ctx.workspace_root.parent
+
+            fake_config = _FakeConfig()
             count = scheduler_deferred._process_deferred_health_ops(
                 fake_config, fake_task, user_temp,
             )
