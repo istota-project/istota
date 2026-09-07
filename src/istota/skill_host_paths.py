@@ -8,14 +8,18 @@ write unless it is scoped — and the model chooses the path.
 There are two allowlists here, for two kinds of path.
 
 ``resolve_host_path`` scopes a path inside the caller's own workspace against
-the mount roots below. Its consumers are devbox's ``cp-in`` / ``cp-out``, ``kv
-set --value-file``, email's outbound ``--attach``, ``browse screenshot
---output``, ``health export-csv --output`` and both ``feeds`` OPML verbs;
-``scheduler_deferred`` applies the same rule to deferred health-op paths.
-``tests/test_skill_host_paths_coverage.py`` walks every skill's argparse tree
-and requires each host-path argument to be registered as scoped or, where it is
-not, as a recorded gap — a hand-maintained list of consumers goes stale in
-silence, and the arguments that were never added to it are the whole problem.
+the mount roots below.
+
+**Who the consumers are is not written down here, and that is the point.** It
+used to be, as a hand-maintained sentence naming three of them — and a
+hand-maintained list goes stale in silence, so by the time anyone walked the
+tree three write verbs and a read were outside it and sixteen path arguments
+went through no allowlist at all (ISSUE-447). The disposition now lives on each
+argument, as a stamp ``skills/_hostpath.host_path`` applies and
+``skills/_cli.parse_and_resolve`` reads back at the parse, so an argument that
+is declared is enforced. ``tests/test_skill_host_paths_coverage.py`` walks
+every skill's parser — argparse and Click both — and fails by name on one that
+carries no disposition, which is what makes it an enumeration nobody maintains.
 
 ``resolve_under_repos`` scopes a *worktree* against ``DEVELOPER_REPOS_DIR``,
 which is somewhere else entirely and is bound into the sandbox for admins only.
@@ -23,8 +27,9 @@ Its consumer is the ``code_review`` CLI. The two live in one module so neither
 the roots nor the error convention can drift apart, but they are separate
 allowlists and a path admitted by one is not admitted by the other.
 
-The rule lives here rather than in any skill: a stdlib-only leaf module,
-importable from a skill subprocess without dragging in the framework.
+The rule lives here rather than in any skill: a leaf module importing the
+stdlib and ``user_scope`` and nothing else, so a skill subprocess can reach it
+without dragging in the framework.
 
 **The roots mirror what the sandbox binds, per user.** `NEXTCLOUD_MOUNT_PATH`
 is deliberately the *shared* mount root for everyone — every consumer builds
@@ -52,7 +57,10 @@ trusting it.
 **Callers must use the returned resolved path.** Validating one path and then
 opening the original re-walks every symlink in it, so a link swapped in between
 lands outside the allowlist with the check already passed. The resolved path
-has no symlink components *as of the check*, which removes that re-walk.
+has no symlink components *as of the check*, which removes that re-walk. For a
+stamped argument this stopped being a rule each handler has to remember:
+``resolve_parsed`` writes the resolved value back onto the namespace, so
+``args.file_path`` already is it. A caller resolving by hand still owes it.
 
 It does not make the caller's later open atomic. Both allowlists validate a
 path, and the trees they validate are bound read-write into the sandbox, so a
