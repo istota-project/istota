@@ -37,7 +37,7 @@ from ._events import (
 )
 from istota import task_cgroup
 from istota import usage as usage_types
-from ..process_group import kill_process_group
+from ..process_group import kill_group_if_live
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
 from ._types import BrainRequest, BrainResult
@@ -1895,19 +1895,13 @@ class ClaudeCodeBrain:
         # Timeout via timer
         timed_out = threading.Event()
 
-        def _kill_group_if_live() -> None:
-            # `process.kill()` used to go through Popen.send_signal, which
-            # no-ops once the child is reaped. A raw pid carries no such check,
-            # and the reap happens at `process.wait()` below while this timer
-            # can still fire during the two 5s thread joins that follow it —
-            # long enough for the OS to hand the number to someone else, whose
-            # group we would then kill. Mirrors the guard bash.py already has.
-            if process.returncode is None:
-                kill_process_group(process.pid)
-
         def _kill() -> None:
             timed_out.set()
-            _kill_group_if_live()
+            # The reap happens at `process.wait()` below while this timer can
+            # still fire during the two 5s thread joins that follow it —
+            # `kill_group_if_live`'s guard is what keeps that off a recycled
+            # pid.
+            kill_group_if_live(process)
 
         timer = threading.Timer(req.timeout_seconds, _kill)
         timer.start()
@@ -2036,7 +2030,7 @@ class ClaudeCodeBrain:
                     try:
                         if req.cancel_check():
                             logger.info("Cancellation requested, killing subprocess")
-                            _kill_group_if_live()
+                            kill_group_if_live(process)
                             cancelled = True
                             break
                     except Exception:

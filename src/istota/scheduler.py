@@ -141,7 +141,7 @@ from .notification_store import (
     sweep_retention,
 )
 from .notifications import effective_log_destinations, send_notification
-from .process_group import kill_process_group
+from .process_group import kill_group_if_live
 from .session.session_log import (
     SWEEP_STATE_KEY,
     SWEEP_STATE_NAMESPACE,
@@ -1804,14 +1804,6 @@ def _run_garmin_sync_inprocess(
     return (not res.auth_error), result_text
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """SIGKILL a subprocess and every descendant in its process group."""
-    # Every caller here spawns with start_new_session=True, so the child leads
-    # its own group and the shared helper takes the group path; the
-    # single-process fallback covers a group that is already gone.
-    kill_process_group(proc.pid)
-
-
 def _run_capture(
     cmd, *, timeout: float, cwd: str, env: dict,
 ) -> subprocess.CompletedProcess:
@@ -1841,7 +1833,10 @@ def _run_capture(
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
+        # `start_new_session=True` above, so the child leads its own group and
+        # the shared helper takes the group path; the single-process fallback
+        # covers a group that is already gone.
+        kill_group_if_live(proc)
         # The group is dead now, so this drains the pipes and reaps without
         # blocking; bound it anyway so a pathological case can't hang the worker.
         try:
