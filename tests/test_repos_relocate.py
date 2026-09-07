@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from istota import repos_relocate
 from istota.repos_relocate import (
     EXIT_OK,
     EXIT_PARTIAL,
@@ -1152,6 +1153,96 @@ class TestTheWalkReportsWhatItCouldNotSee:
 
         assert any("scan depth" in n for n in report.notes)
         assert "deep" in report.moved
+
+
+class TestTheGitWrapperContract:
+    """The two things this module's `_git` needs that the reaper's does not.
+
+    Both were uncovered before the wrappers were consolidated: dropping either
+    keyword turned nothing red across the reaper, relocate and scrub suites,
+    which is precisely the state in which "the two copies are the same" gets
+    written down and is wrong.
+    """
+
+    def test_it_carries_gits_own_diagnosis(self, tmp_path):
+        """`git worktree repair` says what it refused on stderr and nothing on
+        stdout, and `_run_repair` puts that text in the operator's note. A
+        stdout-only wrapper reports `exited 128:` and no reason."""
+        repo = _upstream(tmp_path, "diag")
+
+        status, out = repos_relocate._git(repo, "worktree", "repair", "/nonexistent")
+
+        assert status != 0
+        assert out.strip(), "the reason git gave was dropped"
+
+    def test_a_git_that_cannot_run_reports_why(self, tmp_path, monkeypatch):
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+
+        status, out = repos_relocate._git(tmp_path, "status")
+
+        assert status == 1
+        assert out.strip(), "the exception's own message was dropped"
+
+
+class TestAFakeRepositoryDoesNotHideARealOne:
+    """Finding a git directory *prunes the walk*, and `repos_dir` is bound
+    read-write into the sandbox, so what counts as one is a decision about
+    hostile input rather than about tidiness.
+
+    The loose predicate this module carried — `HEAD` is a file, `objects/` and
+    `refs/` are directories — is satisfiable with one empty file and two empty
+    directories. Plant that above a real clone and the walk stops there: the
+    clone below is never examined, its worktrees are never repaired, and the
+    migration reports a clean run.
+    """
+
+    @staticmethod
+    def _decoy(path: Path) -> None:
+        """Everything the loose test asked for and nothing a repository has."""
+        path.mkdir(parents=True)
+        (path / "HEAD").write_text("")
+        (path / "objects").mkdir()
+        (path / "refs").mkdir()
+
+    def test_the_walk_does_not_prune_on_it(self, tree, tmp_path):
+        repos_dir = tree["repos_dir"]
+        self._decoy(repos_dir / "acme" / "not-a-repo")
+        hidden = _clone(
+            repos_dir, "acme/not-a-repo", "hidden", _upstream(tmp_path, "hidden")
+        )
+        worktree = _worktree(hidden, "hidden--istota-9-task")
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        moved = repos_dir / "alice" / "acme" / "not-a-repo" / "hidden--istota-9-task"
+        assert not worktree.exists()
+        assert moved.is_dir()
+        assert _resolves(moved), (
+            "the worktree under the decoy was never repaired: the walk pruned "
+            "on a directory the model could have made"
+        )
+        assert report.unrepaired == ()
+
+    def test_it_is_not_reported_as_a_repository(self, tree, tmp_path):
+        """The listing is what an operator reads before running the move."""
+        repos_dir = tree["repos_dir"]
+        self._decoy(repos_dir / "acme" / "not-a-repo")
+
+        outcome = plan(repos_dir, {"alice"})
+
+        assert not any("not-a-repo" in str(r.clone_src) for r in outcome.resume_repairs)
+
+    def test_a_real_repository_is_still_found(self, tree):
+        """The other direction, so the stricter predicate cannot pass by
+        recognising nothing at all."""
+        repos_dir = tree["repos_dir"]
+
+        apply(plan(repos_dir, {"alice"}))
+
+        moved = repos_dir / "alice" / "acme" / "widget--istota-42-add-auth"
+        assert _resolves(moved)
 
 
 class TestAlreadyMigratedStillReports:

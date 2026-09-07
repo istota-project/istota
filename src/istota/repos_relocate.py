@@ -114,10 +114,15 @@ re-run. The cost is that a forge namespace legitimately named after the admin
 stays where it is, one level shallower than the rest — inside that user's own
 root, which is where it belongs, and reported rather than passed over.
 
-Every ``git`` invocation carries :data:`istota.git_hardening.GIT_HARDENING`,
-for the reason it always does under ``repos_dir``: repository config is
+Every ``git`` invocation goes through :func:`istota.git_hardening.run_git`, for
+the reason it always does under ``repos_dir``: repository config is
 model-written and a plain ``git`` command there runs whatever
 ``core.fsmonitor`` names, as the daemon user, with the daemon's environment.
+
+A repository is recognised by :func:`istota.git_remote_scrub.is_git_dir`, the
+strict structural test, for the same reason: recognising one *prunes the walk*,
+so a hand-made directory carrying an empty ``HEAD`` beside empty ``objects/``
+and ``refs/`` would otherwise hide every real clone beneath it from repair.
 
 Error posture follows :mod:`istota.worktree_reaper` and
 :mod:`istota.sandbox_cache_sweeper`, the other two delete-adjacent paths:
@@ -136,13 +141,13 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .git_hardening import GIT_HARDENING
+from .git_hardening import run_git
+from .git_remote_scrub import is_git_dir
 
 logger = logging.getLogger(__name__)
 
@@ -416,18 +421,6 @@ def _clear_progress(repos_dir: Path) -> None:
         pass
 
 
-def _is_git_dir(path: Path) -> bool:
-    """The standard shape of a git directory, bare or otherwise."""
-    try:
-        return (
-            (path / "HEAD").is_file()
-            and (path / "objects").is_dir()
-            and (path / "refs").is_dir()
-        )
-    except OSError:
-        return False
-
-
 def _git_dirs(
     root: Path, max_depth: int = _MAX_SCAN_DEPTH
 ) -> tuple[list[Path], list[str]]:
@@ -440,13 +433,19 @@ def _git_dirs(
     The notes matter as much as the list. This walk decides what gets repaired,
     so a subtree dropped for depth or for an unreadable directory is a clone
     whose worktrees nobody will fix, and it is reported rather than passed over.
+    That is why this is not
+    :func:`istota.git_remote_scrub.find_git_dirs`, which shares the predicate
+    and answers a different question: it logs what it skipped instead of
+    returning it, and it records a repository reached through a symlink, whose
+    path is outside ``clone_root`` and has no translation into the destination
+    tree.
     """
     found: list[Path] = []
     notes: list[str] = []
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
         directory, depth = stack.pop()
-        if _is_git_dir(directory):
+        if is_git_dir(directory):
             found.append(directory)
             continue
         dot_git = directory / ".git"
@@ -456,7 +455,7 @@ def _git_dirs(
         except OSError as exc:
             notes.append(f"{directory}: could not be examined ({exc})")
             continue
-        if _is_git_dir(dot_git):
+        if is_git_dir(dot_git):
             found.append(dot_git)
             continue
         if depth >= max_depth:
@@ -807,31 +806,15 @@ def plan(
 
 
 def _git(cwd: Path, *args: str) -> tuple[int, str]:
-    """``(exit_status, output)``. Never raises.
+    """``(exit_status, output)``, through :func:`istota.git_hardening.run_git`.
 
-    ``GIT_HARDENING`` first, before ``-C``: this runs against repositories
-    whose own config the model writes, and a later ``-c`` beats the
-    repository's value. The two ``GIT_CONFIG_*`` variables cover the system and
-    user files and do nothing about the repository's own, which is the writable
-    one. Bytes are decoded rather than rejected — ``text=True`` would raise
-    ``UnicodeDecodeError`` on a repository holding one non-UTF-8 path.
+    stderr is merged into stdout and a failure to run git at all comes back as
+    the exception's own message, because this output is reported to an operator
+    as the reason a repair did not happen rather than parsed. ``git worktree
+    repair`` says what it refused on stderr and nothing on stdout, so a
+    stdout-only wrapper would report a bare exit code.
     """
-    try:
-        proc = subprocess.run(
-            ["git", *GIT_HARDENING, "-C", str(cwd), *args],
-            capture_output=True, timeout=_GIT_TIMEOUT,
-            env={
-                **os.environ,
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_OPTIONAL_LOCKS": "0",
-            },
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return 1, str(exc)
-    out = proc.stdout + proc.stderr
-    return proc.returncode, out.decode("utf-8", "surrogateescape")
+    return run_git(cwd, *args, timeout=_GIT_TIMEOUT, merge_stderr=True, on_error=None)
 
 
 def _links_back(worktree: Path, git_dir: Path) -> bool:

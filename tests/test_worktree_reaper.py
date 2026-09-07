@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch
 
+from istota import worktree_reaper
 from istota.worktree_reaper import (
     parse_worktree_list,
     reap_and_report,
@@ -1062,6 +1063,32 @@ class TestRetentionFloor:
         _age(old, 5)
 
         assert _names(reap_worktrees(repos_dir, retention_hours=0)) == {"project--old"}
+
+
+class TestTheGitWrapperContract:
+    """Stdout only, and empty when git could not run at all.
+
+    Every caller here parses the output — `worktree list --porcelain -z`, a
+    `status` listing, a `cherry` report — so git's own diagnosis arriving on the
+    same string is a listing with an extra record in it. `merge_stderr` is what
+    the relocation wrapper needs and this one must not have; before the two were
+    consolidated, giving this one stderr as well turned nothing red.
+    """
+
+    def test_stderr_does_not_reach_a_caller_that_parses(self, repos):
+        _repos_dir, bare, _ = repos
+
+        status, out = worktree_reaper._git(bare, "rev-parse", "--verify", "no-such-ref")
+
+        assert status != 0
+        assert out == ""
+
+    def test_a_git_that_cannot_run_is_an_empty_answer(self, tmp_path, monkeypatch):
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+
+        assert worktree_reaper._git(tmp_path, "status") == (1, "")
 
 
 class TestHardening:
