@@ -164,6 +164,14 @@ def _scoped(raw: str, *, writable: bool, operation: str) -> str:
     The resolved path is what goes down to the Click CLI. Handing it the
     original would re-walk every symlink the check just settled, in a process
     that opens the path itself.
+
+    **The destination's parent is created here.** `resolve_host_path` used to
+    do it and no longer does — resolution answers a question and must not
+    mutate the filesystem answering it. This is the one consumer that does not
+    write through `write_resolved`, because the Click CLI opens the path
+    itself, so the parent is ensured at the boundary where the path is handed
+    over. Ensured only after the resolution passed, so nothing is created
+    outside the roots.
     """
     from istota.skill_host_paths import resolve_host_path
 
@@ -173,6 +181,11 @@ def _scoped(raw: str, *, writable: bool, operation: str) -> str:
     if err:
         # `emit` exits 1 on an error envelope, so this does not return.
         _output(error_envelope(err))
+    if writable:
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            _output(error_envelope(f"could not create {resolved.parent}: {e}"))
     return str(resolved)
 
 

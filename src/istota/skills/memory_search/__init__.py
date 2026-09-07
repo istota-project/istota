@@ -17,8 +17,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from istota.skill_host_paths import env_host_roots, resolve_in_roots
 from istota.skills._cli import run_skill_cli
-from istota.user_scope import scoped_user_dir
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -108,72 +108,53 @@ def cmd_index_conversation(args) -> dict:
     return {"status": "ok", "task_id": args.task_id, "chunks_inserted": n}
 
 
-def _indexable_roots(user_id: str) -> list[Path]:
-    """Directories `index file` may read from: this user's own data, only.
-
-    The CLI runs host-side under the skill proxy, so the path argument is
-    evaluated with the daemon's filesystem access rather than the sandbox's —
-    an unbounded read here would let a task index the config file (or another
-    user's workspace) and then retrieve the contents through `search`, walking
-    straight past both the sandbox masks and the credential proxy. The scoping
-    that makes the other subcommands safe is in their SQL; a filesystem
-    argument needs its own.
-    """
-    roots: list[Path] = []
-    mount = os.environ.get("NEXTCLOUD_MOUNT_PATH", "")
-    if mount:
-        # Scoped, not joined: a `.` or an absolute `ISTOTA_USER_ID` collapses
-        # this root to `{mount}/Users`, which is exactly the "another user's
-        # workspace" the docstring above says must not be indexable
-        # (ISSUE-402). No root rather than a wider one — an empty allowlist
-        # refuses everything.
-        own = scoped_user_dir(Path(mount) / "Users", user_id)
-        if own is not None:
-            roots.append(own)
-    token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "")
-    if mount and token:
-        roots.append(Path(mount) / "Channels" / token)
-    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
-    if deferred:
-        roots.append(Path(deferred))
-    return [r.resolve() for r in roots]
-
-
 def cmd_index_file(args) -> dict:
-    """Index a file."""
+    """Index a file.
+
+    The path is a *host* path and this CLI runs host-side, spawned by the skill
+    proxy with the daemon's whole filesystem view — so an unbounded read here
+    would let a task index the config file, another user's workspace or a
+    session transcript and then retrieve the contents through `search`, walking
+    past both the sandbox masks and the credential proxy. The scoping that
+    makes the other subcommands safe is in their SQL; a filesystem argument
+    needs its own.
+
+    **`talk=False`, which is the one thing that makes this root set its own.**
+    `{mount}/Talk` is bound read-only into the sandbox because a task may
+    legitimately read a Talk attachment into its own reasoning. Indexing one
+    puts it in a store `search` reads back afterwards, which is the other
+    question, so the shared read set is asked for without it. This used to be
+    `_indexable_roots`, a second copy of the derivation that joined
+    `ISTOTA_CONVERSATION_TOKEN` raw — a token of `../..` reached every user's
+    directory (ISSUE-447).
+
+    Refused before the database is opened: a refusal should not connect on the
+    way to saying no.
+    """
     from istota.memory.search import index_file
 
-    conn = _get_conn()
     user_id = _get_user_id()
+    resolved, err = resolve_in_roots(
+        Path(args.path), env_host_roots(talk=False),
+        writable=False, operation="memory_search index file",
+    )
+    if err:
+        return {"status": "error", "error": err}
 
-    path = Path(args.path)
-    # Resolve before comparing: the check is worthless against `../` or a
-    # symlink planted in the workspace otherwise.
-    resolved = path.resolve()
-    roots = _indexable_roots(user_id)
-    if not roots or not any(
-        resolved == root or resolved.is_relative_to(root) for root in roots
-    ):
-        conn.close()
-        return {
-            "status": "error",
-            "error": (
-                f"Refusing to index {path}: it is outside your own workspace. "
-                "index file reads with the daemon's filesystem access, so it is "
-                "restricted to your user directory, the current channel "
-                "directory, and the task's working directory."
-            ),
-        }
-    if not resolved.is_file():
-        conn.close()
-        return {"status": "error", "error": f"File not found: {path}"}
-
+    # The *resolved* path, both to read and to record: reopening the argument
+    # re-walks every symlink the check just settled, and a row naming the
+    # unresolved path would hand `search` a name that no longer means what was
+    # indexed.
     content = resolved.read_text()
     source_type = args.source_type or "memory_file"
-    n = index_file(conn, user_id, str(path), content, source_type)
+    conn = _get_conn()
+    n = index_file(conn, user_id, str(resolved), content, source_type)
     conn.close()
 
-    return {"status": "ok", "path": str(path), "source_type": source_type, "chunks_inserted": n}
+    return {
+        "status": "ok", "path": str(resolved), "source_type": source_type,
+        "chunks_inserted": n,
+    }
 
 
 def cmd_reindex(args) -> dict:

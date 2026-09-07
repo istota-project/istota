@@ -295,11 +295,11 @@ class TestDeferredImportCsvSourcePath:
 
         import istota.health as _health
 
-        class _FakeConfig:
-            # Mirrors Config.workspace_root(user_id) -> {mount}/Users/{uid}.
-            @staticmethod
-            def workspace_root(user_id=None):
-                return ctx.workspace_root.parent
+        # A real Config, not a stand-in: the guard derives its roots from
+        # `nextcloud_mount_path` and the task's user id, so a fake answering
+        # one hand-written question would not exercise the derivation the
+        # deployment runs.
+        config = Config(nextcloud_mount_path=ctx.workspace_root.parent.parent.parent)
 
         original = _health.resolve_for_user
         try:
@@ -308,7 +308,7 @@ class TestDeferredImportCsvSourcePath:
                 id=task_id, status="completed", source_type="cli",
                 user_id="alice", prompt="",
             )
-            return _process_deferred_health_ops(_FakeConfig(), task, deferred)
+            return _process_deferred_health_ops(config, task, deferred)
         finally:
             _health.resolve_for_user = original
 
@@ -413,15 +413,15 @@ class TestDeferredImportCsvSourcePath:
     def test_the_roots_come_from_a_real_config(self, tmp_path):
         """Bind the guard to `Config.workspace_root`, not to the fake.
 
-        Every case above hands the replayer a hand-written config. If the
-        real method were renamed or its signature changed, `_source_path_allowed`
-        would fall through to its fallback arm and silently start refusing
-        every workspace import, with a WARNING as the only signal.
+        The guard derives `{mount}/Users/{uid}` itself now, so this is what
+        holds that derivation to the one `Config.workspace_root` states. A
+        drift between the two would move the boundary for the daemon's replay
+        without moving it for anything else that asks the config where a
+        user's workspace is.
         """
         from istota.scheduler_deferred import _source_path_allowed
 
-        config = Config()
-        config.nextcloud_mount_path = tmp_path / "mount"
+        config = Config(nextcloud_mount_path=tmp_path / "mount")
         user_root = config.workspace_root("alice")
         assert user_root == tmp_path / "mount" / "Users" / "alice"
 
@@ -432,5 +432,5 @@ class TestDeferredImportCsvSourcePath:
             tmp_path / "mount" / "Users" / "bob" / "inbox" / "labs.csv",
         )
 
-        assert _source_path_allowed(mine, deferred, config, "alice", None)
-        assert not _source_path_allowed(theirs, deferred, config, "alice", None)
+        assert _source_path_allowed(mine, deferred, config, "alice")
+        assert not _source_path_allowed(theirs, deferred, config, "alice")

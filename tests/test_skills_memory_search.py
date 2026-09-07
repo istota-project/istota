@@ -262,7 +262,10 @@ class TestCmdIndexFile:
 
         result = cmd_index_file(args)
         assert result["status"] == "error"
-        assert "outside your own workspace" in result["error"]
+        # The shared allowlist's message since ISSUE-447 put this verb on the
+        # shared rule; it deliberately does not enumerate the roots.
+        assert "outside allowed roots" in result["error"]
+        assert str(secret.parent) not in result["error"].split("is outside")[1]
 
     def test_refuses_traversal_out_of_a_permitted_root(self, tmp_path, monkeypatch):
         """The bound is on the resolved path, or `../` walks straight out."""

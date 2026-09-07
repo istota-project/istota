@@ -33,6 +33,8 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .skill_host_paths import path_under_roots
+
 if TYPE_CHECKING:
     from .config import Config
 
@@ -495,6 +497,16 @@ def _confined_attachment(config: "Config", draft: OutboundDraft, path: str) -> P
     subprocess and absent in the daemon. The root is derived from the draft's
     own `user_id` instead, which is the same boundary computed from data we
     hold rather than from ambient env.
+
+    **Containment is `skill_host_paths.path_under_roots`; the rest is this
+    function's own.** The error type is a `DraftError` because the caller is a
+    send path and a refusal has to fail the draft rather than return a tuple,
+    and the symlink rule is stated here rather than delegated because the
+    single root is what makes it decidable — a link inside the workspace
+    pointing anywhere else is the whole attack, and following it first would
+    turn the check into a race with the daemon's own read. One root, and
+    deliberately: the deferred dir and the channel are the *task's* context,
+    and by release time there is no task.
     """
     root = config.workspace_root(draft.user_id)
     if root is None:
@@ -508,12 +520,10 @@ def _confined_attachment(config: "Config", draft: OutboundDraft, path: str) -> P
     if not candidate.is_file():
         raise DraftError(f"attachment is no longer readable: {path}")
     resolved = candidate.resolve()
-    try:
-        resolved.relative_to(Path(root).resolve())
-    except ValueError:
+    if not path_under_roots(resolved, [Path(root).resolve()]):
         raise DraftError(
             f"attachment resolves outside the user's workspace: {path}"
-        ) from None
+        )
     return resolved
 
 

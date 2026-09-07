@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from istota.config import Config
 from istota.health import db as health_db
 from istota.health import documents as health_documents
 from istota.health._migrate import ensure_initialised
@@ -485,11 +486,11 @@ class TestDeferredAttachOps:
 
         import istota.health as _health
 
-        class _FakeConfig:
-            # Mirrors Config.workspace_root(user_id) → {mount}/Users/{uid}.
-            @staticmethod
-            def workspace_root(user_id=None):
-                return ctx.workspace_root.parent
+        # A real Config: the replay's source-path guard derives its roots
+        # from `nextcloud_mount_path` plus the task's user id.
+        default_config = Config(
+            nextcloud_mount_path=ctx.workspace_root.parent.parent.parent,
+        )
 
         original = _health.resolve_for_user
         try:
@@ -499,7 +500,7 @@ class TestDeferredAttachOps:
                 user_id="alice", prompt="",
             )
             return _process_deferred_health_ops(
-                config or _FakeConfig(), task, deferred,
+                config or default_config, task, deferred,
             )
         finally:
             _health.resolve_for_user = original
@@ -854,9 +855,7 @@ class TestDeferredAttachOps:
             class health:
                 max_document_bytes = 100
 
-            @staticmethod
-            def workspace_root(user_id=None):
-                return ctx.workspace_root.parent
+            nextcloud_mount_path = ctx.workspace_root.parent.parent.parent
 
         assert self._replay(ctx, deferred, [{
             "op": "attach_document", "source_path": str(src),
@@ -885,9 +884,7 @@ class TestDeferredAttachOps:
             class health:
                 max_document_bytes = 0
 
-            @staticmethod
-            def workspace_root(user_id=None):
-                return ctx.workspace_root.parent
+            nextcloud_mount_path = ctx.workspace_root.parent.parent.parent
 
         assert self._replay(ctx, deferred, [{
             "op": "attach_document", "source_path": str(src),

@@ -60,12 +60,100 @@ component can in principle be replaced between the return and the use. Path
 validation cannot close that on its own. What it does close is the much larger
 window of re-resolving an attacker-supplied string, which is why the rule is to
 operate on what comes back and never to re-walk the argument.
+
+**One rule, two derivations.** The containment rule itself is
+``path_under_roots`` plus ``resolve_in_roots``, and the roots it works against
+are built in exactly one place, ``workspace_roots``. What varies is where the
+ingredients come from. A skill CLI reads them out of its own environment
+(``env_host_roots``, and ``resolve_host_path`` on top of it), because the proxy
+sets them per task. The daemon has no such environment — a deferred op is
+replayed and a held draft released long after the task that wrote them is over
+— so ``scheduler_deferred`` and ``outbound_drafts`` pass the mount and the user
+id explicitly and ask ``path_under_roots`` directly. Four separately written
+copies of this rule stood in the tree before ISSUE-447, and they had drifted in
+their roots, in their symlink handling and in whether the conversation token
+was guarded.
+
+Unifying the *implementation* is not unifying the *roots*, and the difference
+is deliberate. The deferred replay has no conversation token and no Talk
+access; a draft is confined to its owner's workspace alone. Each caller states
+its own root set at its own call site, which is why ``talk`` is opt-in rather
+than implied by ``writable``: a read whose bytes leave the task is not the same
+question as a read whose bytes stay in it.
 """
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 from .user_scope import scoped_user_dir
+
+
+def workspace_roots(
+    *,
+    mount: Path | str | None,
+    user_id: object,
+    deferred_dir: Path | str | None = None,
+    conversation_token: str | None = None,
+    writable: bool = False,
+    talk: bool = False,
+) -> list[Path]:
+    """The roots one caller may operate inside, derived from explicit values.
+
+    The single derivation. Every consumer of this module gets its root list
+    from here — the skill CLIs through `env_host_roots`, the daemon-side
+    callers by passing the mount and the user id they already hold. Before
+    ISSUE-447 four separately written copies of this derivation stood in the
+    tree and disagreed about three separate things.
+
+    **Each ingredient is optional and each is dropped rather than widened.**
+    `{mount}/Users/{user_id}` goes through `scoped_user_dir`, so a `.`, a
+    `..`, an absolute or a nested user id costs that one root instead of
+    collapsing it to `{mount}/Users` — every user's directory at once
+    (ISSUE-402). The conversation token is guarded the same way, since
+    `../..` would walk straight back out of `Channels/`. An *absent* user id
+    is different from an unscopable one and contributes nothing from the
+    mount at all: without an identity there is no per-user subtree, and the
+    channel root would then be the only thing standing between the caller and
+    a directory it has no claim to.
+
+    **`talk` is opt-in rather than implied by `writable`.** `{mount}/Talk` is
+    shared, and the sandbox binds it read-only because a task may legitimately
+    read a Talk attachment into its own reasoning. Whether those bytes may
+    then *leave* the task — be mailed out, or indexed into something later
+    searchable — is a different question, and the caller is the only one that
+    knows the answer. A writable call never gets it whatever `talk` says.
+
+    Returns `[]` when nothing resolves. An empty allowlist means refuse
+    everything; `resolve_in_roots` and `path_under_roots` both read it that way.
+    """
+    roots: list[Path] = []
+
+    if deferred_dir:
+        try:
+            roots.append(Path(deferred_dir).resolve())
+        except OSError:
+            pass
+
+    scoped_id = user_id.strip() if isinstance(user_id, str) else user_id
+    if not mount or not scoped_id:
+        return roots
+    try:
+        mount_path = Path(mount).resolve()
+    except (OSError, TypeError, ValueError):
+        return roots
+
+    own = scoped_user_dir(mount_path / "Users", scoped_id)
+    if own is not None:
+        roots.append(own)
+
+    token = conversation_token.strip() if isinstance(conversation_token, str) else ""
+    if token and "/" not in token and token not in (".", ".."):
+        roots.append(mount_path / "Channels" / token)
+
+    if talk and not writable:
+        roots.append(mount_path / "Talk")
+    return roots
 
 
 def user_workspace_root() -> Path | None:
@@ -81,79 +169,84 @@ def user_workspace_root() -> Path | None:
     file it writes has to be somewhere the task can read back *and*
     `/chat/files` can serve, and only the workspace is both.
 
-    Scoped exactly as `allowed_host_roots` scopes it, by calling this — one
-    derivation, so a default destination cannot land somewhere the allowlist
-    would then refuse, or (worse) somewhere it would not. None when either
-    variable is unset or blank, and None when the user id does not name a
-    child of `{mount}/Users`: the collapsed join is `{mount}/Users` itself,
-    every user's directory at once (ISSUE-402).
+    Derived by asking `workspace_roots` for that one ingredient and nothing
+    else — one derivation, so a default destination cannot land somewhere the
+    allowlist would then refuse, or (worse) somewhere it would not. The
+    indexing is safe here and is not the list-position choice warned against
+    above: the call requests exactly one root, so the list is empty or has one
+    element. None when either variable is unset or blank, and None when the
+    user id does not name a child of `{mount}/Users`: the collapsed join is
+    `{mount}/Users` itself, every user's directory at once (ISSUE-402).
     """
-    mount_raw = os.environ.get("NEXTCLOUD_MOUNT_PATH", "").strip()
-    user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
-    if not mount_raw or not user_id:
-        return None
-    try:
-        mount = Path(mount_raw).resolve()
-    except OSError:
-        return None
-    return scoped_user_dir(mount / "Users", user_id)
+    own = workspace_roots(
+        mount=os.environ.get("NEXTCLOUD_MOUNT_PATH", "").strip() or None,
+        user_id=os.environ.get("ISTOTA_USER_ID", "").strip(),
+    )
+    return own[0] if own else None
+
+
+def env_host_roots(*, writable: bool = False, talk: bool = True) -> list[Path]:
+    """`workspace_roots` for a skill CLI, from the environment the proxy set.
+
+    The four variables are the ones `build_task_runtime` exports per task, and
+    they are the reason this is a separate entry point rather than a default:
+    the daemon has none of them set, so a daemon-side caller reading them would
+    silently get an empty allowlist (or, worse, another task's).
+
+    `talk=False` is for a read whose bytes leave the task — see
+    `workspace_roots` for why that is the caller's question and not this
+    module's.
+    """
+    return workspace_roots(
+        mount=os.environ.get("NEXTCLOUD_MOUNT_PATH", "").strip() or None,
+        user_id=os.environ.get("ISTOTA_USER_ID", "").strip(),
+        deferred_dir=os.environ.get("ISTOTA_DEFERRED_DIR", "").strip() or None,
+        conversation_token=os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip(),
+        writable=writable,
+        talk=talk,
+    )
 
 
 def allowed_host_roots(*, writable: bool = False) -> list[Path]:
     """Host directories a skill CLI may read from (or write to).
 
-    `writable=True` drops the roots the sandbox binds read-only, so a
-    destination path can't be steered into shared, non-user-owned storage.
+    Deprecated alias for `env_host_roots`, kept for the call sites outside this
+    module that still name it. Prefer `env_host_roots` in new code, and
+    `workspace_roots` wherever the caller can state its own ingredients.
     """
-    roots: list[Path] = []
-
-    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "").strip()
-    if deferred:
-        try:
-            roots.append(Path(deferred).resolve())
-        except OSError:
-            pass
-
-    mount_raw = os.environ.get("NEXTCLOUD_MOUNT_PATH", "").strip()
-    user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
-    if mount_raw and user_id:
-        try:
-            mount = Path(mount_raw).resolve()
-        except OSError:
-            return roots
-        # Scoped the same way the token below already was. The two sat side by
-        # side with only the token guarded, so a `.` or an absolute
-        # `ISTOTA_USER_ID` collapsed this root to `{mount}/Users` — every
-        # user's directory, as a destination a skill CLI may write to
-        # (ISSUE-402). No root rather than a wider one; `resolve_host_path`
-        # refuses everything when the list comes back empty.
-        own = user_workspace_root()
-        if own is not None:
-            roots.append(own)
-        token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip()
-        # Guard the token the same way the container name is guarded: it lands
-        # in a path, and "../.." would walk straight back out of Channels/.
-        if token and "/" not in token and token not in (".", ".."):
-            roots.append(mount / "Channels" / token)
-        if not writable:
-            # Talk attachments are bound read-only in the sandbox; a read may
-            # reach them, a destination may not.
-            roots.append(mount / "Talk")
-    return roots
+    return env_host_roots(writable=writable)
 
 
 def resolve_host_path(
     path: Path, *, writable: bool, operation: str,
 ) -> tuple[Path | None, str | None]:
-    """Validate `path` against the allowlist and return the path to actually use.
+    """Validate `path` against the skill CLI's own allowlist.
 
-    Returns `(resolved, None)` on success or `(None, error)` on refusal.
-    **Use the returned path**, not the one passed in — see the module docstring.
+    `resolve_in_roots` over `env_host_roots`. Returns `(resolved, None)` on
+    success or `(None, error)` on refusal. **Use the returned path**, not the
+    one passed in — see the module docstring.
 
     `writable=False` means an existing source to read; `writable=True` means a
     destination that need not exist yet.
     """
-    roots = allowed_host_roots(writable=writable)
+    return resolve_in_roots(
+        path, env_host_roots(writable=writable),
+        writable=writable, operation=operation,
+    )
+
+
+def resolve_in_roots(
+    path: Path, roots: Sequence[Path], *, writable: bool, operation: str,
+) -> tuple[Path | None, str | None]:
+    """The containment rule itself, against roots the caller derived.
+
+    **It never touches the filesystem except to read it.** An earlier version
+    created the destination's parent here, which made answering "may this path
+    be used" a mutation — and once resolution moves to parse time that side
+    effect fires before dispatch on every write argument, so a verb refusing
+    for an unrelated reason would leave a tree behind on every invocation.
+    `write_resolved` ensures the parent instead, where the write happens.
+    """
     if not roots:
         # No allowlist resolvable — a CLI smoke test outside the executor, or a
         # misconfigured deployment. Refuse rather than silently widening the
@@ -171,16 +264,14 @@ def resolve_host_path(
                 return None, f"Path not found: {path}"
             resolved = path.resolve(strict=True)
         else:
-            # A destination need not exist yet, so anchor on the parent. Resolve
-            # and check it *before* creating anything — the old order mkdir'd an
-            # out-of-bounds tree as the daemon user and only then refused.
+            # A destination need not exist yet, so anchor on the parent.
             parent = path.parent
             if parent.is_symlink():
                 return None, f"Refusing host-side symlink on dest parent: {parent}"
             resolved_parent = parent.resolve()
-            if not _under_a_root(resolved_parent, roots):
-                return None, _outside(resolved_parent, roots)
-            # `_under_a_root` is lexical, and the join below is what makes a
+            if not path_under_roots(resolved_parent, roots):
+                return None, _outside(resolved_parent)
+            # `path_under_roots` is lexical, and the join below makes a
             # `..` leaf reachable: the parent is resolved, so a `..` anywhere
             # above the last component is collapsed and caught, but
             # `{root}/..` passes `relative_to` and names the root's parent.
@@ -204,12 +295,11 @@ def resolve_host_path(
             # allowlist" into a race rather than a one-liner.
             if resolved.is_symlink():
                 return None, f"Refusing host-side symlink as destination: {resolved}"
-            parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return None, f"Path resolution failed: {e}"
 
-    if not _under_a_root(resolved, roots):
-        return None, _outside(resolved, roots)
+    if not path_under_roots(resolved, roots):
+        return None, _outside(resolved)
     return resolved, None
 
 
@@ -244,6 +334,11 @@ def write_resolved(path: Path, data: bytes, *, exclusive: bool = False) -> None:
     Raises `OSError`, which every consumer already handles: a refusal is an
     envelope, not a traceback.
     """
+    # The parent, here rather than in the resolver: `resolve_in_roots` answers
+    # a question and must not mutate anything answering it, and this is the one
+    # place that knows a write is actually about to happen. `path` is what the
+    # resolver returned, so its parent is inside a root by construction.
+    path.parent.mkdir(parents=True, exist_ok=True)
     mode = os.O_EXCL if exclusive else os.O_TRUNC
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | mode | os.O_NOFOLLOW, 0o666)
     try:
@@ -442,14 +537,25 @@ def resolve_under_repos(path: str | Path) -> tuple[Path | None, str | None]:
         # returning False on some versions.
         return None, f"Path resolution failed: {e}"
 
-    if not _under_a_root(resolved, [root]):
+    if not path_under_roots(resolved, [root]):
         return None, (
             f"Path {resolved} is outside the developer repos root ({root})"
         )
     return resolved, None
 
 
-def _under_a_root(resolved: Path, roots: list[Path]) -> bool:
+def path_under_roots(resolved: Path, roots: Sequence[Path]) -> bool:
+    """Is `resolved` at or under one of `roots`?
+
+    Lexical, so the caller resolves first — which every caller does, because a
+    symlink out of the workspace is a child by name and elsewhere on disk.
+    Keeping the resolution outside is what lets the daemon-side callers reuse
+    this without also inheriting the skill CLIs' symlink *refusal*, which is a
+    different rule and one of them (`outbound_drafts`) states its own version.
+
+    An empty `roots` is False, never True. Refusing is this module's posture
+    for an allowlist it could not build.
+    """
     for root in roots:
         try:
             resolved.relative_to(root)
@@ -459,8 +565,11 @@ def _under_a_root(resolved: Path, roots: list[Path]) -> bool:
     return False
 
 
-def _outside(resolved: Path, roots: list[Path]) -> str:
-    return (
-        f"Path {resolved} is outside allowed roots "
-        f"({', '.join(str(r) for r in roots)})"
-    )
+def _outside(resolved: Path) -> str:
+    """The refusal, which deliberately does not enumerate the roots.
+
+    Naming them tells a model that has just tried to read another user's
+    directory what the other directories are called, and the refused path is
+    already in the message.
+    """
+    return f"Path {resolved} is outside allowed roots"

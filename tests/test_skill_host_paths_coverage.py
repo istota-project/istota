@@ -118,6 +118,12 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         SCOPED, guard="istota.skills.kv._resolve_set_value",
         helper="resolve_host_path",
     ),
+    ("memory_search", "index.file", "path"): Entry(
+        SCOPED, guard="istota.skills.memory_search.cmd_index_file",
+        helper="resolve_in_roots",
+        note="the shared rule over `env_host_roots(talk=False)`: the indexed "
+             "content comes back through `search`, so Talk is not a root",
+    ),
     ("email", "send", "attach"): Entry(
         SCOPED, guard="istota.skills.email._scoped_attachments",
         helper="resolve_host_path",
@@ -211,9 +217,6 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
     ),
     ("health", "import-immunizations", "paste"): Entry(
         UNSCOPED, note="host read: a leading @ makes the value a path to read",
-    ),
-    ("memory_search", "index.file", "path"): Entry(
-        UNSCOPED, note="host read: any file is indexed and comes back through search",
     ),
     ("money", "import-csv", "file"): Entry(UNSCOPED, note="host read"),
     ("money", "portfolio.import", "file"): Entry(UNSCOPED, note="host read"),
