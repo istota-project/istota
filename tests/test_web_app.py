@@ -1384,6 +1384,86 @@ class TestAdminStats:
             assert feeds["users_resolved"] == 0
             assert feeds["status"] == "unreachable"
 
+    def test_admin_stats_feeds_read_closes_and_uses_the_module_pragmas(self, tmp_path):
+        """The feeds dashboard read goes through ``feeds.db.connect``.
+
+        Two properties, both of which the hand-rolled
+        ``with sqlite3.connect(...) as conn`` lacked (ISSUE-454). It is closed
+        at the end of the read: that block commits and does not close, so the
+        connection was released whenever the local fell out of scope — which is
+        why the spy holding a reference is what makes the pre-fix state
+        observable, rather than an accumulation across loads. And it carries the
+        module's pragmas, where the read had sqlite3's 5s default busy timeout
+        against a feeds poll that writes every five minutes.
+
+        ``busy_timeout`` reads back 30000 from ``timeout=30.0`` alone, so that
+        half pins the effective wait rather than proving a pragma ran (see the
+        ``sqlite_util`` module docstring); ``foreign_keys`` is the pragma
+        evidence.
+        """
+        import istota.web_app as mod
+        from istota.feeds import db as feeds_db
+
+        config = self._config_with_admin(tmp_path)
+        db_path = config.module_db_path("alice", "feeds")
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        feeds_db.init_db(db_path)
+
+        opened: list[sqlite3.Connection] = []
+        pragmas: list[tuple[int, int]] = []
+        real_connect = sqlite3.connect
+
+        class _Recording(sqlite3.Connection):
+            def close(self):
+                pragmas.append((
+                    self.execute("PRAGMA busy_timeout").fetchone()[0],
+                    self.execute("PRAGMA foreign_keys").fetchone()[0],
+                ))
+                super().close()
+
+        def _spy(target, *args, **kwargs):
+            if str(target) != str(db_path):
+                return real_connect(target, *args, **kwargs)
+            conn = real_connect(target, *args, factory=_Recording, **kwargs)
+            opened.append(conn)
+            return conn
+
+        _patch_app(config)
+        with patch.object(sqlite3, "connect", _spy):
+            stats = mod._admin_module_feeds()
+
+        assert stats["users_resolved"] == 1
+        assert stats["feeds_total"] == 0
+        assert len(opened) == 1
+        for conn in opened:
+            with pytest.raises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
+        assert pragmas == [(30_000, 1)]
+
+    def test_admin_stats_feeds_read_makes_no_database_for_a_user_who_has_none(
+        self, tmp_path,
+    ):
+        """A user with feeds on but no DB yet is skipped, not opened.
+
+        Opening creates the file, so the dashboard read used to mint an empty
+        database under the user's module dir and then report the missing tables
+        as a resolve error. ``_aggregate_module_db`` already skipped that case.
+        """
+        import istota.web_app as mod
+
+        config = self._config_with_admin(tmp_path)
+        db_path = config.module_db_path("alice", "feeds")
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        assert not db_path.exists()
+
+        _patch_app(config)
+        stats = mod._admin_module_feeds()
+
+        assert not db_path.exists()
+        assert stats["users_resolved"] == 1
+        assert "resolve_errors" not in stats
+        assert stats["feeds_total"] == 0
+
     async def test_admin_stats_includes_health_module(self, tmp_path):
         """The health module surfaces per-user panel/stat counts + last update."""
         from istota import health as health_mod

@@ -557,20 +557,18 @@ class TestNoSecondCopy:
         "money/routes.py",
     ]
 
-    #: What survives, per file, with the reason. Three are ``init_db`` bodies:
-    #: those are the *only* place ``PRAGMA journal_mode=WAL`` is issued, and the
-    #: init/connect split is what keeps it out of the per-open path. The fourth
-    #: is `web_app`'s feeds dashboard read, which is a feeds connection and
-    #: belongs on `feeds.db.connect` — a conversion outside this stage's line,
-    #: named here rather than exempted quietly.
+    #: What survives, per file, with the reason. All three are ``init_db``
+    #: bodies: those are the *only* place ``PRAGMA journal_mode=WAL`` is issued,
+    #: and the init/connect split is what keeps it out of the per-open path.
+    #: `web_app`'s feeds dashboard read was the fourth entry until ISSUE-454
+    #: moved it onto `feeds.db.connect`.
     SURVIVING = {
         "db.py": 1,           # init_db
         "health/db.py": 1,    # init_db
         "location/db.py": 1,  # init_db
-        "web_app.py": 1,      # the feeds dashboard read
     }
 
-    def test_the_hand_rolled_connects_are_exactly_the_four_named(self):
+    def test_the_hand_rolled_connects_are_exactly_the_three_named(self):
         counts = {
             rel: (SRC / rel).read_text(encoding="utf-8").count("sqlite3.connect(")
             for rel in self.CONVERTED
